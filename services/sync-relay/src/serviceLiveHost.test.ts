@@ -1,18 +1,23 @@
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost } from "./serviceLiveHost.js";
 import {observeRelayWrites} from "./relayWriteChanges.js";
+import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 
 const spawn = vi.hoisted(() => vi.fn());
+vi.mock("node:fs/promises",async importOriginal => {
+  const original = await importOriginal<typeof import("node:fs/promises")>();
+  return {...original,rm: vi.fn(original.rm)};
+});
 vi.mock("@dohc/workspace-engine-client/daemon", async importOriginal => ({
   ...await importOriginal<typeof import("@dohc/workspace-engine-client/daemon")>(), createEngineClient: spawn,
 }));
 const cleanup: (() => Promise<void>)[] = [];
-afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); spawn.mockReset(); });
+afterEach(async () => {vi.mocked(rm).mockReset(); for (const close of cleanup.splice(0).reverse()) await close(); spawn.mockReset();});
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "service-host-test-"));
@@ -40,6 +45,54 @@ function clientFrom(options: { env: Record<string, string> }) {
     close: vi.fn(), waitForExit: vi.fn(async () => {}) };
   return { client, config, nativePath };
 }
+
+function deferred<T>() {let resolve!: (value: T) => void; const promise = new Promise<T>(done => {resolve = done;}); return {promise,resolve};}
+
+it("joins concurrent closes and retains the directory and reservation until process exit",async () => {
+  const f = await fixture(), exited = deferred<void>(); let captured!: ReturnType<typeof clientFrom>;
+  spawn.mockImplementation(async options => {
+    captured = clientFrom(options);
+    captured.client.waitForExit.mockImplementation(() => exited.promise);
+    return captured.client;
+  });
+  const host = await startServiceLiveHost(f), closed = vi.fn();
+  const first = host.close().then(closed), second = host.close().then(closed);
+  try {
+    expect(captured.client.close).toHaveBeenCalledTimes(1);
+    await expect(startServiceLiveHost(f)).rejects.toThrow("unavailable");
+    await vi.waitFor(() => expect(captured.client.waitForExit).toHaveBeenCalledTimes(1));
+    expect(closed).not.toHaveBeenCalled();
+    expect(existsSync(captured.nativePath)).toBe(true);
+  } finally {exited.resolve(); await Promise.all([first,second]);}
+  expect(closed).toHaveBeenCalledTimes(2);
+  expect(existsSync(captured.nativePath)).toBe(false);
+  spawn.mockImplementation(async options => clientFrom(options).client);
+  const replacement = await startServiceLiveHost(f);
+  await replacement.close();
+});
+
+it("preserves the startup error and releases its reservation when directory cleanup fails",async () => {
+  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
+  spawn.mockImplementation(async options => {
+    captured = clientFrom(options);
+    captured.client.sendRequest.mockResolvedValue({result: {relayNamespace: "foreign",host: captured.config.host,workspaces: []}});
+    return captured.client;
+  });
+  const removal = vi.mocked(rm).mockRejectedValueOnce(new Error("directory locked"));
+  const log = vi.spyOn(console,"error").mockImplementation(() => {});
+  try {
+    await expect(startServiceLiveHost(f)).rejects.toThrow("identity mismatch");
+    expect(captured.client.close).toHaveBeenCalledTimes(1);
+    expect(captured.client.waitForExit).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith("Service host startup cleanup failed.",expect.any(Error));
+    spawn.mockImplementation(async options => clientFrom(options).client);
+    const replacement = await startServiceLiveHost(f);
+    await replacement.close();
+  } finally {
+    removal.mockReset(); log.mockRestore();
+    if (captured) await rm(dirname(captured.nativePath),{recursive: true,force: true});
+  }
+});
 
 it("registers only the discovered engine identity and releases its incarnation on close", async () => {
   const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
@@ -243,8 +296,7 @@ it("requires a restore working reserve and passes only native restore bounds to 
   } finally {await host.close();}
 });
 
-it("runs bounded ordinary preparation in the configured activation lifecycle and closes its pass",async()=>{
-  const f=await fixture();let captured!:ReturnType<typeof clientFrom>;
+async function configureActivation(f: Awaited<ReturnType<typeof fixture>>,limits = {}) {
   Object.assign(f.config.workspaces[0]!,{ordinaryReplication:{relay:{baseUrl:"https://relay.example",bearerToken:"owner-token"},
     identity:{kind:"join",replicationEpoch:"epoch",streamIdentity:"stream"},maxPagesPerPull:1}});
   Object.assign(f.config,{adoption:{maxBytes:1_000_000,maxEvents:10,ownerOutbox:{maxPendingBytes:1_000_000,maxPendingAgeMs:60_000}},
@@ -252,8 +304,13 @@ it("runs bounded ordinary preparation in the configured activation lifecycle and
     activation:{targets:[{workspaceId:"workspace",path:"file.md",shareId:"share"}],maxCaptureBytes:1_000_000,
       maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,maxDocumentsPerPass:1,pollIntervalMs:60_000,passDeadlineMs:1000,
       validation:{maxStructVisits:1000,maxValueNodeVisits:1000,maxDecodedPayloadByteVisits:1000,maxStructClientGroupVisits:1000,
-        maxDeleteClientGroupVisits:1000,maxDeleteIntervalVisits:1000,maxIndexOperations:1000}}});
+        maxDeleteClientGroupVisits:1000,maxDeleteIntervalVisits:1000,maxIndexOperations:1000},...limits}});
   await f.save();
+}
+
+it("runs bounded ordinary preparation in the configured activation lifecycle and closes its pass",async()=>{
+  const f=await fixture();let captured!:ReturnType<typeof clientFrom>;
+  await configureActivation(f);
   spawn.mockImplementation(async options=>{
     captured=clientFrom(options);const discovery=captured.client.sendRequest.getMockImplementation()!;
     captured.client.sendRequest.mockImplementation(async(...args:unknown[])=>{
@@ -273,4 +330,51 @@ it("runs bounded ordinary preparation in the configured activation lifecycle and
   await host.close();
   expect(captured.client.close).toHaveBeenCalledTimes(1);
   expect(captured.client.waitForExit).toHaveBeenCalledTimes(1);
+});
+
+it("joins deadline-expired activation work before removing the native directory",async () => {
+  const f = await fixture(), entered = deferred<AbortSignal>();
+  const settled = deferred<Awaited<ReturnType<ServiceActivationDriver["activate"]>>>();
+  await configureActivation(f,{passDeadlineMs: 10});
+  let captured!: ReturnType<typeof clientFrom>;
+  spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
+  const activate = vi.spyOn(ServiceActivationDriver.prototype,"activate").mockImplementation((_target,signal) => {
+    entered.resolve(signal); return settled.promise;
+  });
+  const host = await startServiceLiveHost(f), signal = await entered.promise;
+  await new Promise<void>(resolve => {
+    if (signal.aborted) resolve(); else signal.addEventListener("abort",() => resolve(),{once: true});
+  });
+  const closed = vi.fn(), closes = [host.close().then(closed),host.close().then(closed)];
+  try {
+    await Promise.resolve();
+    expect(signal.aborted).toBe(true);
+    expect(closed).not.toHaveBeenCalled();
+    expect(captured.client.close).toHaveBeenCalledTimes(1);
+    expect(captured.client.waitForExit).not.toHaveBeenCalled();
+    expect(existsSync(captured.nativePath)).toBe(true);
+    expect(activate).toHaveBeenCalledTimes(1);
+  } finally {settled.resolve({kind: "pending",reason: "finished"}); await Promise.all(closes); activate.mockRestore();}
+  expect(closed).toHaveBeenCalledTimes(2);
+  expect(captured.client.waitForExit).toHaveBeenCalledTimes(1);
+  expect(existsSync(captured.nativePath)).toBe(false);
+});
+
+it("keeps activation polling when logging throws and resets repeated errors after success",async () => {
+  const f = await fixture(); await configureActivation(f,{pollIntervalMs: 100});
+  spawn.mockImplementation(async options => clientFrom(options).client);
+  const activate = vi.spyOn(ServiceActivationDriver.prototype,"activate").mockRejectedValue(new Error("offline"));
+  const log = vi.spyOn(console,"error").mockImplementation(() => {throw new Error("logger failed");});
+  vi.useFakeTimers();
+  const host = await startServiceLiveHost(f);
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(activate).toHaveBeenCalledTimes(1); expect(log).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(activate).toHaveBeenCalledTimes(2); expect(log).toHaveBeenCalledTimes(1);
+    activate.mockResolvedValueOnce({kind: "pending",reason: "completed pass"});
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(activate).toHaveBeenCalledTimes(4); expect(log).toHaveBeenCalledTimes(2);
+  } finally {await host.close(); vi.useRealTimers(); log.mockRestore(); activate.mockRestore();}
 });

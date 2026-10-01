@@ -11,7 +11,10 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import { createEngineClient, type EngineClient } from "@dohc/workspace-engine-client/daemon";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Scope from "effect/Scope";
+import { createEngineClient } from "@dohc/workspace-engine-client/daemon";
 import { VersionedLiveAdapter, type Event } from "@dohc/workspace-engine-client";
 import type { LiveClaimLedger } from "./automationLiveClaims.js";
 import { parseLiveDocumentKey, parseLiveUpdateIdentifier, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
@@ -128,19 +131,15 @@ export async function startServiceLiveHost(options: {
   const lifetime = liveHostSignal(storage.unavailable, invalidated.signal, options.signal);
   const signal = lifetime.signal;
   const changes = options.frameChanges;
-  const stopObserving = changes ? observeRelayWrites(storage, () => changes.notify()) : () => {};
+  const scope = Scope.makeUnsafe();
   const consumers = new Map<string, LiveCommittedDelivery>();
   const ordinary = new Map<string, ServiceOrdinaryReplication>();
   const documents = new LiveDocumentWork();
   const attachments=new Map<string,{handle:string;ordinary:ServiceOrdinaryReplication}>();
   const ledgers = new Map<string, LiveClaimLedger>();
-  let activation:ServiceActivationDriver|undefined,activationTimer:ReturnType<typeof setTimeout>|undefined,activationPass:Promise<void>|undefined;
+  let activation:ServiceActivationDriver|undefined;
   const restore = config.restore ? new LiveRestorePreparation(config.restore) : undefined;
-  let client: EngineClient | undefined, temporary: string | undefined, registered = false, closing: Promise<void> | undefined;
-  let clientClosed = false;
-  const stopClient = () => { if (client && !clientClosed) { clientClosed = true; client.close(); } };
-  let finishStartup!: () => void;
-  const startupSettled = new Promise<void>(resolve => { finishStartup = resolve; });
+  let registered = false, closing: Promise<void> | undefined;
   let requestId = 0;
   const nextRequestId = () => {
     if (requestId === Number.MAX_SAFE_INTEGER) throw new Error("Service host request IDs exhausted.");
@@ -162,26 +161,13 @@ export async function startServiceLiveHost(options: {
   const close = (): Promise<void> => {
     if (closing) return closing;
     closing = Promise.resolve().then(async () => {
-      await startupSettled;
-      stopClient();
-      await activationPass;
-      try {
-        if (registered && !storage.unavailable.aborted) storage.disconnectLiveHost({ ...coordinate, updatedAtMs: Date.now(), guard: standing });
-      } finally {
-        await client?.waitForExit();
-        if (temporary) await rm(temporary, { recursive: true, force: true });
-        held.delete(storage);
-      }
+      await startup.catch(() => {});
+      await Effect.runPromise(Scope.close(scope,Exit.void));
     });
     invalidated.abort();
-    clearTimeout(activationTimer);
-    stopObserving();
     changes?.notify();
-    lifetime.dispose();
-    stopClient();
     return closing;
   };
-  held.add(storage);
   const abort = () => { void close().catch(error => console.error("Service host shutdown failed.", error)); };
   const runDocument = async <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined, operation: (joined: AbortSignal) => Promise<T>): Promise<T> => {
     try {
@@ -206,27 +192,45 @@ export async function startServiceLiveHost(options: {
     if (!consumer) throw new Error("Workspace is not configured on this service host.");
     return runDocument(document, callerSignal, joined => consumer.drain(document, joined));
   };
-  signal.addEventListener("abort", abort, { once: true });
-  try {
+  const startup = Effect.runPromise(Effect.provideService(Effect.gen(function* () {
+    yield* Effect.acquireRelease(Effect.succeed(lifetime), value => Effect.sync(() => value.dispose()));
+    yield* Effect.acquireRelease(Effect.sync(() => {held.add(storage);}), () => Effect.sync(() => {held.delete(storage);}));
+    yield* Effect.acquireRelease(Effect.sync(() => {
+      signal.addEventListener("abort",abort,{once: true});
+    }),() => Effect.sync(() => signal.removeEventListener("abort",abort)));
     if (signal.aborted) throw new Error("Service host startup cancelled.");
-    temporary = await mkdtemp(join(tmpdir(), "dohc-service-live-host-"));
+    yield* Effect.acquireRelease(Effect.sync(() => {
+      const stop = changes ? observeRelayWrites(storage, () => changes.notify()) : () => {};
+      signal.addEventListener("abort",stop,{once: true});
+      return stop;
+    }),stop => Effect.sync(() => {signal.removeEventListener("abort",stop); stop();}));
+    const temporary = yield* Effect.acquireRelease(
+      Effect.promise(() => mkdtemp(join(tmpdir(), "dohc-service-live-host-"))),
+      directory => Effect.promise(() => rm(directory,{recursive: true,force: true})),
+    );
     const nativeConfig = join(temporary, "host.json");
-    await writeFile(nativeConfig, JSON.stringify({ version: 1, relayNamespace: history.namespace, host,
+    yield* Effect.promise(() => writeFile(nativeConfig, JSON.stringify({ version: 1, relayNamespace: history.namespace, host,
       workspaces: config.workspaces.map(({ordinaryReplication, ...workspace}) => ({...workspace,
         ...(ordinaryReplication ? {relay: ordinaryReplication.relay} : {})})),
       ingress: config.ingress, settlement: config.settlement, sync: config.sync, adoption: config.adoption,
-      restore: config.restore ? {maxBytes: config.restore.maxBytes, maxEvents: config.restore.maxEvents} : undefined }), { flag: "wx", mode: 0o600 });
-    client = await createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
+      restore: config.restore ? {maxBytes: config.restore.maxBytes, maxEvents: config.restore.maxEvents} : undefined }), { flag: "wx", mode: 0o600 }));
+    signal.throwIfAborted();
+    const native = yield* Effect.acquireRelease(Effect.promise(() => createEngineClient({ command: config.engineExecutable, authToken: randomBytes(32).toString("base64url"),
       protocolVersion: 2, capabilities: ["blobs"], privateLiveApplication: config.client, connectTimeoutMs: config.client.connectTimeoutMs,
       env: { DOHC_ENGINE_LIVE_HOST_CONFIG: nativeConfig }, signal,
       onExit: abort, onStderr: text => console.error("[service-live-host]", text.trimEnd()),
-    });
+    })),value => Effect.promise(() => value.waitForExit()));
+    yield* Effect.acquireRelease(Effect.sync(() => {
+      const stop = () => native.close();
+      if (signal.aborted) stop(); else signal.addEventListener("abort",stop,{once: true});
+      return stop;
+    }),stop => Effect.sync(() => signal.removeEventListener("abort",stop)));
     // Caller input retention and native upload buffers each have their own cap.
-    if (changes) client = queueLiveHostRequests(client, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
+    const client = changes ? queueLiveHostRequests(native, {maxPendingReads: changes.maxListeners, maxPendingWrites: changes.maxListeners,
       maxRetainedInputBytes: config.client.aggregateBytes,
-      deadlineMs: config.client.requestDeadlineMs, signal, retire: abort});
+      deadlineMs: config.client.requestDeadlineMs, signal, retire: abort}) : native;
     if (signal.aborted) throw new Error("Service host startup cancelled.");
-    const discovery = await client.sendRequest({ id: nextRequestId(), method: "liveApplication.hosts", params: {}, deadlineMs: config.client.requestDeadlineMs });
+    const discovery = yield* Effect.promise(() => client.sendRequest({ id: nextRequestId(), method: "liveApplication.hosts", params: {}, deadlineMs: config.client.requestDeadlineMs }));
     const reply = record(discovery.result, ["relayNamespace", "host", "workspaces"]);
     if (reply.relayNamespace !== history.namespace || !isDeepStrictEqual(reply.host, host) || !Array.isArray(reply.workspaces) ||
       reply.workspaces.length !== config.workspaces.length) throw new Error("Configured engine identity mismatch.");
@@ -243,6 +247,9 @@ export async function startServiceLiveHost(options: {
         signal, assertCurrent: checkPreparing}, attachment));
       if(attachment)attachments.set(row.workspaceId as string,{handle:row.workspaceHandle,ordinary:ordinary.get(row.workspaceId as string)!});
     }
+    yield* Effect.addFinalizer(() => Effect.sync(() => {
+      if (registered && !storage.unavailable.aborted) storage.disconnectLiveHost({...coordinate,updatedAtMs: Date.now(),guard: standing});
+    }));
     standing();
     if (signal.aborted || !history.reconciled) throw new Error("Service host startup cancelled.");
     if (preparingOrdinary) {
@@ -281,13 +288,25 @@ export async function startServiceLiveHost(options: {
           lastError=undefined;
         }catch(error){
           const message=error instanceof Error?error.message:String(error);
-          if(!signal.aborted && message!==lastError){lastError=message;console.error("Service activation pass failed.",message);}
+          if(!signal.aborted && message!==lastError){
+            lastError=message;
+            try{console.error("Service activation pass failed.",message);}catch{ /* Reporting must not stop activation. */ }
+          }
         }
-        if(!signal.aborted){activationTimer=setTimeout(()=>{activationPass=pass();},bounds.pollIntervalMs);activationTimer.unref();}
       };
-      activationPass=Promise.resolve().then(pass);
+      const pause = Effect.callback<void>(resume => {
+        const timer = setTimeout(() => resume(Effect.void),config.activation!.pollIntervalMs);
+        timer.unref();
+        return Effect.sync(() => clearTimeout(timer));
+      });
+      yield* Effect.forkScoped(Effect.gen(function* () {
+        while (!signal.aborted) {
+          // Native passes retain ownership until their actual work settles.
+          yield* Effect.uninterruptible(Effect.promise(pass));
+          yield* pause;
+        }
+      }));
     }
-    finishStartup();
     return Object.freeze({ coordinate, invalidated: signal,
       isDocumentReady(document: LiveDocumentKey): boolean {
         try { check(); return consumerFor(parseLiveDocumentKey(document)) !== undefined; }
@@ -369,12 +388,17 @@ export async function startServiceLiveHost(options: {
         return runDocument(document, callerSignal, joined => consumer.settle(document, joined));
       },
       drain,
-      async close() { signal.removeEventListener("abort", abort); await close(); },
+      close,
     });
+  }),Scope.Scope,scope));
+  try {
+    return await startup;
   } catch (error) {
-    finishStartup();
-    signal.removeEventListener("abort", abort);
-    await close();
+    signal.removeEventListener("abort",abort);
+    try {await close();}
+    catch (cleanupError) {
+      try {console.error("Service host startup cleanup failed.",cleanupError);} catch { /* Preserve the startup failure. */ }
+    }
     throw error;
   }
 }
