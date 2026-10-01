@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { useLayoutEffect } from "react";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { ChatReactionRecord } from "../../ipc/bridgeContract";
 import { deferred, type Deferred } from "../../testing/deferred";
@@ -398,6 +400,25 @@ describe("reaction store: one confirmed state from every read", () => {
     expect(h.reactions).toEqual([fresher]);
   });
 
+  it("tells subscribers nothing for a read that changes nothing, yet still orders later reads by it", () => {
+    const h = setup([peer]);
+    const listener = vi.fn();
+    h.store.subscribe(listener);
+    const version = h.store.version();
+    const stale = h.beginRead();
+    h.read([peer]);
+    expect(listener).not.toHaveBeenCalled();
+    expect(h.store.version()).toBe(version);
+    // The unchanged read is still newer than one that began before it.
+    stale([]);
+    expect(h.reactions).toEqual([peer]);
+    expect(listener).not.toHaveBeenCalled();
+    h.read([peer, you()]);
+    expect(listener).toHaveBeenCalledOnce();
+    h.read([peer, you()], "you@normalized");
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
   it("returns the same view until something in its thread changes", () => {
     const h = setup([peer]);
     bridgeMock.setChatReaction.mockReturnValue(deferred<undefined>().promise);
@@ -598,6 +619,54 @@ describe("reaction store: visits and accounts", () => {
       expect(store.view("thread-1")).toEqual({ reactions: [], viewerAuthorId: fallback });
     });
 
+    // A Home item for an unreacted message can name the new viewer before any
+    // read carries the stable id that proves the rename.
+    describe.each([
+      { name: "signing in", from: fallback, to: account },
+      { name: "signing out", from: account, to: fallback },
+    ])("a removal pending across $name, proven only by a later read", ({ from, to }) => {
+      const before = you({ reactionId: "same-stable-id", authorId: from });
+      const after = { ...before, authorId: to };
+
+      function pendingRemoval() {
+        const store = createReactionStore("ws");
+        store.ingest([{ threadId: "thread-1", reactions: [before], viewerAuthorId: from, ticket: store.ticket() }]);
+        const write = deferred<undefined>();
+        bridgeMock.setChatReaction.mockReturnValueOnce(write.promise);
+        store.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState: "removed", viewerAuthorId: from, onError: vi.fn() });
+        return { store, write };
+      }
+
+      it("keeps the row off when the proving read comes after the naming one", async () => {
+        const { store, write } = pendingRemoval();
+        store.ingest([{ threadId: "thread-1", messageIds: ["m2"], reactions: [], viewerAuthorId: to, ticket: store.ticket() }]);
+        expect(store.view("thread-1").reactions).toEqual([]);
+        store.ingest([{ threadId: "thread-1", reactions: [after], viewerAuthorId: to, ticket: store.ticket() }]);
+        expect(store.view("thread-1")).toEqual({ reactions: [], viewerAuthorId: to });
+        write.reject(new TypeError("offline"));
+        await settled(store);
+        expect(store.view("thread-1").reactions).toEqual([after]);
+      });
+
+      it("keeps the row off when one page names the viewer before it proves the rename", () => {
+        const { store } = pendingRemoval();
+        const ticket = store.ticket();
+        store.ingest([
+          { threadId: "thread-1", messageIds: ["m2"], reactions: [], viewerAuthorId: to, ticket },
+          { threadId: "thread-1", messageIds: ["m1"], reactions: [after], viewerAuthorId: to, ticket },
+        ]);
+        expect(store.view("thread-1")).toEqual({ reactions: [], viewerAuthorId: to });
+      });
+    });
+
+    it("does not take a pending row as evidence that two names are one person", () => {
+      const store = createReactionStore("ws");
+      bridgeMock.setChatReaction.mockReturnValueOnce(deferred<undefined>().promise);
+      store.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState: "added", viewerAuthorId: fallback, onError: vi.fn() });
+      store.ingest([{ threadId: "thread-1", reactions: [], viewerAuthorId: account, ticket: store.ticket() }]);
+      expect(store.view("thread-1").reactions.map((row) => row.authorId)).toEqual([fallback]);
+    });
+
     it("does not join another account whose read leaves the account's row where it was", () => {
       const store = createReactionStore("ws");
       const read = (reactions: ChatReactionRecord[], viewerAuthorId: string) =>
@@ -608,6 +677,58 @@ describe("reaction store: visits and accounts", () => {
       bridgeMock.setChatReaction.mockReturnValueOnce(deferred<undefined>().promise);
       store.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState: "added", viewerAuthorId: "bob@example.com", onError: vi.fn() });
       expect(store.view("thread-1").reactions.map((row) => row.authorId)).toEqual([account, "bob@example.com"]);
+    });
+
+    // R is the fallback's row, listed under the account while signed in. S was
+    // stored under the account, so main lists it there even after sign-out.
+    describe("beside a row the account itself stored", () => {
+      function signedOut(sameCell: boolean) {
+        const store = createReactionStore("ws");
+        const local = you({ reactionId: "local-id", authorId: fallback });
+        const owned = you({ reactionId: "account-id", authorId: account, ...(sameCell ? {} : { messageId: "m2" }) });
+        const read = (reactions: ChatReactionRecord[], viewerAuthorId: string) =>
+          store.ingest([{ threadId: "thread-1", reactions, viewerAuthorId, ticket: store.ticket() }]);
+        read([local], fallback);
+        read([{ ...local, authorId: account }, owned], account);
+        return { store, read, local, owned };
+      }
+
+      it("keeps the account's row under the account after sign-out, on its own cell", () => {
+        const { store, read, local, owned } = signedOut(false);
+        read([local, owned], fallback);
+        expect(store.view("thread-1", "m2")).toEqual({ reactions: [owned], viewerAuthorId: fallback });
+        // The fallback's like there is its own, beside the account's.
+        bridgeMock.setChatReaction.mockReturnValueOnce(deferred<undefined>().promise);
+        store.toggle({ threadId: "thread-1", messageId: "m2", emoji: "👍", nextState: "added", viewerAuthorId: fallback, onError: vi.fn() });
+        expect(store.view("thread-1", "m2").reactions.map((row) => row.authorId)).toEqual([account, fallback]);
+      });
+
+      it.each(["refused", "accepted"] as const)("removes only the fallback's row when the signed-out removal is %s", async (outcome) => {
+        const { store, read, local, owned } = signedOut(true);
+        read([local, owned], fallback);
+        const write = deferred<undefined>();
+        bridgeMock.setChatReaction.mockReturnValueOnce(write.promise);
+        bridgeMock.listChatReactions.mockResolvedValueOnce(listing([owned], fallback));
+        store.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState: "removed", viewerAuthorId: fallback, onError: vi.fn() });
+        expect(store.view("thread-1").reactions).toEqual([owned]);
+        if (outcome === "refused") write.reject(new TypeError("offline"));
+        else write.resolve(undefined);
+        await settled(store);
+        expect(store.view("thread-1").reactions).toEqual(outcome === "refused" ? [local, owned] : [owned]);
+      });
+
+      it("rolls a removal chosen while signed in back to both rows after sign-out", async () => {
+        const { store, read, local, owned } = signedOut(true);
+        const write = deferred<undefined>();
+        bridgeMock.setChatReaction.mockReturnValueOnce(write.promise);
+        store.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState: "removed", viewerAuthorId: account, onError: vi.fn() });
+        read([local, owned], fallback);
+        // The account's write covers its own row and the one listed under it.
+        expect(store.view("thread-1").reactions).toEqual([]);
+        write.reject(new TypeError("offline"));
+        await settled(store);
+        expect(store.view("thread-1")).toEqual({ reactions: [local, owned], viewerAuthorId: fallback });
+      });
     });
   });
 
@@ -662,13 +783,14 @@ describe("reaction store: visits and accounts", () => {
     h.toggle("added", { messageId: "m2", emoji: "👍" });
     writes[0]!.resolve(undefined);
     await waitFor(() => expect(lists).toHaveLength(1));
-    lists[0]!.resolve(listing([you({ authorId: "next-account" }), you({ messageId: "m2" }), oldRow], "next-account"));
+    const second = you({ reactionId: "r-second", messageId: "m2" });
+    lists[0]!.resolve(listing([you({ authorId: "next-account" }), second, oldRow], "next-account"));
     await waitFor(() => expect(h.viewerAuthorId).toBe("next-account"));
     expect(h.reactions.find((row) => row.messageId === "m2")?.authorId).toBe("you@x");
     expect(h.reactions).toContainEqual(oldRow);
     writes[1]!.resolve(undefined);
     await waitFor(() => expect(lists).toHaveLength(2));
-    lists[1]!.resolve(listing([you({ messageId: "m2" })], "next-account"));
+    lists[1]!.resolve(listing([second], "next-account"));
     await settled(h.store, "m2");
   });
 
@@ -681,13 +803,14 @@ describe("reaction store: visits and accounts", () => {
     h.toggle("added", { messageId: "m2", emoji: "👍" });
     writes[0]!.resolve(undefined);
     await waitFor(() => expect(lists).toHaveLength(1));
-    lists[0]!.resolve(listing([you({ authorId: "next-account" }), you({ messageId: "m2" }), currentRow], "next-account"));
+    const second = you({ reactionId: "r-second", messageId: "m2" });
+    lists[0]!.resolve(listing([you({ authorId: "next-account" }), second, currentRow], "next-account"));
     await waitFor(() => expect(h.viewerAuthorId).toBe("next-account"));
     expect(h.reactions.filter((row) => row.messageId === "m2").map((row) => row.authorId).sort())
       .toEqual(["next-account", "you@x"]);
     writes[1]!.resolve(undefined);
     await waitFor(() => expect(lists).toHaveLength(2));
-    lists[1]!.resolve(listing([you({ messageId: "m2" }), currentRow], "next-account"));
+    lists[1]!.resolve(listing([second, currentRow], "next-account"));
     await settled(h.store, "m2");
   });
 
@@ -936,6 +1059,48 @@ describe("reaction store: session owner", () => {
       await writes[1]!.promise;
     });
     await settled(a);
+  });
+
+  // Outside act, React commits a return to A, then runs passive effects in a
+  // later task. A settlement in between must already see A as open.
+  it("keeps the store it provides when its last write settles as a return to it commits", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", false);
+    const write = deferred<undefined>();
+    bridgeMock.setChatReaction.mockReturnValueOnce(write.promise);
+    const committed: ReactionStore[] = [];
+    function Shell(props: { onCommit?: () => void }) {
+      const store = useReactions();
+      useLayoutEffect(() => {
+        committed.push(store);
+        props.onCommit?.();
+      });
+      return null;
+    }
+    const shell = (workspaceId: string, onCommit?: () => void) => (
+      <ReactionStoreProvider workspaceId={workspaceId}>
+        <Shell key={workspaceId} onCommit={onCommit} />
+      </ReactionStoreProvider>
+    );
+    const root = createRoot(document.createElement("div"));
+    const settle = () => write.reject(new TypeError("offline"));
+    try {
+      root.render(shell("workspace-a"));
+      await vi.waitFor(() => expect(committed).toHaveLength(1));
+      const a = committed[0]!;
+      a.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState: "added", viewerAuthorId: "you@x", onError: vi.fn() });
+      root.render(shell("workspace-b"));
+      await vi.waitFor(() => expect(committed.at(-1)).not.toBe(a));
+      root.render(shell("workspace-a", settle));
+      await vi.waitFor(() => expect(committed.at(-1)).toBe(a));
+      await vi.waitFor(() => expect(a.pending("thread-1", "m1")).toBe(false));
+      // A later root render still finds the same owner.
+      const commits = committed.length;
+      root.render(shell("workspace-a"));
+      await vi.waitFor(() => expect(committed.length).toBeGreaterThan(commits));
+      expect(committed.at(-1)).toBe(a);
+    } finally {
+      root.unmount();
+    }
   });
 
   it("retires a left workspace's store once its work settles, and keeps the open one", async () => {

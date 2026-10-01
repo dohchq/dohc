@@ -1,7 +1,7 @@
 import {
   createContext,
   useContext,
-  useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -30,10 +30,9 @@ import { ipcErrorMessage } from "../ipcError";
 //   3. An accepted write stays painted until a read that began after it
 //      lands, even when its own listing fails. That failure says the write
 //      saved only when the accepted write was this viewer's.
-//   4. When a read names a new viewer, the old name follows only on positive
-//      evidence that they are one person: a row held under the old name whose
-//      stable id the newer read attributes to the new one. A viewer changing,
-//      having no rows, or sharing a cell proves nothing.
+//   4. Two names are one person only when main listed one stable reaction id
+//      under both. A viewer changing, having no rows, or sharing a cell proves
+//      nothing, and a row keeps the author main listed it under most recently.
 // Nothing here sets a surface's state. Errors go to the destination the
 // toggle named, which each surface gates on its own visit.
 
@@ -125,60 +124,25 @@ interface Thread {
   // Messages read since then, each by its newest read.
   messages: Map<string, Confirmed>;
   viewer: { id: string; at: number } | null;
-  // Each name proven, by a stable reaction id, to be one person with another.
-  people: Map<string, Person>;
+  // Every name main listed each stable reaction id under, and its newest.
+  // Main lists a local fallback's rows under the signed-in account and under
+  // the fallback again after sign-out, so one id can carry both names.
+  listed: Map<string, { names: Set<string>; author: string; at: number }>;
   cells: Map<string, Cell>;
   revision: number;
-}
-
-// One person's proven names. Rows show under the thread's viewer when the
-// viewer is one of them, else under the name the newest proof gave.
-interface Person {
-  names: Set<string>;
-  current: string;
-}
-
-interface Rows {
-  reactions: ChatReactionRecord[];
-  viewerAuthorId?: string;
 }
 
 const NO_VIEW: ReactionView = { reactions: [], viewerAuthorId: "" };
 
 const inMessage = (messageId: string) => (row: ChatReactionRecord) => row.messageId === messageId;
 
-function provenAlias(older: Rows, newer: Rows) {
-  const from = older.viewerAuthorId ?? "";
-  const to = newer.viewerAuthorId ?? "";
-  if (!from || !to || from === to) return null;
-  const renamed = new Set(
-    newer.reactions.filter((row) => row.authorId === to).map((row) => row.reactionId),
-  );
-  return older.reactions.some((row) => row.authorId === from && renamed.has(row.reactionId))
-    ? { from, to }
-    : null;
-}
-
-// Main maps a local fallback's rows to the signed-in account and back again
-// on sign-out, so a proof can run either way between the same names.
-function proveSamePerson(thread: Thread, from: string, to: string) {
-  const left = thread.people.get(from);
-  const right = thread.people.get(to);
-  const person = left ?? right ?? { names: new Set<string>(), current: to };
-  for (const name of [from, to, ...(left?.names ?? []), ...(right?.names ?? [])]) {
-    person.names.add(name);
-    thread.people.set(name, person);
+// Two names are one person only when main listed one stable row under both.
+function samePerson(thread: Thread, left: string, right: string): boolean {
+  if (left === right) return true;
+  for (const { names } of thread.listed.values()) {
+    if (names.has(left) && names.has(right)) return true;
   }
-  person.current = to;
-}
-
-function renamer(thread: Thread) {
-  const viewer = thread.viewer?.id;
-  return (name: string) => {
-    const person = thread.people.get(name);
-    if (!person) return name;
-    return viewer !== undefined && person.names.has(viewer) ? viewer : person.current;
-  };
+  return false;
 }
 
 // Replace the rows `matches` selects, in place; new rows go last. Unchanged
@@ -198,18 +162,22 @@ function replaceRows(
   return [...kept.slice(0, index), ...next, ...kept.slice(index)];
 }
 
-// One author's rows on a cell, as an intent or accepted write leaves them.
+// A cell's rows as an intent or accepted write leaves them. The write covers
+// rows under its author's name, and rows main ever listed under that name.
 // A row a read already holds for them stays as it is.
-function withAuthor(
+function withWrite(
   rows: ChatReactionRecord[],
   threadId: string,
+  thread: Thread,
   cell: Cell,
-  author: string,
   write: Omit<Intent, "onError">,
 ): ChatReactionRecord[] {
-  const own = rows.find((row) => row.authorId === author);
-  if (write.state === "removed") return own ? rows.filter((row) => row.authorId !== author) : rows;
-  if (own) return rows.filter((row) => row.authorId !== author || row === own);
+  const covers = (row: ChatReactionRecord) =>
+    row.authorId === write.author || thread.listed.get(row.reactionId)?.names.has(write.author) === true;
+  if (rows.some(covers)) return write.state === "removed" ? rows.filter((row) => !covers(row)) : rows;
+  if (write.state === "removed") return rows;
+  const viewer = thread.viewer?.id ?? "";
+  const author = viewer && samePerson(thread, viewer, write.author) ? viewer : write.author;
   return [
     ...rows,
     {
@@ -240,14 +208,15 @@ function confirmedRows(thread: Thread, messageId?: string): ChatReactionRecord[]
 function ingestRead(thread: Thread, read: ReactionRead) {
   const { ticket } = read;
   const viewer = read.viewerAuthorId ?? "";
-  if (viewer) {
-    const known = thread.viewer;
-    if (known && known.id !== viewer) {
-      const before = { reactions: confirmedRows(thread), viewerAuthorId: known.id };
-      const alias = known.at < ticket ? provenAlias(before, read) : provenAlias(read, before);
-      if (alias) proveSamePerson(thread, alias.from, alias.to);
+  if (viewer && (!thread.viewer || thread.viewer.at < ticket)) thread.viewer = { id: viewer, at: ticket };
+  for (const row of read.reactions) {
+    const known = thread.listed.get(row.reactionId);
+    if (!known) {
+      thread.listed.set(row.reactionId, { names: new Set([row.authorId]), author: row.authorId, at: ticket });
+      continue;
     }
-    if (!known || known.at < ticket) thread.viewer = { id: viewer, at: ticket };
+    known.names.add(row.authorId);
+    if (known.at < ticket) Object.assign(known, { author: row.authorId, at: ticket });
   }
   const covered = read.messageIds;
   if (covered === undefined) {
@@ -273,27 +242,26 @@ function ingestRead(thread: Thread, read: ReactionRead) {
 }
 
 function project(threadId: string, thread: Thread, messageId: string | undefined): ReactionView {
-  const rename = renamer(thread);
-  let rows = confirmedRows(thread, messageId);
-  if (thread.people.size > 0) {
-    rows = rows.map((row) => {
-      const authorId = rename(row.authorId);
-      return authorId === row.authorId ? row : { ...row, authorId };
-    });
-  }
+  // A row from an older read shows under the author main listed it under
+  // most recently. Rows from the newest read are already main's answer.
+  const rows = confirmedRows(thread, messageId).map((row) => {
+    const author = thread.listed.get(row.reactionId)?.author ?? row.authorId;
+    return author === row.authorId ? row : { ...row, authorId: author };
+  });
+  let projected = rows;
   for (const cell of thread.cells.values()) {
     if (messageId !== undefined && cell.messageId !== messageId) continue;
     const inCell = (row: ChatReactionRecord) =>
       row.messageId === cell.messageId && row.emoji === cell.emoji;
-    let cellRows = rows.filter(inCell);
+    let cellRows = projected.filter(inCell);
     // Accepted writes no read has seen, then intents in flight. An unknown
     // viewer's writes paint nothing: their listing names them.
     for (const write of [...cell.accepted, cell.writing, cell.queued]) {
-      if (write?.author) cellRows = withAuthor(cellRows, threadId, cell, rename(write.author), write);
+      if (write?.author) cellRows = withWrite(cellRows, threadId, thread, cell, write);
     }
-    rows = replaceRows(rows, inCell, cellRows);
+    projected = replaceRows(projected, inCell, cellRows);
   }
-  return { reactions: rows, viewerAuthorId: rename(thread.viewer?.id ?? "") };
+  return { reactions: projected, viewerAuthorId: thread.viewer?.id ?? "" };
 }
 
 function sameRow(left: ChatReactionRecord, right: ChatReactionRecord): boolean {
@@ -330,7 +298,7 @@ export function createReactionStore(workspaceId: string): ReactionStore {
   function threadOf(threadId: string): Thread {
     let thread = threads.get(threadId);
     if (!thread) {
-      thread = { full: null, messages: new Map(), viewer: null, people: new Map(), cells: new Map(), revision: 0 };
+      thread = { full: null, messages: new Map(), viewer: null, listed: new Map(), cells: new Map(), revision: 0 };
       threads.set(threadId, thread);
     }
     return thread;
@@ -360,8 +328,7 @@ export function createReactionStore(workspaceId: string): ReactionStore {
         (error: unknown) => {
           // A newer toggle's own listing or rejection speaks for it.
           if (cell.latest !== latest) return;
-          const rename = renamer(thread);
-          const saved = accepted !== undefined && rename(accepted.author) === rename(latest.author);
+          const saved = accepted !== undefined && samePerson(thread, accepted.author, latest.author);
           latest.onError(
             withErrorWords(
               saved
@@ -412,13 +379,18 @@ export function createReactionStore(workspaceId: string): ReactionStore {
   return {
     ticket: () => ++seq,
     ingest(reads) {
-      const touched = new Set<Thread>();
+      // Tickets always advance, but subscribers hear only a visible change.
+      const before = new Map<string, ReactionView>();
       for (const read of reads) {
         const thread = threadOf(read.threadId);
+        if (!before.has(read.threadId)) before.set(read.threadId, project(read.threadId, thread, undefined));
         ingestRead(thread, read);
-        touched.add(thread);
       }
-      if (touched.size > 0) changed(...touched);
+      const touched = [...before].flatMap(([threadId, view]) => {
+        const thread = threadOf(threadId);
+        return sameView(view, project(threadId, thread, undefined)) ? [] : [thread];
+      });
+      if (touched.length > 0) changed(...touched);
     },
     toggle(input) {
       const thread = threadOf(input.threadId);
@@ -495,7 +467,8 @@ export function ReactionStoreProvider(props: { workspaceId: string | null; child
     store = stores.get(workspaceId) ?? createReactionStore(workspaceId);
     stores.set(workspaceId, store);
   }
-  useEffect(() => {
+  // At commit, before any settlement can ask which workspace is open.
+  useLayoutEffect(() => {
     open.current = workspaceId;
     for (const [id, left] of stores) {
       if (id === workspaceId) continue;
