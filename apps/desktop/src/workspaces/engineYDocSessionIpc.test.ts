@@ -15,6 +15,7 @@ import {
 import {
   createEngineYDocSessionIpc,
   DOCUMENT_EDIT_SHARED_WARNING,
+  EngineYDocArrivals,
   LiveDocumentEditAppliedError,
   type EngineYDocIpcSender,
   type EngineYDocSessionCapture,
@@ -226,6 +227,118 @@ describe("engine Y.Doc IPC adapter", () => {
       typedBy("account-alice", first), typedBy("account-alice", first), typedBy("account-bob", second),
     ]);
     await h.ipc.shutdown();
+  });
+
+  it("keeps the arrival person for an identical retry through a recreated session, and never for changed bytes", async () => {
+    // The engine's request ledger: a key repeats only with the same bytes and attribution.
+    const ledger = new Map<string, string>();
+    const outcomes: Array<{ outcome: "recorded" | "deduped" | "refused"; person: string | undefined }> = [];
+    const provider = () => providerSession({
+      applyLocalUpdate: vi.fn<WorkspaceEngineYDocProviderSession["applyLocalUpdate"]>((update, onArmed, options) => {
+        const key = options?.idempotencyKey ?? "";
+        const payload = JSON.stringify([[...update], options?.actorOriginId ?? null, options?.attribution ?? null]);
+        const recorded = ledger.get(key);
+        if (recorded === undefined) {
+          ledger.set(key, payload);
+          outcomes.push({ outcome: "recorded", person: options?.actorOriginId });
+          onArmed?.();
+          return;
+        }
+        outcomes.push({ outcome: recorded === payload ? "deduped" : "refused", person: options?.actorOriginId });
+      }),
+    });
+    const original = provider();
+    const h = harness(original);
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender, openPayload);
+    h.setPerson("account-alice");
+    const requestId = "33333333-3333-4333-8333-333333333333";
+    const batch = new Uint8Array([1, 2, 3]);
+    const apply = (sessionId: string, update: Uint8Array) =>
+      h.ipc.applyUpdate(sender, { sessionId, update, seq: 1, lineageGeneration: 1, requestId });
+    expect(apply(openPayload.sessionId, batch)).toEqual({ accepted: true });
+    // The acceptance never reaches the renderer. The account changes, and the
+    // document's session closes and opens again over a new provider.
+    h.setPerson("account-bob");
+    await h.ipc.close(sender, { sessionId: openPayload.sessionId });
+    const recreated = provider();
+    vi.mocked(h.capture.openYDocSession).mockResolvedValueOnce(recreated);
+    const reopened = { ...openPayload, sessionId: "renderer-session-2" };
+    await h.ipc.open(sender, reopened);
+    expect(original.close).toHaveBeenCalled();
+    // The same batch is still Alice's; other bytes under its id are Bob's.
+    expect(apply(reopened.sessionId, batch)).toEqual({ accepted: true });
+    expect(apply(reopened.sessionId, new Uint8Array([9]))).toEqual({ accepted: true });
+    expect(outcomes).toEqual([
+      { outcome: "recorded", person: "account-alice" },
+      { outcome: "deduped", person: "account-alice" },
+      { outcome: "refused", person: "account-bob" },
+    ]);
+    expect(vi.mocked(recreated.applyLocalUpdate)).toHaveBeenCalledTimes(2);
+    await h.ipc.shutdown();
+  });
+
+  it("lets a renderer session's next update retire its earlier ones, and its workspace attachment retire them all", async () => {
+    const h = harness(providerSession());
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender, openPayload);
+    const first = "44444444-4444-4444-8444-444444444444";
+    const second = "55555555-5555-4555-8555-555555555555";
+    const apply = (sessionId: string, requestId: string, update: Uint8Array) =>
+      h.ipc.applyUpdate(sender, { sessionId, update, seq: 1, lineageGeneration: 1, requestId });
+    const a = new Uint8Array([1]);
+    const b = new Uint8Array([2]);
+    h.setPerson("account-alice");
+    apply(openPayload.sessionId, first, a);
+    // Sent only once the renderer heard the first accepted.
+    apply(openPayload.sessionId, second, b);
+    h.setPerson("account-bob");
+    apply(openPayload.sessionId, second, b);
+    apply(openPayload.sessionId, first, a);
+    await h.ipc.retireAuthority(AUTHORITY_ID);
+    h.setPerson("account-carol");
+    const reopened = { ...openPayload, sessionId: "renderer-session-3" };
+    await h.ipc.open(sender, reopened);
+    apply(reopened.sessionId, first, a);
+    const people = vi.mocked(h.session.applyLocalUpdate).mock.calls.map(call => call[2]?.actorOriginId);
+    expect(people).toEqual(["account-alice", "account-alice", "account-alice", "account-bob", "account-carol"]);
+    await h.ipc.shutdown();
+  });
+
+  it("bounds what renderers leave behind, reaching an update still being retried last", () => {
+    const arrivals = new EngineYDocArrivals(2);
+    const authorityId = Symbol("attachment");
+    let person = "account-alice";
+    const name = (source: string, requestId: string) => arrivals.person(
+      { authorityId, path: "notes/a.md", source, requestId, update: new Uint8Array([1]) }, () => person);
+    name("session-1", "request-1");
+    name("session-2", "request-2");
+    // Session 1 retries, so session 2's leftover is the oldest.
+    name("session-1", "request-1");
+    name("session-3", "request-3");
+    person = "account-bob";
+    expect(name("session-1", "request-1")).toBe("account-alice");
+    expect(name("session-3", "request-3")).toBe("account-alice");
+    expect(name("session-2", "request-2")).toBe("account-bob");
+  });
+
+  it("keeps nothing beyond the bounded records however many renderer sessions come and go", () => {
+    const arrivals = new EngineYDocArrivals(3);
+    const authorityId = Symbol("attachment");
+    const send = (session: number, request: number) => arrivals.person({
+      authorityId, path: "notes/a.md", source: `session-${session}`,
+      requestId: `request-${session}-${request}`, update: new Uint8Array([request]),
+    }, () => "account-alice");
+    for (let request = 0; request < 3; request += 1) send(0, request);
+    // A session keeps only the update it may still retry.
+    expect(arrivals.size).toBe(1);
+    // Sessions that close or reload leave their last update, up to the bound.
+    for (let session = 1; session < 50; session += 1) {
+      for (let request = 0; request < 3; request += 1) send(session, request);
+    }
+    expect(arrivals.size).toBe(3);
+    arrivals.retireAuthority(authorityId);
+    expect(arrivals.size).toBe(0);
   });
 
   it("preserves author capacity refusal on the owned session's save event", async () => {

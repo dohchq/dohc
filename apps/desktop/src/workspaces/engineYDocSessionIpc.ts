@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -139,10 +140,8 @@ interface EngineYDocIpcOwnedSession {
   saveSeq: EngineYDocSaveSeqState;
   artifactAssetsById: Map<string, ArtifactAssetDescriptor>;
   retiredArtifactAssets: ArtifactAssetDescriptor[];
-  // The person behind each renderer request, by request id: main's account
-  // when the request first arrived. A retry keeps that person, so an account
-  // change cannot relabel an edit main already took.
-  arrivals: Map<string, string>;
+  // The canonical document path this session was opened for.
+  path: string;
   deleted: boolean;
   // Another object took this document's path. Implies `deleted`: the
   // session is gone from this path either way, only the reason differs.
@@ -154,15 +153,79 @@ interface EngineYDocIpcOwnedSession {
   close: WorkspaceEngineYDocProviderSession["close"];
 }
 
-// The renderer holds no more unacknowledged records than the pending limit for
-// one document, so a request it can still retry is never forgotten here.
-function arrivalPerson(arrivals: Map<string, string>, requestId: string, current: () => string): string {
-  const pinned = arrivals.get(requestId);
-  if (pinned !== undefined) return pinned;
-  const person = current();
-  arrivals.set(requestId, person);
-  if (arrivals.size > YDOC_PENDING_MAX_RECORDS) arrivals.delete(arrivals.keys().next().value!);
-  return person;
+// One renderer session, as it delivers its updates in order.
+function arrivalSource(sender: EngineYDocIpcSender, sessionId: string): string {
+  return `${sender.id}\u0000${sessionId}`;
+}
+
+interface Arrival {
+  readonly person: string;
+  // The renderer session that last sent it.
+  readonly source: string;
+}
+
+/**
+ * The person behind each renderer update: main's account when the update
+ * first arrived. An update is its document, request id, and bytes, so a retry
+ * keeps its person across the document's owned sessions, and a request id
+ * sent with other bytes is another update, named when it arrives.
+ *
+ * A renderer session delivers its batches in order and sends the next only
+ * once main's acceptance of the last one reached it, so its next update proves
+ * its earlier ones need no person here. Any it abandoned are never sent again.
+ * What a renderer leaves behind when it goes, a closed or reloaded session's
+ * last update included, is bounded per workspace attachment and goes with it.
+ * The records are all there is: nothing else is kept per renderer session.
+ */
+export class EngineYDocArrivals {
+  readonly #byAuthority = new Map<symbol, Map<string, Arrival>>();
+  readonly #limit: number;
+
+  constructor(limit = YDOC_PENDING_MAX_RECORDS) {
+    this.#limit = limit;
+  }
+
+  /** How many updates are remembered, across every workspace attachment. */
+  get size(): number {
+    let size = 0;
+    for (const arrivals of this.#byAuthority.values()) size += arrivals.size;
+    return size;
+  }
+
+  person(
+    input: { authorityId: symbol; path: string; source: string; requestId: string; update: Uint8Array },
+    current: () => string,
+  ): string {
+    let arrivals = this.#byAuthority.get(input.authorityId);
+    if (!arrivals) {
+      arrivals = new Map();
+      this.#byAuthority.set(input.authorityId, arrivals);
+    }
+    const key = `${input.path}\u0000${input.requestId}\u0000${createHash("sha256").update(input.update).digest("hex")}`;
+    // This session's other updates were acknowledged or abandoned.
+    for (const [earlier, arrival] of arrivals) {
+      if (earlier !== key && arrival.source === input.source) arrivals.delete(earlier);
+    }
+    const known = arrivals.get(key);
+    if (known) {
+      // Still being retried, so the bound reaches it last.
+      arrivals.delete(key);
+      arrivals.set(key, { person: known.person, source: input.source });
+      return known.person;
+    }
+    const person = current();
+    arrivals.set(key, { person, source: input.source });
+    if (arrivals.size > this.#limit) arrivals.delete(arrivals.keys().next().value!);
+    return person;
+  }
+
+  retireAuthority(authorityId: symbol): void {
+    this.#byAuthority.delete(authorityId);
+  }
+
+  clear(): void {
+    this.#byAuthority.clear();
+  }
 }
 
 /**
@@ -354,6 +417,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   ];
   readonly #onError: EngineYDocSessionIpcOptions["onError"];
   readonly #localPersonId: EngineYDocSessionIpcOptions["localPersonId"];
+  readonly #arrivals = new EngineYDocArrivals();
   readonly #owner: EngineYDocIpcSessionOwner;
   readonly #documentReservations: DocumentMutationReservations;
   // One main-side edit at a time per document. Each edit reads the document's
@@ -632,7 +696,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             ]),
           ),
           retiredArtifactAssets: [],
-          arrivals: new Map(),
+          path: canonicalPath,
           deleted: false,
           objectChanged: false,
           emit: signals.emit,
@@ -771,7 +835,10 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
         // A renderer editor update is this computer's person typing: agent
         // and automation writes take the collection write seam, never this
         // IPC. Main names the person; the renderer names no one.
-        const person = arrivalPerson(owned.arrivals, input.requestId, this.#localPersonId);
+        const person = this.#arrivals.person({
+          authorityId: owned.workspace.attachmentId, path: owned.path,
+          source: arrivalSource(sender, input.sessionId), requestId: input.requestId, update: input.update,
+        }, this.#localPersonId);
         owned.provider.applyLocalUpdate(
           input.update,
           () => noteLocalEdit(owned.saveSeq, input.seq),
@@ -1097,6 +1164,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   }
 
   shutdown(): Promise<EngineYDocSessionReleaseOutcome[]> {
+    this.#arrivals.clear();
     return this.#owner.shutdown();
   }
 
@@ -1107,6 +1175,8 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
   retireAuthority(
     authorityId: symbol,
   ): Promise<EngineYDocSessionReleaseOutcome[]> {
+    // The attachment's documents and their pending updates go with it.
+    this.#arrivals.retireAuthority(authorityId);
     return this.#owner.retireAuthority(authorityId);
   }
   #caller(sender: EngineYDocIpcSender, sessionId: string) {
