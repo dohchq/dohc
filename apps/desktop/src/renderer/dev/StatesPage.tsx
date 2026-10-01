@@ -420,10 +420,11 @@ function Pane(props: { theme: "light" | "dark" }) {
         </ul>
       </Section>
 
-      {/* Both menus are opened by the capture, and their boxes are tall
-          enough for the open menu and its shadow. The ••• menu's first row
-          takes keyboard focus when it opens; forcing focus there draws the
-          same row the same way whether or not focus has since moved on. */}
+      {/* Both menus are opened by the capture, one at a time, and their
+          boxes are tall enough for the open menu and its shadow. A menu's
+          first row takes keyboard focus when it opens; forcing focus there
+          draws the same row the same way whether or not focus has since
+          moved on. */}
       <Section part="menu" title="Menu">
         <Specimen label="rows: keyboard-active, hover, rest, disabled">
           <div
@@ -439,7 +440,11 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="document-menu" title="Document menu">
-        <div className="flex h-64 w-56 items-start justify-end">
+        <div
+          className="flex h-64 w-56 items-start justify-end"
+          data-force-state="focus"
+          data-force-target="[role=menuitem]:nth-child(1)"
+        >
           <DocumentMenu workspaceId="states" suggestedName="states" getMarkdown={() => null} />
         </div>
       </Section>

@@ -51,17 +51,16 @@ async function withDesktop(
   }
 }
 
-// Every element marked `data-force-state` gets that pseudo-class forced
-// through the browser, so the part's own :hover, :focus-visible or :focus
-// rules apply. `data-force-target` names a descendant to force instead.
-async function forceMarkedStates(page: Page): Promise<void> {
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("DOM.enable");
-  await cdp.send("CSS.enable");
+// Every element marked `data-force-state` under `scope` gets that
+// pseudo-class forced through the browser, so the part's own :hover,
+// :focus-visible or :focus rules apply. `data-force-target` names a
+// descendant to force instead.
+type Cdp = Awaited<ReturnType<ReturnType<Page["context"]>["newCDPSession"]>>;
+async function forceMarkedStates(cdp: Cdp, scope: string): Promise<void> {
   const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
   const { nodeIds } = await cdp.send("DOM.querySelectorAll", {
     nodeId: root.nodeId,
-    selector: "[data-force-state]",
+    selector: `${scope} [data-force-state]`,
   });
   for (const nodeId of nodeIds) {
     const { attributes } = await cdp.send("DOM.getAttributes", { nodeId });
@@ -82,10 +81,23 @@ async function forceMarkedStates(page: Page): Promise<void> {
 
 // Opened from the keyboard, so no pointer is left over the trigger or lands
 // on a row, and no pointer press reaches the listeners that close a menu.
+// Focus then leaves the menu for the page: a menu closes when focus moves to
+// another element, not when it goes to the page, and the row the part marks
+// is drawn by a forced :focus rather than by the keyboard's focus ring.
 async function openMenu(page: Page, trigger: Locator, menu: Locator): Promise<void> {
   await trigger.focus();
   await page.keyboard.press("Enter");
   await expect(menu).toBeVisible();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+}
+
+// Closed from its trigger, which Escape reaches while focus is inside the
+// menu's frame. Focus then leaves the trigger, so no ring outlives the part.
+async function closeMenu(page: Page, trigger: Locator, menu: Locator): Promise<void> {
+  await trigger.focus();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 }
 
 // Pressed from the keyboard for the same reason. The part says what it says
@@ -163,17 +175,12 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       const detailsIcon = pane.getByTestId(`states-copy-details-icon-copied-${theme}`);
       await press(page, detailsIcon);
       await expect(detailsIcon).toHaveAttribute("title", "Copied");
-
-      await openMenu(page, pane.getByTestId(`states-menu-${theme}`), pane.getByRole("menu", { name: "More for Research" }));
-      await openMenu(
-        page,
-        pane.getByRole("button", { name: "Document actions" }),
-        pane.getByRole("menu", { name: "Document actions" }),
-      );
     }
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 
-    // After the menus exist, so their rows can be marked.
-    await forceMarkedStates(page);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("DOM.enable");
+    await cdp.send("CSS.enable");
 
     const seen = new Set<string>();
     for (const theme of THEMES) {
@@ -184,9 +191,18 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         if (!name || !box) throw new Error("every part needs a data-part name and a box on the page");
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
+        // One menu is open at a time: opening another moves focus and closes
+        // the first. A part with a menu opens it for its own capture, and its
+        // rows can be marked only while they exist.
+        const trigger = part.locator("[aria-haspopup='menu']");
+        const menu = part.getByRole("menu");
+        const hasMenu = (await trigger.count()) === 1;
+        if (hasMenu) await openMenu(page, trigger, menu);
+        await forceMarkedStates(cdp, `[data-testid="states-${theme}"] [data-part="${name}"]`);
         await expect(page).toHaveScreenshot(`${name}-${theme}.png`, {
           clip: { x: box.x - BLEED, y: box.y - BLEED, width: box.width + 2 * BLEED, height: box.height + 2 * BLEED },
         });
+        if (hasMenu) await closeMenu(page, trigger, menu);
       }
     }
     expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());
