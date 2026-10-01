@@ -65,6 +65,8 @@ test("verification selects packages and proofs and prepares before parallel jobs
     ["pr", null, "rust-source"], ["pr", null, "rust-cancel"],
     ["pr", "js", "accounts-skipped"], ["pr", "js", "desktop-skipped"], ["pr", "js", "onboarding-missing"],
     ["pr", "js", "native-skipped"], ["pr", "js", "accounts-cancelled"], ["pr", "js", "desktop-cancelled"],
+    // The gallery is required only where it runs, so its missing-proof case exists only there.
+    ...(process.platform === "win32" ? [["pr", "js", "gallery-missing"]] : []),
     ["pr", null, null, "packages/fixture/src/index.ts"],
     ["pr", null, null, "packages/mcp/src/index.ts"],
     ["pr", null, null, "services/workspace-api/src/index.ts"],
@@ -300,7 +302,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
             assert.ok(${desktop},'Unselected desktop proof');
             const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|@self-host-onboarding'+(${gallery}?'|@states-page':''):'@verification-smoke'];
             assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
-            const titles=['@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?['@states-page every shared part']:[])];
+            const titles=['@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
             writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
               stats:{expected:pr?2:1,unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'?1:0},
               suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:'passed'}]}]}))}]}],
@@ -373,6 +375,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
           "desktop-cancelled": /Desktop verification did not complete a passing test run/,
           "desktop-skipped": /A mandatory desktop smoke test was skipped/,
           "onboarding-missing": /did not pass every required proof: @verification-smoke, @self-host-onboarding/,
+          "gallery-missing": /did not pass every required proof: .*@states-baselines/,
         };
         assert.match(result.stderr, messages[fault]);
         const ranJs = js;

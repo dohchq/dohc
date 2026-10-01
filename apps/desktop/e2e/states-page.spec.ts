@@ -23,6 +23,18 @@ const WIDTH = 1440;
 // neighbors are not.
 const BLEED = 16;
 const THEMES = ["light", "dark"] as const;
+// Every part the page has, so a section dropped by mistake fails here
+// instead of leaving its baselines unread.
+const PARTS = [
+  "surfaces", "buttons", "copy", "segmented", "switch", "chips", "avatars", "badges", "text-inputs",
+  "steps", "folder-chip", "hue-control", "color-control", "list-rows", "menu", "document-menu",
+  "empty", "loading", "toasts", "notices", "dialog",
+];
+// A fixed instant for the page's clock. The capture pauses the clock an
+// hour past it, so the real time that passes between installing and
+// pausing can never put the pause in the clock's past.
+const CLOCK_START = Date.UTC(2026, 6, 8, 9, 0, 0);
+const HOUR_MS = 60 * 60 * 1000;
 
 async function withDesktop(
   env: NodeJS.ProcessEnv,
@@ -83,7 +95,9 @@ async function press(page: Page, button: Locator): Promise<void> {
   await page.keyboard.press("Enter");
 }
 
-test("@states-page every shared part matches its baseline in both themes", async () => {
+// The gate requires this test by its own tag: the route check below shares
+// @states-page and must not stand in for the pixels.
+test("@states-page @states-baselines every shared part matches its baseline in both themes", async () => {
   test.skip(process.platform !== "win32", "the baselines were taken on Windows");
   test.setTimeout(240_000);
   await withDesktop({ DOHC_DEV_TOOLS: "1" }, async (page) => {
@@ -107,6 +121,11 @@ test("@states-page every shared part matches its baseline in both themes", async
     // The page holds the document light so its light pane reads light tokens.
     await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 
+    // The page's clock is faked from here. Real time passes while the fonts
+    // and the viewport are checked below, and the clock runs with it until
+    // it is paused ahead of now.
+    await page.clock.install({ time: CLOCK_START });
+
     // `fonts.check` answers true for a family no font declares, so ask the
     // loaded faces themselves.
     await page.evaluate(() => document.fonts.ready);
@@ -126,11 +145,9 @@ test("@states-page every shared part matches its baseline in both themes", async
     await page.setViewportSize({ width: WIDTH, height });
 
     // An acknowledged copy says "Copied" for a moment and then reverts on
-    // its own timer. The page's clock is paused so the moment holds for the
+    // its own timer. The clock is paused so the moment holds for the
     // capture; the parts are unchanged.
-    const now = Date.now();
-    await page.clock.install({ time: now });
-    await page.clock.pauseAt(now);
+    await page.clock.pauseAt(CLOCK_START + HOUR_MS);
 
     for (const theme of THEMES) {
       const pane = page.getByTestId(`states-${theme}`);
@@ -172,7 +189,7 @@ test("@states-page every shared part matches its baseline in both themes", async
         });
       }
     }
-    expect(seen.size, "the page must have parts to capture").toBeGreaterThan(0);
+    expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());
   });
 });
 

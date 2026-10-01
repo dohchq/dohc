@@ -271,12 +271,16 @@ export async function verify(args) {
           if (!report.accounts?.expected || report.accounts.unexpected || report.accounts.flaky || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
         }
         if (proofs.desktop) {
-          // The states page compares pixels on Windows only; elsewhere its
-          // test skips, and a skipped proof fails the gate below.
-          const required = mode === "pr"
-            ? ["@verification-smoke", "@self-host-onboarding", ...(proofs.statesPage && process.platform === "win32" ? ["@states-page"] : [])]
-            : ["@verification-smoke"];
-          const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", required.join("|")];
+          // The states page compares its baselines on Windows, where they were
+          // taken. Elsewhere its pixel test skips itself, which the skip check
+          // below would count as a failure, so it is left out and the report
+          // says so. @states-page selects both of its tests; the pixel test
+          // alone carries @states-baselines, and that is the proof required.
+          const gallery = mode === "pr" && proofs.statesPage && process.platform === "win32";
+          if (mode === "pr" && proofs.statesPage && !gallery) { report.statesPage = `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`; save(); }
+          const selected = mode === "pr" ? ["@verification-smoke", "@self-host-onboarding", ...(gallery ? ["@states-page"] : [])] : ["@verification-smoke"];
+          const required = mode === "pr" ? ["@verification-smoke", "@self-host-onboarding", ...(gallery ? ["@states-baselines"] : [])] : ["@verification-smoke"];
+          const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", selected.join("|")];
           const jsonReport = join(output, "playwright.json");
           await proofStep("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { env }), { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
           const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));

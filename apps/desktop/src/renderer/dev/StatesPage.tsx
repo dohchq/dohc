@@ -3,12 +3,15 @@ import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { DocumentMenu } from "../DocumentMenu";
 import { OverlayFrame } from "../Overlay";
-import { SegmentedControl, SwitchControl, TextControl } from "../settings/SettingRow";
+import { ColorControl, HueControl, SegmentedControl, SwitchControl, TextControl } from "../settings/SettingRow";
 import { CopyDetailsButton } from "../shell/copyDetails";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
 import { EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { MoreMenu } from "../ui/MoreMenu";
+import { FolderChip, Step } from "../ui/Step";
+import { AgentBadge } from "../workbench/AgentBadge";
+import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
@@ -35,6 +38,11 @@ import { closeStatesPage } from "./statesRoute";
 // the parts.
 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
+
+// A floating part draws a shadow up to 38px below and 28px beside itself.
+// A part that floats one keeps that much room inside its own section, so
+// its whole shadow is in its own capture and in no neighbor's.
+const SHADOW_ROOM = "p-10";
 
 function Section(props: { part: string; title: string; children: ReactNode }) {
   return (
@@ -118,6 +126,7 @@ function Row(props: {
 }
 
 const RELAY_ERROR = "dohc could not reach the sync relay. Check your connection.";
+const FOLDER = "C:\\Users\\ice\\Research";
 
 function toast(tone: "danger" | "success") {
   return {
@@ -340,6 +349,15 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      <Section part="badges" title="Badges">
+        <Specimen label="agent, automation">
+          <span className="text-[13px] font-medium text-ink">Agent</span>
+          <AgentBadge testIdPrefix={`states-${theme}`} author={{ authorDisplayName: "Agent", authorOwnerDisplayName: "You" }} />
+          <span className="ml-4 text-[13px] font-medium text-ink">Nightly digest</span>
+          <AutomationBadge testIdPrefix={`states-${theme}`} author={{ authorDisplayName: "Nightly digest" }} />
+        </Specimen>
+      </Section>
+
       <Section part="text-inputs" title="Text inputs">
         <Specimen label="rest">
           <TextControl label="Relay" value="" placeholder="wss://relay.example" onChange={noop} />
@@ -354,6 +372,43 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
+      <Section part="steps" title="Steps">
+        <div className="w-80">
+          <Step number={1} title="Sign in on this machine" state="done" summary="ice@example.com" />
+          <Step number={2} title="Choose an empty folder on this machine" state="current">
+            <FolderChip folder={null} placeholder="Choose a folder" onClick={noop} />
+          </Step>
+          <Step number={3} title="Enter the code from your other machine" state="pending" last />
+        </div>
+      </Section>
+
+      <Section part="folder-chip" title="Folder chip">
+        <Specimen label="empty">
+          <div className="w-64"><FolderChip folder={null} placeholder="Choose a folder" onClick={noop} /></div>
+        </Specimen>
+        <Specimen label="chosen">
+          <div className="w-64"><FolderChip folder={FOLDER} placeholder="Choose a folder" onClick={noop} /></div>
+        </Specimen>
+        <Specimen label="hover">
+          <div className="w-64" data-force-state="hover" data-force-target="button">
+            <FolderChip folder={FOLDER} placeholder="Choose a folder" onClick={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="hue-control" title="Hue control">
+        <Specimen label="person, olive chosen">
+          <HueControl label="Your color" value="olive" shape="person" onChange={noop} />
+        </Specimen>
+        <Specimen label="agent, none chosen">
+          <HueControl label="Your agent's color" value={null} shape="agent" onChange={noop} />
+        </Specimen>
+      </Section>
+
+      <Section part="color-control" title="Color control">
+        <ColorControl label="Accent" value="#6b7230" onChange={noop} />
+      </Section>
+
       <Section part="list-rows" title="List rows">
         <ul role="tree" aria-label="Rows" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
           <Row name="rest" folder />
@@ -365,13 +420,14 @@ function Pane(props: { theme: "light" | "dark" }) {
         </ul>
       </Section>
 
-      {/* Both menus are opened by the capture. The ••• menu's first row takes
-          keyboard focus when it opens; forcing focus there draws the same
-          row the same way whether or not focus has since moved on. */}
+      {/* Both menus are opened by the capture, and their boxes are tall
+          enough for the open menu and its shadow. The ••• menu's first row
+          takes keyboard focus when it opens; forcing focus there draws the
+          same row the same way whether or not focus has since moved on. */}
       <Section part="menu" title="Menu">
         <Specimen label="rows: keyboard-active, hover, rest, disabled">
           <div
-            className="flex h-40 w-56 items-start justify-end"
+            className="flex h-56 w-56 items-start justify-end"
             data-force-state="focus"
             data-force-target="[role=menuitem]:nth-child(1)"
           >
@@ -383,7 +439,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="document-menu" title="Document menu">
-        <div className="flex h-48 w-56 items-start justify-end">
+        <div className="flex h-64 w-56 items-start justify-end">
           <DocumentMenu workspaceId="states" suggestedName="states" getMarkdown={() => null} />
         </div>
       </Section>
@@ -403,11 +459,13 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="toasts" title="Toasts">
-        <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
-        <div data-force-state="hover" data-force-target="[data-testid='workspace-shell-error-retry']">
+        <div className={`flex w-full flex-wrap items-start gap-x-6 gap-y-4 ${SHADOW_ROOM}`}>
           <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
+          <div data-force-state="hover" data-force-target="[data-testid='workspace-shell-error-retry']">
+            <WorkspaceErrorToast error={toast("danger")} onRetry={noop} onHide={noop} />
+          </div>
+          <WorkspaceErrorToast error={toast("success")} onHide={noop} />
         </div>
-        <WorkspaceErrorToast error={toast("success")} onHide={noop} />
       </Section>
 
       <Section part="notices" title="Notices">
