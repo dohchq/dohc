@@ -74,6 +74,8 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
   const [deletingCollection, setDeletingCollection] = useState(false), [deleted, setDeleted] = useState(false);
   const restoreLock = useRef(false);
   const [recordsVersion, setRecordsVersion] = useState(0);
+  // Rises when automations changed records; the table reads them again in place.
+  const [recordsChanged, setRecordsChanged] = useState(0);
   const [deletion, setDeletion] = useState<TransactionalRow | null>(null);
   const deleteResult = useRef<((confirmed: boolean) => void) | null>(null);
   const request = useRef(0);
@@ -126,8 +128,9 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
   const buttons = useAutomationButtons({ workspaceId, of: table && buttonFields.length > 0 ? { datasetId, table: table.name } : null, onError, onNotice: message => onNotice?.(message) });
   useEffect(() => { void buttons?.refresh(); }, [buttons, dataset]);
   useEffect(() => buttons === null ? undefined : bridge().onCollectionAutomationsChanged(event => { if (event.workspaceId === workspaceId) void buttons.refresh(); }), [buttons, workspaceId]);
-  // A run a press started changes records without touching a file, so the table reads them again when it ends.
-  useEffect(() => buttons?.onSettled(() => setRecordsVersion(value => value + 1)), [buttons]);
+  // A run or its Undo changes records without touching a file, whether a press, a record change, or a schedule
+  // started it, so the table reads them again when runs end.
+  useEffect(() => bridge().onAutomationRunsChanged(event => { if (event.workspaceId === workspaceId) setRecordsChanged(value => value + 1); }), [workspaceId]);
   const buttonColumns = useMemo((): TransactionalButtons | undefined => buttons === null || buttonFields.length === 0 ? undefined : {
     fields: buttonFields,
     // A dataset record's id goes to main as JSON, since the table's key can be a number.
@@ -148,7 +151,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
     automations.start(buttonAutomation(field, table.name, action === undefined ? []
       : [{ kind: "invoke", collection: null, operation: action.name, input: [{ key: "id", value: { kind: "formula", expression: "record.id" } }] }]));
   };
-  const automations = useDatasetAutomations({ workspaceId, datasetId, tableId, dataset, refreshKey: recordsVersion, onError,
+  const automations = useDatasetAutomations({ workspaceId, datasetId, tableId, dataset, onError,
     onRecordsChanged: () => setRecordsVersion(value => value + 1),
     onNotice: (message, undo) => onNotice?.(message, undo), onOpenFile, onOpenScheduleSettings,
     onOpenFields: owner ? () => { setViewingHistory(false); setEditingFields(true); } : undefined });
@@ -199,7 +202,7 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
       return result;
     }} />}</>;
   // The ⚡ panel docks at the right of the table.
-  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="flex min-h-0 min-w-0 flex-1 flex-col"><button type="button" className="truncate px-3 py-1 text-left font-mono text-[12px] text-muted hover:text-ink" title={datasetPath} onClick={() => onOpenFile(datasetPath)}>{datasetPath}</button><TransactionalCollectionPage recordsVersion={recordsVersion} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onNotice={onNotice}
+  return <><div className="flex h-full min-h-0 min-w-0 flex-1"><div className="flex min-h-0 min-w-0 flex-1 flex-col"><button type="button" className="truncate px-3 py-1 text-left font-mono text-[12px] text-muted hover:text-ink" title={datasetPath} onClick={() => onOpenFile(datasetPath)}>{datasetPath}</button><TransactionalCollectionPage recordsVersion={recordsVersion} recordsChanged={recordsChanged} workspaceId={workspaceId} dataset={columns} tableId={tableId} onError={onError} onNotice={onNotice}
     buttons={buttonColumns}
     automationsButton={automations.button}
     fieldMarks={automations.fieldMarks}

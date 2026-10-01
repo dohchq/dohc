@@ -14,7 +14,7 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
   listAutomationButtons: vi.fn(), pressAutomationButton: vi.fn(), onCollectionAutomationsChanged: vi.fn(() => () => undefined),
   findDatasetCollection: vi.fn(async (): Promise<FindDatasetCollectionResult> => ({ status: "unavailable" })),
   listCollectionAutomations: vi.fn(), listAutomationHolds: vi.fn(async () => ({ holds: [], stops: [], unreadable: false })),
-  onAutomationRunsChanged: vi.fn(() => () => undefined), onAutomationHoldsChanged: vi.fn(() => () => undefined),
+  onAutomationRunsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined), onAutomationHoldsChanged: vi.fn(() => () => undefined),
   settled: [] as Array<(event: AutomationRunSettledEvent) => void>,
   onAutomationRunSettled: vi.fn(), onAutomationRunWaiting: vi.fn(() => () => undefined),
   checkCollectionAutomation: vi.fn(async () => ({ diagnostics: [], formulaProblems: [], cannotRun: null, missingFiles: [] })),
@@ -25,10 +25,10 @@ const backend = vi.hoisted(() => ({ dataset: vi.fn(), createWorkspaceFile: vi.fn
   onCloudSessionChanged: vi.fn(() => () => undefined),
   writeCollectionAutomations: vi.fn() }));
 vi.mock("./bridge", () => ({ bridge: () => backend }));
-vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void }) => <>
+vi.mock("./TransactionalCollectionPage", () => ({ TransactionalCollectionPage: (props: { automationsButton?: ReactNode; recordsVersion?: number; recordsChanged?: number; buttons?: TransactionalButtons; onRefresh?(): void; onHistory?(): void; onReviewSchema?(): void; onTransferCsv?(): void; onPendingResponses?(): void; onExportRecovery?(): void; onCustomize?(): void }) => <>
   {props.automationsButton}
   {props.buttons?.fields.map(field => <span key={field}>{props.buttons!.render(field, { id: 12, version: 1, values: {} })}</span>)}
-  <input aria-label="Collection view state" data-records-version={props.recordsVersion} defaultValue="" />
+  <input aria-label="Collection view state" data-records-version={props.recordsVersion} data-records-changed={props.recordsChanged} defaultValue="" />
   <button onClick={props.onRefresh}>Refresh records</button>
   {props.onHistory && <button onClick={props.onHistory}>History</button>}
   {props.onReviewSchema && <button onClick={props.onReviewSchema}>Fields and names</button>}
@@ -61,7 +61,7 @@ describe("a dataset table's buttons", () => {
     await waitFor(() => expect(backend.pressAutomationButton).toHaveBeenCalledWith(expect.objectContaining({ field: "Confirm", confirmed: ["registrations.receipt"] })));
   });
 
-  it("presses with the dataset, the table's name, and the record's key as JSON, runs until settled, says what ran, and reads the records again", async () => {
+  it("presses with the dataset, the table's name, and the record's key as JSON, runs until settled, and says what ran", async () => {
     backend.dataset.mockResolvedValue({ kind: "description", dataset: withButton });
     backend.onAutomationRunSettled.mockImplementation((listener: (event: AutomationRunSettledEvent) => void) => { backend.settled.push(listener); return () => undefined; });
     backend.listAutomationButtons.mockResolvedValue({ buttons: [
@@ -80,13 +80,9 @@ describe("a dataset table's buttons", () => {
       workspaceId: "workspace-a", datasetId: id(1), table: "Registrations", field: "Confirm", recordId: "12", pressId: expect.any(String), confirmed: [],
     }));
     await waitFor(() => expect(button.getAttribute("aria-busy")).toBe("true"));
-    const version = () => Number(screen.getByLabelText("Collection view state").getAttribute("data-records-version"));
-    const before = version();
     act(() => settle({ workspaceId: "workspace-a", claimId: "claim-1", outcome: "done", error: null }));
     await waitFor(() => expect(button.getAttribute("aria-busy")).toBeNull());
     expect(onNotice).toHaveBeenCalledWith("Ran Confirm on record 12");
-    // The run changed records without touching a file, so the table reads them again.
-    expect(version()).toBe(before + 1);
   });
 
   it("asks main nothing about buttons for a table that has none", async () => {
@@ -120,6 +116,22 @@ it("opens wrapped history through the real dialog and reverses the saved edit", 
     revisionSha256: current.revisionSha256, operationId: id(5), idempotencyKey: expect.any(String), input: { id: "record", expectedVersion: 2, values: { [id(3)]: "Original name" } } });
   expect(onNotice).toHaveBeenCalledWith("Reversed the edit");
   expect(onError).not.toHaveBeenCalled();
+});
+it("reads the records again in place when runs in its workspace end, however they started", async () => {
+  const runsChanged: Array<(event: { workspaceId: string }) => void> = [];
+  backend.onAutomationRunsChanged.mockImplementation(listener => { runsChanged.push(listener); return () => undefined; });
+  backend.dataset.mockResolvedValue({ kind: "description", dataset });
+  render(<ConnectedTransactionalCollection workspaceId="workspace-a" datasetPath="data/dataset.json" tableId={id(2)} onError={vi.fn()} onFormCreated={vi.fn()} onOpenFile={vi.fn()} onOpenScheduleSettings={vi.fn()} />);
+  const input = await screen.findByLabelText("Collection view state");
+  await waitFor(() => expect(input.getAttribute("data-records-version")).toBe("1"));
+  expect(input.getAttribute("data-records-changed")).toBe("0");
+  const runsEnded = (workspaceId: string) => act(() => { for (const listener of runsChanged) listener({ workspaceId }); });
+  runsEnded("workspace-b");
+  expect(input.getAttribute("data-records-changed")).toBe("0");
+  runsEnded("workspace-a");
+  expect(input.getAttribute("data-records-changed")).toBe("1");
+  // The quiet read, not the one that shows a loading line.
+  expect(input.getAttribute("data-records-version")).toBe("1");
 });
 it("keeps the page mounted through successful and failed metadata refreshes", async () => {
   backend.dataset.mockResolvedValue({ kind: "description", dataset });

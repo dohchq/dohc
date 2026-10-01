@@ -854,6 +854,25 @@ describe("Collection automations", () => {
     expect(w.journaled[0]?.attribution).toEqual({ actorKind: "automation", depth: 1, run: { claimId: claim.claimId, automationName: "Stamp" } });
   });
 
+  it("tells the windows once runs finish, once per drain, since a dataset table has no file to watch", async () => {
+    const w = await world({ automations: { Tasks: "  - id: seen\n    name: Seen\n    when: {field-changed: Status}\n    do: [{set: {Seen: true}}]\n" } });
+    const claims = ["one", "two", "three"].map((name) => w.claim("collection:Tasks#seen", w.addRecord("Tasks", name, { Status: "Done" })));
+    await w.executor.open();
+    for (const claim of claims) expect((await w.settledClaim(claim)).state).toBe("done");
+    await w.executor.idle();
+    expect(w.runsChanged).toEqual(["changed"]);
+  });
+
+  it("tells the windows once for a drain whose runs failed, and still sends the failure's notice", async () => {
+    const w = await world({ automations: { Tasks: "  - id: broken\n    name: Broken\n    when: {field-changed: Status}\n    do: [{set: {Note: '=record.Details.name'}}]\n" } });
+    const claims = ["one", "two", "three"].map((name) => w.claim("collection:Tasks#broken", w.addRecord("Tasks", name, { Status: "Done", Details: null })));
+    await w.executor.open();
+    for (const claim of claims) expect((await w.settledClaim(claim)).state).toBe("failed");
+    await w.executor.idle();
+    expect(w.runsChanged).toEqual(["changed"]);
+    await w.until(() => w.failureReports.length > 0);
+  });
+
   it("gives a record change's person to formulas and to the run's own writes", async () => {
     const note = "  - id: note\n    name: Note\n    when: {field-changed: Status}\n    do: [{set: {Note: '=person == null ? \"nobody\" : person.name'}}]\n";
     const w = await world({ automations: { Tasks: note } });
@@ -2365,8 +2384,12 @@ describe("Collection automations", () => {
       for (const [id, record] of w.records) if (record.path === path) w.records.delete(id);
     };
     w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
+    await w.executor.idle();
+    const pokes = w.runsChanged.length;
     await expect(w.executor.undo({ automationId: "collection:Tasks#stamp", claimId: claim.claimId, deletes: null }, trash))
       .resolves.toEqual({ status: "undone", reverted: 1, removed: 1, changedSince: 1, missing: 0, kept: 0, irreversible: 0, actions: 0, deleted: 0, keptChanged: 0, gone: 0, actionsReversed: 0 });
+    // Every window reads again, not only the pane that asked for the Undo.
+    expect(w.runsChanged).toHaveLength(pokes + 1);
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "theirs" });
     expect(trashed).toEqual([added!.path]);
     expect(w.journaled.at(-1)).toMatchObject({ path: task.path, attribution: { actorKind: "human" } });
@@ -2459,8 +2482,12 @@ describe("Collection automations", () => {
     await expect(w.executor.undoRunsOf([{ collectionPath: "Tasks", id: "stamp", definitionHash: "0000000000000000" }], async () => undefined))
       .resolves.toEqual({ undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
     expect(w.fieldsOf(task).Count).toBe(4);
+    await w.executor.idle();
+    const pokes = w.runsChanged.length;
     await expect(w.executor.undoRunsOf([{ collectionPath: "Tasks", id: "stamp", definitionHash: hash }], async () => undefined))
       .resolves.toMatchObject({ undone: 2, left: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
+    // The windows hear once for the pass, not once per run it undid.
+    expect(w.runsChanged).toHaveLength(pokes + 1);
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "old" });
     // Runs already undone are passed over.
     await expect(w.executor.undoRunsOf([{ collectionPath: "Tasks", id: "stamp", definitionHash: hash }], async () => undefined))

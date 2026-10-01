@@ -459,6 +459,43 @@ it("keeps an open record's details, and the focus in them, when the records are 
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "Record details" })).toBeNull());
 });
 
+it("shows records an automation changed in place, with no loading line, nothing disabled, and an open record kept open", async () => {
+  const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: page() }));
+  const { props, rerender } = setup({ invoke });
+  fireEvent.click(await screen.findByRole("button", { name: "Open record 1" }));
+  const reread = deferred<{ result: AppBackendJson }>();
+  invoke.mockReturnValueOnce(reread.promise);
+  rerender(<TransactionalCollectionPage {...props} recordsChanged={1} />);
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+  expect(screen.queryByText("Loading records…")).toBeNull();
+  expect(screen.getByRole("region", { name: "People", hidden: true }).getAttribute("aria-busy")).toBe("false");
+  expect((screen.getByRole("button", { name: "New record", hidden: true }) as HTMLButtonElement).disabled).toBe(false);
+  // A record the read left out keeps its dialog open, which says so instead of showing old values.
+  await act(async () => reread.resolve({ result: { rows: [], nextCursor: null } }));
+  expect(within(screen.getByRole("dialog", { name: "Record details" })).getByRole("status").textContent).toBe("This record is no longer in this view. Close it, then search for it.");
+  invoke.mockResolvedValueOnce({ result: page("Alice Paid") });
+  rerender(<TransactionalCollectionPage {...props} recordsChanged={2} />);
+  await waitFor(() => expect(within(screen.getByRole("dialog", { name: "Record details" })).getByText("Alice Paid")).toBeTruthy());
+  expect(screen.queryByText("Loading records…")).toBeNull();
+});
+
+it("finishes a read and a read in place asked for in one render, and leaves nothing loading or disabled", async () => {
+  const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: page() }));
+  const { props, rerender } = setup({ invoke });
+  await screen.findByText("Alice");
+  const read = deferred<{ result: AppBackendJson }>();
+  invoke.mockReturnValueOnce(read.promise).mockResolvedValue({ result: page("Alice Paid") });
+  rerender(<TransactionalCollectionPage {...props} recordsVersion={1} recordsChanged={1} />);
+  expect(await screen.findByText("Loading records…")).toBeTruthy();
+  await act(async () => read.resolve({ result: page() }));
+  // The read in place waited for the other read, then ran.
+  await screen.findByText("Alice Paid");
+  expect(invoke).toHaveBeenCalledTimes(3);
+  expect(screen.queryByText("Loading records…")).toBeNull();
+  expect((screen.getByRole("button", { name: "New record" }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
+});
+
 it("shows the ⚡ button beside New record, and a ⚡ that names the automations on each field they set", async () => {
   setup({
     automationsButton: <button type="button">Automations</button>,

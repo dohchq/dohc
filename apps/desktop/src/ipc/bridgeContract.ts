@@ -6528,9 +6528,11 @@ export interface DohcDesktopBridge
   // workspace plus global events. The payload is additive context — a
   // subscriber may ignore it. Returns an unsubscribe function.
   onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
-  // Live push: an automation claim failed or a retry queued one, so run
-  // history changed. A poke, not the record; the subscriber reads the runs
-  // again, guarded by its own workspace. Returns an unsubscribe function.
+  // Live push: automation runs finished, an Undo put records back, a claim
+  // failed, or a retry queued one, so run history and dataset records may
+  // have changed. A poke, not the
+  // record; the subscriber reads again, guarded by its own workspace. Returns
+  // an unsubscribe function.
   onAutomationRunsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;
