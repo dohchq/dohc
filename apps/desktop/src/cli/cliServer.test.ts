@@ -1610,7 +1610,7 @@ describe("CLI socket server", () => {
     const presses: Array<Parameters<NonNullable<CliWorkspaceContext["buttons"]>["press"]>[0]> = [];
     const actions = [{ name: "sendInvoice", label: "Send invoice" }];
     const pressedBy: unknown[] = [];
-    context.buttons = {
+    context.buttons = { inspect: vi.fn(async () => []),
       press: vi.fn(async (input, by) => {
         presses.push(input);
         pressedBy.push(by);
@@ -1621,6 +1621,8 @@ describe("CLI socket server", () => {
       }),
     };
     const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks", field: "Mark paid", record: "rec_1", confirm: [] };
+    await expect(invoke("automationButtons", { cwd: workspaceRoot, actor: "agent", collectionPath: "shared" })).resolves.toEqual({ ok: true, buttons: [] });
+    expect(context.buttons.inspect).toHaveBeenCalledWith({ collectionPath: "shared" }, expect.objectContaining({ kind: "agent" }));
 
     await expect(invoke("automationPress", args)).resolves.toEqual({
       ok: true, run: "atc_1", outcome: null, error: null, waiting: "Waiting to check who can edit this Collection.",
@@ -1983,7 +1985,7 @@ describe("CLI socket server", () => {
     };
     await expect(invoke("automationRun", { cwd, actor: "agent", collectionPath: "tasks", automation: "stamp", run: "atc_1" })).resolves.toMatchObject({ ok: true, run: { steps: [{ changes: [{ ...kept, path: "tasks/a.md" }, action] }] } });
     expect(context.automations.automationIdAt).toHaveBeenLastCalledWith("app/tasks", "stamp");
-    context.buttons = { press: vi.fn(async () => ({ result: { busy: false as const, relayed: true as const }, waiting: null })) };
+    context.buttons = { inspect: vi.fn(async () => []), press: vi.fn(async () => ({ result: { busy: false as const, relayed: true as const }, waiting: null })) };
     await expect(invoke("automationPress", { cwd, actor: "agent", collectionPath: "tasks", field: "Save", record: "rec_1", confirm: [] })).resolves.toEqual({ ok: true, relayed: true });
     expect(context.buttons.press).toHaveBeenLastCalledWith(expect.objectContaining({ collectionPath: "app/tasks" }), expect.anything());
   });

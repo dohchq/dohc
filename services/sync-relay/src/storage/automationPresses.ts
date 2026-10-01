@@ -4,12 +4,15 @@ import {
   type AutomationPressState,
   type RelayAutomationPress,
   type RelayAutomationPressReceipt,
+  type RelayButtonAuthority,
 } from "@dohc/workspace-contracts/relay";
+import { authorizeShareGrantAction } from "../shareAuthorization";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { currentCollectionEditGrant, grantEditsCollection } from "../collectionEditGrant";
 import { notFound, RelayError, relayError } from "../errors";
 import type { StorageContext } from "./context";
 import type { SqliteDb } from "./types";
+import { markNotices, noticeIdFrom } from "./notices";
 
 // Button presses from shared views, waiting for the workspace's automation
 // host (ADR 0012). A press is recorded for the recipient's named Edit grant
@@ -51,6 +54,8 @@ export function initializeAutomationPressSchema(db: SqliteDb): void {
       record_id TEXT NOT NULL CHECK (length(record_id) BETWEEN 1 AND 1024),
       state TEXT NOT NULL CHECK (state IN ('pending', 'accepted', 'settled')),
       accepted_by TEXT CHECK (accepted_by IS NULL OR length(accepted_by) BETWEEN 1 AND 256),
+      confirmed_json TEXT NOT NULL DEFAULT '[]',
+      accepted_generation INTEGER,
       outcome TEXT CHECK (outcome IS NULL OR outcome IN ('done', 'skipped', 'failed', 'ended', 'busy')),
       error TEXT CHECK (error IS NULL OR length(error) <= 1000),
       created_at_ms INTEGER NOT NULL CHECK (created_at_ms BETWEEN 0 AND 9007199254740991),
@@ -64,6 +69,13 @@ export function initializeAutomationPressSchema(db: SqliteDb): void {
     CREATE INDEX IF NOT EXISTS idx_sync_relay_automation_presses_created
       ON sync_relay_automation_presses(created_at_ms);
   `);
+  const marker = "automation-press-confirmations-v1";
+  if (!db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(marker)) {
+    const columns = new Set(db.prepare("PRAGMA table_info(sync_relay_automation_presses)").all().map(row => String(row.name)));
+    if (!columns.has("confirmed_json")) db.exec("ALTER TABLE sync_relay_automation_presses ADD COLUMN confirmed_json TEXT NOT NULL DEFAULT '[]'");
+    if (!columns.has("accepted_generation")) db.exec("ALTER TABLE sync_relay_automation_presses ADD COLUMN accepted_generation INTEGER");
+    db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)").run(marker, Date.now());
+  }
 }
 
 // A Collection automation's id: "collection:<collection id>#<automation id>".
@@ -88,6 +100,7 @@ export interface RecordAutomationPressInput {
   // The automation as the recipient saw it; the host refuses a press whose automation changed.
   definitionHash: string;
   recordId: string;
+  confirmed: readonly string[];
   nowMs: number;
   newId: () => string;
 }
@@ -106,6 +119,8 @@ interface PressRow {
   record_id: string;
   state: AutomationPressState;
   accepted_by: string | null;
+  accepted_generation: number | null;
+  confirmed_json: string;
   outcome: AutomationPressOutcome | null;
   error: string | null;
   created_at_ms: number;
@@ -145,7 +160,7 @@ export function recordAutomationPress(storage: StorageContext, input: RecordAuto
     if (existing) {
       const row = pressRow(existing);
       if (row.automation_id !== input.automationId || row.collection_path !== input.collectionPath || row.definition_hash !== input.definitionHash ||
-        row.record_id !== input.recordId || row.user_id !== input.userId) {
+        row.record_id !== input.recordId || row.user_id !== input.userId || row.confirmed_json !== JSON.stringify(input.confirmed)) {
         throw relayError("conflict");
       }
       return receipt(row);
@@ -160,11 +175,11 @@ export function recordAutomationPress(storage: StorageContext, input: RecordAuto
     storage.db.prepare(
       `INSERT INTO sync_relay_automation_presses (
          host_press_id, workspace_id, share_id, grant_id, grant_generation, press_id, user_id,
-         automation_id, collection_path, definition_hash, record_id, state, accepted_by, outcome, error, created_at_ms, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, ?)`,
+         automation_id, collection_path, definition_hash, record_id, confirmed_json, state, accepted_by, outcome, error, created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, ?, ?)`,
     ).run(
       input.newId(), workspaceId, input.shareId, input.grantId, input.grantGeneration, input.pressId, input.userId,
-      input.automationId, input.collectionPath, input.definitionHash, input.recordId, input.nowMs, input.nowMs,
+      input.automationId, input.collectionPath, input.definitionHash, input.recordId, JSON.stringify(input.confirmed), input.nowMs, input.nowMs,
     );
     return { pressId: input.pressId, state: "pending", outcome: null, createdAtMs: input.nowMs };
   });
@@ -197,7 +212,7 @@ export interface HostScope {
 // Only the computer that runs the workspace's automations gets presses: the
 // recorded host, while no handover is open (the contract in relay.ts). With a
 // generation, the host must also be the one that computer read.
-function isRunningHost(storage: StorageContext, scope: HostScope & { generation?: number }): boolean {
+export function isRunningHost(storage: StorageContext, scope: HostScope & { generation?: number }): boolean {
   if (!storage.workspaceIsOwnedBy(scope.workspaceId, scope.ownerUserId)) throw notFound();
   const host = storage.db.prepare(
     "SELECT install_id, handover_from, generation FROM sync_relay_automation_hosts WHERE workspace_id = ?",
@@ -235,10 +250,11 @@ function settle(storage: StorageContext, hostPressId: string, outcome: Automatio
 // automations: that computer handed over, was replaced, or was taken over,
 // and may never settle them. Running them again here could repeat them.
 function endOtherHostsPresses(storage: StorageContext, scope: HostScope, nowMs: number): void {
+  const generation = Number(storage.db.prepare("SELECT generation FROM sync_relay_automation_hosts WHERE workspace_id=?").get(scope.workspaceId)?.generation);
   storage.db.prepare(
     `UPDATE sync_relay_automation_presses SET state = 'settled', accepted_by = NULL, outcome = 'ended', error = ?, updated_at_ms = ?
-     WHERE workspace_id = ? AND state = 'accepted' AND accepted_by <> ?`,
-  ).run(HOST_CHANGED, nowMs, scope.workspaceId, scope.installId);
+     WHERE workspace_id = ? AND state = 'accepted' AND (accepted_by <> ? OR accepted_generation IS NULL OR accepted_generation <> ?)`,
+  ).run(HOST_CHANGED, nowMs, scope.workspaceId, scope.installId, generation);
 }
 
 /**
@@ -279,6 +295,7 @@ export function listAutomationPresses(storage: StorageContext, scope: HostScope 
       recordId: row.record_id,
       pressedBy: row.user_id,
       createdAtMs: row.created_at_ms,
+      confirmed: JSON.parse(row.confirmed_json) as string[],
     }));
   });
 }
@@ -303,19 +320,54 @@ export function acceptAutomationPresses(
       ).get(id, scope.workspaceId, oldestKept(scope.nowMs));
       if (!found) continue;
       const row = pressRow(found);
-      const mine = row.state === "accepted" && row.accepted_by === scope.installId;
+      const mine = row.state === "accepted" && row.accepted_by === scope.installId && row.accepted_generation === scope.generation;
       if ((row.state !== "pending" && !mine) || !stillAllowed(storage, row, scope.nowMs)) continue;
       if (mine) {
         accepted.push(id);
         continue;
       }
       storage.db.prepare(
-        "UPDATE sync_relay_automation_presses SET state = 'accepted', accepted_by = ?, updated_at_ms = ? WHERE host_press_id = ?",
-      ).run(scope.installId, scope.nowMs, id);
+        "UPDATE sync_relay_automation_presses SET state = 'accepted', accepted_by = ?, accepted_generation = ?, updated_at_ms = ? WHERE host_press_id = ?",
+      ).run(scope.installId, scope.generation, scope.nowMs, id);
       accepted.push(id);
     }
     return accepted;
   });
+}
+
+/** Current named grants in this workspace. No roster, email, or owner description crosses the transport. */
+export function buttonAuthority(storage: StorageContext, input: {
+  workspaceId: string; shareId: string; grantId: string; grantGeneration: number; userId: string;
+  automationId: string; collectionPath: string; definitionHash: string;
+}, generation: number): RelayButtonAuthority {
+  const source = currentCollectionEditGrant(storage, input);
+  if (source.share.workspaceId !== input.workspaceId || !grantEditsCollection(storage, source, input.collectionPath)) throw notFound();
+  const principals: RelayButtonAuthority["principals"] = [];
+  for (const received of storage.listSharesReceivedBy(input.userId)) {
+    if (received.share.workspaceId !== input.workspaceId) continue;
+    const allowed = authorizeShareGrantAction({ storage, grantId: received.grant.grantId, action: "read", principal: { kind: "user", userId: input.userId } });
+    if (!allowed.ok || !["view", "comment", "edit"].includes(allowed.grant.access)) continue;
+    principals.push({ grantId: allowed.grant.grantId, userId: input.userId, access: allowed.grant.access as "view" | "comment" | "edit" });
+  }
+  return { workspaceId: input.workspaceId, automationId: input.automationId, collectionPath: input.collectionPath, definitionHash: input.definitionHash,
+    userId: input.userId, grantId: input.grantId, grantGeneration: input.grantGeneration, hostGeneration: generation, principals, confirmed: [] };
+}
+
+/** The host supplies only its relay press id. All presser fields come from the authenticated stored press. */
+export function resolveAutomationPress(storage: StorageContext, scope: HostScope & { generation: number; hostPressId: string; nowMs: number }): RelayButtonAuthority {
+  // Synchronous reads also run inside a dataset commit's existing transaction.
+  if (!isRunningHost(storage, scope)) throw relayError("conflict");
+  const found = storage.db.prepare("SELECT * FROM sync_relay_automation_presses WHERE workspace_id=? AND host_press_id=? AND created_at_ms>=?")
+    .get(scope.workspaceId, scope.hostPressId, oldestKept(scope.nowMs));
+  if (!found) throw notFound();
+  const row = pressRow(found);
+  if (row.state !== "accepted") throw notFound();
+  if (row.accepted_generation !== scope.generation) throw relayError("conflict");
+  if (row.accepted_by !== scope.installId) throw notFound();
+  return { ...buttonAuthority(storage, { workspaceId: row.workspace_id, shareId: row.share_id, grantId: row.grant_id,
+    grantGeneration: row.grant_generation, userId: row.user_id, automationId: row.automation_id,
+    collectionPath: row.collection_path, definitionHash: row.definition_hash }, scope.generation),
+    recordId: row.record_id, confirmed: JSON.parse(row.confirmed_json) as string[] };
 }
 
 /**
@@ -328,7 +380,7 @@ export function settleAutomationPress(
   input: { workspaceId: string; ownerUserId: string; hostPressId: string; outcome: AutomationPressOutcome; error: string | null; nowMs: number },
 ): RelayAutomationPressReceipt {
   if (!OUTCOMES.includes(input.outcome)) throw relayError("share_op_rejected");
-  return storage.tx(() => {
+  const result = storage.tx(() => {
     if (!storage.workspaceIsOwnedBy(input.workspaceId, input.ownerUserId)) throw notFound();
     const found = storage.db.prepare(
       "SELECT * FROM sync_relay_automation_presses WHERE host_press_id = ? AND workspace_id = ?",
@@ -337,10 +389,24 @@ export function settleAutomationPress(
     const row = pressRow(found);
     if (row.state === "settled") {
       if (row.outcome !== input.outcome) throw relayError("conflict");
-      return receipt(row);
+      return { answer: receipt(row), row };
     }
     if (row.state !== "accepted") throw relayError("conflict");
     settle(storage, input.hostPressId, input.outcome, input.error, input.nowMs);
-    return { ...receipt(row), state: "settled", outcome: input.outcome };
+    return { answer: { ...receipt(row), state: "settled" as const, outcome: input.outcome }, row };
   });
+  if (input.outcome === "done") {
+    const { row } = result;
+    // A successful later press clears earlier failures for this person's record.
+    const prefix = row.user_id === input.ownerUserId ? "automation-press:" : noticeIdFrom(input.ownerUserId, "automation-press:");
+    const notices = storage.db.prepare(`SELECT n.notice_id FROM sync_relay_automation_presses p
+      JOIN sync_relay_notices n ON n.notice_id = ? || p.host_press_id
+      WHERE p.workspace_id=? AND p.automation_id=? AND p.record_id=? AND p.user_id=?
+        AND p.state='settled' AND p.outcome IN ('failed','busy') AND p.created_at_ms<=?
+        AND n.sender_user_id=? AND n.recipient_user_id=? AND n.dismissed_at_ms IS NULL`)
+      .all(prefix, input.workspaceId, row.automation_id, row.record_id, row.user_id, row.created_at_ms, input.ownerUserId, row.user_id);
+    if (notices.length) markNotices(storage, { recipientUserId: row.user_id,
+      marks: notices.map(notice => ({ noticeId: String(notice.notice_id), mark: "dismissed" as const })), nowMs: input.nowMs });
+  }
+  return result.answer;
 }

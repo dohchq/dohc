@@ -15,6 +15,7 @@ import {
   queryCollection,
   listAutomationRuns,
   pressButton,
+  inspectButtons,
   readAutomationRun,
   readRecord,
   retryAutomationRun,
@@ -432,6 +433,19 @@ it("preserves partial record facts and accepts the returned retry identity", asy
 });
 
 describe("desktop CLI button proxy", () => {
+  it("inspects a shared Collection and carries its confirmation names to the same press path", async () => {
+    await withWorkspace(async base => {
+      await mkdir(join(base.root, "Billing"), { recursive: true });
+      const actions = [{ name: "destination/sendInvoice", label: "Send invoice" }];
+      const listed = { ok: true as const, buttons: [{ field: "Send", state: { kind: "ready" as const, automationId: "collection:Billing#send", irreversible: actions } }] };
+      const request = vi.fn(async (input: CliRequestWithoutToken) => input.verb === "automationButtons" ? listed : { ok: true as const, relayed: true as const });
+      const ctx: ToolContext = { ...base, shareAccess: "edit", request };
+      await expect(inspectButtons(ctx, { collectionPath: "Billing" })).resolves.toEqual(listed);
+      expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ verb: "automationButtons", args: { cwd: base.root, actor: "agent", collectionPath: "Billing" } }));
+      await expect(pressButton(ctx, { collectionPath: "Billing", button: "Send", recordId: "12", confirm: actions.map(action => action.name) })).resolves.toEqual({ ok: true, relayed: true });
+      expect(request).toHaveBeenLastCalledWith(expect.objectContaining({ verb: "automationPress", args: expect.objectContaining({ confirm: ["destination/sendInvoice"], actor: "agent" }) }));
+    });
+  });
   it("maps dohc_press_button to the press verb, and refuses a mounted share before any request", async () => {
     await withWorkspace(async (base) => {
       await mkdir(join(base.root, "Billing"), { recursive: true });

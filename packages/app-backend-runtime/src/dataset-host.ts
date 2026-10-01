@@ -47,6 +47,8 @@ export function resolveCompatibleDatasetRevision(db: JournalDb, key: DatasetScop
   return previous;
 }
 export interface DatasetAuthority {
+  /** Trusted automation ceiling, checked at admission and inside each commit transaction. */
+  authorizeOperation?: (datasetId: string, operationId: string) => void;
   caller: AppBackendCaller;
   /** Stable identity derived from the credential, never from request JSON. */
   principalKey: string;
@@ -271,7 +273,8 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
     const verified = { caller, principalKey: text(result.principalKey),
       appId: result.appId === undefined ? undefined : text(result.appId),
       authorityToken: result.authorityToken === undefined ? undefined : text(result.authorityToken, 1024),
-      chainDepth: chainDepth(result.chainDepth, caller), agent: agent(result.agent, caller), person: person(result.person, caller) };
+      chainDepth: chainDepth(result.chainDepth, caller), agent: agent(result.agent, caller), person: person(result.person, caller),
+      authorizeOperation: result.authorizeOperation };
     if (through.kind === "app" && verified.appId !== through.appId) denied();
     // An automation acts for its Collection, never as an app.
     if (caller.kind === "automation" && through.kind !== "data") denied();
@@ -841,6 +844,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       }
       const authorize = () => {
         const current = permissions(context, key, through);
+        current.authority.authorizeOperation?.(key.datasetId, operationId);
         if (current.token !== permitted.token || !current.operations.some(candidate => candidate.operationId === operationId)) denied();
         try { assertDatasetAttemptNotCancelled(db, key, hash(JSON.stringify([permitted.authority.principalKey, through])), idempotencyKey); }
         catch (error) { throw new DatasetHostError("conflict", error instanceof Error ? error.message : "This submission was cancelled."); }

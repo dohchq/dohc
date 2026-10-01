@@ -67,6 +67,7 @@ type CliCommandBody =
   | { verb: "automationSwitch"; collectionPath: string; automation: string; enabled: boolean; expectedContentHash: string; reformat: boolean; submitId: string }
   | { verb: "automationRun"; collectionPath: string; automation: string; run: string }
   | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean }
+  | { verb: "automationButtons"; collectionPath: string; table?: string }
   | {
       verb: "automationPress";
       collectionPath: string;
@@ -500,6 +501,18 @@ const AUTOMATION_VERBS = {
       if (!expectedContentHash || !/^[a-f0-9]{64}$/u.test(expectedContentHash)) fail("--base requires the contentHash from automation list");
       if (!submitId || !requestIdSchema.safeParse(submitId).success) fail("--submit-id requires a printable id of at most 64 characters");
       return { verb: "automationSwitch", collectionPath, automation, enabled: state === "on", expectedContentHash, submitId, reformat: input.flags.has("--reformat") };
+    },
+  },
+  buttons: {
+    summary: "Inspect Button fields and the actions they require you to confirm.",
+    operands: "<collection>",
+    flags: [{ name: "--table", value: "table", text: "Inspect the buttons in this dataset table." }],
+    parse: input => {
+      const [collectionPath, ...extra] = input.operands;
+      if (!collectionPath) fail("automation buttons requires a Collection");
+      noExtraArgs(extra, "automation buttons");
+      const table = lastValue(input, "--table");
+      return { verb: "automationButtons", collectionPath, ...(table ? { table } : {}) };
     },
   },
   runs: {

@@ -13,6 +13,7 @@ import {
   type RunAdmission,
 } from "@dohc/automation-executor/collection-automations";
 import { claimPerson } from "@dohc/automation-executor/collection-automation-run";
+import { AutomationRunWait, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-notice";
 import { parseReachHandover } from "@dohc/automation-executor/reach-verdicts";
@@ -56,6 +57,14 @@ import { notFound, RelayError } from "./errors";
 import { observeRelayWrites } from "./relayWriteChanges";
 import type { SyncRelayStorage } from "./storage";
 import type { AutomationServer, AutomationServerSchedules } from "./storage/automationHosts";
+
+function checkedButtonAuthority<T>(read: () => T): T {
+  try { return read(); }
+  catch (error) {
+    if (error instanceof RelayError && (error.code === "not_found" || error.code === "share_read_only")) throw error;
+    throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED, "roster");
+  }
+}
 
 // This server runs the automations of every workspace whose host record
 // names it (docs/engineering/security-boundaries.md). Each workspace
@@ -102,6 +111,7 @@ export type ServerExecutor = Pick<
   | "releaseGroupSubscriptions" | "reachHandover" | "relayedClaim" | "pressRelayed" | "automationName"
   | "schedules" | "scheduleMarks" | "claimSchedule" | "failuresChanged" | "datasetsChanged" | "pressDataset" | "holds"
   | "runs" | "listedRun" | "retry" | "undo" | "undoRunsOf" | "confirmReach"
+  | "inspectRelayed"
 >;
 
 export interface AutomationServerOptions {
@@ -435,6 +445,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       marks: [{
         noticeId: automationFailedNoticeId({ workspaceId: ws.replica.workspaceId, installId: AUTOMATION_SERVER_INSTALL_ID, failure }).replace("automation-failed:", SERVER_RUN_FAILED_NOTICE_PREFIX),
         mark: "dismissed",
+        withdraw: true,
       }],
       installId: AUTOMATION_SERVER_INSTALL_ID,
       nowMs: nowMs(),
@@ -624,6 +635,13 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       onPressSettled: (event) => self().presses.runSettled(event),
       onPressWaiting: () => undefined,
       holdForHost: () => hold(ws),
+      resolveRelayedPress: async (hostPressId) => {
+        const current = () => checkedButtonAuthority(() => storage.resolveAutomationPress({ workspaceId, ownerUserId, installId: AUTOMATION_SERVER_INSTALL_ID,
+          generation: ws.host?.generation ?? 0, hostPressId, nowMs: nowMs() }));
+        return { ...current(), current };
+      },
+      resolveButtonInspection: async (inspectionId) => checkedButtonAuthority(() => storage.resolveButtonInspection({ workspaceId, ownerUserId, installId: AUTOMATION_SERVER_INSTALL_ID,
+        generation: ws.host?.generation ?? 0, inspectionId })),
       admitRun: (signal) => gate.admit(workspaceId, signal),
       onError: (context, error) => options.onError(`automations in workspace "${workspaceId}": ${context}`, error),
       withDatasetHost: async (work) => {
@@ -695,17 +713,22 @@ export async function startAutomationServer(options: AutomationServerOptions) {
 
   function pressTransport(ws: WorkspaceState): PressTransport {
     const scope = { workspaceId: ws.replica.workspaceId, ownerUserId: ws.replica.ownerUserId, installId: AUTOMATION_SERVER_INSTALL_ID };
-    const empty = () => storage.automationPressWait({ ...scope, nowMs: nowMs() }) === "empty";
+    const empty = () => storage.automationPressWait({ ...scope, nowMs: nowMs() }) === "empty" && storage.listButtonInspections(scope).length === 0;
     return {
       async list(signal) {
-        if (empty()) await nextWrite(signal, PRESS_WAIT_MS, () => !empty());
-        return storage.listAutomationPresses({ ...scope, nowMs: nowMs() });
+        const release = storage.parkButtonInspectionHost(scope);
+        try {
+          if (empty()) await nextWrite(signal, PRESS_WAIT_MS, () => !empty());
+          return storage.listAutomationPresses({ ...scope, nowMs: nowMs() });
+        } finally { release(); }
       },
       accept: async (generation, hostPressIds) =>
         storage.acceptAutomationPresses({ ...scope, generation, hostPressIds, nowMs: nowMs() }),
       settle: async (input) => {
         storage.settleAutomationPress({ workspaceId: scope.workspaceId, ownerUserId: scope.ownerUserId, ...input, nowMs: nowMs() });
       },
+      inspections: () => storage.listButtonInspections(scope),
+      answerInspection: async (generation, inspectionId, result) => storage.answerButtonInspection({ ...scope, generation, inspectionId }, result),
     };
   }
 
@@ -766,6 +789,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       host: hostSeam(ws, self),
       transport: async () => (ws.closed ? null : pressTransport(ws)),
       heldClaim: (press) => self().executor.relayedClaim({ automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, pressId: press.hostPressId }),
+      inspect: async id => await self().executor.inspectRelayed(id),
       press: async (input, watch) => {
         // A formula's `person` shows the name of whoever pressed.
         await nameOf(ws, input.pressedBy).catch(() => null);

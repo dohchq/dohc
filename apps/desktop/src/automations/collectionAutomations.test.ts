@@ -8,7 +8,7 @@ import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/data
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import type { CollectionQueryFilter, CollectionRecord } from "@dohc/workspace-contracts/collection";
 import type { AutomationClaim, AutomationClaimMessage, AutomationGroupHandover, AutomationGroupRelayRecord, ChangeAttributionWire } from "@dohc/workspace-engine-client";
-import type { RelayAutomationHost } from "@dohc/workspace-contracts/relay";
+import type { RelayAutomationHost, RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
 import { derivedRecordId } from "@dohc/automation-executor/record-ids";
 import { AUTOMATION_SWITCHED_OFF_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import { parseReachHandover } from "@dohc/automation-executor/reach-verdicts";
@@ -399,6 +399,7 @@ async function world(options: {
         return created;
       })();
       presses.set(pressId, claim.claimId);
+      if (rosterAfterPress !== null) { roster = rosterAfterPress; rosterAfterPress = null; }
       return { busy: false, claim: summary(claim) };
     },
     releaseAutomationClaim: async ({ claimId }) => {
@@ -548,7 +549,14 @@ async function world(options: {
     })));
   };
   // A new executor over the same engine, files, and saved runs, as after a restart.
+  const relayAuthorities = new Map<string, RelayButtonAuthority>();
+  let rosterAfterPress: ReachRoster | null = null;
   const makeExecutor = (extra: Partial<CollectionAutomationsOptions> = {}) => new CollectionAutomations({
+    resolveRelayedPress: async id => {
+      const authority = relayAuthorities.get(id);
+      if (!authority) throw Error("No accepted relay press.");
+      return authority;
+    },
     withEngine: async (work) => await work(engine),
     withRecordWrites: recordWrites,
     readText: async (path) => {
@@ -648,6 +656,15 @@ async function world(options: {
 
   return {
     root, executor, makeExecutor, engine, records, claims, journaled, authored, subscriptions, events, failures, errors, runsChanged, failureReports, withdrawnFailures, switchedOff, pressEvents,
+    relayPress: async (host: CollectionAutomations, input: Parameters<CollectionAutomations["pressRelayed"]>[0], watch: Parameters<CollectionAutomations["pressRelayed"]>[1]) => {
+      relayAuthorities.set(input.pressId, { workspaceId: "workspace", userId: input.pressedBy, grantId: "g-ana", grantGeneration: 1, hostGeneration: 1,
+        principals: [], confirmed: [], automationId: input.automationId, collectionPath: input.collectionPath, definitionHash: input.definitionHash, recordId: input.recordId });
+      // These old host-hold tests lose the roster after admission, before the claim drains.
+      if (roster.kind === "unknown") {
+        rosterAfterPress = roster; roster = OWNER;
+      }
+      return host.pressRelayed(input, watch);
+    },
     reportedFailures: () => reportedFailures,
     enabledSaved: (collection: string) => enabledSaved.get(collection) ?? [],
     fileReads: (path: string) => fileReads.get(path) ?? 0,
@@ -1096,7 +1113,7 @@ describe("Collection automations", () => {
       { field: "Archive", state: { kind: "no-automation", reason: "No automation uses this button." } },
     ]);
     const watched: string[] = [];
-    const pressed = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, (claimId) => watched.push(claimId));
+    const pressed = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", confirmed: [], by: { kind: "human" } }, (claimId) => watched.push(claimId));
     if (pressed.busy) throw new Error("Expected a claim");
     expect(pressed.settled).toBeNull();
     const claim = w.claims.get(pressed.claimId)!;
@@ -1111,7 +1128,7 @@ describe("Collection automations", () => {
     // An agent's press for Ice reaches the engine as the agent's, at its run's depth, and its run writes one step deeper.
     const other = w.addRecord("Tasks", "other", { Status: "Sent" });
     const byAgent = await w.executor.press(
-      { collectionPath: "Tasks", field: "Mark paid", recordId: other.id, pressId: "press-agent", pressedBy: "user-ice", by: { kind: "agent", originId: "dohc-mcp", depth: 2 } },
+      { collectionPath: "Tasks", field: "Mark paid", recordId: other.id, pressId: "press-agent", pressedBy: "user-ice", confirmed: [], by: { kind: "agent", originId: "dohc-mcp", depth: 2 } },
       () => undefined);
     if (byAgent.busy) throw new Error("Expected a claim");
     const agentClaim = w.claims.get(byAgent.claimId)!;
@@ -1129,23 +1146,23 @@ describe("Collection automations", () => {
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
     await w.until(() => w.idleDrains() > idle);
     await expect(w.executor.buttons("Tasks", ["Mark paid"])).resolves.toMatchObject([{ state: { kind: "disabled" } }]);
-    const again = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, (claimId) => watched.push(claimId));
+    const again = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", confirmed: [], by: { kind: "human" } }, (claimId) => watched.push(claimId));
     expect(again).toEqual({ busy: false, claimId: claim.claimId, settled: { outcome: "done", error: null } });
     // A run that already ended has no settle left to hear.
     expect(watched).toEqual([claim.claimId]);
     // The id names this press, so another person, field, or record is refused.
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana", by: { kind: "human" } }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana", confirmed: [], by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("This press id already names another press.");
     // After a restart the engine still has the press, so the switched-off
     // button answers it, and still refuses it to anyone else.
     const restarted = w.makeExecutor();
     await restarted.open();
-    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined))
+    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", confirmed: [], by: { kind: "human" } }, () => undefined))
       .resolves.toEqual({ busy: false, claimId: claim.claimId, settled: { outcome: "done", error: null } });
-    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana", by: { kind: "human" } }, () => undefined))
+    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana", confirmed: [], by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("This press id already names another press.");
     // A new press on the switched-off button is still refused.
-    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-2", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined))
+    await expect(restarted.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-2", pressedBy: "user-ice", confirmed: [], by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("Mark paid is off. Turn it on in Automations.");
     await restarted.dispose();
   });
@@ -1154,7 +1171,7 @@ describe("Collection automations", () => {
     const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" } });
     const invoice = w.addRecord("Tasks", "invoice", {});
     await w.executor.open();
-    const input = { collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" as const } };
+    const input = { collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", confirmed: [], by: { kind: "human" as const } };
     // The record leaves before the run reads it, so the run changes nothing.
     w.records.delete(invoice.id);
     await expect(w.executor.press(input, () => undefined)).rejects.toThrow("This record is no longer in Tasks.");
@@ -1176,16 +1193,16 @@ describe("Collection automations", () => {
     const invoice = w.addRecord("Tasks", "invoice", {});
     w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
     await w.executor.open();
-    const first = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined);
+    const first = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", confirmed: [], by: { kind: "human" } }, () => undefined);
     if (first.busy) throw new Error("Expected a claim");
     // Who can edit is unknown, so the run waits and its window hears why.
     await w.until(() => w.pressEvents.length > 0);
     expect(w.pressEvents).toEqual([{ waiting: { claimId: first.claimId, reason: "roster" } }]);
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-2", pressedBy: "user-ana", by: { kind: "human" } }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-2", pressedBy: "user-ana", confirmed: [], by: { kind: "human" } }, () => undefined))
       .resolves.toEqual({ busy: true });
     // A second window of the same person joins the run and learns why it waits.
     const joined: Array<[string, string | null]> = [];
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-3", pressedBy: "user-ice", by: { kind: "human" } },
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-3", pressedBy: "user-ice", confirmed: [], by: { kind: "human" } },
       (claimId, waiting) => joined.push([claimId, waiting])))
       .resolves.toEqual({ busy: false, claimId: first.claimId, settled: null });
     expect(joined).toEqual([[first.claimId, "roster"]]);
@@ -1200,16 +1217,16 @@ describe("Collection automations", () => {
     const invoice = w.addRecord("Tasks", "invoice", {});
     await w.executor.open();
     const paid = await hashOf(w.executor, "Tasks", "paid");
-    await expect(w.executor.pressRelayed(
-      { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: "0000000000000000", recordId: invoice.id, pressId: "relay-0", pressedBy: "user-ana" }, () => undefined))
+    await expect(w.relayPress(w.executor,
+      { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: "0000000000000000", recordId: invoice.id, pressId: "relay-0", pressedBy: "user-ana", confirmed: [] }, () => undefined))
       .rejects.toThrow("Mark paid changed after it was pressed. Press it again.");
     // The relay checked the presser's grant for the path they saw, so the
     // press runs only while the Collection is still there.
-    await expect(w.executor.pressRelayed(
-      { automationId: "collection:Tasks#paid", collectionPath: "Old/Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-moved", pressedBy: "user-ana" }, () => undefined))
+    await expect(w.relayPress(w.executor,
+      { automationId: "collection:Tasks#paid", collectionPath: "Old/Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-moved", pressedBy: "user-ana", confirmed: [] }, () => undefined))
       .rejects.toThrow("This Collection moved after the button was pressed. Press it again.");
-    const relayed = await w.executor.pressRelayed(
-      { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    const relayed = await w.relayPress(w.executor,
+      { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana", confirmed: [] }, () => undefined);
     expect(relayed.field).toBe("Mark paid");
     if (relayed.pressed.busy) throw new Error("Expected a claim");
     await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
@@ -1217,8 +1234,8 @@ describe("Collection automations", () => {
 
     // The relay cannot tell which Collection a record is in, so the host checks.
     const elsewhere = w.addRecord("Log", "entry", {});
-    await expect(w.executor.pressRelayed(
-      { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: elsewhere.id, pressId: "relay-outside", pressedBy: "user-ana" }, () => undefined))
+    await expect(w.relayPress(w.executor,
+      { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: elsewhere.id, pressId: "relay-outside", pressedBy: "user-ana", confirmed: [] }, () => undefined))
       .rejects.toThrow("This record is no longer in Tasks.");
     expect([...w.claims.values()].filter((claim) => claim.recordId === elsewhere.id)).toEqual([]);
 
@@ -1226,8 +1243,8 @@ describe("Collection automations", () => {
     const idle = w.idleDrains();
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
     await w.until(() => w.idleDrains() > idle);
-    await expect(w.executor.pressRelayed(
-      { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-2", pressedBy: "user-ana" }, () => undefined))
+    await expect(w.relayPress(w.executor,
+      { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-2", pressedBy: "user-ana", confirmed: [] }, () => undefined))
       .rejects.toThrow("This button no longer runs an automation in its Collection.");
 
     // The pressed automation is off, and another now runs the button.
@@ -1235,8 +1252,8 @@ describe("Collection automations", () => {
     const again = w.idleDrains();
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
     await w.until(() => w.idleDrains() > again);
-    await expect(w.executor.pressRelayed(
-      { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: await hashOf(w.executor, "Tasks", "paid"), recordId: invoice.id, pressId: "relay-3", pressedBy: "user-ana" }, () => undefined))
+    await expect(w.relayPress(w.executor,
+      { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: await hashOf(w.executor, "Tasks", "paid"), recordId: invoice.id, pressId: "relay-3", pressedBy: "user-ana", confirmed: [] }, () => undefined))
       .rejects.toThrow("Mark paid now runs another automation. Press it again.");
   });
 
@@ -1249,7 +1266,7 @@ describe("Collection automations", () => {
     const paid = await hashOf(w.executor, "Tasks", "paid");
     const input = { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, pressId: "relay-1" };
     expect(await w.executor.relayedClaim(input)).toBeNull();
-    const relayed = await w.executor.pressRelayed({ ...input, collectionPath: "Tasks", recordId: invoice.id, pressedBy: "user-ana" }, () => undefined);
+    const relayed = await w.relayPress(w.executor, { ...input, collectionPath: "Tasks", recordId: invoice.id, pressedBy: "user-ana", confirmed: [] }, () => undefined);
     if (relayed.pressed.busy) throw new Error("Expected a claim");
     expect(await w.executor.relayedClaim(input)).toEqual({ claimId: relayed.pressed.claimId, settled: null });
     // The steps change under the same id before the claim runs.
@@ -1257,6 +1274,7 @@ describe("Collection automations", () => {
     const idle = w.idleDrains();
     w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
     await w.until(() => w.idleDrains() > idle);
+    await vi.waitFor(async () => expect(await hashOf(w.executor, "Tasks", "paid")).not.toBe(paid));
     w.setRoster(OWNER);
     w.executor.rosterChanged();
     const claim = await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
@@ -1280,11 +1298,11 @@ describe("Collection automations", () => {
     const paid = await hashOf(executor, "Tasks", "paid");
     // The owner's own press holds nothing.
     const own = w.addRecord("Tasks", "own", {});
-    const pressed = await executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: own.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined);
+    const pressed = await executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: own.id, pressId: "press-1", pressedBy: "user-ice", confirmed: [], by: { kind: "human" } }, () => undefined);
     if (pressed.busy) throw new Error("Expected a claim");
     await w.settledClaim(w.claims.get(pressed.claimId)!);
     const invoice = w.addRecord("Tasks", "invoice", {});
-    const relayed = await executor.pressRelayed({ automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    const relayed = await w.relayPress(executor, { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana", confirmed: [] }, () => undefined);
     if (relayed.pressed.busy) throw new Error("Expected a claim");
     await w.settledClaim(w.claims.get(relayed.pressed.claimId)!);
     expect(writes).toEqual([0, 1]);
@@ -1292,7 +1310,7 @@ describe("Collection automations", () => {
     // A handover began: the press settles failed and writes nothing.
     hold.refuse();
     const late = w.addRecord("Tasks", "late", {});
-    const refused = await executor.pressRelayed({ automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: late.id, pressId: "relay-2", pressedBy: "user-ana" }, () => undefined);
+    const refused = await w.relayPress(executor, { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: late.id, pressId: "relay-2", pressedBy: "user-ana", confirmed: [] }, () => undefined);
     if (refused.pressed.busy) throw new Error("Expected a claim");
     expect(await w.settledClaim(w.claims.get(refused.pressed.claimId)!))
       .toMatchObject({ state: "failed", error: "This workspace's automations moved to another computer before this press ran." });
@@ -1314,7 +1332,7 @@ describe("Collection automations", () => {
     const first = w.makeExecutor({ holdForHost: hold.take });
     await first.open();
     const paid = await hashOf(first, "Tasks", "paid");
-    const relayed = await first.pressRelayed({ automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    const relayed = await w.relayPress(first, { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana", confirmed: [] }, () => undefined);
     if (relayed.pressed.busy) throw new Error("Expected a claim");
     await w.until(() => w.pressEvents.length > 0);
     expect(w.pressEvents).toMatchObject([{ waiting: { claimId: relayed.pressed.claimId } }]);
@@ -1354,7 +1372,7 @@ describe("Collection automations", () => {
     const executor = w.makeExecutor({ holdForHost: hold.take });
     await executor.open();
     const paid = await hashOf(executor, "Tasks", "paid");
-    const relayed = await executor.pressRelayed({ automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+    const relayed = await w.relayPress(executor, { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana", confirmed: [] }, () => undefined);
     if (relayed.pressed.busy) throw new Error("Expected a claim");
     await aborted;
     await new Promise((resolve) => setImmediate(resolve));
@@ -1384,9 +1402,9 @@ describe("Collection automations", () => {
       { kind: "disabled", reason: "ana@example.com cannot edit Other." },
       { kind: "disabled", reason: "The automation for Broken has a problem. Fix it in Automations." },
     ]);
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Resend", recordId: task.id, pressId: "press-1", pressedBy: "user-owner", by: { kind: "human" } }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Resend", recordId: task.id, pressId: "press-1", pressedBy: "user-owner", confirmed: [], by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("Resend is off. Turn it on in Automations.");
-    await expect(w.executor.press({ collectionPath: "Other", field: "Twice", recordId: task.id, pressId: "press-2", pressedBy: "user-owner", by: { kind: "human" } }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Other", field: "Twice", recordId: task.id, pressId: "press-2", pressedBy: "user-owner", confirmed: [], by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("No automation uses this button.");
     expect(w.claims.size).toBe(0);
   });
@@ -1398,7 +1416,7 @@ describe("Collection automations", () => {
     await expect(w.executor.buttons("Tasks", ["Mark paid"])).resolves.toEqual([
       { field: "Mark paid", state: { kind: "disabled", reason: "Absent is not a field in Tasks." } },
     ]);
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ice", confirmed: [], by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("Absent is not a field in Tasks.");
     expect(w.claims.size).toBe(0);
   });
@@ -1406,7 +1424,7 @@ describe("Collection automations", () => {
   it("refuses a press on a record that left the Collection, and claims nothing", async () => {
     const w = await world({ automations: { Tasks: "  - id: paid\n    name: Paid\n    when: {button: Mark paid}\n    do: [{set: {Paid: true}}]\n" } });
     await w.executor.open();
-    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: "rec_gone", pressId: "press-1", pressedBy: "user-ice", by: { kind: "human" } }, () => undefined))
+    await expect(w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: "rec_gone", pressId: "press-1", pressedBy: "user-ice", confirmed: [], by: { kind: "human" } }, () => undefined))
       .rejects.toThrow("This record is no longer in Tasks.");
     expect(w.claims.size).toBe(0);
   });
@@ -1418,7 +1436,7 @@ describe("Collection automations", () => {
     });
     const invoice = w.addRecord("Tasks", "invoice", {});
     await w.executor.open();
-    const pressed = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana", by: { kind: "human" } }, () => undefined);
+    const pressed = await w.executor.press({ collectionPath: "Tasks", field: "Mark paid", recordId: invoice.id, pressId: "press-1", pressedBy: "user-ana", confirmed: [], by: { kind: "human" } }, () => undefined);
     if (pressed.busy) throw new Error("Expected a claim");
     const claim = await w.settledClaim(w.claims.get(pressed.claimId)!);
     expect(claim.state).toBe("failed");
@@ -5687,8 +5705,8 @@ describe("Collection automations that a Group message starts", () => {
       w.setRoster({ kind: "unknown", problem: { kind: "unchecked", next: "Try again later." } });
       await w.executor.open();
       const paid = await hashOf(w.executor, "Tasks", "paid");
-      const relayed = await w.executor.pressRelayed(
-        { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana" }, () => undefined);
+      const relayed = await w.relayPress(w.executor,
+        { automationId: "collection:Tasks#paid", collectionPath: "Tasks", definitionHash: paid, recordId: invoice.id, pressId: "relay-1", pressedBy: "user-ana", confirmed: [] }, () => undefined);
       if (relayed.pressed.busy) throw new Error("Expected a claim");
       await w.renameCollection("Tasks", "Shared/Tasks");
       await w.executor.automationsIn("Shared/Tasks");

@@ -210,6 +210,7 @@ const LocalFile = z.object({
 type LocalFile = z.infer<typeof LocalFile>;
 
 const OutboxMark = z.object({
+  withdraw: z.literal(true).optional(),
   noticeId: NoticeRow.shape.noticeId,
   mark: z.enum(["read", "dismissed"]),
   atMs: z.number().int().nonnegative(),
@@ -391,12 +392,12 @@ export function createNoticeStore(deps: {
 
   // One waiting mark per notice. Dismissed takes the place of read, and read
   // adds nothing to dismissed. Returns false when nothing changed.
-  function queueMark(file: AccountFile, noticeId: string, mark: NoticeMark): boolean {
+  function queueMark(file: AccountFile, noticeId: string, mark: NoticeMark, withdraw = false): boolean {
     const index = file.marks.findIndex((waiting) => waiting.noticeId === noticeId);
     const waiting = file.marks[index];
-    if (waiting && (waiting.mark === "dismissed" || mark === "read")) return false;
+    if (waiting && (waiting.mark === "dismissed" || mark === "read") && (!withdraw || waiting.withdraw)) return false;
     // A new object, so a batch already on its way still names the old mark.
-    const entry = { noticeId, mark, atMs: nowMs() };
+    const entry = { noticeId, mark, atMs: nowMs(), ...(withdraw ? { withdraw: true as const } : {}) };
     if (waiting) file.marks[index] = entry;
     else file.marks.push(entry);
     return true;
@@ -550,7 +551,7 @@ export function createNoticeStore(deps: {
       if (batch.length === 0) return "done";
       try {
         await relay(session, "/sync/notices/marks", {
-          marks: batch.map(({ noticeId, mark }) => ({ noticeId, mark })),
+          marks: batch.map(({ noticeId, mark, withdraw }) => ({ noticeId, mark, ...(withdraw ? { withdraw } : {}) })),
         });
       } catch (error) {
         if (error instanceof SessionChanged) throw error;
@@ -1026,7 +1027,7 @@ export function createNoticeStore(deps: {
           post.withdrawn = true;
           touched = true;
         }
-        if ((post || file.rows.some((candidate) => candidate.noticeId === noticeId)) && queueMark(file, noticeId, "dismissed")) {
+        if ((post || file.rows.some((candidate) => candidate.noticeId === noticeId)) && queueMark(file, noticeId, "dismissed", true)) {
           touched = true;
         }
         if (touched) await saveAccount(session.account, file);

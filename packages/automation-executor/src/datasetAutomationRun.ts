@@ -95,7 +95,7 @@ export const ACCESS_NARROWED_ERROR = "Someone who edits this automation can no l
 const READ_KEY = "automation-read";
 
 /** The caller a dataset host gives one run: every invocation the run makes carries it. */
-export interface DatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number; readonly person: string | null }
+export interface DatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number; readonly person: string | null; readonly authorizeOperation?: (datasetId: string, operationId: string) => void }
 
 /** One invocation of an approved operation, as a run or an Undo sends it. */
 export interface DatasetInvocation {
@@ -111,7 +111,7 @@ export interface DatasetInvocation {
 /** The dataset host as a run uses it. LocalDatasetHost's `automations` satisfies it. */
 export interface DatasetRunHost {
   /** The context a run's dataset calls go through, at `depth`, for `person`. */
-  context(input: { automationId: string; claimId: string; depth: number; person: string | null }): DatasetAutomationContext;
+  context(input: DatasetAutomationContext): DatasetAutomationContext;
   invoke(context: DatasetAutomationContext, input: DatasetInvocation): Promise<DatasetInvocationResult>;
   revision(datasetId: string): DatasetRevision;
   generated(datasetId: string): boolean;

@@ -250,6 +250,7 @@ export interface CliAutomationsPort {
 // Button presses for the press verb, through the same press path a window's
 // press takes. `waiting` is why the run the press started waits, if it does.
 export interface CliButtonsPort {
+  inspect(input: Pick<NamedPress, "collectionPath" | "table">, by: AutomationPressActor): Promise<import("@dohc/automation-executor/collection-automations").CollectionAutomationButton[]>;
   press(
     input: Omit<NamedPress, "workspaceId">,
     by: AutomationPressActor,
@@ -2105,7 +2106,7 @@ async function dispatch(
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): Promise<unknown> {
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options);
@@ -2175,6 +2176,9 @@ async function dispatch(
         rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
         break;
       case "automationRetry":
+        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+        break;
+      case "automationButtons":
         rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
         break;
       case "automationPress":
@@ -2697,7 +2701,16 @@ async function dispatchWorkspace(
       }
     }
 
-    // A shared view's press is checked and relayed as the app's is.
+    // Shared views inspect and press Buttons through the owner's host.
+    case "automationButtons": {
+      if (!context.buttons) return { ok: false as const, reason: "buttons are not available in this workspace" };
+      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.collectionPath);
+      try {
+        const buttons = await context.buttons.inspect({ collectionPath: validated.normalized, ...(request.args.table === undefined ? {} : { table: request.args.table }) }, pressActor(request.args.actor, context, options));
+        return { ok: true as const, buttons };
+      } catch (error) { return mcpFailure(error, "failed to inspect buttons"); }
+    }
     case "automationPress": {
       const buttons = context.buttons;
       if (!buttons) return { ok: false as const, reason: "buttons are not available in this workspace" };

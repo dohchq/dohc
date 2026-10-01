@@ -523,6 +523,8 @@ describe("local dataset owner adapter", () => {
     host.archive({datasetId: id(1)});
     expect(changes).toBe(2);
     expect(host.automations.datasets()).toEqual({definitions: [], failures: []});
+    expect(() => host.automations.dataGrants(id(1))).not.toThrow();
+    await expect(host.action(call(approved, id(6), "archived", {name: "Ink"}))).rejects.toThrow("archived");
     host.restore({datasetId: id(1)});
     expect(changes).toBe(3);
     // A refused change tells nothing.

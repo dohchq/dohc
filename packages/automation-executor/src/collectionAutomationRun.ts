@@ -135,6 +135,8 @@ export interface CollectionRecordWrites {
 }
 
 export interface CollectionAutomationRunDependencies {
+  checkPresser?(): Promise<void>;
+  authorizeDataset?(datasetId: string, operationId: string): Promise<import("./buttonPresser").DatasetOperationCeiling>;
   withHost?: import("./datasetAutomationRun").DatasetAutomationRunDependencies["withHost"];
   cachedRoster?(): Promise<ReachRoster>;
   checkReach?(steps: readonly ReachStep[], roster: Exclude<ReachRoster, { kind: "unknown" }>): Promise<boolean>;

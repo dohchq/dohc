@@ -23,7 +23,7 @@ export function createDatasetAutomationAuthority(current: () => void, storage: S
   return {
     context(auth: Named, input: Context, signal: AbortSignal): Context {
       current(); signal.throwIfAborted();
-      const context = Object.freeze({ automationId: input.automationId, claimId: input.claimId, depth: input.depth, person: input.person });
+      const context = Object.freeze({ automationId: input.automationId, claimId: input.claimId, depth: input.depth, person: input.person, authorizeOperation: input.authorizeOperation });
       const caller = Object.freeze({ ...auth });
       contexts.set(context, caller);
       callers.set(caller, { auth, context, signal });
@@ -40,6 +40,7 @@ export function createDatasetAutomationAuthority(current: () => void, storage: S
       current(); held.signal.throwIfAborted();
       if (access !== "data" || held.auth.workspaceId !== workspaceId || !storage.workspaceIsOwnedBy(workspaceId, held.auth.userId)) throw notFound();
       return { caller: { kind: "automation", automationId: held.context.automationId }, chainDepth: held.context.depth, ...(held.context.person === null ? {} : { person: held.context.person }),
+        authorizeOperation: held.context.authorizeOperation,
         principalKey: createHash("sha256").update(JSON.stringify(["dohc-dataset-automation-v1", workspaceId, held.context.automationId])).digest("hex") };
     },
   };
