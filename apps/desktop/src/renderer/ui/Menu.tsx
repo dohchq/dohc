@@ -94,9 +94,10 @@ export function Menu(props: {
       // useDismiss already closed it; one Escape closes one surface.
       event.stopPropagation();
     } else if (event.key === "Tab") {
-      // The trigger takes focus first, so the key then moves on from it in
-      // either direction instead of landing on the trigger with the menu open.
-      close();
+      // Closed without moving focus: a dialog's trap may already have chosen
+      // where the key goes, and otherwise the focus return puts focus on the
+      // trigger before the browser moves on from it.
+      onOpenChange(false);
     } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && event.key !== " ") {
       typeahead(event.key);
     }

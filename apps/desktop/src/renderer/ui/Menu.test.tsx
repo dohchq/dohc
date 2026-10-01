@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -69,9 +69,10 @@ describe("Menu", () => {
     expect(closeDialog).toHaveBeenCalledOnce();
   });
 
-  // The browser's own Tab then moves on from the trigger in the pressed
-  // direction, so the key's default must stay. user-event's Tab walker
-  // cannot stand in for it: it trips over rows this handler unmounts.
+  // Outside a dialog, the focus return puts focus on the trigger and the
+  // browser's own Tab then moves on from it, so the key's default must stay.
+  // user-event's Tab walker cannot stand in for it: it trips over rows this
+  // handler unmounts.
   it("closes on Tab in either direction and hands the key on from the trigger", async () => {
     const user = userEvent.setup();
     render(<Harness items={items} />);
@@ -81,8 +82,36 @@ describe("Menu", () => {
       const row = screen.getByRole("menuitem", { name: "Rename" });
       expect(fireEvent.keyDown(row, { key: "Tab", shiftKey })).toBe(true);
       expect(screen.queryByRole("menu")).toBeNull();
-      expect(document.activeElement).toBe(trigger);
+      await waitFor(() => expect(document.activeElement).toBe(trigger));
     }
+  });
+
+  // Inside a dialog, the trap decides first. A menu at the dialog's end
+  // wraps Tab from its last row to the dialog's first control, and the menu
+  // must not pull focus back to its trigger afterwards.
+  it("leaves a dialog's Tab trap in charge of where focus goes", async () => {
+    const user = userEvent.setup();
+    render(
+      <Overlay onClose={vi.fn()}>
+        <button type="button">First</button>
+        <Harness items={items} />
+      </Overlay>,
+    );
+    const trigger = screen.getByTestId("row-menu");
+    await user.click(trigger);
+    const lastRow = screen.getByRole("menuitem", { name: "Delete" });
+    lastRow.focus();
+    expect(fireEvent.keyDown(lastRow, { key: "Tab" })).toBe(false);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "First" }));
+    await act(async () => {});
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "First" }));
+
+    // Shift+Tab from a row is not at the trap's edge, so the trigger takes it.
+    await user.click(trigger);
+    expect(fireEvent.keyDown(screen.getByRole("menuitem", { name: "Rename" }), { key: "Tab", shiftKey: true })).toBe(true);
+    expect(screen.queryByRole("menu")).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
   it("keeps focus on its rows when the list itself is pressed", async () => {

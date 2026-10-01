@@ -176,13 +176,30 @@ export function DocumentMenu(props: {
     // A later attempt already answered. Its answer is what the menu shows,
     // and this one describes a click the user has moved past. If instead the
     // menu closed under this write, a failure still reaches the person.
-    if (failure && actions.isCurrent(action)) {
-      props.reportError?.(
-        "dohc could not copy this document. Open the document menu to try again.",
-        failure,
-        null,
-      );
-    }
+    if (failure && actions.isCurrent(action)) reportCopyFailure(failure);
+  }
+
+  function reportCopyFailure(failure: unknown): void {
+    props.reportError?.("dohc could not copy this document.", failure, copyAgain);
+  }
+
+  // Try again on the toast or the Notices row: the same copy, from the
+  // document as it is now, with no menu to answer on. Only a failure speaks,
+  // and not after a later action or the document's view has moved on.
+  function copyAgain(): void {
+    const action = actions.next();
+    void (async () => {
+      let failure: unknown;
+      try {
+        const markdown = props.getMarkdown();
+        if (markdown === null) throw new Error(REFUSAL_LABEL);
+        await navigator.clipboard?.writeText(markdown);
+        return;
+      } catch (error) {
+        failure = error ?? new Error("clipboard write failed");
+      }
+      if (actions.isCurrent(action)) reportCopyFailure(failure);
+    })();
   }
 
   async function exportDocument(kind: "markdown" | "html" | "pdf") {

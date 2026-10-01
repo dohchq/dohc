@@ -625,13 +625,60 @@ describe("DocumentMenu", () => {
         await write.promise.catch(() => undefined);
       });
       expect(reportError).toHaveBeenCalledExactlyOnceWith(
-        "dohc could not copy this document. Open the document menu to try again.",
+        "dohc could not copy this document.",
         failure,
-        null,
+        expect.any(Function),
       );
       // Reopening says nothing about it either.
       await user.click(screen.getByTestId("document-menu-trigger"));
       expect(screen.queryByText("Couldn't copy")).toBeNull();
+    });
+
+    it("offers a retry that copies the document as it is now and reports only a failure", async () => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const reportError = vi.fn();
+      let markdown: string | null = MARKDOWN;
+      render(
+        <DocumentMenu
+          workspaceId="ws-1"
+          suggestedName="Plan"
+          getMarkdown={() => markdown}
+          reportError={reportError}
+        />,
+      );
+      const write = deferredWrite();
+      writeText.mockImplementationOnce(() => write.promise);
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await user.keyboard("{Escape}");
+      await act(async () => {
+        write.reject(new Error("clipboard refused"));
+        await write.promise.catch(() => undefined);
+      });
+      const retry = reportError.mock.calls[0]?.[2] as () => void;
+
+      // The document changed since; the retry copies what it says now.
+      markdown = "# Revised\n";
+      const copied = nextClipboardWrite();
+      await act(async () => retry());
+      expect(await copied).toBe("# Revised\n");
+      expect(reportError).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      // A retry that fails again reports again, with a retry of its own.
+      const refusal = new Error("clipboard refused again");
+      writeText.mockImplementationOnce(() => Promise.reject(refusal));
+      await act(async () => retry());
+      expect(reportError).toHaveBeenCalledTimes(2);
+      expect(reportError).toHaveBeenLastCalledWith("dohc could not copy this document.", refusal, expect.any(Function));
+
+      // And one that finds no document to copy reports that, not "Copied".
+      markdown = null;
+      await act(async () => retry());
+      expect(reportError).toHaveBeenCalledTimes(3);
+      expect((reportError.mock.calls[2]?.[1] as Error).message).toBe("Document not open");
+      expect(writeText).toHaveBeenCalledTimes(3);
     });
 
     it("reports nothing for a success", async () => {
