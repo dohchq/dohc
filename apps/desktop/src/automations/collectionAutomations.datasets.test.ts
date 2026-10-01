@@ -8,9 +8,10 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createDatasetFixtureCompiler } from "../testing/datasetFixtureCompiler";
 import { datasetPrincipalKey } from "@dohc/security-contract/dataset-artifacts";
+import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
 import type { JsonValue } from "@dohc/app-backend-runtime";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
 import type { DatasetDefinition } from "@dohc/security-contract/dataset";
@@ -43,7 +44,8 @@ import {
 import { UNDONE_RUN_ERROR } from "@dohc/automation-executor/collection-automation-run";
 import { PERSONAL_NEEDS_ACCOUNT } from "@dohc/automation-executor/automation-reach";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
-import { UNVERIFIED_SHARED_DATASET_ACCESS } from "@dohc/automation-executor/automation-buttons";
+import { AutomationRunWait, SHARED_BUTTON_DENIED, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
+import type { RelayButtonAuthority } from "@dohc/workspace-contracts/relay";
 import { DATASET_UNDO_RULES_CHANGED } from "@dohc/automation-executor/dataset-automation-undo";
 
 // Automations on a dataset Collection, end to end: a real dataset host runs
@@ -144,6 +146,164 @@ globalThis.operations["invoices.release"] = (ctx, input) => {
 };
 `;
 
+const HELPER_ACTION_DESCRIPTOR = JSON.stringify({ ...JSON.parse(ACTION_DESCRIPTOR) as DatasetDefinition,
+  operations: (JSON.parse(ACTION_DESCRIPTOR) as DatasetDefinition).operations.map(operation => operation.operationId === SETTLE ? { ...operation, access: "helper" } : operation) });
+
+async function sharedButtonWorld(steps: string, options: Parameters<typeof world>[0] = {}) {
+  const f = await world({ documents: true, ...options });
+  await mkdir(join(f.root, "Log"), { recursive: true });
+  await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Send:\n    type: button\n  Status:\n    type: text\n");
+  const text = `version: 1\nautomations:\n  - id: send\n    name: Send\n    when: {button: Send}\n    do:\n${steps}\n`;
+  await writeFile(join(f.root, "Log/automations.yaml"), text);
+  f.documents.set("source", { id: "source", path: "Log/source.md", status: "Source" });
+  await f.executor.open();
+  const parsed = parseAutomationsFile(text);
+  const entry = parsed.status === "read" ? parsed.entries[0] : null;
+  if (entry?.status !== "valid") throw Error("Invalid fixture automation");
+  const input = { automationId: "collection:Log#send", collectionPath: "Log", definitionHash: definitionHash(entry.automation),
+    recordId: "source", confirmed: [], pressId: "relay-named", pressedBy: "user-recipient" };
+  f.registerPress(input);
+  return Object.assign(f, { input });
+}
+
+describe("named shared document Buttons on the desktop host", () => {
+  it.each([true, false])("keeps a failure to open the dataset store unchecked, initially closed=%s", async initiallyClosed => {
+    const f = await sharedButtonWorld("      - find: 'true'\n        collection: Budget\n        operation: invoices.list\n        as: matches", { hostOpen: !initiallyClosed, storeFails: initiallyClosed });
+    f.grant("g-recipient", "user-recipient", [LIST]);
+    if (!initiallyClosed) f.failStore();
+    expect(await f.executor.inspectRelayed(f.input.pressId)).toEqual({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED });
+    await expect(f.executor.pressRelayed(f.input, () => undefined)).rejects.toBeInstanceOf(AutomationRunWait);
+    expect(f.engineClaims).toEqual([]);
+    await f.executor.dispose();
+  });
+  it.each([false, true])("checks the presser ceiling for a computed code destination, create allowed: %s", async allowed => {
+    const f = await sharedButtonWorld("      - run: \"return { records: [{ action: 'add', collection: ['Bud', 'get'].join(''), fields: { Status: 'By code' } }] };\"");
+    f.grant("g-recipient", "user-recipient", allowed ? [LIST, CREATE, EDIT, STATUS_ONLY] : [LIST, EDIT, STATUS_ONLY]);
+    expect((await f.executor.inspectRelayed(f.input.pressId)).kind).toBe("ready");
+    await f.executor.pressRelayed(f.input, () => undefined);
+    await f.until(() => f.engineClaims[0]?.state === "done" || f.engineClaims[0]?.state === "failed");
+    expect(f.engineClaims[0], JSON.stringify(f.engineClaims)).toMatchObject({ state: allowed ? "done" : "failed" });
+    expect((await f.records()).map(row => row.values[STATUS])).toEqual(allowed ? ["By code"] : []);
+    await f.executor.dispose();
+  });
+  it("does not borrow the same named operation grant from another dataset on the desktop", async () => {
+    const f = await sharedButtonWorld("      - find: 'true'\n        collection: Other\n        operation: invoices.list\n        as: matches");
+    const other = { ...definition, datasetId: id(90), name: "Other", schemaPath: "Other/schema.sql", operationsPath: "Other/operations.js" };
+    await mkdir(join(f.root, "Other"), { recursive: true });
+    await writeFile(join(f.root, "Other/dataset.json"), JSON.stringify(other));
+    await writeFile(join(f.root, other.schemaPath), files[definition.schemaPath]!);
+    await writeFile(join(f.root, other.operationsPath), generateDatasetOperations(other));
+    const prepared = await f.host.prepare({ descriptorPath: "Other/dataset.json", adapter: f.adapter });
+    const approved = await f.host.approve({ preparationId: prepared.preparationId, revisionSha256: prepared.revision.revisionSha256 });
+    f.grant("g-recipient", "user-recipient", [LIST]);
+    expect(await f.executor.inspectRelayed(f.input.pressId)).toEqual({ kind: "denied", reason: SHARED_BUTTON_DENIED });
+    await expect(f.executor.pressRelayed(f.input, () => undefined)).rejects.toThrow(SHARED_BUTTON_DENIED);
+    f.grant("g-recipient", "user-recipient", [LIST], { datasetId: other.datasetId, revision: approved.revision, revisionSha256: approved.revisionSha256 });
+    await vi.waitFor(async () => expect((await f.executor.inspectRelayed(f.input.pressId)).kind).toBe("ready"));
+    await f.executor.pressRelayed(f.input, () => undefined);
+    await f.until(() => f.engineClaims[0]?.state === "done");
+    await f.executor.dispose();
+  });
+  it("requires the implicit read and refuses forged identities and workspaces", async () => {
+    const f = await sharedButtonWorld("      - add-record: {Status: Open}\n        collection: Budget\n        operation: invoices.create\n        as: added\n      - set: {Status: Done}\n        records: added\n        operation: invoices.status");
+    f.grant("g-recipient", "user-recipient", [CREATE, STATUS_ONLY]);
+    expect(await f.executor.inspectRelayed(f.input.pressId)).toEqual({ kind: "denied", reason: SHARED_BUTTON_DENIED });
+    f.grant("g-recipient", "user-recipient", [CREATE, STATUS_ONLY, LIST]);
+    expect((await f.executor.inspectRelayed(f.input.pressId)).kind).toBe("ready");
+    await expect(f.executor.pressRelayed({ ...f.input, pressedBy: "user-owner" }, () => undefined)).rejects.toThrow(SHARED_BUTTON_DENIED);
+    const held = f.authorities.get(f.input.pressId)!;
+    held.workspaceId = "another";
+    expect(await f.executor.inspectRelayed(f.input.pressId)).toEqual({ kind: "denied", reason: SHARED_BUTTON_DENIED });
+    held.workspaceId = "workspace";
+    const result = await f.executor.pressRelayed(f.input, () => undefined);
+    if (result.pressed.busy) throw Error("Expected a claim");
+    await f.until(() => f.engineClaims[0]?.state === "done");
+    expect((await f.records()).map(row => row.values[STATUS])).toEqual(["Done"]);
+    await f.executor.dispose();
+  });
+
+  it("inspects an authorized invoke, requires its qualified confirmation, and rechecks grants after listing", async () => {
+    const f = await sharedButtonWorld("      - invoke: invoices.settle\n        collection: Budget\n        input: {id: destination, note: Sent}", { descriptor: HELPER_ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS });
+    f.grant("g-recipient", "user-recipient", [SETTLE]);
+    const listed = await f.executor.inspectRelayed(f.input.pressId);
+    expect(listed).toMatchObject({ kind: "ready", irreversible: [{ name: `${BUDGET}/invoices.settle`, label: "Budget: Settle" }] });
+    await expect(f.executor.pressRelayed(f.input, () => undefined)).rejects.toThrow("changed after it was pressed");
+    await expect(f.executor.pressRelayed({ ...f.input, confirmed: ["invoices.settle"] }, () => undefined)).rejects.toThrow(SHARED_BUTTON_DENIED);
+    const confirmed = { ...f.input, confirmed: [`${BUDGET}/invoices.settle`] };
+    f.registerPress(confirmed);
+    f.grant("g-recipient", "user-recipient", []);
+    await expect(f.executor.pressRelayed(confirmed, () => undefined)).rejects.toThrow(SHARED_BUTTON_DENIED);
+    f.grant("g-recipient", "user-recipient", [SETTLE]);
+    const destination = await f.create({ [STATUS]: "Original" });
+    // The generated id is read from the record, so the fixture's authored action names it directly.
+    const held = f.authorities.get(f.input.pressId)!;
+    const text = (await readFile(join(f.root, "Log/automations.yaml"), "utf8")).replace("id: destination", `id: '${destination.id}'`);
+    await writeFile(join(f.root, "Log/automations.yaml"), text);
+    f.executor.handleWatcherEvents([{ operation: "update", path: "Log/automations.yaml" }]);
+    await vi.waitFor(async () => expect((await f.executor.inspectRelayed(f.input.pressId)).kind).toBe("denied"));
+    await expect(f.executor.pressRelayed(confirmed, () => undefined)).rejects.toThrow("changed after it was pressed");
+    const parsed = parseAutomationsFile(text); const entry = parsed.status === "read" ? parsed.entries[0] : null;
+    if (entry?.status !== "valid") throw Error("Invalid fixture");
+    held.definitionHash = definitionHash(entry.automation);
+    const result = await f.executor.pressRelayed({ ...confirmed, definitionHash: held.definitionHash }, () => undefined);
+    if (result.pressed.busy) throw Error("Expected a claim");
+    await f.until(() => f.engineClaims[0]?.state === "done");
+    expect((await f.record(destination.id))?.values[STATUS]).toContain("Sent");
+    await f.executor.dispose();
+  });
+
+  it("waits for unknown authority and keeps committed work across restart, then stops after revocation", async () => {
+    let revoke = () => {};
+    const f = await sharedButtonWorld("      - add-record: {Status: First}\n        collection: Budget\n        operation: invoices.create\n      - add-record: {Status: Second}\n        collection: Budget\n        operation: invoices.create", { afterInvoke: async () => revoke() });
+    f.grant("g-recipient", "user-recipient", [CREATE]);
+    f.setAuthorityAvailable(false);
+    expect(await f.executor.inspectRelayed(f.input.pressId)).toEqual({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED });
+    await expect(f.executor.pressRelayed(f.input, () => undefined)).rejects.toBeInstanceOf(AutomationRunWait);
+    expect(await f.records()).toHaveLength(0);
+    f.setAuthorityAvailable(true);
+    revoke = () => f.setAuthorityAvailable(false);
+    const pressed = await f.executor.pressRelayed(f.input, () => undefined);
+    if (pressed.pressed.busy) throw Error("Expected a claim");
+    await f.until(() => f.waiting.length > 0);
+    expect(await f.records()).toHaveLength(1);
+    await f.executor.dispose();
+    f.setAuthorityAvailable(true);
+    f.authorities.delete(f.input.pressId);
+    f.makeExecutor(); await f.executor.open();
+    await f.until(() => f.engineClaims[0]?.state === "failed");
+    expect(await f.records()).toHaveLength(1);
+    await expect(f.executor.retry({ automationId: f.input.automationId, claimId: f.engineClaims[0]!.claimId, startOver: false })).resolves.toMatchObject({ status: "refused" });
+    await f.executor.dispose();
+  });
+
+  it("resumes an accepted press after restart with its presser ceiling and no repeated committed step", async () => {
+    let loseAuthority = () => {};
+    const f = await sharedButtonWorld("      - add-record: {Status: First}\n        collection: Budget\n        operation: invoices.create\n      - add-record: {Status: Second}\n        collection: Budget\n        operation: invoices.create", { afterInvoke: async () => loseAuthority() });
+    f.grant("g-recipient", "user-recipient", [CREATE]);
+    loseAuthority = () => f.setAuthorityAvailable(false);
+    await f.executor.pressRelayed(f.input, () => undefined);
+    await f.until(() => f.waiting.length > 0);
+    expect(await f.records()).toHaveLength(1);
+    await f.executor.dispose();
+    loseAuthority = () => {};
+    f.setAuthorityAvailable(true);
+    f.makeExecutor(); await f.executor.open();
+    await f.until(() => f.engineClaims[0]?.state === "done");
+    expect((await f.records()).map(row => row.values[STATUS]).sort()).toEqual(["First", "Second"]);
+    await f.executor.dispose();
+  });
+
+  it("refuses owner-only actions and gives hidden and missing targets the same refusal", async () => {
+    const hidden = await sharedButtonWorld("      - invoke: invoices.settle\n        collection: Budget\n        input: {id: private}", { descriptor: ACTION_DESCRIPTOR, operations: ACTION_OPERATIONS });
+    hidden.grant("g-recipient", "user-recipient", [SETTLE]);
+    const denied = await hidden.executor.inspectRelayed(hidden.input.pressId);
+    const missing = await sharedButtonWorld("      - invoke: invoices.settle\n        collection: Missing\n        input: {id: private}");
+    expect(await missing.executor.inspectRelayed(missing.input.pressId)).toEqual(denied);
+    expect(denied).toEqual({ kind: "denied", reason: SHARED_BUTTON_DENIED });
+    await hidden.executor.dispose(); await missing.executor.dispose();
+  });
+});
+
 async function world(options: { documents?: boolean; roster?: ReachRoster; hostOpen?: boolean; evaluator?: AutomationFormulaEvaluator; groups?: boolean; mayRetryPress?: boolean; storeFails?: boolean; operations?: string; descriptor?: string;
   agentRun?: () => LocalDatasetAgent | null;
   onMessage?: (message: AutomationChatMessage) => Promise<void>;
@@ -234,6 +394,14 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     { rows: Array<{ id: string; version: number; values: Record<string, JsonValue> }> }).rows;
 
   const documents = new Map<string, { id: string; path: string; status: string }>();
+  const authorities = new Map<string, RelayButtonAuthority>();
+  let authorityAvailable = true;
+  const resolveAuthority = async (id: string) => {
+    if (!authorityAvailable) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED, "roster");
+    const held = authorities.get(id);
+    if (!held) throw new Error(SHARED_BUTTON_DENIED);
+    return held;
+  };
   let documentPath = "Log";
   // Group subscriptions the executor asks the engine for.
   const subscribed: unknown[] = [];
@@ -247,6 +415,15 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
   // How many claims the engine has served.
   let served = 0;
   const engine = {
+    pressAutomation: async ({ pressId, automationId, recordId, pressedBy }: { pressId: string; automationId: string; recordId: string; pressedBy: string }) => {
+      const previous = engineClaims.find(claim => "key" in claim.trigger && claim.trigger.key === `press:${pressId}`);
+      if (previous) return { busy: false, claim: previous };
+      const claim: AutomationClaim = { claimId: `claim-${engineClaims.length}`, automationId, recordId, collectionPath: null,
+        trigger: { key: `press:${pressId}` }, depth: 0, state: "pending", attempts: 0, run: 1, createdAtMs: Date.now(), updatedAtMs: 0,
+        change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: pressedBy, sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 } };
+      engineClaims.push(claim);
+      return { busy: false, claim };
+    },
     listCollections: async () => ({ collections: [
       ...(options.documents ? [{ objectId: "Log", path: documentPath, status: "valid", reasons: [] }] : []),
       ...(options.documentCollection ? [{ path: options.documentCollection, objectId: options.documentCollection, status: "valid", reasons: [] }] : []),
@@ -369,6 +546,8 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
       });
     };
   const makeExecutor = () => executor = new CollectionAutomations({
+    resolveRelayedPress: resolveAuthority,
+    resolveButtonInspection: resolveAuthority,
     personName: (userId) => `Person ${userId}`,
     localPersonId: () => "user-ana",
     mayRetryPress: async () => options.mayRetryPress ?? false,
@@ -458,6 +637,13 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
   });
   makeExecutor();
   return {
+    authorities,
+    setAuthorityAvailable: (available: boolean) => { authorityAvailable = available; },
+    registerPress: (input: Parameters<CollectionAutomations["pressRelayed"]>[0]) => {
+      authorities.set(input.pressId, { workspaceId: "workspace", userId: input.pressedBy, grantId: "g-recipient", grantGeneration: 1, hostGeneration: 1,
+        automationId: input.automationId, collectionPath: input.collectionPath, definitionHash: input.definitionHash, recordId: input.recordId,
+        confirmed: [...(input.confirmed ?? [])].sort(), principals: [{ grantId: "g-recipient", userId: input.pressedBy, access: "edit" }] });
+    },
     host, root, adapter, documents, rules, approved, create, edit, record, records, until, errors, opened, subscribed, watched, writeAutomations, makeExecutor, settled, waiting, messages, notices, failureReports,
     expiries: () => expiries,
     engineClaims, engineFailures, engineRetries, setEngineReadable: (readable: boolean) => { engineReadable = readable; },
@@ -468,11 +654,11 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     setRoster: (next: ReachRoster) => { roster = next; },
     crashAfterOwnerInvoke: (operationId: string) => { afterOwnerInvoke = { operationId, then: async () => { throw new Error("dohc stopped."); } }; },
     /** Gives a person the data grant on these operations, as the share dialog would. */
-    grant: (grantId: string, userId: string, operationIds: string[]) => {
+    grant: (grantId: string, userId: string, operationIds: string[], reference = rules) => {
       const store = new DatabaseSync(join(root, ".dohc", "datasets", "state.sqlite"));
       try {
-        store.prepare("INSERT OR REPLACE INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", definition.datasetId, datasetPrincipalKey("workspace", grantId, userId),
-          JSON.stringify({ operationIds, discover: true, revision: rules.revision, revisionSha256: rules.revisionSha256 }), "token");
+        store.prepare("INSERT OR REPLACE INTO dohc_dataset_data_grants VALUES(?,?,?,?,?)").run("workspace", reference.datasetId, datasetPrincipalKey("workspace", grantId, userId),
+          JSON.stringify({ operationIds, discover: true, revision: reference.revision, revisionSha256: reference.revisionSha256 }), "token");
       } finally {
         store.close();
       }
@@ -482,6 +668,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     dropRules: () => { rulesResolve = false; },
     keepRules: () => { rulesResolve = true; },
     fixStore: () => { storeFails = false; },
+    failStore: () => { hostOpen = false; storeFails = true; },
     failNextMetadata: (failure: NonNullable<typeof metadataFailure>) => { metadataFailure = failure; },
     afterNextSave: (hook: () => void) => { afterSave = hook; },
     moveDocuments: async (path: string) => {
@@ -1545,6 +1732,9 @@ ${step}`;
       describeDataset: async () => { throw new Error("The CLI describes the dataset itself."); },
       pressedBy: async () => PRESSER,
       relayPress: async () => { throw new Error("Nothing relays here."); },
+      relayInspect: async () => { throw new Error("Nothing relays here."); },
+      inspectionAccount: async () => null,
+      inspectionChanged: () => undefined,
       pressWindows: createPressWindows(() => null),
     });
     const operation: Operation = { workspace: { workspaceId: "workspace", rootPath: f.root }, state: { collectionAutomations: f.executor } };
@@ -3359,7 +3549,7 @@ automations:
         input: {id: destination}
 `);
   await f.executor.open();
-  const input = { collectionPath: "Log", field: "Send", recordId: "source", pressId: id(206), pressedBy: "user-owner", by: { kind: "human" as const } };
+  const input = { collectionPath: "Log", field: "Send", recordId: "source", confirmed: [], pressId: id(206), pressedBy: "user-owner", by: { kind: "human" as const } };
   const describe = async (datasetId: string) => f.host.describe(datasetId);
   expect(await f.executor.buttons("Log", ["Send"])).toMatchObject([{ state: { kind: "disabled" } }]);
   expect(await f.executor.buttons("Log", ["Send"], async (id) => ({ ...await describe(id), operations: [] }))).toMatchObject([{ state: { kind: "disabled" } }]);
@@ -3368,8 +3558,9 @@ automations:
   const automationFile = parseAutomationsFile(await readFile(join(f.root, "Log/automations.yaml"), "utf8"));
   const automation = automationFile?.status === "read" ? automationFile.entries.find((entry) => entry.status === "valid") : undefined;
   if (automation?.status !== "valid") throw new Error("Expected the document button automation");
-  await expect(f.executor.pressRelayed({ automationId: "collection:Log#send", collectionPath: "Log", definitionHash: definitionHash(automation.automation),
-    recordId: "source", pressId: id(207), pressedBy: "user-recipient" }, () => undefined)).rejects.toThrow(UNVERIFIED_SHARED_DATASET_ACCESS);
+  const relayed = { automationId: "collection:Log#send", collectionPath: "Log", definitionHash: definitionHash(automation.automation), recordId: "source", confirmed: [], pressId: id(207), pressedBy: "user-recipient" };
+  f.registerPress(relayed);
+  await expect(f.executor.pressRelayed(relayed, () => undefined)).rejects.toThrow(SHARED_BUTTON_DENIED);
   expect(f.engineClaims).toEqual([]);
   await f.executor.dispose();
 });
@@ -3380,7 +3571,7 @@ it.each([
   ["nested Find", "      - if: 'false'\n        do: [{set: {Status: Done}}]\n        otherwise:\n          - find: 'true'\n            collection: Budget\n            operation: invoices.list\n            as: matches"],
   ["bound records and implicit reads", "      - add-record: {Status: Open}\n        collection: Budget\n        operation: invoices.create\n        as: added\n      - set: {Status: Done}\n        records: added\n        operation: invoices.status"],
   ["unresolved destination", "      - find: 'true'\n        collection: Missing\n        as: matches"],
-])("refuses a relayed document press with %s before claiming", async (_name, steps) => {
+])("checks the named presser for %s before claiming", async (name, steps) => {
   const f = await world({ documents: true });
   await mkdir(join(f.root, "Log"), { recursive: true });
   await writeFile(join(f.root, "Log/collection.yaml"), "fields:\n  Send:\n    type: button\n  Status:\n    type: text\n");
@@ -3389,16 +3580,27 @@ it.each([
   const automationFile = parseAutomationsFile(await readFile(join(f.root, "Log/automations.yaml"), "utf8"));
   const automation = automationFile?.status === "read" ? automationFile.entries.find((entry) => entry.status === "valid") : undefined;
   if (automation?.status !== "valid") throw new Error("Expected the document button automation");
-  const input = { automationId: "collection:Log#send", collectionPath: "Log", definitionHash: definitionHash(automation.automation), recordId: "source", pressId: id(208), pressedBy: "user-recipient" };
+  const input = { automationId: "collection:Log#send", collectionPath: "Log", definitionHash: definitionHash(automation.automation), recordId: "source", confirmed: [], pressId: id(208), pressedBy: "user-recipient" };
+  f.registerPress(input);
+  f.documents.set("source", { id: "source", path: "Log/source.md", status: "Source" });
   f.grant("g-recipient", "user-recipient", [LIST, CREATE, STATUS_ONLY]);
   f.executor.datasetsChanged();
   await f.executor.idle();
-  await expect(f.executor.pressRelayed(input, () => undefined)).rejects.toThrow(UNVERIFIED_SHARED_DATASET_ACCESS);
+  const inspection = await f.executor.inspectRelayed(input.pressId);
+  const deniedBeforeClaim = name === "unresolved destination" || name === "Find without a pinned operation";
+  if (deniedBeforeClaim) expect(inspection).toEqual({ kind: "denied", reason: SHARED_BUTTON_DENIED });
+  else {
+    expect(inspection.kind).toBe("ready");
+    const result = await f.executor.pressRelayed(input, () => undefined);
+    if (result.pressed.busy) throw Error("Expected a claim");
+    const claimId = result.pressed.claimId;
+    await f.until(() => f.engineClaims.find(claim => claim.claimId === claimId)?.state === "done");
+  }
   f.grant("g-recipient", "user-recipient", []);
   f.executor.datasetsChanged();
   await f.executor.idle();
-  await expect(f.executor.pressRelayed(input, () => undefined)).rejects.toThrow(UNVERIFIED_SHARED_DATASET_ACCESS);
-  expect(f.engineClaims).toEqual([]);
+  await expect(f.executor.pressRelayed(input, () => undefined)).rejects.toThrow(SHARED_BUTTON_DENIED);
+  expect(f.engineClaims).toHaveLength(deniedBeforeClaim ? 0 : 1);
   await f.executor.dispose();
 });
 

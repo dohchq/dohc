@@ -55,6 +55,8 @@ const NOTICE_SCHEMA = {
   ON sync_relay_notices(expires_at_ms)`,
   idx_sync_relay_notices_sender: `CREATE INDEX idx_sync_relay_notices_sender
   ON sync_relay_notices(recipient_user_id, sender_user_id, created_at_ms)`,
+  idx_sync_relay_notices_post: `CREATE INDEX idx_sync_relay_notices_post
+  ON sync_relay_notices(sender_user_id, notice_id)`,
 } as const;
 
 // Each notice's first dismissal, kept after the notice row itself goes, so a
@@ -136,7 +138,16 @@ function initializeSchema(db: SqliteDb, schema: Record<string, string>, tables: 
 }
 
 export function initializeNoticeSchema(db: SqliteDb): void {
+  const postIndexMarker = "notice-post-index-v1";
+  const postIndexMarked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(postIndexMarker);
+  if (!postIndexMarked && db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?").get(MARKER)) {
+    if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name = 'idx_sync_relay_notices_post'").get()) {
+      db.exec(NOTICE_SCHEMA.idx_sync_relay_notices_post);
+    }
+  }
   initializeSchema(db, NOTICE_SCHEMA, [NOTICE_LISTS, NOTICES], MARKER);
+  if (!postIndexMarked) db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
+    .run(postIndexMarker, Date.now());
   initializeSchema(db, DISMISSAL_SCHEMA, [NOTICE_DISMISSALS, NOTICE_DISMISSAL_FLOORS], DISMISSALS_MARKER);
   initializeSchema(db, {
     sync_relay_automation_wakes: `CREATE TABLE sync_relay_automation_wakes (

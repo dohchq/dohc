@@ -116,6 +116,7 @@ const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
 export const AUTOMATION_RESULTS: Record<string, CliSocketVerb> = {
   list: "automationList",
   switch: "automationSwitch",
+  buttons: "automationButtons",
   runs: "automationRuns",
   run: "automationRun",
   retry: "automationRetry",
@@ -184,6 +185,7 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_read_automation_run: { cli: "automationRun" },
   dohc_retry_automation_run: { cli: "automationRetry" },
   dohc_press_button: { cli: "automationPress" },
+  dohc_inspect_buttons: { cli: "automationButtons" },
 };
 
 // One request per operation an app page can send over its app channel. The

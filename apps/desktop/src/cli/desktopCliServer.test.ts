@@ -104,7 +104,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
   });
   const dependencies: Dependencies = {
     automations: () => ({ automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn() }),
-    buttons: () => ({ press: vi.fn() }),
+    buttons: () => ({ inspect: vi.fn(async () => []), press: vi.fn() }),
     findWorkspace: (id) => rows.get(id) ?? null,
     listWorkspaces: () => [...rows.values()],
     openWorkspaceActivity: vi.fn(async () => undefined),

@@ -619,6 +619,12 @@ export interface SyncRelayStorage {
   automationSwitchableFolder(workspaceId: string, folder: string): boolean;
   readOwnerCollectionWrites(input: import("./ownerCollectionWrites").OwnerCollectionWritesInput): import("./ownerCollectionWrites").OwnerCollectionWritesPage;
   recordAutomationPress(input: import("./automationPresses").RecordAutomationPressInput): import("@dohc/workspace-contracts/relay").RelayAutomationPressReceipt;
+  resolveAutomationPress(input: Parameters<typeof import("./automationPresses").resolveAutomationPress>[1]): import("@dohc/workspace-contracts/relay").RelayButtonAuthority;
+  inspectAutomationButton(input: import("../automationButtonInspections").ButtonInspectionInput): Promise<import("@dohc/workspace-contracts/relay").RelayButtonInspection>;
+  parkButtonInspectionHost(scope: import("./automationPresses").HostScope): () => void;
+  listButtonInspections(input: import("./automationPresses").HostScope): import("@dohc/workspace-contracts/relay").RelayButtonInspectionRequest[];
+  resolveButtonInspection(input: Parameters<typeof import("../automationButtonInspections").resolveButtonInspection>[1]): import("@dohc/workspace-contracts/relay").RelayButtonAuthority;
+  answerButtonInspection(input: Parameters<typeof import("../automationButtonInspections").answerButtonInspection>[1], result: import("@dohc/workspace-contracts/relay").RelayButtonInspection): void;
   listAutomationPresses(input: import("./automationPresses").HostScope & { nowMs: number }): import("@dohc/workspace-contracts/relay").RelayAutomationPress[];
   automationPressWait(input: import("./automationPresses").HostScope & { nowMs: number }): "not-host" | "waiting" | "empty";
   pruneExpiredAutomationPresses(nowMs: number): number;

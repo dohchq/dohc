@@ -2280,14 +2280,21 @@ export async function retryAutomationRun(
   });
 }
 
-// A press of a Button field, through the desktop's press path. A press
-// changes records, so the path must clear the write rules.
+// The desktop checks current access and hosts shared Collection Buttons.
+export async function inspectButtons(ctx: ToolContext, args: { collectionPath: string; table?: string }) {
+  const resolved = await safeResolve(ctx, args.collectionPath, "read");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  if (isSharedWithMePath(resolved.normalized)) return { ok: false as const, reason: "path rejected: a mounted share is not a Collection in this workspace" };
+  return requestCli(ctx, "automationButtons", { collectionPath: resolved.normalized, ...(args.table === undefined ? {} : { table: args.table }) });
+}
+
 export async function pressButton(
   ctx: ToolContext,
   args: { collectionPath: string; button: string; recordId: string; table?: string; confirm?: string[]; requestId?: string },
 ) {
-  const resolved = await safeResolve(ctx, args.collectionPath, "write");
+  const resolved = await safeResolve(ctx, args.collectionPath, "read");
   if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  if (isSharedWithMePath(resolved.normalized)) return { ok: false as const, reason: "path rejected: a mounted share is not a Collection in this workspace" };
   return requestCli(ctx, "automationPress", {
     collectionPath: resolved.normalized,
     field: args.button,

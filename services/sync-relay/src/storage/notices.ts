@@ -90,7 +90,7 @@ function formatNoticeCursor(cursor: NoticeCursor): string {
 
 export interface MarkNoticesInput {
   recipientUserId: string;
-  marks: readonly { noticeId: string; mark: NoticeMark }[];
+  marks: readonly { noticeId: string; mark: NoticeMark; withdraw?: true }[];
   // The computer that dismisses. A first dismissal names it, and it hears
   // "first" again when it asks again.
   installId?: string;
@@ -499,6 +499,15 @@ export function readNoticeChanges(
  * after its retention is not dismissed first twice.
  */
 export function markNotices(storage: StorageContext, input: MarkNoticesInput): string[] {
+  for (const mark of input.marks) {
+    if (!mark.withdraw || mark.mark !== "dismissed") continue;
+    // A sender can withdraw only copies they posted under this exact id.
+    const copies = storage.db.prepare(`SELECT recipient_user_id,notice_id FROM sync_relay_notices
+      WHERE sender_user_id=? AND notice_id=? AND recipient_user_id<>? AND dismissed_at_ms IS NULL`)
+      .all(input.recipientUserId, noticeIdFrom(input.recipientUserId, mark.noticeId), input.recipientUserId);
+    for (const copy of copies) markNotices(storage, { recipientUserId: String(copy.recipient_user_id),
+      marks: [{ noticeId: String(copy.notice_id), mark: "dismissed" }], nowMs: input.nowMs });
+  }
   return storage.tx(() => {
     const nextSeq = changeSequence(storage, input.recipientUserId);
     const dismissed: string[] = [];

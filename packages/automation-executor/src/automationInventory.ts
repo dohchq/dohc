@@ -30,7 +30,10 @@ export async function canPressInventory(inventory: AutomationInventory, describe
       const access = await describe(datasetId);
       if (access.datasetId !== datasetId ||
         [...ids].some((id) => !access.operations.some((operation) => operation.operationId === id))) return false;
-    } catch { return false; }
+    } catch (error) {
+      if (error instanceof AutomationRunWait) throw error;
+      return false;
+    }
   }
   return true;
 }

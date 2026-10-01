@@ -1,7 +1,5 @@
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { Automation, AutomationsFileParseResult } from "@dohc/workspace-contracts/automations";
-import { collectionAutomationId, definitionHash, unsupportedReason } from "./automationPlan";
-import { recordStepDestinations } from "./datasetAutomationPlan";
 
 // Button fields (item 8): which automation a button runs, and who may press
 // it on this computer. Main decides both; a renderer only shows the answer.
@@ -16,6 +14,10 @@ export type AutomationButtonState =
   | { kind: "ready"; automationId: string; irreversible?: IrreversibleAction[] }
   // Nothing runs yet. Someone who can edit the Collection can choose what it does.
   | { kind: "no-automation"; reason: string }
+  // A shared view's host has not answered yet. It cannot run until it does.
+  | { kind: "checking"; reason: string }
+  // The host did not answer, or there is none: dohc cannot say whether it may run.
+  | { kind: "unchecked"; reason: string }
   | { kind: "disabled"; reason: string };
 
 /**
@@ -26,6 +28,7 @@ export type AutomationButtonState =
 export interface IrreversibleAction { name: string; label: string }
 
 export const NO_AUTOMATION = "No automation uses this button.";
+export const BUTTON_CHECKING = "dohc is checking whether you can use this button.";
 export const RUNNING_FOR_RECORD = "Running for this record.";
 
 export function noAccessReason(collectionName: string): string {
@@ -76,54 +79,6 @@ export function resolveButton(
     return disabled(`The automation for ${field} has a problem. Fix it in Automations.`);
   }
   return { kind: "state", state: { kind: "no-automation", reason: NO_AUTOMATION } };
-}
-
-export const UNVERIFIED_SHARED_DATASET_ACCESS = "dohc cannot check your dataset access for this button in a shared view. Ask the owner to run it.";
-
-export type ButtonDestinationKind = (path: string) => Promise<"document" | "dataset" | null>;
-
-/** Shared presses have no caller dataset description. Unknown destinations cannot prove that none is needed. */
-export async function relayedDatasetReason(automation: Automation, source: string, destinationKind: ButtonDestinationKind): Promise<string | null> {
-  try {
-    for (const path of new Set([source, ...recordStepDestinations(automation, source).values()])) {
-      if (await destinationKind(path) !== "document") return UNVERIFIED_SHARED_DATASET_ACCESS;
-    }
-  } catch {
-    return UNVERIFIED_SHARED_DATASET_ACCESS;
-  }
-  return null;
-}
-
-/** What a shared view shows, with the same dataset check that admits its press. */
-export async function relayedButtonState(
-  file: AutomationsFileParseResult | null, collectionId: string, field: string, collectionName: string,
-  collectionPath: string, destinationKind: ButtonDestinationKind,
-): Promise<AutomationButtonState> {
-  const target = await relayedButtonTarget(file, collectionId, field, collectionName, collectionPath, destinationKind);
-  return "state" in target ? target.state : { kind: "ready", automationId: target.automationId };
-}
-
-/**
- * The automation a shared view's press asks the owner's computer to run,
- * with the definition the recipient sees, so it runs only if that still
- * holds. Or the state that stops it.
- */
-export async function relayedButtonTarget(
-  file: AutomationsFileParseResult | null,
-  /** The Collection's id: the object id of its collection.yaml. */
-  collectionId: string,
-  field: string,
-  collectionName: string,
-  collectionPath: string,
-  destinationKind: ButtonDestinationKind,
-): Promise<{ automationId: string; definitionHash: string } | { state: Exclude<AutomationButtonState, { kind: "ready" }> }> {
-  const resolved = resolveButton(file, field, (table) => table === null, collectionName);
-  if (resolved.kind === "state") return { state: resolved.state };
-  const datasetReason = await relayedDatasetReason(resolved.automation, collectionPath, destinationKind);
-  if (datasetReason !== null) return { state: { kind: "disabled", reason: datasetReason } };
-  const unsupported = unsupportedReason(resolved.automation);
-  if (unsupported !== null) return { state: { kind: "disabled", reason: unsupported } };
-  return { automationId: collectionAutomationId(collectionId, resolved.automation.id), definitionHash: definitionHash(resolved.automation) };
 }
 
 /**

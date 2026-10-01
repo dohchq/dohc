@@ -17,6 +17,17 @@ const WORKSPACE = resolve("/workspace");
 const PROJECT = resolve("/workspace/project");
 
 const TOKEN = "a".repeat(64);
+it("lists Button inspection states and confirmations through the desktop socket", async () => {
+  const result = { ok: true, buttons: [{ field: "Send", state: { kind: "ready", automationId: "collection:Billing#send", irreversible: [{ name: "destination/send", label: "Send" }] } },
+    { field: "Later", state: { kind: "unchecked", reason: "Host unavailable" } }] };
+  const request = vi.fn(async () => result);
+  const printed = await executeCli({ argv: ["automation", "buttons", "Billing", "--table", "Invoices", "--json"], env: {}, request });
+  expect(printed.exitCode).toBe(0);
+  expect(JSON.parse(printed.stdout)).toMatchObject(result);
+  expect(request).toHaveBeenCalledWith(expect.objectContaining({ verb: "automationButtons", args: expect.objectContaining({ collectionPath: "Billing", table: "Invoices" }) }));
+  const refused = await executeCli({ argv: ["automation", "buttons", "Billing"], env: {}, request: async () => ({ ok: false, reason: "Collection unavailable" }) });
+  expect(refused).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: Collection unavailable\n" });
+});
 const cleanupDirs: string[] = [];
 
 afterEach(async () => {

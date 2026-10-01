@@ -39,6 +39,26 @@ const definition: DatasetDefinition = {
 };
 const prepared = { revision: describeDatasetRevision({ definition, revision: 1, schemaSql, operationSource }), schemaSql, operationSource };
 const scope = { workspaceId: "workspace", datasetId: id(1) };
+
+it("rechecks a trusted automation's presser ceiling before commit and before an idempotent replay", async () => {
+  let allowed = true, revokeBeforeCommit = false;
+  const f = await fixture({
+    resolveAuthority(context) {
+      return context === "owner" ? { principalKey: "owner", caller: { kind: "owner", userId: "owner" } }
+        : { principalKey: "automation", caller: { kind: "automation", automationId: "collection:source#button" }, chainDepth: 1,
+          authorizeOperation(datasetId, operationId) { if (!allowed || datasetId !== id(1) || operationId !== id(6)) throw Error("presser revoked"); } };
+    },
+    operationResources() { if (revokeBeforeCommit) allowed = false; return {}; },
+  });
+  await f.activate();
+  const input = { ...scope, revision: 1, revisionSha256: prepared.revision.revisionSha256, operationId: id(6), input: { value: "Button" }, idempotencyKey: "shared-press" };
+  revokeBeforeCommit = true;
+  await expect(f.host.invoke("helper", input)).rejects.toThrow("presser revoked");
+  revokeBeforeCommit = false; allowed = true;
+  expect(await f.host.invoke("helper", input)).toMatchObject({ replayed: false });
+  allowed = false;
+  await expect(f.host.invoke("helper", input)).rejects.toThrow("presser revoked");
+});
 type Context = "owner" | "helper" | "friend";
 async function fixture(overrides: Partial<DatasetHostOptions<Context>> = {}) {
   const directory = await mkdtemp(join(tmpdir(), "dohc-dataset-host-"));

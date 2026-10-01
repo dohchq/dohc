@@ -6,6 +6,7 @@ import {
   type RelayAutomationPress,
 } from "@dohc/workspace-contracts/relay";
 import { createAutomationPressRateLimiters, isAutomationPressPath, pruneAutomationPresses } from "./automationPressRoutes";
+import { BUTTON_INSPECTION_HOST_LIVE_MS } from "./automationButtonInspections";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import {
@@ -65,7 +66,7 @@ async function relay(options: { paths?: string[]; access?: "view" | "comment" | 
 
 async function press(r: Relay, body: Record<string, unknown> = {}, as = RECIPIENT): Promise<Response> {
   return r.h(request(as, `/sync/shares/${r.shareId}/automation-presses`, jsonBody({
-    pressId: "press-1", automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH, recordId: "rec-12", ...body,
+    pressId: "press-1", automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH, recordId: "rec-12", confirmed: [], ...body,
   })));
 }
 
@@ -92,8 +93,8 @@ function seed(r: Relay, rows: number, options: { state: "settled" | "accepted"; 
   db.exec("BEGIN");
   const insert = db.prepare(
     `INSERT INTO sync_relay_automation_presses (host_press_id, workspace_id, share_id, grant_id, grant_generation, press_id, user_id,
-       automation_id, collection_path, definition_hash, record_id, state, accepted_by, outcome, error, created_at_ms, updated_at_ms)
-     VALUES (?, ?, ?, ?, 1, ?, ?, ?, 'trip/packing', '${HASH}', 'rec-12', ?, ?, ?, NULL, ?, ?)`,
+       automation_id, collection_path, definition_hash, record_id, state, accepted_by, accepted_generation, outcome, error, created_at_ms, updated_at_ms)
+     VALUES (?, ?, ?, ?, 1, ?, ?, ?, 'trip/packing', '${HASH}', 'rec-12', ?, ?, 1, ?, NULL, ?, ?)`,
   );
   for (let index = 0; index < rows; index += 1) {
     insert.run(`seeded-${options.state}-${index}`, WORKSPACE, r.shareId, options.grantId ?? r.grantId, `seeded-${options.state}-${index}`, RECIPIENT, AUTOMATION,
@@ -109,6 +110,191 @@ async function expectCode(response: Response, status: number, code: string): Pro
 }
 
 describe("relayed Button presses", () => {
+  it("answers unchecked immediately for a sleeping host and a stale parked poll", async () => {
+    const r = await relay(); await host(r);
+    const inspect = () => r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({ targets: [{ automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }] })));
+    expect(await (await inspect()).json()).toMatchObject({ inspections: [{ kind: "unchecked" }] });
+    const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" };
+    const release = r.storage.parkButtonInspectionHost(scope);
+    const at = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(at + BUTTON_INSPECTION_HOST_LIVE_MS + 1);
+    try { expect(await (await inspect()).json()).toMatchObject({ inspections: [{ kind: "unchecked" }] }); }
+    finally { clock.mockRestore(); release(); }
+    expect(r.storage.listButtonInspections(scope)).toEqual([]);
+  });
+  it("checks a press while the live host is busy between polls", async () => {
+    const r = await relay(); await host(r);
+    const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" };
+    // A poll returns a press, leaving the host busy processing it.
+    expect((await press(r)).status).toBe(200);
+    expect(await list(r)).toHaveLength(1);
+    const inspection = r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({
+      targets: [{ automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }],
+    })));
+    await vi.waitFor(() => expect(r.storage.listButtonInspections(scope)).toHaveLength(1));
+    const response = await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-presses?installId=laptop`));
+    const { inspections } = await response.json() as { inspections: Array<{ inspectionId: string }> };
+    expect(inspections).toHaveLength(1);
+    expect((await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-presses/inspection-answer`, jsonBody({
+      installId: "laptop", generation: 1, inspectionId: inspections[0]!.inspectionId,
+      inspection: { kind: "ready", automationId: AUTOMATION, definitionHash: HASH, irreversible: [] },
+    })))).status).toBe(200);
+    expect(await (await inspection).json()).toMatchObject({ inspections: [{ kind: "ready" }] });
+  });
+  it("keeps a released poll live briefly, then answers unchecked without queuing", async () => {
+    const r = await relay(); await host(r);
+    const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" };
+    const release = r.storage.parkButtonInspectionHost(scope);
+    release();
+    const source = { workspaceId: WORKSPACE, shareId: r.shareId, grantId: r.grantId, grantGeneration: 1, userId: RECIPIENT };
+    const target = { automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH };
+    const controller = new AbortController();
+    const inspection = r.storage.inspectAutomationButton({ target, source, id: "busy", signal: controller.signal, wake: () => {} });
+    expect(r.storage.listButtonInspections(scope)).toHaveLength(1);
+    controller.abort();
+    await inspection;
+    const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + BUTTON_INSPECTION_HOST_LIVE_MS + 1);
+    try {
+      await expect(r.storage.inspectAutomationButton({ target, source, id: "offline", signal: new AbortController().signal, wake: () => {} }))
+        .resolves.toMatchObject({ kind: "unchecked" });
+      expect(r.storage.listButtonInspections(scope)).toEqual([]);
+    } finally { now.mockRestore(); }
+  });
+  it("resolves a mismatched ready answer unchecked before rejecting the host", async () => {
+    const r = await relay(); await host(r);
+    const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" };
+    const release = r.storage.parkButtonInspectionHost(scope);
+    const signal = new AbortController().signal;
+    const result = r.storage.inspectAutomationButton({ target: { automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH },
+      source: { workspaceId: WORKSPACE, shareId: r.shareId, grantId: r.grantId, grantGeneration: 1, userId: RECIPIENT }, id: "query", signal, wake: () => {} });
+    expect(() => r.storage.answerButtonInspection({ ...scope, generation: 1, inspectionId: "query" }, { kind: "ready", automationId: "collection:other#button", definitionHash: HASH, irreversible: [] })).toThrow();
+    await expect(result).resolves.toMatchObject({ kind: "unchecked" });
+    expect(r.storage.listButtonInspections(scope)).toEqual([]);
+    release();
+  });
+  it("spends the inspection token before reading its body", async () => {
+    const r = await relay({ overrides: { automationPressRateLimiters: { ...createAutomationPressRateLimiters(), inspection: new TokenBucketLimiter(1, 0.0001, 10) } } });
+    const path = `/sync/shares/${r.shareId}/automation-presses?inspect=true`;
+    expect((await r.h(request(RECIPIENT, path, jsonBody({ targets: [] })))).status).toBe(400);
+    const blocked = request(RECIPIENT, path, jsonBody({ targets: [] }));
+    const read = vi.spyOn(blocked, "arrayBuffer");
+    expect((await r.h(blocked)).status).toBe(429);
+    expect(read).not.toHaveBeenCalled();
+    expect(blocked.bodyUsed).toBe(false);
+  });
+  it("caps pending inspections per workspace without issuing an access verdict", async () => {
+    const r = await relay(); await host(r);
+    const release = r.storage.parkButtonInspectionHost({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" });
+    const lifetime = new AbortController();
+    const target = { automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH };
+    const source = { workspaceId: WORKSPACE, shareId: r.shareId, grantId: r.grantId, grantGeneration: 1, userId: RECIPIENT };
+    const queued = Array.from({ length: 50 }, (_, index) => r.storage.inspectAutomationButton({ target, source, id: `query-${index}`, signal: lifetime.signal, wake: () => {} }));
+    expect((await r.storage.inspectAutomationButton({ target, source, id: "overflow", signal: lifetime.signal, wake: () => {} })).kind).toBe("unchecked");
+    release();
+    expect(r.storage.listButtonInspections({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" })).toHaveLength(50);
+    await claimWorkspace(r.h, "another-owner", "workspace-b");
+    const shareId = await createShare(r.h, "another-owner", "workspace-b", { recipientUserId: RECIPIENT, paths: ["trip"], access: "edit" });
+    const grant = r.storage.listActiveShareGrantsForRecipient(shareId, RECIPIENT)[0]!;
+    await r.h(request("another-owner", "/sync/workspace-b/automation-host/check-in", jsonBody({ installId: "host-b", label: "Host B", claim: true })));
+    const other = { workspaceId: "workspace-b", ownerUserId: "another-owner", installId: "host-b" };
+    const releaseOther = r.storage.parkButtonInspectionHost(other);
+    const otherAnswer = r.storage.inspectAutomationButton({ target, source: { ...source, workspaceId: other.workspaceId, shareId, grantId: grant.grantId }, id: "other-query", signal: lifetime.signal, wake: () => {} });
+    expect(r.storage.listButtonInspections(other)).toHaveLength(1);
+    releaseOther();
+    lifetime.abort();
+    await expect(otherAnswer).resolves.toMatchObject({ kind: "unchecked" });
+    expect((await Promise.all(queued)).every(result => result.kind === "unchecked")).toBe(true);
+    expect(r.storage.listButtonInspections({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" })).toHaveLength(0);
+  });
+
+  it("refuses an ended press from an older host generation instead of waiting", async () => {
+    const r = await relay(); await host(r); await press(r);
+    await post(r, "accept", { hostPressIds: ["relay-id-1"] });
+    const db = inspectDatabase(storagePath(r.storage));
+    try { db.prepare("UPDATE sync_relay_automation_hosts SET generation=2 WHERE workspace_id=?").run(WORKSPACE); }
+    finally { db.close(); }
+    expect(await list(r)).toEqual([]);
+    await expectCode(await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-presses/authority`, jsonBody({
+      installId: "laptop", generation: 2, hostPressId: "relay-id-1" }))), 404, "not_found");
+  });
+
+  it("keeps inspection and operation authority reads out of press and settlement budgets", async () => {
+    const r = await relay({ overrides: { automationPressRateLimiters: { ...createAutomationPressRateLimiters(),
+      press: new TokenBucketLimiter(1, 0.0001, 10), host: new TokenBucketLimiter(2, 0.0001, 10) } } });
+    await host(r);
+    const release = r.storage.parkButtonInspectionHost({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" });
+    for (let index = 0; index < 24; index++) {
+      const reply = r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({ targets: [{
+        automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }] })));
+      const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" };
+      await vi.waitFor(() => expect(r.storage.listButtonInspections(scope)).toHaveLength(1));
+      const query = r.storage.listButtonInspections(scope)[0]!;
+      const body = { installId: "laptop", generation: 1, inspectionId: query.inspectionId };
+      expect((await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-presses/inspection-authority`, jsonBody(body)))).status).toBe(200);
+      expect((await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-presses/inspection-answer`, jsonBody({ ...body,
+        inspection: { kind: "unchecked", reason: "Unavailable" } })))).status).toBe(200);
+      expect((await reply).status).toBe(200);
+    }
+    release();
+    expect((await press(r)).status).toBe(200);
+    const hostPressId = (await list(r))[0]!.hostPressId;
+    expect((await post(r, "accept", { hostPressIds: [hostPressId] })).status).toBe(200);
+    for (let index = 0; index < 150; index++) {
+      expect((await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-presses/authority`, jsonBody({
+        installId: "laptop", generation: 1, hostPressId })))).status).toBe(200);
+    }
+    expect((await post(r, "settle", { hostPressId, outcome: "done", error: null })).status).toBe(200);
+  });
+  it("resolves only accepted stored identity at the current host fence and rechecks source access", async () => {
+    const r = await relay(); await host(r);
+    await press(r, { confirmed: ["dataset/send"] });
+    const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop", generation: 1, hostPressId: "relay-id-1", nowMs: clock };
+    expect(() => r.storage.resolveAutomationPress(scope)).toThrow();
+    await post(r, "accept", { hostPressIds: [scope.hostPressId] });
+    expect(r.storage.resolveAutomationPress(scope)).toMatchObject({ workspaceId: WORKSPACE, userId: RECIPIENT, grantId: r.grantId,
+      confirmed: ["dataset/send"], hostGeneration: 1, recordId: "rec-12", principals: [{ userId: RECIPIENT, grantId: r.grantId, access: "edit" }] });
+    expect(() => r.storage.resolveAutomationPress({ ...scope, ownerUserId: RECIPIENT })).toThrow();
+    expect(() => r.storage.resolveAutomationPress({ ...scope, workspaceId: "forged" })).toThrow();
+    expect(() => r.storage.resolveAutomationPress({ ...scope, generation: 2 })).toThrow();
+    const response = await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-presses/authority`, jsonBody({ ...scope, userId: OWNER })));
+    expect(response.status).toBe(400);
+    await expectCode(await r.h(request(RECIPIENT, `/sync/${WORKSPACE}/automation-presses/authority`, jsonBody(scope))), 404, "not_found");
+    await claimWorkspace(r.h, OWNER, "workspace-b");
+    await r.h(request(OWNER, "/sync/workspace-b/automation-host/check-in", jsonBody({ installId: "laptop", label: "Host", claim: true })));
+    await expectCode(await r.h(request(OWNER, "/sync/workspace-b/automation-presses/authority", jsonBody({
+      installId: "laptop", generation: 1, hostPressId: scope.hostPressId }))), 404, "not_found");
+    await expectCode(await press(r, { confirmed: ["other/send"] }), 409, "conflict");
+    r.storage.revokeShare(r.shareId, ++clock);
+    expect(() => r.storage.resolveAutomationPress(scope)).toThrow();
+  });
+
+  it("forwards authorized inspections, keeps unknown separate, and rechecks access before the answer", async () => {
+    const r = await relay(); await host(r);
+    const release = r.storage.parkButtonInspectionHost({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" });
+    const inspection = r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({ targets: [{
+      automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }] })));
+    await vi.waitFor(() => expect(r.storage.listButtonInspections({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" })).toHaveLength(1));
+    const [query] = r.storage.listButtonInspections({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" });
+    const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop", generation: 1, inspectionId: query!.inspectionId };
+    expect(r.storage.resolveButtonInspection(scope).userId).toBe(RECIPIENT);
+    expect(() => r.storage.resolveButtonInspection({ ...scope, workspaceId: "forged" })).toThrow();
+    await claimWorkspace(r.h, OWNER, "workspace-b");
+    await expectCode(await r.h(request(OWNER, "/sync/workspace-b/automation-presses/inspection-authority", jsonBody({
+      installId: "laptop", generation: 1, inspectionId: scope.inspectionId }))), 404, "not_found");
+    r.storage.answerButtonInspection(scope, { kind: "unchecked", reason: "Host unavailable" });
+    expect(await (await inspection).json()).toMatchObject({ inspections: [{ kind: "unchecked" }] });
+    expect(() => r.storage.resolveButtonInspection(scope)).toThrow();
+    const next = r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({ targets: [{
+      automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }] })));
+    await vi.waitFor(() => expect(r.storage.listButtonInspections({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" })).toHaveLength(1));
+    const [pending] = r.storage.listButtonInspections({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" });
+    r.storage.revokeShare(r.shareId, ++clock);
+    expect(() => r.storage.answerButtonInspection({ ...scope, inspectionId: pending!.inspectionId }, { kind: "ready", automationId: AUTOMATION,
+      definitionHash: HASH, irreversible: [{ name: "dataset/send", label: "Send" }] })).toThrow();
+    const reply = await next;
+    expect(await reply.json()).toMatchObject({ inspections: [{ kind: "denied" }] });
+    release();
+  });
   it("records a recipient's press and offers it to the running host as the verified user's", async () => {
     const r = await relay();
     await host(r);
@@ -119,7 +305,7 @@ describe("relayed Button presses", () => {
     expect(accepted.status, await accepted.clone().text()).toBe(200);
     expect(await accepted.json()).toEqual({ ok: true, pressId: "press-1", state: "pending", outcome: null, createdAtMs: 10_000 });
     const presses = await list(r);
-    expect(presses).toEqual([{ hostPressId: "relay-id-1", definitionHash: HASH, state: "pending", automationId: AUTOMATION, collectionPath: "trip/packing", recordId: "rec-12", pressedBy: RECIPIENT, createdAtMs: 10_000 }]);
+    expect(presses).toEqual([{ hostPressId: "relay-id-1", definitionHash: HASH, state: "pending", automationId: AUTOMATION, collectionPath: "trip/packing", recordId: "rec-12", pressedBy: RECIPIENT, createdAtMs: 10_000, confirmed: [] }]);
 
     // The host's engine takes it. The list still names it until it settles,
     // so a host that restarts before pressing it finds it again.
@@ -173,6 +359,8 @@ describe("relayed Button presses", () => {
     seedLinkGrant(r.storage, { grantId: "link-1", shareId: r.shareId, secretHash: sha256("secret"), access: "edit" });
     seedDependentGrant(r.storage, { shareId: r.shareId, parentGrantId: "link-1", grantId: "from-link", principalUserId: "linked", createdAtMs: clock });
     await expectCode(await press(r, {}, "linked"), 403, "share_read_only");
+    await expectCode(await r.h(request("linked", `/sync/shares/${r.shareId}/automation-presses`, jsonBody({ inspect: true,
+      automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }))), 403, "share_read_only");
   });
 
   it("refuses an automation id that names no Collection", async () => {
@@ -241,6 +429,28 @@ describe("relayed Button presses", () => {
     await expectCode(await post(r, "settle", { hostPressId: "relay-id-1", outcome: "done", error: null }), 409, "conflict");
   });
 
+  it("clears preclaim failure Notices when a later press succeeds, scoped to its record", async () => {
+    const r = await relay();
+    await host(r);
+    for (const [pressId, recordId] of [["failed", "rec-12"], ["other-record", "rec-13"]]) {
+      expect((await press(r, { pressId, recordId })).status).toBe(200);
+      const { hostPressId } = (await list(r))[0]!;
+      expect((await post(r, "accept", { hostPressIds: [hostPressId] })).status).toBe(200);
+      expect((await post(r, "settle", { hostPressId, outcome: "failed", error: "Cannot start" })).status).toBe(200);
+      r.storage.postNotice({ senderUserId: OWNER, recipientUserId: RECIPIENT, reach: { workspaceId: WORKSPACE },
+        noticeId: `automation-press:${hostPressId}`, kind: "automation-failed", senderLabel: "Owner",
+        title: "Button failed", body: "Cannot start", target: { path: "trip/packing", automation: AUTOMATION, record: recordId },
+        originInstallId: "laptop", nowMs: clock });
+    }
+    expect((await press(r, { pressId: "later" })).status).toBe(200);
+    const { hostPressId } = (await list(r))[0]!;
+    expect((await post(r, "accept", { hostPressIds: [hostPressId] })).status).toBe(200);
+    expect((await post(r, "settle", { hostPressId, outcome: "done", error: null })).status).toBe(200);
+    const notices = r.storage.readNoticeChanges({ recipientUserId: RECIPIENT, cursor: null, limit: 50, nowMs: clock }).notices
+      .filter(notice => notice.kind === "automation-failed" && notice.dismissedAtMs === null);
+    expect(notices.map(notice => notice.target?.record)).toEqual(["rec-13"]);
+  });
+
   it("limits presses per grant, and how many wait unsettled", async () => {
     const r = await relay({ overrides: { automationPressRateLimiters: { ...createAutomationPressRateLimiters(), press: new TokenBucketLimiter(2, 0.0001, 10) } } });
     expect((await press(r, { pressId: "a" })).status).toBe(200);
@@ -251,7 +461,7 @@ describe("relayed Button presses", () => {
     for (let index = 0; index < AUTOMATION_PRESSES_UNSETTLED_PER_GRANT; index += 1) {
       s.storage.recordAutomationPress({
         shareId: s.shareId, grantId: s.grantId, grantGeneration: 1, userId: RECIPIENT, pressId: `p-${index}`,
-        automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH, recordId: "rec-12", nowMs: clock, newId: () => `seed-${index}`,
+        automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH, recordId: "rec-12", confirmed: [], nowMs: clock, newId: () => `seed-${index}`,
       });
     }
     await expectCode(await press(s, { pressId: "one-more" }), 429, "automation_press_rate_limited");
@@ -294,7 +504,7 @@ describe("relayed Button presses", () => {
 
   it("keeps every press for the whole retention window, so an old press id never runs twice", async () => {
     const roomy = () => new TokenBucketLimiter(10_000, 1, 10);
-    const r = await relay({ overrides: { automationPressRateLimiters: { press: roomy(), host: roomy() } } });
+    const r = await relay({ overrides: { automationPressRateLimiters: { ...createAutomationPressRateLimiters(), press: roomy(), host: roomy() } } });
     await host(r);
     for (let index = 0; index < 250; index += 1) {
       await press(r, { pressId: `p-${index}` });
@@ -427,5 +637,17 @@ describe("relayed Button presses", () => {
     expect(r.storage.revokeShareGrant({ shareId: r.shareId, grantId: r.grantId, revokedAtMs: clock }).ok).toBe(true);
     expect(await (await post(r, "accept", { hostPressIds: ["relay-id-1"] })).json()).toEqual({ ok: true, accepted: [] });
     expect(await list(r)).toEqual([]);
+  });
+
+  it("ends an accepted press from an older generation of the same computer", async () => {
+    const r = await relay();
+    await host(r);
+    await press(r);
+    await post(r, "accept", { hostPressIds: ["relay-id-1"] });
+    const db = inspectDatabase(storagePath(r.storage));
+    db.prepare("UPDATE sync_relay_automation_hosts SET generation=2 WHERE workspace_id=?").run(WORKSPACE);
+    db.close();
+    expect(await list(r)).toEqual([]);
+    expect(await (await press(r)).json()).toMatchObject({ state: "settled", outcome: "ended" });
   });
 });

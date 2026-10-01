@@ -11,8 +11,9 @@ import type { RecordHistoryTarget } from "./useRecordHistory";
 
 // The record view's row above the record's properties, for a file that is a
 // record in a Collection: its Button fields, and History. Main says which
-// record the file is and what each button does. The shell holds the History
-// dialog, so a failed read's Try again in Notices outlives this view.
+// record the file is. What each button does comes only from the
+// Collection's button store, which the table shares. The shell holds the
+// History dialog, so a failed read's Try again in Notices outlives this view.
 
 export function RecordButtonsRow(props: {
   workspaceId: string;
@@ -26,8 +27,9 @@ export function RecordButtonsRow(props: {
   const buttons = useAutomationButtons({
     workspaceId, of: found === null || found.fields.length === 0 ? null : { collectionPath: found.collectionPath }, onError: props.onError, onNotice: props.onNotice,
   });
-  const answer = useRef<Awaited<ReturnType<ReturnType<typeof bridge>["listRecordButtons"]>> | null>(null);
   const requests = useRef(0);
+  // Rises when the files that decide what the buttons do change.
+  const [settings, setSettings] = useState(0);
   const report = useRef(props.onError);
   report.current = props.onError;
 
@@ -39,10 +41,7 @@ export function RecordButtonsRow(props: {
         const result = await bridge().listRecordButtons({ workspaceId, path });
         // A slower answer for an earlier read, or another file, never lands.
         if (!alive || request !== requests.current) return;
-        answer.current = result;
-        setFound(result.record === null ? null : {
-          record: result.record, collectionPath: result.collectionPath, fields: result.buttons.map((button) => button.field),
-        });
+        setFound(result.record === null ? null : { record: result.record, collectionPath: result.collectionPath, fields: result.fields });
       } catch (error) {
         if (!alive || request !== requests.current) return;
         setFound(null);
@@ -52,10 +51,9 @@ export function RecordButtonsRow(props: {
     void read();
     const folderOf = (file: string) => file.split("/").slice(0, -1).join("/");
     const folder = folderOf(path);
-    // The record itself, or the files that decide its buttons: its
-    // Collection's collection.yaml and automations.yaml, at or above its folder.
+    // The files that decide its buttons: its Collection's collection.yaml
+    // and automations.yaml, at or above its folder.
     const decides = (changed: string) => {
-      if (changed === path) return true;
       const name = changed.split("/").at(-1);
       if (name !== "collection.yaml" && name !== "automations.yaml") return false;
       const dir = folderOf(changed);
@@ -63,8 +61,12 @@ export function RecordButtonsRow(props: {
     };
     const unsubscribe = bridge().onWorkspaceActivity((event) => {
       if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
-      if (event.paths?.length && !event.paths.some(decides)) return;
+      const paths = event.paths ?? [];
+      const buttonsChanged = paths.length === 0 || paths.some(decides);
+      if (!buttonsChanged && !paths.includes(path)) return;
       void read();
+      // A save of the record itself changes its name, not what its buttons do.
+      if (buttonsChanged) setSettings((count) => count + 1);
     });
     return () => {
       alive = false;
@@ -73,11 +75,9 @@ export function RecordButtonsRow(props: {
     };
   }, [workspaceId, path]);
 
-  // The store for this Collection takes the states the read carried.
   useEffect(() => {
-    const result = answer.current;
-    if (buttons && result && result.record !== null && result.collectionPath === found?.collectionPath) buttons.show(result.buttons);
-  }, [buttons, found]);
+    void buttons?.refresh();
+  }, [buttons, settings]);
 
   if (found === null) return null;
   const label = recordLabel(found.record);

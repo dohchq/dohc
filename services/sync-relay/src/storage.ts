@@ -1,4 +1,5 @@
 import * as shareLabelsStorage from "./storage/shareLabels";
+import * as buttonInspections from "./automationButtonInspections";
 import type {ShareLabels} from "@dohc/security-contract/share-labels";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { ServiceActivationStore } from "./storage/serviceActivation";
@@ -669,6 +670,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   recordAutomationPress(input: automationPressStorage.RecordAutomationPressInput) {
     return automationPressStorage.recordAutomationPress(this, input);
+  }
+
+  resolveAutomationPress(input: Parameters<typeof automationPressStorage.resolveAutomationPress>[1]) {
+    return automationPressStorage.resolveAutomationPress(this, input);
+  }
+
+  inspectAutomationButton(input: buttonInspections.ButtonInspectionInput) {
+    return buttonInspections.inspectAutomationButton(this, input);
+  }
+  parkButtonInspectionHost(scope: import("./storage/automationPresses").HostScope) {
+    return buttonInspections.parkButtonInspectionHost(this, scope);
+  }
+  listButtonInspections(input: Parameters<typeof buttonInspections.listButtonInspections>[1]) { return buttonInspections.listButtonInspections(this, input); }
+  resolveButtonInspection(input: Parameters<typeof buttonInspections.resolveButtonInspection>[1]) { return buttonInspections.resolveButtonInspection(this, input); }
+  answerButtonInspection(input: Parameters<typeof buttonInspections.answerButtonInspection>[1], result: Parameters<typeof buttonInspections.answerButtonInspection>[2]) {
+    return buttonInspections.answerButtonInspection(this, input, result);
   }
 
   listAutomationPresses(input: automationPressStorage.HostScope & { nowMs: number }) {

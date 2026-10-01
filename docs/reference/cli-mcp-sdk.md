@@ -425,8 +425,6 @@ Returns `{ ok: true, status: "queued" } | { ok: false, status: "switched-off", r
 
 Press a Button field on one record, as a person clicks it in dohc, and get the id of the run it started; follow it with dohc_read_automation_run. Name the record by its id, or a dataset record by its primary key as JSON. A press that would run actions dohc cannot undo is refused with each action's name; press again with those names in confirm to run them. Send the same requestId again, after a timeout for example, to get the same press instead of a second one. The press is recorded as the agent's, for the person; from an agent run that an automation started, it counts in that chain of automations, which stops after 4 steps.
 
-Changes the workspace, so a shared view does not offer it.
-
 - `collectionPath`: `string`. Required.
 - `button`: `string`. Required.
 - `recordId`: `string`. Required.
@@ -435,6 +433,15 @@ Changes the workspace, so a shared view does not offer it.
 - `requestId`: `string`
 
 Returns `{ ok: true, run, outcome, error, waiting } | { ok: true, relayed: true } | { ok: false, reason, confirm: { name, label }[] } | { ok: false, reason }`.
+
+### `dohc_inspect_buttons`
+
+Inspect a Collection's Button fields, their current access, and any actions that need confirmation. Shared Collection buttons are checked on the owner's host.
+
+- `collectionPath`: `string`. Required.
+- `table`: `string`
+
+Returns `{ ok: true, buttons: { field, table?, state }[] } | { ok: false, reason }`.
 
 ### `dohc_switch_automation`
 
@@ -1310,6 +1317,18 @@ Switch one automation on or off in its file.
 - `--reformat`: Confirm losing comments and hand formatting in automations.yaml.
 
 With `--json`, prints `{ schemaVersion, ok: true, result }`.
+
+#### `dohc automation buttons`
+
+```sh
+dohc automation buttons <collection> [options]
+```
+
+Inspect Button fields and the actions they require you to confirm.
+
+- `--table <table>`: Inspect the buttons in this dataset table.
+
+With `--json`, prints `{ schemaVersion, ok: true, buttons: { field, table?, state }[] }`.
 
 #### `dohc automation runs`
 

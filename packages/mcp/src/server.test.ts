@@ -24,16 +24,17 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_create_record",
   "dohc_edit_document",
   "dohc_create_document",
-  // A shared view keeps no automation runs, so it gets no automation tool.
+  // A shared view keeps no automation runs, so run tools stay owner-only.
   "dohc_list_automation_runs",
   "dohc_read_automation_run",
   "dohc_retry_automation_run",
-  "dohc_press_button",
 ];
 
 const CHAT_WRITE_TOOLS = ["dohc_start_group_chat", "dohc_start_file_chat", "dohc_reply_to_chat"];
 
-const READ_TOOLS = [
+const SHARED_TOOLS = [
+  "dohc_inspect_buttons",
+  "dohc_press_button",
   "dohc_list_files",
   "dohc_read_file",
   "dohc_read_document",
@@ -104,7 +105,7 @@ describe("share-level tool profiles", () => {
       expect(names, tool).not.toContain(tool);
     }
     // The read surface is still available so agents can browse a shared view.
-    for (const tool of READ_TOOLS) {
+    for (const tool of SHARED_TOOLS) {
       expect(names, tool).toContain(tool);
     }
   });
@@ -122,7 +123,7 @@ describe("share-level tool profiles", () => {
         `${tool}: offering a write tool a shared view always refuses`,
       ).not.toContain(tool);
     }
-    for (const tool of READ_TOOLS) {
+    for (const tool of SHARED_TOOLS) {
       expect(names, tool).toContain(tool);
     }
   });

@@ -127,7 +127,6 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
   const buttonFields = useMemo(() => table?.fields.flatMap(field => field.type === "button" ? [field.name] : []) ?? [], [table]);
   const buttons = useAutomationButtons({ workspaceId, of: table && buttonFields.length > 0 ? { datasetId, table: table.name } : null, onError, onNotice: message => onNotice?.(message) });
   useEffect(() => { void buttons?.refresh(); }, [buttons, dataset]);
-  useEffect(() => buttons === null ? undefined : bridge().onCollectionAutomationsChanged(event => { if (event.workspaceId === workspaceId) void buttons.refresh(); }), [buttons, workspaceId]);
   // A run or its Undo changes records without touching a file, whether a press, a record change, or a schedule
   // started it, so the table reads them again when runs end.
   useEffect(() => bridge().onAutomationRunsChanged(event => { if (event.workspaceId === workspaceId) setRecordsChanged(value => value + 1); }), [workspaceId]);

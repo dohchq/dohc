@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { WorkspaceSettings as WorkspaceSettingsContract } from "@dohc/workspace-contracts/workspace-settings";
-import * as Schema from "effect/Schema";
+import { decodeWorkspaceSettings } from "@dohc/workspace-contracts/workspace-settings";
 import {
   isSettingsObject,
   overlaySettings,
@@ -22,7 +21,6 @@ import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 export const WORKSPACE_SETTINGS_FILE = "settings.local.json";
 export const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
 
-const decodeWorkspaceSettings = Schema.decodeUnknownSync(WorkspaceSettingsContract);
 // The contract decides what is valid; the IPC mirror, bound to the contract
 // by type, lists the keys.
 const workspaceSettingKinds = settingKinds(WorkspaceSettings, DEFAULT_WORKSPACE_SETTINGS);

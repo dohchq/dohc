@@ -35,7 +35,7 @@ type OwnerContext = { readonly owner: true };
  * the run. `person` is who its writes are made for: the person whose change
  * started it, or null for nobody.
  */
-export interface LocalDatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number; readonly person: string | null }
+export interface LocalDatasetAutomationContext { readonly automationId: string; readonly claimId: string; readonly depth: number; readonly person: string | null; readonly authorizeOperation?: (datasetId: string, operationId: string) => void }
 /**
  * The owner's agent, as main derives it for one invocation: the owner's
  * authority, attributed to the agent at its run's chain depth, 0 outside a
@@ -281,7 +281,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
         if (agent !== null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, agent: { depth: agent.agent.depth }, person: options.localPersonId() };
         if (automation === null) return { caller: { kind: "owner", userId: ownerId }, principalKey: ownerId, person: options.localPersonId() };
         return { caller: { kind: "automation", automationId: automation.automationId }, principalKey: automationKey(automation.automationId),
-          chainDepth: automation.depth, ...(automation.person === null ? {} : { person: automation.person }) };
+          chainDepth: automation.depth, authorizeOperation: automation.authorizeOperation, ...(automation.person === null ? {} : { person: automation.person }) };
       },
       async compileOperations(source, sourcePath) {
         const compiled = await compile(source, sourcePath, lifetime.signal);
@@ -500,9 +500,9 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       action: (input: LocalDatasetInvocation) => invoke(input, false),
       /** For main's automation executor only. Claims are this workspace's, from the host's ledger. */
       automations: {
-        context(input: { automationId: string; claimId: string; depth: number; person: string | null }): LocalDatasetAutomationContext {
+        context(input: LocalDatasetAutomationContext): LocalDatasetAutomationContext {
           assertCurrent();
-          const context = Object.freeze({ automationId: input.automationId, claimId: input.claimId, depth: input.depth, person: input.person });
+          const context = Object.freeze({ automationId: input.automationId, claimId: input.claimId, depth: input.depth, person: input.person, authorizeOperation: input.authorizeOperation });
           automationContexts.add(context);
           return context;
         },

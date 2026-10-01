@@ -14,6 +14,7 @@ import type {
   AutomationRunSettledEvent,
   AutomationRunWaitingEvent,
   GetCollectionResult,
+  ListAutomationButtonsResult,
   PressAutomationButtonPayload,
   PressAutomationButtonResult,
   QueryCollectionRecordsResult,
@@ -24,6 +25,7 @@ import { CollectionPage, DRAIN_RECORD_LIMIT, type CollectionPageProps } from "./
 import { CustomizeContext } from "./settings/customize";
 import { documentCollectionFiles } from "./collections/CollectionCustomizeDialog";
 import { automationButtonsFor, disposeAutomationButtons, resetAutomationButtonsForTests } from "./collections/useAutomationButtons";
+import { deferred } from "../testing/deferred";
 import {
   beginCollectionWriteOperation,
   CollectionFieldWriteHost,
@@ -2052,16 +2054,19 @@ describe("Button fields", () => {
     expect(button.getAttribute("aria-disabled")).toBeNull();
   });
 
-  it("frees a shared view's button once the owner's computer has the press", async () => {
+  it("frees a shared view's button once the owner's computer has the press, and reports nothing itself", async () => {
     const bridge = buttonsWith({ press: async () => ({ busy: false, relayed: true }) });
     vi.stubGlobal("dohcDesktop", bridge);
-    const onNotice = vi.fn();
-    render(pageWithHost(undefined, undefined, { onNotice }));
+    const onNotice = vi.fn(), onError = vi.fn();
+    render(pageWithHost(undefined, undefined, { onNotice, onError }));
     const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     fireEvent.click(button);
-    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Sent Mark paid for Invoice 12"));
-    expect(button.getAttribute("aria-busy")).toBeNull();
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
+    await waitFor(() => expect(button.getAttribute("aria-busy")).toBeNull());
+    // The owner's computer files the press's one notice if it fails.
+    expect(onNotice).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("still reports a run that ends after its Collection closed, through the surface that showed it", async () => {
@@ -2159,6 +2164,64 @@ describe("Button fields", () => {
     expect(buttons.view("Archive", "rec-1")).toBe(other);
     expect(buttons.view("Mark paid", "rec-1")).not.toBe(pressed);
     await pressing;
+  });
+
+  it("shows the table's buttons as checking while main reads what they do, then shows the answer", async () => {
+    const bridge = buttonsWith();
+    const answer = deferred<ListAutomationButtonsResult>();
+    bridge.listAutomationButtons.mockReturnValueOnce(answer.promise);
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost());
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe("dohc is checking whether you can use this button.");
+    expect(screen.queryByRole("button", { name: "Check Mark paid for Invoice 12 again" })).toBeNull();
+    await act(async () => answer.resolve({ buttons: [{ field: "Mark paid", table: null, state: READY }] }));
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+    expect(button.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("turns a shared document Collection's Button ready when main says the host answered", async () => {
+    const checking: AutomationButtonState = { kind: "checking", reason: "dohc is checking whether you can use this button." };
+    const bridge = buttonsWith({ buttons: [{ field: "Mark paid", state: checking }] });
+    vi.stubGlobal("dohcDesktop", bridge);
+    render(pageWithHost());
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(document.getElementById(button.getAttribute("aria-describedby")!)?.textContent).toBe(checking.reason));
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    // dohc is asking the host, so there is nothing to check again.
+    expect(screen.queryByRole("button", { name: "Check Mark paid for Invoice 12 again" })).toBeNull();
+    bridge.listAutomationButtons.mockResolvedValue({ buttons: [{ field: "Mark paid", state: READY }] });
+    // Nothing in the Collection's folder changed; only the host's answer did.
+    act(() => bridge.emitAutomationsChanged("ws-1"));
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    expect(screen.queryByRole("button", { name: "Check Mark paid for Invoice 12 again" })).toBeNull();
+  });
+
+  it("changes only the views of buttons with no answer or an unchecked one when a read starts", async () => {
+    const bridge = buttonsWith({ buttons: [
+      { field: "Mark paid", state: READY },
+      { field: "Archive", state: { kind: "unchecked", reason: "dohc cannot check this button now. Try again when its host is available." } },
+    ] });
+    vi.stubGlobal("dohcDesktop", bridge);
+    const buttons = automationButtonsFor("ws-1", { collectionPath: "tasks" });
+    await buttons.refresh();
+    const unsubscribe = [buttons.subscribe(buttons.key("Mark paid", "rec-1"), () => undefined), buttons.subscribe(buttons.key("Archive", "rec-1"), () => undefined)];
+    const ready = buttons.view("Mark paid", "rec-1");
+    const unchecked = buttons.view("Archive", "rec-1");
+    // A view read once and not followed is still cached.
+    expect(buttons.view("Archive", "rec-2").checking).toBe(false);
+    expect(unchecked.checking).toBe(false);
+    const answer = deferred<ListAutomationButtonsResult>();
+    bridge.listAutomationButtons.mockReturnValueOnce(answer.promise);
+    const reading = buttons.refresh();
+    expect(buttons.view("Mark paid", "rec-1")).toBe(ready);
+    expect(buttons.view("Archive", "rec-1")).toMatchObject({ state: unchecked.state, checking: true });
+    expect(buttons.view("Archive", "rec-2").checking).toBe(true);
+    answer.resolve({ buttons: [{ field: "Mark paid", table: null, state: READY }, { field: "Archive", table: null, state: READY }] });
+    await reading;
+    expect(buttons.view("Archive", "rec-1")).toMatchObject({ state: READY, checking: false });
+    for (const stop of unsubscribe) stop();
   });
 
   it("offers Button in Fields, and Choose what it does opens the builder on a button nothing uses", async () => {

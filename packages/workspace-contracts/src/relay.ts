@@ -801,6 +801,24 @@ export interface RelayAutomationPress {
   recordId: string;
   pressedBy: string;
   createdAtMs: number;
+  confirmed: string[];
+}
+
+export interface RelayButtonTarget { automationId: string; collectionPath: string; definitionHash: string }
+export type RelayButtonInspection =
+  | { kind: "ready"; automationId: string; definitionHash: string; irreversible: Array<{ name: string; label: string }> }
+  | { kind: "denied" | "unchecked"; reason: string };
+export interface RelayButtonInspectionRequest extends RelayButtonTarget { inspectionId: string }
+/** Host-only authority, derived from a stored press or inspection, never recipient JSON. */
+export interface RelayButtonAuthority extends RelayButtonTarget {
+  workspaceId: string;
+  userId: string;
+  grantId: string;
+  grantGeneration: number;
+  hostGeneration: number;
+  principals: Array<{ grantId: string; userId: string; access: "view" | "comment" | "edit" }>;
+  recordId?: string;
+  confirmed: string[];
 }
 
 // GET /sync/<workspaceId>/automation-presses?installId=...&waitMs=...
@@ -809,4 +827,5 @@ export interface RelayAutomationPress {
 // that long while no press waits to be accepted.
 export interface RelayAutomationPressList {
   presses: RelayAutomationPress[];
+  inspections: RelayButtonInspectionRequest[];
 }
