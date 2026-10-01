@@ -2399,8 +2399,8 @@ describe("Collection automations", () => {
     expect(w.runsChanged).toHaveLength(pokes + 1);
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "theirs" });
     expect(trashed).toEqual([added!.path]);
-    expect(w.journaled.at(-1)).toMatchObject({ path: task.path, attribution: { actorKind: "human" } });
-    expect(w.journaled.at(-1)!.actorOriginId).toBeUndefined();
+    expect(w.journaled.at(-1)).toMatchObject({ path: task.path, actorOriginId: "local:test",
+      attribution: { actorKind: "human", onBehalfOf: "local:test", depth: 0 } });
 
     // Note kept a later value, so Undo can try it again, and keeps it again.
     const [run] = (await w.executor.runs("collection:Tasks#stamp")).runs;
