@@ -83,6 +83,36 @@ it("bounds storage work with the same rate refusal for every target after authen
   expect([refused.status, await refused.text()]).toEqual([404, '{"ok":false,"error":"not found"}']);
 });
 const LINK_REFUSAL_BODY = '{"ok":false,"error":"not found"}';
+it("checks only the requested projected folder on an Edit inventory read", async () => {
+  const storage = await newStorage();
+  const exchangeKey = "link-read-preflight-relay-key-at-least-32";
+  const h = handler(storage, { publicEditRelease: { version: 1 }, relayExchangeKey: exchangeKey,
+    namedBrowserSessionLimits: { maxSessions: 8, retentionMs: 60_000, maxPendingRequests: 4, maxRequestBytes: 8192, maxResponseBytes: 16384, timeoutMs: 1000 } });
+  const seeded = await seed(h, "edit", { paths: ["nested/docs"] });
+  const exchange = await h(request(null, "/sync/link-exchange", {
+    ...jsonBody({ secret: seeded.secret }),
+    headers: { "content-type": "application/json", "x-dohc-relay-exchange-key": exchangeKey },
+  }));
+  expect(exchange.status).toBe(200);
+  const capability = String((await json(exchange)).capabilityToken);
+  const read = storage.readCurrentFileState.bind(storage);
+  vi.spyOn(storage, "readCurrentFileState").mockImplementation(input => ({ ...read(input), files: [
+    { path: "nested/docs/one/automations.yaml", blobSha256: seeded.sharedSha, contentKind: "text" },
+    { path: "nested/docs/two/automations.yaml", blobSha256: seeded.sharedSha, contentKind: "text" },
+  ] }));
+  const check = vi.spyOn(storage, "automationSwitchableFolder").mockReturnValue(true);
+  const inventory = await h(linkRequest(capability, "/sync/link/current"));
+  expect(inventory.status).toBe(200);
+  expect(check).not.toHaveBeenCalled();
+  const requested = await h(linkRequest(capability, "/sync/link/current?collectionPath=docs%2Ftwo"));
+  expect(requested.status).toBe(200);
+  const body = await requested.json();
+  expect(body.files).toEqual([
+    { path: "docs/one/automations.yaml", blobSha256: seeded.sharedSha, contentKind: "text" },
+    { path: "docs/two/automations.yaml", blobSha256: seeded.sharedSha, contentKind: "text", automationSwitchable: true },
+  ]);
+  expect(check).toHaveBeenCalledExactlyOnceWith(WORKSPACE, "nested/docs/two");
+});
 const EPOCH_1 = "epoch-1";
 const STREAM_1 = "stream-1";
 const EPOCH_2 = "epoch-2";

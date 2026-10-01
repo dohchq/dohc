@@ -1133,6 +1133,26 @@ pub enum ShareViewIdentityRecord {
 }
 
 impl ActorHandle {
+    pub async fn share_direct_status(
+        &self,
+        workspace_id: String,
+        share_id: String,
+        path: String,
+        granted: dohc_engine_sync::ShareGrant,
+    ) -> Result<dohc_engine_sync::DirectWriteStatus, RuntimeError> {
+        self.run(move |store, _cache| {
+            dohc_engine_sync::read_direct_write_status(
+                store,
+                &workspace_id,
+                &share_id,
+                &path,
+                &granted,
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn sync_refusal_notices(
         &self,
         workspace_id: String,

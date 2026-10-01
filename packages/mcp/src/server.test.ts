@@ -127,14 +127,15 @@ describe("share-level tool profiles", () => {
     }
   });
 
-  it("offers an edit profile exactly the comment profile's tools", async () => {
+  it("adds automation switches to the Edit profile", async () => {
     const { names: comment } = await connectedToolNames({ ...base, shareAccess: "comment" });
     const { names: edit } = await connectedToolNames({ ...base, shareAccess: "edit" });
-    expect([...edit].sort()).toEqual([...comment].sort());
+    expect([...edit].sort()).toEqual([...comment, "dohc_switch_automation"].sort());
   });
 
   it("registers both write tiers for a local workspace (no share level)", async () => {
     const { names } = await connectedToolNames(base);
+    expect(names).not.toContain("dohc_switch_automation");
     for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
       expect(names, tool).toContain(tool);
     }
@@ -240,6 +241,24 @@ describe("MCP tool results", () => {
     });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toEqual({ ok: false, reason: "This group is read-only." });
+  });
+
+  it.each(["view", "comment", "edit"] as const)("offers shared definitions and only the %s switch permission", async shareAccess => {
+    const root = await workspaceRoot(), requests: unknown[] = [];
+    const definitions = { file: { status: "missing" }, canSwitch: shareAccess === "edit", contentHash: null, sync: "accepted" };
+    const { client, names } = await connectedToolNames({ root, home: "/home", shareAccess, request: async request => {
+      requests.push(request);
+      return request.verb === "automationList" ? { ok: true, definitions } : { ok: true, result: { status: "written", contentHash: "b".repeat(64), sync: "pending" } };
+    } });
+    expect(names).toContain("dohc_list_automations");
+    expect(names.includes("dohc_switch_automation")).toBe(shareAccess === "edit");
+    const listed = await client.callTool({ name: "dohc_list_automations", arguments: { collectionPath: "notes" } });
+    expect(listed.structuredContent).toEqual({ ok: true, definitions });
+    if (shareAccess === "edit") {
+      const switched = await client.callTool({ name: "dohc_switch_automation", arguments: { collectionPath: "notes", automation: "stamp", enabled: false, expectedContentHash: "a".repeat(64), reformat: true, submitId: "switch-1" } });
+      expect(switched.structuredContent).toMatchObject({ result: { status: "written", sync: "pending" } });
+      expect(requests).toContainEqual(expect.objectContaining({ verb: "automationSwitch", args: expect.objectContaining({ automation: "stamp", enabled: false, reformat: true, submitId: "switch-1" }) }));
+    }
   });
 
   it("reads a document through the desktop", async () => {

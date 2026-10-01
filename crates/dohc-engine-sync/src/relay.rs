@@ -23,8 +23,9 @@ use crate::{
     ShareDisposition, SyncError, blob_ceiling,
 };
 pub use direct_write::{
-    DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, ShareCollectionWriteRequest,
-    ShareCollectionWriteResponse, collision_key,
+    DirectWritePushOutcome, DirectWriteReport, DirectWriteResult, DirectWriteState,
+    DirectWriteStatus, ShareCollectionWriteRequest, ShareCollectionWriteResponse, collision_key,
+    read_direct_write_status,
 };
 use direct_write::{read_direct_write_marks, read_direct_write_open_objects};
 

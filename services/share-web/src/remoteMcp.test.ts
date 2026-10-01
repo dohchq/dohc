@@ -1,4 +1,5 @@
 import {afterEach, expect, it} from "vitest";
+import { createHash } from "node:crypto";
 import {Client, StreamableHTTPClientTransport} from "@modelcontextprotocol/client";
 import {createShareWebApplication} from "./server";
 import {linkRefusalBody} from "@dohc/security-contract/link-refusal";
@@ -44,7 +45,7 @@ it("returns identical opaque MCP refusals before and after evicting a revoked se
   expect(f.calls).toHaveLength(calls);
 });
 
-function fixture(access: "view" | "comment" | "edit" = "comment", live = false, versionId: string | null = null, contentKind: "text" | "binary" = "text", paths: string[] = []) {
+function fixture(access: "view" | "comment" | "edit" = "comment", live = false, versionId: string | null = null, contentKind: "text" | "binary" = "text", paths: string[] = [], automationText?: string) {
   const calls: Request[] = [];
   let revoked = false;
   let rateLimited: string | undefined;
@@ -64,10 +65,16 @@ function fixture(access: "view" | "comment" | "edit" = "comment", live = false, 
       if (revoked) return new Response(null, {status: 404});
       if (path === rateLimited) return Response.json(linkRefusalBody(refusalCode), {status: refusalCode === "link_read_rate_limited" ? 429 : 503});
       if (path === "/sync/link/share") return Response.json({ok: true, subjectName: "Trip", access, effectiveSelector: {versionId, paths, access}, lastSettledKnown: true, lastSettledAtMs: 123});
-      if (path === "/sync/link/current") return Response.json({ok: true, files: [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
+      if (path === "/sync/link/current") return Response.json({ok: true, files: automationText !== undefined
+        ? [{ path: "Tasks/automations.yaml", blobSha256: createHash("sha256").update(automationText).digest("hex"), contentKind, automationSwitchable: true }]
+        : [{path: "doc.md", blobSha256: "a".repeat(64), contentKind}]});
       if (path === "/sync/link/log") return Response.json(servedLog);
       if (path === `/sync/link/blobs/${withdrawn}`) return new Response(null, {status: 404});
-      if (path.startsWith("/sync/link/blobs/")) return new Response("hello", {headers: {"content-type": "text/plain"}});
+      if (path.startsWith("/sync/link/blobs/")) return new Response(automationText ?? "hello", {headers: {"content-type": "text/plain"}});
+      if (path === "/sync/link/collection-writes") {
+        const body = await request.json() as { submitId: string; changes: Array<{ afterPath: string }> };
+        return Response.json({ ok: true, submitId: body.submitId, paths: body.changes.map(change => change.afterPath), committedAtMs: 1000, created: true });
+      }
       if (path === "/sync/link/discussion") return Response.json({ok: true, ...(request.method === "POST" ? {body: await request.json()} : {limit: new URL(request.url).searchParams.get("limit")}), profile: request.headers.get("x-dohc-link-profile-secret")});
       if (path === "/sync/live/link-document") return new Response(null, {status: 404});
       throw new Error(`Unexpected route: ${path}`);
@@ -152,7 +159,25 @@ it.each([
   expect(names.includes("dohc_post_discussion")).toBe(comment);
   expect(names.includes("dohc_edit_document")).toBe(edit);
   expect(names.includes("dohc_write_collection_files")).toBe(access === "edit" && version === null);
+  expect(names).toContain("dohc_list_automations");
+  expect(names.includes("dohc_switch_automation")).toBe(access === "edit" && version === null);
   if (edit) expect(await client.callTool({name: "dohc_edit_document", arguments: {path: "doc.md", find: "old", replacement: "new"}})).toMatchObject({isError: true, structuredContent: {ok: false, outcome: "not-applied"}});
+});
+
+it("remote agents read and switch through the same definition serializer and link route", async () => {
+  const source = "version: 1\nautomations:\n  - id: stamp\n    name: Stamp\n    when: record-added\n    do:\n      - set:\n          Title: Ready\n        operation: records.edit\n";
+  const f = fixture("edit", true, null, "text", ["Tasks"], source);
+  const client = await f.connect(await f.exchange());
+  const hash = createHash("sha256").update(source).digest("hex");
+  expect((await client.callTool({ name: "dohc_list_automations", arguments: { collectionPath: "Tasks" } })).structuredContent)
+    .toMatchObject({ definitions: { canSwitch: true, contentHash: hash, file: { status: "read" } } });
+  const inventory = f.calls.find(call => new URL(call.url).pathname === "/sync/link/current");
+  expect(new URL(inventory!.url).searchParams.get("collectionPath")).toBe("Tasks");
+  expect((await client.callTool({ name: "dohc_switch_automation", arguments: { collectionPath: "Tasks", automation: "stamp", enabled: false, expectedContentHash: hash, reformat: true, submitId: "switch-1" } })).structuredContent)
+    .toMatchObject({ result: { status: "written", sync: "accepted" } });
+  const request = f.calls.find(call => new URL(call.url).pathname === "/sync/link/collection-writes");
+  expect(request).toBeDefined();
+  expect(request?.headers.has("x-dohc-link-profile-secret")).toBe(true);
 });
 
 it("keeps Public Edit disabled without the release marker", async () => {

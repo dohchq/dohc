@@ -7,6 +7,7 @@ import { createServerRuns, type ServerAnswer, type ServerRequest } from "../auto
 type ServerReply = Omit<NonNullable<ServerAnswer>, "asker"> | null;
 import { CHANNELS } from "./channels";
 import { registerCollectionAutomationsIpc } from "./collectionAutomationsIpc";
+import { createAutomationControls } from "../workspaces/automationControls";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const DATASET_ID = "22222222-2222-4222-8222-222222222222";
@@ -25,6 +26,9 @@ const run = (claimId: string, createdAtMs: number): CollectionAutomationRun => (
 function fixture(options: {
   file?: string;
   sharedView?: boolean;
+  access?: "view" | "comment" | "edit";
+  version?: boolean;
+  fileOnly?: boolean;
   /** The relay's answers to the owner's server routes; null: this computer cannot ask as the owner. */
   server?: (request: ServerRequest) => ServerReply | Promise<ServerReply>;
 } = {}) {
@@ -73,6 +77,11 @@ function fixture(options: {
     withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) =>
       await work({ workspace: { workspaceId: WORKSPACE_ID, rootPath: "/workspace" }, state: { collectionAutomations: executor } }),
     sharedViewOf: () => (options.sharedView ? {} : null),
+    controls: () => createAutomationControls({
+      resolve: async () => ({ content: options.file === undefined || options.fileOnly ? null : { text: options.file, truncated: false, contentHash: sha256(options.file) },
+        canSwitch: options.access === "edit" && !options.version && !options.fileOnly, delivery: null }),
+      write: async () => ({ status: "written", sync: "pending" }),
+    }),
     readText: async () => options.file === undefined ? null : { text: options.file, truncated: false, contentHash: sha256(options.file) },
     createFile,
     writeText,
@@ -157,6 +166,32 @@ describe("finding a dataset Collection's automations", () => {
 });
 
 describe("writing automations.yaml from the panel", () => {
+  it("keeps owner panel saves on the existing write path", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.switchCollectionAutomation, { collectionPath: "Tasks", automation: "stamp", enabled: false,
+      expectedContentHash: "a".repeat(64), reformat: true, submitId: "switch-1" })).resolves.toMatchObject({ status: "unavailable" });
+  });
+  it.each(["view", "comment", "edit"] as const)("reads shared definitions for %s without executor history", async access => {
+    const f = fixture({ sharedView: true, access, file: "version: 1\nautomations: []\n" });
+    await expect(f.call(CHANNELS.listCollectionAutomations, { collectionPath: "Tasks" })).resolves.toMatchObject({
+      status: "shared", definitions: { file: { status: "read", entries: [] }, canSwitch: access === "edit" },
+    });
+    await expect(f.call(CHANNELS.listCollectionAutomationRuns, { automationId: "collection:tasks#stamp" })).resolves.toMatchObject({ status: "unavailable", reason: expect.stringContaining("unavailable through shares") });
+    expect(f.runs).not.toHaveBeenCalled();
+  });
+  it("reads a saved version without allowing a switch and never infers a file share's sibling", async () => {
+    const version = fixture({ sharedView: true, access: "edit", version: true, file: "version: 1\nautomations: []\n" });
+    await expect(version.call(CHANNELS.listCollectionAutomations, { collectionPath: "Tasks" })).resolves.toMatchObject({ status: "shared", definitions: { canSwitch: false, file: { status: "read" } } });
+    const file = fixture({ sharedView: true, access: "edit", fileOnly: true, file: "version: 1\nautomations: []\n" });
+    await expect(file.call(CHANNELS.listCollectionAutomations, { collectionPath: "Tasks" })).resolves.toMatchObject({ status: "shared", definitions: { canSwitch: false, file: { status: "missing" } } });
+  });
+  it("resolves a shared Notice to one file-local automation control", async () => {
+    const written = writeAutomationsFile([{ status: "valid", automation: stamp as Automation }]);
+    if (written.status !== "ok") throw new Error("fixture");
+    const f = fixture({ sharedView: true, file: written.text });
+    await expect(f.call(CHANNELS.resolveAutomationControls, { path: "Tasks/automations.yaml", automationId: "collection:object-tasks#stamp" })).resolves.toEqual({ status: "found", collectionPath: "Tasks", automation: "stamp" });
+    await expect(f.call(CHANNELS.resolveAutomationControls, { path: "Tasks/private.md", automationId: "collection:object-tasks#stamp" })).resolves.toEqual({ status: "missing" });
+  });
   it("creates the file when the Collection has none, as the writer lays it out", async () => {
     const f = fixture();
     const result = await f.write({ expectedContentHash: null, automations: [stamp] });
@@ -301,9 +336,9 @@ describe("reading a Collection's automation runs", () => {
   it("answers unavailable in a shared view, as the list does", async () => {
     const f = fixture({ sharedView: true });
     await expect(f.call(CHANNELS.listCollectionAutomationRuns, { automationId: "collection:Tasks#stamp" }))
-      .resolves.toEqual({ status: "unavailable" });
+      .resolves.toMatchObject({ status: "unavailable", reason: expect.stringContaining("unavailable through shares") });
     await expect(f.call(CHANNELS.getCollectionAutomationRun, { automationId: "collection:Tasks#stamp", claimId: "atc_old", onServer: false }))
-      .resolves.toEqual({ status: "unavailable" });
+      .resolves.toMatchObject({ status: "unavailable", reason: expect.stringContaining("unavailable through shares") });
   });
 
   it("reads the page after the one before, and one run by its id however old", async () => {
@@ -330,7 +365,7 @@ describe("reading a Collection's automation runs", () => {
       await expect(fixture({ server }).call(CHANNELS.listServerAutomationRuns, automation)).resolves.toEqual({ runs: null, next: null });
     }
     const shared = fixture({ server: () => ({ status: 200, body: { ok: true, runs: [] } }), sharedView: true });
-    await expect(shared.call(CHANNELS.listServerAutomationRuns, automation)).resolves.toEqual({ runs: null, next: null });
+    await expect(shared.call(CHANNELS.listServerAutomationRuns, automation)).resolves.toMatchObject({ runs: null, next: null, reason: expect.stringContaining("unavailable through shares") });
     expect(shared.asked).toEqual([]);
   });
 

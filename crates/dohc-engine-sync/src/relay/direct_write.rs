@@ -33,6 +33,7 @@ use crate::journal::read_sync_identity;
 use crate::{RelayError, SyncError};
 
 const COLLECTION_SCHEMA_FILE: &str = "collection.yaml";
+const DATASET_SCHEMA_FILE: &str = "dataset.json";
 const COLLECTION_AUTOMATIONS_FILE: &str = "automations.yaml";
 const MAIN_VERSION_ID: &str = "main";
 /// The relay's bounds on one direct write
@@ -93,6 +94,135 @@ pub struct DirectWritePushOutcome {
     pub writes: Vec<DirectWriteReport>,
     /// The scan stopped at its file bound; another push has more to read.
     pub more_pending: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectWriteStatus {
+    pub content_hash: Option<String>,
+    pub state: DirectWriteState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DirectWriteState {
+    Accepted,
+    Pending,
+    Refused,
+}
+
+/// Read delivery of the current file, without contacting the relay. A receipt
+/// for an older local moment cannot acknowledge a newer save, even if both
+/// saves contain the same bytes.
+pub fn read_direct_write_status(
+    store: &EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+    path: &str,
+    granted: &crate::ShareGrant,
+) -> Result<DirectWriteStatus, SyncError> {
+    if !crate::share::selected_path_within_grant(path, granted) {
+        return Err(SyncError::ShareBoundaryViolation);
+    }
+    store.read_with(|conn| {
+        let version = granted.version_id.as_deref().unwrap_or(MAIN_VERSION_ID);
+        let snapshot = conn
+            .query_row(
+                "SELECT object_id,blob_sha256,latest_moment_id,metadata_origin FROM snapshots \
+             WHERE workspace_id=?1 AND version_id=?2 AND path=?3",
+                params![workspace_id, version, path],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        let mut status = DirectWriteStatus {
+            content_hash: snapshot.as_ref().and_then(|(_, hash, _, _)| hash.clone()),
+            state: DirectWriteState::Pending,
+            reason: None,
+        };
+        let Some((object_id, hash, moment_id, origin)) = snapshot else {
+            status.state = DirectWriteState::Accepted;
+            return Ok(status);
+        };
+        let latest = conn
+            .query_row(
+                "SELECT log.origin_seq,json_extract(log.payload_json,'$.payloadAfterBlobSha256'), \
+                    json_extract(log.payload_json,'$.payloadAfterPath') \
+             FROM replication_log log JOIN sync_identity identity \
+               ON identity.workspace_id=log.workspace_id AND identity.origin_id=log.origin_id \
+             WHERE log.workspace_id=?1 AND log.imported=0 AND log.op_kind='moment.append' \
+               AND json_extract(log.payload_json,'$.objectId')=?2 \
+               AND json_extract(log.payload_json,'$.versionId')=?3 \
+               AND json_extract(log.payload_json,'$.momentId')=?4 \
+             ORDER BY log.origin_seq DESC LIMIT 1",
+                params![workspace_id, object_id, version, moment_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        let Some((seq, local_hash, local_path)) = latest else {
+            // Share pull assigns local object/moment ids and marks its verified
+            // relay content as sync. Served envelopes deliberately omit those ids.
+            if origin == "sync" && moment_id.starts_with("moment-share-") {
+                status.state = DirectWriteState::Accepted;
+                return Ok(status);
+            }
+            let imported: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM replication_log \
+                 WHERE workspace_id=?1 AND imported=1 AND op_kind='moment.append' \
+                   AND json_extract(payload_json,'$.objectId')=?2 \
+                   AND json_extract(payload_json,'$.versionId')=?3 \
+                   AND json_extract(payload_json,'$.momentId')=?4 \
+                   AND json_extract(payload_json,'$.payloadAfterBlobSha256')=?5 \
+                   AND json_extract(payload_json,'$.payloadAfterPath')=?6 \
+                   AND json_extract(payload_json,'$.operation')='write')",
+                    params![workspace_id, object_id, version, moment_id, hash, path],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            if imported {
+                status.state = DirectWriteState::Accepted;
+            }
+            return Ok(status);
+        };
+        if hash.is_none() || local_hash != hash || local_path != path {
+            return Ok(status);
+        }
+        let mark = conn
+            .query_row(
+                "SELECT delivered_through,decided_through FROM share_direct_write_marks \
+             WHERE workspace_id=?1 AND share_id=?2 AND object_id=?3",
+                params![workspace_id, share_id, object_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        match mark {
+            Some((delivered, _)) if delivered >= seq => status.state = DirectWriteState::Accepted,
+            Some((_, decided)) if decided >= seq => {
+                status.state = DirectWriteState::Refused;
+                status.reason = Some("direct-write-not-delivered".to_owned());
+            }
+            _ => {}
+        }
+        Ok(status)
+    })
 }
 
 /// The direct lane's two positions for one file.
@@ -502,20 +632,20 @@ fn is_markdown(name: &str) -> bool {
     bytes.len() > 3 && bytes[bytes.len() - 3..].eq_ignore_ascii_case(b".md")
 }
 
-/// Whether this replica has `<folder>/collection.yaml` on main, so the
-/// folder is a Collection an automations file can go in.
+/// Whether this replica holds a Collection or dataset manifest on main.
 fn folder_holds_schema(
     store: &EngineStore,
     workspace_id: &str,
     folder: &str,
 ) -> Result<bool, RelayError> {
     let path = format!("{folder}/{COLLECTION_SCHEMA_FILE}");
+    let dataset_path = format!("{folder}/{DATASET_SCHEMA_FILE}");
     store
         .read_with(|conn| {
             conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM snapshots \
-                 WHERE workspace_id=?1 AND version_id=?2 AND path=?3)",
-                params![workspace_id, MAIN_VERSION_ID, path],
+                 WHERE workspace_id=?1 AND version_id=?2 AND path IN (?3,?4))",
+                params![workspace_id, MAIN_VERSION_ID, path, dataset_path],
                 |row| row.get(0),
             )
             .map_err(SyncError::corrupt)

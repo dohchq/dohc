@@ -23,6 +23,7 @@ import {
   dataset,
   createWorkspaceDirectory,
   listAutomationRuns,
+  listAutomations, switchAutomation,
   listGroups,
   pressButton,
   queryCollection,
@@ -122,9 +123,18 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   // Every write tool, document and chat alike.
   const registerWrite: McpServer["registerTool"] =
     ctx.shareAccess === undefined ? register : skip;
-  // A shared view keeps no automation runs, because the owner's computer
-  // runs its automations, so it is offered no automation tool.
+  // Run tools remain owner-only. File-backed controls use the share's access.
   const registerAutomation = registerWrite;
+
+  register("dohc_list_automations", {
+    description: "Read automation definitions and on/off file state in a Collection, including shares. Shared run history and host runtime are unavailable.",
+    inputSchema: { collectionPath: z.string().min(1).max(4096) },
+  }, async args => text(await listAutomations(ctx, args)));
+  if (ctx.shareAccess === "edit") register("dohc_switch_automation", {
+    description: "Change only one automation's enabled value. Read definitions first and provide their contentHash. Reformat confirms losing comments and hand formatting. After an unknown desktop save, read definitions and sync state before retrying; a stale base remains a conflict. A pending save is waiting to sync; acceptance records history, not host execution.",
+    inputSchema: { collectionPath: z.string().min(1).max(4096), automation: z.string().min(1).max(64), enabled: z.boolean(),
+      expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/u), reformat: z.boolean().optional(), submitId: requestIdSchema },
+  }, async args => text(await switchAutomation(ctx, args)));
 
   registerWrite("dohc_dataset", {
     description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",

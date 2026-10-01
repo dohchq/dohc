@@ -9,6 +9,14 @@ import {
 const token = "a".repeat(64);
 const argsBase = { cwd: "C:/ws", actor: "agent" as const };
 
+it("rejects unused agent attribution on automation switches", () => {
+  const args = { ...argsBase, collectionPath: "tasks", automation: "stamp", enabled: false,
+    expectedContentHash: token, reformat: true, submitId: "switch-1" };
+  const request = { token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "automationSwitch", args };
+  expect(cliRequestSchema.safeParse(request).success).toBe(true);
+  expect(cliRequestSchema.safeParse({ ...request, args: { ...args, agent: "Client" } }).success).toBe(false);
+});
+
 it("bounds fileWrite batches to 256 files", () => {
   const request = (count: number) => ({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileWrite",
     args: { ...argsBase, requestId: "batch", files: Array.from({ length: count }, (_, n) => ({ path: `${n}.txt`, contentBase64: "" })) } });

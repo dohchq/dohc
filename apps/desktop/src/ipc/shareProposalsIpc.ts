@@ -87,6 +87,7 @@ export function registerShareProposalsIpcHandlers<
   withStaleSensitiveWorkspaceOperation: typeof withStaleSensitiveWorkspaceOperation;
   shareViewFiles: Pick<ShareViewFiles, "reconcile">;
   receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "relayFor">;
+  automationDefinitionsChanged?(workspaceId: string): void;
 }): { shareViewEdited(workspaceId: string): void } {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -592,6 +593,7 @@ export function registerShareProposalsIpcHandlers<
   const directWrites = createShareDirectWriteQueue({
     push: pushDirectWrites,
     report: dependencies.reportDirectWrites,
+    settled: dependencies.automationDefinitionsChanged,
   });
 
   // A view pushes when it opens, so changes a closed view left go then. The

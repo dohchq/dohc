@@ -2242,6 +2242,20 @@ export async function listAutomationRuns(
   });
 }
 
+export async function listAutomations(ctx: ToolContext, args: { collectionPath: string }) {
+  const resolved = await safeResolve(ctx, args.collectionPath, "read");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "automationList", { collectionPath: resolved.normalized });
+}
+
+export async function switchAutomation(ctx: ToolContext, args: {
+  collectionPath: string; automation: string; enabled: boolean; expectedContentHash: string; reformat?: boolean; submitId: string;
+}) {
+  const resolved = await safeResolve(ctx, args.collectionPath, "read");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "automationSwitch", { ...args, collectionPath: resolved.normalized, reformat: args.reformat ?? false });
+}
+
 export async function readAutomationRun(
   ctx: ToolContext,
   args: { collectionPath: string; automation: string; run: string },

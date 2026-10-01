@@ -173,3 +173,17 @@ export async function fetchShareViewInfo(input: {
     createdAtMs: Number(body.createdAtMs ?? 0),
   };
 }
+
+export async function fetchShareAutomationSwitchable(input: {
+  relay: SyncRelayConnection;
+  shareId: string;
+  collectionPath: string;
+}): Promise<boolean> {
+  const response = await shareFetch(input.relay,
+    `/sync/shares/${encodeURIComponent(input.shareId)}/collection-writes?${new URLSearchParams({ collectionPath: input.collectionPath })}`);
+  const body: unknown = await response.json();
+  if (typeof body !== "object" || body === null || !("canSwitch" in body) || typeof body.canSwitch !== "boolean") {
+    throw new Error("The server did not confirm automation switches.");
+  }
+  return body.canSwitch;
+}

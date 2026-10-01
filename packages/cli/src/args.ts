@@ -63,6 +63,8 @@ type CliCommandBody =
   | { verb: "moments"; path?: string; limit: number }
   | { verb: "moment"; id: string; side: "before" | "after" }
   | { verb: "automationRuns"; collectionPath: string; automation: string; page?: string }
+  | { verb: "automationList"; collectionPath: string }
+  | { verb: "automationSwitch"; collectionPath: string; automation: string; enabled: boolean; expectedContentHash: string; reformat: boolean; submitId: string }
   | { verb: "automationRun"; collectionPath: string; automation: string; run: string }
   | { verb: "automationRetry"; collectionPath: string; automation: string; run: string; startOver: boolean }
   | {
@@ -474,6 +476,32 @@ function automationOperands(input: VerbInput, verb: string, takesRun: boolean): 
 }
 
 const AUTOMATION_VERBS = {
+  list: {
+    summary: "Read a Collection's automation definitions and on/off file state.", operands: "<collection>",
+    parse: input => {
+      const [collectionPath, ...extra] = input.operands;
+      if (!collectionPath) fail("automation list requires a Collection");
+      noExtraArgs(extra, "automation list");
+      return { verb: "automationList", collectionPath };
+    },
+  },
+  switch: {
+    summary: "Switch one automation on or off in its file.", operands: "<collection> <automation> <on|off>",
+    flags: [
+      { name: "--base", value: "hash", text: "Use the contentHash returned by automation list." },
+      { name: "--submit-id", value: "id", text: "Identify this switch. After an unknown save, read definitions and sync state before retrying." },
+      { name: "--reformat", text: "Confirm losing comments and hand formatting in automations.yaml." },
+    ],
+    parse: input => {
+      const [collectionPath, automation, state, ...extra] = input.operands;
+      if (!collectionPath || !automation || (state !== "on" && state !== "off")) fail("automation switch requires a Collection, automation id, and on or off");
+      noExtraArgs(extra, "automation switch");
+      const expectedContentHash = lastValue(input, "--base"), submitId = lastValue(input, "--submit-id");
+      if (!expectedContentHash || !/^[a-f0-9]{64}$/u.test(expectedContentHash)) fail("--base requires the contentHash from automation list");
+      if (!submitId || !requestIdSchema.safeParse(submitId).success) fail("--submit-id requires a printable id of at most 64 characters");
+      return { verb: "automationSwitch", collectionPath, automation, enabled: state === "on", expectedContentHash, submitId, reformat: input.flags.has("--reformat") };
+    },
+  },
   runs: {
     summary: "List an automation's runs on this computer, newest first.",
     operands: "<collection> <automation>",

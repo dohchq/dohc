@@ -2,6 +2,7 @@ use super::share_proposal::{
     journal_local_moment, local_moment_payload, proposal_fixture, proposal_grant,
 };
 use super::*;
+use dohc_engine_storage::hex_sha256;
 
 // ---------------------------------------------------------------------------
 // The recipient writes a Collection's own files directly (ADR 0013).
@@ -96,6 +97,374 @@ fn hold_schema(engine: &mut EngineStore, folder: &str) {
             &NoFaults,
         )
         .expect("pulled schema");
+}
+
+fn save_status_file(engine: &mut EngineStore, moment: &str, text: &str, before: Option<&str>) {
+    let path = "shared/docs/packing/automations.yaml";
+    let object_id = VersionedTextStore::new(engine)
+        .read_text("ws", "main", path)
+        .expect("current status file")
+        .map(|snapshot| snapshot.object_id)
+        .unwrap_or_else(|| "status-file".to_owned());
+    VersionedTextStore::new(engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: object_id.clone(),
+                path: path.to_owned(),
+                text: text.to_owned(),
+                moment_id: moment.to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 2_000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("save status file");
+    let payload = local_moment_payload(
+        moment,
+        &object_id,
+        "write",
+        before.map(|text| (path, text)),
+        path,
+        text,
+    );
+    journal_local_moment(engine, &payload, 2_000);
+}
+
+fn delivery_status(engine: &EngineStore) -> DirectWriteStatus {
+    read_direct_write_status(
+        engine,
+        "ws",
+        SHARE,
+        "shared/docs/packing/automations.yaml",
+        &edit_grant(),
+    )
+    .expect("status")
+}
+
+#[test]
+fn direct_status_accepts_real_share_pull_heads_on_both_replicas() {
+    let path = "shared/docs/packing/automations.yaml";
+    let text = "version: 1\nautomations: []\n";
+    let sha = hex_sha256(text.as_bytes());
+    for _host in ["desktop", "server"] {
+        let (_scratch, _db, mut engine) = proposal_fixture(&[]);
+        let client = RelaySyncClient::new(
+            PagedShareRelay::new([], [(0, ShareViewResponse {
+                ops: vec![ShareReplicationEnvelope {
+                    origin_id: "owner".to_owned(), origin_seq: 0,
+                    op_kind: "moment.append".to_owned(), recorded_at_ms: 2_000,
+                    payload: json!({ "versionId": "main", "operation": "write", "path": path,
+                        "payloadAfterPath": path, "payloadAfterBlobSha256": sha, "payloadAfterContentKind": "text" }),
+                }], next_cursor: 1, has_more: false,
+            })]).with_view_blobs([(sha.clone(), text.as_bytes().to_vec())]),
+        );
+        let pulled = client
+            .pull_share_view(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults)
+            .expect("real share pull");
+        assert_eq!(pulled.applied, 1);
+        assert_eq!(delivery_status(&engine).state, DirectWriteState::Accepted);
+        assert_eq!(delivery_status(&engine).content_hash, Some(sha.clone()));
+        save_status_file(
+            &mut engine,
+            "local-save",
+            "version: 1\nautomations: []\n# local\n",
+            Some(text),
+        );
+        assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+    }
+}
+
+#[test]
+fn direct_status_survives_restart_and_an_old_push_cannot_clear_a_newer_save() {
+    let (_scratch, db, mut engine) = proposal_fixture(&["rules", "new rules"]);
+    hold_schema(&mut engine, "shared/docs/packing");
+    save_status_file(&mut engine, "save-1", "rules", None);
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+    let relay = PagedShareRelay::new([], []);
+    relay
+        .collection_write_answers
+        .lock()
+        .unwrap()
+        .push_back(Err(RelayError::Partitioned));
+    let client = RelaySyncClient::new(relay);
+    assert_eq!(
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0),
+        Err(RelayError::Partitioned),
+    );
+    drop(engine);
+    let mut engine = EngineStore::open(&db, 0).expect("reopen pending");
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+    // Identical bytes are still a newer local moment.
+    save_status_file(&mut engine, "save-2", "rules", Some("rules"));
+    push(&client, &mut engine);
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+    push(&client, &mut engine);
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Accepted);
+    assert_eq!(
+        delivery_status(&engine).content_hash,
+        Some(hex_sha256(b"rules"))
+    );
+    drop(engine);
+    let mut engine = EngineStore::open(&db, 0).expect("reopen accepted");
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Accepted);
+    save_status_file(&mut engine, "save-3", "new rules", Some("rules"));
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+}
+
+#[test]
+fn direct_status_checks_the_current_moment_and_accepts_an_imported_head() {
+    let (_scratch, _db, mut engine) = proposal_fixture(&["rules"]);
+    hold_schema(&mut engine, "shared/docs/packing");
+    save_status_file(&mut engine, "save-1", "rules", None);
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    push(&client, &mut engine);
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Accepted);
+    save_status_file(&mut engine, "remote-head", "rules", Some("rules"));
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE replication_log SET imported=1 WHERE workspace_id='ws' \
+                    AND json_extract(payload_json,'$.momentId')='remote-head'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("imported journal proof");
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Accepted);
+    // An unjournaled head with equal bytes cannot borrow the old receipt.
+    save_status_file(&mut engine, "unknown-head", "rules", Some("rules"));
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM replication_log WHERE workspace_id='ws' \
+                    AND json_extract(payload_json,'$.momentId')='unknown-head'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("unknown journal proof");
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+}
+
+#[test]
+fn direct_status_reports_undelivered_decisions_durably() {
+    for answer in [
+        ShareCollectionWriteResponse::Stale {
+            path: "shared/docs/packing/automations.yaml".to_owned(),
+            current_blob_sha256: Some(hex_sha256(b"owner rules")),
+        },
+        ShareCollectionWriteResponse::Refused {
+            reason: "catalog-refused".to_owned(),
+        },
+    ] {
+        let (_scratch, db, mut engine) = proposal_fixture(&["rules", "new rules"]);
+        hold_schema(&mut engine, "shared/docs/packing");
+        save_status_file(&mut engine, "save-1", "rules", None);
+        let relay = PagedShareRelay::new([], []);
+        relay
+            .collection_write_answers
+            .lock()
+            .unwrap()
+            .push_back(Ok(answer));
+        let client = RelaySyncClient::new(relay);
+        push(&client, &mut engine);
+        drop(engine);
+        let mut engine = EngineStore::open(&db, 0).expect("reopen refused");
+        let status = delivery_status(&engine);
+        assert_eq!(status.state, DirectWriteState::Refused);
+        assert_eq!(status.reason.as_deref(), Some("direct-write-not-delivered"));
+        save_status_file(&mut engine, "save-2", "new rules", Some("rules"));
+        assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+    }
+}
+
+#[test]
+fn direct_status_keeps_undelivered_state_while_a_plan_is_open() {
+    let (_scratch, _db, mut engine) = proposal_fixture(&["rules", "v1", "v2"]);
+    hold_schema(&mut engine, "shared/docs/packing");
+    save_status_file(&mut engine, "save-1", "rules", None);
+    journal_local_moment(
+        &mut engine,
+        &edit_moment(
+            "save-2",
+            "other-schema",
+            "shared/docs/other/collection.yaml",
+            "v1",
+            "v2",
+        ),
+        2_001,
+    );
+    let relay = PagedShareRelay::new([], []);
+    relay.collection_write_answers.lock().unwrap().extend([
+        Ok(ShareCollectionWriteResponse::Stale {
+            path: "shared/docs/packing/automations.yaml".to_owned(),
+            current_blob_sha256: None,
+        }),
+        Err(RelayError::ServerInternal),
+    ]);
+    let client = RelaySyncClient::new(relay);
+    assert_eq!(
+        client.push_direct_writes(&mut engine, "ws", SHARE, &edit_grant(), &NoFaults, 0,),
+        Err(RelayError::ServerInternal)
+    );
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Refused);
+}
+
+#[test]
+fn direct_status_tracks_a_rename_into_automations_left_on_proposals() {
+    let path = "shared/docs/packing/automations.yaml";
+    let from = "shared/docs/packing/other.yaml";
+    let (_scratch, db, mut engine) = proposal_fixture(&["rules"]);
+    hold_schema(&mut engine, "shared/docs/packing");
+    save_status_file(&mut engine, "save-1", "rules", None);
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    push(&client, &mut engine);
+    for (source, target, moment) in [(path, from, "move-away"), (from, path, "rename-in")] {
+        VersionedTextStore::new(&mut engine)
+            .rename_text_file(
+                &RenameTextFile {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    from_path: source.to_owned(),
+                    to_path: target.to_owned(),
+                    moment_id: moment.to_owned(),
+                    request_id: None,
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2_200,
+                },
+                &NoFaults,
+            )
+            .expect("rename");
+    }
+    journal_local_moment(
+        &mut engine,
+        &local_moment_payload(
+            "rename-in",
+            "status-file",
+            "rename",
+            Some((from, "rules")),
+            path,
+            "rules",
+        ),
+        2_200,
+    );
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+    push(&client, &mut engine);
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Refused);
+    drop(engine);
+    let engine = EngineStore::open(&db, 0).expect("reopen proposal status");
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Refused);
+}
+#[test]
+fn direct_status_unknown_files_and_missing_identity_remain_pending_and_scope_is_fenced() {
+    let (_scratch, _db, mut engine) = proposal_fixture(&["rules"]);
+    assert_eq!(
+        delivery_status(&engine),
+        DirectWriteStatus {
+            content_hash: None,
+            state: DirectWriteState::Accepted,
+            reason: None,
+        }
+    );
+    save_status_file(&mut engine, "save-1", "rules", None);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM sync_identity WHERE workspace_id='ws'", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("remove identity");
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE snapshots SET metadata_origin='sync' WHERE workspace_id='ws'",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("unjournaled local sync origin");
+    assert_eq!(delivery_status(&engine).state, DirectWriteState::Pending);
+    for path in [
+        "private/automations.yaml",
+        "shared/docs/../private",
+        "shared/docs/.env",
+    ] {
+        assert!(matches!(
+            read_direct_write_status(&engine, "ws", SHARE, path, &edit_grant(),),
+            Err(SyncError::ShareBoundaryViolation)
+        ));
+    }
+}
+
+#[test]
+fn direct_push_takes_dataset_automations_but_leaves_dataset_schema_rules_and_records_on_proposals()
+{
+    let (_scratch, _db, mut engine) = proposal_fixture(&["old", "new", "rules"]);
+    VersionedTextStore::new(&mut engine)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "dataset".to_owned(),
+                path: "shared/docs/data/dataset.json".to_owned(),
+                text: "old".to_owned(),
+                moment_id: "dataset-seed".to_owned(),
+                metadata_origin: "sync".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 1_000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("dataset manifest");
+    journal_local_moment(
+        &mut engine,
+        &create_moment(
+            "auto",
+            "dataset-auto",
+            "shared/docs/data/automations.yaml",
+            "rules",
+        ),
+        1_001,
+    );
+    for (index, name) in ["dataset.json", "rules.yaml", "record.md"]
+        .iter()
+        .enumerate()
+    {
+        journal_local_moment(
+            &mut engine,
+            &edit_moment(
+                &format!("edit-{index}"),
+                &format!("object-{index}"),
+                &format!("shared/docs/data/{name}"),
+                "old",
+                "new",
+            ),
+            1_002 + index as i64,
+        );
+    }
+    let client = RelaySyncClient::new(PagedShareRelay::new([], []));
+    push(&client, &mut engine);
+    assert_eq!(
+        written_paths(&client),
+        vec![vec!["shared/docs/data/automations.yaml".to_owned()]]
+    );
+    assert_eq!(propose(&client, &mut engine, "proposal").submitted, 3);
 }
 
 #[test]
