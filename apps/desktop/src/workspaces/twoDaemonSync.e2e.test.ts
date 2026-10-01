@@ -19,6 +19,7 @@ import {
 } from "./workspaceEngineCapture";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { createRecordByHand, desktopRecordEditContext } from "./desktopRecordEdits";
+import { onWorkspaceCaptureSettled } from "./captureActivityBridge";
 import { createTestScratch } from "./testTemp";
 import {
   installWorkspaceDataKey,
@@ -363,12 +364,15 @@ it.skipIf(engine.missing)(
       await source.chats.ensureGeneralChannel({ workspaceId });
       await relay.push();
       await capture.writeAuthoredFile(join(rootA, "tasks/collection.yaml"), "fields: {}\n", { kind: "human", humanId: "local-person" });
+      const captureClient = await source.sessions.run(source.workspace, async ({ client }) => client);
+      if (!captureClient.onEvent) throw new Error("The real daemon has no capture event source.");
+      const onEvent = captureClient.onEvent.bind(captureClient);
       const person = { kind: "human", humanId: "local-person" } as const;
       const context = desktopRecordEditContext({
         capture, workspaceRoot: rootA, person, signal: new AbortController().signal,
         withAdapter: work => source.sessions.run(source.workspace, ({ client, workspace }) =>
           work(new VersionedLiveAdapter(client, workspace, { workspaceId }))),
-        onCaptureSettled: () => () => undefined,
+        onCaptureSettled: listener => onWorkspaceCaptureSettled({ onEvent }, workspaceId, listener),
       });
       const record = await createRecordByHand({ collectionPath: "tasks", name: "hand-made" }, {
         author: createLocalChangeAuthor("Local person"),
@@ -394,7 +398,7 @@ it.skipIf(engine.missing)(
       await relayServer.stop();
     }
   },
-  REAL_DAEMON_DEADLINE_MS,
+  3 * REAL_DAEMON_DEADLINE_MS,
 );
 
 it.skipIf(engine.missing)(
