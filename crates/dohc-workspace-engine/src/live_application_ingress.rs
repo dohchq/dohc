@@ -7,7 +7,7 @@ use crate::rpc::live_application::{
 use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveApplicationBootstrap,
-    LiveUpdateStructRange, RelayAcceptedLiveUpdate,
+    LiveUpdateStructRange, RelayAcceptedLiveUpdate, parse_admitted_metadata,
 };
 use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::limits::MAX_WIRE_INTEGER;

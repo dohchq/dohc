@@ -105,19 +105,17 @@ fn imported_activation_rejects_uncommitted_cursor_budget_and_changed_provenance(
                 .map_err(write_sql)
         })
         .unwrap();
-    assert!(
-        adopt_owner_committed(
-            &mut f.store,
-            &f.handle,
-            f.cut.clone(),
-            1_000_000,
-            10,
-            4,
-            &NoFaults,
-            |_, _, _, _| Ok(())
-        )
-        .is_err()
-    );
+    assert!(adopt_owner_committed(
+        &mut f.store,
+        &f.handle,
+        f.cut.clone(),
+        1_000_000,
+        10,
+        4,
+        &NoFaults,
+        |_, _, _, _| Ok(())
+    )
+    .is_err());
     assert!(capture_imported(&mut f, 1_000_000).is_err());
 }
 
@@ -463,17 +461,15 @@ fn accepted_owner_origin_does_not_load_retained_document_bytes() {
 fn release_removes_only_the_matching_unadopted_activation_source() {
     let mut f = imported_fixture();
     let captured = capture_imported(&mut f, 1_000_000).unwrap();
-    assert!(
-        release_imported_owner_activation(
-            &mut f.store,
-            "other",
-            "workspace",
-            &captured.activation_id,
-            Some((&f.key, &f.binding.lineage_claim_id)),
-            &NoFaults,
-        )
-        .is_err()
-    );
+    assert!(release_imported_owner_activation(
+        &mut f.store,
+        "other",
+        "workspace",
+        &captured.activation_id,
+        Some((&f.key, &f.binding.lineage_claim_id)),
+        &NoFaults,
+    )
+    .is_err());
     assert_eq!(
         f.store
             .table_row_count("ydoc_owner_activation_sources")
@@ -505,17 +501,15 @@ fn release_removes_only_the_matching_unadopted_activation_source() {
         &NoFaults,
     )
     .unwrap();
-    assert!(
-        release_imported_owner_activation(
-            &mut f.store,
-            "namespace",
-            "workspace",
-            &captured.activation_id,
-            Some((&f.key, &f.binding.lineage_claim_id)),
-            &NoFaults,
-        )
-        .is_err()
-    );
+    assert!(release_imported_owner_activation(
+        &mut f.store,
+        "namespace",
+        "workspace",
+        &captured.activation_id,
+        Some((&f.key, &f.binding.lineage_claim_id)),
+        &NoFaults,
+    )
+    .is_err());
 }
 
 #[test]
@@ -524,17 +518,15 @@ fn release_preserves_an_adopted_activation_source() {
     let captured = capture_imported(&mut f, 1_000_000).unwrap();
     f.cut.adoption_id = captured.activation_id.clone();
     f.adopt().unwrap();
-    assert!(
-        release_imported_owner_activation(
-            &mut f.store,
-            "namespace",
-            "workspace",
-            &captured.activation_id,
-            Some((&f.key, &f.binding.lineage_claim_id)),
-            &NoFaults,
-        )
-        .is_err()
-    );
+    assert!(release_imported_owner_activation(
+        &mut f.store,
+        "namespace",
+        "workspace",
+        &captured.activation_id,
+        Some((&f.key, &f.binding.lineage_claim_id)),
+        &NoFaults,
+    )
+    .is_err());
     assert_eq!(
         f.store
             .table_row_count("ydoc_owner_activation_sources")
@@ -640,11 +632,10 @@ fn release_reclaims_only_an_unreferenced_captured_full_state() {
             f.store.get_binary_blob(digest).unwrap().is_some(),
             retain_second_capture
         );
-        assert!(
-            f.store
-                .get_binary_blob(&f.binding.lineage_claim_id)
-                .unwrap()
-                .is_some()
-        );
+        assert!(f
+            .store
+            .get_binary_blob(&f.binding.lineage_claim_id)
+            .unwrap()
+            .is_some());
     }
 }

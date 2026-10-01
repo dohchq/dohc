@@ -362,7 +362,7 @@ fn native_restore_tail_retains_interleaved_pending_context_with_descending_termi
             expected,
             serde_json::to_vec(&native_tail_prepare(&mut f, input.clone()).unwrap()).unwrap()
         );
-        use dohc_engine_storage::backup::{BackupOutcome, RealFreeSpace, create_verified_backup};
+        use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, RealFreeSpace};
         let BackupOutcome::Verified(backup) = create_verified_backup(
             &f.store,
             &f._scratch.join("recovery"),
@@ -425,11 +425,9 @@ fn native_restore_tail_retains_adoption_seed_without_admitting_it() {
         proposal.receipt().native_sources[0].source.origin,
         owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
     ));
-    assert!(
-        proposal.receipt().native_sources[0]
-            .accepted_receipt
-            .is_none()
-    );
+    assert!(proposal.receipt().native_sources[0]
+        .accepted_receipt
+        .is_none());
     assert_eq!(before, native_tail_inventory(&f.store));
 }
 
@@ -595,18 +593,17 @@ fn native_restore_tail_budgets_count_pending_sources_on_first_prepare_and_replay
         }
         for (bytes, events) in [(2_000_000, 1), (1, 100)] {
             let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-            assert!(
-                f._owner
-                    .prepare_restore(
-                        &mut f.store,
-                        input.clone(),
-                        coordinate,
-                        bytes,
-                        events,
-                        &NoFaults
-                    )
-                    .is_err()
-            );
+            assert!(f
+                ._owner
+                .prepare_restore(
+                    &mut f.store,
+                    input.clone(),
+                    coordinate,
+                    bytes,
+                    events,
+                    &NoFaults
+                )
+                .is_err());
         }
     }
 }
@@ -734,13 +731,11 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
         proposal.receipt().native_sources[1].source.origin,
         owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate { .. }
     ));
-    assert!(
-        proposal
-            .receipt()
-            .native_sources
-            .iter()
-            .all(|source| source.accepted_receipt.is_none())
-    );
+    assert!(proposal
+        .receipt()
+        .native_sources
+        .iter()
+        .all(|source| source.accepted_receipt.is_none()));
     assert!(proposal.receipt().accepted_history.suffix.is_empty());
     assert_eq!(inventory, native_tail_inventory(&f.store));
 }
@@ -846,7 +841,7 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
             .unwrap(),
         prep.fence
     );
-    use dohc_engine_storage::backup::{BackupOutcome, RealFreeSpace, create_verified_backup};
+    use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, RealFreeSpace};
     let BackupOutcome::Verified(backup) = create_verified_backup(
         &f.store,
         &f._scratch.join("applied-recovery"),
