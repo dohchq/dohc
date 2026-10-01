@@ -84,6 +84,9 @@ test("verification selects packages and proofs and prepares before parallel jobs
     const desktop = mode !== "pr" || desktopScripts || js && changed === "services/workspace-api/src/index.ts";
     const nativeProof = js && selected.includes("@dohc/share-web");
     const accounts = js && selected.includes("@dohc/workspace-api");
+    // The gallery is selected for renderer inputs and for everything; only Windows runs it, where its pixels compare.
+    const statesPage = desktop && js && (full || changed === "pnpm-lock.yaml" || job === "js" && !changed);
+    const gallery = statesPage && process.platform === "win32";
     const prepare = desktop || nativeProof;
     const database = js && (desktop || nativeProof || accounts);
     const browser = js && (desktop || accounts);
@@ -295,9 +298,9 @@ test("verification selects packages and proofs and prepares before parallel jobs
               return {stdout:''};
             }
             assert.ok(${desktop},'Unselected desktop proof');
-            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|@self-host-onboarding':'@verification-smoke'];
+            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|@self-host-onboarding'+(${gallery}?'|@states-page':''):'@verification-smoke'];
             assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
-            const titles=['@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[])];
+            const titles=['@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?['@states-page every shared part']:[])];
             writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
               stats:{expected:pr?2:1,unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'?1:0},
               suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:'passed'}]}]}))}]}],
@@ -369,7 +372,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
           "accounts-cancelled": /Account browser verification did not complete without failures or skips/,
           "desktop-cancelled": /Desktop verification did not complete a passing test run/,
           "desktop-skipped": /A mandatory desktop smoke test was skipped/,
-          "onboarding-missing": /did not pass both persistence and self-host onboarding proofs/,
+          "onboarding-missing": /did not pass every required proof: @verification-smoke, @self-host-onboarding/,
         };
         assert.match(result.stderr, messages[fault]);
         const ranJs = js;
@@ -416,7 +419,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
         assert.equal(report.full,full);
         if (js) {
           assert.deepEqual(report.javascript.packages,selected);
-          assert.deepEqual(report.javascript.proofs,{accounts,selfHostNative:nativeProof,desktop});
+          assert.deepEqual(report.javascript.proofs,{accounts,selfHostNative:nativeProof,desktop,statesPage});
           assert.equal(report.javascript.desktopScripts, desktopScripts);
           assert.deepEqual(report.javascript.testFiles, siteOnly ? {"@dohc/desktop": siteFiles} : {});
           const tests=JSON.parse(readFileSync(report.jsTests,"utf8"));
