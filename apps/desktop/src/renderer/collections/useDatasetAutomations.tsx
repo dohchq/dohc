@@ -30,9 +30,7 @@ export function useDatasetAutomations(props: {
   tableId: string;
   /** The dataset as its host describes it, once the page has read it. */
   dataset: DatasetDescription | null;
-  /** Rises when the page reads its records again, as after a run a press started. */
-  refreshKey: number;
-  /** A run's Undo changed records, so the page reads them again. */
+  /** A server run's Undo changed records, so the page reads them again. */
   onRecordsChanged: () => void;
   onError: ErrorReport;
   onNotice: (message: string, undo?: () => void) => void;
@@ -83,11 +81,11 @@ export function useDatasetAutomations(props: {
   const started = useCallback(() => setStart(null), []);
   const [closeAsk, setCloseAsk] = useState(0);
   const { reload } = automations;
-  // Opening the panel, or a run changing records while it is open, reads
-  // the list again for its last-run marks.
+  // Opening the panel reads the list again for its last-run marks. The open
+  // panel reads it again itself when runs finish.
   useEffect(() => {
     if (open) void reload();
-  }, [open, props.refreshKey]);
+  }, [open]);
   // A save, a hand edit, or approved rules change what main read: the count
   // follows, and a dataset whose rules were approved or archived since has
   // its folder named again. A new folder reads its list on its own.

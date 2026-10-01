@@ -21,7 +21,7 @@ import type {
 import type { DatasetDescription, DatasetOperation } from "@dohc/security-contract/dataset";
 import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
-import { formulaProblems } from "@dohc/automation-executor/automation-plan";
+import { findProblems, formulaProblems } from "@dohc/automation-executor/automation-plan";
 import { automationCount, AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations, type AutomationFocus } from "./AutomationsPanel";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
 import type { AutomationDatasetTable, AutomationTable } from "./automationDraft";
@@ -142,6 +142,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       return {
         diagnostics: written.status === "refused" ? written.diagnostics : [],
         formulaProblems: formulaProblems(automation),
+        findProblems: [] as Array<{ path: string; problem: string }>,
         cannotRun: null as string | null,
         missingFiles: [] as string[],
       };
@@ -645,7 +646,7 @@ describe("a dataset table's ⚡ panel", () => {
     // Main's check of the unchanged automation gives no reason, as for rules it cannot see. The syntax
     // problem it also names shows when its answer has landed.
     bridge.checkCollectionAutomation.mockResolvedValue({
-      diagnostics: [], formulaProblems: [{ path: "/do/0/set/Finished on", problem: "Marker." }], cannotRun: null, missingFiles: [],
+      diagnostics: [], formulaProblems: [{ path: "/do/0/set/Finished on", problem: "Marker." }], findProblems: [], cannotRun: null, missingFiles: [],
     });
     const user = userEvent.setup();
     render(<Panel table={INVOICES} />);
@@ -659,7 +660,7 @@ describe("a dataset table's ⚡ panel", () => {
     const { bridge, written } = makeBridge(read([]));
     const reason = "A schedule starts this automation, so an action's input cannot use trigger.record. Use a value instead.";
     bridge.checkCollectionAutomation.mockImplementation(async ({ automation }: { automation: Automation }) => ({
-      diagnostics: [], formulaProblems: [], cannotRun: automation.do.some((step) => step.kind === "invoke" && step.input.length > 0) ? reason : null, missingFiles: [],
+      diagnostics: [], formulaProblems: [], findProblems: [], cannotRun: automation.do.some((step) => step.kind === "invoke" && step.input.length > 0) ? reason : null, missingFiles: [],
     }));
     const user = userEvent.setup();
     render(<Panel table={withActions} />);
@@ -775,14 +776,20 @@ describe("a dataset table's ⚡ panel", () => {
     await waitFor(() => expect(document.activeElement).toBe(within(screen.getByTestId("automation-later")).getByRole("switch")));
   });
 
-  it("tells the page after an Undo, so it reads the records the run changed again", async () => {
+  it("tells the page after a server run's Undo, and leaves a local Undo to the event every window hears", async () => {
     const rules = { datasetId: "dataset-1", revision: 1, revisionSha256: "a".repeat(64) };
-    makeBridge(read([summary(onInvoices)]), [run({ writes: [{ kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", expectedVersion: 1, version: 2,
-      fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] }] })]);
-    const onRunUndone = vi.fn();
-    render(<Panel table={INVOICES} onRunUndone={onRunUndone} focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    const writes = [{ kind: "dataset-edit" as const, rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", expectedVersion: 1, version: 2,
+      fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] }];
+    const local = run({ writes });
+    const { bridge } = makeBridge(read([summary(onInvoices)]), [local], { serverRuns: [run({ claimId: "atc_server", createdAtMs: local.createdAtMs + 1, writes })] });
+    const onRunUndone = vi.fn(), onNotice = vi.fn();
+    render(<Panel table={INVOICES} onRunUndone={onRunUndone} onNotice={onNotice} focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
     await userEvent.click(within(await screen.findByTestId("automation-run-atc_1")).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledOnce());
+    expect(onRunUndone).not.toHaveBeenCalled();
+    await userEvent.click(within(screen.getByTestId("automation-run-server-atc_server")).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(onRunUndone).toHaveBeenCalledOnce());
+    expect(bridge.undoCollectionAutomationRun).toHaveBeenLastCalledWith(expect.objectContaining({ claimId: "atc_server", onServer: true }));
   });
 });
 
@@ -1604,6 +1611,54 @@ describe("the builder's Find and results", () => {
     await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(written).toHaveLength(1), SLOW);
     expect(written[0]!.automations[0]!.do).toEqual([{ ...saved.do[0], as: "every" }, { ...saved.do[1], records: "every" }]);
+  }, 30_000);
+
+  it("says beside a Find that its Collection cannot query the condition, by the planner's rule, and refuses Save until it can", async () => {
+    const either = 'record.Title == "Item 1" || record.Title == "Item 2"';
+    const saved: Automation = { ...stamp, do: [{ kind: "find", condition: either, collection: null, as: "items", operation: null }] };
+    const { bridge, written } = makeBridge(read([summary(saved)]));
+    // Main reads each Find as a run does; Tasks keeps its records in documents.
+    const checkBy = bridge.checkCollectionAutomation.getMockImplementation()!;
+    bridge.checkCollectionAutomation.mockImplementation(async (payload: { automation: Automation }) => {
+      const found = findProblems(payload.automation, () => "document");
+      return { ...(await checkBy(payload)), findProblems: found, cannotRun: found[0]?.problem ?? null };
+    });
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const formula = screen.getByRole("textbox", { name: "Step 1, condition formula" });
+    // It shows before Save, as a syntax error does, and once: not again as why the automation does not run.
+    await waitFor(() => expect(formula.getAttribute("aria-invalid")).toBe("true"), SLOW);
+    const supported = 'A Find can check one field, such as record.Status == "Doing" or contains(record.Tags, "urgent").';
+    expect(document.getElementById(formula.getAttribute("aria-describedby")!)?.textContent).toBe(supported);
+    expect(screen.getAllByText(supported)).toHaveLength(1);
+    expect(screen.queryByLabelText("Does not run")).toBeNull();
+    // A Save it refuses moves focus to the Find's condition.
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(document.activeElement).toBe(formula), SLOW);
+    expect(written).toEqual([]);
+    await user.clear(formula);
+    await user.type(formula, 'record.Title == "Item 1"');
+    await waitFor(() => expect(formula.getAttribute("aria-invalid")).toBeNull(), SLOW);
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(written).toHaveLength(1), SLOW);
+    expect(written[0]!.automations[0]!.do[0]).toEqual({ ...saved.do[0], condition: 'record.Title == "Item 1"' });
+  }, 30_000);
+
+  it("still says why the automation does not run when the reason is not the Find's", async () => {
+    const saved: Automation = { ...stamp, do: [{ kind: "find", condition: 'record.Title == "a" || record.Title == "b"', collection: null, as: "items", operation: null }] };
+    const { bridge } = makeBridge(read([summary(saved)]));
+    const unrelated = "Points is not a field in Tasks.";
+    const checkBy = bridge.checkCollectionAutomation.getMockImplementation()!;
+    bridge.checkCollectionAutomation.mockImplementation(async (payload: { automation: Automation }) =>
+      ({ ...(await checkBy(payload)), findProblems: findProblems(payload.automation, () => "document"), cannotRun: unrelated }));
+    const user = userEvent.setup();
+    render(<Panel />);
+    await openBuilder(user);
+    const formula = screen.getByRole("textbox", { name: "Step 1, condition formula" });
+    await waitFor(() => expect(formula.getAttribute("aria-invalid")).toBe("true"), SLOW);
+    expect(screen.getByLabelText("Does not run")).toBeTruthy();
+    expect(screen.getByText(unrelated)).toBeTruthy();
   }, 30_000);
 });
 
@@ -3302,7 +3357,7 @@ describe("the builder", () => {
     bridge.checkCollectionAutomation.mockResolvedValue({
       diagnostics: [{ code: "duplicate-value", path: "/automations/0/do/0/do/1/as" }],
       formulaProblems: [{ path: "/do/0/otherwise/0/set/Title", problem: "Unexpected token." }],
-      cannotRun: null, missingFiles: [],
+      findProblems: [], cannotRun: null, missingFiles: [],
     });
     const user = userEvent.setup();
     render(<Panel />);

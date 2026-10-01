@@ -4769,10 +4769,11 @@ export type ListAutomationPeoplePayload = z.infer<typeof ListAutomationPeoplePay
 export type ListAutomationPeopleResult = CollectionAutomationPeople | { status: "unavailable" };
 
 // The builder checks a draft the way saving would: what the file contract
-// refuses, the syntax error of each formula and message in it, at its JSON
-// Pointer from the automation, why dohc would not run it in its
-// Collection, and the code files its steps name that the Collection's
-// folder lacks. Neither stops a save. Nothing runs.
+// refuses, the syntax error of each formula and message in it and each Find
+// its Collection cannot query, at its JSON Pointer from the automation, why
+// dohc would not run it in its Collection, and the code files its steps name
+// that the Collection's folder lacks. The last two do not stop a save.
+// Nothing runs.
 export const CheckCollectionAutomationPayload = z.object({
   workspaceId: WORKSPACE_ID,
   collectionPath: PATH_STRING,
@@ -4782,6 +4783,8 @@ export type CheckCollectionAutomationPayload = z.infer<typeof CheckCollectionAut
 export type CheckCollectionAutomationResult = {
   diagnostics: AutomationDiagnostic[];
   formulaProblems: Array<{ path: string; problem: string } | { path: string; code: AutomationDiagnostic["code"] }>;
+  /** Each Find whose condition its Collection cannot query, with what a Find there can check. */
+  findProblems: Array<{ path: string; problem: string }>;
   cannotRun: string | null;
   /** Each code file a step names, relative to the Collection's folder, that dohc cannot find. */
   missingFiles: string[];
@@ -6538,9 +6541,11 @@ export interface DohcDesktopBridge
   // workspace plus global events. The payload is additive context — a
   // subscriber may ignore it. Returns an unsubscribe function.
   onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
-  // Live push: an automation claim failed or a retry queued one, so run
-  // history changed. A poke, not the record; the subscriber reads the runs
-  // again, guarded by its own workspace. Returns an unsubscribe function.
+  // Live push: automation runs finished, an Undo put records back, a claim
+  // failed, or a retry queued one, so run history and dataset records may
+  // have changed. A poke, not the
+  // record; the subscriber reads again, guarded by its own workspace. Returns
+  // an unsubscribe function.
   onAutomationRunsChanged(
     listener: (event: { workspaceId: string }) => void,
   ): () => void;

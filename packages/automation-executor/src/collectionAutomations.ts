@@ -48,6 +48,7 @@ import {
   directMessageReach,
   fieldWritesOf,
   fieldsNamedBy,
+  findProblems,
   parseCollectionAutomationId,
   scheduleHash,
   stepsInOrder,
@@ -344,7 +345,12 @@ export interface CollectionAutomationsOptions {
   readMessageBody: CollectionAutomationRunDependencies["readMessageBody"];
   /** Sends one notice from this workspace. */
   postNotice: CollectionAutomationRunDependencies["postNotice"];
-  /** A claim settled failed, or a retry cleared one: run history re-reads. */
+  /**
+   * A drain ran runs to their end, done or failed, an Undo put records back,
+   * a press or the engine made a failed claim, or a retry cleared one: run
+   * history re-reads, and so do tables whose records no file shows, as a
+   * dataset's. A drain and a Stop and restore pass each tell it once.
+   */
   onRunsChanged(): void;
   /**
    * Sends the notice for an automation's newest failure on this computer,
@@ -1133,6 +1139,8 @@ export class CollectionAutomations {
   private reopenAfterRestart = false;
   private draining: Promise<void> | null = null;
   private redrain = false;
+  /** A run finished or failed in this drain; the drain tells the windows once, as it ends. */
+  private runsFinished = false;
   private busyTimer: ReturnType<typeof setTimeout> | null = null;
   // When run history last expired, or null before the first time.
   private historyPrunedAtMs: number | null = null;
@@ -1512,6 +1520,7 @@ export class CollectionAutomations {
     this.state = "disposed";
     await Promise.allSettled([this.draining]);
     await this.payOwed(false);
+    this.flushRunsFinished();
     await Promise.allSettled([this.chain, this.verdictChain]);
   }
 
@@ -1528,6 +1537,7 @@ export class CollectionAutomations {
     this.stopRuns();
     await Promise.allSettled([this.draining]);
     await this.payOwed(false);
+    this.flushRunsFinished();
     this.opened = null;
     await Promise.allSettled([this.chain, this.verdictChain]);
   }
@@ -1889,6 +1899,21 @@ export class CollectionAutomations {
       ? indexed.file.entries.flatMap((entry) => (entry.status === "valid" ? stepsInOrder(entry.automation).map(({ step }) => JSON.stringify(step)) : []))
       : []);
     return (await this.reasonsIn(collectionPath, false)).reasonOf(this.pinned(collectionPath, automation, held));
+  }
+
+  /**
+   * Each Find in a draft whose condition its Collection cannot query, as a
+   * run reads it, at its JSON Pointer. A Find in a Collection dohc has not
+   * indexed has none to give.
+   */
+  async draftFindProblems(collectionPath: string, automation: Automation): Promise<Array<{ path: string; problem: string }>> {
+    await this.ready();
+    return findProblems(automation, (collection) => this.keptIn(collection ?? collectionPath));
+  }
+
+  /** How an indexed Collection keeps its records, or null when dohc cannot tell, as for one whose schema it cannot read. */
+  private keptIn(path: string): "dataset" | "document" | null {
+    return this.datasets.has(path) ? "dataset" : this.collections.has(path) && typeof this.schemaFields.get(path) !== "string" ? "document" : null;
   }
 
   /**
@@ -2919,8 +2944,7 @@ export class CollectionAutomations {
     if (resolved.kind === "one" && resolved.automation.id !== automation.id) {
       throw new Error(`${field} now runs another automation. Press it again.`);
     }
-    const datasetReason = await relayedDatasetReason(automation, id.collectionPath, async (path) =>
-      this.datasets.has(path) ? "dataset" : this.collections.has(path) && typeof this.schemaFields.get(path) !== "string" ? "document" : null);
+    const datasetReason = await relayedDatasetReason(automation, id.collectionPath, async (path) => this.keptIn(path));
     if (datasetReason !== null) throw new Error(datasetReason);
     // The engine's press id carries that definition, so the claim stays
     // bound to it through a restart; the run refuses any other.
@@ -3014,6 +3038,17 @@ export class CollectionAutomations {
    * person's choice of delete where one is needed.
    */
   async undo(
+    input: { automationId: string; claimId: string; deletes: DatasetUndoConfirmed | null },
+    trash: (path: string) => Promise<void>,
+  ): Promise<CollectionAutomationUndo> {
+    const undone = await this.undoClaim(input, trash);
+    // Every window reads again, so a split pane or another window shows what Undo put back.
+    if (undone.status === "undone") this.options.onRunsChanged();
+    return undone;
+  }
+
+  /** Undo for one claim's runs, telling no window; its caller tells them once. */
+  private async undoClaim(
     input: { automationId: string; claimId: string; deletes: DatasetUndoConfirmed | null },
     trash: (path: string) => Promise<void>,
     // Stop and restore undoes only the runs under these definitions.
@@ -3218,6 +3253,9 @@ export class CollectionAutomations {
       await this.undoEachRun(hashes, trash, result, again, keptFields);
     } catch (error) {
       return { ...result, keptFields: [...keptFields], errorMessage: error instanceof Error ? error.message : String(error) };
+    } finally {
+      // Once for the whole pass, however many claims it undid.
+      if (hashes.size > 0) this.options.onRunsChanged();
     }
     return { ...result, keptFields: [...keptFields], errorMessage: null };
   }
@@ -3242,10 +3280,10 @@ export class CollectionAutomations {
           const kept = documentUndoKept(runs).length > 0;
           if (again ? pending || !kept : !pending && !kept) continue;
           const target = { automationId, claimId: claim.claimId };
-          let undone = await this.undo({ ...target, deletes: null }, trash, wanted);
+          let undone = await this.undoClaim({ ...target, deletes: null }, trash, wanted);
           // Stop and restore leaves deletions for the person's confirmation in run history.
           if (undone.status === "confirm" && undone.preview.deletes + undone.preview.unchecked === 0) {
-            undone = await this.undo({ ...target, deletes: { token: undone.preview.token, chosen: [] } }, trash, wanted);
+            undone = await this.undoClaim({ ...target, deletes: { token: undone.preview.token, chosen: [] } }, trash, wanted);
           }
           if (undone.status === "undone") {
             if (pending) result.undone += 1;
@@ -4362,7 +4400,15 @@ export class CollectionAutomations {
     } finally {
       for (const held of release) this.owed.set(held.claim.claimId, { held, action: { kind: "release" } });
       if (!stop.aborted) await this.payOwed(true);
+      this.flushRunsFinished();
     }
+  }
+
+  /** Once per drain, not per run, so a burst of runs, finished or failed, reads history and records again once. */
+  private flushRunsFinished(): void {
+    if (!this.runsFinished) return;
+    this.runsFinished = false;
+    this.options.onRunsChanged();
   }
 
   /** The engine's oldest pending claim, else the dataset ledger's. */
@@ -4397,9 +4443,11 @@ export class CollectionAutomations {
       }
       if (!answered) continue;
       this.owed.delete(id);
-      if (action.kind === "settle" && action.input.state === "failed") this.failuresChanged();
       if (action.kind === "settle") {
+        // A failure sends its notice now; the windows hear once, as the drain ends.
+        if (action.input.state === "failed") this.reportFailures();
         await action.settled();
+        if (action.input.state === "failed" || action.outcome === "done") this.runsFinished = true;
         if (isPress(held)) {
           this.options.onPressSettled({
             claimId: id,

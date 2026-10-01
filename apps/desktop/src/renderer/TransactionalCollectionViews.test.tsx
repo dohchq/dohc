@@ -7,8 +7,8 @@ import { deferred } from "../testing/deferred";
 import { TransactionalCollectionPage, type TransactionalInvoke, type TransactionalDatasetDescription } from "./TransactionalCollectionPage";
 import type { CollectionTableView } from "./collectionTableViews";
 vi.mock("@dohc/collection-views",()=>({
-  BoardView: (props:BoardViewProps)=><div>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}</div>,
-  CalendarView: (props:CalendarViewProps)=><div><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.records.map(record=><span key={record.id}>{record.id}</span>)}</div>,
+  BoardView: (props:BoardViewProps)=><div>{props.groups.map((group,index)=><section key={index} aria-label={String(group.value)}>{group.records.map(record=><div key={record.id}>{record.values.find(value=>value.field==="name")?.value as string}<button disabled={!props.onCellChange} onClick={()=>props.onCellChange?.({recordId:record.id,recordPath:"",field:props.groupBy,value:"Done"})}>Move {record.id}</button><button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></div>)}{props.groupFooter?.(group,index)}</section>)}</div>,
+  CalendarView: (props:CalendarViewProps)=><div><button onClick={()=>props.onNavigate?.(new Date(2027,0,1))}>January</button>{props.records.map(record=><span key={record.id}>{record.id}<button onClick={()=>props.onOpenRecord?.(record)}>Show {record.id}</button></span>)}</div>,
 }));
 const dataset:TransactionalDatasetDescription={datasetId:"dataset",name:"Work",revision:1,revisionSha256:"a".repeat(64),tables:[{tableId:"table",name:"Tasks",fields:[
   {fieldId:"name",name:"Name",type:"text",required:true,unique:false},
@@ -95,4 +95,115 @@ it("ignores reads from a previous workspace",async()=>{
   await screen.findByRole("button",{name:"January"});
   await act(async()=>pending.resolve({result:{rows:[{id:"private",version:1,values:{name:"Private"}}],nextCursor:null}}));
   expect(result.props.onError).not.toHaveBeenCalled();expect(screen.queryByText("private")).toBeNull();
+});
+it("shows board records an automation changed in place, keeping the board on screen while it reads",async()=>{
+  let name="First task",gate:Promise<void>|null=null;
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    await gate;
+    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
+    return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name,status:"Todo"}}]:[]}};
+  });
+  const result=setup(invoke);
+  await screen.findByText("First task");
+  const before=invoke.mock.calls.length,held=deferred();
+  gate=held.promise;name="Changed task";
+  result.rerender(<TransactionalCollectionPage {...result.props} recordsChanged={1}/>);
+  await waitFor(()=>expect(invoke.mock.calls.length).toBeGreaterThan(before));
+  expect(screen.queryByText("Loading view…")).toBeNull();
+  expect(screen.getByText("First task")).toBeTruthy();
+  expect((screen.getByRole("button",{name:"Move 4"}) as HTMLButtonElement).disabled).toBe(false);
+  await act(async()=>held.resolve());
+  await screen.findByText("Changed task");
+  expect(result.props.onError).not.toHaveBeenCalled();
+});
+it("finishes a board read and a read in place asked for in one render, and shows an open record's new values",async()=>{
+  let name="First task",gate:Promise<void>|null=null;
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    await gate;
+    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
+    return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name,status:"Todo"}}]:[]}};
+  });
+  const result=setup(invoke);
+  fireEvent.click(await screen.findByRole("button",{name:"Show 4"}));
+  expect(screen.getByRole("dialog",{name:"Record details"}).textContent).toContain("First task");
+  fireEvent.click(screen.getByRole("button",{name:"Close"}));
+  const held=deferred();gate=held.promise;name="Second task";
+  result.rerender(<TransactionalCollectionPage {...result.props} recordsVersion={1} recordsChanged={1}/>);
+  expect(await screen.findByText("Loading view…")).toBeTruthy();
+  await act(async()=>held.resolve());
+  await screen.findByText("Second task");
+  // Neither read is left holding the view.
+  await waitFor(()=>expect((screen.getByRole("button",{name:"Move 4"}) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole("button",{name:"Show 4"}));
+  name="Third task";
+  result.rerender(<TransactionalCollectionPage {...result.props} recordsVersion={1} recordsChanged={2}/>);
+  await waitFor(()=>expect(screen.getByRole("dialog",{name:"Record details"}).textContent).toContain("Third task"));
+  expect(screen.queryByText("Loading view…")).toBeNull();
+  expect(result.props.onError).not.toHaveBeenCalled();
+});
+it("reads an open Calendar record by its id once an automation moves it out of the shown month, and says when it is gone",async()=>{
+  const table=dataset.tables[0]!;
+  const keyed:TransactionalDatasetDescription={...dataset,tables:[{...table,primaryKeyFieldId:"key",fields:[{fieldId:"key",name:"Record ID",type:"text",required:true,unique:true,generated:"record-id"},...table.fields]}],
+    operations:dataset.operations.map(operation=>operation.kind==="read"?{...operation,fieldIds:["key",...operation.fieldIds]}:operation)};
+  const day=(date:Date)=>`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+  const now=new Date(),inMonth=day(new Date(now.getFullYear(),now.getMonth(),15)),later=day(new Date(now.getFullYear(),now.getMonth()+3,15));
+  let date:string|null=inMonth;
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    const input=request.input as Record<string,AppBackendJson>;
+    const row={id:7,version:date===inMonth?1:2,values:{key:"7",name:"Pay rent",status:"Todo",date}};
+    if(input.filters)return {result:{rows:date===null?[]:[row],nextCursor:null}};
+    const range=input.range as {start:string;end:string};
+    return {result:{range:input.range!,rows:date!==null&&date>=range.start&&date<range.end?[row]:[],nextCursor:null}};
+  });
+  const props={workspaceId:"w",dataset:keyed,tableId:"table",invoke,onError:vi.fn(),onNotice:vi.fn(),activeView:calendar};
+  const {rerender}=render(<TransactionalCollectionPage {...props}/>);
+  fireEvent.click(await screen.findByRole("button",{name:"Show 7"}));
+  const details=()=>screen.getByRole("dialog",{name:"Record details"});
+  expect(details().textContent).toContain(inMonth);
+  date=later;
+  rerender(<TransactionalCollectionPage {...props} recordsChanged={1}/>);
+  await waitFor(()=>expect(details().textContent).toContain(later));
+  expect(details().textContent).toContain("Version 2");
+  expect(invoke.mock.calls.some(([request])=>JSON.stringify((request.input as Record<string,AppBackendJson>).filters)===JSON.stringify([{fieldId:"key",value:7}]))).toBe(true);
+  date=null;
+  rerender(<TransactionalCollectionPage {...props} recordsChanged={2}/>);
+  await waitFor(()=>expect(details().textContent).toContain("This record is no longer in this Collection."));
+  expect(details().textContent).not.toContain(later);
+  expect(props.onError).not.toHaveBeenCalled();
+});
+it("drops a by-id read of an open Calendar record once a newer read finds it back in the month",async()=>{
+  const table=dataset.tables[0]!;
+  const keyed:TransactionalDatasetDescription={...dataset,tables:[{...table,primaryKeyFieldId:"key",fields:[{fieldId:"key",name:"Record ID",type:"text",required:true,unique:true,generated:"record-id"},...table.fields]}],
+    operations:dataset.operations.map(operation=>operation.kind==="read"?{...operation,fieldIds:["key",...operation.fieldIds]}:operation)};
+  const day=(date:Date)=>`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+  const now=new Date(),first=day(new Date(now.getFullYear(),now.getMonth(),10)),later=day(new Date(now.getFullYear(),now.getMonth()+3,15)),back=day(new Date(now.getFullYear(),now.getMonth(),20));
+  let date=first,version=1;
+  const byId=deferred<{result:AppBackendJson}>();
+  const row=()=>({id:7,version,values:{key:"7",name:"Pay rent",status:"Todo",date}});
+  const invoke=vi.fn(async(request:TransactionalInvoke,_signal:AbortSignal):Promise<{result:AppBackendJson}>=>{
+    const input=request.input as Record<string,AppBackendJson>;
+    if(input.filters)return byId.promise;
+    const range=input.range as {start:string;end:string};
+    return {result:{range:input.range!,rows:date>=range.start&&date<range.end?[row()]:[],nextCursor:null}};
+  });
+  const props={workspaceId:"w",dataset:keyed,tableId:"table",invoke,onError:vi.fn(),onNotice:vi.fn(),activeView:calendar};
+  const {rerender}=render(<TransactionalCollectionPage {...props}/>);
+  fireEvent.click(await screen.findByRole("button",{name:"Show 7"}));
+  const details=()=>screen.getByRole("dialog",{name:"Record details"});
+  // Out of the month: the page reads the record by its id, and that read waits.
+  date=later;version=2;
+  rerender(<TransactionalCollectionPage {...props} recordsChanged={1}/>);
+  await waitFor(()=>expect(invoke.mock.calls.some(([request])=>(request.input as Record<string,AppBackendJson>).filters!==undefined)).toBe(true));
+  // Back in the month before it answers: the newer read in place shows the record.
+  date=back;version=3;
+  rerender(<TransactionalCollectionPage {...props} recordsChanged={2}/>);
+  await waitFor(()=>expect(details().textContent).toContain("Version 3"));
+  const signal=invoke.mock.calls.find(([request])=>(request.input as Record<string,AppBackendJson>).filters!==undefined)![1];
+  expect(signal.aborted).toBe(true);
+  // The late answer, from while it was out of the month, changes nothing; nor would one saying it was gone.
+  await act(async()=>byId.resolve({result:{rows:[{id:7,version:2,values:{key:"7",name:"Pay rent",status:"Todo",date:later}}],nextCursor:null}}));
+  expect(details().textContent).toContain("Version 3");
+  expect(details().textContent).toContain(back);
+  expect(details().textContent).not.toContain(later);
+  expect(details().textContent).not.toContain("no longer");
 });

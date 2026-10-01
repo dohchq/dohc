@@ -91,8 +91,6 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
   // One listener set and one cached view per field and record.
   const listeners = new Map<string, Set<() => void>>();
   const views = new Map<string, ButtonView>();
-  // Surfaces that read again what this store's runs changed.
-  const settledListeners = new Set<() => void>();
   let requests = 0;
 
   const notify = (key: string) => {
@@ -120,7 +118,6 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
 
   function settle(key: string, run: Run, outcome: Outcome): void {
     finish(key);
-    for (const listener of [...settledListeners]) listener();
     const { onNotice } = report();
     if (outcome.outcome === "done") onNotice(`Ran ${run.field} on ${run.label}`);
     else if (outcome.outcome === "skipped") onNotice(`${run.field} made no changes to ${run.label}`);
@@ -163,12 +160,6 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
     },
 
     states: () => states,
-
-    /** Calls `listener` each time one of this store's runs ends, however it ended. */
-    onSettled(listener: () => void): () => void {
-      settledListeners.add(listener);
-      return () => settledListeners.delete(listener);
-    },
 
     /** Whether nothing shows or runs these buttons, so the window may drop the store. */
     idle: () => listeners.size === 0 && runs.size === 0,
@@ -265,7 +256,6 @@ export function createAutomationButtons(scope: { workspaceId: string; of: Button
       earlyWaits.clear();
       everyChanged();
       listeners.clear();
-      settledListeners.clear();
     },
   };
 }

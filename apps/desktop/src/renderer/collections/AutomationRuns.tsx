@@ -245,7 +245,7 @@ export function AutomationRuns(props: {
   onRetry: (target: { automationId: string; claimId: string; onServer: boolean }) => void;
   onError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
   onNotice: (message: string) => void;
-  /** An Undo changed records. */
+  /** A server run's Undo changed records. A local Undo tells every window itself. */
   onUndone?: () => void;
 }) {
   const { workspaceId, automationId, onError, onNotice } = props;
@@ -405,7 +405,7 @@ export function AutomationRuns(props: {
           setPreviewing({ claimId, onServer, epoch, preview: result.preview, chosen: {} });
         } else {
           onNotice(undoSentence(result, onServer));
-          props.onUndone?.();
+          if (onServer) props.onUndone?.();
         }
       })
       .catch((error: unknown) => {

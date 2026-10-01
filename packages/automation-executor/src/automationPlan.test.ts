@@ -18,6 +18,7 @@ import {
   fieldWritesOf,
   filterValues,
   formulaProblems,
+  findProblems,
   findQueryOf,
   findRequest,
   localIsoTime,
@@ -134,6 +135,28 @@ describe("find conditions", () => {
     ]) {
       expect(findQueryOf(condition)).toEqual({ problem: expect.stringContaining("A Find can check one field") });
     }
+  });
+
+  it("names each Find its Collection cannot query, at its path, by that Collection's rule", () => {
+    const find = (condition: string, collection: string | null = null): Automation["do"][number] => ({ kind: "find", condition, collection, as: "found", operation: null });
+    const either = 'record.Name == "Item 1" || record.Name == "Item 2"';
+    const both = 'record.Status == "Doing" && record.Paid == false';
+    const drafted: Automation = {
+      id: "finds", name: "Finds", enabled: true, when: { kind: "record-added", table: null }, if: null,
+      do: [
+        find(either),
+        find(both, "Data"),
+        { kind: "if", if: "true", do: [find(both)], otherwise: [find('contains(record.Tags, "urgent")', "Data")] },
+        // A syntax error is formulaProblems', an empty condition the builder's, and an unknown Collection the run's.
+        find("record.Name =="), find(" "), find(either, "Elsewhere"),
+      ],
+    };
+    const keptIn = (collection: string | null): "dataset" | "document" | null => collection === null ? "document" : collection === "Data" ? "dataset" : null;
+    expect(findProblems(drafted, keptIn)).toEqual([
+      { path: "/do/0/find", problem: expect.stringContaining("A Find can check one field") },
+      { path: "/do/2/do/0/find", problem: expect.stringContaining("A Find can check one field") },
+      { path: "/do/2/otherwise/0/find", problem: expect.stringContaining("checks fields with ==") },
+    ]);
   });
 });
 
