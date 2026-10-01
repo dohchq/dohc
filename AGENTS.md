@@ -121,6 +121,16 @@ There are no users yet. Optimize for the best current design instead of preservi
 
 Understand the constraint before building. Choose the smallest model that makes the required behavior and performance unsurprising. Do not preserve complexity because it exists or add machinery because it looks architecturally impressive.
 
+### Effect in TypeScript
+
+- In Electron main, services, and Node-only packages, prefer Effect when it removes manual cancellation, retry, or resource coordination.
+- Keep Promise interfaces for callers that do not use Effect.
+- Prefer Effect Schema for new or changed external contracts in modules whose runtime already uses Effect.
+- Keep renderer and preload runtime imports Effect-free.
+- Keep native and OS resource limits authoritative.
+- Preserve the first recorded failure and wait for owned resources to close before returning.
+- Before retaining a conversion, measure the artifact that loads the changed module, including its first-load time.
+
 ### Continue from approved work
 
 - Treat approved behavior and design choices as the working baseline. Interpret feedback at the requested scope.
