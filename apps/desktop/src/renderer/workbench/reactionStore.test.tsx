@@ -667,6 +667,60 @@ describe("reaction store: visits and accounts", () => {
       expect(store.view("thread-1").reactions.map((row) => row.authorId)).toEqual([fallback]);
     });
 
+    // The fallback's like on an empty m1 shows under the account once a read
+    // of m2 proves the rename. Its later writes must still find that row.
+    describe("its own like painted under the account after a proof on another message", () => {
+      function provenOnM2() {
+        const store = createReactionStore("ws");
+        const stored = you({ reactionId: "stable-m2-id", messageId: "m2", authorId: fallback });
+        store.ingest([{ threadId: "thread-1", reactions: [stored], viewerAuthorId: fallback, ticket: store.ticket() }]);
+        const writes = controlled<undefined>(bridgeMock.setChatReaction);
+        bridgeMock.listChatReactions.mockReturnValue(deferred<Listing>().promise);
+        const choose = (nextState: "added" | "removed") =>
+          store.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState, viewerAuthorId: fallback, onError: vi.fn() });
+        const prove = () =>
+          store.ingest([{
+            threadId: "thread-1",
+            messageIds: ["m2"],
+            reactions: [{ ...stored, authorId: account }],
+            viewerAuthorId: account,
+            ticket: store.ticket(),
+          }]);
+        const m1 = () => store.view("thread-1", "m1").reactions;
+        return { store, writes, choose, prove, m1 };
+      }
+
+      it("lets a queued removal take back the add still being written", () => {
+        const { choose, prove, m1 } = provenOnM2();
+        choose("added");
+        choose("removed");
+        expect(m1()).toEqual([]);
+        prove();
+        expect(m1()).toEqual([]);
+      });
+
+      it("lets a pending removal take back an accepted add", async () => {
+        const { writes, choose, prove, m1 } = provenOnM2();
+        choose("added");
+        writes[0]!.resolve(undefined);
+        await waitFor(() => expect(bridgeMock.listChatReactions).toHaveBeenCalledOnce());
+        prove();
+        expect(m1().map((row) => row.authorId)).toEqual([account]);
+        choose("removed");
+        expect(writes).toHaveLength(2);
+        expect(m1()).toEqual([]);
+      });
+
+      it("paints one row for add, remove, add", () => {
+        const { choose, prove, m1 } = provenOnM2();
+        choose("added");
+        prove();
+        choose("removed");
+        choose("added");
+        expect(m1().map((row) => row.authorId)).toEqual([account]);
+      });
+    });
+
     it("does not join another account whose read leaves the account's row where it was", () => {
       const store = createReactionStore("ws");
       const read = (reactions: ChatReactionRecord[], viewerAuthorId: string) =>
