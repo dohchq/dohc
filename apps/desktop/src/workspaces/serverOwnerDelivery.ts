@@ -1,6 +1,10 @@
 import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import type {DesktopOwnerDeliveryDocument} from "./desktopOwnerDelivery";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import {ownerDeliveryWait} from "./ownerDeliveryWait";
 
 /** Only authenticated, ready server targets may enter native owner enrollment. */
 export function readyOwnerDeliveryDocuments(value: unknown, workspaceId: string): DesktopOwnerDeliveryDocument[] {
@@ -35,46 +39,58 @@ export function startServerOwnerDelivery(options: {
   onError(error: unknown): void;
 }) {
   const lifetime = new AbortController(), nextDocument = new Map<string, number>();
-  let nextWorkspace = 0, timer: ReturnType<typeof setTimeout> | undefined, active: Promise<void> | undefined;
+  const retries = Effect.runSync(Queue.sliding<void>(1));
+  let nextWorkspace = 0;
   let retryWorkspace: string | undefined;
-  let lastDocumentCount = 0;
-  function schedule(delay: number) {
-    if (!lifetime.signal.aborted) {timer = setTimeout(run, delay); timer.unref();}
-  }
-  function run() {
-    timer = undefined;
-    if (lifetime.signal.aborted || active) return;
-    let acknowledged = false;
-    active = Promise.resolve().then(async () => {
+  const pass = Effect.tryPromise({
+    try: async () => {
+      const requested = retryWorkspace; retryWorkspace = undefined;
       const workspaces = options.workspaceIds();
       for (const id of nextDocument.keys()) if (!workspaces.includes(id)) nextDocument.delete(id);
-      if (!workspaces.length) return;
-      if (retryWorkspace && workspaces.includes(retryWorkspace)) nextWorkspace = workspaces.indexOf(retryWorkspace);
-      retryWorkspace = undefined;
+      if (!workspaces.length) return {documentCount: 0, acknowledged: false};
+      if (requested && workspaces.includes(requested)) nextWorkspace = workspaces.indexOf(requested);
       const workspaceId = workspaces[nextWorkspace % workspaces.length]!;
       nextWorkspace = (nextWorkspace + 1) % workspaces.length;
       const index = nextDocument.get(workspaceId) ?? 0;
       const result = await options.runPass(workspaceId, index, AbortSignal.any([lifetime.signal, AbortSignal.timeout(options.attemptTimeoutMs)]));
-      if (lifetime.signal.aborted) return;
+      if (lifetime.signal.aborted) return {documentCount: 0, acknowledged: false};
       nextDocument.set(workspaceId, result.documentCount ? (index + 1) % result.documentCount : 0);
-      lastDocumentCount = result.documentCount;
-      acknowledged = result.acknowledged || index + 1 < result.documentCount;
-    }).catch(error => {
-      if (!lifetime.signal.aborted) {try {options.onError(error);} catch { /* Keep retrying after a logging failure. */ }}
-    }).finally(() => {
-      active = undefined;
-      const delay = retryWorkspace ? 0 : acknowledged ? Math.min(options.retryDelayMs, 200) : lastDocumentCount === 0 ? Math.min(options.retryDelayMs * 5, 60_000) : options.retryDelayMs;
-      schedule(delay);
-      lastDocumentCount = 0;
-    });
-  }
-  schedule(0);
+      return {documentCount: result.documentCount, acknowledged: result.acknowledged || index + 1 < result.documentCount};
+    },
+    catch: error => error,
+  }).pipe(Effect.catch(error => {
+    if (!lifetime.signal.aborted) {try {options.onError(error);} catch { /* Keep retrying after a logging failure. */ }}
+    return Effect.succeed({documentCount: 0, acknowledged: false});
+  }));
+  const finished = Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
+    yield* Effect.acquireRelease(Effect.succeed(retries), Queue.shutdown);
+    let delayMs = 0;
+    while (!lifetime.signal.aborted) {
+      if (delayMs === 0) yield* ownerDeliveryWait(0);
+      else {
+        const requested = yield* Effect.raceFirst(
+          ownerDeliveryWait(delayMs).pipe(Effect.as(false)),
+          Queue.take(retries).pipe(Effect.as(true)),
+        );
+        if (requested) yield* ownerDeliveryWait(0);
+      }
+      yield* Queue.clear(retries);
+      // A retry wakes the idle wait, but never releases an unfinished pass.
+      const result = yield* Effect.uninterruptible(pass);
+      delayMs = retryWorkspace ? 0 : result.acknowledged ? Math.min(options.retryDelayMs, 200)
+        : result.documentCount === 0 ? Math.min(options.retryDelayMs * 5, 60_000) : options.retryDelayMs;
+    }
+  })), {signal: lifetime.signal});
   return {
     retry(workspaceId: string) {
       if (lifetime.signal.aborted) return;
       retryWorkspace = workspaceId;
-      if (!active) {clearTimeout(timer); schedule(0);}
+      Queue.offerUnsafe(retries, undefined);
     },
-    async stop() {lifetime.abort(); clearTimeout(timer); await active;},
+    async stop() {
+      lifetime.abort();
+      const exit = await finished;
+      if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause);
+    },
   };
 }
