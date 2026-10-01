@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { NoticeNotSentError } from "./automationChat";
-import { AUTOMATION_SWITCHED_OFF_BODY, type AutomationFailedNotice } from "./automationFailedNotice";
+import { AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY, type AutomationFailedNotice } from "./automationFailedNotice";
 import { reportAutomationFailure } from "./automationFailureReporting";
 import type { AutomationFailureReport } from "./collectionAutomations";
 import type { NoticeRecipient } from "@dohc/workspace-contracts/relay";
@@ -42,6 +42,16 @@ describe("shared automation failure reporting", () => {
     sent.length = 0;
     await reportAutomationFailure({ ...deps, primary: undefined, primaryUserId: "starter", lastChangedBy: async () => "starter" }, "ws", report);
     expect(sent).toHaveLength(1);
+  });
+
+  it("asks the other people involved to get a switch no share can make, and keeps the host's own wording", async () => {
+    const sent: Array<AutomationFailedNotice & Partial<NoticeRecipient>> = [];
+    await reportAutomationFailure({ computer: { installId: "server", label: "Server" }, primary: { recipientUserId: "owner" }, throughShare: false,
+      post: async (notice) => { sent.push(notice); }, withdraw: async () => undefined, lastChangedBy: async () => "editor", onError: () => undefined,
+    }, "ws", { ...report, ownerSwitchesOnly: true });
+    expect(sent.map((notice) => notice.recipientUserId)).toEqual(["owner", "starter", "editor"]);
+    expect(sent[0]!.body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)).toBe(true);
+    expect(sent.slice(1).map((notice) => notice.body)).toEqual([AUTOMATION_SWITCHED_OFF_VIEW_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY]);
   });
 
   it("skips a recipient denied at the post boundary without blocking other eligible people", async () => {

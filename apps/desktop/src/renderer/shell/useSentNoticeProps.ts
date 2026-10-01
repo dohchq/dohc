@@ -22,19 +22,22 @@ const AUTOMATION_LOOKUP_FAILED_NOTE = "dohc could not open this automation.";
 
 /**
  * What a notice's Open asks the workspace it switches to to open once it is
- * ready: a file, or an automation's switch in the ⚡ panel.
+ * ready: a file, or an automation's switch in the ⚡ panel. `sharedFile` is
+ * the automations.yaml a share holds there.
  */
-export type OpenOnSwitch = string | { automationControls: string };
+export type OpenOnSwitch = string | { automationControls: string; sharedFile?: string };
 
 // Main dismisses a failed run's notice once its run is queued again.
 const nothingToReread = () => undefined;
 
 // A share a notice named, for the Open a share surface, and the notice's
-// file, to open once the share is added.
+// file, to open once the share is added. `controls` opens an automation's
+// switch instead when the share opens as its own workspace.
 export interface NoticeShare {
   resolvedShare: { shareId: string; shareCode: string };
   liveEditing: boolean;
   path: string | null;
+  controls?: { automationControls: string; sharedFile: string };
 }
 
 /**
@@ -51,10 +54,16 @@ export function useSentNoticeProps(input: {
   /**
    * Opens an automation's runs, at the run a notice names when this
    * computer ran it; resolves to a sentence for the row when it cannot.
+   * Nothing opens once `signal` aborts.
    */
-  openAutomation: (automationId: string, run: string | null) => Promise<string | null>;
-  /** Opens an automation's row in the ⚡ panel with its switch focused, to turn it on again. */
-  openAutomationControls: (automationId: string) => Promise<string | null>;
+  openAutomation: (automationId: string, run: string | null, signal: AbortSignal) => Promise<string | null>;
+  /**
+   * Opens an automation's row in the ⚡ panel with its switch focused, to
+   * turn it on again. Through a share, `sharedFile` names its automations.yaml,
+   * which opens when the panel cannot show the automation. Nothing opens
+   * once `signal` aborts.
+   */
+  openAutomationControls: (automationId: string, options: { sharedFile?: string; signal: AbortSignal }) => Promise<string | null>;
   onSwitchWorkspace: (workspace: WorkspaceSummary, open?: OpenOnSwitch) => void;
   onOpenShare: (share: NoticeShare) => void;
   reportShellError: (fallback: string, error: unknown, retry?: (() => void) | null) => void;
@@ -155,18 +164,20 @@ export function useSentNoticeProps(input: {
           return NOT_HERE_NOTE;
         case "workspace": {
           const automation = AUTOMATION_NOTICE_KINDS.has(notice.kind) ? notice.target?.automation : undefined;
-          // Only the person's own workspace lists automations with their
-          // switches. A share view or shared-with-me folder opens the file.
-          const toSwitch = controls && automation !== undefined && place.mount === null && place.workspace.shareView === undefined
-            ? automation
-            : null;
+          // Through a share view or shared-with-me folder, the shared panel
+          // finds the automation by its automations.yaml there.
+          const shared = place.mount !== null || place.workspace.shareView !== undefined;
+          const sharedFile = shared ? place.path ?? undefined : undefined;
+          const toSwitch = controls && automation !== undefined && (!shared || sharedFile !== undefined) ? automation : null;
           if (place.workspace.workspaceId !== workspaceId) {
-            onSwitchWorkspace(place.workspace, toSwitch !== null ? { automationControls: toSwitch } : place.path ?? undefined);
+            onSwitchWorkspace(place.workspace, toSwitch !== null
+              ? { automationControls: toSwitch, ...(sharedFile === undefined ? {} : { sharedFile }) }
+              : place.path ?? undefined);
           } else if (toSwitch !== null) {
-            return await noteOf(openAutomationControls(toSwitch));
+            return await noteOf(openAutomationControls(toSwitch, { sharedFile, signal }));
           } else if (automation !== undefined && place.mount === null && !controls) {
             // Only the computer that ran a run holds it.
-            return await noteOf(openAutomation(automation, notice.postedHere ? notice.target?.run ?? null : null));
+            return await noteOf(openAutomation(automation, notice.postedHere ? notice.target?.run ?? null : null, signal));
           } else if (place.path !== null) {
             openFile(place.path);
           }
@@ -181,10 +192,12 @@ export function useSentNoticeProps(input: {
           }
           if (signal.aborted) return null;
           if (!found.found) return ACCESS_ENDED_NOTE;
+          const automation = controls && AUTOMATION_NOTICE_KINDS.has(notice.kind) ? notice.target?.automation : undefined;
           onOpenShare({
             resolvedShare: { shareId: found.share.shareId, shareCode: found.share.shareCode },
             liveEditing: opensForLiveEditing(found.share),
             path: place.path,
+            ...(automation === undefined || place.path === null ? {} : { controls: { automationControls: automation, sharedFile: place.path } }),
           });
           return null;
         }

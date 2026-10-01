@@ -82,8 +82,8 @@ function setup(
     workspaceId,
     workspaces,
     openFile: vi.fn(),
-    openAutomation: vi.fn(async (_automationId: string, _run: string | null): Promise<string | null> => null),
-    openAutomationControls: vi.fn(async (_automationId: string): Promise<string | null> => null),
+    openAutomation: vi.fn(async (_automationId: string, _run: string | null, _signal: AbortSignal): Promise<string | null> => null),
+    openAutomationControls: vi.fn(async (_automationId: string, _options: { sharedFile?: string; signal: AbortSignal }): Promise<string | null> => null),
     onSwitchWorkspace: vi.fn(),
     onOpenShare: vi.fn(),
     reportShellError: vi.fn(),
@@ -214,12 +214,14 @@ describe("a failed run's notice", () => {
 
   it("opens its automation in the panel here, and its file from another workspace", async () => {
     const { result, openAutomation, openFile, onSwitchWorkspace } = setup([failed], [workspace("notes")]);
-    await expect(result.current.onOpenSentNotice(failed, live())).resolves.toBeNull();
-    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", "atc_1");
+    // The shell opens nothing once the Open's signal aborts.
+    const open = new AbortController();
+    await expect(result.current.onOpenSentNotice(failed, open.signal)).resolves.toBeNull();
+    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", "atc_1", open.signal);
     // Another computer ran it, so its run is not here to open.
     openAutomation.mockClear();
     await result.current.onOpenSentNotice({ ...failed, postedHere: false }, live());
-    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", null);
+    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", null, expect.any(AbortSignal));
     expect(openFile).not.toHaveBeenCalled();
     cleanup();
     const trip = workspace("trip");
@@ -261,7 +263,7 @@ describe("a failed run's notice", () => {
     const switchedOff = { ...failed, target: { ...controls, run: "atc_1" } };
     const { result, openAutomation, openAutomationControls } = setup([switchedOff], [workspace("notes")]);
     await expect(result.current.onOpenSentNotice(switchedOff, live())).resolves.toBeNull();
-    expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp");
+    expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { signal: expect.any(AbortSignal) });
     expect(openAutomation).not.toHaveBeenCalled();
   });
 
@@ -269,7 +271,7 @@ describe("a failed run's notice", () => {
     retryAutomationNotice.mockResolvedValue({ status: "switched-off", target: controls });
     const { result, openAutomation, openAutomationControls, reportShellError, sentNotices } = setup([failed], [workspace("notes")]);
     await act(async () => result.current.onRetrySentNotice(failed));
-    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp"));
+    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { signal: expect.any(AbortSignal) }));
     expect(openAutomation).not.toHaveBeenCalled();
     expect(reportShellError).not.toHaveBeenCalled();
     expect(sentNotices.dismiss).not.toHaveBeenCalled();
@@ -298,35 +300,42 @@ describe("a failed run's notice", () => {
     const { result, openAutomationControls } = setup([copy], [workspace("notes")]);
     expect(result.current.sentNotices[0]?.retryable).toBe(false);
     await result.current.onOpenSentNotice(copy, live());
-    expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp");
+    expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { signal: expect.any(AbortSignal) });
   });
 
-  it("opens the automation's file through a share, which lists no automations to switch on", async () => {
+  it("opens a share's switched-off automation on its switch through that share's automations.yaml", async () => {
     // A copy for someone who reaches the Collection through a share.
     const copy = notice({ kind: "automation-failed", workspaceId: null, recipientShareId: "share-1", target: controls });
     const mounted = workspace("notes", { shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }] });
     const inMount = setup([copy], [mounted]);
-    await inMount.result.current.onOpenSentNotice(copy, live());
-    expect(inMount.openFile).toHaveBeenCalledWith("shared-with-me/owner/Tasks/automations.yaml");
+    const open = new AbortController();
+    await expect(inMount.result.current.onOpenSentNotice(copy, open.signal)).resolves.toBeNull();
+    expect(inMount.openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { sharedFile: "shared-with-me/owner/Tasks/automations.yaml", signal: open.signal });
     cleanup();
 
-    const view = workspace("trip-view", { shareView: { shareId: "share-1", granterEmail: null } });
+    const view = workspace("trip-view", { shareView: { shareId: "share-1", granterEmail: null, access: "edit" } });
     const inView = setup([copy], [workspace("notes"), view], "trip-view");
     await inView.result.current.onOpenSentNotice(copy, live());
-    expect(inView.openFile).toHaveBeenCalledWith("Tasks/automations.yaml");
+    expect(inView.openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { sharedFile: "Tasks/automations.yaml", signal: expect.any(AbortSignal) });
     cleanup();
 
-    const toView = setup([copy], [workspace("notes"), view]);
+    // Only a separate Edit view can switch it, so Open goes there before this workspace's read-only folder.
+    const toView = setup([copy], [mounted, view]);
     await toView.result.current.onOpenSentNotice(copy, live());
-    expect(toView.onSwitchWorkspace).toHaveBeenCalledWith(view, "Tasks/automations.yaml");
+    expect(toView.onSwitchWorkspace).toHaveBeenCalledWith(view, { automationControls: "collection:Tasks#stamp", sharedFile: "Tasks/automations.yaml" });
     cleanup();
 
+    // A share this computer has not added carries the switch through Open a share.
     getRelayReceivedShare.mockResolvedValueOnce(RECEIVED);
     const notAdded = setup([copy], [workspace("notes")]);
     await notAdded.result.current.onOpenSentNotice(copy, live());
-    expect(notAdded.onOpenShare).toHaveBeenCalledWith(expect.objectContaining({ path: "Tasks/automations.yaml" }));
+    expect(notAdded.onOpenShare).toHaveBeenCalledWith({
+      resolvedShare: { shareId: "share-1", shareCode: "code-1" }, liveEditing: true, path: "Tasks/automations.yaml",
+      controls: { automationControls: "collection:Tasks#stamp", sharedFile: "Tasks/automations.yaml" },
+    });
+    expect(notAdded.openAutomationControls).not.toHaveBeenCalled();
     for (const shown of [inMount, inView, toView, notAdded]) {
-      expect(shown.openAutomationControls).not.toHaveBeenCalled();
+      expect(shown.openFile).not.toHaveBeenCalled();
       expect(shown.openAutomation).not.toHaveBeenCalled();
     }
   });
@@ -336,10 +345,10 @@ describe("a failed run's notice", () => {
     retryAutomationNotice.mockResolvedValue({ status: "switched-off", target: controls });
     const { result, openAutomation, openAutomationControls } = setup([cut], [workspace("notes")]);
     await expect(result.current.onOpenSentNotice(cut, live())).resolves.toBeNull();
-    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", "atc_1");
+    expect(openAutomation).toHaveBeenCalledWith("collection:Tasks#stamp", "atc_1", expect.any(AbortSignal));
     expect(openAutomationControls).not.toHaveBeenCalled();
     await act(async () => result.current.onRetrySentNotice(cut));
-    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp"));
+    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { signal: expect.any(AbortSignal) }));
   });
 
   it("reports why main did not run it, as on another computer", async () => {
@@ -383,7 +392,7 @@ describe("Try again on a failed run of the owner's server", () => {
     } });
     const { result, openAutomationControls, reportShellError } = setup([failed()], [workspace("notes")]);
     await act(async () => result.current.onRetrySentNotice(failed()));
-    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp"));
+    await waitFor(() => expect(openAutomationControls).toHaveBeenCalledWith("collection:Tasks#stamp", { signal: expect.any(AbortSignal) }));
     expect(reportShellError).not.toHaveBeenCalled();
   });
 

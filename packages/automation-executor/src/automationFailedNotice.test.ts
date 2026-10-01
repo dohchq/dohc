@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isNoticeBody, isNoticeLine, isNoticeTarget, NOTICE_BODY_MAX_CHARS, NOTICE_TITLE_MAX_CHARS } from "@dohc/workspace-contracts/relay";
-import { automationFailedElsewhereBody, automationFailedNotice, automationFailureBodyForPermission, AUTOMATION_SWITCHED_OFF_BODY, FAILED_ELSEWHERE_BODY, type AutomationFailure } from "./automationFailedNotice";
+import { automationFailedElsewhereBody, automationFailedNotice, automationFailureBodyForPermission, AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY, FAILED_ELSEWHERE_BODY, type AutomationFailure } from "./automationFailedNotice";
 
 const failure = (overrides: Partial<AutomationFailure> = {}): AutomationFailure => ({
   automationId: "collection:object-tasks#stamp",
@@ -16,15 +16,28 @@ const failure = (overrides: Partial<AutomationFailure> = {}): AutomationFailure 
 const laptop = { installId: "install-a", label: "Ice's laptop" };
 
 describe("a failed run's notice", () => {
+  const OPEN = "Open the automation to turn it back on.";
+  const ASK = "Ask someone who can edit the Collection to turn it back on.";
   it.each([
-    [true, true, "Open the automation to turn it back on."],
-    [true, false, "Open its automations file to turn it back on."],
-    [false, false, "Ask someone who can edit the Collection to turn it back on."],
-  ] as const)("gives the recipient a recovery they can use (edit %s, owner %s)", (canEdit, isOwner, next) => {
+    // Owners and editors through a share both open the automation's switch.
+    [AUTOMATION_SWITCHED_OFF_BODY, true, true, OPEN],
+    [AUTOMATION_SWITCHED_OFF_BODY, true, false, OPEN],
+    [AUTOMATION_SWITCHED_OFF_BODY, false, false, ASK],
+    // No share can switch an automation that wakes an agent, so only its owner opens it.
+    [AUTOMATION_SWITCHED_OFF_VIEW_BODY, true, true, OPEN],
+    [AUTOMATION_SWITCHED_OFF_VIEW_BODY, true, false, ASK],
+    [AUTOMATION_SWITCHED_OFF_VIEW_BODY, false, false, ASK],
+  ] as const)("gives the recipient a recovery they can use (sent %s, edit %s, owner %s)", (sent, canEdit, isOwner, next) => {
     const fact = "dohc switched this automation off after 3 runs in a row took too long. ";
-    expect(automationFailureBodyForPermission(`${AUTOMATION_SWITCHED_OFF_BODY} Detail.`, canEdit, isOwner)).toBe(`${fact}${next} Detail.`);
-    expect(isNoticeBody(automationFailureBodyForPermission(AUTOMATION_SWITCHED_OFF_BODY + "x".repeat(2_000), canEdit, isOwner))).toBe(true);
+    expect(automationFailureBodyForPermission(`${sent} Detail.`, canEdit, isOwner)).toBe(`${fact}${next} Detail.`);
+    expect(isNoticeBody(automationFailureBodyForPermission(sent + "x".repeat(2_000), canEdit, isOwner))).toBe(true);
     expect(automationFailureBodyForPermission("Ordinary failure.", canEdit, isOwner)).toBe("Ordinary failure.");
+  });
+
+  it("tells the other people involved to ask for a switch no share can make", () => {
+    const stopped = failure({ switchedOff: { reason: "consecutive-timeouts", collectionPath: "Tasks" } });
+    expect(automationFailedElsewhereBody(stopped, "Slow", true)).toBe(AUTOMATION_SWITCHED_OFF_VIEW_BODY);
+    expect(automationFailedElsewhereBody(failure(), "Slow", true)).toBe(FAILED_ELSEWHERE_BODY);
   });
 
   it("puts the switch-off and recovery before a long private error, with a typed controls target", () => {

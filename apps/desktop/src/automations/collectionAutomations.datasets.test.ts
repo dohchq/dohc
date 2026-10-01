@@ -530,6 +530,7 @@ describe("Collection automations on a dataset", () => {
       // An agent's change does not select a recipient for the failure notice.
       startedBy: null,
       replaces: null,
+      ownerSwitchesOnly: false,
     }]);
     expect(f.claims()).toEqual([expect.objectContaining({ state: "failed", attempts: 0, depth: 4 })]);
     const [run] = (await f.executor.runs(AUTOMATION)).runs;
@@ -779,6 +780,7 @@ describe("Collection automations on a dataset", () => {
       collectionPath: "Budget",
       startedBy: "person-local",
       replaces: null,
+      ownerSwitchesOnly: false,
     }]);
     await f.executor.dispose();
   });
