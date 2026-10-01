@@ -250,13 +250,15 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       const { rows } = await stack!.account.pool.query<{ id: string }>('SELECT id FROM "user" WHERE email = $1', [recipientAccount.email]);
       const recipientUserId = rows[0]!.id;
       const dialog = await openSharedRestore(page);
+      // Restore lists an account recipient by account ID, not email.
+      const recipientLabel = `Account ${recipientUserId}`;
       const access = dialog.getByLabel("Access to stop");
-      await expect(access.locator("option", { hasText: recipientAccount.email })).toHaveCount(1, { timeout: 60_000 });
-      await access.selectOption({ label: recipientAccount.email });
+      await expect(access.locator("option", { hasText: recipientLabel })).toHaveCount(1, { timeout: 60_000 });
+      await access.selectOption({ label: recipientLabel });
       await dialog.getByLabel("Shared restore point").selectOption({ label: "Before accepted edits" });
       await dialog.getByRole("button", { name: "Review affected access" }).click();
       await expect(dialog.getByRole("heading", { name: "Stop access before restoring?" })).toBeVisible();
-      await expect(dialog.getByRole("listitem").filter({ hasText: recipientAccount.email })).toHaveCount(1);
+      await expect(dialog.getByRole("listitem").filter({ hasText: recipientLabel })).toHaveCount(1);
       // The recipient can still edit, so read-only afterwards proves the stop.
       await expect(saveState(recipient!.page)).toHaveAttribute("data-state", "saved");
       await expect(editor(recipient!.page).locator('[contenteditable="true"]')).toHaveCount(1);
