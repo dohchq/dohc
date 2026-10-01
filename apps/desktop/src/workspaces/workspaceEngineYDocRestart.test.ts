@@ -2751,7 +2751,8 @@ it.each([false, true])("retires three Internal answers and saves a later indepen
     expect(notices.mock.calls[0]?.[1]).toContain("No answer after three attempts.");
     expect(notices.mock.calls[0]?.[1]).not.toContain("dohc refused");
   }
-  expect(replacements).toHaveBeenCalled();
+  if (confirmed) expect(replacements).not.toHaveBeenCalled();
+  else expect(replacements).toHaveBeenCalled();
   await session.settleNow();
   expect(notices).toHaveBeenCalledTimes(confirmed ? 0 : 1);
   await session.close({ settle: false }); await capture.stop();

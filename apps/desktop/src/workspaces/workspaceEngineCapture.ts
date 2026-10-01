@@ -2121,7 +2121,7 @@ export function createWorkspaceEngineCapture(
       uncertainFailures: number;
       lastUncertainFailureAt: number | null;
       unanswered: { error: unknown } | null;
-      refusal: { error: unknown } | null;
+      refusal: { error: unknown; editorVisible: boolean } | null;
     };
     const pendingRecords = new Set<PendingRecord>();
     let pendingUpdateBytes = 0;
@@ -2144,16 +2144,16 @@ export function createWorkspaceEngineCapture(
     // Main owns originals across provider generations; the adapter needs wire
     // strings for its standalone retry ladder. Sharing ownership would couple
     // these lifetimes. Both queues are bounded independently.
-    const refuseRecord = (record: PendingRecord, error: unknown, unanswered = false): void => {
-      if (record.refusal !== null) return;
-      record.refusal = { error };
+    const refuseRecord = (record: PendingRecord, error: unknown, unanswered = false): boolean => {
+      if (record.refusal !== null) return record.refusal.editorVisible;
+      record.refusal = { error, editorVisible: record.editorVisible };
       const refusedUpdates = [record.update];
       const refusedEditorRecords = record.editorVisible ? [record] : [];
       let later = false;
       for (const pending of pendingRecords) {
         if (pending === record) { later = true; continue; }
         if (!later || !refusedUpdates.some(update => ydocUpdateDependsOn(pending.update, update))) continue;
-        pending.refusal = { error };
+        pending.refusal = { error, editorVisible: pending.editorVisible };
         refusedUpdates.push(pending.update);
         if (pending.editorVisible) refusedEditorRecords.push(pending);
         removePendingRecord(pending);
@@ -2161,7 +2161,8 @@ export function createWorkspaceEngineCapture(
       removePendingRecord(record);
       // Caller-confirmed writes report their own refusal. Only lost editor
       // content, including dependent typing, needs a notice and recovery copy.
-      if (refusedEditorRecords.length === 0) return;
+      if (refusedEditorRecords.length === 0) return false;
+      record.refusal.editorVisible = true;
       const reason = error instanceof Error ? error.message : "";
       const explanation = reason.includes("pending-edits-limit")
         ? "Too many edits are waiting to save."
@@ -2178,6 +2179,7 @@ export function createWorkspaceEngineCapture(
       const message = `dohc could not save ${what} to "${input.path}". ${explanation} Open Notices. Use Save copy on this file's recovery row.`;
       onError(`Y.Doc local update of ${input.path}`, new Error(message, { cause: error }));
       input.onEditRefused?.(refusedEditorRecords[0]!.options.idempotencyKey ?? "", message);
+      return true;
     };
     const recordUpdateFailure = (record: PendingRecord, error: unknown): boolean => {
       if (isTransientEngineCause(error) || isUpdateBackoffCause(error)) {
@@ -2313,6 +2315,7 @@ export function createWorkspaceEngineCapture(
             );
           }
           let opened: EngineYdocProviderSession | null = null;
+          let refusedEditorVisible: boolean | null = null;
           const opening = { updates: [] as Uint8Array[], installed: false };
           const requestReconnect = (error: unknown): void => {
             if (
@@ -2357,6 +2360,8 @@ export function createWorkspaceEngineCapture(
               input.onRemoteUpdate(update);
             },
             onLineageReplaced: (replacement, recoveredPaths) => {
+              const editorVisible = refusedEditorVisible;
+              refusedEditorVisible = null;
               if (current !== opened || canonicalDoc === null) return;
               const retired = canonicalDoc;
               canonicalDoc = replacement;
@@ -2368,10 +2373,12 @@ export function createWorkspaceEngineCapture(
                 recordedStateVector = Y.encodeStateVector(recordedDoc);
               }
               canonicalLineageClaimId = opened?.lineageClaimId ?? null;
-              announceReplacement(
-                Y.encodeStateAsUpdate(replacement),
-                recoveredPaths,
-              );
+              if (editorVisible !== false) {
+                announceReplacement(
+                  Y.encodeStateAsUpdate(replacement),
+                  recoveredPaths,
+                );
+              }
               retired.destroy();
             },
             onLocalEditError: requestReconnect,
@@ -2387,7 +2394,10 @@ export function createWorkspaceEngineCapture(
             },
             onLocalUpdateRefused: (id, error) => {
               for (const record of pendingRecords) {
-                if (record.options.idempotencyKey === id) refuseRecord(record, error);
+                if (record.options.idempotencyKey === id) {
+                  const editorVisible = refuseRecord(record, error);
+                  refusedEditorVisible = (refusedEditorVisible ?? false) || editorVisible;
+                }
               }
             },
             // requestReconnect returns early for anything that is not a
@@ -2526,12 +2536,12 @@ export function createWorkspaceEngineCapture(
               Y.applyUpdate(doc, record.update);
               Y.applyUpdate(recordedDoc, record.update);
             } else {
-              refuseRecord(record, record.unanswered.error, true);
+              const editorVisible = refuseRecord(record, record.unanswered.error, true);
               const restored = new Y.Doc();
               Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
               for (const pending of pendingRecords) Y.applyUpdate(restored, pending.update);
               canonicalDoc = restored;
-              announceReplacement(Y.encodeStateAsUpdate(restored), []);
+              if (editorVisible) announceReplacement(Y.encodeStateAsUpdate(restored), []);
               doc.destroy();
               doc = restored;
             }
@@ -2550,12 +2560,12 @@ export function createWorkspaceEngineCapture(
           } catch (error) {
             if (!recordUpdateFailure(record, error)) throw error;
             if (record.unanswered === null) {
-              refuseRecord(record, error);
+              const editorVisible = refuseRecord(record, error);
               const restored = new Y.Doc();
               Y.applyUpdate(restored, Y.encodeStateAsUpdate(recordedDoc));
               for (const pending of pendingRecords) Y.applyUpdate(restored, pending.update);
               canonicalDoc = restored;
-              announceReplacement(Y.encodeStateAsUpdate(restored), []);
+              if (editorVisible) announceReplacement(Y.encodeStateAsUpdate(restored), []);
               doc.destroy();
               doc = restored;
             }
@@ -2775,9 +2785,9 @@ export function createWorkspaceEngineCapture(
           if (isLineageChangedCause(error)) throw error;
           const refused = recordUpdateFailure(record, error);
           if (refused && record.unanswered === null) {
-            refuseRecord(record, error);
+            const editorVisible = refuseRecord(record, error);
             if (canonicalDoc !== doc && generation.doc === canonicalDoc) throw error;
-            if (canonicalDoc !== null) announceReplacement(Y.encodeStateAsUpdate(canonicalDoc), []);
+            if (editorVisible && canonicalDoc !== null) announceReplacement(Y.encodeStateAsUpdate(canonicalDoc), []);
           }
           const retired = canonicalDoc === doc ? null : doc;
           try {
@@ -2933,8 +2943,9 @@ export function createWorkspaceEngineCapture(
         };
         if (pendingRecords.size + queuedUpdateCount >= YDOC_PENDING_MAX_RECORDS ||
             pendingUpdateBytes + queuedUpdateBytes + update.byteLength > YDOC_PENDING_MAX_BYTES) {
-          refuseRecord(record, new Error("pending-edits-limit"));
-          announceReplacement(Y.encodeStateAsUpdate(doc), []);
+          if (refuseRecord(record, new Error("pending-edits-limit"))) {
+            announceReplacement(Y.encodeStateAsUpdate(doc), []);
+          }
           if (keyed) throw record.refusal?.error;
           return false;
         }

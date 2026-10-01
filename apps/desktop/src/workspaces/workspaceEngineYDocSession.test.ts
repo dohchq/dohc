@@ -1279,9 +1279,13 @@ function journalMarkdown(): string {
 }
 
 it("refuses a reused idempotency key with other content, and none of that content lands", async () => {
+  const notices = vi.fn();
+  const replacements = vi.fn();
   const session = await capture.openYDocSession({
     path: PATH,
     onRemoteUpdate: () => undefined,
+    onEditRefused: notices,
+    onLineageReplaced: replacements,
   });
   await keyedWrite(session, "First attempt.");
   await session.settleNow();
@@ -1297,6 +1301,8 @@ it("refuses a reused idempotency key with other content, and none of that conten
   expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Changed retry.");
   expect(journalMarkdown()).not.toContain("Changed retry.");
   expect(captureErrors).toEqual([]);
+  expect(notices).not.toHaveBeenCalled();
+  expect(replacements).not.toHaveBeenCalled();
 
   // The session still takes ordinary writes, and they land beside the first.
   session.applyLocalUpdate((() => {
@@ -1316,10 +1322,12 @@ it("refuses a reused idempotency key with other content, and none of that conten
 
 it("reports exactly one notice when local typing reuses a key with other content", async () => {
   const notices = vi.fn();
+  const replacements = vi.fn();
   const session = await capture.openYDocSession({
     path: PATH,
     onRemoteUpdate: () => undefined,
     onEditRefused: notices,
+    onLineageReplaced: replacements,
   });
   await keyedWrite(session, "First attempt.");
   await session.settleNow();
@@ -1336,6 +1344,7 @@ it("reports exactly one notice when local typing reuses a key with other content
   expect(captureErrors).toEqual([`Y.Doc local update of ${PATH}`]);
   expect(notices).toHaveBeenCalledTimes(1);
   expect(notices).toHaveBeenCalledWith("claim/1/0", expect.stringContaining("Use Save copy"));
+  expect(replacements).toHaveBeenCalledTimes(1);
   expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).not.toContain("Refused typing.");
   expect(journalMarkdown()).not.toContain("Refused typing.");
   expect(await readFile(join(root, PATH), "utf8")).not.toContain("Refused typing.");
@@ -1343,6 +1352,52 @@ it("reports exactly one notice when local typing reuses a key with other content
   await session.close({ settle: false });
   expect(captureErrors).toHaveLength(1);
   expect(notices).toHaveBeenCalledTimes(1);
+  editor.destroy();
+});
+
+it("keeps typing queued in main when a keyed caller write is refused", async () => {
+  const notices = vi.fn();
+  const remoteOrigin = Symbol("renderer-remote");
+  let editor = new Y.Doc();
+  const replacements = vi.fn((update: Uint8Array) => {
+    editor.destroy();
+    editor = new Y.Doc();
+    Y.applyUpdate(editor, update, remoteOrigin);
+  });
+  const session = await capture.openYDocSession({
+    path: PATH,
+    onRemoteUpdate: update => Y.applyUpdate(editor, update, remoteOrigin),
+    onEditRefused: notices,
+    onLineageReplaced: replacements,
+  });
+  Y.applyUpdate(editor, session.initialUpdate, remoteOrigin);
+  editor.on("update", (update: Uint8Array, origin: unknown) => {
+    if (origin !== remoteOrigin) session.applyLocalUpdate(update);
+  });
+
+  nextRecordRefusal = wireRefusal("attribution depth exceeds the supported chain bound");
+  const refusedWrite = expect(keyedWrite(session, "Refused write.")).rejects.toThrow(
+    "attribution depth exceeds the supported chain bound",
+  );
+  // The keyed write owns the next turn. Typing enters main's queue before
+  // the refusal is answered, without depending on the caller's scratch doc.
+  typeIntoBody(editor, "Queued typing.");
+  await refusedWrite;
+  await session.settleNow();
+
+  for (const content of [
+    documentMarkdown(Y.encodeStateAsUpdate(editor)),
+    documentMarkdown(Y.encodeStateAsUpdate(session.doc)),
+    journalMarkdown(),
+    await readFile(join(root, PATH), "utf8"),
+  ]) {
+    expect(content).toContain("Queued typing.");
+    expect(content).not.toContain("Refused write.");
+  }
+  expect(captureErrors).toEqual([]);
+  expect(notices).not.toHaveBeenCalled();
+  expect(replacements).not.toHaveBeenCalled();
+  await session.close({ settle: false });
   editor.destroy();
 });
 
