@@ -62,7 +62,7 @@ async function harness(automations: string, run: (context: {
       return await work(adapter);
     });
   const editContext = (signal: AbortSignal): CollectionRecordEditContext => desktopRecordEditContext({
-    personAuthor: () => ({ kind: "human", humanId: "local:test" }),
+    person: { kind: "human", humanId: "local:test" },
     capture, workspaceRoot: root, signal,
     withAdapter: withEngine,
     onCaptureSettled: (listener) => onWorkspaceCaptureSettled(lifecycle, workspace.workspaceId, listener),

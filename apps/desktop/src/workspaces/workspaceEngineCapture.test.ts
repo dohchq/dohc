@@ -85,7 +85,7 @@ const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
 interface CaptureOptions {
-  localPersonId?: () => string;
+  localAuthorContext?: () => string;
   store?: CaptureVersionedTextStore;
   now?: () => number;
   createId?: () => string;
@@ -4155,12 +4155,10 @@ it("pins main's person before edits wait in the document queue", async () => {
   const release = deferred<void>();
   const recorded: Array<Parameters<EngineYdocProviderSession["applyLocalUpdate"]>[1]> = [];
   const sessions = mockLiveSessions(loopback);
-  vi.spyOn(sessions, "admitAuthorContext").mockImplementation(async (_workspace, personId) =>
-    Object.freeze({ authorContext: "context:" + personId }));
   let personId = "local:installation";
   const engine = capture(root, {
     rustEngineSessions: sessions,
-    localPersonId: () => personId,
+    localAuthorContext: () => "context:" + personId,
     openRustYDocProviderSession: async options => {
       const doc = new Y.Doc();
       Y.applyUpdate(doc, initial);
@@ -4196,4 +4194,24 @@ it("pins main's person before edits wait in the document queue", async () => {
   await session.close({ settle: false });
   await engine.stop();
   seed.destroy(); source.destroy();
+});
+
+it("pins main's person when an authored write is requested, not when it runs", async () => {
+  const root = await createTestScratch("dohc-person-authored-");
+  const loopback = new VersionedLoopbackEngine();
+  loopback.admitAuthorContextForTest("context:alice", "alice");
+  const requests: Request[] = [];
+  const sessions = mockLiveSessions(loopback, requests);
+  let personId = "alice";
+  const engine = capture(root, { rustEngineSessions: sessions, localAuthorContext: () => "context:" + personId });
+  const written = engine.writeAuthoredFile(join(root, "agent.txt"), "agent text\n",
+    { kind: "agent", agentId: "agent-a", onBehalfOf: "mallory", agentRunId: "run-a" });
+  // The write waits for its turn on the capture chain; the account changes first.
+  personId = "bob";
+  await written;
+  expect(requests.find(request => request.method === VERSIONED_METHOD.textWrite)?.params)
+    .toMatchObject({ authorContext: "context:alice" });
+  // The engine replaces the declared person; the agent stays declared provenance.
+  expect(await liveMomentAuthors(engine)).toEqual([[{ kind: "agent", agentId: "agent-a", onBehalfOf: "alice", agentRunId: "run-a" }]]);
+  await engine.stop();
 });

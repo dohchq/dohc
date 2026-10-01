@@ -56,6 +56,8 @@ export function daemonCaptureLifecycleAnswer(
     // A loopback has no disk, so it has no rename that refuses to replace.
     case "capture.moveFile":
       return { id: request.id, result: { moved: false, reason: "no-replace-unsupported" } };
+    case "capture.restoreTrashed":
+      return { id: request.id, result: { restored: false, reason: "no-replace-unsupported" } };
     case "watcher.status":
       return { id: request.id, result: READY_WATCHER_STATUS };
     case "collections.listPendingAdoptions":

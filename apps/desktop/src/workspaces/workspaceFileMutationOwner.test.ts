@@ -80,6 +80,8 @@ async function harness(options: {
     authorityId: symbol,
     path: string,
   ) => Promise<void>;
+  // Runs before the workspace operation admits the change.
+  beforeOperation?: () => Promise<void>;
 } = {}) {
   const rootPath = await mkdtemp(join(tmpdir(), "dohc-file-mutations-"));
   roots.push(rootPath);
@@ -188,6 +190,7 @@ async function harness(options: {
     }) => Promise<Result>,
   ): Promise<Result> => {
     rendererOperationCalls(event, workspaceId);
+    await options.beforeOperation?.();
     if (event.authorityId !== undefined && event.authorityId !== authorityId) {
       throw new Error(
         "File change stopped because this window changed workspaces.",
@@ -201,11 +204,15 @@ async function harness(options: {
       assertCurrent: () => { if (event.authorityId !== undefined && event.authorityId !== authorityId) throw new Error("File change stopped because this window changed workspaces."); },
     });
   };
+  let account = "account-alice";
+  const deletedBy: string[] = [];
   const owner = createWorkspaceFileMutationOwner({
     assertTrustedSender,
     withRendererWorkspaceOperation,
     shareViewFiles: { change },
-    deleteLocalPath: async ({ capture, authorityId, yDocSessions }, path) => {
+    localPerson: async () => ({ kind: "human", humanId: account, authorContext: `context:${account}` }),
+    deleteLocalPath: async ({ capture, authorityId, yDocSessions }, path, person) => {
+      deletedBy.push(person.humanId);
       const finish = await capture?.settleAndCloseLiveSessionsForPath(path);
       try {
         const result = await deletePath(rootPath, path, trashItem);
@@ -233,6 +240,10 @@ async function harness(options: {
     ownsDocument,
     withDocumentUnowned,
     markDeletedUnderPath,
+    deletedBy,
+    switchAccount(next: string) {
+      account = next;
+    },
     get authorityId(): symbol {
       return authorityId;
     },
@@ -1205,6 +1216,24 @@ describe("WorkspaceFileMutationOwner", () => {
     await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
     const trashEntries = await readdir(join(test.rootPath, ".dohc/trash"));
     expect(trashEntries).toHaveLength(1);
+  });
+
+  it("credits a hand delete to the person who asked while it waits for its workspace", async () => {
+    const entered = deferred();
+    const release = deferred();
+    const test = await harness({
+      beforeOperation: async () => { entered.resolve(); await release.promise; },
+    });
+    await writeFile(join(test.rootPath, "alice.md"), "text\n");
+    const deleting = test.owner.deletePath(trustedEvent, {
+      workspaceId: test.workspace.workspaceId,
+      relativePath: "alice.md",
+    });
+    await entered.promise;
+    test.switchAccount("account-bob");
+    release.resolve();
+    await expect(deleting).resolves.toMatchObject({ trashed: true });
+    expect(test.deletedBy).toEqual(["account-alice"]);
   });
 
   it("settles and marks an alias delete by its physical path", async () => {

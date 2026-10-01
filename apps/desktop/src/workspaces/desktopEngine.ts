@@ -488,7 +488,6 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
       // 101.8 s for 15,000 files on the launch fixture; 120 s bounds that path
       // with headroom. The renderer names the wait.
       rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
-        ...(authorContextSecret ? { authorContextSecret } : {}),
         workspaceOpenDeadlineMs: 120_000,
         onOpened: workspace => dependencies.onWorkspaceOpened?.(workspace.workspaceId),
       });

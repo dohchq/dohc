@@ -138,8 +138,8 @@ import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
-import { runCollectionRecordCreation, collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
-import { desktopRecordEditContext, type DesktopRecordEditHost } from "./workspaces/desktopRecordEdits";
+import { collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
+import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./workspaces/desktopRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { prepareDeleteWorkspacePathAs } from "./workspaces/workspaceFileMoves";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
@@ -305,6 +305,7 @@ import { noticeReachFor } from "./notices/noticeReach";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
 import { captureLocalAuthorContext, readOrCreateLocalInstallationIdentity, type LocalInstallationIdentity } from "./workspaces/localInstallationIdentity";
+import { createLocalAuthorship } from "./workspaces/localAuthorship";
 import {
   createCloudLogin,
   type CloudLogin,
@@ -805,14 +806,22 @@ function notifyCloudSessionChangedWithKey(
   }
 }
 
+// Runs inside every credential change. An identity it cannot read must not
+// stop the rest of that change; editors keep their earlier context, and each
+// edit that needs a new one refuses on its own.
 function notifyLocalAuthorContextChanged(): void {
-  for (const workspace of listWorkspaces()) {
-    if (workspace.shareView) continue;
-    const event = {
+  let events: Array<{ workspaceId: string; authorContext: string; authorContextGeneration: number }>;
+  try {
+    events = listWorkspaces().filter(workspace => !workspace.shareView).map(workspace => ({
       workspaceId: workspace.workspaceId,
-      authorContext: captureLocalAuthorContext(localInstallationIdentity(), workspace.workspaceId, localUserId()),
+      authorContext: localAuthorContext(workspace.workspaceId),
       authorContextGeneration: localAuthorContextGeneration,
-    };
+    }));
+  } catch (error) {
+    console.error("[desktop] could not tell editors who is editing after the account changed", error);
+    return;
+  }
+  for (const event of events) {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send(CHANNELS.engineYDocAuthorContextChanged, event);
     }
@@ -864,6 +873,13 @@ let cachedCredentials: CloudSessionCredentials | null = null;
 const ownerDatasetCopies = createOwnerDatasetCopyRegistry();
 const namedDatasetPages = createNamedDatasetCacheRegistry({ directory: () => join(stateDir(), "named-dataset-pages") });
 let credentialCacheGeneration = 0;
+// Who History credits this computer's edits to. A credential load's
+// placeholder null never relabels edits made meanwhile.
+const localAuthorship = createLocalAuthorship({
+  installationId: () => localInstallationId(),
+  sign: (workspaceId, personId) => captureLocalAuthorContext(localInstallationIdentity(), workspaceId, personId),
+  loadCredentials: () => credentialSessionCache.warm(() => cloudLogin().credentials()),
+});
 let localAuthorContextGeneration = 0;
 let ownerDeliveryCredentialLifetime = new AbortController();
 // Share kind is relay/account-scoped, not workspace-scoped. Keep one cache
@@ -871,13 +887,16 @@ let ownerDeliveryCredentialLifetime = new AbortController();
 // credential session ends or changes.
 const peekedReceivedGrantKinds = new Map<string, "dm" | "not-dm">();
 const credentialSessionCache =
-  new CredentialSessionCache<CloudSessionCredentials>((snapshot) => {
+  new CredentialSessionCache<CloudSessionCredentials>((snapshot, settled) => {
     ownerDeliveryCredentialLifetime.abort();
     ownerDeliveryCredentialLifetime = new AbortController();
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
-    localAuthorContextGeneration += 1;
-    notifyLocalAuthorContextChanged();
+    if (settled) {
+      localAuthorship.credentialsSettled(snapshot.credentials?.userId ?? null);
+      localAuthorContextGeneration += 1;
+      notifyLocalAuthorContextChanged();
+    }
     void ownerDatasetCopies.credentialsChanged(snapshot.credentials ? datasetCopyOwnerKey(snapshot.credentials) : null)
       .catch(error => console.error("Collection copy cleanup failed", error));
     // A credential load publishes a temporary null first. Keep saved pages until the account is known.
@@ -2053,7 +2072,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       },
       hooks,
       requireEngineSessions(),
-      { ...testCaptureSeams(), localPersonId: localUserId },
+      { ...testCaptureSeams(), localAuthorContext: () => localAuthorContext(workspace.workspaceId) },
     ),
   onWatcherBatch,
 });
@@ -2609,6 +2628,19 @@ function localUserId(): string {
   return cachedCredentials?.userId ?? localInstallationId();
 }
 
+// The engine's evidence that this computer's person made an edit in one
+// workspace. Taken when the edit occurs, so a later account change cannot
+// relabel it.
+function localAuthorContext(workspaceId: string): string {
+  return localAuthorship.authorContext(workspaceId);
+}
+
+// The person a request is made by, read when it arrives, before it waits for
+// its workspace.
+function localPerson(workspaceId: string): Promise<LocalPersonAuthor> {
+  return localAuthorship.person(workspaceId);
+}
+
 // The verified relay identity for a signed-in chat message (WS-MU-C0). A
 // signed-in session always carries the opaque Better Auth user id that the relay
 // verifies as `actor.userId`. Signed-out sends omit `authorUserId`. Reactions
@@ -2810,6 +2842,10 @@ async function ensureWorkspaceActivityOpenBody(
   options: WorkspaceActivityOpenOptions = {},
 ): Promise<SyncStatusResult> {
   const workspace = canonicalWorkspaceFor(lease);
+  // The capture credits edits to the settled account, so learn it before
+  // the capture can take one.
+  await localAuthorship.settled();
+  lease.assertCurrent();
   let status: SyncStatusResult;
   for (;;) {
     const closing = lease.state.activityClosing;
@@ -3275,27 +3311,28 @@ async function requireEngineCaptureForOperation(
 // announcements the adoption wait reads through. Collection writes land on
 // the physical workspace's own engine (a received share view is refused as
 // read-only before this). Without a caller's signal, the write lives as long
-// as the workspace operation.
+// as the workspace operation. `person` is read when the write was requested.
 async function collectionEditContextFor(
   operation: DesktopWorkspaceOperation,
+  person: LocalPersonAuthor,
   editSignal?: AbortSignal,
 ): Promise<CollectionRecordEditContext> {
   const { capture } = await requireEngineCaptureForOperation(operation);
-  return collectionEditContextWith(operation, capture, editSignal ?? operation.signal);
+  return collectionEditContextWith(operation, capture, editSignal ?? operation.signal, person);
 }
 
 function collectionEditContextWith(
   operation: DesktopWorkspaceOperation,
   capture: DesktopRecordEditHost["capture"],
   signal: AbortSignal,
+  person: LocalPersonAuthor,
 ): CollectionRecordEditContext {
   const workspace = operation.workspace;
   assertWritableWorkspace(workspace);
   return desktopRecordEditContext({
     capture,
     workspaceRoot: workspace.rootPath,
-    personAuthor: () => ({ kind: "human", humanId: localUserId(),
-      authorContext: captureLocalAuthorContext(localInstallationIdentity(), workspace.workspaceId, localUserId()) }),
+    person,
     withAdapter: (work) => withEngineAdapter(workspace, work),
     onCaptureSettled: (listener) => {
       const daemon = desktopEngine.daemon;
@@ -3952,15 +3989,17 @@ function createCollectionAutomationsFor(
 ): CollectionAutomations {
   const { workspaceId, canonicalRootPath: rootPath, attachmentId } = binding;
   const workspace = { workspaceId, rootPath, attachmentId };
-  const recordWrites: CollectionAutomationsOptions["withRecordWrites"] = (signal, work) =>
-    withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
+  const recordWrites: CollectionAutomationsOptions["withRecordWrites"] = async (signal, work) => {
+    const person = await localPerson(workspaceId);
+    return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
       if (operation.workspace.attachmentId !== attachmentId) {
         throw new Error("This workspace was closed.");
       }
       const capture = activity.engineCaptureFor(workspaceId);
       if (!capture) throw new Error(captureRefusal("Automations"));
-      return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]))));
+      return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]), person)));
     });
+  };
   return new CollectionAutomations({
     withEngine: (work) => withEngineAdapter(workspace, work),
     // Each write names its author, so Undo writes as the person here the same way.
@@ -4250,6 +4289,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   sharedViewOf,
   withPhysicalWorkspaceOperation,
   collectionEditContextFor,
+  localPerson,
   withEngineAdapter,
   // The sessions are created below; the CLI server reaches them only per request.
   liveDocuments: {
@@ -4272,7 +4312,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
   localPersonId: localUserId,
-  localAuthorContext: workspaceId => ({ authorContext: captureLocalAuthorContext(localInstallationIdentity(), workspaceId, localUserId()),
+  localAuthorContext: workspaceId => ({ authorContext: localAuthorContext(workspaceId),
     authorContextGeneration: localAuthorContextGeneration }),
   sessionFor: (sender) =>
     rendererWorkspaceSessions.current(sender as WebContents),
@@ -4725,12 +4765,11 @@ const workspaceFileMutations = createWorkspaceFileMutationOwner({
       },
     ),
   shareViewFiles,
-  deleteLocalPath: async ({ workspace, authorityId, capture, yDocSessions, assertCurrent }, path) => {
+  localPerson,
+  deleteLocalPath: async ({ workspace, authorityId, capture, yDocSessions, assertCurrent }, path, person) => {
     if (!capture) throw new Error("dohc could not record this delete in History. Restart dohc to try again.");
-    const author = { kind: "human" as const, humanId: localUserId(),
-      authorContext: captureLocalAuthorContext(localInstallationIdentity(), workspace.workspaceId, localUserId()) };
     const complete = await prepareDeleteWorkspacePathAs(
-      { workspace: { ...workspace, attachmentId: authorityId }, assertCurrent }, path, author,
+      { workspace: { ...workspace, attachmentId: authorityId }, assertCurrent }, path, person,
       { capture, requestId: randomUUID(), trashItem: target => shell.trashItem(target),
         markDeleted: target => yDocSessions.markDeletedUnderPath(authorityId, target) },
     );
@@ -5586,12 +5625,13 @@ function registerIpcHandlers(): void {
   handleIpc(CHANNELS.createCollectionRecord, async (event, raw: unknown) => {
     assertTrustedSender(event);
     const input = CreateCollectionRecordPayload.parse(raw);
-    return runCollectionRecordCreation(work =>
-      withRendererWorkspaceOperation(event.sender, input.workspaceId,
-        "Record creation stopped because this window changed workspaces.", async operation =>
-          work(await collectionEditContextFor(operation))),
-      { ...input, author: createLocalChangeAuthor(localUserDisplayName()) });
-
+    return createRecordByHand(input, {
+      author: createLocalChangeAuthor(localUserDisplayName()),
+      localPerson,
+      withWorkspaceOperation: work => withRendererWorkspaceOperation(event.sender, input.workspaceId,
+        "Record creation stopped because this window changed workspaces.", work),
+      editContext: (operation: DesktopWorkspaceOperation, person) => collectionEditContextFor(operation, person),
+    });
   });
   handleIpc(CHANNELS.dataset, async (event, raw: unknown) => {
     assertTrustedSender(event);

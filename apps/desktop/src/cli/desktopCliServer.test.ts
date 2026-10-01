@@ -77,7 +77,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     // regular file, and the disk has no rename that refuses to replace.
     changePathsAs: vi.fn(async (_paths: readonly string[], _authored: unknown, work: (engine: AuthoredPathChanges) => Promise<unknown>) =>
       await work({ policy: await readWorkspaceEnginePolicy(rootPath), recordDisk: async (_path, files) => [...files],
-        moveFile: async () => false, rename: async () => undefined, delete: async () => "moment",
+        moveFile: async () => false, restoreTrashed: async () => "no-replace-unsupported", rename: async () => undefined, delete: async () => "moment",
         undoDelete: async () => undefined })) as Capture["changePathsAs"],
   };
   const requestWorkspace = vi.fn(async (_root: string, _id: string, method: string, _input: unknown) =>
@@ -115,6 +115,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     sharedViewOf: vi.fn(() => null),
     withPhysicalWorkspaceOperation: (id, work) => authorities.withOperation(id, work),
     collectionEditContextFor: vi.fn(async () => { throw new Error("No edit context configured"); }),
+    localPerson: async () => ({ kind: "human", humanId: "local:test", authorContext: "context:local:test" }),
     withEngineAdapter: async () => null,
     liveDocuments: {
       readDocument: vi.fn<Dependencies["liveDocuments"]["readDocument"]>(async ({ path }) => ({ path, state: null })),
@@ -358,10 +359,10 @@ describe("desktop CLI workspace context", () => {
     } as unknown as WorkspaceEngineYDocProviderSession;
     const admitted: symbol[] = [];
     const opened = vi.fn(async () => session);
-    f.dependencies.collectionEditContextFor = async (operation, signal) => {
+    f.dependencies.collectionEditContextFor = async (operation, person, signal) => {
       operation.assertCurrent(); admitted.push(operation.workspace.attachmentId);
       return desktopRecordEditContext({
-      personAuthor: () => ({ kind: "human", humanId: "local:test" }), workspaceRoot: operation.workspace.rootPath,
+        person, workspaceRoot: operation.workspace.rootPath,
         capture: { openRecordSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal });
     };
@@ -376,6 +377,8 @@ describe("desktop CLI workspace context", () => {
       expect(admitted).toHaveLength(2);
       expect(admitted[0]).toBe(admitted[1]);
       expect(opened).toHaveBeenCalledOnce();
+      // The context carries the person read when the request arrived.
+      expect(opened).toHaveBeenCalledWith("tasks/one.md", "context:local:test");
     } finally { doc.destroy(); await f.authorities.close(); }
   });
 
@@ -492,10 +495,10 @@ describe("desktop CLI workspace context", () => {
     const f = fixture();
     const held = deferred(); const entered = deferred();
     const opened = vi.fn();
-    f.dependencies.collectionEditContextFor = async (operation, signal): Promise<CollectionRecordEditContext> => {
+    f.dependencies.collectionEditContextFor = async (operation, person, signal): Promise<CollectionRecordEditContext> => {
       entered.release(); await held.promise; operation.assertCurrent();
       return desktopRecordEditContext({
-      personAuthor: () => ({ kind: "human", humanId: "local:test" }), workspaceRoot: operation.workspace.rootPath,
+        person, workspaceRoot: operation.workspace.rootPath,
         capture: { openRecordSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal });
     };

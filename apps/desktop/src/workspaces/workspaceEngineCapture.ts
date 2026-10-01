@@ -1,4 +1,4 @@
-import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
+import type { RecordEditSession, RecordUpdateOptions } from "@dohc/automation-executor/collection-record-edits";
 import { errorMessage } from "./workspaceError";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WatcherEvent } from "@dohc/workspace-core";
@@ -339,6 +339,12 @@ export interface AuthoredPathChanges {
   // rename, and the caller moves the file another way. Throws when the
   // destination is taken or the source is gone.
   moveFile(fromPath: string, toPath: string): Promise<boolean>;
+  // Puts `trashName`, one entry this change staged in the workspace trash,
+  // back at `toPath`, whole and unread, in one rename that refuses to
+  // replace anything there. Answers "restored", or why it did not move: its
+  // place is taken, it is gone from the trash, or this filesystem has no
+  // such rename.
+  restoreTrashed(trashName: string, toPath: string): Promise<"restored" | "destination-exists" | "source-missing" | "no-replace-unsupported">;
   rename(fromPath: string, toPath: string): Promise<void>;
   // Records a delete of a file already gone from disk. Answers its row's id.
   delete(path: string): Promise<string>;
@@ -547,7 +553,6 @@ export interface WorkspaceEngineCapture {
   // the switch just deleted, and the first keystroke settles a phantom file
   // into the entered version. The disk check runs on the capture chain
   // with the version binding, so a switch cannot land between them.
-  openRecordSession(path: string): Promise<RecordEditSession>;
   openYDocSession(input: {
     path: string;
     assertRecordWritable?: () => void;
@@ -570,6 +575,11 @@ export interface WorkspaceEngineCapture {
     // Opening and corrective status reports claim no edits.
     onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean) => void;
   }): Promise<WorkspaceEngineYDocProviderSession>;
+  // A record write's session. A live editor's session is borrowed rather
+  // than opened twice. Every update carries `authorContext`, main's person
+  // captured when the write was requested; without one, the person is
+  // captured at each update.
+  openRecordSession(path: string, authorContext?: string): Promise<RecordEditSession>;
   // WS-G2-C-2: flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does not run through the capture chain
   // itself (the delete IPC deletes on disk directly). Without this, a later
@@ -738,8 +748,12 @@ export interface WorkspaceEngineCaptureOptions {
   workspaceId: string;
   rootPath: string;
   attachmentId: symbol;
-  /** Main captures the person when an edit arrives, before queued work runs. */
-  localPersonId?: () => string;
+  /**
+   * Main's signed evidence of this computer's person in this workspace. Read
+   * when an edit arrives, before queued work runs, so the engine stamps the
+   * person who made it.
+   */
+  localAuthorContext?: () => string;
   // Injectable for tests; production uses the required Rust workspace sessions.
   store?: CaptureVersionedTextStore;
   // Injectable for tests; production uses the daemon's encrypted secret store.
@@ -1617,15 +1631,10 @@ export function createWorkspaceEngineCapture(
   options: WorkspaceEngineCaptureOptions,
 ): WorkspaceEngineCapture {
   const { workspaceId, rootPath, attachmentId } = options;
-  const authorWorkspace = { workspaceId, rootPath, attachmentId };
-  function pinAuthor(author: MomentWriteAuthor): Promise<MomentWriteAuthor> {
+  function pinAuthor(author: MomentWriteAuthor): MomentWriteAuthor {
     const captured = structuredClone(author);
-    if (!options.localPersonId || captured.authorContext !== undefined) return Promise.resolve(captured);
-    const personId = options.localPersonId();
-    const pending = options.rustEngineSessions.admitAuthorContext(authorWorkspace, personId)
-      .then(context => ({ ...captured, authorContext: context.authorContext }));
-    void pending.catch(() => undefined);
-    return pending;
+    const authorContext = captured.authorContext ?? options.localAuthorContext?.();
+    return authorContext === undefined ? captured : { ...captured, authorContext };
   }
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
@@ -1763,7 +1772,21 @@ export function createWorkspaceEngineCapture(
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
 
-  function borrowRecordSession(entry: LiveYDocSession): RecordEditSession {
+  // A record update is always keyed, so the caller hears its refusal and the
+  // editor hears only its late acknowledgement. It carries the person pinned
+  // when the write was requested.
+  function recordUpdateOptions(
+    applyOptions: RecordUpdateOptions | undefined,
+    authorContext: string | undefined,
+  ): NonNullable<Parameters<WorkspaceEngineYDocProviderSession["applyDecidedLocalUpdate"]>[2]> {
+    return {
+      ...applyOptions,
+      idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
+      ...(authorContext !== undefined ? { authorContext } : {}),
+    };
+  }
+
+  function borrowRecordSession(entry: LiveYDocSession, authorContext: string | undefined): RecordEditSession {
     const owner = entry.publicSession;
     if (owner === null || entry.closing || entry.orphaned || entry.status === "failing-close") {
       throw new Error("The record is closing. Try again after it closes.");
@@ -1776,12 +1799,9 @@ export function createWorkspaceEngineCapture(
       if (closing !== null) return Promise.reject(new Error(`Y.Doc session for ${entry.path} is closed.`));
       return operation();
     };
-    const applyDecidedLocalUpdate: WorkspaceEngineYDocProviderSession["applyDecidedLocalUpdate"] =
-      (decide, onArmed, applyOptions) => run(() => owner.applyDecidedLocalUpdate(decide, onArmed, {
-        ...applyOptions, idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
-      }));
     return {
-      applyDecidedLocalUpdate,
+      applyDecidedLocalUpdate: (decide, onArmed, applyOptions) => run(() =>
+        owner.applyDecidedLocalUpdate(decide, onArmed, recordUpdateOptions(applyOptions, authorContext))),
       settleNow: opts => run(() => owner.settleNow(opts)),
       close() {
         closing ??= (async () => {
@@ -2974,21 +2994,24 @@ export function createWorkspaceEngineCapture(
       // another settle). #514, and its two review rounds.
       const armed = announceOnce(onArmed);
       const keyed = confirmRecording && applyOptions?.idempotencyKey !== undefined;
-      const personId = options.localPersonId?.();
+      // The person is pinned now, when the edit arrives, never when its turn
+      // comes. With a context the engine stamps the person itself, so a
+      // declared person is dropped rather than claimed.
       const capturedOptions: NonNullable<Parameters<WorkspaceEngineYDocProviderSession["applyLocalUpdate"]>[2]> = {
         ...structuredClone(applyOptions ?? {}),
         idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
       };
-      let decided = false;
-      return append(async () => {
-        if (canonicalDoc === null || closed) throw closedError();
-        if (personId !== undefined && capturedOptions.authorContext === undefined) {
-          capturedOptions.authorContext = (await sessions.admitAuthorContext(workspace, personId)).authorContext;
-        }
-        if (capturedOptions.authorContext && capturedOptions.attribution?.actorKind === "human") {
+      const authorContext = capturedOptions.authorContext ?? options.localAuthorContext?.();
+      if (authorContext !== undefined) {
+        capturedOptions.authorContext = authorContext;
+        if (capturedOptions.attribution?.actorKind === "human") {
           delete capturedOptions.attribution;
           delete capturedOptions.actorOriginId;
         }
+      }
+      let decided = false;
+      return append(async () => {
+        if (canonicalDoc === null || closed) throw closedError();
         const doc = canonicalDoc;
         const decidedUpdate = decide(doc);
         decided = true;
@@ -3871,9 +3894,9 @@ export function createWorkspaceEngineCapture(
     );
   }
 
-  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite: true): Promise<RecordEditSession>;
-  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite?: false): Promise<WorkspaceEngineYDocProviderSession>;
-  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite = false): Promise<WorkspaceEngineYDocProviderSession | RecordEditSession> {
+  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite: { authorContext?: string }): Promise<RecordEditSession>;
+  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0]): Promise<WorkspaceEngineYDocProviderSession>;
+  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite?: { authorContext?: string }): Promise<WorkspaceEngineYDocProviderSession | RecordEditSession> {
 
       // ON THE CAPTURE CHAIN, deliberately. The version this session
       // binds to is read here and the registry entry is written at the end,
@@ -3945,7 +3968,7 @@ export function createWorkspaceEngineCapture(
         // of it must keep refusing.
         const retained = liveYDocSessions.get(input.path);
         if (recordWrite && retained && !retained.orphaned) {
-          return borrowRecordSession(retained);
+          return borrowRecordSession(retained, recordWrite.authorContext);
         }
         if (retained?.status === "failing-close" && retained.orphaned) {
           try {
@@ -5310,14 +5333,14 @@ export function createWorkspaceEngineCapture(
           close: closeEntry,
         };
         liveEntry.publicSession = publicSession;
-        if (recordWrite) return {
-          applyDecidedLocalUpdate: (decide, onArmed, applyOptions) => publicSession.applyDecidedLocalUpdate(decide, onArmed, {
-            ...applyOptions, idempotencyKey: applyOptions.idempotencyKey ?? createId(),
-          }),
+        if (!recordWrite) return publicSession;
+        const { authorContext } = recordWrite;
+        return {
+          applyDecidedLocalUpdate: (decide, onArmed, applyOptions) => publicSession.applyDecidedLocalUpdate(decide, onArmed,
+            recordUpdateOptions(applyOptions, authorContext)),
           settleNow: opts => publicSession.settleNow(opts),
           close: () => publicSession.close(),
         } satisfies RecordEditSession;
-        return publicSession;
       }
   }
 
@@ -5374,13 +5397,12 @@ export function createWorkspaceEngineCapture(
     },
 
     setActiveAgentRun(run) {
-      const pinnedAuthor = run === null ? Promise.resolve(null) : pinAuthor({ kind: "agent",
+      const author = run === null ? null : pinAuthor({ kind: "agent",
         agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId,
         ...(run.depth > 0 ? { depth: run.depth } : {}) });
       return enqueueResult("daemon capture authorship", async () => {
         const engine = await engineStore();
         if (run === null) await engine.flushCapture?.();
-        const author = await pinnedAuthor;
         if (author !== null && author.kind !== "agent") throw new Error("Invalid captured agent author.");
         await engine.setCaptureAuthor?.(author);
       });
@@ -5439,7 +5461,7 @@ export function createWorkspaceEngineCapture(
             ...(writeOptions.expectedContentHash !== undefined ? { expectedSha256: writeOptions.expectedContentHash } : {}),
             ...(writeOptions.createOnly ? { createOnly: true } : {}),
             metadata,
-            author: await pinnedAuthor,
+            author: pinnedAuthor,
           };
           const result = typeof decoded === "string"
             ? await engine.writeTextFile({ ...input, text: decoded, publish: true })
@@ -5458,7 +5480,8 @@ export function createWorkspaceEngineCapture(
     },
 
     openYDocSession: input => openSession(input),
-    openRecordSession: path => openSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined }, true),
+    openRecordSession: (path, authorContext) =>
+      openSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined }, { authorContext }),
 
     settleAndCloseLiveSessionsForPath(pathOrPrefix) {
       // Public seam for destructive ops that DON'T run through the capture chain
@@ -5532,11 +5555,9 @@ export function createWorkspaceEngineCapture(
     },
 
     changePathsAs(paths, authored, work, removed) {
-      const pinnedAuthor = pinAuthor(authored.author);
-      const captured = { ...authored };
+      authored = { ...authored, author: pinAuthor(authored.author) };
       const match = (candidate: string) => paths.some(path => pathIsAtOrUnder(candidate, path));
       return enqueueResult("authored path change", async () => {
-        authored = { ...captured, author: await pinnedAuthor };
         const engine = await engineStore();
         const versionId = await activeVersionIdOf(engine);
         const ensureAllowed = async (author?: MomentWriteAuthor) => {
@@ -5564,8 +5585,8 @@ export function createWorkspaceEngineCapture(
         let result: { value: Awaited<ReturnType<typeof work>> } | undefined;
         try {
           await ensureAllowed();
-          const { holdCapture, renewCapture, releaseCapture, moveFileUnderHold } = engine;
-          if (!holdCapture || !renewCapture || !releaseCapture || !moveFileUnderHold) {
+          const { holdCapture, renewCapture, releaseCapture, moveFileUnderHold, restoreTrashedUnderHold } = engine;
+          if (!holdCapture || !renewCapture || !releaseCapture || !moveFileUnderHold || !restoreTrashedUnderHold) {
             throw new Error("This engine cannot record the change under its author. Restart dohc to try again.");
           }
           // Changes capture has seen land as their own rows first. Changes it
@@ -5618,6 +5639,10 @@ export function createWorkspaceEngineCapture(
                 throw new Error(outcome.reason === "destination-exists"
                   ? `Something new is at ${toPath}. Choose another destination.`
                   : `${fromPath} changed while dohc prepared the change. Try again.`);
+              },
+              restoreTrashed: async (trashName, toPath) => {
+                const outcome = await restoreTrashedUnderHold.call(engine, { holdId, trashName, toPath });
+                return outcome.restored ? "restored" : outcome.reason;
               },
               rename: async (fromPath, toPath) => {
                 assertEngineWritablePath(toPath, policy);

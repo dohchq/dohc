@@ -36,6 +36,7 @@ import {
   writeWorkspaceTextInLease,
 } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
+import type { LocalPersonAuthor } from "./desktopRecordEdits";
 import {
   createFile,
   createFolder,
@@ -127,9 +128,12 @@ export function createWorkspaceFileMutationOwner<
     ) => Promise<Result>,
   ): Promise<Result>;
   shareViewFiles: Pick<ShareViewFiles, "change">;
+  /** This computer's person, read when a request arrives. */
+  localPerson(workspaceId: string): Promise<LocalPersonAuthor>;
   deleteLocalPath(
     authority: WorkspaceFileMutationAuthority<Workspace>,
     path: string,
+    person: LocalPersonAuthor,
   ): Promise<{ trashed: boolean }>;
   notifyRenderer(workspaceId: string): void;
   // A file in a share view was created or saved, and its change is in the
@@ -190,23 +194,31 @@ export function createWorkspaceFileMutationOwner<
     return committedShareViewChangeValue(workspaceId, outcome);
   };
 
-  const runMutation = <Payload extends { workspaceId: string }, Result>(
+  const admitMutation = <Payload>(
     event: IpcEvent,
     payload: unknown,
     parse: (value: unknown) => Payload,
-    work: (input: {
-      input: Payload;
-      workspace: Readonly<Workspace>;
-      receivedShare: boolean;
-      authorityId: symbol;
-      capture: MutationCapture | null;
-      yDocSessions: WorkspaceFileMutationYDocPort;
-      assertCurrent(): void;
-    }) => Promise<Result>,
-  ): Promise<Result> => {
+  ): Payload => {
     dependencies.assertTrustedSender(event);
-    const input = parse(payload);
-    return dependencies.withRendererWorkspaceOperation(
+    return parse(payload);
+  };
+
+  type MutationWork<Payload, Result> = (input: {
+    input: Payload;
+    workspace: Readonly<Workspace>;
+    receivedShare: boolean;
+    authorityId: symbol;
+    capture: MutationCapture | null;
+    yDocSessions: WorkspaceFileMutationYDocPort;
+    assertCurrent(): void;
+  }) => Promise<Result>;
+
+  const runAdmittedMutation = <Payload extends { workspaceId: string }, Result>(
+    event: IpcEvent,
+    input: Payload,
+    work: MutationWork<Payload, Result>,
+  ): Promise<Result> =>
+    dependencies.withRendererWorkspaceOperation(
       event,
       input.workspaceId,
       async (authority) =>
@@ -220,7 +232,13 @@ export function createWorkspaceFileMutationOwner<
           assertCurrent: () => authority.assertCurrent(),
         }),
     );
-  };
+
+  const runMutation = <Payload extends { workspaceId: string }, Result>(
+    event: IpcEvent,
+    payload: unknown,
+    parse: (value: unknown) => Payload,
+    work: MutationWork<Payload, Result>,
+  ): Promise<Result> => runAdmittedMutation(event, admitMutation(event, payload, parse), work);
 
   return {
     createFile: async (event, payload) => {
@@ -375,14 +393,17 @@ export function createWorkspaceFileMutationOwner<
       );
     },
 
-    deletePath: async (event, payload) =>
-      await runMutation(event, payload, DeleteWorkspacePathPayload.parse,
+    deletePath: async (event, payload) => {
+      const request = admitMutation(event, payload, DeleteWorkspacePathPayload.parse);
+      // History credits whoever asked, read before the delete waits for its workspace.
+      const person = await dependencies.localPerson(request.workspaceId);
+      return await runAdmittedMutation(event, request,
         async ({ input, workspace, receivedShare, authorityId, capture, yDocSessions, assertCurrent }) => {
           if (!receivedShare) {
             assertWritableWorkspace(workspace);
             const path = await prepareWorkspaceDelete(workspace.rootPath, input.relativePath);
             return DeleteWorkspacePathResult.parse(await dependencies.deleteLocalPath(
-              { authorityId, workspace, capture, yDocSessions, assertCurrent }, path,
+              { authorityId, workspace, capture, yDocSessions, assertCurrent }, path, person,
             ));
           }
           return await withExclusiveWorkspaceOperation(workspace.rootPath, async (markWorkspaceChanged, lease) => {
@@ -394,7 +415,8 @@ export function createWorkspaceFileMutationOwner<
             }
             return DeleteWorkspacePathResult.parse(result);
           });
-        }),
+        });
+    },
 
     writeText: async (event, payload) => {
       return await runMutation(

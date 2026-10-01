@@ -5,10 +5,42 @@ import type { TextFileSnapshot } from "@dohc/workspace-contracts/engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestScratch } from "./testTemp";
 import {
+  historyExcludesSubtree,
   readWorkspaceEnginePolicy,
   resolveEngineSearchPolicy,
   type WorkspaceEnginePolicySnapshot,
 } from "./workspaceEnginePolicyFile";
+
+describe("historyExcludesSubtree", () => {
+  const excludes = (rules: Array<{ path: string; tracked?: boolean }>, folder: string, errors: string[] = []) =>
+    historyExcludesSubtree(snapshot({ filesPolicy: rules, errors }), folder);
+
+  it("proves a folder excluded only by a rule covering its whole subtree", () => {
+    expect(excludes([{ path: "build/**", tracked: false }], "build")).toBe(true);
+    expect(excludes([{ path: "build/**", tracked: false }], "build/cache")).toBe(true);
+    expect(excludes([{ path: "*/cache/**", tracked: false }], "app/cache")).toBe(true);
+    expect(excludes([{ path: "**", tracked: false }], "anything")).toBe(true);
+    // A rule for some depth, or for some names, leaves the rest tracked.
+    expect(excludes([{ path: "build/*", tracked: false }], "build")).toBe(false);
+    expect(excludes([{ path: "build/**/x", tracked: false }], "build")).toBe(false);
+    expect(excludes([{ path: "build/cache/**", tracked: false }], "build")).toBe(false);
+    expect(excludes([], "build")).toBe(false);
+  });
+
+  it("keeps walking when a later rule could track something inside", () => {
+    expect(excludes([{ path: "build/**", tracked: false }, { path: "build/keep.md", tracked: true }], "build")).toBe(false);
+    expect(excludes([{ path: "build/**", tracked: false }, { path: "*/notes/**", tracked: true }], "build")).toBe(false);
+    expect(excludes([{ path: "build/**", tracked: false }, { path: "**", tracked: true }], "build")).toBe(false);
+    // Searchable-only rules and rules elsewhere do not reach the folder.
+    expect(excludes([{ path: "build/**", tracked: false }, { path: "build/**" }, { path: "docs/**", tracked: true }], "build")).toBe(true);
+    // A later exclusion of the whole subtree takes the earlier inclusion back.
+    expect(excludes([{ path: "build/keep.md", tracked: true }, { path: "build/**", tracked: false }], "build")).toBe(true);
+  });
+
+  it("proves nothing from a policy that did not parse", () => {
+    expect(excludes([{ path: "build/**", tracked: false }], "build", ["files.toml: invalid TOML"])).toBe(false);
+  });
+});
 
 function snapshot(
   overrides: Partial<WorkspaceEnginePolicySnapshot> = {},

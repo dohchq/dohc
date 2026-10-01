@@ -33,6 +33,7 @@ import {
   type VersionedTextReadValue,
   type KeptCopy,
   type CaptureMoveFileResult,
+  type CaptureRestoreTrashedResult,
   type KeptCopySaveResult,
   type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
@@ -178,6 +179,9 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   releaseCapture?(holdId: string): Promise<boolean>;
   // One rename that refuses to replace, of a visible regular file, under a hold.
   moveFileUnderHold?(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult>;
+  // One workspace trash entry back at its place, whole, in one rename that
+  // refuses to replace, under a hold.
+  restoreTrashedUnderHold?(input: { holdId: string; trashName: string; toPath: string }): Promise<CaptureRestoreTrashedResult>;
 };
 
 export interface CaptureLiveStores {
@@ -1442,6 +1446,9 @@ export function createCaptureLiveStores(
 
     moveFileUnderHold: async (input: { holdId: string; fromPath: string; toPath: string }) =>
       await runMutation(async (adapter) => await adapter.moveFileUnderHold(input)),
+
+    restoreTrashedUnderHold: async (input: { holdId: string; trashName: string; toPath: string }) =>
+      await runMutation(async (adapter) => await adapter.restoreTrashedUnderHold(input)),
 
     async setCaptureAuthor(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null) {
       const desired = author === null ? null : captureAuthor(author);

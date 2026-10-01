@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
-import { desktopRecordEditContext, type DesktopRecordEditHost } from "./desktopRecordEdits";
+import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./desktopRecordEdits";
 import { AuthoredTextChangedError } from "./workspaceEngineCapture";
+import { deferred } from "../testing/deferred";
 
 const automation = {
   kind: "automation", automationId: "collection:tasks#stamp", onBehalfOf: "local", depth: 1,
@@ -16,17 +17,23 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function contextFor(materializeOutcome: string) {
+const personNamed = (humanId: string): LocalPersonAuthor => ({ kind: "human", humanId, authorContext: `context:${humanId}` });
+
+async function scratchRoot(): Promise<string> {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-record-edits-"));
   roots.push(workspaceRoot);
+  return workspaceRoot;
+}
+
+async function contextFor(materializeOutcome: string) {
   const capture: DesktopRecordEditHost["capture"] = {
     openRecordSession: () => Promise.reject(new Error("not used")),
     writeAuthoredFile: async (absolutePath) => ({ resolvedAbsolutePath: absolutePath, materializeOutcome }),
   };
   return desktopRecordEditContext({
     capture,
-    workspaceRoot,
-    personAuthor: () => ({ kind: "human", humanId: "local:installation" }),
+    workspaceRoot: await scratchRoot(),
+    person: personNamed("local:installation"),
     withAdapter: async () => null,
     onCaptureSettled: () => () => undefined,
     signal: new AbortController().signal,
@@ -51,24 +58,65 @@ describe("desktopRecordEditContext createFile for an automation", () => {
 });
 
 it("hand creation uses the person main captured instead of a caller's claim", async () => {
-  const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-record-edits-person-"));
-  roots.push(workspaceRoot);
   const writes: Array<Parameters<DesktopRecordEditHost["capture"]["writeAuthoredFile"]>> = [];
+  const opened: Array<Parameters<DesktopRecordEditHost["capture"]["openRecordSession"]>> = [];
   const context = desktopRecordEditContext({
     capture: {
-      openYDocSession: () => Promise.reject(new Error("not used")),
+      openRecordSession: (...args) => {
+        opened.push(args);
+        return Promise.reject(new Error("not used"));
+      },
       writeAuthoredFile: async (...args) => {
         writes.push(args);
         return { resolvedAbsolutePath: args[0], materializeOutcome: "applied" };
       },
     },
-    workspaceRoot,
-    personAuthor: () => ({ kind: "human", humanId: "local:installation", authorContext: "host-context" }),
+    workspaceRoot: await scratchRoot(),
+    person: personNamed("local:installation"),
     withAdapter: async () => null,
     onCaptureSettled: () => () => undefined,
     signal: new AbortController().signal,
   });
   await context.createFile("tasks/hand.md", "hand made", createLocalChangeAuthor("Hand edit"));
-  expect(writes[0]?.[2]).toEqual({ kind: "human", humanId: "local:installation", authorContext: "host-context" });
+  await context.createFile("tasks/run.md", "run made", automation);
+  await expect(context.openRecord("tasks/hand.md")).rejects.toThrow("not used");
+  expect(writes[0]?.[2]).toEqual(personNamed("local:installation"));
   expect(writes[0]?.[3]?.createOnly).toBe(true);
+  // An automation keeps its declared provenance under the same person.
+  expect(writes[1]?.[2]).toEqual({ ...automation, authorContext: "context:local:installation" });
+  expect(opened).toEqual([["tasks/hand.md", "context:local:installation"]]);
+});
+
+it("a hand-made record keeps the person who asked while it waits for its workspace", async () => {
+  const workspaceRoot = await scratchRoot();
+  let account = "account-alice";
+  const entered = deferred();
+  const release = deferred();
+  const writes: Array<Parameters<DesktopRecordEditHost["capture"]["writeAuthoredFile"]>> = [];
+  const creating = createRecordByHand({ workspaceId: "workspace", collectionPath: "tasks", name: "hand" }, {
+    author: createLocalChangeAuthor("Alice"),
+    localPerson: async () => personNamed(account),
+    // The workspace operation and its engine capture are still opening.
+    withWorkspaceOperation: async work => {
+      entered.resolve();
+      await release.promise;
+      return await work("operation");
+    },
+    editContext: async (_operation, person) => desktopRecordEditContext({
+      capture: {
+        openRecordSession: () => Promise.reject(new Error("not used")),
+        writeAuthoredFile: async (...args) => {
+          writes.push(args);
+          throw new Error("stop after the create");
+        },
+      },
+      workspaceRoot, person, withAdapter: async () => null,
+      onCaptureSettled: () => () => undefined, signal: new AbortController().signal,
+    }),
+  });
+  await entered.promise;
+  account = "account-bob";
+  release.resolve();
+  await expect(creating).rejects.toThrow("stop after the create");
+  expect(writes.map(write => write[2])).toEqual([personNamed("account-alice")]);
 });
