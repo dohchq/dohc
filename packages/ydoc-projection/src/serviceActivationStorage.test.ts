@@ -1,5 +1,7 @@
 import {ServiceActivationDriver} from "../../../services/sync-relay/src/serviceActivationDriver.js"
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js"
+import {LiveDocumentWork} from "../../../services/sync-relay/src/liveDocumentWork.js"
+import {parseLiveDocumentKey} from '@dohc/live-session-contract/live-update-admission'
 import {createHash} from 'node:crypto'
 import {mkdtempSync,rmSync} from 'node:fs'
 import {createRequire} from 'node:module'
@@ -433,7 +435,9 @@ it('rolls back the full activation when its retained-state quota charge fails',(
   }finally{f.close()}
 })
 
-function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:ReturnType<typeof vi.fn>,sendRequest=vi.fn(async()=>({result:{released:true}}))){
+type RunDocument=ConstructorParameters<typeof ServiceActivationDriver>[0]['runDocument']
+function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:ReturnType<typeof vi.fn>,sendRequest=vi.fn(async()=>({result:{released:true}})),
+  runDocument:RunDocument=(_document,_signal,operation)=>operation()){
   const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md',shareId:'share'}
   const driver=new ServiceActivationDriver({storage:f.storage,history:f.history,host,
     client:{captureOwnerActivation,sendRequest} as never,
@@ -441,10 +445,135 @@ function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:Re
     config:{targets:[target],validateBaseline,validateJournal,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
-    runDocument:(_document,_signal,operation)=>operation(),
+    runDocument,
   })
   return {driver,target,pull}
 }
+
+// A completed service activation: adopted, seed accepted and applied natively.
+function completeActivation(f:ReturnType<typeof fixture>){
+  f.prepare()
+  const access=f.store.pending(f.document,host),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
+  const adoption=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:f.capture.activationId,
+    expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+  delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:f.capture.activationId,localYDocSequence:2,terminalCursor:0,adoptionReplayed:false})
+  const current=f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)
+  const cut=f.storage.readLiveUpdateJournalCut({document:f.document})
+  if(current.kind!=='current' || cut.kind!=='cut')throw new Error('Missing activation authority')
+  const validation=validateJournal({document:f.document,currentPath:current.binding.currentPath,
+    checkpoint:cut.cut.checkpoint.bytes,suffix:cut.cut.suffix.map(row=>row.bytes),candidate:f.capture.fullState})
+  f.storage.commitLiveUpdateJournal({host,actor,expectedAuthority:current.authority,
+    metadata:{deliveryId:'seed',updateDigest:hash(f.capture.fullState),binding:current.binding},cutToken:cut.cut,validation,
+    updateBytes:f.capture.fullState,receivedAtMs:4},access)
+  const owner=delivery.openOwnerDelivery({host,document:f.document,actor})
+  const event=delivery.nextOwnerApplication(owner)!
+  delivery.acknowledgeOwnerDeliveryApplication(owner,{...event.metadata.accepted.receipt,localYDocSequence:2,applicationReplayed:false})
+  f.store.complete({document:f.document,host,access,nativeState:{adoptionId:f.capture.activationId,pendingBytes:0},guard(){}})
+}
+function deferred(){
+  let resolve!:()=>void
+  const promise=new Promise<void>(done=>{resolve=done})
+  return {promise,resolve}
+}
+
+// A completed driver whose document work runs through real serialization, with
+// a barrier that reports when an activation has passed its precheck and queued.
+function serializedActivation(f:ReturnType<typeof fixture>){
+  const work=new LiveDocumentWork(),key=JSON.stringify(parseLiveDocumentKey(f.document))
+  let entered=deferred()
+  const runDocument:RunDocument=(document,signal,operation)=>{
+    entered.resolve()
+    return work.run(JSON.stringify(parseLiveDocumentKey(document)),signal,operation)
+  }
+  const send=vi.fn(async()=>({result:{released:true}})),capture=vi.fn(async()=>f.capture)
+  completeActivation(f)
+  const d=activationDriver(f,capture,send,runDocument),signal=new AbortController().signal
+  const fence=Number(f.raw.prepare('SELECT restore_fence_generation AS fence FROM sync_relay_live_documents').get()!.fence)
+  // Queue an activation behind other document work, apply `change` while it
+  // waits, then let it run.
+  const queueBehind=async(change:()=>void,settle?:Parameters<typeof d.driver.activate>[2])=>{
+    const holder=deferred(),holding=work.run(key,signal,()=>holder.promise)
+    entered=deferred()
+    const queued=d.driver.activate(d.target,signal,settle)
+    await entered.promise
+    expect(work.busy(key)).toBe(true)
+    change()
+    holder.resolve();await holding
+    return queued
+  }
+  return {d,work,key,send,capture,signal,fence,queueBehind}
+}
+
+// Proves: an activation that passed its precheck and then waited for document
+// work rechecks the exact binding under that work. A restore fence there is
+// pending, not damaged evidence: no engine request, readiness cleared, and the
+// same cut and owner continue once the exact binding opens. Periodic settlement
+// runs inside that same work. It does not drive the restore lifecycle or the
+// native fence; it applies the relay row change advanceStopRestoreFence commits.
+it('reports a restore fence that lands while a completed activation waits for document work',async()=>{
+  const f=fixture()
+  try{
+    const {d,work,key,send,capture,signal,fence,queueBehind}=serializedActivation(f)
+    const settle=vi.fn(async()=>{expect(work.busy(key)).toBe(true)})
+    let drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    expect(await d.driver.activate(d.target,signal,settle)).toMatchObject({kind:'done'})
+    expect(settle).toHaveBeenCalledTimes(1)
+    drain.mockRestore()
+
+    const queued=queueBehind(()=>{
+      f.raw.prepare("UPDATE sync_relay_live_documents SET admission_state='closed',restore_fence_generation=? WHERE admission_state='open' AND restore_fence_generation=?")
+        .run(fence+1,fence)
+      expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).not.toBe('current')
+    },settle)
+    await expect(queued).resolves.toMatchObject({kind:'pending'})
+    expect(send).not.toHaveBeenCalled()
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
+    expect(d.driver.workspaceReady('workspace')).toBe(false)
+
+    // The exact binding opens again: activation proceeds on the same cut and owner.
+    f.raw.prepare("UPDATE sync_relay_live_documents SET admission_state='open',restore_fence_generation=?").run(fence)
+    drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    expect(await d.driver.activate(d.target,signal,settle)).toMatchObject({kind:'done'})
+    drain.mockRestore()
+    expect(settle).toHaveBeenCalledTimes(2)
+    expect(d.driver.workspaceReady('workspace')).toBe(true)
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(d.pull).not.toHaveBeenCalled()
+    expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()).toEqual({n:1})
+    expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_live_delivery_owners').get()).toEqual({n:1})
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
+
+    // Damaged owner evidence on an open binding is still an integrity failure.
+    f.raw.exec("UPDATE sync_relay_live_delivery_owners SET origin_json=json_set(origin_json,'$.sourceMomentId','unrelated-source')")
+    await expect(d.driver.activate(d.target,signal,settle)).rejects.toThrow('Committed delivery evidence is damaged or conflicts.')
+    expect(send).not.toHaveBeenCalled()
+    expect(settle).toHaveBeenCalledTimes(2)
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+// A binding that opens at another generation while an activation waits is not
+// drained with the old owner. The next pass recaptures the retained source and
+// revalidates it against the new binding.
+it('revalidates a binding that changed while an activation waited for document work',async()=>{
+  const f=fixture()
+  try{
+    const {d,capture,signal,fence,queueBehind}=serializedActivation(f)
+    const drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
+    const queued=queueBehind(()=>{
+      f.raw.prepare('UPDATE sync_relay_live_documents SET restore_fence_generation=?').run(fence+1)
+    })
+    await expect(queued).resolves.toMatchObject({kind:'pending'})
+    expect(drain).toHaveBeenCalledTimes(1)
+    expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
+    // The resumed source does not match the new generation, so it is refused.
+    await expect(d.driver.activate(d.target,signal)).rejects.toThrow()
+    expect(capture).toHaveBeenCalledTimes(2)
+    expect(capture).toHaveBeenLastCalledWith(expect.objectContaining({workspace:'native-workspace'}),'docs/a.md',1_000_000,expect.any(AbortSignal),f.capture.activationId)
+    expect(drain).toHaveBeenCalledTimes(1)
+  }finally{vi.restoreAllMocks();f.close()}
+})
 it('releases a real captured session after a stale cut without retaining another source',async()=>{
   const f=fixture();try{
     f.raw.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','other',1,'object.snapshot','{}',3)")

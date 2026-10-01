@@ -237,10 +237,12 @@ const OWNER_LIVE_REFUSALS_BODY =
 // Corner hosts need room above the bell; rail hosts use the bottom-right corner.
 export type NoticeHostPlacement = "rail" | "corner";
 
+// Toasts share the Notices panel's layer, below workbench modals and their
+// scrim, so they cannot cover a review's actions. Their rows stay in Notices.
 const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
-  rail: "fixed bottom-3 right-3 z-40 flex flex-col items-end gap-2",
+  rail: "fixed bottom-3 right-3 z-20 flex flex-col items-end gap-2",
   // The corner toggle is 36px tall on an 8px inset; 56px clears it with a gap.
-  corner: "fixed bottom-14 right-3 z-40 flex flex-col items-end gap-2",
+  corner: "fixed bottom-14 right-3 z-20 flex flex-col items-end gap-2",
 };
 
 const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
