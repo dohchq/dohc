@@ -559,11 +559,15 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           else if (delivery === "pending") pending.push(send);
         };
         let provider: EngineYDocSessionProvider;
+        let recordWriteHeld: () => boolean = () => false;
         let markObjectChanged: () => void = () => undefined;
         try {
           provider = await capture.openYDocSession({
             path: canonicalPath,
             contentKind: documentKind,
+            assertRecordWritable: () => {
+              if (recordWriteHeld()) throw new Error(`dohc is handing ${canonicalPath} to its live session, and nothing changed. Try again.`);
+            },
             onEditRefused: (requestId, message) => {
               publish(() => signals.emit({
                 state: "error", seq: saveSeq.dirtySeq,
@@ -627,6 +631,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             return provider.close(options);
           },
         };
+        recordWriteHeld = () => owned.ownerHandoff !== undefined;
         markObjectChanged = () => {
           if (owned.objectChanged) return;
           owned.objectChanged = true;

@@ -2524,6 +2524,33 @@ function keyedUpdate(rendererDoc: Y.Doc, text: string): Uint8Array {
   return Y.encodeStateAsUpdate(scratch, before);
 }
 
+it.each([false, true])("forwards a keyed write acknowledged after an uncertain failure (committed: %s)", async committed => {
+  const fixture = await daemonDeathCapture("dohc-ydoc-late-ack-", "ydoc-late-ack");
+  const capture = createWorkspaceEngineCapture({
+    workspaceId: "ydoc-late-ack", rootPath: fixture.rootPath,
+    rustEngineSessions: fixture.sessions, openRustYDocProviderSession: fixture.openProvider,
+    onError: () => undefined,
+  });
+  const editor = new Y.Doc();
+  const session = await capture.openYDocSession({
+    path: "note.md", onRemoteUpdate: update => Y.applyUpdate(editor, update),
+  });
+  Y.applyUpdate(editor, session.initialUpdate);
+  const original = keyedUpdate(session.doc, "Late acknowledgement");
+  if (committed) fixture.state.applyFaults.push("commit-then-die");
+  else fixture.state.daemonAlive = false;
+  await expect(session.applyDecidedLocalUpdate(() => original, undefined, { idempotencyKey: "late-ack" }))
+    .rejects.toThrow("may have been recorded");
+  expect(editor.getText("plainText").toString()).toBe("");
+  fixture.state.daemonAlive = true;
+  await session.settleNow();
+  expect(editor.getText("plainText").toString()).toBe("Late acknowledgement");
+  expect(fixture.state.journalKeys).toEqual(["late-ack"]);
+  typeInto(editor, session, " and later typing");
+  expect((await session.settleNow()).content).toBe("Late acknowledgement and later typing");
+  editor.destroy(); await session.close({ settle: false }); await capture.stop();
+});
+
 it.each(["commit-then-cancel", "commit-then-internal"] as const)("dedupes %s without a refusal notice", async fault => {
   for (const confirmed of [false, true]) {
     const fixture = await daemonDeathCapture("dohc-ydoc-uncertain-answer-", "ydoc-uncertain-answer");

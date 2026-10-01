@@ -12,7 +12,7 @@ import { createFile, CreatedFileWriteError } from "./workspaceFiles";
 
 /** What this desktop's record writes in one workspace run over. Main supplies it. */
 export interface DesktopRecordEditHost {
-  capture: Pick<WorkspaceEngineCapture, "openYDocSession" | "writeAuthoredFile">;
+  capture: Pick<WorkspaceEngineCapture, "openRecordSession" | "writeAuthoredFile">;
   workspaceRoot: string;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
   withAdapter<T>(
@@ -38,15 +38,7 @@ export interface DesktopRecordEditHost {
 export function desktopRecordEditContext(host: DesktopRecordEditHost): CollectionRecordEditContext {
   const { capture, workspaceRoot, signal } = host;
   return {
-    openRecord: (path) =>
-      capture.openYDocSession({
-        path,
-        // A record file is a live Markdown document.
-        contentKind: "richdoc",
-        // The capture already folds remote updates into the session's
-        // canonical doc; the seam holds no second replica to notify.
-        onRemoteUpdate: () => undefined,
-      }),
+    openRecord: (path) => capture.openRecordSession(path),
     async createFile(path, text, author) {
       if (author.kind === "automation") {
         requirePublishedWrite(path, await capture.writeAuthoredFile(join(workspaceRoot, path), text, author, {
