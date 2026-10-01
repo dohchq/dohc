@@ -11,7 +11,7 @@ import {HOST_CONTROL_IDENTIFIER_MAX_BYTES} from "@dohc/live-session-contract/hos
 import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHistoryDigest} from "../liveAcceptedHistory";
 import type {NativeRestoreHistoryProof} from "../liveRestoreProposal";
 export type {RestoreLifecycle} from "../liveRestoreLifecycle";
-import type { LiveOwnerAdoptionCut } from "@dohc/workspace-engine-client/daemon";
+import type { LiveOwnerAdoptionCut, NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import { isDeepStrictEqual } from "node:util";
 import {
   parseLiveUpdateDigest,
@@ -247,7 +247,8 @@ export class LiveCommittedDeliveryStore {
   readonly #drains = new WeakMap<CommittedDeliveryDrain, DrainCapture>();
   readonly #storage: StorageContext;
   readonly #history: LiveJournalHistoryAuthority;
-  readonly #ownerCuts = new WeakMap<OwnerCutCapture,{ host: LiveHostConnectionCoordinate; document: LiveDocumentKey; digest: string }>();
+  readonly #ownerCuts = new WeakMap<OwnerCutCapture,{ host: LiveHostConnectionCoordinate; document: LiveDocumentKey; digest: string;
+    activation: NativeOwnerActivationSource | null }>();
   readonly #ownerDeliveries = new WeakMap<OwnerDeliveryCapture,{host: LiveHostConnectionCoordinate;document: LiveDocumentKey;highWater: number}>();
   readonly #restores = new WeakMap<StopRestoreCutCapture,RestoreCapture>();
   constructor(storage: StorageContext, history: LiveJournalHistoryAuthority, private readonly activation?: ServiceActivationAccess) {
@@ -446,7 +447,7 @@ export class LiveCommittedDeliveryStore {
     };
     assertCurrent();
     const capture = { binding: structuredClone(captured.binding), cut: captured.cut, assertCurrent };
-    this.#ownerCuts.set(capture,{ host,document,digest: ownerCutDigest(capture) });
+    this.#ownerCuts.set(capture,{ host,document,digest: ownerCutDigest(capture),activation: captured.source.activation?.source ?? null });
     return capture;
   }
   #ownerCapture(capture: OwnerCutCapture) {
@@ -460,13 +461,16 @@ export class LiveCommittedDeliveryStore {
       .get(this.#history.namespace,...documentParams(document),host.hostId);
   }
   acknowledgeOwnerAdoption(capture: OwnerCutCapture, value: unknown): void {
-    const { host,document } = this.#ownerCapture(capture), cut = capture.cut;
+    const { host,document,activation } = this.#ownerCapture(capture), cut = capture.cut;
     const ack = baselineRecord(value,["adoptionId","localYDocSequence","terminalCursor","adoptionReplayed"]);
     integrity(ack.adoptionId === cut.adoptionId && ack.localYDocSequence === cut.expectedLocalSequence && ack.terminalCursor === (cut.terminalReceipt?.journalCursor ?? 0) && typeof ack.adoptionReplayed === "boolean");
     const { baselineBytes: _baseline,events: _events,...header } = cut;
-    const originEvidenceDigest = createHash("sha256").update(JSON.stringify([capture.binding, cut.relayDatabaseNamespace, cut.sourceMomentId,
+    const cutEvidenceDigest = createHash("sha256").update(JSON.stringify([capture.binding, cut.relayDatabaseNamespace, cut.sourceMomentId,
       cut.sourceDigest, cut.sourceByteLength, cut.baselineMomentRelaySequence, cut.baselineRegisteredAtMs, cut.expectedLocalSequence,
       cut.events.map(event => canonicalAcceptedMetadata(event.metadata))])).digest("hex");
+    // Native adoption of an ordinary service activation also binds its retained source, as native evidence does.
+    const originEvidenceDigest = activation === null ? cutEvidenceDigest
+      : createHash("sha256").update(JSON.stringify(["ordinary-replication", cutEvidenceDigest, activation])).digest("hex");
     const originEventCount = cut.events.length;
     const originHistoryEvidenceDigest = cut.events.reduce((previous, event, index) => nextAcceptedHistoryDigest(previous, index + 1, event.metadata),
       initialAcceptedHistoryDigest(this.#history.namespace, document));

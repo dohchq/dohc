@@ -321,6 +321,27 @@ it('rejects changed retained activation provenance when opening or revalidating 
     expect(()=>owner.delivery.openOwnerDelivery({host,document:f.document,actor})).toThrow()
   }finally{f.close()}
 })
+// Native adoption of an ordinary activation saves sha256 of ["ordinary-replication", cut evidence, retained source],
+// and a restore proposal returns that digest. The relay must record the same one, whatever order the source arrived in.
+it('records the native ordinary-replication evidence for an activated service owner',()=>{
+  const f=fixture();try{
+    f.capture.source=Object.fromEntries(Object.entries(f.capture.source).reverse()) as typeof f.capture.source
+    const owner=ownerCapture(f);owner.acknowledge()
+    const origin=JSON.parse(String(f.raw.prepare('SELECT origin_json FROM sync_relay_live_delivery_owners').get()!.origin_json))
+    const cut=owner.capture.cut,s=f.capture.source
+    const cutEvidence=hash(Buffer.from(JSON.stringify([owner.capture.binding,cut.relayDatabaseNamespace,cut.sourceMomentId,cut.sourceDigest,
+      cut.sourceByteLength,cut.baselineMomentRelaySequence,cut.baselineRegisteredAtMs,cut.expectedLocalSequence,[]])))
+    const nativeSource=`{"version":1,"relayDatabaseNamespace":"history","workspaceId":"workspace","mainVersionId":"main","objectId":"object",`+
+      `"lineageClaimId":"${f.document.lineageClaimId}","currentPath":"docs/a.md","replicationEpoch":"epoch","streamIdentity":"stream",`+
+      `"committedCursor":3,"baseOriginId":"origin","baseOriginSeq":1,"baseRelaySeq":2,"sourceMomentId":"${s.sourceMomentId}",`+
+      `"sourceDigest":"${s.sourceDigest}","sourceByteLength":${s.sourceByteLength},"nativeHeadSequence":2,`+
+      `"fullStateDigest":"${s.fullStateDigest}","fullStateByteLength":${s.fullStateByteLength}}`
+    expect(origin.originEvidenceDigest).toBe(hash(Buffer.from(`["ordinary-replication","${cutEvidence}",${nativeSource}]`)))
+    expect(origin.originEvidenceDigest).not.toBe(cutEvidence)
+    expect(owner.delivery.openOwnerDelivery({host,document:f.document,actor}).assertCurrent).not.toThrow()
+  }finally{f.close()}
+})
+
 it('checks the frozen service origin separately from the original baseline when guarding restore',()=>{
   const f=fixture();try{
     const owner=ownerCapture(f);owner.acknowledge()
