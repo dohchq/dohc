@@ -1,20 +1,12 @@
 import { describe, expect, it } from "vitest";
-import * as Result from "effect/Result";
-import * as Schema from "effect/Schema";
 import {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
   DEFAULT_WORKSPACE_SETTINGS,
-  WorkspaceSettings,
+  decodeWorkspaceSettings,
 } from "./workspaceSettings";
 
-const decodeWorkspaceSettings = Schema.decodeUnknownResult(WorkspaceSettings);
-
 function expectFailureMessage(input: unknown, message: string): void {
-  const result = decodeWorkspaceSettings(input);
-  expect(Result.isFailure(result)).toBe(true);
-  if (Result.isFailure(result)) {
-    expect(result.failure.message).toContain(message);
-  }
+  expect(() => decodeWorkspaceSettings(input)).toThrow(message);
 }
 
 describe("WorkspaceSettings", () => {
@@ -25,11 +17,7 @@ describe("WorkspaceSettings", () => {
       sites: { defaultPreviewMode: "auto" },
       privacy: { confirmExternalLinks: true },
     };
-    const result = decodeWorkspaceSettings(oldShape);
-    expect(Result.isSuccess(result)).toBe(true);
-    if (Result.isSuccess(result)) {
-      expect(result.success).toEqual(DEFAULT_WORKSPACE_SETTINGS);
-    }
+    expect(decodeWorkspaceSettings(oldShape)).toEqual(DEFAULT_WORKSPACE_SETTINGS);
   });
 
   it("rejects excess properties at every strict object level", () => {
@@ -49,7 +37,7 @@ describe("WorkspaceSettings", () => {
   });
 
   it("keeps decoded settings mutable", () => {
-    const decoded = Schema.decodeUnknownSync(WorkspaceSettings)(DEFAULT_WORKSPACE_SETTINGS);
+    const decoded = decodeWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS);
     decoded.agents.mcpAutoStart = true;
     decoded.files.attachmentFolderName = "attachments";
     expect(decoded.agents.mcpAutoStart).toBe(true);

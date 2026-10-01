@@ -61,9 +61,11 @@ export const WorkspaceSettings = Schema.Struct({
   files: WorkspaceFilesSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(WORKSPACE_SETTINGS_DEFAULTS.files)),
   ),
-})
-  .mapFields(Struct.map(Schema.mutableKey))
-  .annotate({ parseOptions: { onExcessProperty: "error" } });
+}).mapFields(Struct.map(Schema.mutableKey));
 export type WorkspaceSettings = typeof WorkspaceSettings.Type;
+
+export const decodeWorkspaceSettings = Schema.decodeUnknownSync(WorkspaceSettings, {
+  onExcessProperty: "error",
+});
 
 export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = WORKSPACE_SETTINGS_DEFAULTS;
