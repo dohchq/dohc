@@ -149,7 +149,9 @@ describe("workspace file write admission", () => {
     expect(await f.run([{ ...file("plain.txt"), expectedSha256: "0".repeat(64) }])).toMatchObject({
       ok: false, written: [], currentSha256: createHash("sha256").update(current).digest("hex"),
     });
-    expect(await readFile(join(f.rootPath, "plain.txt"))).toEqual(current);
+    const retained = await readFile(join(f.rootPath, "plain.txt"));
+    expect(retained.byteLength).toBe(current.byteLength);
+    expect(retained.equals(current)).toBe(true);
   });
 
   it("returns only the first two paths when file three fails", async () => {
