@@ -45,8 +45,14 @@ const CLOCK_START = Date.UTC(2026, 6, 8, 9, 0, 0);
 const HOUR_MS = 60 * 60 * 1000;
 
 // The GPU rasterizes and composites with run-to-run noise at edges; software
-// rendering is the same every run.
-const SWITCHES = ["--disable-gpu"];
+// rendering is the same every run. One CSS pixel is one device pixel: on a
+// display scaled to 150%, an odd CSS offset lands on half a device pixel
+// and every edge below it re-antialiases, so a 1px move in one section
+// changed every part under it. Every invalidated tile rasterizes whole:
+// partial raster copies a tile's unchanged pixels forward and redraws the
+// rest, and the antialiased edges at that seam rounded differently from
+// run to run, by one unit.
+const SWITCHES = ["--disable-gpu", "--force-device-scale-factor=1", "--disable-partial-raster"];
 
 type Pixels = Pick<PNG, "width" | "height" | "data">;
 
@@ -174,6 +180,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
   test.skip(process.platform !== "win32", "the baselines were taken on Windows");
   test.setTimeout(240_000);
   await withDesktop({ DOHC_DEV_TOOLS: "1" }, async (page) => {
+    expect(await page.evaluate(() => window.devicePixelRatio), "the baselines are one device pixel per CSS pixel").toBe(1);
     await page.setViewportSize({ width: WIDTH, height: 900 });
     await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
     // Until the viewport grows to the page, a scrollbar would narrow the
@@ -262,6 +269,11 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         const name = await part.getAttribute("data-part");
         const box = await part.boundingBox();
         if (!name || !box) throw new Error("every part needs a data-part name and a box on the page");
+        // A part's pixels depend on where in a pixel it starts, so a
+        // fractional offset in one section would change every part below it.
+        if (!Number.isInteger(box.x) || !Number.isInteger(box.y)) {
+          throw new Error(`${name} (${theme}) starts at a fractional pixel: ${box.x}, ${box.y}`);
+        }
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
         const capture = await page.screenshot({

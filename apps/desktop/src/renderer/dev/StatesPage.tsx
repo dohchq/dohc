@@ -44,9 +44,30 @@ const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-su
 // padding; the menus get the same room from their taller boxes.
 const SHADOW_ROOM = "p-10";
 
+// A part's pixels depend on where in a pixel it starts, and Chromium lays
+// out in 1/64 px, so a section whose content ends on a fraction would move
+// every section below it off the pixel grid and change their captures. Each
+// section holds its border box to the next whole pixel; with whole gaps and
+// padding around them, every part then starts on one.
+function useWholePixelHeight() {
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const size = entry?.borderBoxSize[0];
+      if (size) element.style.minHeight = `${Math.ceil(size.blockSize)}px`;
+    });
+    observer.observe(element, { box: "border-box" });
+    return () => observer.disconnect();
+  }, []);
+  return ref;
+}
+
 function Section(props: { part: string; title: string; children: ReactNode }) {
+  const ref = useWholePixelHeight();
   return (
-    <section data-part={props.part} className="flex flex-col gap-3">
+    <section ref={ref} data-part={props.part} className="flex flex-col gap-3">
       <SectionLabel as="h3" className="m-0">
         {props.title}
       </SectionLabel>
