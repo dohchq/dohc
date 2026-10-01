@@ -383,8 +383,27 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
         },
         update_bytes: bytes,
     };
-    let (checkpoint_metadata, baseline_bytes, history_bytes, prior_metadata): (usize, usize, usize, usize) = f.store.read_with(|conn| conn.query_row(
-        "SELECT (SELECT length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB)) FROM live_accepted_checkpoints WHERE event_count=0),(SELECT byte_length FROM binary_blobs WHERE sha256=(SELECT state_sha256 FROM live_accepted_checkpoints WHERE event_count=0)),(SELECT sum(length(CAST(a.metadata_json AS BLOB))+b.byte_length) FROM live_accepted_updates a JOIN binary_blobs b ON b.sha256=a.update_sha256),(SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates ORDER BY event_count DESC LIMIT 1)",[],|r|Ok((r.get::<_,i64>(0)? as usize,r.get::<_,i64>(1)? as usize,r.get::<_,i64>(2)? as usize,r.get::<_,i64>(3)? as usize)))).unwrap();
+    let (checkpoint_text, baseline_bytes, history_bytes, prior_metadata, stamp): (usize, usize, usize, usize, String) = f.store.read_with(|conn| conn.query_row(
+        "SELECT (SELECT length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB))+length(CAST(state_sha256 AS BLOB))+length(CAST(evidence_digest AS BLOB))+length(CAST(origin_stamp AS BLOB))+coalesce(length(CAST(restore_operation_id AS BLOB)),0)+coalesce(length(CAST(restore_stamp AS BLOB)),0) FROM live_accepted_checkpoints WHERE event_count=0),(SELECT byte_length FROM binary_blobs WHERE sha256=(SELECT state_sha256 FROM live_accepted_checkpoints WHERE event_count=0)),(SELECT sum(length(CAST(a.metadata_json AS BLOB))+b.byte_length) FROM live_accepted_updates a JOIN binary_blobs b ON b.sha256=a.update_sha256),(SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates ORDER BY event_count DESC LIMIT 1),(SELECT origin_stamp FROM live_accepted_checkpoints WHERE event_count=0)",[],|r|Ok((r.get::<_,i64>(0)? as usize,r.get::<_,i64>(1)? as usize,r.get::<_,i64>(2)? as usize,r.get::<_,i64>(3)? as usize,r.get(4)?)))).unwrap();
+    // Each checkpoint read also verifies its origin stamp by serializing the
+    // bootstrap record those stored stamp bytes hash.
+    let held = Registration {
+        workspace_id: "workspace".into(),
+        namespace: "namespace".into(),
+        coordinate: f.host.clone(),
+        binding: f.binding.clone(),
+        live: false,
+    };
+    let origin = serde_json::to_vec(
+        &f.store
+            .read_with(|conn| bootstrap::read_bootstrap(conn, &held))
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(hex_sha256(&origin), stamp);
+    // The stamp read costs its raw columns or their serialization, whichever is larger.
+    let checkpoint_metadata = checkpoint_text + origin.len().max(bootstrap_raw(&f));
     let replay_bytes = checkpoint_metadata
         + baseline_bytes
         + history_bytes
@@ -677,7 +696,15 @@ impl Fixture {
         point(&self.doc, cursor, receipt.update_digest)
     }
     fn freeze(&mut self, point: NativeRestorePoint) -> NativeRestorePreparation {
-        let operation = NativeRestoreFence {
+        let operation = self.fence_input();
+        let fence = self
+            .owner
+            .fence_restore(&mut self.store, operation, self.host.clone(), 50, &NoFaults)
+            .unwrap();
+        NativeRestorePreparation { fence, point }
+    }
+    fn fence_input(&self) -> NativeRestoreFence {
+        NativeRestoreFence {
             operation_id: if self.binding.restore_fence_generation == 0 {
                 "restore".into()
             } else {
@@ -692,12 +719,7 @@ impl Fixture {
             },
             terminal: self.terminal.clone(),
             applied_sequence: self.sequence,
-        };
-        let fence = self
-            .owner
-            .fence_restore(&mut self.store, operation, self.host.clone(), 50, &NoFaults)
-            .unwrap();
-        NativeRestorePreparation { fence, point }
+        }
     }
     fn prepare(
         &mut self,
@@ -1559,6 +1581,910 @@ fn ordinary_settlement_starts_at_verified_restore_anchor_under_future_open_bindi
     );
 }
 
+/// The restore's settlement moment replaces the text the fenced generation last
+/// settled. After durable resume its publication needs the restored after-image
+/// and that replaced before-image, but no other history of the old generation.
+#[test]
+fn resumed_restore_settlement_moment_publishes_its_replaced_and_restored_images() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    let mut f = Fixture::new("Original");
+    let unsettled = f.edit("Accepted but never settled", 5);
+    f.edit("Recipient continued", 7);
+    let replaced = with_settlement(
+        &mut f.store,
+        &f.handle,
+        f.terminal.clone(),
+        100,
+        |store, audit| record_test_projection(store, audit, "replaced-moment"),
+    )
+    .unwrap();
+    let old = f.binding.clone();
+    let restored = restore_and_resume(&mut f);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            // The moment the restore settlement journals for publication.
+            let (before, after): (String, String) = conn
+                .query_row(
+                    "SELECT before_blob_sha256,after_blob_sha256 FROM moments WHERE moment_id='restore-moment'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((before.as_str(), after.as_str()), (replaced.markdown_digest.as_str(), restored.markdown_digest.as_str()));
+            // Its before-image is settled only under the generation the restore fenced.
+            let replaced_binding: String = conn
+                .query_row(
+                    "SELECT binding_json FROM live_device_settlements WHERE settlement_id=?1",
+                    [&replaced.settlement_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(serde_json::from_str::<LiveObjectBinding>(&replaced_binding).unwrap(), old);
+            assert_eq!(f.binding.restore_fence_generation, old.restore_fence_generation + 1);
+            let proof = |digest: &str| {
+                contains_in(conn, &key, &f.binding.current_path, None, PublicationContentKind::Projection, digest, &mut 4_000_000)
+                    .unwrap()
+            };
+            assert_eq!(proof(&after), PublicationProof::Contained, "restored after-image");
+            assert_eq!(proof(&before), PublicationProof::Contained, "replaced before-image");
+            // Neither unsettled history of the fenced generation nor unrelated text is proved.
+            assert_eq!(proof(&unsettled.markdown_digest), PublicationProof::NotContained);
+            assert_eq!(proof(&hex_sha256(b"unrelated private draft")), PublicationProof::NotContained);
+            // Only this registration's exact namespace and resumed binding read the evidence,
+            // and the evidence reads are charged to the caller's budget.
+            let predecessor = |namespace: &str, binding: &LiveObjectBinding, remaining: usize| {
+                crate::live_update_application::read_restore_predecessor_in(conn, &key, namespace, binding, &mut { remaining })
+            };
+            assert_eq!(predecessor("namespace", &f.binding, 4_000_000)?, Some(before.clone()));
+            assert_eq!(predecessor("other-namespace", &f.binding, 4_000_000)?, None);
+            assert_eq!(predecessor("namespace", &old, 4_000_000)?, None);
+            assert!(matches!(
+                predecessor("namespace", &f.binding, 64),
+                Err(ApplicationError::ConfiguredByteBudgetExceeded)
+            ));
+            Ok(())
+        })
+        .unwrap();
+    // Changed resume evidence no longer proves the replaced head.
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE live_restore_fences SET resume_evidence_digest=?1",
+                [&"0".repeat(64)],
+            )
+            .map_err(write_sql)?;
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            let proof = |digest: &str| {
+                contains_in(
+                    conn,
+                    &key,
+                    &f.binding.current_path,
+                    None,
+                    PublicationContentKind::Projection,
+                    digest,
+                    &mut 4_000_000,
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                proof(&replaced.markdown_digest),
+                PublicationProof::NotContained
+            );
+            assert_eq!(
+                proof(&restored.markdown_digest),
+                PublicationProof::Contained
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// A restore before the fenced generation ever settled replaced that generation's origin.
+#[test]
+fn resumed_restore_without_a_prior_settlement_replaced_its_origin() {
+    let mut f = Fixture::new("Original");
+    f.edit("Recipient continued", 7);
+    restore_and_resume(&mut f);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let origin = hex_sha256(b"Original");
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            let before: String = conn
+                .query_row(
+                    "SELECT before_blob_sha256 FROM moments WHERE moment_id='restore-moment'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(before, origin);
+            let predecessor = |remaining: &mut usize| {
+                crate::live_update_application::read_restore_predecessor_in(
+                    conn,
+                    &key,
+                    "namespace",
+                    &f.binding,
+                    remaining,
+                )
+            };
+            let mut remaining = 4_000_000;
+            assert_eq!(predecessor(&mut remaining)?, Some(origin.clone()));
+            // The origin read is the proof's last charge.
+            let used = 4_000_000 - remaining;
+            assert_eq!(predecessor(&mut { used })?, Some(origin.clone()));
+            assert!(matches!(
+                predecessor(&mut { used - 1 }),
+                Err(ApplicationError::ConfiguredByteBudgetExceeded)
+            ));
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// The fence replay inside the predecessor proof shares the caller's budget.
+/// With enough for the receipts read before it, the proof refuses before
+/// reading the candidate and its application record, which would fail if read.
+#[test]
+fn restore_predecessor_refuses_before_reading_the_restore_candidate() {
+    let mut f = Fixture::new("Original");
+    f.edit("Recipient continued", 7);
+    restore_and_resume(&mut f);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    // The resume row's receipt, settlement and evidence; the application row's
+    // receipt and delivery; and the candidate.
+    let (operation, receipt, application, candidate): (String, i64, i64, i64) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT f.operation_id,length(CAST(f.resume_receipt_json AS BLOB))+length(CAST(f.resume_settlement_id AS BLOB))+length(CAST(f.resume_evidence_digest AS BLOB)),length(CAST(f.application_json AS BLOB))+length(CAST(f.application_delivery_id AS BLOB)),b.byte_length FROM live_restore_fences f JOIN binary_blobs b ON b.sha256=json_extract(f.application_json,'$.candidateDigest') WHERE f.resume_receipt_json IS NOT NULL",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .map_err(read_sql)
+        })
+        .unwrap();
+    let held = Registration {
+        workspace_id: "workspace".into(),
+        namespace: "namespace".into(),
+        coordinate: f.host.clone(),
+        binding: f.binding.clone(),
+        live: false,
+    };
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE live_device_update_applications SET applied_connection_id=applied_connection_id||'-changed' WHERE delivery_id=(SELECT json_extract(application_json,'$.admitted.accepted.receipt.deliveryId') FROM live_restore_fences)",
+                [],
+            )
+            .map_err(write_sql)?;
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+    let predecessor = |remaining: usize| {
+        f.store.read_with(|conn| {
+            crate::live_update_application::read_restore_predecessor_in(
+                conn,
+                &key,
+                "namespace",
+                &f.binding,
+                &mut { remaining },
+            )
+        })
+    };
+    assert!(matches!(
+        predecessor(4_000_000),
+        Err(ApplicationError::Corrupt)
+    ));
+    // The resume row, the application row, and the replay's repeated application
+    // row fit; the candidate does not.
+    let before_candidate = usize::try_from(receipt + 2 * application).unwrap();
+    let replaced = |remaining: usize| {
+        f.store.read_with(|conn| {
+            restore_resume::replaced_head(conn, &held, &operation, &mut Budget { remaining })
+        })
+    };
+    assert!(matches!(
+        replaced(4_000_000),
+        Err(ApplicationError::Corrupt)
+    ));
+    assert!(matches!(
+        replaced(before_candidate + usize::try_from(candidate).unwrap() - 1),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+}
+
+/// The fence replay charges every first-seen child's stored workspace before
+/// reading it. A damaged child grown by `extra` bytes is read, and found
+/// corrupt, with exactly the grown cost; one byte less refuses before the read.
+#[test]
+fn fence_replay_charges_first_seen_children_before_reading_them() {
+    let mut f = Fixture::new("Original");
+    f.edit("Recipient continued", 7);
+    restore_and_resume(&mut f);
+    let held = Registration {
+        workspace_id: "workspace".into(),
+        namespace: "namespace".into(),
+        coordinate: f.host.clone(),
+        binding: f.binding.clone(),
+        live: false,
+    };
+    let (json, children): (String, i64) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT application_json,(SELECT count(*) FROM live_device_application_first_seen c WHERE c.delivery_id=f.application_delivery_id) FROM live_restore_fences f",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(read_sql)
+        })
+        .unwrap();
+    assert!(children > 0, "the restore candidate has first-seen ranges");
+    let fence = serde_json::from_str::<NativeRestoreApplicationReceipt>(&json)
+        .unwrap()
+        .fence;
+    let replay = |remaining: usize| {
+        let mut budget = Budget { remaining };
+        let result = f
+            .store
+            .read_with(|conn| application::fence_replay_head_in(conn, &held, &fence, &mut budget));
+        (result, remaining - budget.remaining)
+    };
+    // Valid children, each repeating the workspace string, fit exactly what is charged.
+    let (head, used) = replay(4_000_000);
+    let head = head.unwrap();
+    assert_eq!(replay(used).0.unwrap(), head);
+    assert!(matches!(
+        replay(used - 1).0,
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    let extra = 1_000_000;
+    f.store
+        .read_with(|conn| {
+            conn.execute_batch(&format!(
+                "PRAGMA foreign_keys=OFF; UPDATE live_device_application_first_seen SET workspace_id=workspace_id||replace(hex(zeroblob({extra})),'00','x') WHERE delivery_id=(SELECT application_delivery_id FROM live_restore_fences) AND ordinal=0; PRAGMA foreign_keys=ON"
+            ))
+        })
+        .unwrap();
+    assert!(matches!(
+        replay(used + extra).0,
+        Err(ApplicationError::Corrupt)
+    ));
+    assert!(matches!(
+        replay(used + extra - 1).0,
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+}
+
+/// The bootstrap origin stamp is bounded before its row is read, charges its
+/// serialized record exactly, and keeps the bytes the unbounded read hashed.
+#[test]
+fn bootstrap_origin_stamp_is_bounded_before_reading_and_keeps_its_bytes() {
+    let f = Fixture::new("Original");
+    let held = Registration {
+        workspace_id: "workspace".into(),
+        namespace: "namespace".into(),
+        coordinate: f.host.clone(),
+        binding: f.binding.clone(),
+        live: false,
+    };
+    let stamp = |remaining: usize| {
+        f.store.read_with(|conn| {
+            accepted_history::origin_stamp_in(conn, &held, &mut Budget { remaining })
+        })
+    };
+    let record = f
+        .store
+        .read_with(|conn| bootstrap::read_bootstrap(conn, &held))
+        .unwrap()
+        .unwrap();
+    let bytes = serde_json::to_vec(&record).unwrap();
+    // Compact stored JSON serializes larger than its raw columns, so the
+    // serialization sets the cost here.
+    assert!(bytes.len() > bootstrap_raw(&f));
+    assert_eq!(stamp(bytes.len()).unwrap(), hex_sha256(&bytes));
+    assert!(matches!(
+        stamp(bytes.len() - 1),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    // A damaged oversized binding would fail to decode once read.
+    f.store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE live_device_bootstraps SET binding_json=json_object('padding',replace(hex(zeroblob(1000000)),'00','x'))",
+                [],
+            )
+        })
+        .unwrap();
+    assert!(matches!(
+        stamp(500_000),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    assert!(matches!(
+        stamp(4_000_000),
+        Err(error) if !matches!(error, ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+}
+
+/// The raw bytes of the bootstrap columns an origin stamp reads.
+fn bootstrap_raw(f: &Fixture) -> usize {
+    let length: i64 = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT length(CAST(bootstrap_id AS BLOB))+length(CAST(bootstrap_moment_id AS BLOB))+length(CAST(baseline_moment_relay_sequence AS BLOB))+length(CAST(baseline_registered_at_ms AS BLOB))+length(CAST(baseline_digest AS BLOB))+length(CAST(baseline_byte_length AS BLOB))+length(CAST(projected_markdown_digest AS BLOB))+length(CAST(projected_markdown_byte_length AS BLOB))+length(CAST(binding_json AS BLOB))+length(CAST(host_coordinate_json AS BLOB))+length(CAST(local_ydoc_sequence AS BLOB)) FROM live_device_bootstraps",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    usize::try_from(length).unwrap()
+}
+
+/// Decoding drops whitespace from stored bootstrap JSON without changing the
+/// stamp. Each read still consumes the raw bytes it read, so reads sharing one
+/// budget refuse at the raw boundary rather than the much smaller serialization.
+#[test]
+fn bootstrap_origin_stamp_consumes_raw_whitespace_padded_json() {
+    let f = Fixture::new("Original");
+    let held = Registration {
+        workspace_id: "workspace".into(),
+        namespace: "namespace".into(),
+        coordinate: f.host.clone(),
+        binding: f.binding.clone(),
+        live: false,
+    };
+    let stamp = |remaining: &mut usize| {
+        let mut budget = Budget {
+            remaining: *remaining,
+        };
+        let result = f
+            .store
+            .read_with(|conn| accepted_history::origin_stamp_in(conn, &held, &mut budget));
+        *remaining = budget.remaining;
+        result
+    };
+    let original = stamp(&mut 4_000_000).unwrap();
+    let pad = "replace(hex(zeroblob(100000)),'00',' ')";
+    f.store
+        .read_with(|conn| {
+            conn.execute(
+                &format!("UPDATE live_device_bootstraps SET binding_json={pad}||binding_json||{pad},host_coordinate_json=host_coordinate_json||char(10)||{pad}"),
+                [],
+            )
+        })
+        .unwrap();
+    let raw = bootstrap_raw(&f);
+    let serialized = serde_json::to_vec(
+        &f.store
+            .read_with(|conn| bootstrap::read_bootstrap(conn, &held))
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+    .len();
+    assert!(
+        raw > 300_000 && serialized < 10_000,
+        "{raw} raw, {serialized} serialized"
+    );
+    let mut remaining = 4_000_000;
+    assert_eq!(stamp(&mut remaining).unwrap(), original);
+    assert_eq!(4_000_000 - remaining, raw);
+    // Two reads fit exactly their raw cost; one byte less refuses the second.
+    let mut remaining = 2 * raw;
+    assert_eq!(stamp(&mut remaining).unwrap(), original);
+    assert_eq!(stamp(&mut remaining).unwrap(), original);
+    assert_eq!(remaining, 0);
+    let mut remaining = 2 * raw - 1;
+    assert_eq!(stamp(&mut remaining).unwrap(), original);
+    assert!(matches!(
+        stamp(&mut remaining),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+}
+
+/// An adoption row's decoded binding scopes its source reads, but the row's
+/// precharge covers only this document's sources. A damaged binding naming
+/// another object is refused before it can read that object's source.
+#[test]
+fn adoption_origin_refuses_a_redirected_binding_before_reading_its_source() {
+    let f = Fixture::new("Original");
+    let held = Registration {
+        workspace_id: "workspace".into(),
+        namespace: "namespace".into(),
+        coordinate: f.host.clone(),
+        binding: f.binding.clone(),
+        live: false,
+    };
+    let b = &f.binding;
+    let text = "adopted source";
+    let digest = hex_sha256(text.as_bytes());
+    let binding = serde_json::to_string(b).unwrap();
+    let redirected = serde_json::to_string(&LiveObjectBinding {
+        object_id: "sibling".into(),
+        ..b.clone()
+    })
+    .unwrap();
+    f.store
+        .read_with(|conn| -> rusqlite::Result<()> {
+            conn.execute_batch("PRAGMA foreign_keys=OFF")?;
+            conn.execute(
+                "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![digest, text.len() as i64, text],
+            )?;
+            // This document's real source, and a sibling's whose moment ID is a megabyte.
+            for (object, moment, order) in [
+                ("object", "adopted-source".to_owned(), 900_001),
+                ("sibling", "m".repeat(1_000_000), 900_002),
+            ] {
+                conn.execute(
+                    "INSERT INTO moments (workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,metadata_origin) VALUES ('workspace',?1,?2,'main',?3,?4,1,'write',?5,0,'api')",
+                    params![order, moment, object, b.current_path, digest],
+                )?;
+                conn.execute(
+                    "INSERT INTO ydoc_owner_base_sources (workspace_id,version_id,object_id,lineage_claim_id,path,source_moment_id,source_blob_sha256,source_byte_length) VALUES ('workspace','main',?1,?2,?3,?4,?5,?6)",
+                    params![object, b.lineage_claim_id, b.current_path, moment, digest, text.len() as i64],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO live_owner_adoptions (relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) VALUES ('namespace','adoption','workspace','main','object',?1,?2,'adopted-source',?3,?4,0,1,?3,?3,0,0,0,'null','{}',1,1)",
+                params![b.lineage_claim_id, binding, digest, text.len() as i64],
+            )?;
+            conn.execute_batch("PRAGMA foreign_keys=ON")
+        })
+        .unwrap();
+    let origin = |remaining: usize| {
+        let mut budget = Budget { remaining };
+        let result = f
+            .store
+            .read_with(|conn| adoption::read_origin_with(conn, &held, Some(&mut budget)));
+        (result, budget.remaining)
+    };
+    // The row's binding, moment, digest, terminal and ID; this document's
+    // source moment and digest; and the original snapshot digest.
+    let cost = |binding: &str| {
+        binding.len()
+            + 2 * ("adopted-source".len() + digest.len())
+            + "null".len()
+            + "adoption".len()
+            + b.lineage_claim_id.len()
+    };
+    let (valid, left) = origin(cost(&binding));
+    assert!(matches!(valid, Ok(Some(_))));
+    assert_eq!(left, 0);
+    assert!(matches!(
+        origin(cost(&binding) - 1).0,
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    f.store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE live_owner_adoptions SET binding_json=?1",
+                [&redirected],
+            )
+        })
+        .unwrap();
+    // Reading the sibling's source would have failed as a different moment.
+    // Refusal comes first, having charged none of the sibling's megabyte.
+    let (redirected_result, left) = origin(cost(&redirected));
+    assert!(matches!(redirected_result, Err(ApplicationError::Conflict)));
+    assert_eq!(left, 0);
+}
+
+/// The adoption origin stamp keeps the escaped bytes SQLite's `json_array`
+/// produced, charges them exactly, and is bounded by its raw columns before
+/// any column is serialized.
+#[test]
+fn adoption_origin_stamp_keeps_sqlite_json_bytes_and_is_bounded_before_serializing() {
+    let f = Fixture::new("Original");
+    let adopted = |object: &str| Registration {
+        workspace_id: "workspace".into(),
+        namespace: "namespace".into(),
+        coordinate: f.host.clone(),
+        binding: LiveObjectBinding {
+            object_id: object.into(),
+            ..f.binding.clone()
+        },
+        live: false,
+    };
+    let stamp = |held: &Registration, remaining: usize| {
+        f.store.read_with(|conn| {
+            accepted_history::origin_stamp_in(conn, held, &mut Budget { remaining })
+        })
+    };
+    let columns = "relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms";
+    let held = adopted("adopted");
+    let binding = serde_json::to_string(&held.binding).unwrap();
+    f.store
+        .read_with(|conn| -> rusqlite::Result<()> {
+            conn.execute_batch("PRAGMA foreign_keys=OFF")?;
+            conn.execute(
+                &format!("INSERT INTO live_owner_adoptions ({columns}) VALUES ('namespace',?1,'workspace','main','adopted',?2,?3,?4,?5,9007199254740991,0,1,?5,?5,2,3,4,'null',?6,1,9007199254740991)"),
+                params![
+                    "quote\" back\\ nl\n tab\t ctl\u{1} del\u{7f} é ☃ \u{2028}",
+                    f.binding.lineage_claim_id,
+                    binding,
+                    "moment\r\u{c}\u{8}",
+                    "0".repeat(64),
+                    r#"{"hostId":"h\u0001\"x"}"#
+                ],
+            )?;
+            conn.execute_batch("PRAGMA foreign_keys=ON")
+        })
+        .unwrap();
+    // The stamp the removed SQLite query hashed.
+    let reference: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT json_array(adoption_id,evidence_digest,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) FROM live_owner_adoptions WHERE object_id='adopted'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(
+        reference.contains(r"\n") && reference.contains(r"\u0001") && reference.contains(r"\\")
+    );
+    assert_eq!(
+        stamp(&held, reference.len()).unwrap(),
+        hex_sha256(reference.as_bytes())
+    );
+    assert!(matches!(
+        stamp(&held, reference.len() - 1),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    // Its first column cannot be serialized and a later one is oversized.
+    f.store
+        .read_with(|conn| {
+            conn.execute_batch(&format!(
+                "PRAGMA foreign_keys=OFF; INSERT INTO live_owner_adoptions ({columns}) SELECT relay_database_namespace,CAST(x'ff' AS TEXT),workspace_id,main_version_id,'damaged',lineage_claim_id,binding_json,replace(hex(zeroblob(1000000)),'00','x'),source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms FROM live_owner_adoptions WHERE object_id='adopted'; PRAGMA foreign_keys=ON"
+            ))
+        })
+        .unwrap();
+    let damaged = adopted("damaged");
+    assert!(matches!(
+        stamp(&damaged, 500_000),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    assert!(matches!(
+        stamp(&damaged, 4_000_000),
+        Err(ApplicationError::Corrupt)
+    ));
+}
+
+/// A new fence waits until the relay acknowledged this document's journaled
+/// settlement moments. The last one's before-image is publishable only before
+/// the fence; afterwards only the replaced head and restored image are.
+#[test]
+fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    let mut f = Fixture::new("Original");
+    f.edit("First settled", 5);
+    let first = with_settlement(
+        &mut f.store,
+        &f.handle,
+        f.terminal.clone(),
+        100,
+        |store, audit| record_test_projection(store, audit, "first-moment"),
+    )
+    .unwrap();
+    f.edit("Second settled", 7);
+    let second = with_settlement(
+        &mut f.store,
+        &f.handle,
+        f.terminal.clone(),
+        100,
+        |store, audit| record_test_projection(store, audit, "second-moment"),
+    )
+    .unwrap();
+    // The local journal holds both settlement moments, then another object's
+    // moment. The relay acknowledged only the first.
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('workspace','origin','epoch','stream',1)", [])
+                .map_err(write_sql)?;
+            for (seq, moment, object) in [(0, "first-moment", "object"), (1, "second-moment", "object"), (2, "other-moment", "other-object")] {
+                tx.execute(
+                    "INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('workspace','origin',?1,'moment.append',json_object('momentId',?2,'versionId','main','objectId',?3),1,0)",
+                    params![seq, moment, object],
+                )
+                .map_err(write_sql)?;
+            }
+            tx.execute("INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES ('workspace','origin',0)", [])
+                .map_err(write_sql)?;
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+    let state = |f: &Fixture| {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT count(*) FROM live_restore_fences),available,restore_fence_generation FROM live_device_application_bindings",
+                    [],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+                )
+                .map_err(read_sql)
+            })
+            .unwrap()
+    };
+    let publish = |f: &Fixture, pushed: i64| {
+        f.store
+            .read_with(|conn| {
+                conn.execute("UPDATE sync_relay_push_state SET pushed_seq=?1", [pushed])
+            })
+            .unwrap()
+    };
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let proof = |f: &Fixture, digest: &str| {
+        f.store
+            .read_with(|conn| {
+                contains_in(
+                    conn,
+                    &key,
+                    &f.binding.current_path,
+                    None,
+                    PublicationContentKind::Projection,
+                    digest,
+                    &mut 4_000_000,
+                )
+            })
+            .unwrap()
+    };
+    let before = state(&f);
+    assert_eq!(before, (0, 1, 0));
+    let input = f.fence_input();
+    assert!(matches!(
+        f.owner
+            .fence_restore(&mut f.store, input.clone(), f.host.clone(), 50, &NoFaults),
+        Err(ApplicationError::PublicationPending)
+    ));
+    assert_eq!(state(&f), before);
+    // Unfenced, the waiting moment's before-image can still be published.
+    assert_eq!(
+        proof(&f, &first.markdown_digest),
+        PublicationProof::Contained
+    );
+    // Publication reached the second moment. The other object's moment does not block.
+    publish(&f, 1);
+    let fenced = f
+        .owner
+        .fence_restore(&mut f.store, input.clone(), f.host.clone(), 50, &NoFaults)
+        .unwrap();
+    // The committed fence replays without asking about publication again.
+    publish(&f, 0);
+    assert_eq!(
+        f.owner
+            .fence_restore(&mut f.store, input, f.host.clone(), 51, &NoFaults)
+            .unwrap(),
+        fenced
+    );
+    publish(&f, 1);
+    let restored = restore_and_resume(&mut f);
+    assert!(![
+        restored.markdown_digest.as_str(),
+        second.markdown_digest.as_str(),
+        hex_sha256(b"Original").as_str()
+    ]
+    .contains(&first.markdown_digest.as_str()));
+    assert_eq!(
+        proof(&f, &restored.markdown_digest),
+        PublicationProof::Contained
+    );
+    assert_eq!(
+        proof(&f, &second.markdown_digest),
+        PublicationProof::Contained,
+        "the head the restore replaced"
+    );
+    // Had the fence not waited, this before-image would have stopped the origin.
+    assert_eq!(
+        proof(&f, &first.markdown_digest),
+        PublicationProof::NotContained
+    );
+}
+
+/// Retained settlement history that enrollment export has not journaled yet
+/// has the same before-images. A new fence waits for that export too, but not
+/// for an export stream that already passed every settlement or another object's.
+#[test]
+fn fence_waits_for_retained_settlement_history_to_be_exported() {
+    let mut f = Fixture::new("Original");
+    f.edit("Settled before export", 5);
+    let settled = with_settlement(
+        &mut f.store,
+        &f.handle,
+        f.terminal.clone(),
+        100,
+        |store, audit| record_test_projection(store, audit, "retained-moment"),
+    )
+    .unwrap();
+    let export = |f: &Fixture, object: &str, after: i64| {
+        f.store
+            .read_with(|conn| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO live_audit_pending_exports(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,after_event_count,after_settlement_cursor) VALUES ('namespace','workspace','main',?1,?2,0,?3)",
+                    params![object, f.binding.lineage_claim_id, after],
+                )
+            })
+            .unwrap()
+    };
+    let fences = |f: &Fixture| f.store.table_row_count("live_restore_fences").unwrap();
+    export(&f, "other-object", -1);
+    export(&f, "object", -1);
+    let input = f.fence_input();
+    assert!(matches!(
+        f.owner
+            .fence_restore(&mut f.store, input.clone(), f.host.clone(), 50, &NoFaults),
+        Err(ApplicationError::PublicationPending)
+    ));
+    assert_eq!(fences(&f), 0);
+    // Export journaled the settlement. Its stream stays open for later events.
+    export(&f, "object", settled.terminal_cursor);
+    f.owner
+        .fence_restore(&mut f.store, input, f.host.clone(), 50, &NoFaults)
+        .unwrap();
+    assert_eq!(fences(&f), 1);
+}
+
+/// Restore at generation 1 after one prior settlement, for proof reads.
+fn resumed_with_prior() -> Fixture {
+    let mut f = Fixture::new("Original");
+    f.edit("Recipient continued", 7);
+    with_settlement(
+        &mut f.store,
+        &f.handle,
+        f.terminal.clone(),
+        100,
+        |store, audit| record_test_projection(store, audit, "replaced-moment"),
+    )
+    .unwrap();
+    restore_and_resume(&mut f);
+    f
+}
+
+fn damage(f: &Fixture, sql: &str) {
+    f.store
+        .read_with(|conn| {
+            conn.execute_batch(&format!(
+                "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON; {sql}; PRAGMA ignore_check_constraints=OFF; PRAGMA foreign_keys=ON"
+            ))
+        })
+        .unwrap();
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProofReader {
+    Predecessor,
+    Accepted,
+}
+
+fn prove(f: &Fixture, reader: ProofReader, remaining: &mut usize) -> Result<(), ApplicationError> {
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    f.store.read_with(|conn| match reader {
+        ProofReader::Predecessor => crate::live_update_application::read_restore_predecessor_in(
+            conn,
+            &key,
+            "namespace",
+            &f.binding,
+            remaining,
+        )
+        .map(|found| assert!(found.is_some())),
+        ProofReader::Accepted => {
+            crate::live_update_application::read_native_accepted_in(conn, &key, remaining)
+                .map(|found| assert!(found.is_some()))
+        }
+    })
+}
+
+/// Each damaged row holds a megabyte of raw text that fails once read. A
+/// smaller budget refuses before reading it; enough budget reaches the damage.
+#[test]
+fn publication_proof_charges_each_raw_row_before_reading_it() {
+    use ProofReader::{Accepted, Predecessor};
+    let pad = "replace(hex(zeroblob(1000000)),'00','x')";
+    let cases = [
+        // Registration, before anything else is read.
+        (Predecessor, format!("UPDATE live_device_application_bindings SET connection_id=connection_id||{pad}")),
+        (Accepted, format!("UPDATE live_device_application_bindings SET connection_id=connection_id||{pad}")),
+        // The current-state marker and resumed fence registration.
+        (Predecessor, format!("UPDATE ydoc_docs SET path=path||{pad}")),
+        (Accepted, format!("UPDATE live_restore_fences SET resume_receipt_json=json_set(resume_receipt_json,'$.padding',{pad})")),
+        // The resume receipt's settlement and evidence, and the saved application.
+        (Predecessor, format!("UPDATE live_restore_fences SET resume_evidence_digest=resume_evidence_digest||{pad}")),
+        (Predecessor, format!("UPDATE live_restore_fences SET application_delivery_id=application_delivery_id||{pad}")),
+        // The replaced settlement's digests, read after the restore evidence.
+        (Predecessor, format!("UPDATE live_device_settlements SET interval_digest=interval_digest||{pad} WHERE moment_id='replaced-moment'")),
+        // The accepted checkpoint's stored digests.
+        (Accepted, format!("UPDATE live_accepted_checkpoints SET evidence_digest=evidence_digest||{pad}")),
+    ];
+    for (reader, sql) in cases {
+        let f = resumed_with_prior();
+        assert!(
+            prove(&f, reader, &mut 4_000_000).is_ok(),
+            "{reader:?} valid rows"
+        );
+        damage(&f, &sql);
+        assert!(
+            matches!(
+                prove(&f, reader, &mut 500_000),
+                Err(ApplicationError::ConfiguredByteBudgetExceeded)
+            ),
+            "{reader:?} refuses before reading: {sql}"
+        );
+        assert!(
+            matches!(prove(&f, reader, &mut 4_000_000), Err(error) if !matches!(error, ApplicationError::ConfiguredByteBudgetExceeded)),
+            "{reader:?} reaches the damage with enough budget: {sql}"
+        );
+    }
+}
+
+/// A valid registration string is charged each time a proof reads it: once by
+/// registration and once by the current binding check.
+#[test]
+fn publication_proof_charges_valid_repeated_registration_text() {
+    for reader in [ProofReader::Predecessor, ProofReader::Accepted] {
+        let f = resumed_with_prior();
+        let used = |f: &Fixture| {
+            let mut remaining = 4_000_000;
+            prove(f, reader, &mut remaining).unwrap();
+            4_000_000 - remaining
+        };
+        let before = used(&f);
+        let longer = 200;
+        damage(&f, &format!("UPDATE live_device_application_bindings SET host_id=host_id||replace(hex(zeroblob({longer})),'00','h')"));
+        assert_eq!(used(&f) - before, 2 * longer, "{reader:?}");
+    }
+}
+
+/// Restore to the baseline, settle and durably resume, then register the resumed binding.
+fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
+    let prep = f.freeze(f.baseline_point.clone());
+    let input = admitted_restore(f, prep);
+    apply_restore(f, input.clone(), &NoFaults).unwrap();
+    let restored = f
+        .owner
+        .with_restore_settlement(
+            &mut f.store,
+            input.clone(),
+            f.host.clone(),
+            2_000_000,
+            100,
+            |store, audit| record_test_projection(store, audit, "restore-moment"),
+        )
+        .unwrap();
+    let resumed = f
+        .owner
+        .resume_restore(
+            &mut f.store,
+            NativeRestoreResume {
+                application: input,
+                settlement_id: restored.settlement_id.clone(),
+            },
+            f.host.clone(),
+            2_000_000,
+            100,
+            100,
+            &NoFaults,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+    f.binding = resumed.binding.clone();
+    f.handle = f
+        .owner
+        .register(
+            &mut f.store,
+            "namespace".into(),
+            f.host.clone(),
+            f.binding.clone(),
+        )
+        .unwrap();
+    restored
+}
+
 #[test]
 fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repeated_restore() {
     let mut f = Fixture::new("Original");
@@ -1566,6 +2492,24 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
     let prep = f.freeze(f.baseline_point.clone());
     let input = admitted_restore(&mut f, prep);
     apply_restore(&mut f, input.clone(), &NoFaults).unwrap();
+    // An applied but unresumed restore keeps every generation unpublishable.
+    let document = DocKey::new("workspace", "main", "object").unwrap();
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            for binding in [&f.binding, &input.admitted.accepted.binding] {
+                assert!(
+                    crate::live_update_application::require_restore_registration(
+                        conn,
+                        &document,
+                        "namespace",
+                        binding
+                    )
+                    .is_err()
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
     let missing = NativeRestoreResume {
         application: input.clone(),
         settlement_id: "missing".into(),
@@ -1680,6 +2624,48 @@ fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repe
             Ok(())
         })
         .unwrap();
+    // The resumed generation publishes the restore's accepted update; the one it replaced does not.
+    {
+        use crate::owner_outbox::publication::{
+            contains_in, PublicationContentKind, PublicationProof,
+        };
+        let restored = input.admitted.accepted.receipt.update_digest.clone();
+        let mut stale = f.binding.clone();
+        stale.restore_fence_generation -= 1;
+        f.store
+            .read_with(|conn| -> Result<(), ApplicationError> {
+                crate::live_update_application::require_restore_registration(
+                    conn,
+                    &key,
+                    "namespace",
+                    &f.binding,
+                )?;
+                assert!(
+                    crate::live_update_application::require_restore_registration(
+                        conn,
+                        &key,
+                        "namespace",
+                        &stale
+                    )
+                    .is_err()
+                );
+                assert_eq!(
+                    contains_in(
+                        conn,
+                        &key,
+                        &f.binding.current_path,
+                        Some(&f.binding.lineage_claim_id),
+                        PublicationContentKind::Ydoc,
+                        &restored,
+                        &mut 4_000_000,
+                    )
+                    .unwrap(),
+                    PublicationProof::Contained
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
     let second_prep = f.freeze(f.baseline_point.clone());
     assert_eq!(
         first,

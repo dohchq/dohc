@@ -17,7 +17,9 @@ export function snapshotStopRestoreLookup(input: StopRestoreLookup): StopRestore
 export async function deliverStopRestore(options: {
   store: LiveCommittedDeliveryStore;
   lookup: StopRestoreLookup;
-  connection: {client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number};
+  connection: {client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number;
+    /** Publishes this host's ordinary journal; absent where the host has none to drive. */
+    publishOrdinary?(signal?: AbortSignal): Promise<unknown>};
   deliveryKind: "bootstrap" | "owner";
   signal?: AbortSignal;
 }): Promise<StopRestoreOutcome> {
@@ -64,11 +66,22 @@ export async function deliverStopRestore(options: {
     check();
     const pending = store.pendingStopRestoreFence(input);
     if (pending.receipt) return {kind: "done", receipt: pending.receipt};
-    const response = await c.client.sendRequest({...request(), method: "liveApplication.fenceRestore", params: {operation: pending.operation as never}}, signal);
+    // A refused fence commits nothing. Publishing once, under this same document
+    // exclusion, lets the old generation's settlement moments reach the relay first.
+    let response = await c.client.sendRequest({...request(), method: "liveApplication.fenceRestore", params: {operation: pending.operation as never}}, signal);
     check();
-    const result = configRecord(response.result, ["status", "receipt"]);
+    let result = configRecord(response.result, ["status"], ["receipt", "reason"]);
+    if (result.status === "pending" && typeof result.reason === "string") {
+      if (!c.publishOrdinary) return {kind: "pending", reason: result.reason};
+      await c.publishOrdinary(signal);
+      check();
+      response = await c.client.sendRequest({...request(), method: "liveApplication.fenceRestore", params: {operation: pending.operation as never}}, signal);
+      check();
+      result = configRecord(response.result, ["status"], ["receipt", "reason"]);
+      if (result.status === "pending" && typeof result.reason === "string") return {kind: "pending", reason: result.reason};
+    }
     if (result.status !== "fenced") throw new Error("Native restore fence did not commit.");
-    const receipt = parseNativeRestoreFenceReceipt(result.receipt);
+    const receipt = parseNativeRestoreFenceReceipt(configRecord(response.result, ["status", "receipt"]).receipt);
     if (!isDeepStrictEqual(receipt.operation, pending.operation)) throw new Error("Native restore fence acknowledgement changed the operation.");
     return {kind: "done", receipt: store.acknowledgeStopRestoreFence(input, receipt)};
   } finally {if (capture) store.closeStopRestoreCut(capture);}

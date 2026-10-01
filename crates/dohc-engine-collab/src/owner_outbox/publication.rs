@@ -39,6 +39,22 @@ pub fn contains_in(
             super::draft::descriptor_for_key_in(conn, key)?
         {
             let observed = super::accepted::current(conn, &draft.binding)?;
+            // An active restore fence refuses; a resumed one publishes only its own
+            // generation. The native reader below checks this as part of its current state.
+            crate::live_update_application::require_restore_registration_in(
+                conn,
+                key,
+                &observed.relay_database_namespace,
+                &observed.binding,
+                remaining,
+            )
+            .map_err(|error| {
+                budget_exhausted = matches!(
+                    error,
+                    crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded
+                );
+                OwnerOutboxError::Frozen
+            })?;
             let checkpoint = read_blob(
                 conn,
                 &observed.checkpoint_digest,
@@ -62,7 +78,6 @@ pub fn contains_in(
         {
             return Ok(false);
         }
-        crate::live_update_application::require_restore_open(conn, key).map_err(collab)?;
         match kind {
             PublicationContentKind::Ydoc => {
                 let update = read_blob(conn, digest, remaining, &mut budget_exhausted)?;
@@ -82,6 +97,18 @@ pub fn contains_in(
                     .map_err(collab)?;
                 if hex_sha256(projection.content.as_bytes()) == digest {
                     return Ok(true);
+                }
+                // A resumed restore's settlement replaced exactly one accepted head of the
+                // generation it fenced. Its verified resume evidence proves that head only.
+                match crate::live_update_application::read_restore_predecessor_in(
+                    conn, key, &namespace, &binding, remaining,
+                ) {
+                    Ok(Some(replaced)) if replaced == digest => return Ok(true),
+                    Err(crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded) => {
+                        budget_exhausted = true;
+                        return Err(OwnerOutboxError::Frozen);
+                    }
+                    _ => {}
                 }
                 // Initial observed enrollment proves that the original claimed
                 // base is contained, including its delete set, before installing.
@@ -167,7 +194,13 @@ pub fn contains_observed_update_in(
     }
     let observed = super::accepted::current(conn, &draft.binding)?;
     let checkpoint = super::draft::bounded_blob(conn, &observed.checkpoint_digest)?;
-    crate::live_update_application::require_restore_open(conn, key).map_err(collab)?;
+    crate::live_update_application::require_restore_registration(
+        conn,
+        key,
+        &observed.relay_database_namespace,
+        &observed.binding,
+    )
+    .map_err(|_| OwnerOutboxError::Frozen)?;
     if update == checkpoint {
         return Ok(Some(true));
     }

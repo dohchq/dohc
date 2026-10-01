@@ -102,6 +102,9 @@ pub(crate) fn drain_and_claim(
             let object: String = row.get(6).map_err(SyncError::corrupt)?;
             let key = DocKey::new(workspace_id, &version, &object).map_err(SyncError::corrupt)?;
             let encoded: String = row.get(2).map_err(SyncError::corrupt)?;
+            // Each queued row is a bound owner's host settlement, which an open
+            // owner editor does not defer. It waits only once the owner is unbound.
+            let deferred = leases.is_live(&key) && !is_bound_owner(tx, &key);
             ready.push((ReplicationEnvelope {
                 workspace_id: workspace_id.to_owned(),
                 origin_id: row.get(0).map_err(SyncError::corrupt)?,
@@ -110,7 +113,7 @@ pub(crate) fn drain_and_claim(
                 payload: serde_json::from_str(&encoded).map_err(SyncError::corrupt)?,
                 recorded_at_ms: row.get(3).map_err(SyncError::corrupt)?,
                 relay_seq: None,
-            }, row.get::<_, bool>(4).map_err(SyncError::corrupt)?, leases.is_live(&key), row.get::<_, Option<String>>(7).map_err(SyncError::corrupt)?));
+            }, row.get::<_, bool>(4).map_err(SyncError::corrupt)?, deferred, row.get::<_, Option<String>>(7).map_err(SyncError::corrupt)?));
             if ready.len() > PAGE_SIZE { break; }
         }
         drop(rows);
@@ -123,9 +126,9 @@ pub(crate) fn drain_and_claim(
         let mut record_facts = Vec::new();
         let mut envelopes = Vec::new();
         let checked_sequence: i64 = tx.query_row("SELECT COALESCE(MAX(checked_sequence),0)+1 FROM owner_pending_settlements WHERE workspace_id=?1", [workspace_id], |r| r.get(0)).map_err(SyncError::corrupt)?;
-        for (envelope, applied, live, facts_json) in ready {
+        for (envelope, applied, deferred, facts_json) in ready {
             tx.execute("UPDATE owner_pending_settlements SET checked_sequence=?4 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3", params![workspace_id,envelope.origin_id,envelope.origin_seq,checked_sequence]).map_err(SyncError::persist)?;
-            if live { continue; }
+            if deferred { continue; }
             if !applied {
                 let payload: MomentAppendPayload = serde_json::from_value(envelope.payload.clone()).map_err(SyncError::corrupt)?;
                 envelope.validate()?;

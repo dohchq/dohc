@@ -352,7 +352,11 @@ pub fn apply_moment_envelope_detailed(
         .map_err(|_| SyncError::InvalidInput {
             reason: "moment.append Y.Doc coordinates are invalid",
         })?;
-        if leases.is_live(&key) {
+        if leases.is_live(&key)
+            && !(payload.operation == "write"
+                && is_ydoc_settlement_moment_id(&payload.moment_id)
+                && is_bound_owner(tx, &key))
+        {
             return Err(SyncError::RetryableState {
                 reason: "ydoc-session-live",
             });
@@ -1200,6 +1204,17 @@ fn equivalent_ydoc_settlement_preimage(snapshot: &Snapshot, payload: &MomentAppe
         && payload.payload_before_path.as_deref() == Some(snapshot.path.as_str())
         && payload.payload_before_blob_sha256.as_deref() == Some(snapshot.digest.as_str())
         && ContentKind::from_wire(payload.payload_before_content_kind.as_deref()) == snapshot.kind
+}
+
+/// A bound owner never settles its own file: the admitted host's settlement is
+/// the only way its accepted state reaches disk, so an open owner editor does
+/// not defer that settlement. `apply_moment_append` still checks it against the
+/// owner's native accepted state. A failed lookup keeps the live deferral.
+pub(crate) fn is_bound_owner(conn: &rusqlite::Connection, key: &DocKey) -> bool {
+    matches!(
+        dohc_engine_collab::owner_outbox::draft::descriptor_for_key_in(conn, key),
+        Ok(Some(_))
+    )
 }
 
 fn is_ydoc_settlement_moment_id(moment_id: &str) -> bool {

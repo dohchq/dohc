@@ -269,9 +269,11 @@ export async function startServiceLiveHost(options: {
         try{
           for(let visited=0;visited<Math.min(bounds.maxDocumentsPerPass,bounds.targets.length);visited++){
             const target=bounds.targets[index]!;index=(index+1)%bounds.targets.length;
-            const result=await activation!.activate(target,passSignal);
+            // Settlement runs in the activation's own document work, after its
+            // fence check, so a restore cannot fence the binding in between.
+            const result=await activation!.activate(target,passSignal,
+              config.settlement?(consumer,document,joined)=>consumer.settle(document,joined):undefined);
             if(result.kind==="done"){
-              if(config.settlement)await runDocument(result.document,passSignal,joined=>activation!.consumer(result.document).consumer.settle(result.document,joined));
               await attachments.get(target.workspaceId)!.ordinary.push(passSignal);
               if(activation!.workspaceReady(target.workspaceId))await attachments.get(target.workspaceId)!.ordinary.pull(passSignal);
             }

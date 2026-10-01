@@ -88,6 +88,7 @@ test("new desktop consumers cannot silently reuse browser-only input coverage", 
   for (const [input, helper] of [
     ["services/workspace-api/e2e/harness", "selfHostOnboarding"],
     ["packages/workspace-postgres/src/db/migrations/0001_better_auth.sql", "selfHostOnboarding"],
+    ["services/share-web/src/testing/localhostCa", "selfHostOnboarding"],
     ["services/share-web/src/server", "sharedDatasetBrowser"],
   ]) {
     const source = `import "../../../../${input}";`;

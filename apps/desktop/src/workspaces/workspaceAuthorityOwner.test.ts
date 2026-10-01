@@ -82,6 +82,37 @@ describe("workspace authority owner", () => {
     replacement.release();
   });
 
+  // A shared live session outlives the lease it opened under, and its workspace
+  // carries the canonical root. On Windows the registry spells the same folder
+  // C:/..., so only the attachment can say whether the session is still current.
+  it("recognizes a released attachment across root spellings until it is replaced", async () => {
+    const registered = { workspaceId: "shared", rootPath: "C:/Users/person/Trip", label: "A" };
+    let workspace: typeof registered | null = registered;
+    const createState = vi.fn(() => ({}));
+    const owner = createWorkspaceAuthorityOwner({
+      findWorkspace: () => workspace,
+      canonicalizeRoot: (rootPath) => rootPath.replaceAll("/", "\\"),
+      createState,
+    });
+    const lease = owner.acquire("shared");
+    const { attachmentId, canonicalRootPath } = lease.binding;
+    lease.release();
+    expect(canonicalRootPath).toBe("C:\\Users\\person\\Trip");
+    expect(owner.isCurrentAttachment("shared", attachmentId)).toBe(true);
+
+    workspace = null;
+    await owner.invalidate("shared");
+    expect(owner.isCurrentAttachment("shared", attachmentId)).toBe(false);
+    workspace = { ...registered };
+    expect(owner.isCurrentAttachment("shared", attachmentId)).toBe(false);
+    // The check is a lookup: it attached nothing new.
+    expect(createState).toHaveBeenCalledOnce();
+    const replacement = owner.acquire("shared");
+    expect(owner.isCurrentAttachment("shared", replacement.binding.attachmentId)).toBe(true);
+    expect(owner.isCurrentAttachment("shared", attachmentId)).toBe(false);
+    replacement.release();
+  });
+
   it("keeps retired state alive until the exact async lease releases", async () => {
     const test = testOwner({
       workspaceId: "workspace",

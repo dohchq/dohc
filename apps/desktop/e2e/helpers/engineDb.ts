@@ -165,6 +165,43 @@ export function ydocUpdateAuthors(
   );
 }
 
+// Counts and cursors only: where this owner's copy of its host's live
+// settlements stands against its accepted cursor. Pulled settlement records
+// and settlement moments, by disposition; settlements
+// parked for a later accepted cursor; and any pulled operation deferred for a
+// retry, such as one waiting for an open document.
+export function ownerSettlementState(rootPath: string) {
+  return withEngineDb(rootPath, (db) => {
+    const count = (sql: string) => Number(db.prepare(sql).get()?.n ?? 0);
+    return {
+      // The cursor each pulled settlement covers, and whether its moment is here.
+      settlementRecords: db
+        .prepare(
+          `SELECT json_extract(l.payload_json,'$.record.terminalCursor') AS cursor,
+             EXISTS(SELECT 1 FROM moments m
+               WHERE m.moment_id=json_extract(l.payload_json,'$.record.momentId')) AS moment_here
+           FROM replication_log l WHERE l.imported=1 AND l.op_kind='live.audit.settlement'
+           ORDER BY cursor`,
+        )
+        .all()
+        .map((row) => ({ terminalCursor: Number(row.cursor), momentHere: Number(row.moment_here) === 1 })),
+      acceptedCursor: count("SELECT COALESCE(MAX(accepted_cursor),-1) AS n FROM ydoc_owner_bindings"),
+      settlementMoments: db
+        .prepare(
+          `SELECT apply_disposition AS disposition, COUNT(*) AS n FROM replication_log
+           WHERE imported=1 AND op_kind='moment.append'
+             AND json_extract(payload_json,'$.momentId') LIKE 'moment-ydoc-%'
+           GROUP BY apply_disposition`,
+        )
+        .all()
+        .map((row) => ({ disposition: String(row.disposition), count: Number(row.n) })),
+      parked: count("SELECT COUNT(*) AS n FROM owner_pending_settlements WHERE applied=0"),
+      parkedApplied: count("SELECT COUNT(*) AS n FROM owner_pending_settlements WHERE applied=1"),
+      deferred: count("SELECT COUNT(*) AS n FROM relay_deferred_ops"),
+    };
+  });
+}
+
 // Every text-carrying moment with its blob text, ordered by moment_order.
 //
 // A moment's `payload_after_blob_sha256` holds a `blobs` digest for text and a
