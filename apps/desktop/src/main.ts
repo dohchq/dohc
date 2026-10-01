@@ -679,8 +679,9 @@ function notifyAutomationHoldsChanged(workspaceId: string): void {
   notifyWorkspaceWindows(workspaceId, CHANNELS.automationHoldsChanged);
 }
 
-// The automations main read from a workspace changed: the windows on that
-// workspace re-read the ⚡ field marks.
+// The automations main read from a workspace changed, or a shared view's host
+// answered a Button check: the windows on that workspace re-read the ⚡ field
+// marks and their Buttons' states.
 function notifyCollectionAutomationsChanged(workspaceId: string): void {
   notifyWorkspaceWindows(workspaceId, CHANNELS.collectionAutomationsChanged);
 }

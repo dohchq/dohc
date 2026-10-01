@@ -14,6 +14,9 @@ export type AutomationButtonState =
   | { kind: "ready"; automationId: string; irreversible?: IrreversibleAction[] }
   // Nothing runs yet. Someone who can edit the Collection can choose what it does.
   | { kind: "no-automation"; reason: string }
+  // A shared view's host has not answered yet. It cannot run until it does.
+  | { kind: "checking"; reason: string }
+  // The host did not answer, or there is none: dohc cannot say whether it may run.
   | { kind: "unchecked"; reason: string }
   | { kind: "disabled"; reason: string };
 
@@ -25,6 +28,7 @@ export type AutomationButtonState =
 export interface IrreversibleAction { name: string; label: string }
 
 export const NO_AUTOMATION = "No automation uses this button.";
+export const BUTTON_CHECKING = "dohc is checking whether you can use this button.";
 export const RUNNING_FOR_RECORD = "Running for this record.";
 
 export function noAccessReason(collectionName: string): string {

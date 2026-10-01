@@ -9,6 +9,7 @@ import type { CollectionRecord } from "@dohc/workspace-contracts/collection";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import { isSharedWithMePath } from "@dohc/workspace-core";
 import {
+  BUTTON_CHECKING,
   noAccessReason,
   type IrreversibleAction,
   resolveButton,
@@ -205,36 +206,43 @@ export function registerAutomationButtonsIpc<
   }
 
   const inspections = new Map<string, { at: number; pending: boolean; scope: object | symbol; buttons: SharedButton[] }>();
-  async function sharedButtons(operation: Operation, collectionPath: string, fields: readonly string[], background = false): Promise<SharedButton[]> {
+  /**
+   * A shared view's buttons. "now" asks the host and waits, as a press does.
+   * A listing answers at once from the last answer, or as checking while the
+   * host is asked in the background; "fresh" asks again whatever was cached.
+   */
+  async function sharedButtons(operation: Operation, collectionPath: string, fields: readonly string[], mode: "now" | "cached" | "fresh" = "now"): Promise<SharedButton[]> {
     const file = await sharedAutomations(operation, collectionPath);
     const collectionId = await dependencies.collectionId(operation, collectionPath);
     const buttons: SharedButton[] = fields.map(field => {
       const resolved = resolveButton(file, field, table => table === null, nameOf(collectionPath));
       if (resolved.kind === "state") return { state: resolved.state };
-      return { target: { automationId: collectionAutomationId(collectionId, resolved.automation.id), definitionHash: definitionHash(resolved.automation), collectionPath }, state: { kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED } };
+      return { target: { automationId: collectionAutomationId(collectionId, resolved.automation.id), definitionHash: definitionHash(resolved.automation), collectionPath }, state: { kind: "checking", reason: BUTTON_CHECKING } };
     });
     const targets = buttons.flatMap(button => button.target ? [button.target] : []);
     if (targets.length === 0) return buttons;
     const refresh = async () => {
       const answers = await dependencies.relayInspect(operation, targets).catch(() => targets.map((): RelayButtonInspection => ({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED })));
       let index = 0;
-      return buttons.map(button => {
+      return buttons.map((button): SharedButton => {
         const target = button.target;
         if (!target) return button;
         const answer = answers[index++];
-        if (!answer) return button;
+        // No answer, or one for another definition, is not an answer.
+        const unknown = { target, state: { kind: "unchecked" as const, reason: SHARED_BUTTON_UNCHECKED } };
+        if (!answer) return unknown;
         if (answer.kind !== "ready") return { state: { kind: answer.kind === "denied" ? "disabled" as const : "unchecked" as const, reason: answer.reason } };
-        if (answer.automationId !== target.automationId || answer.definitionHash !== target.definitionHash) return button;
+        if (answer.automationId !== target.automationId || answer.definitionHash !== target.definitionHash) return unknown;
         return { target, state: { kind: "ready" as const, automationId: target.automationId, ...(answer.irreversible.length ? { irreversible: answer.irreversible } : {}) } };
       });
     };
-    if (!background) return refresh();
+    if (mode === "now") return refresh();
     const account = await dependencies.inspectionAccount();
     const key = JSON.stringify([account, operation.workspace.workspaceId, operation.workspace.rootPath, operation.workspace.shareView, collectionPath, fields, file, targets]);
     const cached = inspections.get(key);
     const scope = operation.workspace.attachmentId ?? operation.workspace;
-    const recent = cached?.scope === scope && Date.now() - cached.at < 120_000;
-    if (cached?.scope === scope && (cached.pending || Date.now() - cached.at < 5_000)) {
+    const recent = mode === "cached" && cached?.scope === scope && Date.now() - cached.at < 120_000;
+    if (mode === "cached" && cached?.scope === scope && (cached.pending || Date.now() - cached.at < 5_000)) {
       inspections.delete(key);
       inspections.set(key, cached);
       if (!recent) cached.buttons = buttons;
@@ -262,7 +270,7 @@ export function registerAutomationButtonsIpc<
    * view's are read from its automations.yaml and run on the owner's
    * computer; anything less than Edit on the Collection's folder refuses all.
    */
-  async function documentButtons(operation: Operation, collectionPath: string, describe: (datasetId: string) => Promise<DatasetDescription>): Promise<CollectionAutomationButton[]> {
+  async function documentButtons(operation: Operation, collectionPath: string, describe: (datasetId: string) => Promise<DatasetDescription>, check = false): Promise<CollectionAutomationButton[]> {
     let fields: string[];
     try {
       fields = await dependencies.buttonFields(operation, collectionPath);
@@ -279,7 +287,7 @@ export function registerAutomationButtonsIpc<
       return fields.map((field) => ({ field, state: { kind: "disabled", reason } }));
     }
     if (access === "press") return await operation.state.collectionAutomations.buttons(collectionPath, fields, describe);
-    const buttons = await sharedButtons(operation, collectionPath, fields, true);
+    const buttons = await sharedButtons(operation, collectionPath, fields, check ? "fresh" : "cached");
     return fields.map((field, index) => ({ field, state: buttons[index]!.state }));
   }
 
@@ -292,7 +300,7 @@ export function registerAutomationButtonsIpc<
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListRecordButtonsResult> => {
       const found = await dependencies.recordAt(operation, input.path);
       if (found === null) return { record: null };
-      return { ...found, buttons: await documentButtons(operation, found.collectionPath, (id) => dependencies.describeDataset(event.sender, input.workspaceId, id)) };
+      return { ...found, fields: await dependencies.buttonFields(operation, found.collectionPath) };
     });
   });
 
@@ -311,7 +319,7 @@ export function registerAutomationButtonsIpc<
       return { buttons: buttons.map((button, index) => ({ ...button, state: states[index]! })) };
     }
     assertCollectionPath(input.collectionPath);
-    const buttons = await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, (operation) => documentButtons(operation, input.collectionPath, (id) => dependencies.describeDataset(event.sender, input.workspaceId, id)));
+    const buttons = await withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, (operation) => documentButtons(operation, input.collectionPath, (id) => dependencies.describeDataset(event.sender, input.workspaceId, id), input.check === true));
     return { buttons: buttons.map((button) => ({ ...button, table: null })) };
   });
 

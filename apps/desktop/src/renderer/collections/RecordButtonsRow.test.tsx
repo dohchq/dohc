@@ -2,16 +2,19 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CollectionRecord } from "@dohc/workspace-contracts";
+import userEvent from "@testing-library/user-event";
+import type { AutomationButtonState } from "@dohc/automation-executor/automation-buttons";
 import type {
-  AutomationRunSettledEvent, GetCollectionRecordHistoryPayload, GetCollectionRecordHistoryResult, ListRecordButtonsResult,
-  LocateRecordHistoryRunPayload, LocateRecordHistoryRunResult, RecordHistoryEntry, WorkspaceActivityEvent,
+  AutomationRunSettledEvent, GetCollectionRecordHistoryPayload, GetCollectionRecordHistoryResult, ListAutomationButtonsResult,
+  ListRecordButtonsResult, LocateRecordHistoryRunPayload, LocateRecordHistoryRunResult, PressAutomationButtonResult,
+  RecordHistoryEntry, WorkspaceActivityEvent,
 } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { useShellError } from "../shell/useShellError";
 import { RecordButtonsRow } from "./RecordButtonsRow";
 import { RecordHistoryDialog } from "./RecordHistoryDialog";
 import { RUN_NOT_CHECKED, useRecordHistory } from "./useRecordHistory";
-import { resetAutomationButtonsForTests } from "./useAutomationButtons";
+import { automationButtonsFor, disposeAutomationButtons, resetAutomationButtonsForTests } from "./useAutomationButtons";
 
 // The shell opens the ⚡ panel at a run; these tests open none.
 const noRun = async () => null;
@@ -22,12 +25,19 @@ const invoice: CollectionRecord = {
   values: [{ field: "title", value: "Invoice 12", validation: { status: "valid" }, resolvedRelations: [] }],
 };
 
-function stub(answer: ListRecordButtonsResult) {
+type Button = { field: string; state: AutomationButtonState };
+
+/** Main's answers: the record the file is, and what its Collection's buttons do. */
+function stub(answer: { record: null } | { record: CollectionRecord; collectionPath: string; buttons: Button[] }) {
   const activity = new Set<(event: WorkspaceActivityEvent) => void>();
   const settled = new Set<(event: AutomationRunSettledEvent) => void>();
+  const changed = new Set<(event: { workspaceId: string }) => void>();
+  const listed = (buttons: Button[]): ListAutomationButtonsResult => ({ buttons: buttons.map((button) => ({ ...button, table: null })) });
   const bridge = {
-    listRecordButtons: vi.fn(async () => answer),
-    pressAutomationButton: vi.fn(async () => ({ busy: false as const, claimId: "atc_press", settled: null })),
+    listRecordButtons: vi.fn(async (): Promise<ListRecordButtonsResult> => answer.record === null ? answer
+      : { record: answer.record, collectionPath: answer.collectionPath, fields: answer.buttons.map((button) => button.field) }),
+    listAutomationButtons: vi.fn(async () => listed(answer.record === null ? [] : answer.buttons)),
+    pressAutomationButton: vi.fn(async (): Promise<PressAutomationButtonResult> => ({ busy: false, claimId: "atc_press", settled: null })),
     onWorkspaceActivity: vi.fn((listener: (event: WorkspaceActivityEvent) => void) => {
       activity.add(listener);
       return () => activity.delete(listener);
@@ -37,8 +47,14 @@ function stub(answer: ListRecordButtonsResult) {
       return () => settled.delete(listener);
     }),
     onAutomationRunWaiting: vi.fn(() => () => undefined),
+    onCollectionAutomationsChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
+      changed.add(listener);
+      return () => changed.delete(listener);
+    }),
+    emitChanged: (event: { workspaceId: string }) => { for (const listener of [...changed]) listener(event); },
     emitActivity: (event: WorkspaceActivityEvent) => { for (const listener of [...activity]) listener(event); },
     emitSettled: (event: AutomationRunSettledEvent) => { for (const listener of [...settled]) listener(event); },
+    listed,
   };
   vi.stubGlobal("dohcDesktop", bridge);
   return bridge;
@@ -119,7 +135,7 @@ describe("RecordButtonsRow", () => {
     const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     // A press someone else is running leaves words on the button, which show while the pointer is over it.
-    bridge.pressAutomationButton.mockResolvedValueOnce({ busy: true as const, reason: "Running for this record." } as never);
+    bridge.pressAutomationButton.mockResolvedValueOnce({ busy: true, reason: "Running for this record." });
     fireEvent.click(button);
     fireEvent.click(screen.getByRole("button", { name: "Run" }));
     await waitFor(() => expect(button.getAttribute("aria-describedby")).not.toBeNull());
@@ -141,10 +157,9 @@ describe("RecordButtonsRow", () => {
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     fireEvent.click(button);
     expect(document.activeElement?.textContent).toBe("Run");
-    bridge.listRecordButtons.mockResolvedValue({
-      record: invoice, collectionPath: "Invoices",
-      buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid", irreversible: [{ name: "invoices.settle", label: "Settle" }, { name: "invoices.refund", label: "Refund" }] } }],
-    });
+    bridge.listAutomationButtons.mockResolvedValue(bridge.listed(
+      [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid", irreversible: [{ name: "invoices.settle", label: "Settle" }, { name: "invoices.refund", label: "Refund" }] } }],
+    ));
     act(() => bridge.emitActivity({ workspaceId: "ws-1", paths: ["Invoices/automations.yaml"] } as WorkspaceActivityEvent));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(document.activeElement).toBe(button);
@@ -182,6 +197,19 @@ describe("RecordButtonsRow", () => {
     await waitFor(() => expect(bridge.listRecordButtons).toHaveBeenCalledTimes(2));
   });
 
+  it("reads what its buttons do again when the Collection's automations change, not when the record is saved", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [{ field: "Mark paid", state: { kind: "ready", automationId: "collection:Invoices#paid" } }] });
+    render(<RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={() => undefined} onNotice={() => undefined} onOpenHistory={() => undefined} />);
+    await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1));
+    act(() => bridge.emitActivity({ workspaceId: "ws-1", paths: ["Invoices/12.md"] } as WorkspaceActivityEvent));
+    await waitFor(() => expect(bridge.listRecordButtons).toHaveBeenCalledTimes(2));
+    await act(async () => undefined);
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1);
+    act(() => bridge.emitActivity({ workspaceId: "ws-1", paths: ["Invoices/automations.yaml"] } as WorkspaceActivityEvent));
+    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2));
+  });
+
   it("reports a failed read with Try again", async () => {
     const bridge = stub({ record: null });
     bridge.listRecordButtons.mockRejectedValueOnce(new Error("The workspace engine is not running."));
@@ -190,6 +218,228 @@ describe("RecordButtonsRow", () => {
     await waitFor(() => expect(onError).toHaveBeenCalledWith("dohc could not read this record's buttons.", expect.any(Error), expect.any(Function)));
     act(() => (onError.mock.calls[0]![2] as () => void)());
     await waitFor(() => expect(bridge.listRecordButtons).toHaveBeenCalledTimes(2));
+  });
+});
+
+// What main says about a shared view's buttons, from the computer that runs the owner's automations.
+const UNCHECKED = "dohc cannot check this button now. Try again when its host is available.";
+const CHECKING_BUTTON = "dohc is checking whether you can use this button.";
+const BUTTON_NOT_CHECKED = "dohc could not check this button.";
+const DENIED = "This button cannot use the requested Collection or operations.";
+const READY: AutomationButtonState = { kind: "ready", automationId: "collection:Invoices#paid" };
+const CHECKING: AutomationButtonState = { kind: "checking", reason: CHECKING_BUTTON };
+const row = (onError = vi.fn(), onNotice = vi.fn()) => (
+  <RecordButtonsRow workspaceId="ws-1" path="Invoices/12.md" onError={onError} onNotice={onNotice} onOpenHistory={() => undefined} />
+);
+const wordsOf = (control: HTMLElement) => document.getElementById(control.getAttribute("aria-describedby") ?? "")?.textContent ?? null;
+const checkAgain = () => screen.queryByRole("button", { name: "Check Mark paid for Invoice 12 again" });
+// The mark beside a checking or running button's name.
+const loaderIn = (button: HTMLElement) => button.querySelector("svg.lucide-loader-circle");
+
+describe("RecordButtonsRow in an Edit share view", () => {
+  it("shows the record at once, and its button as checking until main answers", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [{ field: "Mark paid", state: READY }] });
+    const answer = deferred<ListAutomationButtonsResult>();
+    bridge.listAutomationButtons.mockReturnValueOnce(answer.promise);
+    render(row());
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    expect(screen.getByRole("button", { name: "History" })).toBeTruthy();
+    expect(bridge.listAutomationButtons).toHaveBeenCalledWith({ workspaceId: "ws-1", collectionPath: "Invoices" });
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(wordsOf(button)).toBe(CHECKING_BUTTON);
+    // dohc is already checking, so there is nothing to check again.
+    expect(checkAgain()).toBeNull();
+    fireEvent.click(button);
+    expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
+    await act(async () => answer.resolve(bridge.listed([{ field: "Mark paid", state: READY }])));
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+    expect(button.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  it("says dohc cannot check a button now, and Check again from the keyboard reads again and gives focus back", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [{ field: "Mark paid", state: { kind: "unchecked", reason: UNCHECKED } }] });
+    const user = userEvent.setup();
+    render(row());
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(checkAgain()).not.toBeNull());
+    const again = checkAgain()!;
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(wordsOf(button)).toBe(UNCHECKED);
+    expect(wordsOf(again)).toBe(UNCHECKED);
+    await user.click(button);
+    expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
+    act(() => button.focus());
+    await user.tab();
+    expect(document.activeElement).toBe(again);
+    expect(document.getElementById(again.getAttribute("aria-describedby")!)!.hidden).toBe(false);
+    const answer = deferred<ListAutomationButtonsResult>();
+    bridge.listAutomationButtons.mockReturnValueOnce(answer.promise);
+    await user.keyboard("{Enter}");
+    // Check again asks the host, past main's last answer.
+    expect(bridge.listAutomationButtons).toHaveBeenLastCalledWith({ workspaceId: "ws-1", collectionPath: "Invoices", check: true });
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2);
+    // It stays while main answers, so focus stays, and it asks nothing more.
+    expect(again.getAttribute("aria-disabled")).toBe("true");
+    expect(wordsOf(button)).toBe(CHECKING_BUTTON);
+    await user.keyboard("{Enter}");
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2);
+    // Main says the host is being asked: Check again goes, and focus moves to the button.
+    await act(async () => answer.resolve(bridge.listed([{ field: "Mark paid", state: CHECKING }])));
+    expect(checkAgain()).toBeNull();
+    expect(document.activeElement).toBe(button);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(wordsOf(button)).toBe(CHECKING_BUTTON);
+    expect(loaderIn(button)).not.toBeNull();
+    bridge.listAutomationButtons.mockResolvedValue(bridge.listed([{ field: "Mark paid", state: READY }]));
+    act(() => bridge.emitChanged({ workspaceId: "ws-1" }));
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    expect(loaderIn(button)).toBeNull();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows Check again's words only for keyboard focus, closes them on Escape, and keeps Escape inside", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [{ field: "Mark paid", state: { kind: "unchecked", reason: UNCHECKED } }] });
+    const outer = vi.fn();
+    render(<div onKeyDown={outer}>{row()}</div>);
+    await waitFor(() => expect(checkAgain()).not.toBeNull());
+    const again = checkAgain()!;
+    const words = document.getElementById(again.getAttribute("aria-describedby")!)!;
+    // Focus that a click gives shows nothing.
+    fireEvent.pointerDown(again);
+    fireEvent.focus(again);
+    expect(words.hidden).toBe(true);
+    fireEvent.blur(again);
+    fireEvent.focus(again);
+    expect(words.hidden).toBe(false);
+    fireEvent.keyDown(again, { key: "Escape" });
+    expect(words.hidden).toBe(true);
+    expect(outer).not.toHaveBeenCalled();
+    // While main answers, it looks as inert as it is.
+    expect(again.className).toContain("aria-disabled:hover:bg-transparent");
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows checking while the host is asked, and reads again when main says it answered, for this workspace only", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [{ field: "Mark paid", state: CHECKING }] });
+    const view = render(row());
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(loaderIn(button)).not.toBeNull());
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(wordsOf(button)).toBe(CHECKING_BUTTON);
+    expect(checkAgain()).toBeNull();
+    // The mark turns only where motion is allowed, so with reduced motion it stays still beside the words.
+    const mark = loaderIn(button)!.getAttribute("class")!.split(/\s+/);
+    expect(mark).toContain("motion-safe:animate-spin");
+    expect(mark).not.toContain("animate-spin");
+    bridge.listAutomationButtons.mockResolvedValue(bridge.listed([{ field: "Mark paid", state: READY }]));
+    act(() => bridge.emitChanged({ workspaceId: "ws-2" }));
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1);
+    act(() => bridge.emitChanged({ workspaceId: "ws-1" }));
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2);
+    expect(loaderIn(button)).toBeNull();
+    // A store nothing shows reads when it next shows, not on every change.
+    view.unmount();
+    act(() => bridge.emitChanged({ workspaceId: "ws-1" }));
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2);
+    const store = automationButtonsFor("ws-1", { collectionPath: "Invoices" });
+    const stop = store.subscribe(store.key("Mark paid", "rec-12"), () => undefined);
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(3);
+    stop();
+    await act(async () => undefined);
+    // A closed workspace's store hears nothing.
+    act(() => disposeAutomationButtons("ws-1"));
+    store.subscribe(store.key("Mark paid", "rec-12"), () => undefined);
+    act(() => bridge.emitChanged({ workspaceId: "ws-1" }));
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["the host refuses what it needs", DENIED],
+    ["the person holds a link", "Only people who can edit Invoices can use this button."],
+  ])("says why a button cannot run when %s, offers no Check again, and runs nothing", async (_case, reason) => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [{ field: "Mark paid", state: { kind: "disabled", reason } }] });
+    render(row());
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(wordsOf(button)).toBe(reason));
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(checkAgain()).toBeNull();
+    fireEvent.click(button);
+    expect(bridge.pressAutomationButton).not.toHaveBeenCalled();
+  });
+
+  it("asks before actions dohc cannot undo, sends the confirmed names, and leaves the notice of a relayed press to its host", async () => {
+    const send = "00000000-0000-4000-8000-000000000001/sendInvoice";
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [{ field: "Mark paid", state: { ...READY, irreversible: [{ name: send, label: "Send invoice" }] } }] });
+    bridge.pressAutomationButton.mockResolvedValue({ busy: false, relayed: true });
+    const onError = vi.fn(), onNotice = vi.fn();
+    render(row(onError, onNotice));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    fireEvent.click(button);
+    expect(screen.getByRole("dialog", { name: "Run Mark paid for Invoice 12" }).textContent).toContain("Send invoice can't be undone.");
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledWith(expect.objectContaining({ collectionPath: "Invoices", recordId: "rec-12", confirmed: [send] })));
+    await waitFor(() => expect(button.getAttribute("aria-busy")).toBeNull());
+    // The owner's computer runs it and files its one notice, so this view reports nothing.
+    expect(onNotice).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    // A press the host refuses when pressed files one notice, with Try again.
+    bridge.pressAutomationButton.mockRejectedValueOnce(new Error(UNCHECKED));
+    fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    expect(onError).toHaveBeenCalledWith("Mark paid did not start.", new Error(UNCHECKED), expect.any(Function));
+  });
+
+  it("files one notice for a failed read, and the button says dohc could not check it until Check again reads", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [{ field: "Mark paid", state: READY }] });
+    bridge.listAutomationButtons.mockRejectedValueOnce(new Error("The workspace engine is not running."));
+    const onError = vi.fn();
+    render(row(onError));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(checkAgain()).not.toBeNull());
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith("dohc could not read this Collection's buttons.", expect.any(Error), expect.any(Function));
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(wordsOf(button)).toBe(BUTTON_NOT_CHECKED);
+    fireEvent.click(checkAgain()!);
+    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
+    expect(checkAgain()).toBeNull();
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the newest answer when an older read lands late, and reads nothing for a closed workspace", async () => {
+    const bridge = stub({ record: invoice, collectionPath: "Invoices", buttons: [{ field: "Mark paid", state: { kind: "unchecked", reason: UNCHECKED } }] });
+    const onError = vi.fn();
+    render(row(onError));
+    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
+    await waitFor(() => expect(checkAgain()).not.toBeNull());
+    const older = deferred<ListAutomationButtonsResult>(), newer = deferred<ListAutomationButtonsResult>();
+    bridge.listAutomationButtons.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+    fireEvent.click(checkAgain()!);
+    // The host answered while that read was out, so the store reads again.
+    act(() => bridge.emitChanged({ workspaceId: "ws-1" }));
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(3);
+    await act(async () => newer.resolve(bridge.listed([{ field: "Mark paid", state: READY }])));
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+    await act(async () => older.resolve(bridge.listed([{ field: "Mark paid", state: { kind: "unchecked", reason: UNCHECKED } }])));
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+    expect(button.getAttribute("aria-describedby")).toBeNull();
+    expect(checkAgain()).toBeNull();
+    const late = deferred<ListAutomationButtonsResult>();
+    bridge.listAutomationButtons.mockReturnValueOnce(late.promise);
+    act(() => bridge.emitChanged({ workspaceId: "ws-1" }));
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(4);
+    const store = automationButtonsFor("ws-1", { collectionPath: "Invoices" });
+    act(() => disposeAutomationButtons("ws-1"));
+    await act(async () => late.resolve(bridge.listed([{ field: "Mark paid", state: { kind: "disabled", reason: DENIED } }])));
+    expect(store.states()?.get("Mark paid")).toEqual(READY);
+    // A closed workspace's store asks main nothing more.
+    await store.refresh();
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(4);
+    expect(onError).not.toHaveBeenCalled();
   });
 });
 
