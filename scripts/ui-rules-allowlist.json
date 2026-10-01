@@ -1,8 +1,5 @@
 {
   "violations": {
-    "apps/desktop/src/renderer/Overlay.tsx": {
-      "backdrop": 1
-    },
     "apps/desktop/src/renderer/accentColor.ts": {
       "raw-hex": 2
     },
@@ -11,6 +8,9 @@
     },
     "apps/desktop/src/renderer/collab/excalidrawPresence.ts": {
       "raw-hex": 12
+    },
+    "apps/desktop/src/renderer/dev/StatesPage.tsx": {
+      "raw-hex": 1
     },
     "apps/desktop/src/renderer/editor/documentExport.ts": {
       "raw-hex": 12
@@ -23,6 +23,9 @@
     },
     "apps/desktop/src/renderer/excalidrawDocument.ts": {
       "raw-hex": 1
+    },
+    "apps/desktop/src/renderer/Overlay.tsx": {
+      "backdrop": 1
     }
   }
 }
