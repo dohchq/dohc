@@ -39,9 +39,9 @@ import { closeStatesPage } from "./statesRoute";
 
 const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
-// A floating part draws a shadow up to 38px below and 28px beside itself.
-// A part that floats one keeps that much room inside its own section, so
-// its whole shadow is in its own capture and in no neighbor's.
+// A floating part draws a shadow up to 38px below and 28px beside itself,
+// and its whole shadow must stay in its own capture. The toasts get this
+// padding; the menus get the same room from their taller boxes.
 const SHADOW_ROOM = "p-10";
 
 function Section(props: { part: string; title: string; children: ReactNode }) {
