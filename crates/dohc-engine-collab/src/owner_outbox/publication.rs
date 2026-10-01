@@ -87,6 +87,18 @@ pub fn contains_in(
                 if hex_sha256(projection.content.as_bytes()) == digest {
                     return Ok(true);
                 }
+                // A resumed restore's settlement replaced exactly one accepted head of the
+                // generation it fenced. Its verified resume evidence proves that head only.
+                match crate::live_update_application::read_restore_predecessor_in(
+                    conn, key, &namespace, &binding, remaining,
+                ) {
+                    Ok(Some(replaced)) if replaced == digest => return Ok(true),
+                    Err(crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded) => {
+                        budget_exhausted = true;
+                        return Err(OwnerOutboxError::Frozen);
+                    }
+                    _ => {}
+                }
                 // Initial observed enrollment proves that the original claimed
                 // base is contained, including its delete set, before installing.
                 let original = Ydoc::wire();

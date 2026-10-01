@@ -1559,6 +1559,248 @@ fn ordinary_settlement_starts_at_verified_restore_anchor_under_future_open_bindi
     );
 }
 
+/// The restore's settlement moment replaces the text the fenced generation last
+/// settled. After durable resume its publication needs the restored after-image
+/// and that replaced before-image, but no other history of the old generation.
+#[test]
+fn resumed_restore_settlement_moment_publishes_its_replaced_and_restored_images() {
+    use crate::owner_outbox::publication::{contains_in, PublicationContentKind, PublicationProof};
+    let mut f = Fixture::new("Original");
+    let unsettled = f.edit("Accepted but never settled", 5);
+    f.edit("Recipient continued", 7);
+    let replaced = with_settlement(
+        &mut f.store,
+        &f.handle,
+        f.terminal.clone(),
+        100,
+        |store, audit| record_test_projection(store, audit, "replaced-moment"),
+    )
+    .unwrap();
+    let old = f.binding.clone();
+    let restored = restore_and_resume(&mut f);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            // The moment the restore settlement journals for publication.
+            let (before, after): (String, String) = conn
+                .query_row(
+                    "SELECT before_blob_sha256,after_blob_sha256 FROM moments WHERE moment_id='restore-moment'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((before.as_str(), after.as_str()), (replaced.markdown_digest.as_str(), restored.markdown_digest.as_str()));
+            // Its before-image is settled only under the generation the restore fenced.
+            let replaced_binding: String = conn
+                .query_row(
+                    "SELECT binding_json FROM live_device_settlements WHERE settlement_id=?1",
+                    [&replaced.settlement_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(serde_json::from_str::<LiveObjectBinding>(&replaced_binding).unwrap(), old);
+            assert_eq!(f.binding.restore_fence_generation, old.restore_fence_generation + 1);
+            let proof = |digest: &str| {
+                contains_in(conn, &key, &f.binding.current_path, None, PublicationContentKind::Projection, digest, &mut 4_000_000)
+                    .unwrap()
+            };
+            assert_eq!(proof(&after), PublicationProof::Contained, "restored after-image");
+            assert_eq!(proof(&before), PublicationProof::Contained, "replaced before-image");
+            // Neither unsettled history of the fenced generation nor unrelated text is proved.
+            assert_eq!(proof(&unsettled.markdown_digest), PublicationProof::NotContained);
+            assert_eq!(proof(&hex_sha256(b"unrelated private draft")), PublicationProof::NotContained);
+            // Only this registration's exact namespace and resumed binding read the evidence,
+            // and the evidence reads are charged to the caller's budget.
+            let predecessor = |namespace: &str, binding: &LiveObjectBinding, remaining: usize| {
+                crate::live_update_application::read_restore_predecessor_in(conn, &key, namespace, binding, &mut { remaining })
+            };
+            assert_eq!(predecessor("namespace", &f.binding, 4_000_000)?, Some(before.clone()));
+            assert_eq!(predecessor("other-namespace", &f.binding, 4_000_000)?, None);
+            assert_eq!(predecessor("namespace", &old, 4_000_000)?, None);
+            assert!(matches!(
+                predecessor("namespace", &f.binding, 64),
+                Err(ApplicationError::ConfiguredByteBudgetExceeded)
+            ));
+            Ok(())
+        })
+        .unwrap();
+    // Changed resume evidence no longer proves the replaced head.
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE live_restore_fences SET resume_evidence_digest=?1",
+                [&"0".repeat(64)],
+            )
+            .map_err(write_sql)?;
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            let proof = |digest: &str| {
+                contains_in(
+                    conn,
+                    &key,
+                    &f.binding.current_path,
+                    None,
+                    PublicationContentKind::Projection,
+                    digest,
+                    &mut 4_000_000,
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                proof(&replaced.markdown_digest),
+                PublicationProof::NotContained
+            );
+            assert_eq!(
+                proof(&restored.markdown_digest),
+                PublicationProof::Contained
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// A restore before the fenced generation ever settled replaced that generation's origin.
+#[test]
+fn resumed_restore_without_a_prior_settlement_replaced_its_origin() {
+    let mut f = Fixture::new("Original");
+    f.edit("Recipient continued", 7);
+    restore_and_resume(&mut f);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let origin = hex_sha256(b"Original");
+    f.store
+        .read_with(|conn| -> Result<(), ApplicationError> {
+            let before: String = conn
+                .query_row(
+                    "SELECT before_blob_sha256 FROM moments WHERE moment_id='restore-moment'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(before, origin);
+            let predecessor = |remaining: &mut usize| {
+                crate::live_update_application::read_restore_predecessor_in(
+                    conn,
+                    &key,
+                    "namespace",
+                    &f.binding,
+                    remaining,
+                )
+            };
+            let mut remaining = 4_000_000;
+            assert_eq!(predecessor(&mut remaining)?, Some(origin.clone()));
+            // The origin read is the proof's last charge.
+            let used = 4_000_000 - remaining;
+            assert_eq!(predecessor(&mut { used })?, Some(origin.clone()));
+            assert!(matches!(
+                predecessor(&mut { used - 1 }),
+                Err(ApplicationError::ConfiguredByteBudgetExceeded)
+            ));
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// The fence replay inside the predecessor proof shares the caller's budget.
+/// With enough for the receipts read before it, the proof refuses before
+/// reading the candidate and its application record, which would fail if read.
+#[test]
+fn restore_predecessor_refuses_before_reading_the_restore_candidate() {
+    let mut f = Fixture::new("Original");
+    f.edit("Recipient continued", 7);
+    restore_and_resume(&mut f);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let (receipt, application, candidate): (i64, i64, i64) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT length(CAST(f.resume_receipt_json AS BLOB)),length(CAST(f.application_json AS BLOB)),b.byte_length FROM live_restore_fences f JOIN binary_blobs b ON b.sha256=json_extract(f.application_json,'$.candidateDigest') WHERE f.resume_receipt_json IS NOT NULL",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(read_sql)
+        })
+        .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE live_device_update_applications SET applied_connection_id=applied_connection_id||'-changed' WHERE delivery_id=(SELECT json_extract(application_json,'$.admitted.accepted.receipt.deliveryId') FROM live_restore_fences)",
+                [],
+            )
+            .map_err(write_sql)?;
+            Ok::<_, ApplicationError>(())
+        })
+        .unwrap();
+    let predecessor = |remaining: usize| {
+        f.store.read_with(|conn| {
+            crate::live_update_application::read_restore_predecessor_in(
+                conn,
+                &key,
+                "namespace",
+                &f.binding,
+                &mut { remaining },
+            )
+        })
+    };
+    assert!(matches!(
+        predecessor(4_000_000),
+        Err(ApplicationError::Corrupt)
+    ));
+    // Resume receipt, application receipt, and the replay's application receipt fit.
+    let before_candidate = usize::try_from(receipt + 2 * application).unwrap();
+    assert!(matches!(
+        predecessor(before_candidate + usize::try_from(candidate).unwrap() - 1),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+}
+
+/// Restore to the baseline, settle and durably resume, then register the resumed binding.
+fn restore_and_resume(f: &mut Fixture) -> LiveSettlementResult {
+    let prep = f.freeze(f.baseline_point.clone());
+    let input = admitted_restore(f, prep);
+    apply_restore(f, input.clone(), &NoFaults).unwrap();
+    let restored = f
+        .owner
+        .with_restore_settlement(
+            &mut f.store,
+            input.clone(),
+            f.host.clone(),
+            2_000_000,
+            100,
+            |store, audit| record_test_projection(store, audit, "restore-moment"),
+        )
+        .unwrap();
+    let resumed = f
+        .owner
+        .resume_restore(
+            &mut f.store,
+            NativeRestoreResume {
+                application: input,
+                settlement_id: restored.settlement_id.clone(),
+            },
+            f.host.clone(),
+            2_000_000,
+            100,
+            100,
+            &NoFaults,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+    f.binding = resumed.binding.clone();
+    f.handle = f
+        .owner
+        .register(
+            &mut f.store,
+            "namespace".into(),
+            f.host.clone(),
+            f.binding.clone(),
+        )
+        .unwrap();
+    restored
+}
+
 #[test]
 fn explicit_resume_requires_settlement_and_keeps_historical_receipts_across_repeated_restore() {
     let mut f = Fixture::new("Original");

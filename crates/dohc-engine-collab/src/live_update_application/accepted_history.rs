@@ -72,8 +72,21 @@ pub(super) fn origin_stamp(
         ));
     }
     let p = parameters(held);
-    let json:String=conn.query_row("SELECT json_array(adoption_id,evidence_digest,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",p,|r|r.get(0)).map_err(read_sql)?;
+    let json: String = conn
+        .query_row(ADOPTION_STAMP, p, |r| r.get(0))
+        .map_err(read_sql)?;
     Ok(hex_sha256(json.as_bytes()))
+}
+
+const ADOPTION_STAMP: &str = "SELECT json_array(adoption_id,evidence_digest,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) AS stamp FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5";
+
+/// The stored bytes `origin_stamp` reads, so a bounded proof can charge them first.
+pub(super) fn origin_stamp_length(
+    conn: &Connection,
+    held: &Registration,
+) -> Result<usize, ApplicationError> {
+    let length: i64 = conn.query_row(&format!("SELECT coalesce((SELECT length(CAST(bootstrap_id AS BLOB))+length(CAST(bootstrap_moment_id AS BLOB))+length(CAST(baseline_digest AS BLOB))+length(CAST(projected_markdown_digest AS BLOB))+length(CAST(binding_json AS BLOB))+length(CAST(host_coordinate_json AS BLOB)) FROM live_device_bootstraps WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5),(SELECT length(CAST(stamp AS BLOB)) FROM ({ADOPTION_STAMP})),0)"), parameters(held), |r| r.get(0)).map_err(read_sql)?;
+    usize::try_from(length).map_err(|_| ApplicationError::Corrupt)
 }
 
 pub(super) fn initialize(
