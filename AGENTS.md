@@ -128,8 +128,10 @@ Understand the constraint before building. Choose the smallest model that makes 
 - Prefer Effect Schema for new or changed external contracts in modules whose runtime already uses Effect.
 - Keep renderer and preload runtime imports Effect-free.
 - Keep native and OS resource limits when adding Effect timeouts or interruption.
-- Preserve the first recorded failure and wait for owned resources to close before returning.
-- Before retaining a conversion, measure the production artifact containing the changed module, including size and first-load time.
+- Preserve the operation's error precedence through cleanup and shutdown.
+- Wait for owned resources to close before returning.
+- Before retaining a conversion, measure the production artifact containing the changed module.
+  Compare size and first-load time against baseline under matching build and machine conditions.
 
 ### Continue from approved work
 
