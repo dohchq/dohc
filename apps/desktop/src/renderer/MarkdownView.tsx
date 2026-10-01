@@ -33,9 +33,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
-  type ForwardRefExoticComponent,
   type LazyExoticComponent,
-  type RefAttributes,
 } from "react";
 import type * as Y from "yjs";
 import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
@@ -55,8 +53,8 @@ import {
 import type {
   BlockNavigationTarget,
   MarkdownEditorHandle,
-  MarkdownEditorProps,
 } from "./editor/MarkdownEditor";
+import { LazyMarkdownEditor, preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
 import type { WorkspaceLinkTarget } from "./linkActivation";
 import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
@@ -111,27 +109,6 @@ const SOURCE_VIEW_UPDATE_DELAY_MS = 150;
 const SOURCE_VIEW_UPDATE_MAX_WAIT_MS = 500;
 
 const WYSIWYG_MARKDOWN_THRESHOLD_BYTES = 64 * 1024;
-
-type MarkdownEditorComponent = ForwardRefExoticComponent<
-  MarkdownEditorProps & RefAttributes<MarkdownEditorHandle>
->;
-
-let markdownEditorPromise: Promise<{ default: MarkdownEditorComponent }> | null = null;
-
-function loadMarkdownEditor(): Promise<{ default: MarkdownEditorComponent }> {
-  markdownEditorPromise ??= import("./editor/MarkdownEditor").then((mod) => ({
-    default: mod.MarkdownEditor as MarkdownEditorComponent,
-  }));
-  return markdownEditorPromise;
-}
-
-export function preloadMarkdownEditor(): void {
-  void loadMarkdownEditor();
-}
-
-const LazyMarkdownEditor = lazy(loadMarkdownEditor) as unknown as LazyExoticComponent<
-  MarkdownEditorComponent
->;
 
 const LazyPropertiesPanel = lazy(() =>
   import("./PropertiesPanel").then((mod) => ({
@@ -765,7 +742,7 @@ export function MarkdownView(props: {
     orphanedDrafts.some((draft) => draft.id === engine.deletedDraftId);
 
   useEffect(() => {
-    if (surfaceMode === "read") void loadMarkdownEditor();
+    if (surfaceMode === "read") preloadMarkdownEditor();
   }, [surfaceMode, props.path]);
 
   const { onSaveStateChange } = props;
@@ -2049,40 +2026,33 @@ export function MarkdownView(props: {
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
           >
-            <Suspense
-              fallback={
-                <div className="flex h-full items-center justify-center text-xs text-subtle">
-                  Loading editor...
-                </div>
-              }
+            <LazyMarkdownEditor
+              ref={wysiwygRef}
+              value={props.body}
+              onDirty={() => undefined}
+              workspaceId={props.workspaceId}
+              path={props.path}
+              knownFiles={knownFiles}
+              onOpenWikilink={openWikilink}
+              onOpenWorkspaceLink={openWorkspaceLink}
+              headingTarget={props.headingTarget}
+              blockTarget={jump?.kind === "block" ? jump : undefined}
+              onBlockTargetConsumed={retireJump}
+              pendingUndo={editorPendingUndo}
+              onPendingUndoConsumed={props.onPendingUndoConsumed}
+              readOnly={readOnly}
+              collab={{
+                ydoc: engine.doc,
+                // Solo engine editing shows the settle indicator, not presence
+                // chrome — "disabled" hides the in-editor presence bar while the
+                // ydoc still drives Tiptap (collabActive keys off ydoc, not this).
+                status: "disabled",
+                peerCount: 0,
+                synced: true,
+              }}
             >
-              <LazyMarkdownEditor
-                ref={wysiwygRef}
-                value={props.body}
-                onDirty={() => undefined}
-                workspaceId={props.workspaceId}
-                path={props.path}
-                knownFiles={knownFiles}
-                onOpenWikilink={openWikilink}
-                onOpenWorkspaceLink={openWorkspaceLink}
-                headingTarget={props.headingTarget}
-                blockTarget={jump?.kind === "block" ? jump : undefined}
-                onBlockTargetConsumed={retireJump}
-                pendingUndo={editorPendingUndo}
-                onPendingUndoConsumed={props.onPendingUndoConsumed}
-                readOnly={readOnly}
-                collab={{
-                  ydoc: engine.doc,
-                  // Solo engine editing shows the settle indicator, not presence
-                  // chrome — "disabled" hides the in-editor presence bar while the
-                  // ydoc still drives Tiptap (collabActive keys off ydoc, not this).
-                  status: "disabled",
-                  peerCount: 0,
-                  synced: true,
-                }}
-              />
               <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
-            </Suspense>
+            </LazyMarkdownEditor>
           </EditorErrorBoundary>
           {backlinks}
         </div>
@@ -2273,34 +2243,27 @@ export function MarkdownView(props: {
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:local`}
           >
-            <Suspense
-              fallback={
-                <div className="flex h-full items-center justify-center text-xs text-subtle">
-                  Loading editor...
-                </div>
+            <LazyMarkdownEditor
+              key={wysiwygResyncEpoch}
+              ref={wysiwygRef}
+              value={markdownEditorBody(draft)}
+              onDirty={(materialize) =>
+                scheduleSave("wysiwyg", materialize)
               }
+              onFocus={onLocalEditorFocus}
+              workspaceId={props.workspaceId}
+              path={props.path}
+              knownFiles={knownFiles}
+              onOpenWikilink={openWikilink}
+              onOpenWorkspaceLink={openWorkspaceLink}
+              headingTarget={props.headingTarget}
+              pendingUndo={editorPendingUndo}
+              onPendingUndoConsumed={props.onPendingUndoConsumed}
+              readOnly={readOnly}
+              collab={null}
             >
-              <LazyMarkdownEditor
-                key={wysiwygResyncEpoch}
-                ref={wysiwygRef}
-                value={markdownEditorBody(draft)}
-                onDirty={(materialize) =>
-                  scheduleSave("wysiwyg", materialize)
-                }
-                onFocus={onLocalEditorFocus}
-                workspaceId={props.workspaceId}
-                path={props.path}
-                knownFiles={knownFiles}
-                onOpenWikilink={openWikilink}
-                onOpenWorkspaceLink={openWorkspaceLink}
-                headingTarget={props.headingTarget}
-                pendingUndo={editorPendingUndo}
-                onPendingUndoConsumed={props.onPendingUndoConsumed}
-                readOnly={readOnly}
-                collab={null}
-              />
               <MarkdownRenderCommitted onRendered={onMarkdownRendered} />
-            </Suspense>
+            </LazyMarkdownEditor>
           </EditorErrorBoundary>
           {backlinks}
         </div>
