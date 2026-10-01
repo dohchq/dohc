@@ -6,6 +6,7 @@ import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
 import {fixture as ticketFixture, binding, scope} from "./liveTickets.test-helper";
 import {createLiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
 import {createNamedFrameChanges} from "./liveHostChanges";
+import {hasRelayWriteObservers} from "./relayWriteChanges";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {vi.restoreAllMocks(); for (const close of cleanup.splice(0).reverse()) await close();});
@@ -17,8 +18,9 @@ function deferred() {
   return {promise, resolve};
 }
 
-async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean} = {}) {
+async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean; unavailable?: AbortSignal} = {}) {
   const f = await ticketFixture(); cleanup.push(f.close);
+  if (options.unavailable) vi.spyOn(f.storage, "unavailable", "get").mockReturnValue(options.unavailable);
   // The ticket fixture provisions a device; this supervisor test starts a clean service deployment.
   f.raw.exec("DELETE FROM sync_relay_session_host_control");
   f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
@@ -28,14 +30,14 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean}
   f.storage.enrollServiceHostDocument(input);
   if (options.empty) f.storage.setServiceHostEnrollmentEnabled({...input, enabled: false});
   const history = createLiveJournalHistoryAuthority({namespace: "supervisor-history", reconciled: true});
-  const starts: Array<{config: Configuration; close: ReturnType<typeof vi.fn<() => Promise<void>>>; ready: ReturnType<typeof vi.fn<() => boolean>>; controller: AbortController}> = [];
+  const starts: Array<{config: Configuration; configPath: string; close: ReturnType<typeof vi.fn<() => Promise<void>>>; ready: ReturnType<typeof vi.fn<() => boolean>>; controller: AbortController}> = [];
   let live = 0, peak = 0;
   const startHost = vi.fn(async ({configPath}: {configPath: string}) => {
     await options.beforeStart?.();
     const config = JSON.parse(await readFile(configPath, "utf8")) as Configuration;
     const controller = new AbortController(); let stopped = false;
     const close = vi.fn(async () => {if (!stopped) {stopped = true; live--; controller.abort();}}), ready = vi.fn(() => true);
-    live++; peak = Math.max(peak, live); starts.push({config, close, ready, controller});
+    live++; peak = Math.max(peak, live); starts.push({config, configPath, close, ready, controller});
     return {invalidated: controller.signal, close, isDocumentReady: ready, onEvent: () => () => undefined} as never;
   });
   const onError = vi.fn();
@@ -194,6 +196,96 @@ it("cancels a prepared restart when the supervisor closes during drain", async (
   const stopped = f.host.close(); drained.resolve(); await stopped;
   expect(f.starts).toHaveLength(1); expect(first.close).toHaveBeenCalledTimes(1);
   expect(f.host.current()).toBeUndefined(); expect(f.host.unavailable).toBe(true);
+});
+
+it("releases its observer and cancels queued work when closed before the initial pass", async () => {
+  const f = await fixture();
+  expect(hasRelayWriteObservers(f.storage)).toBe(true);
+  f.host.reconcile();
+  await f.host.close();
+  expect(hasRelayWriteObservers(f.storage)).toBe(false);
+  expect(f.startHost).not.toHaveBeenCalled();
+  expect(f.host.unavailable).toBe(true);
+  f.host.reconcile();
+  await f.host.close();
+  expect(f.startHost).not.toHaveBeenCalled();
+});
+
+it("waits for a late daemon start and its close before every concurrent close returns", async () => {
+  const entered = deferred(), finish = deferred();
+  const f = await fixture({beforeStart: async () => {entered.resolve(); await finish.promise;}});
+  await entered.promise;
+  const first = vi.fn(), second = vi.fn();
+  const closes = [f.host.close().then(first), f.host.close().then(second)];
+  try {
+    await Promise.resolve();
+    expect(first).not.toHaveBeenCalled();
+    expect(second).not.toHaveBeenCalled();
+    expect(hasRelayWriteObservers(f.storage)).toBe(true);
+  } finally {finish.resolve();}
+  await Promise.all(closes);
+  expect(first).toHaveBeenCalledTimes(1); expect(second).toHaveBeenCalledTimes(1);
+  expect(f.starts).toHaveLength(1);
+  expect(f.starts[0]!.close).toHaveBeenCalledTimes(1);
+  await expect(readFile(f.starts[0]!.configPath)).rejects.toMatchObject({code: "ENOENT"});
+  expect(f.host.current()).toBeUndefined();
+  expect(hasRelayWriteObservers(f.storage)).toBe(false);
+  expect(f.onError).not.toHaveBeenCalled();
+});
+
+it("keeps concurrent closes waiting while the current daemon drains", async () => {
+  const f = await fixture(); await f.waitStarted(1);
+  const first = f.starts[0]!, entered = deferred(), drained = deferred();
+  const close = first.close.getMockImplementation()!;
+  first.close.mockImplementation(async () => {entered.resolve(); await drained.promise; await close();});
+  const done = vi.fn();
+  const closing = f.host.close(); await entered.promise;
+  const alsoClosing = f.host.close().then(done);
+  try {
+    await Promise.resolve();
+    expect(done).not.toHaveBeenCalled();
+  } finally {drained.resolve();}
+  await Promise.all([closing, alsoClosing]);
+  expect(first.close).toHaveBeenCalledTimes(1);
+  expect(f.host.current()).toBeUndefined();
+});
+
+it("closes the daemon and observer when storage becomes unavailable", async () => {
+  const unavailable = new AbortController();
+  const f = await fixture({unavailable: unavailable.signal}); await f.waitStarted(1);
+  unavailable.abort();
+  await vi.waitFor(() => expect(f.starts[0]!.close).toHaveBeenCalledTimes(1));
+  await f.host.close();
+  expect(f.host.unavailable).toBe(true);
+  expect(f.host.current()).toBeUndefined();
+  expect(hasRelayWriteObservers(f.storage)).toBe(false);
+  expect(f.onError).not.toHaveBeenCalled();
+});
+
+it("retries a failed daemon start without another enrollment write", async () => {
+  const failure = new Error("Temporary daemon startup failure.");
+  let attempted = false;
+  const f = await fixture({beforeStart: async () => {
+    if (!attempted) {attempted = true; throw failure;}
+  }});
+  await vi.waitFor(() => expect(f.onError).toHaveBeenCalledWith(failure), {timeout: 10_000});
+  await vi.waitFor(() => expect(f.host.unavailable).toBe(false), {timeout: 10_000});
+  expect(f.startHost).toHaveBeenCalledTimes(2);
+  expect(f.starts).toHaveLength(1);
+  expect(f.onError).toHaveBeenCalledTimes(1);
+  expect(f.peak()).toBe(1);
+});
+
+it("surfaces the same daemon close failure to all callers", async () => {
+  const f = await fixture(); await f.waitStarted(1);
+  const failure = new Error("Native process did not close.");
+  const close = f.starts[0]!.close.getMockImplementation()!;
+  f.starts[0]!.close.mockImplementation(async () => {await close(); throw failure;});
+  await expect(f.host.close()).rejects.toBe(failure);
+  await expect(f.host.close()).rejects.toBe(failure);
+  expect(hasRelayWriteObservers(f.storage)).toBe(false);
+  // The failure is already checked; fixture teardown still closes its database.
+  cleanup.pop();
 });
 
 it("omits a renamed document without stopping live hosting for the other document", async () => {
