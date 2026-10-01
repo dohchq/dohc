@@ -145,8 +145,8 @@ describe("DocumentMenu", () => {
     renderMenu();
     const trigger = screen.getByTestId("document-menu-trigger");
     await user.click(trigger);
-    // Focus moves into the menu list on open.
-    expect(document.activeElement).toBe(screen.getByRole("menu"));
+    // Focus moves to the first row on open.
+    expect(document.activeElement).toBe(screen.getByTestId("document-menu-item-copy-markdown"));
 
     await user.keyboard("{Escape}");
 
@@ -160,18 +160,12 @@ describe("DocumentMenu", () => {
     stubClipboard();
     await user.click(screen.getByTestId("document-menu-trigger"));
 
-    // First item ("Copy as Markdown") is selected by default.
-    expect(
-      screen.getByTestId("document-menu-item-copy-markdown").className,
-    ).toContain("is-selected");
+    // First item ("Copy as Markdown") holds focus by default.
+    expect(document.activeElement).toBe(screen.getByTestId("document-menu-item-copy-markdown"));
     await user.keyboard("{ArrowDown}");
-    expect(
-      screen.getByTestId("document-menu-item-export-markdown").className,
-    ).toContain("is-selected");
+    expect(document.activeElement).toBe(screen.getByTestId("document-menu-item-export-markdown"));
     await user.keyboard("{ArrowUp}");
-    expect(
-      screen.getByTestId("document-menu-item-copy-markdown").className,
-    ).toContain("is-selected");
+    expect(document.activeElement).toBe(screen.getByTestId("document-menu-item-copy-markdown"));
 
     const written = nextClipboardWrite();
     await user.keyboard("{Enter}");
