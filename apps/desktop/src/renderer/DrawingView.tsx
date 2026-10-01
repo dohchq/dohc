@@ -24,13 +24,12 @@ import {
 } from "./excalidrawDocument";
 import {
   AffordanceCard,
-  ENGINE_CHIP,
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
-  READ_ONLY_TRANSITION_CHIP,
   ViewHeader,
   type FileSaveState,
 } from "./fileInspectorUi";
+import { StateMark } from "./ui/StateMark";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import { useAutosavedTextDraft, type DraftFlush } from "./useAutosavedTextDraft";
 
@@ -275,9 +274,13 @@ export function DrawingView({
         : engineMode
           ? engine.saveState
           : editor.saveState;
-  const drawingChip = engine.readOnlyWhileEditing
-    ? READ_ONLY_TRANSITION_CHIP
-    : ENGINE_CHIP[drawingChipState];
+  // A read-only chip with neither a read-only share nor an engine cause behind
+  // it is the bounded read's: the file was too large, so the canvas is off.
+  const drawingShown = engine.readOnlyWhileEditing
+    ? "read-only-transition"
+    : drawingChipState === "read-only" && !readOnly && !engineReadOnly
+      ? "too-large"
+      : drawingChipState;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
@@ -287,24 +290,12 @@ export function DrawingView({
         label="drawing"
         onShare={onShare}
         actions={
-          <span
-            data-testid="drawing-save-state"
-            data-state={drawingChipState}
-            title={
-              drawingChipState === "error" && engine.saveError
-                ? engine.saveError
-                : drawingChip.title
-            }
-            className={`text-[11px] ${
-              drawingChipState === "saved" ||
-              drawingChipState === "saving" ||
-              drawingChipState === "read-only"
-                ? "text-subtle"
-                : "text-danger"
-            }`}
-          >
-            {drawingChip.label}
-          </span>
+          <StateMark
+            testId="drawing-save-state"
+            state={drawingChipState}
+            shown={drawingShown}
+            title={drawingChipState === "error" && engine.saveError ? engine.saveError : undefined}
+          />
         }
       />
       {engineMode || engine.opening ? null : notice}

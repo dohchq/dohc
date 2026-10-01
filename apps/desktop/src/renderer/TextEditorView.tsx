@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import type { PendingTextUndo } from "./fileEditorUndo";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
+import { StateMark } from "./ui/StateMark";
 import {
   useAutosavedTextDraft,
   type DraftFlush,
@@ -79,19 +80,12 @@ export function TextEditorView({
         <span className="font-mono text-[11px] uppercase tracking-wide text-subtle">
           {language}
         </span>
-        <span
-          data-testid={`${testId}-save-state`}
-          data-state={editor.saveState}
-          className={`ml-auto text-[11px] ${editor.saveState === "error" ? "text-danger" : "text-subtle"}`}
-        >
-          {truncated
-            ? "Read-only"
-            : editor.saveState === "saved"
-              ? "Saved"
-              : editor.saveState === "saving"
-                ? "Saving..."
-                : "Couldn't save"}
-        </span>
+        <StateMark
+          testId={`${testId}-save-state`}
+          state={editor.saveState}
+          shown={truncated ? "too-large" : editor.saveState}
+          className="ml-auto"
+        />
       </div>
       <Suspense
         fallback={

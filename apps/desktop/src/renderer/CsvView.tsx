@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { extensionOf } from "./path";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
+import { StateMark } from "./ui/StateMark";
 import {
   useAutosavedTextDraft,
   type DraftFlush,
@@ -375,19 +376,12 @@ export function CsvView({
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="view-csv">
       <div className="flex items-center justify-end gap-1 border-b border-line px-3 py-1">
-        <span
-          data-testid="csv-save-state"
-          data-state={draft.saveState}
-          className={`mr-auto font-mono text-[11px] ${draft.saveState === "error" ? "text-danger" : "text-subtle"}`}
-        >
-          {truncated
-            ? "Read-only"
-            : draft.saveState === "saved"
-              ? "Saved"
-              : draft.saveState === "saving"
-                ? "Saving..."
-                : "Couldn't save"}
-        </span>
+        <StateMark
+          testId="csv-save-state"
+          state={draft.saveState}
+          shown={truncated ? "too-large" : draft.saveState}
+          className="mr-auto"
+        />
         {importError ? (
           <span data-testid="csv-import-error" className="px-1 text-[11px] text-danger">
             {importError}

@@ -4,7 +4,6 @@ import { dismissOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Share2 } from "lucide-react";
 import { bridge } from "./bridge";
-import type { EngineDocSaveState } from "./collab/engineDocLease";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { IconButton, SectionLabel } from "./ui/controls";
 import type { SaveState } from "./useAutosavedTextDraft";
@@ -47,82 +46,10 @@ export function ViewHeader(props: {
   );
 }
 
-export const DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
-  "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.";
-
-// dohc cannot tell whether the original was moved or deleted, only that
-// another file now has its path.
-export const REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
-  "Another file replaced this file while you had it open. Close this tab to open the file now at this path.";
-
 export type FileSaveState = SaveState | "deleted";
 
-// Document + source-mode editor. Edits autosave on a short settle (and
-// Ctrl/Cmd+S) through the bounded write IPC; the watcher then records the
-// change into history like any other file change — the editor is just another
-// writer, never a privileged one. Live co-editing (Yjs) layers onto this
-// surface for shared workspaces in the collab step.
-// What the engine save-state chip says, one row per state. A `Record` over the
-// state union rather than a ternary chain, so a new save state is a
-// compile-time omission instead of one that silently renders "Couldn't save".
-// `recovery` is the shell's own state, not an engine one: an unresolved
-// set-aside draft beside a settled document.
-//
-// `title` is absent where the label already says everything.
-export const ENGINE_CHIP: Record<
-  EngineDocSaveState | "recovery",
-  { label: string; title?: string }
-> = {
-  saved: { label: "Saved" },
-  "saved-to-host": {
-    label: "Saved to host",
-    title: "The session host accepted your edits. The local file may still be updating.",
-  },
-  "pending-share": {
-    label: "Saved locally · Pending share",
-    title: "Your edits are saved on this device. The shared file update is pending.",
-  },
-  saving: { label: "Saving…" },
-  error: {
-    label: "Couldn't save",
-    title:
-      "Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit.",
-  },
-  "file-locked": {
-    label: "File in use",
-    title:
-      "Another program has this file open, so dohc can't update it on disk. dohc has your edits saved and retries until the file is free.",
-  },
-  "read-only": {
-    label: "Read-only",
-    title:
-      "This document is shared with you to read. Your changes stay on screen but are not saved.",
-  },
-  "changed-on-disk": {
-    label: "Changed on disk",
-    title:
-      "This file changed outside dohc while it was open. Open History to restore your text.",
-  },
-  deleted: {
-    label: "Deleted",
-    title: DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
-  },
-  "object-changed": {
-    label: "Replaced",
-    title: REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
-  },
-  recovery: {
-    label: "Edit set aside",
-    title:
-      "A set-aside edit is not saved. Copy or dismiss it in the notice below.",
-  },
-};
-
-export const READ_ONLY_TRANSITION_CHIP = {
-  label: "Read-only",
-  title:
-    "This document became read-only. Your edit was set aside in the notice below.",
-};
+// What each save state says and how it is marked lives in ui/StateMark.tsx,
+// one map over every union a chip can show.
 
 // The engine open hit its retry deadline. The document stays read-only
 // — never the writable plain editor — with the reason stated and the retry
