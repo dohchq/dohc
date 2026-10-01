@@ -478,7 +478,7 @@ export function AutomationsPanel(props: {
   collectionPath: string;
   /** The dataset table this panel shows; absent for a document Collection. */
   table?: AutomationTable;
-  /** A run's Undo changed records the page cannot see change, as a dataset's are. */
+  /** A server run's Undo changed records the page cannot see change, as a dataset's are. */
   onRunUndone?: () => void;
   automations: ReturnType<typeof useCollectionAutomations>;
   /** This Collection's fields, for the builder. */

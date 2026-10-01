@@ -632,9 +632,10 @@ function resourcesBasePath(): string {
     : join(desktopPackageRootInDev(), "resources");
 }
 
-// An automation claim failed or a retry queued one: poke the windows on
-// that workspace to read its run history again. A poke, not the record, so
-// nothing here can go stale or leak across workspaces.
+// Automation runs finished, an Undo put records back, a claim failed, or a
+// retry queued one: poke the windows on that workspace to read its run
+// history and dataset records again. A poke, not the record, so nothing here can go stale or leak across
+// workspaces.
 function notifyAutomationRunsChanged(workspaceId: string): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (

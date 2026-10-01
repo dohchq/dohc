@@ -775,14 +775,20 @@ describe("a dataset table's ⚡ panel", () => {
     await waitFor(() => expect(document.activeElement).toBe(within(screen.getByTestId("automation-later")).getByRole("switch")));
   });
 
-  it("tells the page after an Undo, so it reads the records the run changed again", async () => {
+  it("tells the page after a server run's Undo, and leaves a local Undo to the event every window hears", async () => {
     const rules = { datasetId: "dataset-1", revision: 1, revisionSha256: "a".repeat(64) };
-    makeBridge(read([summary(onInvoices)]), [run({ writes: [{ kind: "dataset-edit", rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", expectedVersion: 1, version: 2,
-      fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] }] })]);
-    const onRunUndone = vi.fn();
-    render(<Panel table={INVOICES} onRunUndone={onRunUndone} focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    const writes = [{ kind: "dataset-edit" as const, rules, operationId: "edit", tableId: "table-1", recordId: "invoice-1", expectedVersion: 1, version: 2,
+      fields: [{ fieldId: "status", field: "Status", before: "Open", after: "Closed" }] }];
+    const local = run({ writes });
+    const { bridge } = makeBridge(read([summary(onInvoices)]), [local], { serverRuns: [run({ claimId: "atc_server", createdAtMs: local.createdAtMs + 1, writes })] });
+    const onRunUndone = vi.fn(), onNotice = vi.fn();
+    render(<Panel table={INVOICES} onRunUndone={onRunUndone} onNotice={onNotice} focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
     await userEvent.click(within(await screen.findByTestId("automation-run-atc_1")).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledOnce());
+    expect(onRunUndone).not.toHaveBeenCalled();
+    await userEvent.click(within(screen.getByTestId("automation-run-server-atc_server")).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(onRunUndone).toHaveBeenCalledOnce());
+    expect(bridge.undoCollectionAutomationRun).toHaveBeenLastCalledWith(expect.objectContaining({ claimId: "atc_server", onServer: true }));
   });
 });
 

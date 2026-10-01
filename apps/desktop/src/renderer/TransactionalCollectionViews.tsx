@@ -14,6 +14,10 @@ interface Props {
   fields: TransactionalField[];
   search: string;
   refresh: number;
+  /** Rises when records changed elsewhere; the view reads them again in place. */
+  changed: number;
+  /** The records a read in place found, so an open record shows its new values. */
+  onReadInPlace(rows: readonly TransactionalRow[]): void;
   disabled: boolean;
   read(input: AppBackendJson, signal: AbortSignal): Promise<{ result: AppBackendJson }>;
   onBusy(busy: boolean): void;
@@ -23,6 +27,7 @@ interface Props {
   canMove(fieldId: string): boolean;
 }
 type Position = { after: TransactionalCursor | null; history: Array<TransactionalCursor | null> };
+type Loaded = { columns: Column[]; calendar: TransactionalPage | null; moreGroups: boolean; nextGroup: GroupCursor | null };
 const beginning = (): Position => ({ after: null, history: [] });
 
 /** A board requests each visible group; a calendar requests its visible date range. Neither reuses a table page. */
@@ -32,69 +37,91 @@ export function TransactionalCollectionViews(props: Props) {
   const [groupHistory, setGroupHistory] = useState<Array<GroupCursor | null>>([]);
   const [positions, setPositions] = useState<Record<string, Position>>({});
   const [calendarPosition, setCalendarPosition] = useState<Position>(beginning);
-  const [loaded, setLoaded] = useState<{ columns: Column[]; calendar: TransactionalPage | null; moreGroups: boolean; nextGroup: GroupCursor | null } | null>(null);
+  const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [busy, setBusy] = useState(false), [attempt, setAttempt] = useState(0);
   const latest = useRef(props); latest.current = props;
   const current = useRef(0);
+  // Whether a read that shows "Loading view…" is in flight. A ref, so a read in place started in the same
+  // commit sees it, and never supersedes it, which would leave the view loading.
+  const reading = useRef(false);
   const fieldKey = JSON.stringify(props.fields);
   const schema = useMemo(() => visualSchema(props.fields), [fieldKey]);
   const queryKey = JSON.stringify([props.view,props.search,props.refresh,offset,groupAfter,positions,calendarPosition,month.getFullYear(),month.getMonth(),attempt]);
   useLayoutEffect(() => () => { current.current++; }, []);
+  /** Reads what the view shows now, at this render's months, groups, and pages. */
+  async function readView(signal: AbortSignal): Promise<Loaded> {
+    const { view, fields, read } = latest.current;
+    const base: Record<string, AppBackendJson> = {};
+    if (props.search) base.search = props.search;
+    if (view.filters.length) base.filters = view.filters;
+    const readPage = async (input: Record<string, AppBackendJson>) => {
+      signal.throwIfAborted();
+      const response = await read(input,signal);
+      signal.throwIfAborted();
+      return response.result;
+    };
+    let columns: Column[] = [], calendar: TransactionalPage | null = null, moreGroups = false, nextGroup: GroupCursor | null = null;
+    if (view.kind === "calendar") {
+      const range = calendarRange(view.dateField!,month);
+      const result = await readPage({ ...base, limit: 50, range, ...(view.sort ? {sort:view.sort} : {}), ...(calendarPosition.after ? {after:{...calendarPosition.after}} : {}) });
+      calendar = parseCalendarPage(result,fields.map(field=>field.fieldId),range);
+    } else {
+      const field = fields.find(field=>field.fieldId===view.groupBy);
+      if (!field) throw Error("Choose a readable field for this board.");
+      let values: AppBackendJson[];
+      if (field.type === "select" || field.type === "checkbox") {
+        const all: AppBackendJson[] = [...(field.required ? [] : [null]), ...(field.type === "select" ? field.options ?? [] : [false,true])];
+        values = all.slice(offset,offset+BOARD_GROUP_PAGE_SIZE); moreGroups = offset+values.length < all.length;
+      } else {
+        const result = parseGroups(await readPage({ ...base, limit: BOARD_GROUP_PAGE_SIZE, groupBy: field.fieldId, ...(groupAfter ? {groupAfter} : {}) }),field.fieldId);
+        values = result.values; nextGroup = result.next; moreGroups = nextGroup !== null;
+      }
+      const ids = new Set<string>();
+      // Sequential reads bound both host admission and renderer memory: at most 8 columns × 50 records.
+      for (const value of values) {
+        const position = positions[JSON.stringify(value)] ?? beginning();
+        const group = {fieldId:field.fieldId,value};
+        const result = await readPage({ ...base, limit:50, group, ...(view.sort ? {sort:view.sort} : {}), ...(position.after ? {after:{...position.after}} : {}) });
+        const rawGroup = object(result).group, acknowledged = rawGroup && object(rawGroup);
+        if (!acknowledged || acknowledged.fieldId!==field.fieldId || JSON.stringify(acknowledged.value)!==JSON.stringify(value)) throw Error("This Collection's read action does not support boards. Update its rules, then try again.");
+        const page = parsePage(result,fields.map(field=>field.fieldId));
+        for (const row of page.rows) {
+          const id = JSON.stringify(row.id);
+          if (JSON.stringify(row.values[field.fieldId] ?? null)!==JSON.stringify(value)) throw Error("This Collection's read action did not filter the board. Update its rules, then try again.");
+          if (ids.has(id)) throw Error("Records changed while loading this board. Refresh to try again.");
+          ids.add(id);
+        }
+        columns.push({value,page});
+      }
+    }
+    return {columns,calendar,moreGroups,nextGroup};
+  }
+  const readLatest = useRef(readView); readLatest.current = readView;
   useEffect(() => {
     const request = ++current.current, abort = new AbortController();
-    const { view, fields, read, onError, onBusy } = latest.current;
-    setLoaded(null); setBusy(true); onBusy(true);
-    async function load() {
-      const base: Record<string, AppBackendJson> = {};
-      if (props.search) base.search = props.search;
-      if (view.filters.length) base.filters = view.filters;
-      const readPage = async (input: Record<string, AppBackendJson>) => {
-        abort.signal.throwIfAborted();
-        const response = await read(input,abort.signal);
-        abort.signal.throwIfAborted();
-        return response.result;
-      };
-      let columns: Column[] = [], calendar: TransactionalPage | null = null, moreGroups = false, nextGroup: GroupCursor | null = null;
-      if (view.kind === "calendar") {
-        const range = calendarRange(view.dateField!,month);
-        const result = await readPage({ ...base, limit: 50, range, ...(view.sort ? {sort:view.sort} : {}), ...(calendarPosition.after ? {after:{...calendarPosition.after}} : {}) });
-        calendar = parseCalendarPage(result,fields.map(field=>field.fieldId),range);
-      } else {
-        const field = fields.find(field=>field.fieldId===view.groupBy);
-        if (!field) throw Error("Choose a readable field for this board.");
-        let values: AppBackendJson[];
-        if (field.type === "select" || field.type === "checkbox") {
-          const all: AppBackendJson[] = [...(field.required ? [] : [null]), ...(field.type === "select" ? field.options ?? [] : [false,true])];
-          values = all.slice(offset,offset+BOARD_GROUP_PAGE_SIZE); moreGroups = offset+values.length < all.length;
-        } else {
-          const result = parseGroups(await readPage({ ...base, limit: BOARD_GROUP_PAGE_SIZE, groupBy: field.fieldId, ...(groupAfter ? {groupAfter} : {}) }),field.fieldId);
-          values = result.values; nextGroup = result.next; moreGroups = nextGroup !== null;
-        }
-        const ids = new Set<string>();
-        // Sequential reads bound both host admission and renderer memory: at most 8 columns × 50 records.
-        for (const value of values) {
-          const position = positions[JSON.stringify(value)] ?? beginning();
-          const group = {fieldId:field.fieldId,value};
-          const result = await readPage({ ...base, limit:50, group, ...(view.sort ? {sort:view.sort} : {}), ...(position.after ? {after:{...position.after}} : {}) });
-          const rawGroup = object(result).group, acknowledged = rawGroup && object(rawGroup);
-          if (!acknowledged || acknowledged.fieldId!==field.fieldId || JSON.stringify(acknowledged.value)!==JSON.stringify(value)) throw Error("This Collection's read action does not support boards. Update its rules, then try again.");
-          const page = parsePage(result,fields.map(field=>field.fieldId));
-          for (const row of page.rows) {
-            const id = JSON.stringify(row.id);
-            if (JSON.stringify(row.values[field.fieldId] ?? null)!==JSON.stringify(value)) throw Error("This Collection's read action did not filter the board. Update its rules, then try again.");
-            if (ids.has(id)) throw Error("Records changed while loading this board. Refresh to try again.");
-            ids.add(id);
-          }
-          columns.push({value,page});
-        }
-      }
-      if (request===current.current&&!abort.signal.aborted) setLoaded({columns,calendar,moreGroups,nextGroup});
-    }
-    void load().catch(error => {
+    const { onError, onBusy } = latest.current;
+    setLoaded(null); setBusy(true); onBusy(true); reading.current = true;
+    void readView(abort.signal).then(next => {
+      if (request===current.current&&!abort.signal.aborted) setLoaded(next);
+    }).catch(error => {
       if(request===current.current&&!abort.signal.aborted) onError("Could not open this Collection view.",error,()=>{if(request===current.current)setAttempt(value=>value+1);});
-    }).finally(()=>{if(request===current.current&&!abort.signal.aborted){setBusy(false);onBusy(false);}});
+    }).finally(()=>{if(request===current.current&&!abort.signal.aborted){reading.current=false;setBusy(false);onBusy(false);}});
     return ()=>{abort.abort(); current.current++; onBusy(false);};
   },[queryKey]);
+  // A change elsewhere waits for a read in flight, then replaces what shows without a loading state.
+  // One that fails keeps what the view shows, which Refresh reads again.
+  const changedSeen = useRef(props.changed);
+  useEffect(() => {
+    if (changedSeen.current === props.changed || busy || reading.current) return;
+    changedSeen.current = props.changed;
+    const request = ++current.current, abort = new AbortController();
+    void readLatest.current(abort.signal).then(next => {
+      if (request!==current.current||abort.signal.aborted) return;
+      setLoaded(next);
+      latest.current.onReadInPlace(next.calendar?.rows ?? next.columns.flatMap(column=>column.page.rows));
+    }, () => undefined);
+    return () => abort.abort();
+  },[props.changed, busy]);
 
   const disabled = props.disabled || busy;
   const rows = loaded?.calendar?.rows ?? loaded?.columns.flatMap(column=>column.page.rows) ?? [];

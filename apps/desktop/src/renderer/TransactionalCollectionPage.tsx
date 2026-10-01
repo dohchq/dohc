@@ -43,6 +43,8 @@ export interface TransactionalCollectionPageProps extends CollectionResources {
   copy?: DatasetCopyStatus;
   onRefresh?(): void;
   recordsVersion?: number;
+  /** Rises when records changed outside this page, as an automation changes them; the page reads them again in place. */
+  recordsChanged?: number;
   workspaceId: string;
   dataset: TransactionalDatasetDescription;
   tableId: string;
@@ -112,6 +114,8 @@ function Cell({ field, value }: { field: TransactionalField; value: AppBackendJs
   return <span className="truncate text-[13px] text-ink">{display(value) || "—"}</span>;
 }
 
+const sameRecord = (a: TransactionalRow, b: TransactionalRow) => JSON.stringify(a.id) === JSON.stringify(b.id);
+
 /** Keep view state across refreshes, but never across Collection identities. */
 export function TransactionalCollectionPage(props: TransactionalCollectionPageProps) {
   const scope = JSON.stringify([props.workspaceId, props.dataset.datasetId, props.tableId]);
@@ -135,13 +139,20 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   useLayoutEffect(() => { setLocalView(null); }, [props.activeView]);
   const [page, setPage] = useState<TransactionalPage | null>(null);
   const [busy, setBusy] = useState(false);
-  const [visualBusy, setVisualBusy] = useState(false), [visualRefresh, setVisualRefresh] = useState(0);
+  const [visualBusy, setVisualBusy] = useState(false), [visualRefresh, setVisualRefresh] = useState(0), [visualChanged, setVisualChanged] = useState(0);
   const visual = selectedView?.kind === "board" || selectedView?.kind === "calendar";
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState<Query>({ after: null, search: "" });
   const [previous, setPrevious] = useState<Array<TransactionalCursor | null>>([]);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [details, setDetails] = useState<TransactionalRow | null>(null);
+  // What the open record's dialog says instead of its values, by the record's id, once a read in place could not find it.
+  const [detailsUnavailable, setDetailsUnavailable] = useState<{ id: string; text: string } | null>(null);
+  const openDetails = useRef(details); openDetails.current = details;
+  // The by-id read of an open record a read in place left out, while it runs.
+  const openRecordRead = useRef<AbortController | null>(null);
+  const detailsOpen = details !== null;
+  useEffect(() => { if (!detailsOpen) setDetailsUnavailable(null); }, [detailsOpen]);
   const editorForm = useRef<HTMLFormElement>(null);
   const [draft, setDraft] = useState<Record<string, AppBackendJson>>({});
   const [invalid, setInvalid] = useState<string | null>(null);
@@ -154,12 +165,20 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   const mutation = useRef<Mutation | null>(null), locked = useRef(false);
   const trigger = useRef<HTMLElement | null>(null);
   const currentQuery = useRef(query); currentQuery.current = query;
-  const loadedVersion = useRef(props.recordsVersion);
-  useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; sequence.current++; active.current?.abort(); readActive.current?.abort(); }; }, []);
+  const loadedVersion = useRef(props.recordsVersion), changedVersion = useRef(props.recordsChanged);
+  useLayoutEffect(() => { alive.current = true; return () => { alive.current = false; sequence.current++; active.current?.abort(); readActive.current?.abort(); openRecordRead.current?.abort(); }; }, []);
   useLayoutEffect(() => { if (editor) editorForm.current?.querySelector<HTMLElement>("input, select, button")?.focus(); }, [editor]);
 
   function request(operation: DatasetOperation, input: AppBackendJson, key: string): TransactionalInvoke {
     return { workspaceId, datasetId: dataset.datasetId, revision: dataset.revision, revisionSha256: dataset.revisionSha256, operationId: operation.operationId, input, idempotencyKey: key };
+  }
+  function pageInput(next: Query): AppBackendJson {
+    const input: Record<string, AppBackendJson> = { limit: 50 };
+    if (next.after) input.after = { id: next.after.id, value: next.after.value };
+    if (next.search) input.search = next.search;
+    if (next.filters?.length) input.filters = next.filters;
+    if (next.sort) input.sort = { ...next.sort };
+    return input;
   }
   async function load(next: Query, history = previous): Promise<void> {
     if (!read || !alive.current) return;
@@ -169,12 +188,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     const mine = ++sequence.current;
     locked.current = true; setBusy(true);
     try {
-      const input: Record<string, AppBackendJson> = { limit: 50 };
-      if (next.after) input.after = { id: next.after.id, value: next.after.value };
-      if (next.search) input.search = next.search;
-      if (next.filters?.length) input.filters = next.filters;
-      if (next.sort) input.sort = { ...next.sort };
-      const response = await invoke(request(read, input, crypto.randomUUID()), abort.signal);
+      const response = await invoke(request(read, pageInput(next), crypto.randomUUID()), abort.signal);
       if (!alive.current || sequence.current !== mine || abort.signal.aborted) return;
       const loaded = parsePage(response.result, read.fieldIds);
       setPage(loaded); setQuery(next); setPrevious(history);
@@ -214,6 +228,70 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     loadedVersion.current = props.recordsVersion;
     void load(currentQuery.current);
   }, [props.recordsVersion, pending, editor, resourceBusy, busy]);
+  /**
+   * Reads the shown page again in place: no loading line, nothing disabled,
+   * and an open record stays open, with its new values. A later read
+   * supersedes it, and one that fails keeps what the page shows, which
+   * Refresh reads again. It never starts while a read or a change holds the
+   * page, since superseding that one would leave the page busy.
+   */
+  async function reread(): Promise<void> {
+    if (!read || !alive.current || locked.current) return;
+    readActive.current?.abort();
+    const abort = new AbortController(); readActive.current = abort;
+    const mine = ++sequence.current;
+    try {
+      const response = await invoke(request(read, pageInput(currentQuery.current), crypto.randomUUID()), abort.signal);
+      if (!alive.current || sequence.current !== mine || abort.signal.aborted) return;
+      const loaded = parsePage(response.result, read.fieldIds);
+      setPage(loaded);
+      showOpenRecord(loaded.rows);
+    } catch {
+      // Nothing to say: the change happened elsewhere, and the page still shows its last read.
+    }
+  }
+  /**
+   * An open record shows what a read in place found of it. One the read left
+   * out, as a Calendar record moved to another month, is read by its id, and
+   * one that is gone says so instead of showing its old values.
+   */
+  function showOpenRecord(rows: readonly TransactionalRow[]): void {
+    const open = openDetails.current;
+    if (!open) return;
+    // This read is newer than a by-id read still in flight, which then changes nothing.
+    openRecordRead.current?.abort();
+    const found = rows.find(row => sameRecord(row, open));
+    if (!found) { void readOpenRecord(open); return; }
+    setDetails(found); setDetailsUnavailable(null);
+  }
+  async function readOpenRecord(open: TransactionalRow): Promise<void> {
+    if (!read || !alive.current || locked.current) return;
+    const id = JSON.stringify(open.id), key = table?.primaryKeyFieldId;
+    if (key === undefined || !read.fieldIds.includes(key)) {
+      setDetailsUnavailable({ id, text: "This record is no longer in this view. Close it, then search for it." });
+      return;
+    }
+    // Its own controller, so a newer read in place can stop it; the sequence, so any newer read makes it stale.
+    const abort = new AbortController(); openRecordRead.current = abort;
+    const mine = ++sequence.current;
+    try {
+      const response = await invoke(request(read, { limit: 1, filters: [{ fieldId: key, value: open.id }] }, crypto.randomUUID()), abort.signal);
+      if (!alive.current || sequence.current !== mine || abort.signal.aborted) return;
+      const found = parsePage(response.result, read.fieldIds).rows.find(row => sameRecord(row, open));
+      if (!found) { setDetailsUnavailable({ id, text: "This record is no longer in this Collection." }); return; }
+      setDetails(current => current && sameRecord(current, open) ? found : current); setDetailsUnavailable(null);
+    } catch {
+      // Nothing to say, as for the read in place: the next change or Refresh reads again.
+    }
+  }
+  // What changed elsewhere waits for a read or a change in flight to end, then shows in place. The lock is
+  // read now, not from this render, since a read the effect above started in this same commit has taken it.
+  useEffect(() => {
+    if (changedVersion.current === props.recordsChanged || busy || visualBusy || resourceBusy || locked.current) return;
+    changedVersion.current = props.recordsChanged;
+    if (visual) setVisualChanged(value => value + 1);
+    else void reread();
+  }, [props.recordsChanged, busy, visualBusy, resourceBusy]);
 
   function closeEditor(): void { setEditor(null); setInvalid(null); trigger.current?.focus(); }
   const currentExecute = useRef(execute);
@@ -314,7 +392,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {props.copy ? <span role="status" className="text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? "Offline copy · Read-only" : "Saved on this device"} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
     {pending && !busy ? <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><span>Browse records while you wait. Retry this change before making another.</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
     {busy ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : null}
-    {visual && selectedView ? <Suspense fallback={<p role="status" className="text-sm text-muted">Opening view…</p>}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search])} view={selectedView} fields={fields} search={query.search} refresh={visualRefresh}
+    {visual && selectedView ? <Suspense fallback={<p role="status" className="text-sm text-muted">Opening view…</p>}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search])} view={selectedView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} onReadInPlace={showOpenRecord}
       disabled={busy || pending !== null || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={onError}
       read={(input,signal)=>invoke(request(read,input,crypto.randomUUID()),signal)}
       onOpen={row=>{trigger.current=document.activeElement instanceof HTMLElement ? document.activeElement : null;setDetails(row);}}
@@ -336,7 +414,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       })}{props.buttons?.fields.map(field => <td key={`button:${field}`} className="max-w-72 px-3 py-2">{props.buttons!.render(field, row)}</td>)}<td className="px-3 py-2"><div className="flex justify-end gap-2"><IconButton title="Record details" aria-label={`Open record ${row.id}`} disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDetails(row); }}><Expand size={15} strokeWidth={1.9} aria-hidden /></IconButton>{remove && confirmDelete ? <IconButton title="Delete record" aria-label={`Delete record ${row.id}`} disabled={disabled || editor !== null} onClick={() => void deleteRecord(row)}><Trash2 size={15} strokeWidth={1.9} aria-hidden /></IconButton> : null}</div></td></tr>)}</tbody>
     </table></div> : null}
     {!visual && page ? <footer className="flex items-center justify-between gap-2 text-[12px] text-muted"><span className="font-mono">{page.rows.length} {page.rows.length === 1 ? "record" : "records"} on this page</span><div className="flex gap-2"><IconButton aria-label="Previous" title="Previous page" disabled={readDisabled || editor !== null || previous.length === 0} onClick={() => void load({ ...query, after: previous.at(-1) ?? null }, previous.slice(0, -1))}><ChevronLeft size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Next" title="Next page" disabled={readDisabled || editor !== null || page.nextCursor === null} onClick={() => void load({ ...query, after: page.nextCursor }, [...previous, query.after])}><ChevronRight size={16} strokeWidth={1.9} aria-hidden /></IconButton></div></footer> : null}
-    {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled} canEdit={canInput} onError={onError} buttons={props.buttons} fieldMarks={props.fieldMarks}
+    {details ? <TransactionalRecordDetailsDialog scope={scope} row={details} unavailable={detailsUnavailable?.id === JSON.stringify(details.id) ? detailsUnavailable.text : undefined} fields={fields} readOperation={read} operations={operations} readFile={props.readFile} offline={props.copy?.offline} disabled={disabled} canEdit={canInput} onError={onError} buttons={props.buttons} fieldMarks={props.fieldMarks}
       onClose={() => setDetails(null)}
       onEdit={(field, operation) => { setDetails(null); setDraft({ [field.fieldId]: details.values[field.fieldId] ?? null }); setInvalid(null); setEditor({ kind: "edit", operation, row: details, field }); }}
       onAction={onCustomAction ? operation => { setDetails(null); onCustomAction(operation.operationId); } : undefined} /> : null}
