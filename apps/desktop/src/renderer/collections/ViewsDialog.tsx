@@ -178,9 +178,12 @@ export function ViewsDialog(props: {
                   Rename
                 </SecondaryButton>
                 {confirmDelete === view.name ? (
+                  // Arming replaces the focused Delete, so the confirm takes
+                  // its focus. Fixed height: the row's secondaries are 30px.
                   <DangerButton
                     aria-label={`Delete view ${view.name}`}
-                    className="h-8 py-0 text-xs"
+                    className="h-[30px] text-xs"
+                    autoFocus
                     disabled={pending}
                     onClick={() => void remove(view.name)}
                   >
