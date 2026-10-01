@@ -340,7 +340,7 @@ it('checks the frozen service origin separately from the original baseline when 
   }finally{f.close()}
 })
 
-it('requires exact seed application ACK and supports lost completion responses',()=>{
+it('requires exact seed application ACK and supports lost completion responses',async()=>{
   const f=fixture();try{
     f.prepare()
     const access=f.store.pending(f.document,host), delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
@@ -371,6 +371,13 @@ it('requires exact seed application ACK and supports lost completion responses',
     complete();complete()
     expect(f.store.read('workspace','docs/a.md',1_000_000)!.completed).toBe(true)
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('current')
+    // While its activated native session is held, stopping access uses that session's verified owner transport.
+    const drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    try{
+      const active=activationDriver(f,vi.fn(async()=>f.capture))
+      expect(await active.driver.activate(active.target,new AbortController().signal)).toMatchObject({kind:'done'})
+      expect(active.driver.restoreConsumer(f.document)).toBe(active.driver.consumer(f.document).consumer)
+    }finally{drain.mockRestore()}
     f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2")
     expect(()=>f.store.resume({document:f.document,activationId:f.capture.activationId,host,registeredAtMs:5,guard(){}})).toThrow()
     f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'")

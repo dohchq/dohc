@@ -59,7 +59,6 @@ export class ServiceActivationDriver {
   }
   restoreConsumer(document:LiveDocumentKey){
     const o=this.options,key=JSON.stringify(parseLiveDocumentKey(document));
-    const existing=this.#restoreConsumers.get(key);if(existing)return existing;
     const target=o.config.targets.find(target=>{
       if(target.workspaceId!==document.workspaceId)return false;
       const saved=this.#store.read(target.workspaceId,target.path,o.config.maxCaptureBytes);
@@ -67,6 +66,13 @@ export class ServiceActivationDriver {
     });
     const workspace=o.workspaces.get(document.workspaceId);
     if(!target || !workspace)throw new Error("Service restore source is unavailable.");
+    // Stopping access re-registers the retained owner. Only the activated session's
+    // verified transport can check that adoption; native registration takes the binding alone.
+    const activated=this.#owners.get(key);
+    if(activated && !activated.activationPending)return activated.consumer;
+    // Without that session, as after a restart, only a restore whose old cut
+    // already applied can continue, because it does not register again.
+    const existing=this.#restoreConsumers.get(key);if(existing)return existing;
     const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:o.client,workspace:workspace.handle,host:o.host,
       deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
       ownerAdmission:{shares:new Map([[target.workspaceId,target.shareId]]),maxEntriesPerDrain:o.config.maxEntriesPerDrain,

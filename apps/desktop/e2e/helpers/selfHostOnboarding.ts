@@ -57,6 +57,10 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
       // Counts and cursors only, for a failure report: the live settlements the
       // service host made, held for export, or journaled, and those the relay holds.
       settlementEvidence: () => settlementEvidence(directory),
+      // The document's accepted change just before a named account's first live
+      // edit, the restore point that keeps everything the account did not write.
+      acceptedCursorBefore: (workspaceId: string, path: string, principalId: string) =>
+        acceptedCursorBefore(directory, workspaceId, path, principalId),
       async close() {
         const results = await Promise.allSettled([proxy.close(), relay!.close(), account.close()]);
         const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
@@ -136,6 +140,20 @@ async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">) 
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     },
   };
+}
+
+function acceptedCursorBefore(directory: string, workspaceId: string, path: string, principalId: string): number {
+  const db = new DatabaseSync(join(directory, "relay-data", "relay.sqlite"), { readOnly: true });
+  try {
+    const row = db.prepare(
+      `SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal WHERE workspace_id=? AND current_path=?
+         AND journal_cursor < (SELECT MIN(journal_cursor) FROM sync_relay_live_update_journal
+           WHERE workspace_id=? AND current_path=? AND principal_kind='named' AND principal_id=?)`,
+    ).get(workspaceId, path, workspaceId, path, principalId);
+    const cursor = Number(row?.cursor);
+    assert.ok(Number.isSafeInteger(cursor) && cursor >= 1, "An accepted change precedes the account's first live edit.");
+    return cursor;
+  } finally { db.close(); }
 }
 
 function settlementEvidence(directory: string) {

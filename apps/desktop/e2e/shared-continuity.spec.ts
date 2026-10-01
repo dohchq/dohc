@@ -255,7 +255,12 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       const access = dialog.getByLabel("Access to stop");
       await expect(access.locator("option", { hasText: recipientLabel })).toHaveCount(1, { timeout: 60_000 });
       await access.selectOption({ label: recipientLabel });
-      await dialog.getByLabel("Shared restore point").selectOption({ label: "Before accepted edits" });
+      // Restore to the accepted change just before the recipient's first edit,
+      // which keeps the owner's and agent's work.
+      const point = stack!.acceptedCursorBefore(workspace.workspaceId, PATH, recipientUserId);
+      const pointSelect = dialog.getByLabel("Shared restore point");
+      await expect(pointSelect.locator(`option[value="${point}"]`)).toHaveText(new RegExp(` · Change ${point}$`));
+      await pointSelect.selectOption({ value: String(point) });
       await dialog.getByRole("button", { name: "Review affected access" }).click();
       await expect(dialog.getByRole("heading", { name: "Stop access before restoring?" })).toBeVisible();
       await expect(dialog.getByRole("listitem").filter({ hasText: recipientLabel })).toHaveCount(1);
