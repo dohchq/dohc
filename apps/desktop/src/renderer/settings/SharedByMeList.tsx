@@ -10,6 +10,7 @@ import { bridge } from "../bridge";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { ProposalReviewDialog } from "../workbench/ProposalReviewDialog";
 import { ShareAccessBadge } from "./ShareAccessBadge";
+import { DangerButton, SecondaryButton } from "../ui/controls";
 
 // "Shared by me": the management list for relay share grants. Lives
 // in Settings → Cloud. Calm inventory: what's shared, with whom, and one
@@ -275,23 +276,23 @@ export function SharedByMeList(props: {
                         : `End this share and decline ${waiting.count} changes ${recipientLabel(share)} sent? Undo restores the share, not the declined changes.`
                       : `End this share? ${recipientLabel(share)} keeps a read-only copy and stops receiving updates.`}
                   </span>
-                  <button
-                    type="button"
+                  <SecondaryButton
+                    size="compact"
                     data-testid="shared-by-me-revoke-cancel"
                     onClick={() => setConfirmShareId(null)}
-                    className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:text-ink"
+                    className="shrink-0"
                   >
                     Cancel
-                  </button>
-                  <button
-                    type="button"
+                  </SecondaryButton>
+                  <DangerButton
+                    size="compact"
                     data-testid="shared-by-me-revoke"
                     disabled={busyShareId === share.shareId}
                     onClick={() => void revoke(share)}
-                    className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-danger transition-colors hover:bg-hover disabled:opacity-50"
+                    className="shrink-0"
                   >
                     {busyShareId === share.shareId ? "Ending…" : "End share"}
-                  </button>
+                  </DangerButton>
                 </>
               ) : (
                 <button

@@ -20,7 +20,7 @@ import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
-import { PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
+import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 
 type LinkAccess = "view" | "comment" | "edit";
 
@@ -542,6 +542,11 @@ export function useRelayShareLinkPane(props: {
       : confirmation?.kind === "end"
         ? "Ending…"
         : retuneLabels.pending;
+  // Ending or resetting a link revokes it; changing its access keeps it.
+  const LinkConfirm =
+    confirmation?.kind === "reset" || confirmation?.kind === "end" ? DangerButton : PrimaryButton;
+  // Making access independent grants; the other three take something away.
+  const OwnerConfirm = ownerConfirmation?.kind === "promote" ? SecondaryButton : DangerButton;
 
   useLayoutEffect(() => {
     stopAllOwnerActivity();
@@ -2303,7 +2308,7 @@ export function useRelayShareLinkPane(props: {
                               >
                                 Cancel
                               </SecondaryButton>
-                              <SecondaryButton
+                              <OwnerConfirm
                                 disabled={ownerMutationBusy !== null}
                                 aria-busy={ownerMutationBusy !== null}
                                 onClick={() =>
@@ -2317,7 +2322,7 @@ export function useRelayShareLinkPane(props: {
                                     : ownerConfirmation.kind === "promote"
                                       ? "Make independent"
                                       : "End access"}
-                              </SecondaryButton>
+                              </OwnerConfirm>
                             </div>
                           </div>
                         ) : null}
@@ -2445,14 +2450,14 @@ export function useRelayShareLinkPane(props: {
                 >
                   Cancel
                 </SecondaryButton>
-                <PrimaryButton
+                <LinkConfirm
                   disabled={mutationBusy !== null}
                   onClick={() => void mutateLink(confirmation, confirmationRow)}
                 >
                   {mutationBusy?.grantId === confirmationRow.grantId
                     ? confirmationPendingLabel
                     : confirmationActionLabel}
-                </PrimaryButton>
+                </LinkConfirm>
               </div>
             </div>
           ) : null}
