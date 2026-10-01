@@ -58,6 +58,33 @@ const pendingPress: RelayAutomationPress = {
 };
 
 describe("relay polling lifetime", () => {
+  it("keeps one lifetime when its eligibility check starts it again", async () => {
+    const runsHere = vi.fn(async () => {
+      if (runsHere.mock.calls.length === 1) host.start();
+      return false;
+    });
+    const host = hostWith({ list: async () => [], accept: async () => [], settle: async () => undefined }, {
+      host: { runsHere, stillRuns: () => true, generation: () => 7, hold: () => () => undefined },
+    });
+    host.start();
+    await setImmediate();
+    expect(runsHere).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors a stop from its eligibility check before requesting a transport", async () => {
+    const transport = vi.fn(async () => null);
+    const host = hostWith({ list: async () => [], accept: async () => [], settle: async () => undefined }, {
+      host: {
+        runsHere: async () => { host.stop(); return true; },
+        stillRuns: () => true, generation: () => 7, hold: () => () => undefined,
+      },
+      transport,
+    });
+    host.start();
+    await setImmediate();
+    expect(transport).not.toHaveBeenCalled();
+  });
+
   it("clears the default retry timer when stopped during backoff", async () => {
     vi.useFakeTimers();
     const errors = channel<unknown>();

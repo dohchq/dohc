@@ -219,6 +219,8 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
   }
 
   const loop = Effect.gen(function* () {
+    // Store the fiber before host callbacks can re-enter start or stop.
+    yield* Effect.promise(() => Promise.resolve());
     let retryMs = RETRY_FIRST_MS;
     while (true) {
       const proceed = yield* Effect.gen(function* () {
