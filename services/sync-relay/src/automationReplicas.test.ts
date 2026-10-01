@@ -18,9 +18,14 @@ vi.mock("@dohc/workspace-engine-client/daemon", async (importOriginal) => ({
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  for (const close of cleanup.splice(0).reverse()) await close();
+  // Every cleanup runs even after one fails; the first failure is reported once all have run.
+  let failure: { error: unknown } | undefined;
+  for (const close of cleanup.splice(0).reverse()) {
+    try { await close(); } catch (error) { failure ??= { error }; }
+  }
   spawn.mockReset();
   closeTestStorages();
+  if (failure) throw failure.error;
 });
 
 const WORKSPACE = "workspace-trip";
@@ -142,7 +147,7 @@ describe("the automation replicas", () => {
   function fakeEngine() {
     const sent: Sent[] = [];
     let failPush = false;
-    const engines: Array<{ exit(): void }> = [];
+    const engines: Array<{ exit(): void; close: ReturnType<typeof vi.fn>; waitForExit: ReturnType<typeof vi.fn> }> = [];
     spawn.mockImplementation(async (spawned: { env?: Record<string, string>; onExit?: () => void }) => {
       expect(spawned.env?.DOHC_ENGINE_LIVE_HOST_CONFIG, "a plain engine, not the live host's").toBeUndefined();
       let handles = 0;
@@ -166,17 +171,76 @@ describe("the automation replicas", () => {
         }),
         close: vi.fn(), waitForExit: vi.fn(async () => undefined),
       };
-      engines.push({ exit: () => spawned.onExit?.() });
+      engines.push({ exit: () => spawned.onExit?.(), close: engine.close, waitForExit: engine.waitForExit });
       return engine;
     });
     return { sent, engines, failPush: (value: boolean) => { failPush = value; }, methods: () => sent.map((request) => request.method) };
+  }
+
+  // The engine refuses to open the workspaces `refused` names.
+  function refuseOpens(engine: ReturnType<typeof fakeEngine>, refused: (workspaceId: unknown) => boolean) {
+    const answer = spawn.getMockImplementation()!;
+    spawn.mockImplementation(async (spawned: Parameters<typeof answer>[0]) => {
+      const client = await answer(spawned);
+      const send = client.sendRequest.getMockImplementation()!;
+      client.sendRequest.mockImplementation(async (request: Sent) => {
+        if (request.method === "workspace.open" && refused(request.params.workspaceId)) {
+          engine.sent.push(request);
+          throw new Error("the engine refused this workspace");
+        }
+        return await send(request);
+      });
+      return client;
+    });
+  }
+
+  function gate() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  // Answers a function that holds each engine start from then until it is called.
+  function holdStartups() {
+    const answer = spawn.getMockImplementation()!;
+    let held: Promise<void> = Promise.resolve();
+    spawn.mockImplementation(async (spawned: Parameters<typeof answer>[0]) => { await held; return await answer(spawned); });
+    return () => {
+      const started = gate();
+      held = started.promise;
+      return started.resolve;
+    };
+  }
+
+  // Fake time does not wait for a pass's file work, so a test waits for the pass's end.
+  function passEnds() {
+    const waiting: Array<() => void> = [];
+    return { onReconciled: () => { for (const resolve of waiting.splice(0)) resolve(); }, next: () => new Promise<void>((resolve) => waiting.push(resolve)) };
+  }
+
+  // One turn of the event loop: whatever only waited on promises has run.
+  const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  // Errors no test expects: the test fails if one is reported before it ends.
+  function unexpectedErrors() {
+    const errors: unknown[] = [];
+    cleanup.push(async () => { expect(errors).toEqual([]); });
+    return (error: unknown) => { errors.push(error); };
+  }
+
+  async function start(storage: SyncRelayStorage, options: Partial<Parameters<typeof startAutomationReplicas>[0]> = {}, closes = true) {
+    const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
+    const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
+      key, namespace, wanted: () => [], onError: unexpectedErrors(), ...options });
+    cleanup.push(async () => { if (closes) await running.close(); await rm(root, { recursive: true, force: true }); });
+    return running;
   }
 
   async function replicas(
     storage: SyncRelayStorage,
     wanted: () => string[],
     clock: { ms: number },
-    onError: (error: unknown) => void = (error) => { throw error; },
+    onError: (error: unknown) => void = unexpectedErrors(),
     onPulled?: (workspaceId: string, paths: readonly string[]) => void,
   ) {
     const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
@@ -456,7 +520,7 @@ describe("the automation replicas", () => {
     const clock = { ms: 5 };
     const root = await mkdtemp(join(tmpdir(), "automation-replicas-"));
     const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
-      key, namespace, wanted: () => ["busy", WORKSPACE], nowMs: () => clock.ms, onError: (error) => { throw error; } });
+      key, namespace, wanted: () => ["busy", WORKSPACE], nowMs: () => clock.ms, onError: unexpectedErrors() });
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
     // The busy one never catches up, and the quiet one still opens.
     await vi.waitFor(() => expect(running.replica(WORKSPACE)).toBeDefined());
@@ -508,7 +572,7 @@ describe("the automation replicas", () => {
     const nextPass = () => new Promise<void>((resolve) => waiting.push(resolve));
     const opened = nextPass();
     const running = await startAutomationReplicas({ storage, root, engineExecutable: process.execPath, relayOrigin: "https://relay.example",
-      key, namespace, wanted: () => [], onError: (error) => { throw error; },
+      key, namespace, wanted: () => [], onError: unexpectedErrors(),
       onReconciled: () => { for (const resolve of waiting.splice(0)) resolve(); } });
     cleanup.push(async () => { await running.close(); await rm(root, { recursive: true, force: true }); });
     await vi.advanceTimersByTimeAsync(0);
@@ -523,5 +587,338 @@ describe("the automation replicas", () => {
     await leaving;
     expect(storage.currentAutomationWorkspace(WORKSPACE)).toBeNull();
     expect(storage.listAutomationWorkspaces()[0]?.leftAtMs).toBeGreaterThanOrEqual(start + AUTOMATION_WORKSPACE_LEAVE_AFTER_MS);
+  });
+
+  it("closes only after an engine start and exit that ignore its abort, and every close waits for them", async () => {
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    const exited = gate();
+    const answer = spawn.getMockImplementation()!;
+    spawn.mockImplementation(async (spawned: Parameters<typeof answer>[0]) => {
+      const client = await answer(spawned);
+      client.waitForExit.mockImplementation(() => exited.promise);
+      return client;
+    });
+    const started = holdStartups()();
+    const running = await start(storage);
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalled());
+    const first = running.close(), second = running.close();
+    expect(second).toBe(first);
+    expect((spawn.mock.calls[0]![0] as { signal: AbortSignal }).signal.aborted, "it aborts at once").toBe(true);
+    let closed = false;
+    void second.then(() => { closed = true; });
+    await turn();
+    expect(closed, "the engine is still starting").toBe(false);
+    started();
+    await vi.waitFor(() => expect(engine.engines[0]?.close).toHaveBeenCalled());
+    await turn();
+    expect(closed, "the engine has not exited").toBe(false);
+    exited.resolve();
+    await first;
+    expect(closed).toBe(true);
+  });
+
+  it("waits on close for a replica that an engine exit is still closing", async () => {
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    const answer = spawn.getMockImplementation()!;
+    const pushing = gate(), pushed = gate();
+    let hold = false;
+    spawn.mockImplementation(async (spawned: Parameters<typeof answer>[0]) => {
+      const client = await answer(spawned);
+      const send = client.sendRequest.getMockImplementation()!;
+      // The held push ignores every abort.
+      client.sendRequest.mockImplementation(async (request: Sent) => {
+        if (request.method === "sync.push" && hold) { pushing.resolve(); await pushed.promise; }
+        return await send(request);
+      });
+      return client;
+    });
+    const changed: string[] = [];
+    const running = await start(storage, { wanted: () => [WORKSPACE], onChanged: (workspaceId) => changed.push(workspaceId) });
+    await running.settled();
+    hold = true;
+    const syncing = running.replica(WORKSPACE)!.sync().catch(() => undefined);
+    await pushing.promise;
+    engine.engines[0]!.exit();
+    expect(running.replica(WORKSPACE), "the exit retires it at once").toBeUndefined();
+    changed.length = 0;
+    let closed = false;
+    const closing = running.close().then(() => { closed = true; });
+    await turn();
+    expect(closed, "its push still runs").toBe(false);
+    pushed.resolve();
+    await closing;
+    expect(changed, "it closed before close() ended").toEqual([WORKSPACE]);
+    await syncing;
+  });
+
+  it("closes the other replicas and the engine when a replica's listener throws as it closes, and reports that", async () => {
+    const { storage } = await relay();
+    storage.claimWorkspace({ workspaceId: "other", ownerUserId: "owner", createdAtMs: 1 });
+    storage.claimWorkspaceIdentity({ workspaceId: "other", replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
+    const engine = fakeEngine();
+    let closing = false;
+    const changed: string[] = [];
+    const running = await start(storage, { wanted: () => [WORKSPACE, "other"], onChanged: (workspaceId) => {
+      if (closing && workspaceId === WORKSPACE) throw new Error("The listener failed.");
+      changed.push(workspaceId);
+    } }, false);
+    await running.settled();
+    closing = true;
+    changed.length = 0;
+    await expect(running.close()).rejects.toThrow("The listener failed.");
+    expect(changed).toEqual(["other"]);
+    expect(engine.methods().filter((method) => method === "workspace.close")).toHaveLength(2);
+    expect(engine.engines[0]!.close).toHaveBeenCalled();
+    expect(engine.engines[0]!.waitForExit).toHaveBeenCalled();
+  });
+
+  it("waits out a failed pass's whole delay, however many passes are asked for meanwhile", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    fakeEngine();
+    let failing = true, reads = 0;
+    const errors: unknown[] = [];
+    const running = await start(storage, { onError: (error) => errors.push(error), wanted: () => {
+      reads += 1;
+      if (failing) throw new Error("The host records did not read.");
+      return [];
+    } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(errors).toHaveLength(1);
+    failing = false;
+    running.reconcile();
+    running.reconcile();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(reads).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reads).toBe(2);
+    await running.settled();
+    expect(reads, "the passes asked for ran in it").toBe(2);
+  });
+
+  it("ends a failed workspace's retry delay when a pass is asked for, and waits that pass's own delay", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    // Joined already, so a pass's join writes nothing that asks for another pass.
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    refuseOpens(fakeEngine(), () => true);
+    const passes = passEnds();
+    let reads = 0;
+    const running = await start(storage, { onError: () => {}, onReconciled: passes.onReconciled, wanted: () => { reads += 1; return [WORKSPACE]; } });
+    let next = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await next;
+    expect(running.failedSyncs().has(WORKSPACE)).toBe(true);
+    running.reconcile();
+    await vi.advanceTimersByTimeAsync(99);
+    expect(reads).toBe(1);
+    next = passes.next();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reads, "it runs before the retry's 2 s").toBe(2);
+    await next;
+    // Its retry replaced the first one, and doubled.
+    await vi.advanceTimersByTimeAsync(3_999);
+    expect(reads).toBe(2);
+    next = passes.next();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reads).toBe(3);
+    await next;
+  });
+
+  it("keeps the first delay asked for, and runs the passes asked for during a pass as one, 100 ms after it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    const engine = fakeEngine();
+    const hold = holdStartups();
+    const passes = passEnds();
+    let reads = 0;
+    const running = await start(storage, { onReconciled: passes.onReconciled, wanted: () => { reads += 1; return []; } });
+    let next = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await next;
+    // The exit asks for a pass in 2 s first; one asked for in 100 ms after it waits as long.
+    engine.engines[0]!.exit();
+    running.reconcile();
+    const started = hold();
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(spawn, "the pass is running").toHaveBeenCalledTimes(2);
+    running.reconcile();
+    running.reconcile();
+    next = passes.next();
+    started();
+    await next;
+    expect(reads).toBe(2);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(reads).toBe(2);
+    next = passes.next();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reads).toBe(3);
+    await next;
+    await running.settled();
+    expect(reads, "only one pass followed").toBe(3);
+  });
+
+  it("settles once a failed workspace's retry has run, without waiting for a later deadline or setting timers", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    storage.claimWorkspace({ workspaceId: "leaving", ownerUserId: "owner", createdAtMs: 1 });
+    storage.claimWorkspaceIdentity({ workspaceId: "leaving", replicationEpoch: "epoch-1", streamIdentity: "stream-1" });
+    storage.joinAutomationWorkspace({ workspaceId: "leaving", nowMs: 0 });
+    storage.unwantAutomationWorkspace({ workspaceId: "leaving", nowMs: 0 });
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    let refuse = true;
+    refuseOpens(fakeEngine(), () => refuse);
+    const passes = passEnds();
+    const running = await start(storage, { onError: () => {}, onReconciled: passes.onReconciled, wanted: () => [WORKSPACE], nowMs: () => 0 });
+    let next = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await next;
+    expect(running.failedSyncs().has(WORKSPACE)).toBe(true);
+    const timers = vi.getTimerCount();
+    let settled = false;
+    const settling = running.settled().then(() => { settled = true; });
+    await turn();
+    expect(settled, "its retry is still to run").toBe(false);
+    expect(vi.getTimerCount(), "settled() sets no timer").toBe(timers);
+    refuse = false;
+    next = passes.next();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await next;
+    await settling;
+    expect(running.replica(WORKSPACE)).toBeDefined();
+    expect(vi.getTimerCount(), "the deadline for the one leaving is still to come").toBe(1);
+  });
+
+  it("runs a pass after one that a retention deadline passed during", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    const engine = fakeEngine();
+    const hold = holdStartups();
+    const passes = passEnds();
+    const clock = { ms: 0 };
+    let reads = 0;
+    const running = await start(storage, { onReconciled: passes.onReconciled, nowMs: () => clock.ms, wanted: () => { reads += 1; return []; } });
+    let next = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await next;
+    // The engine exits, and the pass that starts it again holds past the deadline.
+    const started = hold();
+    engine.engines[0]!.exit();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(spawn).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(AUTOMATION_WORKSPACE_LEAVE_AFTER_MS);
+    next = passes.next();
+    started();
+    await next;
+    expect(reads).toBe(2);
+    expect(storage.currentAutomationWorkspace(WORKSPACE), "that pass ran before the deadline").not.toBeNull();
+    clock.ms = AUTOMATION_WORKSPACE_LEAVE_AFTER_MS;
+    next = passes.next();
+    await vi.advanceTimersByTimeAsync(100);
+    await next;
+    expect(reads).toBe(3);
+    expect(storage.currentAutomationWorkspace(WORKSPACE)).toBeNull();
+    expect(running.unavailable).toBe(false);
+  });
+
+  it("does not wake at once for an overdue deadline whose workspace failed to leave", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    vi.spyOn(storage, "unwantAutomationWorkspace").mockImplementation(() => { throw new Error("The row did not write."); });
+    fakeEngine();
+    const passes = passEnds();
+    let reads = 0;
+    const running = await start(storage, { onError: () => {}, onReconciled: passes.onReconciled,
+      nowMs: () => AUTOMATION_WORKSPACE_LEAVE_AFTER_MS, wanted: () => { reads += 1; return []; } });
+    let next = passes.next();
+    await vi.advanceTimersByTimeAsync(0);
+    await next;
+    expect(running.failedSyncs().has(WORKSPACE)).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(reads, "only its retry wakes the replicas").toBe(1);
+    next = passes.next();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reads).toBe(2);
+    await next;
+  });
+
+  it("goes on with its passes when onError or onReconciled throws", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    cleanup.push(async () => { logged.mockRestore(); });
+    const { storage } = await relay();
+    fakeEngine();
+    const passes = passEnds();
+    let failing = true, reads = 0, errors = 0;
+    const running = await start(storage, {
+      wanted: () => {
+        reads += 1;
+        if (failing) throw new Error("The host records did not read.");
+        return [];
+      },
+      onError: () => { errors += 1; throw new Error("The error listener failed."); },
+      onReconciled: () => { passes.onReconciled(); throw new Error("The pass listener failed."); },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(errors).toBe(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(errors, "the failed pass ran again").toBe(2);
+    failing = false;
+    let next = passes.next();
+    await vi.advanceTimersByTimeAsync(4_000);
+    await next;
+    expect(running.unavailable).toBe(false);
+    running.reconcile();
+    next = passes.next();
+    await vi.advanceTimersByTimeAsync(100);
+    await next;
+    expect(reads, "the pass after a throwing onReconciled ran").toBe(4);
+    await running.settled();
+    expect(logged).toHaveBeenCalledWith("[automation-replicas] A callback failed.", new Error("The error listener failed."));
+    expect(logged).toHaveBeenCalledWith("[automation-replicas] A callback failed.", new Error("The pass listener failed."));
+  });
+
+  it("retries a pass whose rows did not read, and looks for a deadline only after a pass", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    cleanup.push(async () => { vi.useRealTimers(); });
+    const { storage } = await relay();
+    storage.joinAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    storage.unwantAutomationWorkspace({ workspaceId: WORKSPACE, nowMs: 0 });
+    const list = storage.listAutomationWorkspaces.bind(storage);
+    let failing = true;
+    vi.spyOn(storage, "listAutomationWorkspaces").mockImplementation(() => {
+      if (failing) throw new Error("The rows did not read.");
+      return list();
+    });
+    fakeEngine();
+    const errors: unknown[] = [];
+    const passes = passEnds();
+    const running = await start(storage, { onError: (error) => errors.push(error), onReconciled: passes.onReconciled, nowMs: () => 0 });
+    expect(vi.getTimerCount(), "only the first pass's wait").toBe(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(errors, "the pass's own failure, once").toEqual([new Error("The rows did not read.")]);
+    expect(vi.getTimerCount(), "its retry, and no deadline it could not read").toBe(1);
+    failing = false;
+    const next = passes.next();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await next;
+    expect(running.unavailable).toBe(false);
+    expect(vi.getTimerCount(), "the deadline the pass read").toBe(1);
   });
 });
