@@ -85,11 +85,12 @@ function isModified(value: unknown, defaultValue: unknown): boolean {
   return JSON.stringify(value) !== JSON.stringify(defaultValue);
 }
 
-// After a failed save the control shows the value on disk: every catch and
-// refusal path below restores it, or never left it. The document chip's
-// "your edits are still here" would be false here.
+// The document chip's "your edits are still here" is false here: a failed
+// save rolls the control back. The title promises nothing about which value
+// it shows, because two overlapping saves that both fail leave the later
+// one's optimistic value on screen, not the value on disk.
 export const SETTINGS_SAVE_ERROR_TITLE =
-  "dohc could not save this setting. It shows its saved value.";
+  "dohc could not save this setting. Try changing it again.";
 
 function StatusPill(props: { state: SettingsSaveState }) {
   if (props.state === "idle") return null;
