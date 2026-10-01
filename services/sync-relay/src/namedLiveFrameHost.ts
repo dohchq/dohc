@@ -10,6 +10,7 @@ import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.j
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
+import type { TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
 import { createAccountlessPathProjection } from "./accountlessPathProjection.js";
 export { createNamedFrameChanges, type NamedFrameChanges } from "./liveHostChanges.js";
 
@@ -38,6 +39,7 @@ export interface NamedFrameHostBounds {
 export function captureNamedLiveFrameHost(options: {
   ticket: RedeemedLiveTicket;
   actor: CurrentLiveBindingRequest["actor"];
+  trustedAccount?: TrustedLiveAccount;
   storage: SyncRelayStorage;
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
@@ -55,6 +57,7 @@ export function captureNamedLiveFrameHost(options: {
 /** The owner route supplies the authenticated account, never an identity from a frame. */
 export function captureOwnerLiveFrameHost(options: {
   authenticatedUserId: string;
+  trustedAccount?: TrustedLiveAccount;
   shareId: string;
   storage: SyncRelayStorage;
   native: NamedFrameNativeHost;
@@ -74,6 +77,7 @@ export function captureOwnerLiveFrameHost(options: {
 
 function captureLiveFrameHost(options: {
   actor: CurrentLiveBindingRequest["actor"];
+  trustedAccount?: TrustedLiveAccount;
   binding: LiveObjectBinding;
   authority: ServerDerivedLiveUpdateAuthority;
   hostEpoch: NamedFrameNativeHost["coordinate"]["hostEpoch"];
@@ -87,6 +91,7 @@ function captureLiveFrameHost(options: {
   const authority = Object.freeze(parseServerDerivedLiveUpdateAuthority(options.authority));
   const hostEpoch = options.hostEpoch;
   const { storage } = options;
+  const trustedAccount = options.trustedAccount ? Object.freeze({...options.trustedAccount}) : undefined;
   const original = options.native;
   const native = { ...original, coordinate: { ...original.coordinate }, binding: parseLiveObjectBinding(original.binding),
     nextRequestId: original.nextRequestId.bind(original), drain: original.drain.bind(original) };
@@ -216,6 +221,7 @@ function captureLiveFrameHost(options: {
         check(signal);
         if (validation.kind === "retry") return {result: "retry", reason: validation.reason};
         const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
+          ...(trustedAccount ? {trustedAccount} : {}),
           metadata: { deliveryId, updateDigest, binding }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
         if (committed.result.kind === "refused") return { result: "refused", reason: committed.result.reason };
         if (committed.result.kind === "retry") return { result: "retry", reason: committed.result.reason };

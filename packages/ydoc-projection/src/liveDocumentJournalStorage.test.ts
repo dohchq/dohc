@@ -949,7 +949,7 @@ it('hashes no copied state while holding the SQLite writer transaction', () => {
     })
     vi.spyOn(hashPrototype, 'update').mockImplementation(function(this: unknown, ...args: unknown[]) {
       if (writer) {
-        expect(args[0]).toEqual(expect.stringMatching(/^\["accepted-(history|event)-v1",/))
+        expect(args[0]).toEqual(expect.stringMatching(/^\["accepted-(history-v1|event-v[12])",/))
         metadataHashes++
       }
       hashCalls++

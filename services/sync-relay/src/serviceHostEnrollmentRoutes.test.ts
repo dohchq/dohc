@@ -15,7 +15,7 @@ const serviceReplication = (storage: Parameters<typeof authorizeServiceHostRepli
 async function fixture() {
   const f = await ticketFixture(); cleanup.push(f.close);
   f.storage.claimWorkspaceIdentity({workspaceId: scope.workspaceId, replicationEpoch: "epoch", streamIdentity: "stream"});
-  f.raw.prepare("INSERT INTO sync_relay_log VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
+  f.raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,relay_seq) VALUES (?,'owner',0,'moment.append','{}',1,1)").run(scope.workspaceId);
   f.raw.prepare("INSERT INTO sync_relay_current_files VALUES (?,'main',?,?,'text',1)").run(scope.workspaceId, binding.currentPath, "b".repeat(64));
   const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
   const host = {ready: vi.fn(() => false), reconcile: vi.fn(), unavailable: false};

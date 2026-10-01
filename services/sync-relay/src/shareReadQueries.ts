@@ -248,6 +248,7 @@ export function createShareReadQueries(
           opKind: row.opKind,
           payload,
           recordedAtMs: row.recordedAtMs,
+          ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
         });
         if (ops.length === limit) {
           return {

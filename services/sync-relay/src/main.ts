@@ -579,7 +579,7 @@ if (namedLiveConfig) {
   const admission = createLiveConnectionAdmission();
   const membership = createLiveMembershipRegistry({maxSessions: namedLiveConfig.transport.maxConnections, maxMembers: namedLiveConfig.transport.maxConnections,
     maxSnapshotBytes: namedLiveConfig.frames.receive.maxFrameBytes}, storage.readLiveAuthority.bind(storage));
-  namedLive = createNamedLiveRoutes({ kind: "named", storage, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+  namedLive = createNamedLiveRoutes({ kind: "named", storage, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
     sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative, membership, admission });
@@ -595,13 +595,13 @@ if (namedLiveConfig) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
     desktopAdmission = createNamedDesktopLive({storage, resolveActor, publicOrigin: shareWebOrigin!, hosts,
       limits: namedBrowserSessionLimits!, editorLimits: desktopEditorLimits, tickets});
-    desktopLive = createNamedLiveRoutes({kind: "named", desktopBearer: true, storage, hosts,
+    desktopLive = createNamedLiveRoutes({kind: "named", desktopBearer: true, storage, lookupUserDisplayName, hosts,
       publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
       frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
       sessions: desktopAdmission, tickets, captureNative, membership, admission});
     server.once("close", desktopLive.close); process.once("SIGINT", desktopLive.close); process.once("SIGTERM", desktopLive.close);
   }
-  const ownerLive = createOwnerLiveRoutes({ storage, resolveActor, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+  const ownerLive = createOwnerLiveRoutes({ storage, resolveActor, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate, captureNative, admission });
   server.once("close", ownerLive.close);

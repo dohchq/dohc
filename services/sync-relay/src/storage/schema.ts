@@ -1,3 +1,4 @@
+import { initializeLiveAuthorshipSchema, originalLiveJournalSql, liveAuthorSchemaMarked, assertLiveAuthorColumns } from "./liveAuthorshipSchema";
 import { initializeAppPublicationSchema } from "./publicationSchema";
 import { initializeAppCollectionSchema } from "./appCollectionSchema";
 import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySchema";
@@ -893,10 +894,11 @@ function assertLiveJournalSchema(db: SqliteDb): void {
     same(rows.length, 1);
     same(row?.type, name.startsWith("idx_") ? "index" : "table");
     same(row?.tbl_name, name.includes("struct_provenance") ? LIVE_JOURNAL_PROVENANCE : LIVE_JOURNAL_TABLE);
-    same(typeof row?.sql === "string" ? normalizedSchemaSql(row.sql) : null, normalizedSchemaSql(sql));
+    same(typeof row?.sql === "string" ? (name === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db) ? originalLiveJournalSql(row.sql) : normalizedSchemaSql(row.sql)) : null, normalizedSchemaSql(sql));
   }
   for (const [table, expected] of Object.entries(LIVE_JOURNAL_SHAPE)) {
-    same(db.prepare(`PRAGMA table_info(${table})`).all().map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk]), expected.columns);
+    if (table === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db)) assertLiveAuthorColumns(db);
+    same(db.prepare(`PRAGMA table_info(${table})`).all().filter(r => table !== LIVE_JOURNAL_TABLE || !liveAuthorSchemaMarked(db) || Number(r.cid) < 24).map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk]), expected.columns);
     same(db.prepare(`PRAGMA foreign_key_list(${table})`).all().map(r => [r.id,r.seq,r.table,r.from,r.to,r.on_update,r.on_delete,r.match]), expected.foreignKeys);
     same(db.prepare(`PRAGMA index_list(${table})`).all().map(r => [r.name,r.unique,r.origin,r.partial]).sort((a,b) => String(a[0]).localeCompare(String(b[0]))), expected.indexes);
     for (const [name, columns] of Object.entries(expected.indexColumns)) same(db.prepare(`PRAGMA index_info(${name})`).all().map(r => [r.seqno,r.cid,r.name]), columns);
@@ -1220,6 +1222,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeLiveTicketSchema(db);
     initializeAppPublicationSchema(db);
     initializeAppCollectionSchema(db);
+    initializeLiveAuthorshipSchema(db);
     initializeNoticeSchema(db);
     initializeShareNoticeDeliverySchema(db);
     initializeAutomationHostSchema(db);

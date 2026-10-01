@@ -95,6 +95,9 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
         currentMax = op.originSeq;
         newOps.push(op);
         addedLogBytes += Buffer.byteLength(op.payloadJson, "utf8");
+        if (op.admittedAuthorSnapshot !== undefined) {
+          addedLogBytes += Buffer.byteLength(JSON.stringify(op.admittedAuthorSnapshot), "utf8");
+        }
       }
 
       assertWorkspaceQuota(storage, input.workspaceId, addedLogBytes);
@@ -132,8 +135,8 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
 
       const insertStmt = storage.db.prepare(
         `INSERT INTO sync_relay_log (
-          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?)`,
+          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, admitted_author_snapshot_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       );
       const objectPathStmt = storage.db.prepare(OBJECT_PATH_UPSERT_SQL);
       const objectMomentStmt = storage.db.prepare(OBJECT_MOMENT_INSERT_SQL);
@@ -147,6 +150,7 @@ export function appendLogBatchInTransaction(storage: StorageContext, input: {
           op.opKind,
           op.payloadJson,
           op.recordedAtMs,
+          op.admittedAuthorSnapshot === undefined ? null : JSON.stringify(op.admittedAuthorSnapshot),
         );
         inserted += 1;
         // Keep "where is this object now?" answerable by primary
@@ -228,7 +232,7 @@ export function fetchLogPage(storage: StorageContext, input: {
   }): FetchLogPageResult {
     const rows = storage.db
       .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND relay_seq > ?
          ORDER BY relay_seq
@@ -253,7 +257,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
       input.beforeRelaySeq === null
         ? storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json
                FROM sync_relay_log
                WHERE workspace_id = ?
                ORDER BY relay_seq DESC
@@ -262,7 +266,7 @@ export function fetchLogPageDescending(storage: StorageContext, input: {
             .all(input.workspaceId, input.limit)
         : storage.db
             .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
+              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json
                FROM sync_relay_log
                WHERE workspace_id = ? AND relay_seq < ?
                ORDER BY relay_seq DESC
@@ -279,7 +283,7 @@ export function fetchLogCoordinate(storage: StorageContext, input: {
   }): SyncRelayLogRow | null {
     const row = storage.db
       .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq, admitted_author_snapshot_json
          FROM sync_relay_log
          WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
       )

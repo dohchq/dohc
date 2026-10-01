@@ -250,6 +250,8 @@ export interface LiveMarkdownJournalEvidence {
   readonly suffixDigests: readonly string[]
   readonly candidate: {
     readonly updateDigest: string
+    readonly firstSeen: readonly LiveUpdateStructRange[]
+    readonly firstSeenDeletes: readonly LiveUpdateStructRange[]
     readonly ranges: readonly LiveUpdateStructRange[]
   }
   readonly projectedMarkdownSha256: string
@@ -318,6 +320,8 @@ export function createLiveMarkdownJournalValidator(
           suffixDigests: cut.suffixDigests,
           candidate: Object.freeze({
             updateDigest: cut.candidate.updateDigest,
+            firstSeen: cut.candidate.firstSeen,
+            firstSeenDeletes: cut.candidate.firstSeenDeletes,
             ranges: Object.freeze(cut.candidate.ranges.map(range => Object.freeze({ ...range }))),
           }),
           projectedMarkdownSha256: sha256Hex(markdownBytes),

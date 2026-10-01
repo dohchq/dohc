@@ -8,7 +8,8 @@ import {revalidateAcceptedHistoryDelivery,readAcceptedHistory, readAcceptedHisto
 import {captureSqliteReadRevision} from "./readRevision";
 import {requireRestoreLifecycleBudget} from "./liveRestoreLifecycleBudget";
 import {HOST_CONTROL_IDENTIFIER_MAX_BYTES} from "@dohc/live-session-contract/host-control";
-import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHistoryDigest} from "../liveAcceptedHistory";
+import {canonicalVersionedAcceptedMetadata, initialAcceptedHistoryDigest, nextVersionedAcceptedHistoryDigest} from "../liveAcceptedHistory";
+import {assessLiveAuthorWindow} from "./liveAuthorWindow";
 import type {NativeRestoreHistoryProof} from "../liveRestoreProposal";
 export type {RestoreLifecycle} from "../liveRestoreLifecycle";
 import type { LiveOwnerAdoptionCut } from "@dohc/workspace-engine-client/daemon";
@@ -466,9 +467,9 @@ export class LiveCommittedDeliveryStore {
     const { baselineBytes: _baseline,events: _events,...header } = cut;
     const originEvidenceDigest = createHash("sha256").update(JSON.stringify([capture.binding, cut.relayDatabaseNamespace, cut.sourceMomentId,
       cut.sourceDigest, cut.sourceByteLength, cut.baselineMomentRelaySequence, cut.baselineRegisteredAtMs, cut.expectedLocalSequence,
-      cut.events.map(event => canonicalAcceptedMetadata(event.metadata))])).digest("hex");
+      cut.events.map(event => canonicalVersionedAcceptedMetadata(event.metadata))])).digest("hex");
     const originEventCount = cut.events.length;
-    const originHistoryEvidenceDigest = cut.events.reduce((previous, event, index) => nextAcceptedHistoryDigest(previous, index + 1, event.metadata),
+    const originHistoryEvidenceDigest = cut.events.reduce((previous, event, index) => nextVersionedAcceptedHistoryDigest(previous, index + 1, event.metadata),
       initialAcceptedHistoryDigest(this.#history.namespace, document));
     const origin = JSON.stringify({ ...header,bindingDigest: createHash("sha256").update(JSON.stringify(capture.binding)).digest("hex"),
       originEvidenceDigest, originEventCount, originHistoryEvidenceDigest,originalBinding:structuredClone(capture.binding) });
@@ -799,7 +800,7 @@ export class LiveCommittedDeliveryStore {
       const bytes = (prior.hasCheckpoint ? 0 : prior.bytes) + rowBytes;
       integrity(
         count <= 4095 &&
-          hasCheckpoint === (restored!==null || liveJournalCheckpointDue(count, bytes)),
+          hasCheckpoint === (restored!==null || row.admitted.metadata.checkpointCoverage !== undefined || liveJournalCheckpointDue(count, bytes)),
       );
       position = { count, bytes };
     } else {
@@ -1318,6 +1319,9 @@ export class LiveCommittedDeliveryStore {
       const raw=this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(document));
       return raw?decodeJournalRow(this.#storage.db,raw).admitted.metadata:null;
     });
+    const authorWindow = assessLiveAuthorWindow(capture.accepted.events.map(event => event.metadata), {
+      authorSnapshot: [], firstSeen: validated.content.replacementRanges, firstSeenDeletes: validated.content.firstSeenDeletes});
+    integrity(!authorWindow.refused);
     this.#storage.tx(()=>{
       assertReviewCurrent?.();
       assertProposalCurrent();
@@ -1326,7 +1330,8 @@ export class LiveCommittedDeliveryStore {
       integrity(operation.phase==="native-fenced");
       const admitted=appendValidatedLiveJournal(this.#storage,{document,namespace:this.#history.namespace,host,
         current:{binding,authority:{principalKind:"owner",principalId:input.ownerUserId,grantId:null,grantGeneration:null}},metadata,
-        updateBytes,receivedAtMs:at,firstSeen:validated.content.replacementRanges,checkpointBytes,checkpointDigest,priorMetadata,restoreOperationId:input.operationId});
+        updateBytes,receivedAtMs:at,firstSeen:validated.content.replacementRanges,firstSeenDeletes:validated.content.firstSeenDeletes,
+        authorSnapshot:[],checkpointCoverage:authorWindow.coverage,checkpointBytes,checkpointDigest,priorMetadata,restoreOperationId:input.operationId});
       const admission:RestoreAdmission={proposalDigest:expectedProposalDigest,candidateDigest:proposal.candidateDigest,preparation:{fence,point},
         nativeSourceManifestDigest,admitted:admitted.metadata,checkpointDigest,sourceRanges,recordedAtMs:at};
       const admissionJson=JSON.stringify(admission);

@@ -19,7 +19,8 @@ export interface OwnerOutboxAdmission {
   readonly shares: ReadonlyMap<string,string>;
   readonly maxEntriesPerDrain: number;
   readonly maxBytesPerDrain: number;
-  validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
+  validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array;
+    retainStateUpdate?: boolean}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
 
 /** Runs within one authenticated device delivery and rechecks standing at every await. */

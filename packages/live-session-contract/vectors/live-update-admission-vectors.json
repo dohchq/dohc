@@ -635,6 +635,288 @@
         "grantId": "grant-1",
         "grantGeneration": 1
       }
+    },
+    {
+      "parser": "parseAdmittedLiveUpdateMetadata",
+      "case": "v2 immutable author and deletion metadata",
+      "input": {
+        "accepted": {
+          "receipt": {
+            "deliveryId": "delivery-1",
+            "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "journalCursor": 1,
+            "acceptingHostEpoch": 2
+          },
+          "binding": {
+            "workspaceId": "workspace-1",
+            "mainVersionId": "main-1",
+            "objectId": "object-1",
+            "lineageClaimId": "lineage-1",
+            "currentPath": "notes/a.md",
+            "selectorPaths": [
+              "notes/a.md"
+            ],
+            "restoreFenceGeneration": 0
+          },
+          "authority": {
+            "principalKind": "named",
+            "principalId": "person-1",
+            "grantId": "grant-1",
+            "grantGeneration": 1
+          },
+          "receivedAtMs": 0
+        },
+        "firstSeen": [
+          {
+            "clientId": 1,
+            "startClock": 0,
+            "endClock": 1
+          }
+        ],
+        "canonicalVersion": 2,
+        "authorSnapshot": [
+          {
+            "kind": "human",
+            "humanId": "alice",
+            "humanName": "Alice"
+          },
+          {
+            "kind": "agent",
+            "agentId": "agent",
+            "agentName": "Writer",
+            "onBehalfOf": "alice",
+            "depth": 1
+          }
+        ],
+        "firstSeenDeletes": [
+          {
+            "clientId": 9,
+            "startClock": 1,
+            "endClock": 2
+          }
+        ]
+      },
+      "expected": {
+        "accepted": {
+          "receipt": {
+            "deliveryId": "delivery-1",
+            "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "journalCursor": 1,
+            "acceptingHostEpoch": 2
+          },
+          "binding": {
+            "workspaceId": "workspace-1",
+            "mainVersionId": "main-1",
+            "objectId": "object-1",
+            "lineageClaimId": "lineage-1",
+            "currentPath": "notes/a.md",
+            "selectorPaths": [
+              "notes/a.md"
+            ],
+            "restoreFenceGeneration": 0
+          },
+          "authority": {
+            "principalKind": "named",
+            "principalId": "person-1",
+            "grantId": "grant-1",
+            "grantGeneration": 1
+          },
+          "receivedAtMs": 0
+        },
+        "firstSeen": [
+          {
+            "clientId": 1,
+            "startClock": 0,
+            "endClock": 1
+          }
+        ],
+        "canonicalVersion": 2,
+        "authorSnapshot": [
+          {
+            "kind": "human",
+            "humanId": "alice",
+            "humanName": "Alice"
+          },
+          {
+            "kind": "agent",
+            "agentId": "agent",
+            "agentName": "Writer",
+            "onBehalfOf": "alice",
+            "depth": 1
+          }
+        ],
+        "firstSeenDeletes": [
+          {
+            "clientId": 9,
+            "startClock": 1,
+            "endClock": 2
+          }
+        ]
+      }
+    },
+    {
+      "parser": "parseAdmittedLiveUpdateMetadata",
+      "case": "v2 complete checkpoint author coverage",
+      "input": {
+        "accepted": {
+          "receipt": {
+            "deliveryId": "delivery-1",
+            "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "journalCursor": 1,
+            "acceptingHostEpoch": 2
+          },
+          "binding": {
+            "workspaceId": "workspace-1",
+            "mainVersionId": "main-1",
+            "objectId": "object-1",
+            "lineageClaimId": "lineage-1",
+            "currentPath": "notes/a.md",
+            "selectorPaths": [
+              "notes/a.md"
+            ],
+            "restoreFenceGeneration": 0
+          },
+          "authority": {
+            "principalKind": "named",
+            "principalId": "person-1",
+            "grantId": "grant-1",
+            "grantGeneration": 1
+          },
+          "receivedAtMs": 0
+        },
+        "firstSeen": [
+          {
+            "clientId": 1,
+            "startClock": 0,
+            "endClock": 1
+          }
+        ],
+        "canonicalVersion": 2,
+        "authorSnapshot": [
+          {
+            "kind": "human",
+            "humanId": "alice",
+            "humanName": "Alice"
+          },
+          {
+            "kind": "agent",
+            "agentId": "agent",
+            "agentName": "Writer",
+            "onBehalfOf": "alice",
+            "depth": 1
+          }
+        ],
+        "firstSeenDeletes": [
+          {
+            "clientId": 9,
+            "startClock": 1,
+            "endClock": 2
+          }
+        ],
+        "checkpointCoverage": [
+          {
+            "author": {
+              "kind": "human",
+              "humanId": "alice",
+              "humanName": "Alice"
+            },
+            "structRanges": [
+              {
+                "clientId": 1,
+                "startClock": 0,
+                "endClock": 1
+              }
+            ],
+            "deletionRanges": [
+              {
+                "clientId": 9,
+                "startClock": 1,
+                "endClock": 2
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "accepted": {
+          "receipt": {
+            "deliveryId": "delivery-1",
+            "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "journalCursor": 1,
+            "acceptingHostEpoch": 2
+          },
+          "binding": {
+            "workspaceId": "workspace-1",
+            "mainVersionId": "main-1",
+            "objectId": "object-1",
+            "lineageClaimId": "lineage-1",
+            "currentPath": "notes/a.md",
+            "selectorPaths": [
+              "notes/a.md"
+            ],
+            "restoreFenceGeneration": 0
+          },
+          "authority": {
+            "principalKind": "named",
+            "principalId": "person-1",
+            "grantId": "grant-1",
+            "grantGeneration": 1
+          },
+          "receivedAtMs": 0
+        },
+        "firstSeen": [
+          {
+            "clientId": 1,
+            "startClock": 0,
+            "endClock": 1
+          }
+        ],
+        "canonicalVersion": 2,
+        "authorSnapshot": [
+          {
+            "kind": "human",
+            "humanId": "alice",
+            "humanName": "Alice"
+          },
+          {
+            "kind": "agent",
+            "agentId": "agent",
+            "agentName": "Writer",
+            "onBehalfOf": "alice",
+            "depth": 1
+          }
+        ],
+        "firstSeenDeletes": [
+          {
+            "clientId": 9,
+            "startClock": 1,
+            "endClock": 2
+          }
+        ],
+        "checkpointCoverage": [
+          {
+            "author": {
+              "kind": "human",
+              "humanId": "alice",
+              "humanName": "Alice"
+            },
+            "structRanges": [
+              {
+                "clientId": 1,
+                "startClock": 0,
+                "endClock": 1
+              }
+            ],
+            "deletionRanges": [
+              {
+                "clientId": 9,
+                "startClock": 1,
+                "endClock": 2
+              }
+            ]
+          }
+        ]
+      }
     }
   ],
   "refused": [
@@ -984,6 +1266,148 @@
         "acceptingHostEpoch": 2,
         "localYDocSequence": 7,
         "applicationReplayed": false
+      }
+    },
+    {
+      "parser": "parseAdmittedLiveUpdateMetadata",
+      "case": "v2 null deletion metadata",
+      "input": {
+        "accepted": {
+          "receipt": {
+            "deliveryId": "delivery-1",
+            "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "journalCursor": 1,
+            "acceptingHostEpoch": 2
+          },
+          "binding": {
+            "workspaceId": "workspace-1",
+            "mainVersionId": "main-1",
+            "objectId": "object-1",
+            "lineageClaimId": "lineage-1",
+            "currentPath": "notes/a.md",
+            "selectorPaths": [
+              "notes/a.md"
+            ],
+            "restoreFenceGeneration": 0
+          },
+          "authority": {
+            "principalKind": "named",
+            "principalId": "person-1",
+            "grantId": "grant-1",
+            "grantGeneration": 1
+          },
+          "receivedAtMs": 0
+        },
+        "firstSeen": [
+          {
+            "clientId": 1,
+            "startClock": 0,
+            "endClock": 1
+          }
+        ],
+        "canonicalVersion": 2,
+        "authorSnapshot": [
+          {
+            "kind": "human",
+            "humanId": "alice",
+            "humanName": "Alice"
+          },
+          {
+            "kind": "agent",
+            "agentId": "agent",
+            "agentName": "Writer",
+            "onBehalfOf": "alice",
+            "depth": 1
+          }
+        ],
+        "firstSeenDeletes": null
+      }
+    },
+    {
+      "parser": "parseAdmittedLiveUpdateMetadata",
+      "case": "v2 missing snapshot metadata",
+      "input": {
+        "accepted": {
+          "receipt": {
+            "deliveryId": "delivery-1",
+            "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "journalCursor": 1,
+            "acceptingHostEpoch": 2
+          },
+          "binding": {
+            "workspaceId": "workspace-1",
+            "mainVersionId": "main-1",
+            "objectId": "object-1",
+            "lineageClaimId": "lineage-1",
+            "currentPath": "notes/a.md",
+            "selectorPaths": [
+              "notes/a.md"
+            ],
+            "restoreFenceGeneration": 0
+          },
+          "authority": {
+            "principalKind": "named",
+            "principalId": "person-1",
+            "grantId": "grant-1",
+            "grantGeneration": 1
+          },
+          "receivedAtMs": 0
+        },
+        "firstSeen": [
+          {
+            "clientId": 1,
+            "startClock": 0,
+            "endClock": 1
+          }
+        ],
+        "canonicalVersion": 2,
+        "firstSeenDeletes": [
+          {
+            "clientId": 9,
+            "startClock": 1,
+            "endClock": 2
+          }
+        ]
+      }
+    },
+    {
+      "parser": "parseAdmittedLiveUpdateMetadata",
+      "case": "v1 checkpoint metadata without version",
+      "input": {
+        "accepted": {
+          "receipt": {
+            "deliveryId": "delivery-1",
+            "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "journalCursor": 1,
+            "acceptingHostEpoch": 2
+          },
+          "binding": {
+            "workspaceId": "workspace-1",
+            "mainVersionId": "main-1",
+            "objectId": "object-1",
+            "lineageClaimId": "lineage-1",
+            "currentPath": "notes/a.md",
+            "selectorPaths": [
+              "notes/a.md"
+            ],
+            "restoreFenceGeneration": 0
+          },
+          "authority": {
+            "principalKind": "named",
+            "principalId": "person-1",
+            "grantId": "grant-1",
+            "grantGeneration": 1
+          },
+          "receivedAtMs": 0
+        },
+        "firstSeen": [
+          {
+            "clientId": 1,
+            "startClock": 0,
+            "endClock": 1
+          }
+        ],
+        "checkpointCoverage": []
       }
     }
   ],

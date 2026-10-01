@@ -102,7 +102,7 @@ export type ValidatedLiveUpdateCut =
       readonly checkpointDigest: string
       readonly checkpointRanges: readonly LiveUpdateStructRange[]
       readonly suffixDigests: readonly string[]
-      readonly candidate: ValidatedCutInputEvidence
+      readonly candidate: ValidatedCutInputEvidence & { readonly firstSeen: readonly LiveUpdateStructRange[]; readonly firstSeenDeletes: readonly LiveUpdateStructRange[] }
     })
 
 export type OrderedLiveUpdateCutResult =
@@ -2599,6 +2599,27 @@ class ReplayFrontier {
   private unsafe = new Map<number, number[]>()
   private rawDeleteEndpoints = new Map<number, number[]>()
 
+  newCoverage(input: NormalizedInput, budget: ValidationBudget, stage: OrderedLiveUpdateCutFailureStage) {
+    const subtract = (ranges: readonly NumericRange[], prior: Map<number, NumericRange[]>) => {
+      const result: LiveUpdateStructRange[] = []
+      for (const range of ranges) {
+        let clock = range.startClock
+        const blocked = prior.get(range.clientId) ?? []
+        for (let index = firstEndingAfter(blocked, 0, clock, budget, stage); index < blocked.length && clock < range.endClock; index += 1) {
+          const old = blocked[index]!
+          budget.visitIndexOperation(stage)
+          if (old.startClock >= range.endClock) break
+          if (old.startClock > clock) result.push({clientId: range.clientId, startClock: clock, endClock: Math.min(old.startClock, range.endClock)})
+          clock = Math.min(range.endClock, Math.max(clock, old.endClock))
+        }
+        if (clock < range.endClock) result.push({clientId: range.clientId, startClock: clock, endClock: range.endClock})
+      }
+      return result
+    }
+    return {firstSeen: subtract(input.structuralRanges, this.structural),
+      firstSeenDeletes: subtract(normalizeRanges([...input.deleteRanges, ...input.tombstones], budget, stage), this.deletes)};
+  }
+
   apply(
     input: NormalizedInput,
     budget: ValidationBudget,
@@ -3564,6 +3585,7 @@ function validateCut(
     let projectedUsage = { ...preEvidenceUsage }
     const frontier = new ReplayFrontier()
     const inputEvidence: ValidatedCutInputEvidence[] = []
+    let candidateCoverage: {firstSeen: readonly LiveUpdateStructRange[]; firstSeenDeletes: readonly LiveUpdateStructRange[]} | undefined
     const evidenceDeltas: CappedUsage[] = []
     const applyForecasts: DecoderUsage[] = []
 
@@ -3571,6 +3593,7 @@ function validateCut(
       const entry = snapshot.entries[index] as InputBytes
       const before = budget.cappedSnapshot()
       const decoded = decodeOwnedInput(entry, budget, index === 0)
+      if (entry.stage.kind === "input" && entry.stage.role === "candidate") candidateCoverage = frontier.newCoverage(decoded.normalized, budget, entry.stage)
       frontier.apply(decoded.normalized, budget, entry.stage)
       const after = budget.cappedSnapshot()
       const evidenceDelta = cappedDelta(after, before, entry.stage)
@@ -3681,10 +3704,9 @@ function validateCut(
         suffixDigests: Object.freeze(
           inputEvidence.slice(1, 1 + snapshot.suffixCount).map(entry => entry.updateDigest),
         ),
-        candidate: frozenInputEvidence(
-          candidate.updateDigest,
-          candidate.ranges,
-        ),
+        candidate: Object.freeze({...frozenInputEvidence(candidate.updateDigest, candidate.ranges),
+          firstSeen: frozenInputEvidence(candidate.updateDigest, candidateCoverage!.firstSeen).ranges,
+          firstSeenDeletes: frozenInputEvidence(candidate.updateDigest, candidateCoverage!.firstSeenDeletes).ranges}),
       })
     }
     if (topology !== undefined) {

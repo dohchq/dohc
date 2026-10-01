@@ -413,7 +413,7 @@ export function listLinkRevisionLogRows(storage: StorageContext, input: {
            FROM revisions
          )
          SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
-                l.payload_json, l.recorded_at_ms, l.relay_seq
+                l.payload_json, l.recorded_at_ms, l.relay_seq, l.admitted_author_snapshot_json
          FROM placed
          JOIN sync_relay_current_files AS current_file
            ON current_file.workspace_id = ?

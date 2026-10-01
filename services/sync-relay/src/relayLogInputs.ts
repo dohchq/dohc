@@ -1,4 +1,5 @@
 import { sha256Hex } from "@dohc/workspace-core/hash";
+import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { stableJsonStringify } from "./canonicalJson";
 import { badRequest, relayError } from "./errors";
 import { parseString } from "./requestInputs";
@@ -66,6 +67,44 @@ export function parseLogOp(value: unknown): SyncRelayLogInput {
     throw badRequest("payload is too large");
   }
   return { originSeq, opKind, payloadJson, recordedAtMs };
+}
+
+export type LogAuthorNameLookup = (userId: string) => Promise<string | null> | string | null;
+
+function ordinaryAuthorContext(payload: unknown): LiveAuthorContext | undefined {
+  const fields = payload as Record<string, unknown>;
+  if (!Object.hasOwn(fields, "authorContext")) return undefined;
+  try {
+    const context = parseLiveAuthorContext(fields.authorContext);
+    if (context.agent) parseLiveAuthorSnapshot([{kind: "agent", ...context.agent}]);
+    return context;
+  } catch {
+    throw badRequest("invalid ydoc.update authorContext");
+  }
+}
+
+export async function parseAuthenticatedLogOps(
+  values: unknown[],
+  actorUserId: string,
+  lookupUserDisplayName?: LogAuthorNameLookup,
+): Promise<SyncRelayLogInput[]> {
+  const ops = values.map(value => parseLogOp(value));
+  const contexts = ops.map((op, index) => op.opKind === "ydoc.update"
+    ? ordinaryAuthorContext((values[index] as Record<string, unknown>).payload)
+    : undefined);
+  if (!contexts.some(context => context?.kind === "account" && context.accountId === actorUserId)) return ops;
+  const name = (await lookupUserDisplayName?.(actorUserId))?.trim() || actorUserId;
+  let humanName = name;
+  try { parseLiveAuthorSnapshot([{kind: "human", humanId: actorUserId, humanName}]); }
+  catch { humanName = actorUserId; }
+  for (const [index, context] of contexts.entries()) {
+    if (context?.kind !== "account" || context.accountId !== actorUserId) continue;
+    ops[index]!.admittedAuthorSnapshot = parseLiveAuthorSnapshot([
+      {kind: "human", humanId: actorUserId, humanName},
+      ...(context.agent ? [{kind: "agent", ...context.agent}] : []),
+    ]);
+  }
+  return ops;
 }
 
 // MU-C0 verified authorship. The relay authenticates who is pushing

@@ -1,3 +1,4 @@
+import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext, type LiveAuthorSnapshot, type LiveAuthorEntry } from "./liveAuthorship.js";
 import { parseHostEpoch, type HostEpoch } from "./hostControl.js";
 import {
   parseLiveObjectBinding,
@@ -53,6 +54,7 @@ export interface LiveUpdateSubmissionMetadata {
   readonly deliveryId: string;
   readonly updateDigest: string;
   readonly binding: LiveObjectBinding;
+  readonly authorContext?: LiveAuthorContext;
 }
 
 export interface LiveUpdateSubmission {
@@ -80,9 +82,32 @@ export interface LiveUpdateStructRange {
   readonly endClock: number;
 }
 
+export interface LiveCheckpointAuthorCoverage {
+  readonly author: LiveAuthorEntry;
+  readonly structRanges: readonly LiveUpdateStructRange[];
+  readonly deletionRanges: readonly LiveUpdateStructRange[];
+}
+export function parseLiveCheckpointCoverage(value: unknown): readonly LiveCheckpointAuthorCoverage[] {
+  if (!Array.isArray(value) || value.length > 1024) throw new TypeError("Invalid checkpoint coverage.");
+  const identities = new Set<string>();
+  const coverage = Array.from(value, item => {
+    const entry = exactRecord(item, "Checkpoint author coverage", ["author", "structRanges", "deletionRanges"]);
+    const author = parseLiveAuthorSnapshot([entry.author])[0]!;
+    const identity = JSON.stringify([author.kind, author.kind === "agent" ? author.onBehalfOf ?? null : null, author.kind === "human" ? author.humanId : author.kind === "link" ? author.publicPrincipalId : author.agentId]);
+    if (identities.has(identity)) throw new TypeError("Duplicate checkpoint author.");
+    identities.add(identity);
+    return { author, structRanges: parseLiveUpdateStructRanges(entry.structRanges), deletionRanges: parseLiveUpdateStructRanges(entry.deletionRanges) };
+  });
+  if (new TextEncoder().encode(JSON.stringify(coverage.map(entry => entry.author))).byteLength > 128 * 1024) throw new TypeError("Checkpoint authors exceed byte bound.");
+  return coverage;
+}
 export interface AdmittedLiveUpdateMetadata {
   readonly accepted: RelayAcceptedLiveUpdate;
   readonly firstSeen: readonly LiveUpdateStructRange[];
+  readonly canonicalVersion?: 2;
+  readonly authorSnapshot?: LiveAuthorSnapshot;
+  readonly firstSeenDeletes?: readonly LiveUpdateStructRange[];
+  readonly checkpointCoverage?: readonly LiveCheckpointAuthorCoverage[];
 }
 
 export interface AdmittedLiveUpdate {
@@ -292,12 +317,13 @@ export function parseLiveUpdateSubmissionMetadata(
   const record = exactRecord(
     value,
     "LiveUpdateSubmissionMetadata",
-    SUBMISSION_METADATA_FIELDS,
+    [...SUBMISSION_METADATA_FIELDS, ...(typeof value === "object" && value !== null && Object.hasOwn(value, "authorContext") ? ["authorContext"] : [])],
   );
   return {
     deliveryId: parseLiveUpdateIdentifier(record.deliveryId, "deliveryId"),
     updateDigest: parseLiveUpdateDigest(record.updateDigest),
     binding: parseLiveObjectBinding(record.binding),
+    ...(Object.hasOwn(record, "authorContext") ? {authorContext: parseLiveAuthorContext(record.authorContext)} : {}),
   };
 }
 
@@ -409,11 +435,13 @@ export function parseAdmittedLiveUpdateMetadata(
   const record = exactRecord(
     value,
     "AdmittedLiveUpdateMetadata",
-    ADMITTED_METADATA_FIELDS,
+    [...ADMITTED_METADATA_FIELDS, ...(typeof value === "object" && value !== null && Object.hasOwn(value, "canonicalVersion") ? ["canonicalVersion", "authorSnapshot", "firstSeenDeletes", ...(Object.hasOwn(value, "checkpointCoverage") ? ["checkpointCoverage"] : [])] : [])],
   );
+  if (Object.hasOwn(record, "canonicalVersion") && record.canonicalVersion !== 2) throw new TypeError("Unknown canonical version.");
   return {
     accepted: parseRelayAcceptedLiveUpdate(record.accepted),
     firstSeen: parseLiveUpdateStructRanges(record.firstSeen),
+    ...(record.canonicalVersion === 2 ? {canonicalVersion: 2 as const, authorSnapshot: parseLiveAuthorSnapshot(record.authorSnapshot), firstSeenDeletes: parseLiveUpdateStructRanges(record.firstSeenDeletes), ...(Object.hasOwn(record, "checkpointCoverage") ? {checkpointCoverage: parseLiveCheckpointCoverage(record.checkpointCoverage)} : {})} : {}),
   };
 }
 

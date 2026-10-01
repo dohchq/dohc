@@ -115,6 +115,7 @@ export function compareLiveRestoreContent(input: RestoreContentInput, policy: Or
       get stateUpdate() {return new Uint8Array(stateUpdate);},
       acceptedCheckpointRanges: "checkpointRanges" in context ? context.checkpointRanges : context.checkpoint.ranges,
       replacementRanges: Object.freeze(restored.evidence.candidate.ranges.map(range => Object.freeze({...range}))),
+      firstSeenDeletes: Object.freeze(restored.evidence.candidate.firstSeenDeletes.map(range => Object.freeze({...range}))),
       inputBytes: bytes,
     });
   } finally {pointDoc.destroy(); restoredDoc.destroy();}
