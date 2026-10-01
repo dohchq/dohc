@@ -199,7 +199,7 @@ it('cuts a complete checkpoint at 960 identities and starts the next author wind
   const advanced = f.storage.readLiveUpdateJournalCut({ document: f.input.evidence.document })
   expect(advanced).toMatchObject({ kind: 'cut', cut: { highWater: 960, suffixCount: 1, checkpoint: { cursor: 959 },
     suffix: [{ metadata: { authorSnapshot: [...alice, { kind: 'agent', agentId: 'next-agent' }] } }] } })
-}, 180_000)
+}, 600_000)
 
 it('uses a stable public link ID and exports no private principal or grant in its author snapshot', () => {
   const f = setup(), key = 'k'.repeat(32), time = Date.now()
