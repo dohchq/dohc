@@ -84,6 +84,22 @@ impl LiveSettlementAudit {
         validate_historical_binding(&binding, b).map_err(audit_error)?;
         Ok(saved_moment == moment && saved_markdown == markdown && sequence <= self.sequence)
     }
+    /// An unchanged projection may name the current head moment only when that
+    /// moment is already this document's latest audited settlement. Any other
+    /// head, such as a pre-live imported projection, would publish its own
+    /// historical before-image. Restore and replay keep their exact
+    /// record-time checks.
+    pub fn reuses_head_in(
+        &self,
+        conn: &Connection,
+        moment: &str,
+        markdown: &str,
+    ) -> Result<bool, StorageError> {
+        if self.restore.is_some() || self.replay_anchor.is_some() {
+            return Ok(true);
+        }
+        self.covers_projection_in(conn, moment, markdown)
+    }
     pub fn binding(&self) -> &LiveObjectBinding {
         &self.binding
     }

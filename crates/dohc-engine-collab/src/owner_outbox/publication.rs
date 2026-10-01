@@ -83,29 +83,29 @@ pub fn contains_in(
                 if hex_sha256(projection.content.as_bytes()) == digest {
                     return Ok(true);
                 }
-                // An earlier native state proves its projection only while
-                // accepted state contains it, including its delete set: the
-                // claimed base, then an adopted activation's retained state.
-                let activation:Option<String>=conn.query_row("SELECT a.full_state_digest FROM ydoc_owner_activation_sources a JOIN live_owner_adoptions o ON o.relay_database_namespace=a.relay_database_namespace AND o.adoption_id=a.activation_id AND o.workspace_id=a.workspace_id AND o.main_version_id=a.version_id AND o.object_id=a.object_id AND o.lineage_claim_id=a.lineage_claim_id AND o.source_moment_id=a.source_moment_id AND o.source_digest=a.source_digest WHERE o.relay_database_namespace=?1 AND o.workspace_id=?2 AND o.main_version_id=?3 AND o.object_id=?4 AND o.lineage_claim_id=?5 AND o.binding_json=?6",params![namespace,key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id,binding_json(&binding)?],|r|r.get(0)).optional().map_err(read_sql)?;
-                let states = [Some(binding.lineage_claim_id.clone()), activation];
-                for state in states.into_iter().flatten() {
-                    let earlier = Ydoc::wire();
-                    earlier
-                        .apply(&read_blob(conn, &state, remaining, &mut budget_exhausted)?)
-                        .map_err(collab)?;
-                    let before = bounded(&accepted)?;
-                    accepted.apply(&bounded(&earlier)?).map_err(collab)?;
-                    if accepted.has_pending_dependencies() || bounded(&accepted)? != before {
-                        return Ok(false);
-                    }
-                    let projection = earlier
-                        .project(crate::ContentKind::Richdoc)
-                        .map_err(collab)?;
-                    if hex_sha256(projection.content.as_bytes()) == digest {
-                        return Ok(true);
-                    }
+                // Initial observed enrollment proves that the original claimed
+                // base is contained, including its delete set, before installing.
+                let original = Ydoc::wire();
+                original
+                    .apply(&read_blob(
+                        conn,
+                        &binding.lineage_claim_id,
+                        remaining,
+                        &mut budget_exhausted,
+                    )?)
+                    .map_err(collab)?;
+                let before = bounded(&accepted)?;
+                accepted.apply(&bounded(&original)?).map_err(collab)?;
+                if accepted.has_pending_dependencies() || bounded(&accepted)? != before {
+                    return Ok(false);
                 }
-                Ok(false)
+                Ok(hex_sha256(
+                    original
+                        .project(crate::ContentKind::Richdoc)
+                        .map_err(collab)?
+                        .content
+                        .as_bytes(),
+                ) == digest)
             }
         }
     })();
