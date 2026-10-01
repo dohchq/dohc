@@ -1519,7 +1519,8 @@ describe("CLI socket server", () => {
         next: "1:atc_1",
       })),
       run: vi.fn(async (_automationId: string, claimId: string) =>
-        claimId === "atc_1" ? { ...run, steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
+        claimId === "atc_1" ? { ...run, findMs: 12, planMs: 0, writeMs: 30, writeCount: 1,
+          steps: [{ step: 2, writes: [field] }], failedStep: 3, startsOver: true } : null),
       retry: vi.fn(async (input) => {
         retries.push(input);
         return answers.shift()!;
@@ -1541,7 +1542,8 @@ describe("CLI socket server", () => {
     expect(context.automations!.runs).toHaveBeenLastCalledWith(AUTOMATION, "1:atc_1");
     await expect(invoke("automationRun", { ...args, run: "atc_1" })).resolves.toMatchObject({
       ok: true,
-      run: { run: "atc_1", trigger, steps: [{ step: 2, changes: [field] }], failedStep: 3, startsOver: true },
+      run: { run: "atc_1", trigger, findMs: 12, planMs: 0, writeMs: 30, writeCount: 1,
+        steps: [{ step: 2, changes: [field] }], failedStep: 3, startsOver: true },
     });
     await expect(invoke("automationRun", { ...args, run: "atc_9" })).resolves.toEqual({
       ok: false,

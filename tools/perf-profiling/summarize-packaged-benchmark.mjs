@@ -88,6 +88,7 @@ function automationSummary(runs) {
         fixtureSha256: unique(rows.map(c => c.fixtureSha256)), expected: unique(rows.map(c => c.expected)), outcomes: unique(rows.map(c => c.outcome)), visibility: unique(rows.map(c => c.visibility)),
         failures: rows.filter(c => !c.pass).length, runs: rows.length, contention: typed.length > 0,
         triggerToSettledPaintedMs: stats(rows.map(c => c.triggerToSettledPaintedMs)), startMs: stats(rows.map(c => c.startMs)), runMs: stats(rows.map(c => c.runMs)),
+        findMs: stats(rows.map(c => c.findMs)), planMs: stats(rows.map(c => c.planMs)), writeMs: stats(rows.map(c => c.writeMs)), writes: stats(rows.map(c => c.writes)),
         settledOnDiskObservedMs: stats(rows.map(c => c.verification?.settledOnDiskObservedMs)),
         headerPeakBytesSampled: stats(rows.map(c => c.journal?.headerPeakBytesSampled)),
         headerBytes: stats(rows.map(c => c.journal?.runs?.at(-1)?.headerBytes)), progressBytes: stats(rows.map(c => c.journal?.runs?.at(-1)?.progressBytes)),

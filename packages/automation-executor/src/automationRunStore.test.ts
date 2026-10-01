@@ -23,6 +23,23 @@ function run(claimId: string, state: "done" | "failed" | null, atMs: number, set
 }
 
 describe("the automation run store", () => {
+  it("preserves timing on appended progress lines across restart and whole saves", async () => {
+    const root = await createTestScratch("dohc-automation-timing-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("timed", null, 1);
+    saved.steps[0] = { ...saved.steps[0]!, findMs: 12, planMs: 3 };
+    saved.applied[0] = { ...saved.applied[0]!, writeMs: 15, writeCount: 1 };
+    await store.save(saved);
+    const step = { ordinal: 1, effects: [setA], findMs: 0, planMs: 4 };
+    const effect = { ordinal: 1, writes: [], writeMs: 0, writeCount: 1 };
+    await store.appendStep(saved, step);
+    await store.appendEffect(saved, effect);
+    const expected = { ...saved, steps: [...saved.steps, step], applied: [...saved.applied, effect] };
+    const restarted = createAutomationRunStore(root, testMetadataDir);
+    expect(await restarted.runsOf(AUTOMATION, "timed")).toEqual({ runs: [expected], unreadable: false });
+    await restarted.save(expected);
+    expect(await store.runsOf(AUTOMATION, "timed")).toEqual({ runs: [expected], unreadable: false });
+  });
   it("keeps the structured circuit breaker outcome across restart and clears it after recovery", async () => {
     const root = await createTestScratch("dohc-automation-breaker-");
     const store = createAutomationRunStore(root, testMetadataDir);

@@ -352,7 +352,8 @@ describe("desktop CLI automation proxy", () => {
   };
   const answers = {
     automationRuns: { ok: true, runs: [{ ...run, changes: 1 }], next: "1:atc_1" },
-    automationRun: { ok: true, run: { ...run, steps: [{ step: 1, changes: [{ kind: "created", recordId: "rec_2", path: "tasks/two.md" }] }], failedStep: 2, startsOver: false } },
+    automationRun: { ok: true, run: { ...run, findMs: 12, planMs: 0, writeMs: 30, writeCount: 1,
+      steps: [{ step: 1, changes: [{ kind: "created", recordId: "rec_2", path: "tasks/two.md" }] }], failedStep: 2, startsOver: false } },
   } satisfies { [Verb in Extract<CliVerb, "automationRuns" | "automationRun">]: CliResultByVerb[Verb] };
 
   it("maps the automation tools to their CLI verbs, and passes on a refused retry of a changed automation", async () => {

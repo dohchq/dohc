@@ -329,8 +329,16 @@ export async function readRunJournal(workspaceRoot, automation) {
     if (header.automationId !== automationId) continue;
     const progressText = await readFile(join(folder, `${file.slice(0, -'.json'.length)}.progress.jsonl`), 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
     const lines = progressText.split('\n').filter(Boolean).map(line => JSON.parse(line));
-    const writes = lines.filter(line => line.kind === 'effect').flatMap(line => line.writes);
+    const steps = lines.filter(line => line.kind === 'step');
+    const effects = lines.filter(line => line.kind === 'effect');
+    const writes = effects.flatMap(line => line.writes);
+    const total = (entries, field) => entries.every(line => Number.isFinite(line[field])) ? entries.reduce((sum, line) => sum + line[field], 0) : null;
+    const findMs = steps.length ? total(steps, 'findMs') : null;
+    const planMs = steps.length ? total(steps, 'planMs') : null;
+    const measured = findMs !== null && planMs !== null;
     runs.push({ claimId: header.claimId, startedAtMs: header.startedAtMs, finishedAtMs: header.finishedAtMs, outcome: header.outcome,
+      findMs, planMs, writeMs: effects.length || measured ? total(effects, 'writeMs') : null,
+      writes: effects.length || measured ? total(effects, 'writeCount') : null,
       headerBytes: Buffer.byteLength(headerText), progressBytes: Buffer.byteLength(progressText), progressLines: lines.length,
       fieldWrites: writes.reduce((sum, write) => sum + (write.kind === 'field' ? 1 : write.kind === 'dataset-edit' ? write.fields.length : 0), 0),
       created: lines.filter(line => line.kind === 'created').length + writes.filter(write => write.kind === 'dataset-created').length,

@@ -2627,6 +2627,10 @@ async function dispatchWorkspace(
             ok: true,
             run: {
               ...automationRunFields(run),
+              ...(run.findMs === undefined ? {} : { findMs: run.findMs }),
+              ...(run.planMs === undefined ? {} : { planMs: run.planMs }),
+              ...(run.writeMs === undefined ? {} : { writeMs: run.writeMs }),
+              ...(run.writeCount === undefined ? {} : { writeCount: run.writeCount }),
               steps: run.steps.map((step) => ({ step: step.step, changes: step.writes })),
               failedStep: run.failedStep,
               startsOver: run.startsOver,

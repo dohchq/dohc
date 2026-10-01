@@ -640,6 +640,11 @@ export interface CollectionAutomationRun {
 
 /** One run with what each of its steps changed, for reading a single run. */
 export interface CollectionAutomationRunDetail extends Omit<CollectionAutomationRun, "writes"> {
+  /** Totals for saved stages; absent when a saved stage has no measurement. */
+  findMs?: number;
+  planMs?: number;
+  writeMs?: number;
+  writeCount?: number;
   /**
    * What each step changed on this computer, in step order. Steps are
    * numbered from 1 in the order the file lists them, counting the steps
@@ -777,6 +782,32 @@ function stepsOf(runs: readonly StoredRun[]): CollectionAutomationRunDetail["ste
   const steps = new Map<number, RunWrite[]>();
   for (const { ordinal, write } of stepWritesOf(runs)) steps.set(ordinal, [...(steps.get(ordinal) ?? []), write]);
   return [...steps].sort(([left], [right]) => left - right).map(([ordinal, writes]) => ({ step: ordinal + 1, writes }));
+}
+
+function timingOf(runs: readonly StoredRun[]): Pick<CollectionAutomationRunDetail, "findMs" | "planMs" | "writeMs" | "writeCount"> {
+  const steps = runs.flatMap((run) => run.steps);
+  if (steps.length === 0) return {};
+  const effects = runs.flatMap((run) => run.applied);
+  const total = (values: readonly (number | undefined)[]) => {
+    let sum = 0;
+    for (const value of values) {
+      if (value === undefined) return undefined;
+      sum += value;
+    }
+    return sum;
+  };
+  const findMs = total(steps.map((step) => step.findMs));
+  const planMs = total(steps.map((step) => step.planMs));
+  // With no effects, zero is known only for runs whose steps were measured.
+  const measured = findMs !== undefined && planMs !== undefined;
+  const writeMs = effects.length > 0 || measured ? total(effects.map((effect) => effect.writeMs)) : undefined;
+  const writeCount = effects.length > 0 || measured ? total(effects.map((effect) => effect.writeCount)) : undefined;
+  return {
+    ...(findMs === undefined ? {} : { findMs }),
+    ...(planMs === undefined ? {} : { planMs }),
+    ...(writeMs === undefined ? {} : { writeMs }),
+    ...(writeCount === undefined ? {} : { writeCount }),
+  };
 }
 
 /**
@@ -2396,12 +2427,13 @@ export class CollectionAutomations {
     const claim = found.history;
     const automation = this.definitionFor(automationId);
     const { stored, run } = await this.runOf(automationId, claim, automation ? definitionHash(automation) : null);
-    if (run.state !== "failed" || run.neverStarted) return { ...run, steps: stepsOf(stored), failedStep: null, startsOver: false };
+    if (run.state !== "failed" || run.neverStarted) return { ...run, ...timingOf(stored), steps: stepsOf(stored), failedStep: null, startsOver: false };
     // The run Try again continues, and whether it starts over, by retry's own rule.
     const tryAgain = automation ? tryAgainOf(await runsForClaim(this.options.store, { automationId, claimId }, automation)) : null;
     const readable = tryAgain !== null && !("refused" in tryAgain) ? tryAgain : null;
     return {
       ...run,
+      ...timingOf(stored),
       steps: stepsOf(stored),
       failedStep: stoppedAtStep(readable?.current ?? stored.filter((entry) => !entry.superseded).at(-1)),
       startsOver: readable?.startsOver ?? false,
