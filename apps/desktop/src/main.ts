@@ -139,8 +139,8 @@ import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
-import { runCollectionRecordCreation, collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
-import { desktopRecordEditContext, type DesktopRecordEditHost } from "./workspaces/desktopRecordEdits";
+import { collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
+import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./workspaces/desktopRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
@@ -305,7 +305,8 @@ import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices
 import { noticeReachFor } from "./notices/noticeReach";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
-import { readOrCreateLocalReactorId } from "./workspaces/localReactorId";
+import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
+import { createLocalAuthorship } from "./workspaces/localAuthorship";
 import {
   createCloudLogin,
   type CloudLogin,
@@ -854,18 +855,25 @@ let clearButtonInspections: (() => void) | undefined;
 const ownerDatasetCopies = createOwnerDatasetCopyRegistry();
 const namedDatasetPages = createNamedDatasetCacheRegistry({ directory: () => join(stateDir(), "named-dataset-pages") });
 let credentialCacheGeneration = 0;
+// Who History credits this computer's edits to. A credential load's
+// placeholder null never relabels edits made meanwhile.
+const localAuthorship = createLocalAuthorship({
+  installationId: () => localInstallationId(),
+  loadCredentials: () => credentialSessionCache.warm(() => cloudLogin().credentials()),
+});
 let ownerDeliveryCredentialLifetime = new AbortController();
 // Share kind is relay/account-scoped, not workspace-scoped. Keep one cache
 // across physical workspaces in the same session, and clear it whenever that
 // credential session ends or changes.
 const peekedReceivedGrantKinds = new Map<string, "dm" | "not-dm">();
 const credentialSessionCache =
-  new CredentialSessionCache<CloudSessionCredentials>((snapshot) => {
+  new CredentialSessionCache<CloudSessionCredentials>((snapshot, settled) => {
     ownerDeliveryCredentialLifetime.abort();
     ownerDeliveryCredentialLifetime = new AbortController();
     if (chatShareSessionKey(cachedCredentials) !== chatShareSessionKey(snapshot.credentials)) clearButtonInspections?.();
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
+    if (settled) localAuthorship.credentialsSettled(snapshot.credentials?.userId ?? null);
     void ownerDatasetCopies.credentialsChanged(snapshot.credentials ? datasetCopyOwnerKey(snapshot.credentials) : null)
       .catch(error => console.error("Collection copy cleanup failed", error));
     // A credential load publishes a temporary null first. Keep saved pages until the account is known.
@@ -944,7 +952,7 @@ function noticeStore(): NoticeStore {
   cachedNoticeStore ??= createNoticeStore({
     directory: join(stateDir(), "notices"),
     session: noticeSession,
-    installId: localReactorFallbackId,
+    installId: localInstallationId,
     onChanged: notifyNoticesChanged,
     ...createWorkspaceRefusalNotices({
       sessions: () => desktopEngine.sessions,
@@ -1330,7 +1338,7 @@ const shareRosters = createShareRosters({
   localPersonId: async (workspace) => {
     const proved = await provedNeverShared(workspace, () =>
       withEngineAdapter(workspace, (adapter) => adapter.remoteChangesApplied()).catch(() => null));
-    return proved ? localReactorFallbackId() : null;
+    return proved ? localInstallationId() : null;
   },
   syncHistory: (workspace) => readSyncHistory(workspace.rootPath),
   logError: (workspaceId, error) =>
@@ -2576,13 +2584,12 @@ function localUserDisplayName(): string {
 // The opaque per-install reactor id used when signed out (no cloud user id). A
 // stable uuid persisted in stateDir — never the email — so a signed-out
 // reaction cell is stable across restarts without leaking PII into the CRDT.
-// Memoized after the first read; the sync fs touch happens at most once.
-let cachedLocalReactorId: string | null = null;
-function localReactorFallbackId(): string {
-  if (cachedLocalReactorId) return cachedLocalReactorId;
-  const id = readOrCreateLocalReactorId(join(stateDir(), "dohc-local-id.json"));
-  cachedLocalReactorId = id;
-  return id;
+// Memoized after the first read, so the sync fs touch happens at most once
+// and an id that could not be saved stays the same for this process.
+let cachedLocalInstallationId: string | null = null;
+function localInstallationId(): string {
+  return cachedLocalInstallationId ??= readOrCreateLocalInstallationId(join(stateDir(), "dohc-local-id.json"),
+    (message, error) => console.error(`[desktop] ${message}`, error));
 }
 
 // The local user's stable, OPAQUE reactor identity (WS-MU-C2). This value
@@ -2592,9 +2599,17 @@ function localReactorFallbackId(): string {
 // when signed in; that is forward-compatible with MU-C0, which verifies
 // authorId === actor.userId server-side. Signed out falls back to a persisted
 // per-install uuid. The email→display-name mapping stays LOCAL in
-// localUserDisplayName().
+// localUserDisplayName(). It is the account the credential cache last settled
+// on, so the null a credential reload publishes while it reads the store never
+// credits this person's work to the installation.
 function localUserId(): string {
-  return cachedCredentials?.userId ?? localReactorFallbackId();
+  return localAuthorship.personId();
+}
+
+// The person a request is made by, read when it arrives, before it waits for
+// its workspace.
+function localPerson(): Promise<LocalPersonAuthor> {
+  return localAuthorship.person();
 }
 
 // The verified relay identity for a signed-in chat message (WS-MU-C0). A
@@ -2798,6 +2813,10 @@ async function ensureWorkspaceActivityOpenBody(
   options: WorkspaceActivityOpenOptions = {},
 ): Promise<SyncStatusResult> {
   const workspace = canonicalWorkspaceFor(lease);
+  // The capture credits edits to the settled account, so learn it before
+  // the capture can take one.
+  await localAuthorship.settled();
+  lease.assertCurrent();
   let status: SyncStatusResult;
   for (;;) {
     const closing = lease.state.activityClosing;
@@ -3263,25 +3282,28 @@ async function requireEngineCaptureForOperation(
 // announcements the adoption wait reads through. Collection writes land on
 // the physical workspace's own engine (a received share view is refused as
 // read-only before this). Without a caller's signal, the write lives as long
-// as the workspace operation.
+// as the workspace operation. `person` is read when the write was requested.
 async function collectionEditContextFor(
   operation: DesktopWorkspaceOperation,
+  person: LocalPersonAuthor,
   editSignal?: AbortSignal,
 ): Promise<CollectionRecordEditContext> {
   const { capture } = await requireEngineCaptureForOperation(operation);
-  return collectionEditContextWith(operation, capture, editSignal ?? operation.signal);
+  return collectionEditContextWith(operation, capture, editSignal ?? operation.signal, person);
 }
 
 function collectionEditContextWith(
   operation: DesktopWorkspaceOperation,
   capture: DesktopRecordEditHost["capture"],
   signal: AbortSignal,
+  person: LocalPersonAuthor,
 ): CollectionRecordEditContext {
   const workspace = operation.workspace;
   assertWritableWorkspace(workspace);
   return desktopRecordEditContext({
     capture,
     workspaceRoot: workspace.rootPath,
+    person,
     withAdapter: (work) => withEngineAdapter(workspace, work),
     onCaptureSettled: (listener) => {
       const daemon = desktopEngine.daemon;
@@ -3643,7 +3665,7 @@ const AUTOMATION_HOST_REQUEST_TIMEOUT_MS = 15_000;
 // Which of the owner's computers runs each open synced workspace's
 // schedules, as the relay records it.
 const automationHosts = createAutomationHosts({
-  installId: localReactorFallbackId,
+  installId: localInstallationId,
   label: () => computerLabel(hostname()),
   synced: (workspaceId) => findWorkspace(workspaceId)?.remote !== undefined,
   send: async (workspaceId, request) => {
@@ -3792,7 +3814,7 @@ async function scheduleHostState(
     throw new Error("dohc could not read which computer runs this workspace's schedules.");
   }
   const host = automationHosts.learned(workspaceId, answered);
-  const installId = localReactorFallbackId();
+  const installId = localInstallationId();
   return {
     kind: "relay",
     generation: host?.generation ?? 0,
@@ -3909,7 +3931,7 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
       return relayPressTransport(
         { baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch },
         workspaceId,
-        localReactorFallbackId(),
+        localInstallationId(),
       );
     },
     heldClaim: async (press) => {
@@ -3940,7 +3962,7 @@ async function hostButtonAuthority(workspaceId: string, id: string, inspection =
     credentials.userId !== entry.remote.ownerUserId || !relayUrlsMatch(credentials.relayUrl, entry.remote.serverUrl) ||
     !automationHosts.stillRuns(workspaceId) || !entry.automationHost) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED, "roster");
   return automationPressRelay({ baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch })
-    .authority(workspaceId, localReactorFallbackId(), entry.automationHost.generation, id, inspection);
+    .authority(workspaceId, localInstallationId(), entry.automationHost.generation, id, inspection);
 }
 
 // An open workspace's Collection automations. Runs write through the same
@@ -3952,15 +3974,17 @@ function createCollectionAutomationsFor(
 ): CollectionAutomations {
   const { workspaceId, canonicalRootPath: rootPath, attachmentId } = binding;
   const workspace = { workspaceId, rootPath, attachmentId };
-  const recordWrites: CollectionAutomationsOptions["withRecordWrites"] = (signal, work) =>
-    withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
+  const recordWrites: CollectionAutomationsOptions["withRecordWrites"] = async (signal, work) => {
+    const person = await localPerson();
+    return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
       if (operation.workspace.attachmentId !== attachmentId) {
         throw new Error("This workspace was closed.");
       }
       const capture = activity.engineCaptureFor(workspaceId);
       if (!capture) throw new Error(captureRefusal("Automations"));
-      return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]))));
+      return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]), person)));
     });
+  };
   return new CollectionAutomations({
     withEngine: (work) => withEngineAdapter(workspace, work),
     // Each write names its author, so Undo writes as the person here the same way.
@@ -3989,14 +4013,14 @@ function createCollectionAutomationsFor(
     onRunsChanged: () => notifyAutomationRunsChanged(workspaceId),
     reportFailure: (report) => sendFailureNotices({
       notices: noticeStore(),
-      computer: { installId: localReactorFallbackId(), label: computerLabel(hostname()) },
+      computer: { installId: localInstallationId(), label: computerLabel(hostname()) },
       throughShare: findWorkspace(workspaceId)?.shareView !== undefined,
       primaryUserId: localUserId(),
       lastChangedBy: (automationId) => automationLastChangedBy(workspaceId, automationId),
       onError: (context, error) => console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     }, workspaceId, report),
     withdrawFailure: (failure) =>
-      noticeStore().withdraw(automationFailedNoticeId({ workspaceId, installId: localReactorFallbackId(), failure })),
+      noticeStore().withdraw(automationFailedNoticeId({ workspaceId, installId: localInstallationId(), failure })),
     onSwitchedOff: (switched) => void sendSwitchedOffNotice(workspaceId, switched).catch((error: unknown) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: tell who changed "${switched.name}" last that it was switched off:`, error)),
     onHoldsChanged: () => notifyAutomationHoldsChanged(workspaceId),
@@ -4032,7 +4056,7 @@ function createCollectionAutomationsFor(
     // after a sign-in: the reach check allowed it as this computer's person.
     postNotice: ({ recipientUserId, ...notice }, signal) => noticeStore().postNotice({
       workspaceId, ...notice, signal,
-      ...(recipientUserId === localReactorFallbackId() ? { onlyHere: true } : { recipientUserId }),
+      ...(recipientUserId === localInstallationId() ? { onlyHere: true } : { recipientUserId }),
     }),
     // From the last host read, with no relay request: the host module calls
     // hostChanged when the answer may differ.
@@ -4176,7 +4200,7 @@ const chatWrites = createChatWrites({
   localUserDisplayName,
   agentDisplayName: async () =>
     (await readCachedUserSettingsFile(stateDir())).settings.profile.agentName ?? "Agent",
-  localReactorFallbackId,
+  localInstallationId,
   projectChatBookmarks: (workspaceId) => void projectPendingChatBookmarks(workspaceId),
   queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
   syncSharedChannelsForChatTarget,
@@ -4216,7 +4240,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
       run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
       retry: (input) => retryAutomationRun({
         notices: noticeStore(),
-        installId: localReactorFallbackId(),
+        installId: localInstallationId(),
         holds: async (run) => (await (await opened()).run(run.automationId, run.claimId)) !== null,
         recovery: async (automationId) => (await opened()).switchedOffTarget(automationId),
         retry: async (run) => (await opened()).retry(run),
@@ -4268,6 +4292,7 @@ const { startDesktopCliServer } = createDesktopCliServer({
   sharedViewOf,
   withPhysicalWorkspaceOperation,
   collectionEditContextFor,
+  localPerson,
   withEngineAdapter,
   // The sessions are created below; the CLI server reaches them only per request.
   liveDocuments: {
@@ -4755,11 +4780,13 @@ const workspaceFileMutations = createWorkspaceFileMutationOwner({
           workspace,
           capture: activity.engineCaptureFor(workspaceId, workspace.rootPath),
           yDocSessions: engineYDocSessionIpc.fileMutationPort(),
+          assertCurrent: () => operation.assertCurrent(),
         });
       },
     ),
   shareViewFiles,
   trashItem: (path) => shell.trashItem(path),
+  localPerson,
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
   shareViewEdited: (workspaceId) => shareDirectWrites?.shareViewEdited(workspaceId),
   logError: (message, error) => console.error(message, error),
@@ -5608,12 +5635,13 @@ function registerIpcHandlers(): void {
   handleIpc(CHANNELS.createCollectionRecord, async (event, raw: unknown) => {
     assertTrustedSender(event);
     const input = CreateCollectionRecordPayload.parse(raw);
-    return runCollectionRecordCreation(work =>
-      withRendererWorkspaceOperation(event.sender, input.workspaceId,
-        "Record creation stopped because this window changed workspaces.", async operation =>
-          work(await collectionEditContextFor(operation))),
-      { ...input, author: createLocalChangeAuthor(localUserDisplayName()) });
-
+    return createRecordByHand(input, {
+      author: createLocalChangeAuthor(localUserDisplayName()),
+      localPerson,
+      withWorkspaceOperation: work => withRendererWorkspaceOperation(event.sender, input.workspaceId,
+        "Record creation stopped because this window changed workspaces.", work),
+      editContext: (operation: DesktopWorkspaceOperation, person) => collectionEditContextFor(operation, person),
+    });
   });
   handleIpc(CHANNELS.dataset, async (event, raw: unknown) => {
     assertTrustedSender(event);
@@ -6003,7 +6031,7 @@ function registerIpcHandlers(): void {
     registerHandler: handleIpc,
     assertTrustedSender, chatScope, requireEngineCapture, linkedChatStoreFor, chatWrites,
     assertWritableWorkspace, warmCredentialCache, localUserId,
-    localReactorFallbackId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
+    localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
     syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
     activity, desktopChatBookmarks, notifyRenderer,

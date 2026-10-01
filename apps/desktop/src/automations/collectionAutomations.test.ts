@@ -543,6 +543,7 @@ async function world(options: {
   const recordWrites: CollectionAutomationsOptions["withRecordWrites"] = async (signal, work) => {
     await options.withRecordWrites?.(signal, events);
     return await work(collectionRecordWrites(desktopRecordEditContext({
+      person: { kind: "human", humanId: "local:test" },
       capture, workspaceRoot: root, signal,
       withAdapter: async (read) => await read(engine),
       onCaptureSettled: (listener) => { if (failures.capture > 0) { failures.capture--; throw Error("capture offline"); } settleListeners.add(listener); return () => settleListeners.delete(listener); },
@@ -2416,8 +2417,8 @@ describe("Collection automations", () => {
     expect(w.runsChanged).toHaveLength(pokes + 1);
     expect(w.fieldsOf(task)).toMatchObject({ Count: 2, Note: "theirs" });
     expect(trashed).toEqual([added!.path]);
-    expect(w.journaled.at(-1)).toMatchObject({ path: task.path, attribution: { actorKind: "human" } });
-    expect(w.journaled.at(-1)!.actorOriginId).toBeUndefined();
+    expect(w.journaled.at(-1)).toMatchObject({ path: task.path, actorOriginId: "local:test",
+      attribution: { actorKind: "human", onBehalfOf: "local:test", depth: 0 } });
 
     // Note kept a later value, so Undo can try it again, and keeps it again.
     const [run] = (await w.executor.runs("collection:Tasks#stamp")).runs;

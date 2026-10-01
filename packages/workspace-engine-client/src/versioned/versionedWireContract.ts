@@ -68,10 +68,12 @@ export type AgentAuthor = JsonObject & {
 };
 
 /**
- * Who a file write names on its moment: an agent run, or an automation with
- * its chain depth, so the claims the write causes carry the automation on.
+ * Who a file write names on its moment: the person desktop main read, an
+ * agent run, or an automation with its chain depth, so the claims the write
+ * causes carry the automation on.
  */
 export type WriteAuthor =
+  | (JsonObject & { kind: "human"; humanId: string })
   | AgentAuthor
   | (JsonObject & { kind: "automation"; automationId: string; onBehalfOf?: string; depth: number });
 

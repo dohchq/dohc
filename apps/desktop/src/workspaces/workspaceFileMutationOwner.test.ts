@@ -27,6 +27,7 @@ import {
   type WorkspaceFileMutationYDocPort,
 } from "./workspaceFileMutationOwner";
 import { deferred } from "../testing/deferred";
+import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 
 interface TestEvent {
   trusted: boolean;
@@ -40,10 +41,10 @@ interface TestWorkspace {
   shareMounts?: unknown;
 }
 
-type MutationCapture = Pick<
-  WorkspaceEngineCapture,
-  "beginFileRename" | "settleAndCloseLiveSessionsForPath"
->;
+type MutationCapture = Pick<WorkspaceEngineCapture, "beginFileRename" | "changePathsAs">;
+// What a test gives the harness: changePathsAs settles through this
+// settleAndCloseLiveSessionsForPath as the real capture settles first.
+type TestCapture = Pick<WorkspaceEngineCapture, "beginFileRename" | "settleAndCloseLiveSessionsForPath">;
 
 const roots: string[] = [];
 const trustedEvent: TestEvent = { trusted: true };
@@ -79,6 +80,8 @@ async function harness(options: {
     authorityId: symbol,
     path: string,
   ) => Promise<void>;
+  // Runs before the workspace operation admits the change.
+  beforeOperation?: () => Promise<void>;
 } = {}) {
   const rootPath = await mkdtemp(join(tmpdir(), "dohc-file-mutations-"));
   roots.push(rootPath);
@@ -183,9 +186,12 @@ async function harness(options: {
       workspace: Readonly<TestWorkspace>;
       capture: MutationCapture | null;
       yDocSessions: WorkspaceFileMutationYDocPort;
+      assertCurrent(): void;
     }) => Promise<Result>,
   ): Promise<Result> => {
     rendererOperationCalls(event, workspaceId);
+    // Only a gated test waits; every other change is admitted in its own turn.
+    if (options.beforeOperation) await options.beforeOperation();
     if (event.authorityId !== undefined && event.authorityId !== authorityId) {
       throw new Error(
         "File change stopped because this window changed workspaces.",
@@ -196,13 +202,17 @@ async function harness(options: {
       workspace: requireWorkspace(workspaceId),
       capture,
       yDocSessions,
+      assertCurrent: () => { if (event.authorityId !== undefined && event.authorityId !== authorityId) throw new Error("File change stopped because this window changed workspaces."); },
     });
   };
+  let account = "account-alice";
+  const deletedBy: string[] = [];
   const owner = createWorkspaceFileMutationOwner({
     assertTrustedSender,
     withRendererWorkspaceOperation,
     shareViewFiles: { change },
     trashItem,
+    localPerson: async () => ({ kind: "human", humanId: account }),
     notifyRenderer,
     shareViewEdited,
     logError,
@@ -222,6 +232,10 @@ async function harness(options: {
     ownsDocument,
     withDocumentUnowned,
     markDeletedUnderPath,
+    deletedBy,
+    switchAccount(next: string) {
+      account = next;
+    },
     get authorityId(): symbol {
       return authorityId;
     },
@@ -239,8 +253,24 @@ async function harness(options: {
     setAuthorityId(next: symbol) {
       authorityId = next;
     },
-    setCapture(next: MutationCapture | null) {
-      capture = next;
+    setCapture(next: TestCapture | null) {
+      capture = next === null ? null : {
+        beginFileRename: next.beginFileRename,
+        changePathsAs: async (paths, authored, work, removed) => {
+          if (authored.author.kind === "human") deletedBy.push(authored.author.humanId);
+          const finishDebts = await next.settleAndCloseLiveSessionsForPath(paths[0]!);
+          let gone = false;
+          try {
+            const value = await work({ policy: await readWorkspaceEnginePolicy(rootPath),
+              recordDisk: async (_path, files) => [...files], moveFile: async () => false,
+              rename: async () => undefined, delete: async () => "moment", undoDelete: async () => undefined });
+            gone = removed(value).length > 0;
+            return value;
+          } finally {
+            finishDebts(gone);
+          }
+        },
+      };
     },
   };
 }
@@ -1194,6 +1224,48 @@ describe("WorkspaceFileMutationOwner", () => {
     await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
     const trashEntries = await readdir(join(test.rootPath, ".dohc/trash"));
     expect(trashEntries).toHaveLength(1);
+  });
+
+  it("credits a hand delete to the person who asked while it waits for its workspace", async () => {
+    const entered = deferred();
+    const release = deferred();
+    const test = await harness({
+      beforeOperation: async () => { entered.resolve(); await release.promise; },
+    });
+    test.setCapture({
+      beginFileRename: vi.fn(async () => vi.fn(async () => undefined)),
+      settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
+    });
+    await writeFile(join(test.rootPath, "alice.md"), "text\n");
+    const deleting = test.owner.deletePath(trustedEvent, {
+      workspaceId: test.workspace.workspaceId,
+      relativePath: "alice.md",
+    });
+    await entered.promise;
+    test.switchAccount("account-bob");
+    release.resolve();
+    await expect(deleting).resolves.toMatchObject({ trashed: true });
+    expect(test.deletedBy).toEqual(["account-alice"]);
+  });
+
+  it("still trashes a person's delete recoverably when History is unavailable", async () => {
+    const test = await harness({
+      trashItem: async () => {
+        throw new Error("OS trash unavailable");
+      },
+    });
+    await mkdir(join(test.rootPath, "notes"));
+    await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
+    // No engine capture: nothing records the delete, and nothing refuses it.
+    await expect(test.owner.deletePath(trustedEvent, {
+      workspaceId: test.workspace.workspaceId,
+      relativePath: "notes",
+    })).resolves.toEqual({ trashed: false });
+    await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
+    const [entry] = await readdir(join(test.rootPath, ".dohc/trash"));
+    expect(await readFile(join(test.rootPath, ".dohc/trash", entry!, "a.md"), "utf8")).toBe("text\n");
+    expect(test.markDeletedUnderPath).toHaveBeenCalledWith(test.authorityId, "notes");
+    expect(test.deletedBy).toEqual([]);
   });
 
   it("settles and marks an alias delete by its physical path", async () => {

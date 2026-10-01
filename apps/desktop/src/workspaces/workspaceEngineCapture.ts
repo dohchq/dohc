@@ -85,6 +85,7 @@ import {
   type ActiveAgentRun,
 } from "./workspaceWatcher";
 import {
+  historyPathAdmission,
   readWorkspaceEnginePolicy,
   type WorkspaceEnginePolicySnapshot,
 } from "./workspaceEnginePolicyFile";
@@ -1606,6 +1607,13 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
       await rm(target, { force: true });
     },
   };
+}
+
+// A person's own file change reads as a local file edit in History, as their
+// disk edits always have; the author names them. Agents and automations write
+// through dohc.
+function localFileOrApi(author: MomentWriteAuthor): "local-file" | "api" {
+  return author.kind === "human" ? "local-file" : "api";
 }
 
 export function createWorkspaceEngineCapture(
@@ -5349,7 +5357,9 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    setActiveAgentRun(run) {
+    setActiveAgentRun(submitted) {
+      // The run as submitted; a caller changing its object later changes nothing here.
+      const run = structuredClone(submitted);
       return enqueueResult("daemon capture authorship", async () => {
         const engine = await engineStore();
         if (run === null) await engine.flushCapture?.();
@@ -5369,7 +5379,9 @@ export function createWorkspaceEngineCapture(
 
     registerExpectedEngineEvents,
 
-    writeAuthoredFile(absolutePath, content, author, writeOptions = {}) {
+    writeAuthoredFile(absolutePath, content, submittedAuthor, writeOptions = {}) {
+      // The author as submitted, before the write waits for its turn.
+      const author = structuredClone(submittedAuthor);
       return enqueueResult("write authored file", async () => {
         if (writeOptions.signal?.aborted) {
           throw new Error("The write was cancelled.");
@@ -5401,7 +5413,7 @@ export function createWorkspaceEngineCapture(
         await engine.flushCapture?.();
         const versionId = await activeVersionIdOf(engine);
         const metadata: ActorNeutralWriteMetadata = {
-          origin: "api",
+          origin: localFileOrApi(author),
           summary: `Updated ${pathBasename(path)}`,
           correlationId: writeOptions.correlationId ?? `authored-write-${writeOptions.requestId ?? createId()}`,
         };
@@ -5511,7 +5523,9 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    changePathsAs(paths, authored, work, removed) {
+    changePathsAs(paths, submitted, work, removed) {
+      // The author as submitted, before the change waits for its turn.
+      const authored = structuredClone(submitted);
       const match = (candidate: string) => paths.some(path => pathIsAtOrUnder(candidate, path));
       return enqueueResult("authored path change", async () => {
         const engine = await engineStore();
@@ -5552,7 +5566,7 @@ export function createWorkspaceEngineCapture(
           const lease = keepCaptureHold(holdId => renewCapture.call(engine, holdId), holdId, leaseMs);
           try {
             const authoredMetadata = (summary: string): ActorNeutralWriteMetadata =>
-              ({ origin: "api", summary, correlationId: authored.correlationId });
+              ({ origin: localFileOrApi(authored.author), summary, correlationId: authored.correlationId });
             const policy = await readPolicyForTask();
             result = { value: await work({
               policy,
@@ -5581,7 +5595,7 @@ export function createWorkspaceEngineCapture(
                 const onDisk = new Set(files);
                 const kept = new Set(held);
                 for (const head of await listTextFileMetadata(engine, versionId)) {
-                  if (!pathIsAtOrUnder(head.path, path) || kept.has(head.path)) continue;
+                  if (!pathIsAtOrUnder(head.path, path) || kept.has(head.path) || !historyPathAdmission(policy)(head.path)) continue;
                   await deleteIfTracked(engine, versionId, head.path,
                     { origin: "local-file", summary: `Deleted ${pathBasename(head.path)}` }, undefined, !onDisk.has(head.path));
                 }

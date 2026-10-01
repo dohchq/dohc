@@ -44,6 +44,8 @@ import {
 } from "../testing/fakeDaemonCapture";
 import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
 import { desktopRecordEditContext } from "./desktopRecordEdits";
+import { deleteWorkspacePathByHand } from "./workspaceFileMoves";
+import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
 
 const WORKSPACE_ID = "engine-ydoc-session-test";
@@ -303,12 +305,18 @@ const recordAutomation = {
   run: { claimId: "finish-run", automationName: "Finish" },
 } as const;
 
+// Main's record edit context for the person main read when the write was requested.
+function recordContext(personId = "person") {
+  return desktopRecordEditContext({
+    capture, workspaceRoot: root, signal: new AbortController().signal,
+    person: { kind: "human", humanId: personId },
+    withAdapter: async () => null, onCaptureSettled: () => () => undefined,
+  });
+}
+
 function writeFinished(expectedBefore: Record<string, unknown> = { "Finished on": null }) {
   enforceRecordOwner = true;
-  return setCollectionRecordFields(desktopRecordEditContext({
-    capture, workspaceRoot: root, signal: new AbortController().signal,
-    withAdapter: async () => null, onCaptureSettled: () => () => undefined,
-  }), {
+  return setCollectionRecordFields(recordContext(), {
     recordPath: PATH, fields: { "Finished on": "2026-10-01" },
     expectedBefore, author: recordAutomation, idempotencyKeyPrefix: "finish-run/set",
   });
@@ -357,16 +365,41 @@ it("writes automation fields through an open session and updates its editor once
   editor.destroy();
 });
 
+it.each(["borrowed", "opened"])("names the person who asked for a %s record write, and an automation's run person", async mode => {
+  const opened = mode === "borrowed" ? await openRecordEditor() : null;
+  const context = recordContext("account-alice");
+  await expect(setCollectionRecordFields(context, {
+    recordPath: PATH, fields: { Owner: "Alice" }, author: createLocalChangeAuthor("Alice"),
+  })).resolves.toMatchObject({ replaced: { Owner: null } });
+  // A run Bob's synced edit started works for Bob, whoever is signed in here.
+  await expect(setCollectionRecordFields(context, {
+    recordPath: PATH, fields: { "Finished on": "2026-10-01" }, author: { ...recordAutomation, onBehalfOf: "bob" },
+  })).resolves.toMatchObject({ replaced: { "Finished on": null } });
+  // A closed record reopens with a seed, which names nobody, before each write.
+  const fieldWrites = requests.filter(request => request.method === YDOC_METHOD.recordUpdate &&
+    (request.params as { seed?: boolean }).seed !== true).slice(-2);
+  // A generated key still names each write, so a refusal reaches only its caller.
+  for (const request of fieldWrites) expect(request.idempotencyKey).toEqual(expect.any(String));
+  const params = (request: Request) => request.params as { actorOriginId?: string; attribution?: unknown };
+  expect(fieldWrites.map(request => ({ actorOriginId: params(request).actorOriginId, attribution: params(request).attribution }))).toEqual([
+    { actorOriginId: "account-alice", attribution: { actorKind: "human", onBehalfOf: "account-alice", depth: 0 } },
+    { actorOriginId: recordAutomation.automationId,
+      attribution: { actorKind: "automation", onBehalfOf: "bob", depth: 1, run: recordAutomation.run } },
+  ]);
+  if (opened) {
+    expect(opened.editor.getMap("frontmatter").get("Owner")).toBe("Alice");
+    await opened.owner.close();
+    opened.editor.destroy();
+  }
+});
+
 it.each(["update-too-large", "pending-edits-limit"])("refuses an unkeyed agent write without losing queued typing (%s)", async refusal => {
   const { owner, editor } = await openRecordEditor();
   const entered = deferred();
   const release = deferred();
   beforeRecordUpdate = async () => { entered.resolve(); await release.promise; };
   nextRecordRefusal = wireRefusal(refusal);
-  const write = setCollectionRecordFields(desktopRecordEditContext({
-    capture, workspaceRoot: root, signal: new AbortController().signal,
-    withAdapter: async () => null, onCaptureSettled: () => () => undefined,
-  }), { recordPath: PATH, fields: { "Finished on": "2026-10-01" },
+  const write = setCollectionRecordFields(recordContext(), { recordPath: PATH, fields: { "Finished on": "2026-10-01" },
     author: { kind: "agent", agentId: "cli-agent", onBehalfOf: "person", depth: 1 } });
   const refused = expect(write).rejects.toThrow(refusal);
   await entered.promise;
@@ -522,6 +555,35 @@ it("keeps the closed-record open, journal, settle and close path", async () => {
   expect(methodCount(YDOC_METHOD.close)).toBe(1);
   expect(ydoc.recordedUpdates).toHaveLength(2);
   expect(await readFile(join(root, PATH), "utf8")).toContain("2026-10-01");
+});
+
+it("settles an open record before a person's delete and credits the person in History", async () => {
+  await mkdir(join(root, ".dohc"), { recursive: true });
+  const { editor } = await openRecordEditor();
+  typeIntoBody(editor, "Typed before the delete.");
+  let trashedText = "";
+  const trashed: Array<{ target: string; requestsBefore: number }> = [];
+  await expect(deleteWorkspacePathByHand(
+    { workspace: { rootPath: root }, assertCurrent: () => undefined }, PATH,
+    { kind: "human", humanId: "person" },
+    { capture, requestId: "hand-delete", markDeleted: () => undefined,
+      trashItem: async target => {
+        trashed.push({ target, requestsBefore: requests.length });
+        trashedText = await readFile(target, "utf8");
+        await rm(target);
+      } },
+  )).resolves.toEqual({ trashed: true });
+  // The system trash takes it from its own place, so its Restore returns it there.
+  expect(trashed.map(entry => entry.target)).toEqual([join(root, PATH)]);
+  const methods = requests.map(request => request.method);
+  // Settled and closed, then trashed, then recorded as deleted.
+  expect(methods.lastIndexOf(YDOC_METHOD.close)).toBeLessThan(trashed[0]!.requestsBefore);
+  expect(methods.indexOf(VERSIONED_METHOD.textDelete)).toBeGreaterThanOrEqual(trashed[0]!.requestsBefore);
+  // The trash holds the settled document, not the artifact from before the typing.
+  expect(trashedText).toContain("Typed before the delete.");
+  const deleted = (await capture.listMoments()).moments.filter(row => row.operation === "delete" && row.path === PATH);
+  expect(deleted).toMatchObject([{ metadata: { origin: "local-file" }, authors: [{ kind: "human", humanId: "person" }] }]);
+  editor.destroy();
 });
 
 it("journals a live editor update through the Rust Y.Doc provider and suppresses its mirror write", async () => {
@@ -1782,8 +1844,9 @@ it("keeps typing records pending through a busy store without reopening or relab
   typeIntoBody(scratch, "Busy typing.");
   const opens = methodCount(YDOC_METHOD.open);
   busyRecordAttempts = 2;
+  // As main's IPC names the person when the update arrives.
   const attribution = { actorKind: "human" as const, onBehalfOf: "alice", depth: 0 };
-  session.applyLocalUpdate(original!, undefined, { idempotencyKey: "renderer-busy", attribution });
+  session.applyLocalUpdate(original!, undefined, { idempotencyKey: "renderer-busy", actorOriginId: "alice", attribution });
   attribution.onBehalfOf = "bob";
   // Drain main's queue. The provider still holds the two refused attempts.
   await session.applyDecidedLocalUpdate(() => null);
@@ -1793,6 +1856,8 @@ it("keeps typing records pending through a busy store without reopening or relab
   expect(records).toHaveLength(3);
   expect(records.map(request => request.params)).toEqual([records[0]!.params, records[0]!.params, records[0]!.params]);
   expect(records[0]!.params).toMatchObject({ attribution: { onBehalfOf: "alice" } });
+  expect(ydoc.recordedAuthors.at(-1)).toEqual({ actorOriginId: "alice",
+    attribution: { actorKind: "human", onBehalfOf: "alice", depth: 0 } });
   expect(methodCount(YDOC_METHOD.open)).toBe(opens);
   expect(await readFile(join(root, PATH), "utf8")).toContain("Busy typing.");
   await session.close({ settle: false });

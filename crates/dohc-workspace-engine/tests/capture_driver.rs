@@ -508,6 +508,121 @@ async fn open_capture_author_stamps_the_startup_baseline() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_authors_are_declared_agents_never_a_person() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    let person = json!({"kind":"human", "humanId":"local"});
+    let automation = json!({"kind":"automation", "automationId":"collection:tasks#a", "depth":1});
+    for (id, author) in [(3, &person), (4, &automation)] {
+        let refused = transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    id,
+                    "capture.setAuthor",
+                    Some(handle.clone()),
+                    json!({ "author": author }),
+                ),
+            )
+            .await
+            .expect_err("only a declared agent run authors capture");
+        assert_eq!(refused.message, "person-author-refused", "request {id}");
+    }
+    call(
+        &transport,
+        &handle,
+        7,
+        "capture.setAuthor",
+        json!({"author": null}),
+    )
+    .await;
+    let mut params = json!({"captureAuthor": person});
+    params["rootDir"] = json!(scratch.path().to_string_lossy());
+    params["workspaceId"] = json!(WORKSPACE_ID);
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(8, "workspace.open", None, params),
+        )
+        .await
+        .expect_err("an open never makes a person its capture author");
+    assert_eq!(refused.message, "person-author-refused");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(10, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outside_edits_stay_unattributed_once_the_agent_capture_author_clears() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let agent = json!({
+        "kind": "agent",
+        "agentId": "agent",
+        "onBehalfOf": "local",
+        "agentRunId": "run",
+    });
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_until_capture_ready(&transport, &handle, 2).await;
+    call(
+        &transport,
+        &handle,
+        100,
+        "capture.setAuthor",
+        json!({"author": agent}),
+    )
+    .await;
+    write_file(scratch.path(), "by-agent.md", b"agent edit");
+    reconcile_until_settled(&transport, &handle, 200).await;
+    call(
+        &transport,
+        &handle,
+        300,
+        "capture.setAuthor",
+        json!({"author": null}),
+    )
+    .await;
+    write_file(scratch.path(), "outside.md", b"outside edit");
+    reconcile_until_settled(&transport, &handle, 400).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(500, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    let store = EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 100)
+        .expect("reopen store");
+    let author_json = |path: &str| -> Option<String> {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT author_json FROM moments WHERE path = ?1",
+                    [path],
+                    |row| row.get(0),
+                )
+            })
+            .expect("captured moment")
+    };
+    let by_agent: Value = serde_json::from_str(
+        author_json("by-agent.md")
+            .as_deref()
+            .expect("the agent's edit keeps its author"),
+    )
+    .expect("valid author json");
+    assert_eq!(by_agent, json!([agent]));
+    assert_eq!(author_json("outside.md"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn policy_flip_on_unchanged_files_retires_and_rewidens() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");

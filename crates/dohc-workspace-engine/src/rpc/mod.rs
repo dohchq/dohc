@@ -1,3 +1,4 @@
+pub(super) mod author_admission;
 pub(super) mod automations;
 pub(super) mod capture;
 pub(super) mod chats;

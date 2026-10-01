@@ -169,6 +169,7 @@ pub(super) fn validated_author(author: Option<&Value>) -> Result<Option<String>,
                     .get("depth")
                     .is_some_and(|value| depth_within(value, 0))
         }
+        Some("human") => nonempty("humanId") && object.len() == 2,
         _ => false,
     };
     // Local author ids and names appear in History; reject Unicode controls.

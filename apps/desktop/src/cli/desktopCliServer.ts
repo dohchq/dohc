@@ -29,6 +29,7 @@ import type { LiveAgentDispatchStoreHandle } from "../agents/liveAgentDispatchSt
 import { requirePublishedWrite, type WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import type { WorkspaceAuthorityOperation } from "../workspaces/workspaceAuthorityOwner";
+import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { captureRefusal } from "../workspaces/engineCaptureGate";
 import {
   runCollectionRecordCreation,
@@ -89,8 +90,11 @@ interface DesktopCliServerDependencies<State> {
   ): Promise<Result>;
   collectionEditContextFor(
     operation: WorkspaceAuthorityOperation<RegistryEntry, State>,
+    person: LocalPersonAuthor,
     signal: AbortSignal,
   ): Promise<CollectionRecordEditContext>;
+  /** This computer's person, read when a write is requested. */
+  localPerson(): Promise<LocalPersonAuthor>;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
     work: (adapter: VersionedLiveAdapter) => Promise<Result>,
@@ -128,6 +132,7 @@ export function createDesktopCliServer<State>(
     sharedViewOf,
     withPhysicalWorkspaceOperation,
     collectionEditContextFor,
+    localPerson,
     withEngineAdapter,
     liveDocuments,
     documentProjection,
@@ -165,14 +170,17 @@ export function createDesktopCliServer<State>(
     // The CLI's collection writes ride the desktop's one collection write
     // seam, resolved per write under the physical workspace's authority, so a
     // retired-and-reattached workspace refuses instead of falling through to
-    // its successor. A write ends with the CLI request that asked for it.
-    const cliCollectionEdit = <T>(
+    // its successor. A write ends with the CLI request that asked for it. Its
+    // person is read when the request arrives, before it waits for the workspace.
+    const cliCollectionEdit = async <T>(
       work: (context: CollectionRecordEditContext) => Promise<T>,
-    ): Promise<T> =>
-      withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
+    ): Promise<T> => {
+      const person = await localPerson();
+      return await withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
         await work(
           await collectionEditContextFor(
             operation,
+            person,
             AbortSignal.any([
               operation.signal,
               AbortSignal.timeout(CLI_REQUEST_DEADLINE_MS),
@@ -180,6 +188,7 @@ export function createDesktopCliServer<State>(
           ),
         ),
       );
+    };
     const publicationAttachment = await withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
         if (resolve(operation.workspace.rootPath) !== resolve(workspace.rootPath)) throw new Error("The workspace attachment changed.");
         return operation.signal;

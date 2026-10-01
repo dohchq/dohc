@@ -78,7 +78,7 @@ export function createChatWrites(dependencies: {
   localUserDisplayName(): string;
   agentDisplayName(): Promise<string>;
   // The stable per-install id a signed-out reaction is authored under.
-  localReactorFallbackId(): string;
+  localInstallationId(): string;
   projectChatBookmarks(workspaceId: string): void;
   queueCloudSync(workspaceId: string): void;
   syncSharedChannelsForChatTarget(
@@ -90,7 +90,7 @@ export function createChatWrites(dependencies: {
 }) {
   const {
     findWorkspace, warmCredentials, currentCredentials, currentCredentialGeneration,
-    localUserDisplayName, agentDisplayName, localReactorFallbackId, projectChatBookmarks,
+    localUserDisplayName, agentDisplayName, localInstallationId, projectChatBookmarks,
     queueCloudSync, syncSharedChannelsForChatTarget, scanChatDispatch, notifyRenderer,
   } = dependencies;
 
@@ -322,7 +322,7 @@ export function createChatWrites(dependencies: {
   }) {
     const { workspaceId, store } = place;
     const target = { threadId: input.threadId };
-    const localAuthorId = localReactorFallbackId();
+    const localAuthorId = localInstallationId();
     const aliased = (authorUserId: string | undefined): authorUserId is string =>
       authorUserId !== undefined && authorUserId !== localAuthorId;
     const admission = await admit(place, target);

@@ -4134,3 +4134,38 @@ it.each(["agent", "typing"])("reopens after a daemon crash by replaying original
   await engine.stop();
   seed.destroy(); source.destroy();
 });
+
+it("records a person's own write as a local file edit, and an agent's under its run's person", async () => {
+  const root = await createTestScratch("dohc-person-authored-");
+  const requests: Request[] = [];
+  const engine = capture(root, { rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine(), requests) });
+  const person = { kind: "human", humanId: "local:installation" } as const;
+  // A run Bob's synced edit started works for Bob, whoever is signed in here.
+  const agent = { kind: "agent" as const, agentId: "agent-a", onBehalfOf: "bob", agentRunId: "run-a" };
+  await engine.writeAuthoredFile(join(root, "hand.md"), "hand\n", person, { createOnly: true });
+  const written = engine.writeAuthoredFile(join(root, "agent.txt"), "agent text\n", agent);
+  // The caller changes its object while the write waits for its turn.
+  Object.assign(agent, { onBehalfOf: "mallory", agentRunId: "run-other" });
+  await written;
+  expect(requests.filter(request => request.method === VERSIONED_METHOD.textWrite)
+    .map(request => [(request.params as { path: string }).path, (request.params as { origin: string }).origin]))
+    .toEqual([["hand.md", "local-file"], ["agent.txt", "api"]]);
+  expect(await liveMomentAuthors(engine)).toEqual([[person],
+    [{ kind: "agent", agentId: "agent-a", onBehalfOf: "bob", agentRunId: "run-a" }]]);
+  await engine.stop();
+});
+
+it("names the run's person as capture's author, whoever is signed in here", async () => {
+  const root = await createTestScratch("dohc-run-person-");
+  const requests: Request[] = [];
+  const engine = capture(root, { rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine(), requests) });
+  const run = { agentId: "dohc-mcp", onBehalfOf: "bob", agentRunId: "run-bob", depth: 2 };
+  const setting = engine.setActiveAgentRun(run);
+  // The caller changes its object while the change waits for its turn.
+  Object.assign(run, { onBehalfOf: "mallory", agentRunId: "run-other", depth: 0 });
+  await setting;
+  expect(requests.find(request => request.method === "capture.setAuthor")?.params).toEqual({
+    author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "bob", agentRunId: "run-bob", depth: 2 },
+  });
+  await engine.stop();
+});

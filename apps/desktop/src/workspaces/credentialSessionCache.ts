@@ -13,9 +13,12 @@ export class CredentialSessionCache<Credentials> {
   // The current load, resolving to why it failed, or null.
   private ready: Promise<{ error: unknown } | null> | null = null;
 
+  // `settled` is false only for the null a load publishes while it reads the
+  // store; the load's own answer follows.
   constructor(
     private readonly onChange: (
       snapshot: CredentialSessionSnapshot<Credentials>,
+      settled: boolean,
     ) => void = () => undefined,
   ) {}
 
@@ -77,7 +80,7 @@ export class CredentialSessionCache<Credentials> {
     // Reserve the generation before the read and expose no old authority while
     // an explicit refresh decides which account is current.
     this.credentials = null;
-    this.publish();
+    this.publish(false);
 
     const attempt = (async () => {
       const credentials = await load();
@@ -97,7 +100,7 @@ export class CredentialSessionCache<Credentials> {
     return attempt;
   }
 
-  private publish(): void {
-    this.onChange(this.snapshot());
+  private publish(settled = true): void {
+    this.onChange(this.snapshot(), settled);
   }
 }

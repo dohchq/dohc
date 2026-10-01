@@ -3,6 +3,7 @@ import { errorMessage } from "./workspaceError";
 import {
   parseFilesPolicy,
   parseVisibilityPolicy,
+  policyGlobMatches,
   resolveEffectivePolicy,
   type FilesPolicyRule,
   type PolicyParseResult,
@@ -91,6 +92,41 @@ export function historyPathAdmission(
       visibilityPolicy: policy.visibilityPolicy,
     }).tracked;
   };
+}
+
+// Whether files.toml leaves every file under `directory` out of History, so
+// nothing inside it needs reading. Rules apply in order and the last one
+// decides. Only a rule that excludes the whole subtree proves it, and a later
+// rule that could track anything inside takes that proof back.
+export function historyExcludesSubtree(
+  policy: WorkspaceEnginePolicySnapshot,
+  directory: string,
+): boolean {
+  if (policy.errors.length > 0) return false;
+  const folder = directory.split("/");
+  const leads = (segments: readonly string[]) =>
+    segments.every((segment, index) => policyGlobMatches(segment, folder[index] ?? ""));
+  const coversAll = (pattern: string) => {
+    if (pattern === "**") return true;
+    const segments = pattern.split("/");
+    return segments.at(-1) === "**" && segments.length - 1 <= folder.length && leads(segments.slice(0, -1));
+  };
+  // `**` is only ever a final segment, so a pattern reaches inside the
+  // folder when its leading segments match the folder's.
+  const reachesInside = (pattern: string) => {
+    if (pattern === "**") return true;
+    const segments = pattern.split("/");
+    const open = segments.at(-1) === "**";
+    if (!open && segments.length <= folder.length) return false;
+    return leads((open ? segments.slice(0, -1) : segments).slice(0, folder.length));
+  };
+  let excluded = false;
+  for (const rule of policy.filesPolicy ?? []) {
+    if (rule.tracked === undefined) continue;
+    if (coversAll(rule.path)) excluded = !rule.tracked;
+    else if (rule.tracked && reachesInside(rule.path)) excluded = false;
+  }
+  return excluded;
 }
 
 export function resolveEngineSearchPolicy(

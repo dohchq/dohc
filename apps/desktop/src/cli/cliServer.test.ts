@@ -30,6 +30,9 @@ import { LiveDocumentEditAppliedError } from "../workspaces/engineYDocSessionIpc
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { createLiveAgentDispatchStore } from "../agents/liveAgentDispatchStore";
 import { createChatWrites } from "../workspaces/chatWrites";
+import { CredentialSessionCache } from "../workspaces/credentialSessionCache";
+import { createLocalAuthorship } from "../workspaces/localAuthorship";
+import { deferred } from "../testing/deferred";
 import { createLiveLinkedChatStore } from "../workspaces/liveLinkedChatStore";
 import type { RegistryEntry } from "../workspaces/registryStore";
 import { createTestScratch } from "../workspaces/testTemp";
@@ -428,7 +431,7 @@ describe("CLI socket server", () => {
         currentCredentialGeneration: () => 0,
         localUserDisplayName: () => "Sam",
         agentDisplayName: async () => "Nova",
-        localReactorFallbackId: () => "install-local-user-id",
+        localInstallationId: () => "install-local-user-id",
         projectChatBookmarks: () => undefined,
         queueCloudSync: () => undefined,
         async syncSharedChannelsForChatTarget(_workspaceId, target) {
@@ -1730,14 +1733,21 @@ describe("CLI socket server", () => {
       recordId: "rec_abcdefghijklmnopqrstuvwxyz",
       recordPath: "tasks/write-brief.md",
     });
-    // A human CLI write is attributed as this device's local author under the
-    // local display name — still derived main-side.
+    // A person edits records in the app. Through the socket, a record write is
+    // an agent's, refused as a document write is.
     await expect(invoke("collectionSetFields", {
       cwd: workspaceRoot,
       actor: "human",
       recordPath: "tasks/a.md",
       fields: { status: "parked" },
-    })).resolves.toEqual({ ok: true, recordPath: "tasks/a.md" });
+    })).resolves.toEqual({ ok: false, reason: "a document edit through the CLI socket is recorded as an agent's; send actor \"agent\"" });
+    await expect(invoke("collectionCreateRecord", {
+      cwd: workspaceRoot,
+      actor: "human",
+      collectionPath: "tasks",
+      name: "by-hand",
+      fields: {},
+    })).resolves.toEqual({ ok: false, reason: "a document created through the CLI socket is recorded as an agent's; send actor \"agent\"" });
 
     // The seam sees plain JSON fields and a main-derived author; the request
     // can claim only the behavior-bearing actor kind.
@@ -1757,14 +1767,6 @@ describe("CLI socket server", () => {
           name: "write-brief",
           fields: { status: "open" },
           author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 0 },
-        },
-      },
-      {
-        kind: "setFields",
-        input: {
-          recordPath: "tasks/a.md",
-          fields: { status: "parked" },
-          author: { kind: "local", label: "Sam" },
         },
       },
     ]);
@@ -2082,12 +2084,10 @@ describe("CLI socket server", () => {
     await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", agent: "Client", collectionPath: "tasks", name: "c", fields: {} });
     await invoke("documentEdit", { cwd: workspaceRoot, actor: "agent", path: "notes/plan.md", replacement: "Done." });
     await invoke("documentCreate", { cwd: workspaceRoot, actor: "agent", agent: "claude-code", path: "notes/new.md", markdown: "# New" });
-    // A write that names a person is the run's agent's too, so the agent
-    // cannot start the chain over by leaving out --as-agent.
-    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "parked" } });
-    // With no run an automation started, a person's write stays a person's.
-    agentRunDepth = 0;
-    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "open" } });
+    // A write that names a person is refused, so the agent cannot start the
+    // chain over by leaving out --as-agent.
+    await expect(invoke("collectionSetFields", { cwd: workspaceRoot, actor: "human", recordPath: "tasks/a.md", fields: { status: "parked" } }))
+      .resolves.toMatchObject({ ok: false });
 
     const woken = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local", depth: 3 };
     const attribution = { actorKind: "agent", onBehalfOf: "person-local", depth: 3 };
@@ -2098,9 +2098,46 @@ describe("CLI socket server", () => {
       { ...woken, agentId: "Client" },
       { actorOriginId: "dohc-mcp", attribution },
       { actorOriginId: "claude-code", attribution },
-      woken,
-      { kind: "local", label: "Sam" },
     ]);
+  });
+
+  it("writes records for the settled account while a credential reload reads the store", async () => {
+    const authors: unknown[] = [];
+    context.collections = {
+      async query() {
+        throw new Error("reads are not under test");
+      },
+      async getRecord() {
+        throw new Error("reads are not under test");
+      },
+      writes: {
+        async setFields(input) {
+          authors.push(input.author);
+          return { path: input.recordPath };
+        },
+        async createRecord(input) {
+          authors.push(input.author);
+          return { path: `${input.collectionPath}/${input.name}.md`, recordId: "rec_abcdefghijklmnopqrstuvwxyz" };
+        },
+      },
+    };
+    // Main's wiring: the person is the account the credential cache last settled on.
+    const authorship = createLocalAuthorship({ installationId: () => "local:installation", loadCredentials: async () => null });
+    const credentials = new CredentialSessionCache<{ userId: string }>((snapshot, settled) => {
+      if (settled) authorship.credentialsSettled(snapshot.credentials?.userId ?? null);
+    });
+    credentials.set({ userId: "account-alice" });
+    serverOptions.localPersonId = () => authorship.personId();
+    const reload = deferred<{ userId: string } | null>();
+    const reloading = credentials.refresh(() => reload.promise);
+    // The reload has published its placeholder null and is still reading.
+    expect(credentials.snapshot().credentials).toBeNull();
+    await invoke("collectionSetFields", { cwd: workspaceRoot, actor: "agent", recordPath: "tasks/a.md", fields: { status: "done" } });
+    await invoke("collectionCreateRecord", { cwd: workspaceRoot, actor: "agent", collectionPath: "tasks", name: "b", fields: {} });
+    reload.resolve({ userId: "account-alice" });
+    await reloading;
+    const agent = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "account-alice", depth: 0 };
+    expect(authors).toEqual([agent, agent]);
   });
 
   it("posts, replies, and reacts as the agent during a run an automation started, whatever actor the caller names", async () => {

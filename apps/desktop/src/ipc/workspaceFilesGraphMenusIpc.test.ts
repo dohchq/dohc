@@ -68,6 +68,7 @@ async function harness() {
   const mutations = createWorkspaceFileMutationOwner<Event, Workspace>({
     assertTrustedSender: trusted,
     withRendererWorkspaceOperation: (event, id, work) => withOperation(event.sender, id, "mutation retired", async (operation) => work({
+      assertCurrent: () => operation.assertCurrent(),
       authorityId: operation.workspace.attachmentId, workspace: operation.workspace, capture: null,
       yDocSessions: {
         withDocumentUnowned: async (_authority, _path, run) => run(),
@@ -75,6 +76,7 @@ async function harness() {
       },
     })),
     shareViewFiles: shareFiles, trashItem: async () => { throw new Error("trash unavailable"); },
+    localPerson: async () => ({ kind: "human", humanId: "local:test" }),
     notifyRenderer: () => undefined, shareViewEdited: () => undefined, logError: () => undefined,
   });
   const openDialog = vi.fn(async () => ({ canceled: true, filePaths: [] as string[] }));

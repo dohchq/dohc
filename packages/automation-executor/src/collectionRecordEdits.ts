@@ -93,8 +93,6 @@ export interface CollectionRecordEditContext {
    * the moment that created it (see createRecordFile).
    */
   createFile(path: string, text: string, author: ChangeAuthor): Promise<string>;
-  /** Whether a failed create left a file that must be removed before retrying. */
-  isIncompleteFileWrite?(error: unknown): boolean;
   /** A file's text in the active version. Throws when there is none. */
   readText(path: string): Promise<{ text: string; truncated: boolean }>;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
@@ -489,15 +487,13 @@ export async function createCollectionRecord(
   } catch (error) {
     // A transport or lease can fail after the write landed.
     const diskId = await fileRecordId(context, path).catch(() => null);
-    if (!durable && diskId !== requestedId && context.isIncompleteFileWrite?.(error) !== true) throw error;
+    if (!durable && diskId !== requestedId) throw error;
     if (diskId !== null && ["write", "capture", "index"].includes(failedStage)) recordId = diskId;
     return {
       kind: "partial", created: [path], failedStage, reason: (error instanceof Error ? error.message : String(error)),
       retry: {
-        mode: context.isIncompleteFileWrite?.(error) === true ? "remove-and-retry" : "resume", recordId,
-        instruction: context.isIncompleteFileWrite?.(error) === true
-          ? "Review the listed file in Files, then remove it. Create the record again."
-          : "Try again with the same record ID and fields to finish this record without creating another.",
+        mode: "resume", recordId,
+        instruction: "Try again with the same record ID and fields to finish this record without creating another.",
       },
     };
   }

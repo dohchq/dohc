@@ -11,7 +11,7 @@ import {
 } from "../versioned/engineTextLimits";
 import {
   VERSIONED_METHOD,
-  type AgentAuthor,
+  type WriteAuthor,
   type MomentRecord,
   type MomentsListResult,
   type SecretMomentRecord,
@@ -3017,7 +3017,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
   // Mirrors the daemon's `validated_author` (lib.rs): a malformed author is
   // refused with `invalid-metadata` before any mutation, and only the
   // recognized fields are stored. `agentRunId` is omitted, never nulled.
-  private validatedAuthorValue(params: JsonObject): AgentAuthor | undefined {
+  private validatedAuthorValue(params: JsonObject): WriteAuthor | undefined {
     const value = params.author;
     if (value === undefined || value === null) return undefined;
     if (typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-metadata");
@@ -3028,6 +3028,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
       throw new Error("invalid-metadata");
     }
     const { kind, agentId, onBehalfOf, agentRunId, depth } = value;
+    if (kind === "human") {
+      if (typeof value.humanId !== "string" || value.humanId.length === 0 || Object.keys(value).length !== 2) {
+        throw new Error("invalid-metadata");
+      }
+      return {kind: "human", humanId: value.humanId};
+    }
     if (
       kind !== "agent" ||
       typeof agentId !== "string" ||

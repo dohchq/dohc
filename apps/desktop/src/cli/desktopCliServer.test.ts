@@ -95,7 +95,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     currentCredentials: () => null,
     localUserDisplayName: () => "Local name",
     agentDisplayName: async () => "Agent",
-    localReactorFallbackId: () => "local:device",
+    localInstallationId: () => "local:device",
     projectChatBookmarks: vi.fn(),
     queueCloudSync: vi.fn(),
     syncSharedChannelsForChatTarget: async () => undefined,
@@ -115,6 +115,7 @@ function fixture(rootPath = resolve("cli-workspace")) {
     sharedViewOf: vi.fn(() => null),
     withPhysicalWorkspaceOperation: (id, work) => authorities.withOperation(id, work),
     collectionEditContextFor: vi.fn(async () => { throw new Error("No edit context configured"); }),
+    localPerson: async () => ({ kind: "human", humanId: "local:test" }),
     withEngineAdapter: async () => null,
     liveDocuments: {
       readDocument: vi.fn<Dependencies["liveDocuments"]["readDocument"]>(async ({ path }) => ({ path, state: null })),
@@ -358,9 +359,10 @@ describe("desktop CLI workspace context", () => {
     } as unknown as WorkspaceEngineYDocProviderSession;
     const admitted: symbol[] = [];
     const opened = vi.fn(async () => session);
-    f.dependencies.collectionEditContextFor = async (operation, signal) => {
+    f.dependencies.collectionEditContextFor = async (operation, person, signal) => {
       operation.assertCurrent(); admitted.push(operation.workspace.attachmentId);
-      return desktopRecordEditContext({ workspaceRoot: operation.workspace.rootPath,
+      return desktopRecordEditContext({
+        person, workspaceRoot: operation.workspace.rootPath,
         capture: { openRecordSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal });
     };
@@ -491,9 +493,10 @@ describe("desktop CLI workspace context", () => {
     const f = fixture();
     const held = deferred(); const entered = deferred();
     const opened = vi.fn();
-    f.dependencies.collectionEditContextFor = async (operation, signal): Promise<CollectionRecordEditContext> => {
+    f.dependencies.collectionEditContextFor = async (operation, person, signal): Promise<CollectionRecordEditContext> => {
       entered.release(); await held.promise; operation.assertCurrent();
-      return desktopRecordEditContext({ workspaceRoot: operation.workspace.rootPath,
+      return desktopRecordEditContext({
+        person, workspaceRoot: operation.workspace.rootPath,
         capture: { openRecordSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal });
     };

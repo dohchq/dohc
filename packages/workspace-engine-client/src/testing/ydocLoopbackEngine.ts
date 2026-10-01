@@ -290,6 +290,9 @@ export class YdocLoopbackEngine implements EngineTransport {
   readonly responses: Response[] = [];
   readonly events: Event[] = [];
   readonly recordedUpdates: Uint8Array[] = [];
+  // The author recorded beside each update. A seed is nobody's, as the
+  // daemon records it (`ydoc_record_update`).
+  readonly recordedAuthors: Array<{ actorOriginId: string | null; attribution: JsonValue | null }> = [];
   readonly helloAck = { capabilities: ["blobs"] } as const;
 
   private readonly files = new Map<string, LoopbackFile>();
@@ -676,6 +679,10 @@ export class YdocLoopbackEngine implements EngineTransport {
       entry.settledUpdates = entry.journaledUpdates;
     }
     this.recordedUpdates.push(update);
+    this.recordedAuthors.push(seed ? { actorOriginId: null, attribution: null } : {
+      actorOriginId: typeof params.actorOriginId === "string" ? params.actorOriginId : null,
+      attribution: params.attribution ?? null,
+    });
     session.updateSeq += 1;
     const result = { seq: session.updateSeq, lineageClaimId: null };
     this.recordRequests.set(request.idempotencyKey, { payload, result });

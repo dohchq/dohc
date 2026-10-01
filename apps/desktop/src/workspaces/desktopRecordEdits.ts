@@ -1,19 +1,24 @@
 import { join } from "node:path";
-import type {
-  CollectionRecordEditAdapter,
-  CollectionRecordEditContext,
-} from "@dohc/automation-executor/collection-record-edits";
 import {
-  readWorkspaceText,
-  withStaleSensitiveWorkspaceOperation,
-} from "./workspaceAssets";
+  runCollectionRecordCreation,
+  type CollectionRecordEditAdapter,
+  type CollectionRecordEditContext,
+  type CreateCollectionRecordInput,
+  type RecordEditSession,
+} from "@dohc/automation-executor/collection-record-edits";
+import { readWorkspaceText } from "./workspaceAssets";
+import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { requirePublishedWrite, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
-import { createFile, CreatedFileWriteError } from "./workspaceFiles";
+
+/** This computer's person, as desktop main read them. */
+export type LocalPersonAuthor = Extract<MomentWriteAuthor, { kind: "human" }>;
 
 /** What this desktop's record writes in one workspace run over. Main supplies it. */
 export interface DesktopRecordEditHost {
   capture: Pick<WorkspaceEngineCapture, "openRecordSession" | "writeAuthoredFile">;
   workspaceRoot: string;
+  /** The person, read when the write was requested. */
+  person: LocalPersonAuthor;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
   withAdapter<T>(
     work: (adapter: CollectionRecordEditAdapter) => Promise<T>,
@@ -27,35 +32,59 @@ export interface DesktopRecordEditHost {
   signal: AbortSignal;
 }
 
+// A person's field edit names the person main read. An agent's or an
+// automation's keeps the person its run names.
+function byPerson(session: RecordEditSession, personId: string): RecordEditSession {
+  return {
+    applyDecidedLocalUpdate: (decide, onArmed, options) => session.applyDecidedLocalUpdate(decide, onArmed,
+      options.attribution?.actorKind === "human"
+        ? { ...options, actorOriginId: personId, attribution: { actorKind: "human", onBehalfOf: personId, depth: 0 } }
+        : options),
+    settleNow: options => session.settleNow(options),
+    close: () => session.close(),
+  };
+}
+
 /**
  * The record edit context over this desktop's capture. A record opens as the
- * capture's live document session. An automation's file is written through
- * the engine with the automation as the moment's author. Anyone else's is
- * created on disk, as the createWorkspaceFile IPC does, and capture takes it
- * from there. Each settled capture pass is the news that records may have
- * been adopted.
+ * capture's live document session. Creation goes through the engine. Each
+ * settled capture pass announces record adoption. A person's writes in the
+ * context name the one person the host read, so an account change during the
+ * write cannot relabel them.
  */
 export function desktopRecordEditContext(host: DesktopRecordEditHost): CollectionRecordEditContext {
-  const { capture, workspaceRoot, signal } = host;
+  const { capture, workspaceRoot, signal, person } = host;
   return {
-    openRecord: (path) => capture.openRecordSession(path),
+    openRecord: async (path) => byPerson(await capture.openRecordSession(path), person.humanId),
     async createFile(path, text, author) {
-      if (author.kind === "automation") {
-        requirePublishedWrite(path, await capture.writeAuthoredFile(join(workspaceRoot, path), text, author, {
-          createOnly: true,
-          signal,
-        }));
-        return path;
-      }
-      return await withStaleSensitiveWorkspaceOperation(
-        workspaceRoot,
-        async () => await createFile(workspaceRoot, path, text, { exclusive: true }),
-      );
+      const named = author.kind === "automation" || author.kind === "agent" ? author : person;
+      requirePublishedWrite(path, await capture.writeAuthoredFile(join(workspaceRoot, path), text, named, {
+        createOnly: true,
+        signal,
+      }));
+      return path;
     },
-    isIncompleteFileWrite: (error) => error instanceof CreatedFileWriteError,
     readText: (path) => readWorkspaceText(workspaceRoot, path),
     withAdapter: host.withAdapter,
     onRecordsChanged: host.onCaptureSettled,
     signal,
   };
+}
+
+/**
+ * A person's request to create a record by hand. The person is read when the
+ * request arrives, before it waits for its workspace and engine capture.
+ */
+export async function createRecordByHand<Operation>(
+  input: Omit<CreateCollectionRecordInput, "author">,
+  host: {
+    author: CreateCollectionRecordInput["author"];
+    localPerson(): Promise<LocalPersonAuthor>;
+    withWorkspaceOperation<T>(work: (operation: Operation) => Promise<T>): Promise<T>;
+    editContext(operation: Operation, person: LocalPersonAuthor): Promise<CollectionRecordEditContext>;
+  },
+): ReturnType<typeof runCollectionRecordCreation> {
+  const person = await host.localPerson();
+  return runCollectionRecordCreation(work => host.withWorkspaceOperation(async operation =>
+    work(await host.editContext(operation, person))), { ...input, author: host.author });
 }

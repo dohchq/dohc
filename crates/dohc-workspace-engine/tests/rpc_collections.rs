@@ -425,8 +425,7 @@ async fn get_record_pages_all_history_past_the_per_request_limit() {
     }));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
+async fn assert_capture_authored_record_edit(human: bool) {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(
@@ -538,28 +537,47 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
         "shared-imported lineage must finish the pending adoption"
     );
 
-    let agent_id = "agent-collection-capture";
-    call(
-        &transport,
-        &handle,
-        61,
-        "capture.setAuthor",
-        json!({
-            "author": {
-                "kind": "agent",
-                "agentId": agent_id,
-                "onBehalfOf": "local",
-                "agentRunId": "run-collection-capture",
-            }
-        }),
-    )
-    .await;
+    let agent_id = if human {
+        "local"
+    } else {
+        "agent-collection-capture"
+    };
     let record_path = collection_dir.join("alpha.md");
     let edited = std::fs::read_to_string(&record_path)
         .expect("read adopted record")
         .replace("status: open", "status: done");
-    std::fs::write(&record_path, edited).expect("agent edits record file");
-    reconcile_capture(&transport, &handle, 70).await;
+    if human {
+        // A person's edit is their own write, named by desktop main. Capture
+        // never takes a person as its author.
+        call(
+            &transport,
+            &handle,
+            61,
+            "versionedText.write",
+            json!({
+                "workspaceId": WORKSPACE_ID,
+                "versionId": "main",
+                "path": "tasks/alpha.md",
+                "text": edited,
+                "origin": "local-file",
+                "author": {"kind":"human", "humanId":"local"},
+            }),
+        )
+        .await;
+    } else {
+        call(
+            &transport,
+            &handle,
+            61,
+            "capture.setAuthor",
+            json!({
+                "author": {"kind":"agent", "agentId":agent_id, "onBehalfOf":"local", "agentRunId":"run-collection-capture"}
+            }),
+        )
+        .await;
+        std::fs::write(&record_path, edited).expect("agent edits record file");
+        reconcile_capture(&transport, &handle, 70).await;
+    }
 
     let record = call(
         &transport,
@@ -581,10 +599,17 @@ async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
         .expect("captured status edit in history");
     assert_eq!(authored_edit["authorOriginId"], json!(agent_id));
     // Capture preserves the declared agent author at depth zero.
-    assert_eq!(authored_edit["actorKind"], json!("agent"));
+    assert_eq!(
+        authored_edit["actorKind"],
+        json!(if human { "human" } else { "agent" })
+    );
     assert_eq!(authored_edit["onBehalfOf"], json!("local"));
     assert_eq!(authored_edit["depth"], json!(0));
 
+    if human {
+        call(&transport, &handle, 101, "workspace.close", json!({})).await;
+        return;
+    }
     // A run an automation started names its chain depth, and capture records
     // the agent's edit at that depth.
     call(
@@ -4180,4 +4205,14 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).expect("count imported response");
     assert_eq!(counts, (1, 1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capture_authored_record_edit_keeps_the_agent_in_field_history() {
+    assert_capture_authored_record_edit(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn person_record_write_keeps_person_in_field_history() {
+    assert_capture_authored_record_edit(true).await;
 }

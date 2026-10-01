@@ -573,9 +573,11 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
   };
 }
 
-// A file write's author. A public or named author arrives only through
-// relay replication, never from this computer.
+// A file write's author. A person is the one desktop main read. A public or
+// named author arrives only through relay replication, never from this
+// computer.
 function adapterAuthor(author: MomentWriteAuthor): WriteAuthor {
+  if (author.kind === "human") return { kind: "human", humanId: author.humanId };
   if (author.kind === "automation") {
     return {
       kind: "automation",

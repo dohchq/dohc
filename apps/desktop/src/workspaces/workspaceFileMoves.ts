@@ -8,8 +8,8 @@ import { validateUserMaterializePath } from "@dohc/workspace-core";
 import type { WorkspaceAuthorityOperation } from "./workspaceAuthorityOwner";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import type { AuthoredPathChanges, WorkspaceEngineCapture } from "./workspaceEngineCapture";
-import { historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
-import { moveIntoWorkspaceTrash } from "./workspaceFiles";
+import { historyExcludesSubtree, historyPathAdmission, type WorkspaceEnginePolicySnapshot } from "./workspaceEnginePolicyFile";
+import { deletePath, moveIntoWorkspaceTrash, prepareWorkspaceDelete } from "./workspaceFiles";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 
 type PathChangeWorkspace = { rootPath: string; readOnly?: boolean; shareView?: unknown };
@@ -39,6 +39,11 @@ const under = (base: string, sub: string) => (sub ? `${base}/${sub}` : base);
 const errnoOf = (error: unknown) => (error instanceof Error && "syscall" in error && "code" in error ? String(error.code) : undefined);
 const exists = (absolute: string) => lstat(absolute).then(() => true, () => false);
 const workspaceTrashPath = (staged: string) => `.dohc/trash/${basename(staged)}`;
+// The engine addresses no path past 1,024 UTF-8 bytes or holding a control
+// character (MAX_CANONICAL_WORKSPACE_PATH_BYTES in dohc-engine-files). History
+// holds nothing there and no live document can open one.
+const engineAddresses = (path: string) =>
+  Buffer.byteLength(path, "utf8") <= 1_024 && !/[\u0000-\u001f\u007f]/u.test(path);
 
 // Node's own messages name absolute host paths, so a system error becomes
 // what happened, in the agent's words. dohc's own refusals pass through.
@@ -56,7 +61,9 @@ function reason(error: unknown, failed: string): string {
   return `${failed} (${code}). ${next}`;
 }
 
-function assertWritable(operation: WorkspaceAuthorityOperation<PathChangeWorkspace, unknown>) {
+type PathChangeOperation = { readonly workspace: PathChangeWorkspace; assertCurrent(): void };
+
+function assertWritable(operation: PathChangeOperation) {
   operation.assertCurrent();
   if (operation.workspace.readOnly || operation.workspace.shareView !== undefined) {
     throw new Error("This workspace is read-only. Change files in the owning workspace.");
@@ -124,6 +131,27 @@ async function admitTree(rootPath: string, spelled: string, allowed: (path: stri
   };
   await walk("");
   return { ...target, files };
+}
+
+// The regular files at or under `entry` that History records. A link moves
+// as itself and is never followed; a folder the policy wholly excludes, or
+// one History cannot address, is not read.
+async function historyFilesUnder(rootPath: string, entry: string, allowed: (path: string) => boolean,
+  excludedFolder: (path: string) => boolean): Promise<string[]> {
+  const files: string[] = [];
+  const walk = async (path: string): Promise<void> => {
+    const info = await lstat(join(rootPath, path));
+    const addressed = validateUserMaterializePath(path, { platform: process.platform }).ok && engineAddresses(path);
+    if (!addressed) return;
+    if (info.isFile()) {
+      if (allowed(path)) files.push(path);
+      return;
+    }
+    if (!info.isDirectory() || excludedFolder(path)) return;
+    for (const name of (await readdir(join(rootPath, path))).sort()) await walk(`${path}/${name}`);
+  };
+  await walk(entry);
+  return files;
 }
 
 // The policy the capture seam read for this change, once it left the queue.
@@ -529,4 +557,64 @@ async function restoreUnrecorded(rootPath: string, staged: string, original: str
     if ((await placeBack(rootPath, join(staged, sub), join(original, sub))).length) kept.push(sub);
   }
   return kept;
+}
+
+/**
+ * A person's delete. An open document settles first, then the entry goes
+ * from its own place to the system trash, whose Restore puts it back there;
+ * the workspace trash takes it when the system refuses. History then records
+ * each file's delete under the person, and a delete History refuses leaves
+ * the entry in the trash, whole. Without capture, the trash move alone is
+ * the delete. Throws, saying where the entry is, when the delete did not
+ * finish.
+ */
+export async function deleteWorkspacePathByHand(
+  operation: PathChangeOperation,
+  path: string,
+  person: Extract<MomentWriteAuthor, { kind: "human" }>,
+  options: Omit<PathChangeOptions, "capture"> & { capture: PathChangeOptions["capture"] | null },
+): Promise<{ trashed: boolean }> {
+  const rootPath = operation.workspace.rootPath;
+  assertWritable(operation);
+  const { capture } = options;
+  const outcome = await withExclusiveWorkspaceOperation(rootPath, async markChanged => {
+    const endpoint = await prepareWorkspaceDelete(rootPath, path);
+    const trash = async () => {
+      const trashed = await deletePath(rootPath, endpoint, options.trashItem);
+      markChanged();
+      options.markDeleted(endpoint);
+      return trashed;
+    };
+    // History holds nothing the engine cannot address, and nothing is open there.
+    if (capture === null || !engineAddresses(endpoint)) return { ...await trash(), refused: undefined };
+    let gone: string[] = [];
+    return await capture.changePathsAs([endpoint], { operation: "delete", author: person, correlationId: `fileDelete:${options.requestId}` },
+      async engine => {
+        // Checked again here, with capture held, right before the disk changes.
+        assertWritable(operation);
+        if (await prepareWorkspaceDelete(rootPath, path) !== endpoint) {
+          throw new Error(`${path} now leads somewhere else. Check the path, then try again.`);
+        }
+        const files = await historyFilesUnder(rootPath, endpoint, historyAdmission(engine.policy),
+          folder => historyExcludesSubtree(engine.policy, folder));
+        // Edits capture has not seen yet land as their own rows first.
+        const recorded = await engine.recordDisk(endpoint, files);
+        const trashed = await trash();
+        gone = [endpoint];
+        for (const file of recorded) {
+          try {
+            await engine.delete(file);
+          } catch (error) {
+            return { ...trashed, refused: reason(error, `History could not record the delete of ${file}.`) };
+          }
+        }
+        return { ...trashed, refused: undefined };
+      },
+      () => gone);
+  });
+  if (outcome.refused !== undefined) {
+    const where = outcome.trashed ? "the trash" : "the workspace trash, .dohc/trash";
+    throw new Error(`${path} is in ${where}. ${outcome.refused}`);
+  }
+  return { trashed: outcome.trashed };
 }

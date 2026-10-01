@@ -146,7 +146,7 @@ export function registerChatsIpcHandlers<
   assertWritableWorkspace(workspace: RegistryEntry): void;
   warmCredentialCache(): Promise<void>;
   localUserId(): string;
-  localReactorFallbackId(): string;
+  localInstallationId(): string;
   currentCredentials(): CloudCredentials | null;
   chatRelayIdentityFor(
     workspaceId: string, target: ChatRelayIdentityTarget, store: DesktopLinkedChatStore,
@@ -181,7 +181,7 @@ export function registerChatsIpcHandlers<
 }) {
   const {
     registerHandler, assertTrustedSender, requireEngineCapture, linkedChatStoreFor, chatWrites,
-    assertWritableWorkspace, warmCredentialCache, localUserId, localReactorFallbackId,
+    assertWritableWorkspace, warmCredentialCache, localUserId, localInstallationId,
     currentCredentials, chatRelayIdentityFor, syncWorkspaceSharedChannels,
     syncSharedChannelsForChatTarget, syncRendererWorkspaceSharedChannels,
     withRendererWorkspaceOperation, activeEngineFileIndex, activity, desktopChatBookmarks,
@@ -803,7 +803,7 @@ export function registerChatsIpcHandlers<
     // item carries its thread's viewer and its reactions normalized to it,
     // as listChatReactions does, so a Like made before sign-in still reads
     // as the viewer's.
-    const localFallbackAuthorId = localReactorFallbackId();
+    const localFallbackAuthorId = localInstallationId();
     const viewerByThread = new Map(
       await Promise.all(
         [...new Set(page.items.map((item) => item.thread.id))].map(async (threadId) => [
@@ -942,7 +942,7 @@ export function registerChatsIpcHandlers<
       input.workspaceId,
       "Chats",
     );
-    const localFallbackAuthorId = localReactorFallbackId();
+    const localFallbackAuthorId = localInstallationId();
     const store = linkedChatStoreFor(workspace);
     const viewerAuthorId = await chatViewerAuthorId({
       localFallbackAuthorId,
@@ -1006,7 +1006,7 @@ export function registerChatsIpcHandlers<
       }, automationCollectionOf(workspace.workspaceId)),
       message: chatMessageForIpc(started.message, automationCollectionOf(workspace.workspaceId)),
       viewerAuthorId:
-        started.message.authorUserId ?? localReactorFallbackId(),
+        started.message.authorUserId ?? localInstallationId(),
     });
   });
 
@@ -1055,7 +1055,7 @@ export function registerChatsIpcHandlers<
     // whole thread open, not just its reactions.
     const { workspace, store } = await requireChatScope(input.workspaceId);
     const viewerAuthorId = await chatViewerAuthorId({
-      localFallbackAuthorId: localReactorFallbackId(),
+      localFallbackAuthorId: localInstallationId(),
       resolveReplicationAuthorId: async () =>
         (
           await chatRelayIdentityFor(workspace.workspaceId, {
@@ -1070,7 +1070,7 @@ export function registerChatsIpcHandlers<
     return ListChatReactionsResult.parse({
       reactions: reactionsForViewer(reactions.map(chatReactionForIpc), {
         viewerAuthorId,
-        localFallbackAuthorId: localReactorFallbackId(),
+        localFallbackAuthorId: localInstallationId(),
       }),
       viewerAuthorId,
     });
