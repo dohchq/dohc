@@ -257,6 +257,9 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await dialog.getByRole("button", { name: "Review affected access" }).click();
       await expect(dialog.getByRole("heading", { name: "Stop access before restoring?" })).toBeVisible();
       await expect(dialog.getByRole("listitem").filter({ hasText: recipientAccount.email })).toHaveCount(1);
+      // The recipient can still edit, so read-only afterwards proves the stop.
+      await expect(saveState(recipient!.page)).toHaveAttribute("data-state", "saved");
+      await expect(editor(recipient!.page).locator('[contenteditable="true"]')).toHaveCount(1);
       await dialog.getByRole("button", { name: "Stop access" }).click();
       const current = dialog.getByLabel("Current file before restore");
       await expect(current).toBeVisible({ timeout: 60_000 });
