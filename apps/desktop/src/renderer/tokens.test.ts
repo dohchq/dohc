@@ -1,5 +1,7 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   CSS_TOKEN_NAMES,
@@ -111,6 +113,18 @@ describe("WCAG AA contrast, both modes", () => {
       }
     });
 
+    // The editor tints a plain find match 22% blue and an inline atom 10%;
+    // ink sits on both. The active match is the opaque chip with paper text,
+    // inside code blocks too (styles.css forces it over the syntax colors).
+    it(`${mode} text on the match tints is AA`, () => {
+      for (const surface of SURFACES) {
+        for (const [label, amount] of [["find match", 0.22], ["atom", 0.1]] as const) {
+          const tint = mix(palette[mode].match, palette[mode][surface], amount);
+          expect(contrast(palette[mode].ink, tint), `ink on ${label}/${surface} (${mode})`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    });
+
     it(`${mode} state fills keep row text and find matches readable`, () => {
       for (const state of ["hover", "selected"] as const) {
         const amount = inkAlpha(palette[mode][state], state);
@@ -183,6 +197,56 @@ describe("styles.css mirrors tokens.ts", () => {
   it("type stacks match", () => {
     for (const [name, value] of Object.entries(fonts)) {
       expect(blocks.light, name).toContain(`${name}: ${value};`);
+    }
+  });
+});
+
+// An attenuated state fill (bg-selected/80, bg-hover/50) lands between hover
+// and selected, too close to either to read; rows use the full fills.
+describe("renderer rows use the full state fills", () => {
+  it("has no bg-selected/ or bg-hover/ opacity modifier", () => {
+    const root = fileURLToPath(new URL(".", import.meta.url));
+    const sources = readdirSync(root, { recursive: true, encoding: "utf8" })
+      .filter((name) => /\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name));
+    expect(sources.length).toBeGreaterThan(100);
+    const offenders = sources.filter((name) => /\bbg-(selected|hover)\//.test(readFileSync(join(root, name), "utf8")));
+    expect(offenders).toEqual([]);
+  });
+});
+
+// Two more stylesheets carry copies of the palette: the marketing demo's
+// shadow root (apps/site) and the light-only document export. The names
+// they spell are the tokens.ts keys, so a changed value must land in all.
+describe("copies of the palette mirror tokens.ts", () => {
+  const keyOf = Object.fromEntries(
+    Object.entries(CSS_TOKEN_NAMES).map(([key, name]) => [name, key as keyof ThemeTokens]),
+  );
+  const declarations = (css: string) =>
+    [...css.matchAll(/(--dohc-[a-z0-9-]+): ([^;]+);/g)].map(([, name, value]) => [name!, value!] as const);
+
+  it("the site demo", () => {
+    const css = readFileSync(new URL("../../../site/src/demo.css", import.meta.url), "utf8");
+    const block = (selector: string) => {
+      const start = css.indexOf(selector);
+      expect(start, selector).toBeGreaterThanOrEqual(0);
+      return css.slice(start, css.indexOf("}", start));
+    };
+    // The first `.demo-window {` is the `:host, .demo-window` token block.
+    for (const [mode, selector] of [["light", ".demo-window {"], ["dark", '.demo-window[data-theme="dark"] {']] as const) {
+      const found = declarations(block(selector)).filter(([name]) => name in keyOf);
+      expect(found.length, `${mode} tokens in demo.css`).toBeGreaterThan(0);
+      for (const [name, value] of found) {
+        expect(value, `${name} (${mode})`).toBe(palette[mode][keyOf[name]!]);
+      }
+    }
+  });
+
+  it("the document export", () => {
+    const source = readFileSync(new URL("./editor/documentExport.ts", import.meta.url), "utf8");
+    const found = [...source.matchAll(/^\s+--([a-z0-9-]+): (#[0-9a-f]{6});$/gm)].map(([, name, value]) => [`--dohc-${name}`, value!] as const);
+    expect(found.length).toBeGreaterThan(0);
+    for (const [name, value] of found) {
+      expect(value, name).toBe(palette.light[keyOf[name]!]);
     }
   });
 });

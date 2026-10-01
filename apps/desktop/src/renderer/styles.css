@@ -1171,7 +1171,8 @@ body {
 .dohc-atom {
   border-radius: 4px;
   background: color-mix(in srgb, var(--dohc-match) 10%, transparent);
-  color: var(--dohc-match);
+  /* Ink, not the match blue: blue text on its own tint is about 4:1. */
+  color: var(--dohc-ink);
   font-family: var(--font-mono);
   font-size: 13px;
   /* A little horizontal breathing room so the tint doesn't hug the glyphs —
@@ -1427,6 +1428,23 @@ body {
   background: var(--dohc-match);
   color: var(--dohc-bg);
   font-weight: 600;
+}
+
+/* Inside a code block the syntax rules above outrank the mark, so a matched
+ * token kept its olive or amber on the blue. Syntax colors fall under AA on
+ * both fills, so the mark's text wins: ink on the tint, paper on the active
+ * mark. Both nestings are covered, since the find decoration can wrap a
+ * token or sit inside one. */
+.dohc-notion-editor pre code .dohc-find-match,
+.dohc-notion-editor pre code .dohc-find-match [class*="hljs-"],
+.dohc-notion-editor pre code [class*="hljs-"] .dohc-find-match {
+  color: var(--dohc-ink);
+}
+
+.dohc-notion-editor pre code .dohc-find-match--active,
+.dohc-notion-editor pre code .dohc-find-match--active [class*="hljs-"],
+.dohc-notion-editor pre code [class*="hljs-"] .dohc-find-match--active {
+  color: var(--dohc-bg);
 }
 
 .dohc-find-replace {

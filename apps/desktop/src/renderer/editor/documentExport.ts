@@ -56,7 +56,7 @@ const EXPORT_STYLE_CSS = `
     --success: #38684e;
     --warning: #8a6420;
     --danger: #a6402c;
-    --match: #397be4;
+    --match: #326fce;
   }
   @page { margin: 20mm 18mm; }
   * { box-sizing: border-box; }

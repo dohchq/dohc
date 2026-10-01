@@ -102,7 +102,7 @@ const DECORATION_ARC =
 const TAB_JOIN = `${DECORATION} -bottom-px`;
 const TAB_JOIN_ARC = `${DECORATION_ARC} border-b shadow-[0_0_0_8px_var(--color-bg)]`;
 const PANE_CORNER = `${DECORATION} top-0`;
-const PANE_CORNER_ARC = `${DECORATION_ARC} border-t shadow-[0_0_0_8px_var(--color-panel-2)]`;
+const PANE_CORNER_ARC = `${DECORATION_ARC} border-t shadow-[0_0_0_8px_var(--color-panel)]`;
 
 // Memoized so the dirty flips while typing (saveState ticks every autosave)
 // re-render only the active tab, not the whole strip (FileRow precedent —

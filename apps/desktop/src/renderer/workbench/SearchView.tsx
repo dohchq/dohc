@@ -140,7 +140,7 @@ const FileGroup = memo(function FileGroup(props: {
                 // matching the h-7 workbench row pitch.
                 className={`block w-full rounded-md py-[4px] pl-6 pr-2 text-left transition-colors duration-75 ${
                   index === props.selectedEntryIndex
-                    ? "bg-selected/80 text-ink"
+                    ? "bg-selected text-ink"
                     : "hover:bg-hover"
                 }`}
               >
