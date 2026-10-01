@@ -134,9 +134,7 @@ describe("WCAG AA contrast, both modes", () => {
             expect(contrast(palette[mode][fg], fill), `${fg} on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(4.5);
           }
           // The opaque match chip keeps the 3:1 graphical floor on the full
-          // fill. Search and multi-selection attenuate the selected fill
-          // (bg-selected/80, /85), which only moves it toward the surface,
-          // where the chip already clears the floor.
+          // fill, the only fill rows use (see the attenuation scan below).
           expect(contrast(palette[mode].match, fill), `match on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(3);
         }
       }
@@ -201,8 +199,9 @@ describe("styles.css mirrors tokens.ts", () => {
   });
 });
 
-// An attenuated state fill (bg-selected/80, bg-hover/50) lands between hover
-// and selected, too close to either to read; rows use the full fills.
+// An attenuated state fill (a bg-selected/ or bg-hover/ opacity modifier)
+// lands between hover and selected, too close to either to read; rows use
+// the full fills and carry any further meaning in weight or a ring.
 describe("renderer rows use the full state fills", () => {
   it("has no bg-selected/ or bg-hover/ opacity modifier", () => {
     const root = fileURLToPath(new URL(".", import.meta.url));

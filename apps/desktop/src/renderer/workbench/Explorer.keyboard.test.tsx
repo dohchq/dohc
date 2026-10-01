@@ -176,3 +176,32 @@ describe("Explorer tree tab stop", () => {
     await tabIntoTree(user, "file-0000.md");
   });
 });
+
+describe("the active row inside a multi-selection", () => {
+  // Every selected row shares one fill. The open file alone is medium
+  // weight, so it still reads once the tree loses focus and the ring (which
+  // follows the focused row, not the open file) is gone.
+  it("keeps its weight cue when the tree is not focused", async () => {
+    const user = userEvent.setup();
+    render(
+      <Fixture
+        {...explorerProps({
+          editorGroups: [{ id: "group-1", tabs: [{ path: "notes.md" }], activeTab: "notes.md", size: 1 }],
+          expandedFolders: ["apps", "apps/reading-list"],
+        })}
+      />,
+    );
+
+    await user.click(row("notes.md"));
+    fireEvent.click(row("apps/reading-list/index.html"), { ctrlKey: true, metaKey: true });
+    expect(row("notes.md").getAttribute("aria-selected")).toBe("true");
+    expect(row("apps/reading-list/index.html").getAttribute("aria-selected")).toBe("true");
+
+    await user.click(screen.getByRole("button", { name: "After tree" }));
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "After tree" }));
+    expect(row("notes.md").className).toContain("font-medium");
+    expect(row("apps/reading-list/index.html").className).not.toContain("font-medium");
+    expect(row("apps/reading-list/index.html").className).toContain("bg-selected");
+    expect(row("notes.md").className).toContain("bg-selected");
+  });
+});
