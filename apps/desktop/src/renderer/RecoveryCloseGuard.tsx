@@ -18,6 +18,7 @@ import {
 import { Overlay } from "./Overlay";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
+import { DangerButton } from "./ui/controls";
 
 type UnloadKind = "close" | "reload" | "update" | "quit";
 
@@ -622,8 +623,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
               >
                 Go back
               </button>
-              <button
-                type="button"
+              <DangerButton
                 data-testid="recovery-close-anyway"
                 onClick={() => {
                   // Resume exactly what the user asked for: a requested
@@ -682,10 +682,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                     if (uncovered) showCloseWarning({ kind, resume });
                   });
                 }}
-                className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
+                className="h-8 rounded-md py-0 text-xs"
               >
                 {UNLOAD_COPY[closeWarning.kind].confirm}
-              </button>
+              </DangerButton>
             </div>
         </Overlay>
       ) : null}

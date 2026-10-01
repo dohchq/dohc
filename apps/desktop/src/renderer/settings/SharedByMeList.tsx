@@ -10,7 +10,7 @@ import { bridge } from "../bridge";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { ProposalReviewDialog } from "../workbench/ProposalReviewDialog";
 import { ShareAccessBadge } from "./ShareAccessBadge";
-import { DangerButton, SecondaryButton } from "../ui/controls";
+import { DangerButton } from "../ui/controls";
 
 // "Shared by me": the management list for relay share grants. Lives
 // in Settings → Cloud. Calm inventory: what's shared, with whom, and one
@@ -276,14 +276,15 @@ export function SharedByMeList(props: {
                         : `End this share and decline ${waiting.count} changes ${recipientLabel(share)} sent? Undo restores the share, not the declined changes.`
                       : `End this share? ${recipientLabel(share)} keeps a read-only copy and stops receiving updates.`}
                   </span>
-                  <SecondaryButton
-                    size="compact"
+                  {/* h-7 only: the row's own button, at End share's height. */}
+                  <button
+                    type="button"
                     data-testid="shared-by-me-revoke-cancel"
                     onClick={() => setConfirmShareId(null)}
-                    className="shrink-0"
+                    className="h-7 shrink-0 rounded-md border border-line bg-bg px-2 text-[11px] text-muted transition-colors hover:text-ink"
                   >
                     Cancel
-                  </SecondaryButton>
+                  </button>
                   <DangerButton
                     size="compact"
                     data-testid="shared-by-me-revoke"

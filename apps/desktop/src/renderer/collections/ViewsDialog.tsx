@@ -5,7 +5,7 @@ import type {
   ViewKind,
 } from "@dohc/workspace-contracts";
 import { Overlay } from "../Overlay";
-import { PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { addView, deleteView, renameView } from "./schemaAuthoring";
 import { useSchemaRun, type SchemaApply } from "./FieldsDialog";
 import { inputClass, selectClass } from "./FieldForm";
@@ -177,20 +177,25 @@ export function ViewsDialog(props: {
                 >
                   Rename
                 </SecondaryButton>
-                <SecondaryButton
-                  aria-label={`Delete view ${view.name}`}
-                  className="text-danger hover:text-danger"
-                  disabled={pending}
-                  onClick={() => {
-                    if (confirmDelete !== view.name) {
-                      setConfirmDelete(view.name);
-                      return;
-                    }
-                    void remove(view.name);
-                  }}
-                >
-                  {confirmDelete === view.name ? "Confirm delete" : "Delete"}
-                </SecondaryButton>
+                {confirmDelete === view.name ? (
+                  <DangerButton
+                    aria-label={`Delete view ${view.name}`}
+                    className="h-8 py-0 text-xs"
+                    disabled={pending}
+                    onClick={() => void remove(view.name)}
+                  >
+                    Confirm delete
+                  </DangerButton>
+                ) : (
+                  <SecondaryButton
+                    aria-label={`Delete view ${view.name}`}
+                    className="text-danger hover:text-danger"
+                    disabled={pending}
+                    onClick={() => setConfirmDelete(view.name)}
+                  >
+                    Delete
+                  </SecondaryButton>
+                )}
               </div>
             ),
           )}

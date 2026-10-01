@@ -542,9 +542,12 @@ export function useRelayShareLinkPane(props: {
       : confirmation?.kind === "end"
         ? "Ending…"
         : retuneLabels.pending;
-  // Ending or resetting a link revokes it; changing its access keeps it.
+  // Ending or resetting a link retires its credential, and so does widening
+  // its access. Narrowing keeps the same link.
   const LinkConfirm =
-    confirmation?.kind === "reset" || confirmation?.kind === "end" ? DangerButton : PrimaryButton;
+    confirmation?.kind === "reset" || confirmation?.kind === "end" || confirmationWidens
+      ? DangerButton
+      : PrimaryButton;
   // Making access independent grants; the other three take something away.
   const OwnerConfirm = ownerConfirmation?.kind === "promote" ? SecondaryButton : DangerButton;
 
@@ -2305,12 +2308,14 @@ export function useRelayShareLinkPane(props: {
                               <SecondaryButton
                                 disabled={ownerMutationBusy !== null}
                                 onClick={() => setOwnerConfirmation(null)}
+                                className="h-8 py-0"
                               >
                                 Cancel
                               </SecondaryButton>
                               <OwnerConfirm
                                 disabled={ownerMutationBusy !== null}
                                 aria-busy={ownerMutationBusy !== null}
+                                className="h-8 py-0 text-xs"
                                 onClick={() =>
                                   executeOwnerConfirmation(ownerConfirmation)
                                 }
