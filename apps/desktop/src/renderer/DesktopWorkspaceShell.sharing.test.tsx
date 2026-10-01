@@ -4,10 +4,10 @@ import "./CollectionPage";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import type { Workspace } from "./DesktopWorkspaceShell";
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
-import { WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 describe("workspace share handoff placement", () => {
   it("uses the existing overlay and dismisses it without a payload or mutation", async () => {

@@ -8,6 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ComponentProps } from "react";
 import { afterEach, expect, vi } from "vitest";
 import * as Y from "yjs";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
@@ -79,7 +80,11 @@ import {
   DEFAULT_WORKSPACE_SETTINGS,
   type WorkspaceSettingsResult,
 } from "../workspaces/workspaceSettings";
-import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import {
+  DesktopWorkspaceShell as ProductionDesktopWorkspaceShell,
+  type Workspace,
+} from "./DesktopWorkspaceShell";
+import { ReactionStoreProvider } from "./workbench/reactionStore";
 import { resetOrphanedDrafts, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { disposeEngineDocLeasesForTests } from "./collab/engineDocLease";
 import {
@@ -89,6 +94,16 @@ import {
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { forgetSyncFailureNoticesForTests } from "./shell/useSyncFailureNotice";
 import { RecoveryList } from "./RecoveryList";
+
+// The shell under the session's reaction owner, as DesktopRoot mounts it. A
+// key on this element remounts the owner too.
+export function DesktopWorkspaceShell(props: ComponentProps<typeof ProductionDesktopWorkspaceShell>) {
+  return (
+    <ReactionStoreProvider workspaceId={props.workspace.workspaceId}>
+      <ProductionDesktopWorkspaceShell {...props} />
+    </ReactionStoreProvider>
+  );
+}
 
 // The close dialog's list, standing on its own: the guard subscribes and hands
 // the rows down, so a test of the LIST needs the same one-line subscriber.

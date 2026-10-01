@@ -10,13 +10,13 @@ import * as Y from "yjs";
 import type { ChatChannelRecord, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { rendererMarks } from "../performance/rendererMarks";
-import { DesktopWorkspaceShell, WORKBENCH_PERSIST_DELAY_MS, type Workspace } from "./DesktopWorkspaceShell";
+import { WORKBENCH_PERSIST_DELAY_MS, type Workspace } from "./DesktopWorkspaceShell";
 import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS, WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS } from "./workspaceActivityCoalescer";
 import { OPEN_EDITORS_DEFAULT_HEIGHT, OPEN_EDITORS_MIN_HEIGHT } from "./workbench/workbenchState";
 import { documentVersionKey } from "./documentVersionKey";
 import { basenameOf } from "./path";
 import { deferred } from "../testing/deferred";
-import { WORKSPACE, STORED_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, WORKSPACE, STORED_STATE, storedStateWithTabs, CANONICAL_DM, dmSyncResult, recordDocUpdate, makeBridge, renderShell, holdHistory, shellBootstrapProps, SHARE_VIEW } from "./DesktopWorkspaceShell.testHarness";
 
 // Count inspector and explorer work when the shell renders again.
 vi.mock("./documentVersionKey", { spy: true });

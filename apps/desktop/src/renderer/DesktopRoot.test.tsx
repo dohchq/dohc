@@ -5,9 +5,12 @@ import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DesktopRoot } from "./DesktopRoot";
 import type { Workspace } from "./DesktopWorkspaceShell";
-import { deferred } from "../testing/deferred";
+import type { ReactionStore } from "./workbench/reactionStore";
+import { deferred, type Deferred } from "../testing/deferred";
 
 const shellRenders = vi.hoisted(() => ({ count: 0 }));
+// The reaction store each mounted shell received from DesktopRoot's owner.
+const shellReactions = vi.hoisted(() => ({ current: null as ReactionStore | null }));
 
 vi.mock("./WorkspaceManager", () => ({
   WorkspaceManager: (props: {
@@ -40,8 +43,9 @@ vi.mock("./WorkspaceManager", () => ({
   ),
 }));
 
-vi.mock("./DesktopWorkspaceShell", () => ({
-  DesktopWorkspaceShell: (props: {
+vi.mock("./DesktopWorkspaceShell", async () => {
+  const { useReactions } = await import("./workbench/reactionStore");
+  return { DesktopWorkspaceShell: (props: {
     workspace: Workspace;
     workspaces: Workspace[];
     handoffStatus: ShareHandoffStatus;
@@ -51,6 +55,7 @@ vi.mock("./DesktopWorkspaceShell", () => ({
     openOnReady?: string | { automationControls: string };
   }) => {
     shellRenders.count += 1;
+    shellReactions.current = useReactions();
     return (
     <div data-testid="workspace-shell">
       <span data-testid="active-workspace">{props.workspace.workspaceId}</span>
@@ -80,8 +85,8 @@ vi.mock("./DesktopWorkspaceShell", () => ({
       </button>
     </div>
     );
-  },
-}));
+  } };
+});
 
 // The notice list DesktopRoot keeps for the window. Empty unless a test
 // says otherwise.
@@ -642,6 +647,79 @@ describe("registry emptied under an open workspace", () => {
       emitActivity?.({});
     });
     expect((await screen.findByTestId("active-workspace")).textContent).toBe("b");
+  });
+});
+
+describe("reaction writes across first run", () => {
+  it("keeps a workspace's write order through first run, and retires its store once settled", async () => {
+    let registry = { workspaces: [workspace("a")] };
+    let emitActivity: ((event: { workspaceId?: string }) => void) | null = null;
+    const writes: Deferred<unknown>[] = [];
+    const setChatReaction = vi.fn(() => {
+      const write = deferred<unknown>();
+      writes.push(write);
+      return write.promise;
+    });
+    vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
+      ...noticeBridge(),
+      getWorkspaceRegistry: vi.fn(async () => registry),
+      getUserSettings: vi.fn(async () => ({
+        settings: DEFAULT_USER_SETTINGS,
+        source: "default" as const,
+      })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn((listener: (event: { workspaceId?: string }) => void) => {
+        emitActivity = listener;
+        return () => undefined;
+      }),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+      setChatReaction,
+      listChatReactions: vi.fn(async () => ({ reactions: [], viewerAuthorId: "you@x" })),
+    });
+    const toggle = (store: ReactionStore, nextState: "added" | "removed") =>
+      act(() =>
+        store.toggle({ threadId: "thread-1", messageId: "m1", emoji: "👍", nextState, viewerAuthorId: "you@x", onError: vi.fn() }),
+      );
+    const toFirstRun = async () => {
+      registry = { workspaces: [] };
+      await act(async () => emitActivity?.({}));
+      await screen.findByTestId("first-run");
+    };
+    const reopen = async () => {
+      registry = { workspaces: [workspace("a")] };
+      await act(async () => emitActivity?.({}));
+      fireEvent.click(await screen.findByRole("button", { name: "Open a" }));
+      await screen.findByTestId("workspace-shell");
+      return shellReactions.current!;
+    };
+    render(<DesktopRoot />);
+    await screen.findByTestId("workspace-shell");
+    const first = shellReactions.current!;
+    toggle(first, "added");
+
+    await toFirstRun();
+    const returned = await reopen();
+    expect(returned).toBe(first);
+    toggle(returned, "removed");
+    // The remove waits for the add still out from before first run.
+    expect(setChatReaction).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      writes[0]!.resolve({});
+      await writes[0]!.promise;
+    });
+    await waitFor(() => expect(setChatReaction).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      writes[1]!.resolve({});
+      await writes[1]!.promise;
+    });
+    await waitFor(() => expect(first.pending("thread-1", "m1")).toBe(false));
+
+    await toFirstRun();
+    expect(await reopen()).not.toBe(first);
   });
 });
 

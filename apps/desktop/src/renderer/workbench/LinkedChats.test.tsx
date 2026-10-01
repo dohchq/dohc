@@ -1,11 +1,22 @@
 import "../../testing/legendListMock";
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatThreadRecord } from "../../ipc/bridgeContract";
-import { LinkedChatsPanel } from "./LinkedChats";
+import { deferred, type Deferred } from "../../testing/deferred";
+import { LinkedChatsPanel as ProductionLinkedChatsPanel } from "./LinkedChats";
+import { ReactionStoreProvider } from "./reactionStore";
+
+// The workspace shell provides the reaction store in production.
+function LinkedChatsPanel(props: ComponentProps<typeof ProductionLinkedChatsPanel>) {
+  return (
+    <ReactionStoreProvider workspaceId={props.workspaceId}>
+      <ProductionLinkedChatsPanel {...props} />
+    </ReactionStoreProvider>
+  );
+}
 
 // CodeRabbit major (WS-D gate): a chat opened from a search result is
 // consumed ONCE. The Shell clears its searchChatThread state through
@@ -732,5 +743,158 @@ describe("LinkedChatsPanel share level", () => {
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(screen.getByTestId("linked-chat-composer")).toBeTruthy();
     expect(screen.queryByTestId("linked-chat-readonly-note")).toBeNull();
+  });
+});
+
+// Independently mounted panels share the workspace's one reaction store, as
+// every Chats surface does under the shell: one write chain per cell, one
+// set of rows, and errors only for a panel still showing the thread.
+describe("LinkedChats reactions through the workspace store", () => {
+  const note = {
+    id: "message-1",
+    threadId: "thread-1",
+    authorKind: "human" as const,
+    authorDisplayName: "Granter",
+    body: "the comet tail",
+    createdAtMs: 1,
+    attachments: [],
+  };
+
+  function controlledWrites() {
+    const writes: Deferred<unknown>[] = [];
+    bridgeMock.setChatReaction.mockImplementation(() => {
+      const write = deferred<unknown>();
+      writes.push(write);
+      return write.promise;
+    });
+    return writes;
+  }
+
+  function openPanel(
+    testId: string,
+    onError: (message: string) => void = () => undefined,
+    initialThread: ChatThreadRecord | null = searchThread,
+  ) {
+    return (
+      <div key={testId} data-testid={testId}>
+        <ProductionLinkedChatsPanel
+          workspaceId="workspace-1"
+          filePath="docs/plan.md"
+          initialThread={initialThread}
+          onError={onError}
+        />
+      </div>
+    );
+  }
+
+  const thumbsIn = (testId: string) =>
+    within(screen.getByTestId(testId))
+      .getAllByTestId("linked-chat-quick-reaction")
+      .find((button) => button.dataset.emoji === "👍")!;
+  const ready = (testId: string) => waitFor(() => expect(thumbsIn(testId)).toBeTruthy());
+
+  it("orders one cell's writes across two open panels and shows both the same rows", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [note] });
+    const writes = controlledWrites();
+    render(
+      <ReactionStoreProvider workspaceId="workspace-1">
+        {openPanel("first")}
+        {openPanel("second")}
+      </ReactionStoreProvider>,
+    );
+    await ready("first");
+    await ready("second");
+
+    await userEvent.click(thumbsIn("first"));
+    expect(thumbsIn("first").getAttribute("aria-pressed")).toBe("true");
+    expect(thumbsIn("second").getAttribute("aria-pressed")).toBe("true");
+    // The other panel removes it before the add is answered: both paint the
+    // removal, and it waits for the add.
+    await userEvent.click(thumbsIn("second"));
+    expect(thumbsIn("first").getAttribute("aria-pressed")).toBe("false");
+    expect(thumbsIn("second").getAttribute("aria-pressed")).toBe("false");
+    expect(writes).toHaveLength(1);
+
+    await act(async () => {
+      writes[0]!.resolve({});
+      await writes[0]!.promise;
+    });
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(bridgeMock.setChatReaction.mock.calls.map(([payload]) => payload.state)).toEqual(["added", "removed"]);
+    expect(thumbsIn("first").getAttribute("aria-pressed")).toBe("false");
+    await act(async () => {
+      writes[1]!.resolve({});
+      await writes[1]!.promise;
+    });
+    await waitFor(() => expect(bridgeMock.listChatReactions).toHaveBeenCalledTimes(3));
+    expect(screen.queryAllByTestId("linked-chat-reaction-pill")).toHaveLength(0);
+  });
+
+  it("keeps a closed panel's write ahead of the reopened panel's, and reports it to nobody", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [note] });
+    const writes = controlledWrites();
+    const left = vi.fn();
+    const reopened = vi.fn();
+    // The provider stays; only the panel closes and opens again.
+    const view = (onError: ((message: string) => void) | null) => (
+      <ReactionStoreProvider workspaceId="workspace-1">
+        {onError ? openPanel("panel", onError) : null}
+      </ReactionStoreProvider>
+    );
+    const { rerender } = render(view(left));
+    await ready("panel");
+    await userEvent.click(thumbsIn("panel"));
+    expect(writes).toHaveLength(1);
+
+    rerender(view(null));
+    rerender(view(reopened));
+    await ready("panel");
+    // The add is still on its way, so the reopened panel shows it.
+    await waitFor(() => expect(thumbsIn("panel").getAttribute("aria-pressed")).toBe("true"));
+    await userEvent.click(thumbsIn("panel"));
+    expect(writes).toHaveLength(1);
+
+    await act(async () => {
+      writes[0]!.reject(new Error("ECONNRESET"));
+      await writes[0]!.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(bridgeMock.setChatReaction.mock.lastCall?.[0].state).toBe("removed");
+    await act(async () => {
+      writes[1]!.resolve({});
+      await writes[1]!.promise;
+    });
+    expect(thumbsIn("panel").getAttribute("aria-pressed")).toBe("false");
+    expect(left).not.toHaveBeenCalled();
+    expect(reopened).not.toHaveBeenCalled();
+  });
+
+  it("does not paint another thread's pending reaction after switching threads", async () => {
+    const otherThread = { ...searchThread, id: "thread-2", title: "Other" };
+    bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [searchThread, otherThread] });
+    bridgeMock.listChatMessages.mockImplementation(async ({ threadId }: { threadId: string }) => ({
+      messages: [{ ...note, threadId }],
+    }));
+    controlledWrites();
+    render(
+      <ReactionStoreProvider workspaceId="workspace-1">
+        {openPanel("panel", undefined, null)}
+      </ReactionStoreProvider>,
+    );
+    const openThread = async (threadId: string) => {
+      const open = await screen.findAllByTestId("linked-chat-open");
+      await userEvent.click(open.find((button) => button.dataset.threadId === threadId)!);
+    };
+    await openThread("thread-1");
+    await ready("panel");
+    await userEvent.click(thumbsIn("panel"));
+    expect(thumbsIn("panel").getAttribute("aria-pressed")).toBe("true");
+
+    await userEvent.click(screen.getByTestId("linked-chat-back"));
+    await openThread("thread-2");
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenLastCalledWith({ workspaceId: "workspace-1", threadId: "thread-2" }));
+    await ready("panel");
+    expect(thumbsIn("panel").getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryAllByTestId("linked-chat-reaction-pill")).toHaveLength(0);
   });
 });

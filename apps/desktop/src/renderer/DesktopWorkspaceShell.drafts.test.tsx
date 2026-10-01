@@ -8,11 +8,11 @@ import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import type { ListWorkspaceFilesPayload, ListWorkspaceFilesResult, ReadWorkspaceTextPayload, SwitchWorkspaceVersionResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
-import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import type { Workspace } from "./DesktopWorkspaceShell";
 import { captureOrphanedDraft } from "./orphanedDrafts";
 import { CollectionFieldWriteHost, abandonPendingCollectionFieldWrites, collectionWriteFailures, collectionWritesPaused, discardCollectionFieldWrite, enqueueCollectionFieldWrite, hasPendingCollectionFieldWrites } from "./collections/recordFieldWrites";
 import { deferred } from "../testing/deferred";
-import { GlobalRecoveryList, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, isFileOpenStartMark, recordDocUpdate, makeBridge, renderShell, enterMarkdownSource, holdHistory, sourceEditorText, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, GlobalRecoveryList, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, isFileOpenStartMark, recordDocUpdate, makeBridge, renderShell, enterMarkdownSource, holdHistory, sourceEditorText, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
 
 async function openDirtyMarkdown(
   bridge: ReturnType<typeof makeBridge>,

@@ -23,9 +23,9 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
-import { DesktopWorkspaceShell } from "../DesktopWorkspaceShell";
 import { VIEW_IDS } from "../workbench/workbenchState";
 import {
+  DesktopWorkspaceShell,
   WORKSPACE,
   STORED_STATE,
   makeBridge,
