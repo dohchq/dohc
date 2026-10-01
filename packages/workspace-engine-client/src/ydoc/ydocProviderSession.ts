@@ -289,6 +289,16 @@ export async function openEngineYdocProviderSession(
   // retries: a stale target cannot be helped by trying again.
   let transientRetryMs = settleDebounceMs;
 
+  function armSettleTimer(ms: number): void {
+    cancelSettle = scheduleSettle(() => {
+      cancelSettle = null;
+      void runSettle().catch((error: unknown) => {
+        notifyError(options.onSessionError, error);
+        scheduleTransientSettleRetry(error);
+      });
+    }, ms);
+  }
+
   function scheduleTransientSettleRetry(error: unknown): void {
     const capMs = settleRetryCapMs(error);
     if (closed || cancelSettle !== null || capMs === null) return;
@@ -296,24 +306,12 @@ export async function openEngineYdocProviderSession(
     // file lock cannot make the next busy-database wait ten seconds.
     const delay = Math.min(transientRetryMs, capMs);
     transientRetryMs = Math.min(delay * 2, capMs);
-    cancelSettle = scheduleSettle(() => {
-      cancelSettle = null;
-      void runSettle().catch((retryError: unknown) => {
-        notifyError(options.onSessionError, retryError);
-        scheduleTransientSettleRetry(retryError);
-      });
-    }, delay);
+    armSettleTimer(delay);
   }
 
   function requestSettle(): void {
     cancelSettle?.();
-    cancelSettle = scheduleSettle(() => {
-      cancelSettle = null;
-      void runSettle().catch((error: unknown) => {
-        notifyError(options.onSessionError, error);
-        scheduleTransientSettleRetry(error);
-      });
-    }, settleDebounceMs);
+    armSettleTimer(settleDebounceMs);
   }
 
   function trackLocalOperation(operation: Promise<unknown>, armSettle: boolean): Promise<void> {
