@@ -713,6 +713,8 @@ export interface AutomationFailureReport {
   startedBy: string | null;
   /** The earlier failure whose notice this one replaces, or null when none is up. */
   replaces: ReportedRun | null;
+  /** A step wakes its person's agent, so no share can switch the automation. */
+  ownerSwitchesOnly?: boolean;
 }
 
 /** An automation someone switched off, as the file this computer read says. */
@@ -1789,12 +1791,14 @@ export class CollectionAutomations {
         const context = await this.failureContextOf(failure);
         const breaker = breakers.find((entry) => automationFailureKey(entry) === key && entry.claimId === failure.claimId && entry.run === context.run);
         if (breaker !== undefined) failure.switchedOff = { reason: breaker.reason, collectionPath: breaker.collectionPath };
+        const definition = this.definitionFor(failure.automationId);
         await this.options.reportFailure({
           failure,
-          name: this.nameOf(failure.automationId),
+          name: definition?.name ?? null,
           collectionPath: this.locate(failure.automationId)?.collectionPath ?? null,
           startedBy: context.startedBy,
           replaces: last?.open ? last : null,
+          ownerSwitchesOnly: definition !== null && wakesAgent(definition),
         });
       } catch (error) {
         // Unsaved, so the next pass sends it again.

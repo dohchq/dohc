@@ -31,6 +31,7 @@ import {
   type ValidAutomationSummary,
 } from "./automationSentence";
 import { useAutomationRetry } from "./useAutomationRetry";
+import { SharedAutomationsPanel } from "./SharedAutomationsPanel";
 import { AUTOMATION_HOLDS_UNREADABLE } from "../workbench/NoticeCenter";
 
 // The ⚡ panel: a Collection's automations in plain words, each with an on
@@ -98,6 +99,7 @@ export function shownInTable(entry: AutomationSummary, table: AutomationTable | 
 
 /** How many automations a Collection's ⚡ button counts: those its panel lists. */
 export function automationCount(file: ListCollectionAutomationsResult | null, table?: AutomationTable): number {
+  if (file?.status === "shared") return file.definitions.file.status === "read" ? file.definitions.file.entries.length : 0;
   return file?.status === "read" ? file.automations.filter((entry) => shownInTable(entry, table)).length : 0;
 }
 
@@ -457,13 +459,18 @@ export function useCollectionAutomations(workspaceId: string, collectionPath: st
   useEffect(() => {
     void reload();
   }, [reload]);
+  // Main says when the file changes, or a shared file's change reaches the relay.
+  useEffect(() => bridge().onCollectionAutomationsChanged((event) => {
+    if (event.workspaceId === workspaceId) void reload();
+  }), [workspaceId, reload]);
   return { ...state, reload };
 }
 
 /**
  * A notice's ask to open one automation: its runs, at the run it names, or
  * with `controls`, its row in the list with its switch focused, to turn it
- * on again. `seq` rises with each ask.
+ * on again. `seq` rises with each ask. A shared panel names the automation
+ * by its id in automations.yaml.
  */
 export interface AutomationFocus {
   automationId: string;
@@ -473,7 +480,28 @@ export interface AutomationFocus {
   seq: number;
 }
 
-export function AutomationsPanel(props: {
+/** A Collection reached through a share lists what its file says; any other lists what this computer runs. */
+export function AutomationsPanel(props: Parameters<typeof OwnerAutomationsPanel>[0]) {
+  const file = props.automations.file;
+  return file?.status === "shared" ? (
+    <SharedAutomationsPanel
+      workspaceId={props.workspaceId}
+      collectionPath={props.collectionPath}
+      definitions={file.definitions}
+      version={props.automations.version}
+      reload={props.automations.reload}
+      focus={props.focus}
+      closeAsk={props.closeAsk}
+      onClose={props.onClose}
+      onOpenFile={props.onOpenFile}
+      onError={props.onError}
+    />
+  ) : (
+    <OwnerAutomationsPanel {...props} />
+  );
+}
+
+function OwnerAutomationsPanel(props: {
   workspaceId: string;
   collectionPath: string;
   /** The dataset table this panel shows; absent for a document Collection. */

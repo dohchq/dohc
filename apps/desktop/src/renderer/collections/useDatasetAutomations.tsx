@@ -86,14 +86,11 @@ export function useDatasetAutomations(props: {
   useEffect(() => {
     if (open) void reload();
   }, [open]);
-  // A save, a hand edit, or approved rules change what main read: the count
-  // follows, and a dataset whose rules were approved or archived since has
-  // its folder named again. A new folder reads its list on its own.
+  // Approved or archived rules name a dataset's folder again. The list
+  // reads itself again when main's automations change.
   useEffect(() => bridge().onCollectionAutomationsChanged((event) => {
-    if (event.workspaceId !== workspaceId) return;
-    void find();
-    void reload();
-  }), [workspaceId, find, reload]);
+    if (event.workspaceId === workspaceId) void find();
+  }), [workspaceId, find]);
   const close = useCallback(() => {
     setOpen(false);
     setStart(null);

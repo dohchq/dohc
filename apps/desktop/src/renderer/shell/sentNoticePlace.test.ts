@@ -35,6 +35,26 @@ describe("where a sent notice opens", () => {
       .toEqual({ kind: "workspace", workspace: view, path: "trip/day-1.md", mount: null });
   });
 
+  it("opens a switched-off automation in a separate Edit view before this workspace's read-only folder", () => {
+    const controls = { recovery: "automation-controls" as const, automation: "collection:Tasks#stamp", path: "Tasks/automations.yaml" };
+    const here = workspace("notes", { shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null }] });
+    const edit = workspace("edit-view", { shareView: { shareId: "share-1", granterEmail: null, access: "edit" } });
+    expect(sentNoticePlace(shared(controls), [here, edit], "notes"))
+      .toEqual({ kind: "workspace", workspace: edit, path: "Tasks/automations.yaml", mount: null });
+    // A view that ended, or one without Edit, switches nothing.
+    const ended = workspace("edit-view", { shareView: { shareId: "share-1", granterEmail: null, access: "edit", ended: true } });
+    const viewOnly = workspace("view", { shareView: { shareId: "share-1", granterEmail: null, access: "view" } });
+    for (const other of [ended, viewOnly]) {
+      expect(sentNoticePlace(shared(controls), [here, other], "notes"))
+        .toEqual({ kind: "workspace", workspace: here, path: "shared-with-me/owner/Tasks/automations.yaml", mount: "owner" });
+    }
+    // An Edit share held only as a read-only folder opens as its own workspace.
+    const editMount = workspace("notes", { shareMounts: [{ shareId: "share-1", label: "owner", granterEmail: null, access: "edit" }] });
+    expect(sentNoticePlace(shared(controls), [editMount], "notes")).toEqual({ kind: "share", shareId: "share-1", path: "Tasks/automations.yaml" });
+    expect(sentNoticePlace(shared({ path: "Tasks/day-1.md" }), [editMount], "notes"))
+      .toEqual({ kind: "workspace", workspace: editMount, path: "shared-with-me/owner/Tasks/day-1.md", mount: "owner" });
+  });
+
   it("offers to add a share this computer does not hold", () => {
     expect(sentNoticePlace(shared({ path: "trip/day-1.md" }), [workspace("notes")], "notes"))
       .toEqual({ kind: "share", shareId: "share-1", path: "trip/day-1.md" });

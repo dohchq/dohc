@@ -1,5 +1,5 @@
 import {shareAccessLabel, shareSubjectFallback} from "@dohc/security-contract/share-labels";
-import { automationFailureBodyForPermission, AUTOMATION_SWITCHED_OFF_BODY } from "@dohc/automation-executor/automation-failed-notice";
+import { automationFailureBodyForPermission, isSwitchedOffBody } from "@dohc/automation-executor/automation-failed-notice";
 import { createHash } from "node:crypto";
 import {
   AUTOMATION_WAKE_PREFIX,
@@ -142,7 +142,7 @@ export function postNotice(storage: StorageContext, input: PostNoticeInput): voi
     sweepExpiredNotices(storage, input.recipientUserId, input.nowMs);
     makeRoom(storage, input.recipientUserId, self ? null : input.senderUserId, input.nowMs);
     let body = input.body;
-    if (input.kind === "automation-failed" && body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)) {
+    if (input.kind === "automation-failed" && isSwitchedOffBody(body)) {
       const workspaceId = placement.workspaceId ?? storage.getShare(placement.recipientShareId)?.workspaceId;
       const isOwner = workspaceId !== undefined && storage.workspaceIsOwnedBy(workspaceId, input.recipientUserId);
       const canEdit = workspaceId !== undefined && (isOwner ||

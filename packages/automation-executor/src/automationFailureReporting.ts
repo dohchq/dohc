@@ -35,7 +35,7 @@ export async function reportAutomationFailure(
     ...[...people].map((recipientUserId) => ({ recipientUserId })),
   ];
   const { run: _run, ...target } = notice.target;
-  const copy = { ...notice, body: automationFailedElsewhereBody(report.failure, report.name), target };
+  const copy = { ...notice, body: automationFailedElsewhereBody(report.failure, report.name, report.ownerSwitchesOnly), target };
   for (const recipient of recipients) {
     try {
       await dependencies.post({ ...copy, ...recipient });

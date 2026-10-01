@@ -90,6 +90,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
   let current = file;
   let holdsUnreadable = options.holdsUnreadable ?? false;
   const failureListeners: Array<(event: { workspaceId: string }) => void> = [];
+  const changeListeners = new Set<(event: { workspaceId: string }) => void>();
   const hostListeners = new Set<(workspaceId: string) => void>();
   const written: WriteCollectionAutomationsPayload[] = [];
   const writeResults: WriteCollectionAutomationsResult[] = [];
@@ -152,6 +153,10 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
       return () => undefined;
     }),
     onAutomationHoldsChanged: vi.fn((_listener: (event: { workspaceId: string }) => void) => () => undefined),
+    onCollectionAutomationsChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
+      changeListeners.add(listener);
+      return () => changeListeners.delete(listener);
+    }),
     readScheduleHost: vi.fn(async (_payload: { workspaceId: string }): Promise<ScheduleHostResult> => ({ kind: "this-computer" })),
     onScheduleHostChanged: vi.fn((listener: (workspaceId: string) => void) => {
       hostListeners.add(listener);
@@ -169,11 +174,15 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
     current = next;
     for (const listener of failureListeners) listener({ workspaceId: "ws-1" });
   };
+  // Main says this workspace's automations changed, as after a hand edit.
+  const automationsChanged = (workspaceId: string) => {
+    for (const listener of changeListeners) listener({ workspaceId });
+  };
   // Main says which computer runs schedules changed, as after a handover.
   const hostChanged = (workspaceId: string) => {
     for (const listener of hostListeners) listener(workspaceId);
   };
-  return { bridge, written, writeResults, replaceFile, hostChanged };
+  return { bridge, written, writeResults, replaceFile, hostChanged, automationsChanged };
 }
 
 const ignoreError = () => undefined;
@@ -241,6 +250,18 @@ describe("the ⚡ panel", () => {
       automations: [{ ...stamp, enabled: false }, nudge],
     });
     await waitFor(() => expect(within(screen.getByTestId("automation-stamp")).getByRole("switch").getAttribute("aria-checked")).toBe("false"));
+  });
+
+  it("reads the list again when main says this workspace's automations changed", async () => {
+    const { bridge, automationsChanged } = makeBridge(read([summary(stamp)]));
+    render(<Panel />);
+    await screen.findByTestId("automation-stamp");
+    const reads = bridge.listCollectionAutomations.mock.calls.length;
+    act(() => automationsChanged("ws-other"));
+    expect(bridge.listCollectionAutomations).toHaveBeenCalledTimes(reads);
+    bridge.listCollectionAutomations.mockResolvedValue(read([summary(stamp), summary(nudge)]));
+    act(() => automationsChanged("ws-1"));
+    expect(await screen.findByTestId("automation-nudge")).toBeTruthy();
   });
 
   it("asks once before it lays out a file with comments, then saves with the person's agreement", async () => {
