@@ -18,9 +18,14 @@ vi.mock("@dohc/workspace-engine-client/daemon", async (importOriginal) => ({
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
-  for (const close of cleanup.splice(0).reverse()) await close();
+  // Every cleanup runs even after one fails; the first failure is reported once all have run.
+  let failure: { error: unknown } | undefined;
+  for (const close of cleanup.splice(0).reverse()) {
+    try { await close(); } catch (error) { failure ??= { error }; }
+  }
   spawn.mockReset();
   closeTestStorages();
+  if (failure) throw failure.error;
 });
 
 const WORKSPACE = "workspace-trip";
