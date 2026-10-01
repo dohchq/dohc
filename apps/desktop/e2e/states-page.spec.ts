@@ -66,38 +66,47 @@ function mismatch(expected: Pixels, actual: Pixels): string | null {
   return differing === 0 ? null : `differs in ${differing} pixels`;
 }
 
+// The baselines are in CSS pixels, whatever the display's scale.
+const CSS_PIXELS = { scale: "css" } as const;
+const STILL_CAPTURES = 20;
+
 // Captures the whole page until two captures in a row are equal, so no part
-// is compared while the page is still settling. Bounded by the test timeout.
+// is compared while the page is still settling.
 async function waitForStillPage(page: Page): Promise<void> {
-  let previous = decode(await page.screenshot());
-  for (;;) {
-    const next = decode(await page.screenshot());
-    if (mismatch(previous, next) === null) return;
+  let previous = decode(await page.screenshot(CSS_PIXELS));
+  let difference: string | null = null;
+  for (let captures = 1; captures < STILL_CAPTURES; captures += 1) {
+    const next = decode(await page.screenshot(CSS_PIXELS));
+    difference = mismatch(previous, next);
+    if (difference === null) return;
     previous = next;
   }
+  throw new Error(`the page did not settle in ${STILL_CAPTURES} captures; the last one ${difference}`);
 }
 
 // Compares a capture with its baseline and honors --update-snapshots the
 // way Playwright does: `missing` writes an absent baseline and still fails,
-// `changed` rewrites a differing one, `all` rewrites every one. A failed
-// comparison leaves the capture beside the test output as `<name>-actual.png`.
+// `changed` writes an absent or differing one and passes, `all` writes every
+// one and passes. A failure leaves the capture beside the test output as
+// `<name>-actual.png`.
 async function compareWithBaseline(name: string, actual: Buffer): Promise<string | null> {
   const info = test.info();
   const path = info.snapshotPath(`${name}.png`);
   const mode = info.config.updateSnapshots;
   const baseline = existsSync(path) ? readFileSync(path) : null;
   const difference = baseline ? mismatch(decode(baseline), decode(actual)) : null;
-  const update = mode === "all" || (mode === "changed" && difference !== null) || (baseline === null && mode !== "none");
-  if (update) {
+  const write = baseline === null ? mode !== "none" : mode === "all" || (mode === "changed" && difference !== null);
+  if (write) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, actual);
   }
-  if (baseline === null) return `${name} has no baseline${update ? "; one was written, run again" : ""}`;
-  if (difference === null || update) return null;
+  const pass = baseline === null ? mode === "changed" || mode === "all" : difference === null || write;
+  if (pass) return null;
   const actualPath = info.outputPath(`${name}-actual.png`);
   writeFileSync(actualPath, actual);
   await info.attach(`${name}-actual`, { path: actualPath, contentType: "image/png" });
-  return `${name} ${difference}; the capture is at ${actualPath}`;
+  const reason = baseline === null ? `has no baseline${write ? "; one was written, run again" : ""}` : difference;
+  return `${name} ${reason}; the capture is at ${actualPath}`;
 }
 
 async function withDesktop(
@@ -256,6 +265,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
         const capture = await page.screenshot({
+          ...CSS_PIXELS,
           clip: { x: box.x - BLEED, y: box.y - BLEED, width: box.width + 2 * BLEED, height: box.height + 2 * BLEED },
         });
         const failure = await compareWithBaseline(`${name}-${theme}`, capture);
