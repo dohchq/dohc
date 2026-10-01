@@ -145,6 +145,88 @@ function daemonRefusal(
 }
 
 describe("EngineWorkspaceSessions", () => {
+  it("preserves recovery already spent across a healthy capture wait and subsequent region calls", async () => {
+    const workspace = await tempWorkspace(), client = new MockClient("capture-budget");
+    let now = 0;
+    const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, { now: () => now });
+    const failure = new Error("Earlier recovery failure.");
+    const refusal = daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
+    await sessions.run(workspace, async () => undefined);
+    vi.useFakeTimers();
+    try {
+      const run = sessions.withRetryBudget(1_000, async () => {
+        now = 100;
+        await sessions.run(workspace, async () => { throw failure; }).catch(() => {});
+        now = 300;
+        let attempts = 0;
+        await sessions.run(workspace, async () => {
+          if (++attempts === 1) throw refusal;
+        }, { retryInitialCapture: true });
+        now = 100_999;
+        await sessions.run(workspace, async () => "still inside recovery budget");
+        now = 101_100;
+        await sessions.run(workspace, async () => "must not start");
+      });
+      const rejected = expect(run).rejects.toMatchObject({
+        name: "EngineWorkspaceRetryDeadlineError", measuredMs: 1_000,
+        totalWaitedMs: 101_100, failedAttempts: 1, cause: failure,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      now = 100_300;
+      client.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
+      await rejected;
+      expect(vi.getTimerCount()).toBe(0);
+      expect(client.eventSubscriberCount).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      await sessions.closeAll();
+    }
+  });
+
+  it("aborts one capture wait without cancelling another and drains its subscriptions and timer", async () => {
+    const workspace = await tempWorkspace(), client = new MockClient("capture-abort");
+    const changed = new Set<() => void>();
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+      onClientChanged: handler => {
+        changed.add(handler);
+        return () => { changed.delete(handler); };
+      },
+    });
+    const controller = new AbortController();
+    const refusal = daemonRefusal("OVERLOADED", "Workspace is still updating. Try again.", "afterBackoff");
+    await sessions.run(workspace, async () => undefined);
+    vi.useFakeTimers();
+    try {
+      const cancelled = sessions.withRetryBudget(6_000, () => sessions.run(workspace,
+        async () => { throw refusal; }, { retryInitialCapture: true }), controller.signal);
+      const rejected = expect(cancelled).rejects.toBe(refusal);
+      let attempts = 0;
+      const surviving = sessions.withRetryBudget(6_000, () => sessions.run(workspace,
+        async () => {
+          if (++attempts === 1) throw refusal;
+          return "ready";
+        }, { retryInitialCapture: true }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(2);
+      expect(client.eventSubscriberCount).toBe(2);
+      controller.abort();
+      await rejected;
+      expect(vi.getTimerCount()).toBe(1);
+      expect(client.eventSubscriberCount).toBe(1);
+      expect(changed.size).toBe(1);
+      client.emit({ seq: 1, sessionGeneration: 1, name: "capture.initialSettled", payload: { workspaceId: workspace.workspaceId } });
+      await expect(surviving).resolves.toBe("ready");
+      expect(vi.getTimerCount()).toBe(0);
+      expect(client.eventSubscriberCount).toBe(0);
+      expect(changed.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      await sessions.closeAll();
+    }
+  });
+
   it.each([
     ["binding close", "deadline"],
     ["client replacement", "deadline"],
@@ -2932,6 +3014,54 @@ describe("EngineWorkspaceSessions", () => {
     // `keeps retrying work outside a bounded region at quit` is the other
     // half of this contract.
     const ABANDONABLE = 60_000;
+
+    it("observes shutdown raised synchronously while a backoff starts", async () => {
+      const workspace = await tempWorkspace(), client = new MockClient("shutdown-start");
+      const failure = transportFailure();
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+        sleep: () => {
+          sessions.beginShutdown();
+          return new Promise<void>(() => {});
+        },
+      });
+      let attempts = 0;
+      await expect(sessions.withRetryBudget(ABANDONABLE, () => sessions.run(workspace,
+        async () => { attempts += 1; throw failure; }, { retryTransportErrors: true }))).rejects.toBe(failure);
+      expect(attempts).toBe(1);
+      await sessions.closeAll();
+    });
+
+    it("clears a real bounded backoff timer at shutdown", async () => {
+      const workspace = await tempWorkspace(), client = new MockClient("shutdown-timer");
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
+      const failure = transportFailure();
+      await sessions.run(workspace, async () => undefined);
+      vi.useFakeTimers();
+      try {
+        const run = sessions.withRetryBudget(ABANDONABLE, () => sessions.run(workspace,
+          async () => { throw failure; }, { retryTransportErrors: true }));
+        const rejected = expect(run).rejects.toBe(failure);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(vi.getTimerCount()).toBe(1);
+        sessions.beginShutdown();
+        await rejected;
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+        await sessions.closeAll();
+      }
+    });
+
+    it("preserves an injected sleep rejection without wrapping it", async () => {
+      const workspace = await tempWorkspace(), client = new MockClient("sleep-refusal");
+      const sleepFailure = new Error("Injected sleep failed.");
+      const sessions = new EngineWorkspaceSessions({ currentClient: () => client }, {
+        sleep: async () => { throw sleepFailure; },
+      });
+      await expect(sessions.withRetryBudget(ABANDONABLE, () => sessions.run(workspace,
+        async () => { throw transportFailure(); }, { retryTransportErrors: true }))).rejects.toBe(sleepFailure);
+      await sessions.closeAll();
+    });
 
     it("cancels an armed backoff and surfaces the transport failure", async () => {
       const workspace = await tempWorkspace("workspace-shutdown-sleep");
