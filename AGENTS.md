@@ -2,7 +2,7 @@
 
 dohc is a local-first workspace where people and their agents build on files, documents, data, chat, and apps.
 It provides sync, sharing, permissions, and history so each workflow does not have to recreate them.
-Users own their work and decide how to use it.
+Users own their work and choose their tools, agents, and workflows.
 
 We are building the MVP and have not launched with users.
 
@@ -19,11 +19,15 @@ The workspace is the primary product object. It can contain files, live document
 
 Files are the portable foundation, not the required runtime representation for every feature. Use the state model that fits the subsystem. A live document can be a Y.Doc and structured data can live in SQLite. Keep work owned, inspectable, and exportable instead of forcing all state into flat text.
 
-Design capabilities around shared work. Chat references the work, apps use explicitly exposed data, and collaborators continue within its permissions and history.
+Start with a job people need to finish. Design capabilities around how they use, change, and share its result.
+Chat references the work, apps use explicitly exposed data, and collaborators continue within its permissions and history.
 Explain each connection through a concrete user action.
 
 Product commitments describe intended behavior. Verify the current implementation before claiming a capability is available.
 Keep illustrative demos distinguishable from working product behavior.
+
+When explaining differentiation, compare a concrete workflow with the tools people already use.
+Separate product choices from demonstrated advantages. Support claims of superiority or uniqueness with evidence.
 
 A workspace must be useful to one person on one device. Team collaboration is still core: adding another person or agent should extend the same work, not require exports, copied context, or a new system.
 
@@ -66,17 +70,17 @@ If a folder and a capable agent can already do the job, dohc must earn its place
 
 ## What dohc looks like in practice
 
-Use these examples to test product proposals. A feature can use dohc's vocabulary and still miss the product.
+These examples describe intended workflows, not a list of shipped features. Use them to test product proposals.
 
 ### Plan a trip
 
 - ✅ **dohc.** A person works with an agent through files and chat, then builds the trip app they want. They share the app, files, and conversation with the group. The group and their agents can continue the same work from a phone or browser. dohc handles sync, identity, permissions, and history underneath. The trip is the work. Agent orchestration is only one possible means.
 - ❌ **Not dohc.** The person downloads a "travel team" template, configures agent roles and heartbeats, then accepts its prescribed workflow.
 
-### Build a project dashboard
+### Run a fundraiser
 
-- ✅ **dohc.** An agent builds a source-backed web app in the workspace. The app reads and updates only the files and data its owner exposed. Collaborators can inspect and edit its source. Someone without dohc can open the published URL when they have access.
-- ❌ **Not dohc.** An artifact or dashboard generator emits detached HTML with no durable source, live data boundary, history, or collaborative path forward. A polished demo is not yet a workspace.
+- ✅ **dohc.** An organizer asks their agent to build a signup app in an event workspace. Participants register through a share link. Organizers manage registrations, discuss changes, and keep editing the app's source in the same workspace. The app uses only the data and capabilities its owner exposes. dohc provides sync, access, and history.
+- ❌ **Not dohc.** The demo ends at a signup page. There is no path to store registrations, control access, or continue the work together.
 
 ### Share work in progress
 

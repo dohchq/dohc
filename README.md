@@ -1,32 +1,40 @@
 # dohc
 
-dohc is a local-first file sync and collaboration workspace for humans and agents. It syncs your files across your devices and lets you share your work with your team and your agents.
+dohc is a local-first workspace for people and their agents. It brings files, documents, data, chat, and web apps together.
 
-At a glance, it is a text editor, chat, and app runner in one. The important part is underneath: your files stay on your computer, multiplayer editing comes standard, and whenever you or your agents need history, access control, or storage, it's already there.
+The ambition is a work suite you can reshape with your own agents. dohc supplies sync, sharing, permissions, and history. You own the work.
 
 [Download a build](https://github.com/dohc-ai/dohc/releases) or [run it from source](#run-it-from-source).
 
 ## Why this exists
 
-This whole AI thing is still new and we're still trying to figure out how agents should fit into real work. So far, we mostly end up trying to bolt agents onto our old workflows with mixed success. We built dohc to help us figure this out by staying out of the way, assuming nothing about how you work, and building on the tools you already use.
+Agents can build useful tools, but making those tools usable by a group still takes work. Someone must connect the data, set up access, share the result, and keep it working as needs change.
 
-Instead of a fixed CRM, project process, or agent-team template, dohc provides building blocks. It handles the boring parts: file sync, history, identity, permissions, storage, hosting, and app isolation. With those parts handled, you and your agents go straight to the work itself.
+dohc is being built to provide those common parts in one workspace. You and your agents decide what to build, using familiar files, documents, and web apps.
 
 Agents now write much of the software people run, and few people read it. The more an agent builds for you, the more you depend on the layer underneath. dohc owns that layer. Sync, history, permissions, and app isolation work the same whether a person or an agent made the change, so you can let an agent build an app without reading its code to know what data it can reach.
 
-Lastly, working with an agent resembles collaborating with another person: communicating with natural language and building on shared context. That is why dohc is multiplayer by design: humans and agents share one workspace. One person can use dohc as a personal workspace and can easily share their work when they're ready.
+Our bet is that keeping the app's source, data, and discussion together makes the work easier to use, change, and hand over. A workspace should be useful alone and let another person or agent continue the same work when you share it.
+
+### Intended example: a fundraiser
+
+Your agent builds a signup app. Participants register from their phones through a share link. Organizers manage registrations, discuss changes, and edit the app in the same event workspace.
+
+The app's source and registration data stay with the project so another organizer and their agent can continue it.
 
 ## Agents and workspace apps
 
 dohc is agent agnostic. It does not provide an agent or prescribe how agents should work. A human, agent, or script can change the same workspace through the access each user configures.
 
-Workspace apps are web apps whose source lives in the workspace. An app can read and update only the files and data its owner exposes. Collaborators can inspect and edit the source with their own tools and agents.
+Workspace apps are web apps whose source lives in the workspace. Collaborators can inspect and edit the source with their own tools and agents. Apps receive only the workspace data and capabilities their owner exposes.
 
-The plan is to make published apps available through normal web URLs, including for people who do not use dohc. App publishing and its permission model are still under development.
+Published apps can be opened through a share link by people who do not use dohc, subject to the owner's access settings. Publishing from the packaged desktop requires Windows x64 and a self-hosted server with app publishing enabled. It is disabled in the default server bundle; see the [self-hosting guide](docs/how-to/self-host.md).
+
+Apps can use approved Collection data through the operations their owner grants. Creating local Collection-backed apps currently requires the Windows x64 desktop build. See the [app backend guide](docs/how-to/app-backend.md) for data, sharing, and current limits, and the [desktop capability requirements](docs/reference/desktop-capabilities.md) for platform and service limits.
 
 ## Where it is today
 
-dohc is pre-launch and under active development. Expect missing pieces, rough edges, and breaking changes.
+dohc is pre-launch and under active development. We have not proved these workflow benefits with users yet. Expect missing pieces, rough edges, and breaking changes.
 
 The desktop app currently includes:
 
