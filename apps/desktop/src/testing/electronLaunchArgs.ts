@@ -20,6 +20,8 @@ export function electronLaunchArgs(input: {
   mainEntry: string;
   /** Per-run user data directory. Must be unique to the run. */
   userDataDir: string;
+  /** Extra Chromium switches a test needs, such as `--disable-gpu`. */
+  switches?: string[];
   platform?: NodeJS.Platform;
 }): string[] {
   const platform = input.platform ?? process.platform;
@@ -28,6 +30,7 @@ export function electronLaunchArgs(input: {
     "--dohc-isolated-test",
     // Chromium's sandbox needs privileges the CI containers do not grant.
     ...(platform === "linux" ? ["--no-sandbox"] : []),
+    ...(input.switches ?? []),
     // Electron takes the first non-switch argument as the app to run, so the
     // entry stays last.
     input.mainEntry,

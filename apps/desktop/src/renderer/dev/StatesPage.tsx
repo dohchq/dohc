@@ -316,10 +316,10 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="chips" title="Chips">
         <Specimen label="pill: neutral, success, warning, danger, agent">
           <Pill>12</Pill>
-          <Pill className="text-success">Synced</Pill>
-          <Pill className="text-warning">Waiting</Pill>
-          <Pill className="text-danger">2 conflicts</Pill>
-          <Pill className="text-agent">Agent</Pill>
+          <Pill tone="success">Synced</Pill>
+          <Pill tone="warning">Waiting</Pill>
+          <Pill tone="danger">2 conflicts</Pill>
+          <Pill tone="agent">Agent</Pill>
         </Specimen>
         <Specimen label="kbd">
           <kbd className={KBD}>Ctrl</kbd>
