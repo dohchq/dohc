@@ -76,7 +76,7 @@ pub(super) fn origin_stamp(
     )
 }
 
-/// Bounds the origin row's raw columns before reading them, then charges the
+/// Charges at least the origin row's raw columns before reading them, and the
 /// stamp's JSON as it is written. The adoption array matches SQLite's former
 /// `json_array` of the same columns byte for byte.
 pub(super) fn origin_stamp_in(
@@ -109,11 +109,17 @@ pub(super) fn origin_stamp_in(
         .optional()
         .map_err(read_sql)?;
     if let Some(length) = bootstrap {
-        if usize::try_from(length).map_err(|_| ApplicationError::Corrupt)? > budget.remaining {
-            return Err(ApplicationError::ConfiguredByteBudgetExceeded);
-        }
+        // Decoding can shrink stored JSON, so the raw read is consumed first.
+        // Serializing reuses that reservation and charges only its expansion.
+        let raw = usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?;
+        budget.charge(raw)?;
         let record = bootstrap::read_bootstrap(conn, held)?.ok_or(ApplicationError::Corrupt)?;
-        return Ok(hex_sha256(&budget.json(&record)?));
+        let bytes = restore_content::Budget {
+            remaining: raw.saturating_add(budget.remaining),
+        }
+        .json(&record)?;
+        budget.charge(bytes.len().saturating_sub(raw))?;
+        return Ok(hex_sha256(&bytes));
     }
     let json = budget.sql_json_array(
         conn,

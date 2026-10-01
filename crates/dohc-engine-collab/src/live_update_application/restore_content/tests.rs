@@ -402,7 +402,8 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
     )
     .unwrap();
     assert_eq!(hex_sha256(&origin), stamp);
-    let checkpoint_metadata = checkpoint_text + origin.len();
+    // The stamp read costs its raw columns or their serialization, whichever is larger.
+    let checkpoint_metadata = checkpoint_text + origin.len().max(bootstrap_raw(&f));
     let replay_bytes = checkpoint_metadata
         + baseline_bytes
         + history_bytes
@@ -1882,6 +1883,9 @@ fn bootstrap_origin_stamp_is_bounded_before_reading_and_keeps_its_bytes() {
         .unwrap()
         .unwrap();
     let bytes = serde_json::to_vec(&record).unwrap();
+    // Compact stored JSON serializes larger than its raw columns, so the
+    // serialization sets the cost here.
+    assert!(bytes.len() > bootstrap_raw(&f));
     assert_eq!(stamp(bytes.len()).unwrap(), hex_sha256(&bytes));
     assert!(matches!(
         stamp(bytes.len() - 1),
@@ -1904,6 +1908,171 @@ fn bootstrap_origin_stamp_is_bounded_before_reading_and_keeps_its_bytes() {
         stamp(4_000_000),
         Err(error) if !matches!(error, ApplicationError::ConfiguredByteBudgetExceeded)
     ));
+}
+
+/// The raw bytes of the bootstrap columns an origin stamp reads.
+fn bootstrap_raw(f: &Fixture) -> usize {
+    let length: i64 = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT length(CAST(bootstrap_id AS BLOB))+length(CAST(bootstrap_moment_id AS BLOB))+length(CAST(baseline_moment_relay_sequence AS BLOB))+length(CAST(baseline_registered_at_ms AS BLOB))+length(CAST(baseline_digest AS BLOB))+length(CAST(baseline_byte_length AS BLOB))+length(CAST(projected_markdown_digest AS BLOB))+length(CAST(projected_markdown_byte_length AS BLOB))+length(CAST(binding_json AS BLOB))+length(CAST(host_coordinate_json AS BLOB))+length(CAST(local_ydoc_sequence AS BLOB)) FROM live_device_bootstraps",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    usize::try_from(length).unwrap()
+}
+
+/// Decoding drops whitespace from stored bootstrap JSON without changing the
+/// stamp. Each read still consumes the raw bytes it read, so reads sharing one
+/// budget refuse at the raw boundary rather than the much smaller serialization.
+#[test]
+fn bootstrap_origin_stamp_consumes_raw_whitespace_padded_json() {
+    let f = Fixture::new("Original");
+    let held = Registration {
+        workspace_id: "workspace".into(),
+        namespace: "namespace".into(),
+        coordinate: f.host.clone(),
+        binding: f.binding.clone(),
+        live: false,
+    };
+    let stamp = |remaining: &mut usize| {
+        let mut budget = Budget {
+            remaining: *remaining,
+        };
+        let result = f
+            .store
+            .read_with(|conn| accepted_history::origin_stamp_in(conn, &held, &mut budget));
+        *remaining = budget.remaining;
+        result
+    };
+    let original = stamp(&mut 4_000_000).unwrap();
+    let pad = "replace(hex(zeroblob(100000)),'00',' ')";
+    f.store
+        .read_with(|conn| {
+            conn.execute(
+                &format!("UPDATE live_device_bootstraps SET binding_json={pad}||binding_json||{pad},host_coordinate_json=host_coordinate_json||char(10)||{pad}"),
+                [],
+            )
+        })
+        .unwrap();
+    let raw = bootstrap_raw(&f);
+    let serialized = serde_json::to_vec(
+        &f.store
+            .read_with(|conn| bootstrap::read_bootstrap(conn, &held))
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+    .len();
+    assert!(
+        raw > 300_000 && serialized < 10_000,
+        "{raw} raw, {serialized} serialized"
+    );
+    let mut remaining = 4_000_000;
+    assert_eq!(stamp(&mut remaining).unwrap(), original);
+    assert_eq!(4_000_000 - remaining, raw);
+    // Two reads fit exactly their raw cost; one byte less refuses the second.
+    let mut remaining = 2 * raw;
+    assert_eq!(stamp(&mut remaining).unwrap(), original);
+    assert_eq!(stamp(&mut remaining).unwrap(), original);
+    assert_eq!(remaining, 0);
+    let mut remaining = 2 * raw - 1;
+    assert_eq!(stamp(&mut remaining).unwrap(), original);
+    assert!(matches!(
+        stamp(&mut remaining),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+}
+
+/// An adoption row's decoded binding scopes its source reads, but the row's
+/// precharge covers only this document's sources. A damaged binding naming
+/// another object is refused before it can read that object's source.
+#[test]
+fn adoption_origin_refuses_a_redirected_binding_before_reading_its_source() {
+    let f = Fixture::new("Original");
+    let held = Registration {
+        workspace_id: "workspace".into(),
+        namespace: "namespace".into(),
+        coordinate: f.host.clone(),
+        binding: f.binding.clone(),
+        live: false,
+    };
+    let b = &f.binding;
+    let text = "adopted source";
+    let digest = hex_sha256(text.as_bytes());
+    let binding = serde_json::to_string(b).unwrap();
+    let redirected = serde_json::to_string(&LiveObjectBinding {
+        object_id: "sibling".into(),
+        ..b.clone()
+    })
+    .unwrap();
+    f.store
+        .read_with(|conn| -> rusqlite::Result<()> {
+            conn.execute_batch("PRAGMA foreign_keys=OFF")?;
+            conn.execute(
+                "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![digest, text.len() as i64, text],
+            )?;
+            // This document's real source, and a sibling's whose moment ID is a megabyte.
+            for (object, moment, order) in [
+                ("object", "adopted-source".to_owned(), 900_001),
+                ("sibling", "m".repeat(1_000_000), 900_002),
+            ] {
+                conn.execute(
+                    "INSERT INTO moments (workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,operation,after_blob_sha256,before_present,metadata_origin) VALUES ('workspace',?1,?2,'main',?3,?4,1,'write',?5,0,'api')",
+                    params![order, moment, object, b.current_path, digest],
+                )?;
+                conn.execute(
+                    "INSERT INTO ydoc_owner_base_sources (workspace_id,version_id,object_id,lineage_claim_id,path,source_moment_id,source_blob_sha256,source_byte_length) VALUES ('workspace','main',?1,?2,?3,?4,?5,?6)",
+                    params![object, b.lineage_claim_id, b.current_path, moment, digest, text.len() as i64],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO live_owner_adoptions (relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) VALUES ('namespace','adoption','workspace','main','object',?1,?2,'adopted-source',?3,?4,0,1,?3,?3,0,0,0,'null','{}',1,1)",
+                params![b.lineage_claim_id, binding, digest, text.len() as i64],
+            )?;
+            conn.execute_batch("PRAGMA foreign_keys=ON")
+        })
+        .unwrap();
+    let origin = |remaining: usize| {
+        let mut budget = Budget { remaining };
+        let result = f
+            .store
+            .read_with(|conn| adoption::read_origin_with(conn, &held, Some(&mut budget)));
+        (result, budget.remaining)
+    };
+    // The row's binding, moment, digest, terminal and ID; this document's
+    // source moment and digest; and the original snapshot digest.
+    let cost = |binding: &str| {
+        binding.len()
+            + 2 * ("adopted-source".len() + digest.len())
+            + "null".len()
+            + "adoption".len()
+            + b.lineage_claim_id.len()
+    };
+    let (valid, left) = origin(cost(&binding));
+    assert!(matches!(valid, Ok(Some(_))));
+    assert_eq!(left, 0);
+    assert!(matches!(
+        origin(cost(&binding) - 1).0,
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+    f.store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE live_owner_adoptions SET binding_json=?1",
+                [&redirected],
+            )
+        })
+        .unwrap();
+    // Reading the sibling's source would have failed as a different moment.
+    // Refusal comes first, having charged none of the sibling's megabyte.
+    let (redirected_result, left) = origin(cost(&redirected));
+    assert!(matches!(redirected_result, Err(ApplicationError::Conflict)));
+    assert_eq!(left, 0);
 }
 
 /// The adoption origin stamp keeps the escaped bytes SQLite's `json_array`

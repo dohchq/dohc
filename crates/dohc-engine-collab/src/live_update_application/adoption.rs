@@ -1577,6 +1577,15 @@ pub(super) fn read_origin_with(
     };
     let binding: LiveObjectBinding =
         serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
+    // This document selected the row, and its decoded binding scopes the
+    // source reads below. It must name this document before any of them.
+    if binding.workspace_id != b.workspace_id
+        || binding.main_version_id != b.main_version_id
+        || binding.object_id != b.object_id
+        || binding.lineage_claim_id != b.lineage_claim_id
+    {
+        return Err(ApplicationError::Conflict);
+    }
     let Some((verified_moment, verified_digest, _, _)) =
         read_adoption_source_metadata(conn, &held.namespace, &adoption_id, &binding)?
     else {
