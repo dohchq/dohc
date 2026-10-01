@@ -275,6 +275,9 @@ export function CollectionPage({
   useEffect(() => {
     void buttons?.refresh();
   }, [buttons]);
+  useEffect(() => buttons === null ? undefined : bridge().onCollectionAutomationsChanged((event) => {
+    if (event.workspaceId === workspaceId) void buttons.refresh();
+  }), [buttons, workspaceId]);
   const refreshCoalescer = useMemo(
     () => createActivityCoalescer(() => {
       void store.refresh();
