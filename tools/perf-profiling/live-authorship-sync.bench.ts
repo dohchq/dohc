@@ -2,13 +2,13 @@ import { createHash } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
 import * as Y from 'yjs';
-import { markdownToYDoc } from '../../packages/ydoc-projection/src/import-export.js';
-import { createLiveMarkdownJournalValidator } from '../../packages/ydoc-projection/src/liveDocumentValidation.js';
+import { markdownToYDoc, yDocToMarkdown } from '../../packages/ydoc-projection/src/import-export.js';
+import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from '../../packages/ydoc-projection/src/liveDocumentValidation.js';
 import { registered, cleanupLiveDeliveryFixtures, policy } from '../../packages/ydoc-projection/src/liveCommittedDeliveryTestSupport.js';
 import { liveJournalCheckpointDue } from '../../services/sync-relay/src/storage/liveJournalCheckpoint.js';
 import type { StorageContext } from '../../services/sync-relay/src/storage/context.js';
 import type { LiveUpdateJournalCommitInput, LiveUpdateJournalCutResult, RelayLiveUpdateJournalResult } from '../../services/sync-relay/src/storage/types.js';
-import type { LiveDocumentKey } from '@dohc/live-session-contract/live-update-admission';
+import type { LiveDocumentKey, LiveUpdateStructRange } from '@dohc/live-session-contract/live-update-admission';
 
 export interface JournalAdapter {
   commit(storage: StorageContext, input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult;
@@ -23,6 +23,7 @@ export async function runAdmissionBenchmark(settings: Settings, adapters: Record
   const baselineDoc = markdownToYDoc('Hello', { clientID: 101 });
   const baselineBytes = Y.encodeStateAsUpdate(baselineDoc); baselineDoc.destroy();
   const validate = createLiveMarkdownJournalValidator(policy);
+  const validateCheckpoint = createLiveMarkdownRegistrationValidator(policy);
   const runs: Awaited<ReturnType<typeof run>>[] = [];
   let fixtureDigest: string | undefined;
   async function run(label: 'before' | 'after', count: number, warmup: boolean, pair: number) {
@@ -31,6 +32,7 @@ export async function runAdmissionBenchmark(settings: Settings, adapters: Record
     const adapter = adapters[label];
     const admissionMs: number[] = [], transactionMs: number[] = [], checkpointAdmissionMs: number[] = [];
     const fixtureHash = createHash('sha256').update(baselineBytes);
+    let checkpoint: { digest: string; ranges: readonly LiveUpdateStructRange[] } | undefined;
     let transactionDuration = 0, transactionCalls = 0, checkpointCount = 0;
     const originalTx = context.tx.bind(context);
     try {
@@ -47,6 +49,8 @@ export async function runAdmissionBenchmark(settings: Settings, adapters: Record
       }) as StorageContext['tx'];
       for (let index = 0; index < count; index++) {
         const account = index % 8, accountId = 'bench-account-' + account;
+        const predecessor = Y.encodeStateAsUpdate(f.doc);
+        const predecessorVector = Y.decodeStateVector(Y.encodeStateVector(f.doc));
         f.doc.clientID = 1000 + account;
         const updateBytes = f.update('bench-field-' + account, 'value-' + String(index).padStart(5, '0'));
         const actor = { kind: 'named' as const, grantId: 'bench-grant-' + account, userId: accountId };
@@ -54,14 +58,27 @@ export async function runAdmissionBenchmark(settings: Settings, adapters: Record
         if (current.kind !== 'current') throw Error('Current binding refused: ' + JSON.stringify(current));
         const cut = adapter.read(context, { document: f.input.evidence.document });
         if (cut.kind !== 'cut') throw Error('Cut refused: ' + JSON.stringify(cut));
-        const validation = validate({ document: cut.cut.document, currentPath: cut.cut.currentPath, checkpoint: cut.cut.checkpoint.bytes, suffix: cut.cut.suffix.map(row => row.bytes), candidate: updateBytes });
-        if (validation.kind !== 'accepted') throw Error('Fixture validation refused: ' + JSON.stringify(validation));
+        if (checkpoint?.digest !== cut.cut.checkpoint.digest) {
+          const registeredCheckpoint = validateCheckpoint({ document: cut.cut.document, currentPath: cut.cut.currentPath, checkpoint: cut.cut.checkpoint.bytes });
+          if (registeredCheckpoint.kind !== 'accepted') throw Error('Fixture checkpoint refused at ' + index + ': ' + JSON.stringify(registeredCheckpoint));
+          checkpoint = {digest: cut.cut.checkpoint.digest, ranges: registeredCheckpoint.evidence.checkpoint.ranges};
+        }
+        const admittedVector = new Map<number, number>();
+        for (const range of [...checkpoint.ranges, ...cut.cut.suffix.flatMap(row => row.metadata.firstSeen)])
+          admittedVector.set(range.clientId, Math.max(admittedVector.get(range.clientId) ?? 0, range.endClock));
+        if (admittedVector.size !== predecessorVector.size || [...admittedVector].some(([client, clock]) => predecessorVector.get(client) !== clock))
+          throw Error('Fixture predecessor differs from the admitted prefix at ' + index);
+        // The fixture document holds exactly the previously admitted updates in order.
+        const validation = validate({ document: cut.cut.document, currentPath: cut.cut.currentPath, checkpoint: predecessor, suffix: [], candidate: updateBytes });
+        if (validation.kind !== 'accepted') throw Error('Fixture validation refused at ' + index + ': ' + JSON.stringify(validation));
+        if (validation.evidence.projectedMarkdownSha256 !== sha(yDocToMarkdown(f.doc)))
+          throw Error('Fixture projection differs from its validated update at ' + index);
         const authorContext = { kind: 'account' as const, accountId, agent: { agentId: 'bench-agent-' + account, agentName: 'Agent ' + account, onBehalfOf: accountId, depth: 1 } };
         const common = { host: current.host, actor, expectedAuthority: current.authority, cutToken: cut.cut, updateBytes, receivedAtMs: 1000 + index };
         const evidence = validation.evidence, candidate = evidence.candidate;
         const due = liveJournalCheckpointDue(cut.cut.suffixCount + 1, cut.cut.suffixBytes + updateBytes.byteLength);
         const ownedEvidence = { version: evidence.version, document: evidence.document, currentPath: evidence.currentPath,
-          checkpointDigest: evidence.checkpointDigest, checkpointRanges: evidence.checkpointRanges, suffixDigests: evidence.suffixDigests,
+          checkpointDigest: checkpoint.digest, checkpointRanges: checkpoint.ranges, suffixDigests: cut.cut.suffix.map(row => row.digest),
           stateUpdateSha256: evidence.stateUpdateSha256, stateUpdateByteLength: evidence.stateUpdateByteLength,
           ...(due ? { stateUpdate: evidence.stateUpdate } : {}) };
         const v2Candidate = { updateDigest: candidate.updateDigest, ranges: candidate.ranges, firstSeen: candidate.firstSeen, firstSeenDeletes: candidate.firstSeenDeletes };
@@ -96,7 +113,7 @@ export async function runAdmissionBenchmark(settings: Settings, adapters: Record
     for (const label of order) runs.push(await run(label, settings.updates, false, pair + 1));
   }
   const result = { status: 'passed', finishedAt: new Date().toISOString(), platform: process.platform, architecture: process.arch, node: process.version, statistics: { quantiles: 'nearest rank' },
-    scope: 'Relay commitLiveUpdateJournal admission call and its single SQLite transaction. Registration, update construction, cut reads, ordered Yjs validation, fixture hashing, receipt assertions and host application are excluded from timing.',
+    scope: 'Relay commitLiveUpdateJournal admission call and its single SQLite transaction. Registration, update construction, cut reads, Yjs validation, fixture hashing, receipt assertions and host application are excluded from timing. Validation uses the fixture document containing the exact admitted prefix as its predecessor state, then binds its evidence to the stored checkpoint and suffix digests. It does not replay the full suffix for each update.',
     fixture: { version: 1, baselineClientId: 101, accounts: 8, agents: 8, clientIds: [1000,1001,1002,1003,1004,1005,1006,1007], sha256: fixtureDigest,
       edit: 'Rotate eight named accounts and fixed account client IDs; replace each account frontmatter field with value- plus the zero-padded update index.', baselineSha256: sha(baselineBytes) },
     settings: { ...settings, resultPath: undefined, validatorPolicy: policy, freshSqlitePerRun: true, baselineSchema: 'Current schema, preserved v1 admission implementation' },
