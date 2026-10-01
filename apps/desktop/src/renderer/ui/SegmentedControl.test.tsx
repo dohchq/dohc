@@ -118,6 +118,41 @@ describe("SegmentedControl", () => {
     expect(checked()).toEqual(["Medium"]);
   });
 
+  it("moves from the focused radio when the chosen one is disabled", async () => {
+    const user = userEvent.setup();
+    const options = SIZES.map((option) => (option.value === "small" ? { ...option, disabled: true } : option));
+    render(<Harness options={options} initial="small" />);
+
+    radio("Medium").focus();
+    await user.keyboard("{ArrowRight}");
+    expect(checked()).toEqual(["Large"]);
+    expect(document.activeElement).toBe(radio("Large"));
+
+    cleanup();
+    render(<Harness options={options} initial="small" />);
+    radio("Medium").focus();
+    await user.keyboard("{ArrowLeft}");
+    expect(checked()).toEqual(["Large"]);
+  });
+
+  it("moves from the focused radio when no option matches the value", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<SegmentedControl<string> label="Size" value="huge" options={SIZES} onChange={onChange} />);
+    expect(checked()).toEqual([]);
+    expect(tabbable()).toEqual(["Small"]);
+
+    radio("Small").focus();
+    await user.keyboard("{ArrowRight}");
+    expect(onChange).toHaveBeenLastCalledWith("medium");
+    expect(document.activeElement).toBe(radio("Medium"));
+    await user.keyboard("{ArrowLeft}");
+    expect(onChange).toHaveBeenLastCalledWith("small");
+    radio("Small").focus();
+    await user.keyboard("{ArrowLeft}");
+    expect(onChange).toHaveBeenLastCalledWith("large");
+  });
+
   it("takes no input while the group is disabled", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();

@@ -44,10 +44,13 @@ export function SegmentedControl<T extends string>(props: {
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (props.disabled || props.options.length === 0) return;
-    const from = currentIndex >= 0 ? currentIndex : 0;
+    // The arrows move from the focused radio. The checked one can be disabled
+    // or absent, and then the tab stop is where the person started from.
+    const focused = optionRefs.current.indexOf(event.target as HTMLButtonElement);
+    const from = focused >= 0 ? focused : tabbableIndex;
     let target: number;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") target = step(from, 1);
-    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") target = step(from, -1);
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") target = step(Math.max(from, 0), -1);
     else if (event.key === "Home") target = firstEnabled;
     else if (event.key === "End") target = step(0, -1);
     else return;
