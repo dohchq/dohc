@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { buildRelay } from "../../../../services/sync-relay/scripts/build.mjs";
+import { stableJsonStringify } from "../../../../services/sync-relay/src/canonicalJson";
 import * as Y from "yjs";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { VersionedLiveAdapter, WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
@@ -344,7 +345,7 @@ async function expectTwoDaemonFileSync(input: {
   }
 }
 
-it.skipIf(engine.missing).each(["new", "legacy"] as const)(
+it.skipIf(engine.missing).each(["new", "legacy", "accepted"] as const)(
   "syncs a %s hand-made Collection record with local human History through the real relay",
   async (queueStyle) => {
     const workspaceId = "two-daemon-human-record-" + queueStyle;
@@ -384,15 +385,16 @@ it.skipIf(engine.missing).each(["new", "legacy"] as const)(
       if ("kind" in record) throw new Error(record.reason);
       const local = (await capture.listMoments({ limit: 100 })).moments.find(moment => moment.path === record.path);
       expect(local?.authors).toEqual([person]);
-      if (queueStyle === "legacy") {
-        // A pre-fix build journaled the local human list. Restore that wire
-        // row with the daemon stopped, then retry it through the real relay.
+      if (queueStyle !== "new") {
+        // Restore an older build's wire row with the daemon stopped.
+        // Accepted agent rows also exist remotely, with a lost acknowledgement.
+        if (queueStyle === "accepted") expect((await relay.push()).pushed).toBeGreaterThan(0);
         await capture.stop();
         await owner.close();
         capture = undefined;
         owner = undefined;
         const legacyAuthors = [
-          person,
+          ...(queueStyle === "legacy" ? [person] : []),
           { kind: "agent", agentId: "signed-out-agent", onBehalfOf: "local:123" },
           { kind: "automation", automationId: "signed-out-rule", onBehalfOf: "local:456", depth: 1 },
         ];
@@ -403,9 +405,27 @@ it.skipIf(engine.missing).each(["new", "legacy"] as const)(
           ).run(JSON.stringify(legacyAuthors), workspaceId, record.path);
           expect(restored.changes).toBe(1);
           const row = db.prepare(
-            "SELECT payload_json FROM replication_log WHERE workspace_id=? AND op_kind='moment.append' AND json_extract(payload_json, '$.path')=?",
-          ).get(workspaceId, record.path) as { payload_json: string };
+            "SELECT origin_id, origin_seq, payload_json FROM replication_log WHERE workspace_id=? AND op_kind='moment.append' AND json_extract(payload_json, '$.path')=?",
+          ).get(workspaceId, record.path) as { origin_id: string; origin_seq: number; payload_json: string };
           expect(JSON.parse(row.payload_json).authors).toEqual(legacyAuthors);
+          // Older Rust builds also serialized the entire row with sorted keys.
+          row.payload_json = stableJsonStringify(JSON.parse(row.payload_json));
+          expect(db.prepare(
+            "UPDATE replication_log SET payload_json=? WHERE workspace_id=? AND origin_id=? AND origin_seq=?",
+          ).run(row.payload_json, workspaceId, row.origin_id, row.origin_seq).changes).toBe(1);
+          if (queueStyle === "accepted") {
+            const relayDb = new DatabaseSync(relayServer.dbPath);
+            try {
+              expect(relayDb.prepare(
+                "UPDATE sync_relay_log SET payload_json=? WHERE workspace_id=? AND origin_id=? AND origin_seq=?",
+              ).run(row.payload_json, workspaceId, row.origin_id, row.origin_seq).changes).toBe(1);
+            } finally {
+              relayDb.close();
+            }
+            expect(db.prepare(
+              "UPDATE sync_relay_push_state SET pushed_seq=? WHERE workspace_id=? AND origin_id=?",
+            ).run(row.origin_seq - 1, workspaceId, row.origin_id).changes).toBe(1);
+          }
         } finally {
           db.close();
         }
@@ -423,15 +443,15 @@ it.skipIf(engine.missing).each(["new", "legacy"] as const)(
         expect(rows.length).toBeGreaterThan(0);
         for (const row of rows) {
           const payload = JSON.parse(row.payload_json);
-          expect(payload.authors).toEqual(queueStyle === "legacy" && payload.path === record.path
-            ? [{ kind: "agent", agentId: "signed-out-agent" }, { kind: "automation", automationId: "signed-out-rule", depth: 1 }]
+          expect(payload.authors).toEqual(queueStyle !== "new" && payload.path === record.path
+            ? [{ kind: "agent", agentId: "signed-out-agent", onBehalfOf: "local:123" }, { kind: "automation", automationId: "signed-out-rule", onBehalfOf: "local:456", depth: 1 }]
             : undefined);
-          expect(row.payload_json).not.toContain("local:");
+          if (queueStyle === "new") expect(row.payload_json).not.toContain("local:");
           expect(row.payload_json).not.toContain(person.humanId);
           const stored = engineDb.prepare(
             "SELECT payload_json FROM replication_log WHERE workspace_id=? AND origin_id=? AND origin_seq=?",
           ).get(workspaceId, row.origin_id, row.origin_seq) as { payload_json: string };
-          expect(JSON.parse(stored.payload_json)).toEqual(payload);
+          expect(stored.payload_json).toBe(row.payload_json);
         }
       } finally {
         engineDb.close();

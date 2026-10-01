@@ -17,24 +17,7 @@ pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool
     let original_len = authors.len();
     authors
         .retain(|author| author.get("kind").and_then(serde_json::Value::as_str) != Some("human"));
-    let mut changed = authors.len() != original_len;
-    for author in authors.iter_mut() {
-        if matches!(
-            author.get("kind").and_then(serde_json::Value::as_str),
-            Some("agent" | "automation")
-        ) && author
-            .get("onBehalfOf")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|id| id.starts_with("local:"))
-        {
-            author
-                .as_object_mut()
-                .expect("author with kind is an object")
-                .remove("onBehalfOf");
-            changed = true;
-        }
-    }
-    if !changed {
+    if authors.len() == original_len {
         return false;
     }
     if authors.is_empty() {
@@ -43,7 +26,11 @@ pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool
             .expect("moment payload is an object")
             .remove("authors");
     }
-    changed
+    true
+}
+
+pub(crate) fn relay_person_id(id: &str) -> Option<&str> {
+    (!id.starts_with("local:")).then_some(id)
 }
 
 /// Persist repaired wire payloads before sending, preserving exact echo checks.
@@ -259,6 +246,26 @@ pub(crate) fn moment_append_payload_in_tx(
         "beforeMetadata": before_metadata,
     });
     omit_local_person_authors(&mut payload);
+    if let Some(authors) = payload
+        .get_mut("authors")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for author in authors {
+            if matches!(
+                author.get("kind").and_then(serde_json::Value::as_str),
+                Some("agent" | "automation")
+            ) && author
+                .get("onBehalfOf")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| relay_person_id(id).is_none())
+            {
+                author
+                    .as_object_mut()
+                    .expect("author with kind is an object")
+                    .remove("onBehalfOf");
+            }
+        }
+    }
     if measured_json_len(&payload)? > PAYLOAD_PACKING_TARGET_BYTES {
         payload["beforeMetadata"] = serde_json::Value::Null;
     }

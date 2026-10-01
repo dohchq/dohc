@@ -2,7 +2,7 @@ use super::*;
 use dohc_engine_domain::WriteText;
 
 #[test]
-fn outbound_authors_omit_people_and_installation_delegation() {
+fn queued_author_repair_omits_only_people() {
     let human = json!({"kind":"human","humanId":"person","onBehalfOf":"owner"});
     let agent =
         json!({"kind":"agent","agentId":"agent","onBehalfOf":"owner","agentRunId":"run","depth":3});
@@ -11,17 +11,15 @@ fn outbound_authors_omit_people_and_installation_delegation() {
     let local_agent = json!({"kind":"agent","agentId":"agent","onBehalfOf":"local:123","agentRunId":"run","depth":3});
     let local_automation =
         json!({"kind":"automation","automationId":"rule","onBehalfOf":"local:456","depth":4});
-    let bare_agent = json!({"kind":"agent","agentId":"agent","agentRunId":"run","depth":3});
-    let bare_automation = json!({"kind":"automation","automationId":"rule","depth":4});
     for (authors, expected) in [
         (json!([human]), None),
         (json!([human, agent]), Some(json!([agent]))),
         (json!([agent, automation]), Some(json!([agent, automation]))),
-        (json!([local_agent]), Some(json!([bare_agent]))),
-        (json!([local_automation]), Some(json!([bare_automation]))),
+        (json!([local_agent]), Some(json!([local_agent]))),
+        (json!([local_automation]), Some(json!([local_automation]))),
         (
             json!([human, local_agent, local_automation, agent, automation]),
-            Some(json!([bare_agent, bare_automation, agent, automation])),
+            Some(json!([local_agent, local_automation, agent, automation])),
         ),
     ] {
         let mut payload = json!({"authors": authors, "momentId":"moment"});
@@ -76,8 +74,6 @@ fn queue_legacy_moment(engine: &mut EngineStore, authors: serde_json::Value) -> 
 #[test]
 fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
     for authors in [
-        json!([{"kind":"agent","agentId":"agent","onBehalfOf":"local:123"}]),
-        json!([{"kind":"automation","automationId":"rule","onBehalfOf":"local:456","depth":1}]),
         json!([{"kind":"human","humanId":"person"}]),
         json!([{"kind":"human","humanId":"person"},{"kind":"agent","agentId":"agent","onBehalfOf":"owner"}]),
     ] {
@@ -128,6 +124,40 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
                 2004,
             )
             .expect("exact own echo must not diverge");
+    }
+}
+
+#[test]
+fn queued_agent_and_automation_authors_push_and_echo_unchanged() {
+    for authors in [
+        json!([{"kind":"agent","agentId":"agent","onBehalfOf":"local:123"}]),
+        json!([{"kind":"automation","automationId":"rule","onBehalfOf":"local:456","depth":1}]),
+    ] {
+        let (_scratch, _path, mut engine) = open_store();
+        let legacy = queue_legacy_moment(&mut engine, authors);
+        let stored = list_replication_ops(&engine, "ws", "local", -1, 10).unwrap();
+        let client = RelaySyncClient::new(FakeRelay::default());
+        client
+            .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 2001, 0)
+            .unwrap();
+        let pushed = client.transport().pushes.lock().unwrap()[0].ops.clone();
+        assert_eq!(pushed, stored);
+        assert_eq!(pushed[1].payload, legacy);
+        *client.transport().pull.lock().unwrap() = Some(PullResponse {
+            ops: stored,
+            next_cursor: 2,
+            has_more: false,
+        });
+        client
+            .pull_chat_workspace(
+                &mut engine,
+                &mut WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                2002,
+            )
+            .expect("the relay's pre-upgrade echo must still match");
     }
 }
 
