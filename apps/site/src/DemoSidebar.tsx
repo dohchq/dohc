@@ -4,6 +4,7 @@ import type {
   WorkspaceFileEntry,
 } from "../../desktop/src/ipc/bridgeContract";
 import { ChatsView } from "../../desktop/src/renderer/workbench/ChatsView";
+import { ReactionStoreProvider } from "../../desktop/src/renderer/workbench/reactionStore";
 import { EngineHistoryView } from "../../desktop/src/renderer/workbench/EngineHistory";
 import { Explorer } from "../../desktop/src/renderer/workbench/Explorer";
 import { GraphView } from "../../desktop/src/renderer/workbench/GraphView";
@@ -249,6 +250,7 @@ export function DemoSidebar(props: {
           <SearchView search={search} onOpenResult={(path) => open(path)} />
         </div>
       ) : props.activePanel === "chats" ? (
+        <ReactionStoreProvider workspaceId="marketing-demo">
         <ChatsView
           workspaceId="marketing-demo"
           workspaces={[{ workspaceId: "marketing-demo", label: "Marketing" }]}
@@ -272,6 +274,7 @@ export function DemoSidebar(props: {
             },
           ]}
         />
+        </ReactionStoreProvider>
       ) : props.activePanel === "graph" ? (
         <GraphView
           workspaceId="marketing-demo"

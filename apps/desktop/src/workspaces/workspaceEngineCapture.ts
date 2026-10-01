@@ -1,3 +1,4 @@
+import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { errorMessage } from "./workspaceError";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WatcherEvent } from "@dohc/workspace-core";
@@ -546,8 +547,10 @@ export interface WorkspaceEngineCapture {
   // the switch just deleted, and the first keystroke settles a phantom file
   // into the entered version. The disk check runs on the capture chain
   // with the version binding, so a switch cannot land between them.
+  openRecordSession(path: string): Promise<RecordEditSession>;
   openYDocSession(input: {
     path: string;
+    assertRecordWritable?: () => void;
     onRemoteUpdate: (update: Uint8Array) => void;
     onLineageReplaced?: (update: Uint8Array, recoveredPaths: string[]) => void;
     onEditRefused?: (requestId: string, message: string) => void;
@@ -1727,6 +1730,9 @@ export function createWorkspaceEngineCapture(
     // which is exactly why every version op must vacate live sessions first.
     versionId: string;
     session: RestartSafeYDocSession;
+    publicSession: WorkspaceEngineYDocProviderSession | null;
+    recordWriters: Set<Promise<void>>;
+    closing: boolean;
     // "live": healthy; sha-precise suppression, external edits captured.
     // "dead-generation": the daemon generation died; the canonical doc still
     // holds the user's text and a later op can rebuild a generation around it.
@@ -1756,6 +1762,36 @@ export function createWorkspaceEngineCapture(
     armRemovalSuppression: (expected: boolean, deletedAtMs: number) => void;
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
+
+  function borrowRecordSession(entry: LiveYDocSession): RecordEditSession {
+    const owner = entry.publicSession;
+    if (owner === null || entry.closing || entry.orphaned || entry.status === "failing-close") {
+      throw new Error("The record is closing. Try again after it closes.");
+    }
+    let release!: () => void;
+    const released = new Promise<void>(resolve => { release = resolve; });
+    entry.recordWriters.add(released);
+    let closing: Promise<void> | null = null;
+    const run = <T>(operation: () => Promise<T>): Promise<T> => {
+      if (closing !== null) return Promise.reject(new Error(`Y.Doc session for ${entry.path} is closed.`));
+      return operation();
+    };
+    const applyDecidedLocalUpdate: WorkspaceEngineYDocProviderSession["applyDecidedLocalUpdate"] =
+      (decide, onArmed, applyOptions) => run(() => owner.applyDecidedLocalUpdate(decide, onArmed, {
+        ...applyOptions, idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
+      }));
+    return {
+      applyDecidedLocalUpdate,
+      settleNow: opts => run(() => owner.settleNow(opts)),
+      close() {
+        closing ??= (async () => {
+          entry.recordWriters.delete(released);
+          release();
+        })();
+        return closing;
+      },
+    };
+  }
   // The detached locked-write debts, by path: each entry is the payment
   // routine its arming session left behind, plus the way to re-arm it. The
   // registry is what lets other lifecycle edges find a debt whose session is
@@ -2081,7 +2117,7 @@ export function createWorkspaceEngineCapture(
     onDead: () => void;
     onAlive: () => void;
     onObjectChanged: () => void;
-    onRemoteUpdate: (update: Uint8Array) => void;
+    onRemoteUpdate: (update: Uint8Array, localAcknowledgement?: boolean) => void;
     onLineageReplaced: (update: Uint8Array, recoveredPaths: string[]) => void;
     onEditRefused?: (requestId: string, message: string) => void;
     onSettled: (
@@ -2146,6 +2182,17 @@ export function createWorkspaceEngineCapture(
     const clearPendingRecords = (): void => {
       pendingRecords.clear();
       pendingUpdateBytes = 0;
+    };
+    const acknowledge = (record: PendingRecord, doc: Y.Doc): void => {
+      if (record.acknowledged) return;
+      record.acknowledged = true;
+      removePendingRecord(record);
+      Y.applyUpdate(doc, record.update);
+      Y.applyUpdate(recordedDoc, record.update);
+      if (!record.editorVisible) {
+        try { input.onRemoteUpdate(record.update, true); }
+        catch (error) { onError(`Y.Doc record update observer of ${input.path}`, error); }
+      }
     };
     let queuedUpdateBytes = 0;
     let queuedUpdateCount = 0;
@@ -2400,10 +2447,8 @@ export function createWorkspaceEngineCapture(
             onLocalUpdateAcknowledged: (id) => {
               for (const record of pendingRecords) {
                 if (record.options.idempotencyKey === id) {
-                  record.acknowledged = true;
-                  Y.applyUpdate(recordedDoc, record.update);
+                  if (canonicalDoc !== null) acknowledge(record, canonicalDoc);
                   recordedStateVector = Y.encodeStateVector(recordedDoc);
-                  removePendingRecord(record);
                 }
               }
             },
@@ -2546,10 +2591,7 @@ export function createWorkspaceEngineCapture(
           if (!pendingRecords.has(record)) continue;
           if (record.unanswered !== null) {
             if (durableUpdateCovers(replacement.initialUpdate, record.update)) {
-              record.acknowledged = true;
-              removePendingRecord(record);
-              Y.applyUpdate(doc, record.update);
-              Y.applyUpdate(recordedDoc, record.update);
+              acknowledge(record, doc);
             } else {
               const editorVisible = refuseRecord(record, record.unanswered.error, true);
               const restored = new Y.Doc();
@@ -2602,10 +2644,7 @@ export function createWorkspaceEngineCapture(
             await adoptGeneration(doc, clean, onReplayArmed);
             return;
           }
-          record.acknowledged = true;
-          removePendingRecord(record);
-          Y.applyUpdate(doc, record.update);
-          Y.applyUpdate(recordedDoc, record.update);
+          acknowledge(record, doc);
           replacementClaimId = replacement.lineageClaimId ?? replacementClaimId;
         }
         onReplayArmed?.();
@@ -2778,9 +2817,7 @@ export function createWorkspaceEngineCapture(
           const journaled = generation.applyLocalUpdate(update, applyOptions);
           armed();
           await journaled;
-          removePendingRecord(record);
-          Y.applyUpdate(doc, update);
-          Y.applyUpdate(recordedDoc, update);
+          acknowledge(record, doc);
           recordedStateVector = Y.encodeStateVector(recordedDoc);
           if (
             canonicalLineageClaimId === null &&
@@ -2834,13 +2871,13 @@ export function createWorkspaceEngineCapture(
 
     const keyedWriteNotRecorded = (cause: unknown): Error =>
       new Error(
-        `The engine did not record this write to ${input.path}, and nothing of it was kept. Retry it with the same idempotency key.`,
+        `The engine did not record this write to ${input.path}, and nothing of it was kept. Retry with the same request.`,
         { cause },
       );
 
     const keyedWriteUncertain = (cause: unknown): Error =>
       new Error(
-        `The write to ${input.path} may have been recorded. Retry it with the same idempotency key to find out; the key keeps a recorded write from applying twice.`,
+        `The write to ${input.path} may have been recorded. Read the record, then retry with the same request.`,
         { cause },
       );
 
@@ -3005,10 +3042,7 @@ export function createWorkspaceEngineCapture(
           const journaled = generation.applyLocalUpdate(update, capturedOptions);
           armed();
           await journaled;
-          record.acknowledged = true;
-          removePendingRecord(record);
-          Y.applyUpdate(doc, update);
-          Y.applyUpdate(recordedDoc, update);
+          acknowledge(record, doc);
           recordedStateVector = Y.encodeStateVector(recordedDoc);
           // A successful record can promote a local-only lineage. Retain
           // the durable claim now; later deltas change the full-state hash.
@@ -3837,143 +3871,10 @@ export function createWorkspaceEngineCapture(
     );
   }
 
-  return {
-    start() {
-      pollDaemonCaptureHealth();
-    },
+  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite: true): Promise<RecordEditSession>;
+  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite?: false): Promise<WorkspaceEngineYDocProviderSession>;
+  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite = false): Promise<WorkspaceEngineYDocProviderSession | RecordEditSession> {
 
-    captureBatch(events) {
-      if (events.length === 0) return;
-      const batch = events.map((event) => ({ ...event }));
-      // The no-debt tombstone, recorded here at
-      // watcher-delivery time rather than inside the enqueued cleanup
-      // below. A close-retry's own removal check runs off the capture
-      // chain, on its own timer, and a chain busy with reconciliation or a
-      // version op can leave the cleanup task queued behind that work for
-      // as long as it runs. A retry firing inside that window used to find
-      // no tombstone at all — nothing had recorded it yet — and resurrect
-      // the file. `detachedLockedDebts` and `expectedEvents` are plain
-      // maps a synchronous read sees exactly as fresh as the enqueued
-      // read would, so recording immediately only narrows the window.
-      //
-      // A retrying entry also gets armed directly (codex P1-C follow-up):
-      // the tombstone's own TTL (`EXPECTED_ENGINE_EVENT_EXPIRY_MS`) caps at
-      // the same 10s the close-retry ladder's doubling delay eventually
-      // reaches, so a delete landing right after one retry can otherwise
-      // expire before the next one arrives to consume it. Calling the
-      // session's own door bypasses the TTL for that session entirely —
-      // nothing here can expire, because nothing here is a map entry.
-      for (const event of batch) {
-        if (event.operation !== "delete") continue;
-        const expected = peekExpectedEvent(event.path);
-        if (!detachedLockedDebts.has(event.path)) {
-          noteExternalDeleteWithNoDebt(event.path, expected);
-        }
-        const live = liveYDocSessions.get(event.path);
-        if (live?.status === "failing-close") {
-          live.armRemovalSuppression(expected, now());
-        }
-      }
-      // Registry maintenance, not capture: the daemon performs the
-      // disk-to-engine write, but a detached debt is JS-side bookkeeping
-      // about a Y.Doc session's own close failure, and its cleanup must run
-      // for every batch (see `cleanupDetachedDebtForEvent`).
-      enqueue("detached-debt cleanup", async () => {
-        for (const event of batch) {
-          try {
-            await cleanupDetachedDebtForEvent(event);
-          } catch (error) {
-            onError(`detached-debt cleanup of ${event.path}`, error);
-          }
-        }
-      });
-    },
-
-    setActiveAgentRun(run) {
-      const pinnedAuthor = run === null ? Promise.resolve(null) : pinAuthor({ kind: "agent",
-        agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId,
-        ...(run.depth > 0 ? { depth: run.depth } : {}) });
-      return enqueueResult("daemon capture authorship", async () => {
-        const engine = await engineStore();
-        if (run === null) await engine.flushCapture?.();
-        const author = await pinnedAuthor;
-        if (author !== null && author.kind !== "agent") throw new Error("Invalid captured agent author.");
-        await engine.setCaptureAuthor?.(author);
-      });
-    },
-
-    registerExpectedEngineEvents,
-
-    writeAuthoredFile(absolutePath, content, author, writeOptions = {}) {
-      const pinnedAuthor = pinAuthor(author);
-      return enqueueResult("write authored file", async () => {
-        if (writeOptions.signal?.aborted) {
-          throw new Error("The write was cancelled.");
-        }
-        const { relative: resolvedRelative, resolvedAbsolute } =
-          await assertResolvedWorkspacePath({
-            rootPath,
-            absolutePath: resolve(absolutePath),
-            spelled: absolutePath,
-            label: "Authored text path",
-            access: "write",
-          });
-        const path = resolvedRelative.replaceAll("\\", "/");
-        await writeOptions.beforeWrite?.(resolvedAbsolute);
-        if (
-          path.length === 0 ||
-          isAbsolute(path) ||
-          path === ".." ||
-          path.startsWith("../")
-        ) {
-          throw new Error(`Authored text path escapes the workspace: ${absolutePath}.`);
-        }
-        const policy = await readPolicyForTask();
-        assertEngineWritablePath(path, policy);
-        if (writeOptions.signal?.aborted) {
-          throw new Error("The write was cancelled.");
-        }
-        const engine = await engineStore();
-        await engine.flushCapture?.();
-        const versionId = await activeVersionIdOf(engine);
-        const metadata: ActorNeutralWriteMetadata = {
-          origin: "api",
-          summary: `Updated ${pathBasename(path)}`,
-          correlationId: writeOptions.correlationId ?? `authored-write-${writeOptions.requestId ?? createId()}`,
-        };
-        try {
-          let decoded = content;
-          if (typeof content !== "string" && !content.includes(0)) {
-            try { decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content); }
-            catch { /* Invalid UTF-8 is stored as bytes. */ }
-          }
-          const input = {
-            workspaceId,
-            versionId,
-            path,
-            ...(writeOptions.requestId !== undefined ? { requestId: writeOptions.requestId } : {}),
-            ...(writeOptions.expectedContentHash !== undefined ? { expectedSha256: writeOptions.expectedContentHash } : {}),
-            ...(writeOptions.createOnly ? { createOnly: true } : {}),
-            metadata,
-            author: await pinnedAuthor,
-          };
-          const result = typeof decoded === "string"
-            ? await engine.writeTextFile({ ...input, text: decoded, publish: true })
-            : await engine.writeBinaryFile({ ...input, bytes: decoded });
-          return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome };
-        } catch (error) {
-          if (error instanceof VersionedTextStoreError && error.code === "write-precondition-failed") {
-            throw new AuthoredTextChangedError(path);
-          }
-          if (writeOptions.createOnly && error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
-            throw new VersionedTextStoreError("target-path-exists", `File already exists: ${path}`);
-          }
-          throw error;
-        }
-      });
-    },
-
-    openYDocSession(input) {
       // ON THE CAPTURE CHAIN, deliberately. The version this session
       // binds to is read here and the registry entry is written at the end,
       // with a daemon round trip in between. Off the chain, a switch/merge/
@@ -3998,7 +3899,7 @@ export function createWorkspaceEngineCapture(
         ),
       );
 
-      async function openYDocSessionTask(): Promise<WorkspaceEngineYDocProviderSession> {
+      async function openYDocSessionTask(): Promise<WorkspaceEngineYDocProviderSession | RecordEditSession> {
         // This session's own place in time, captured before anything else
         // runs: the registration door
         // (`scheduleDetachedLockedSettle`, far below) compares this against
@@ -4043,6 +3944,9 @@ export function createWorkspaceEngineCapture(
         // converged by its holder and by the version ops, and a second open
         // of it must keep refusing.
         const retained = liveYDocSessions.get(input.path);
+        if (recordWrite && retained && !retained.orphaned) {
+          return borrowRecordSession(retained);
+        }
         if (retained?.status === "failing-close" && retained.orphaned) {
           try {
             await retained.close({ settle: false });
@@ -4357,8 +4261,8 @@ export function createWorkspaceEngineCapture(
               // Observer boundary, like the save-state hook.
             }
           },
-          onRemoteUpdate: (update) => {
-            noteUpdate();
+          onRemoteUpdate: (update, localAcknowledgement) => {
+            if (!localAcknowledgement) noteUpdate();
             input.onRemoteUpdate(update);
           },
           onLineageReplaced: (update, recoveredPaths) => {
@@ -4977,6 +4881,10 @@ export function createWorkspaceEngineCapture(
         const closeEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
+          liveEntry.closing = true;
+          // An admitted record write owns no daemon lease. Keep the real
+          // owner alive until its writes and settlement finish.
+          await Promise.all(liveEntry.recordWriters);
           // THE ORPHAN'S POLICY, and it belongs to the ORPHAN rather than to
           // each caller. An orphan is a session no caller ever received: its
           // doc was seeded from neither a head nor a snapshot, so it holds
@@ -5135,6 +5043,9 @@ export function createWorkspaceEngineCapture(
           path: input.path,
           versionId,
           session,
+          publicSession: null,
+          recordWriters: new Set(),
+          closing: false,
           status: "live",
           orphaned: false,
           close: closeEntry,
@@ -5342,7 +5253,7 @@ export function createWorkspaceEngineCapture(
             reportSaveState("error", 0, "status");
           }
         }
-        return {
+        const publicSession: WorkspaceEngineYDocProviderSession = {
           get nativeOwner() { return session.nativeOwner; },
           get doc() {
             return session.doc;
@@ -5390,13 +5301,164 @@ export function createWorkspaceEngineCapture(
           },
           applyDecidedLocalUpdate: (decide, onArmed, applyOptions) => {
             noteUpdate();
-            return session.applyDecidedLocalUpdate(decide, onArmed, applyOptions);
+            return session.applyDecidedLocalUpdate(doc => {
+              input.assertRecordWritable?.();
+              return decide(doc);
+            }, onArmed, applyOptions);
           },
           settleNow: (opts) => session.settleNow(opts),
           close: closeEntry,
         };
+        liveEntry.publicSession = publicSession;
+        if (recordWrite) return {
+          applyDecidedLocalUpdate: (decide, onArmed, applyOptions) => publicSession.applyDecidedLocalUpdate(decide, onArmed, {
+            ...applyOptions, idempotencyKey: applyOptions.idempotencyKey ?? createId(),
+          }),
+          settleNow: opts => publicSession.settleNow(opts),
+          close: () => publicSession.close(),
+        } satisfies RecordEditSession;
+        return publicSession;
       }
+  }
+
+  return {
+    start() {
+      pollDaemonCaptureHealth();
     },
+
+    captureBatch(events) {
+      if (events.length === 0) return;
+      const batch = events.map((event) => ({ ...event }));
+      // The no-debt tombstone, recorded here at
+      // watcher-delivery time rather than inside the enqueued cleanup
+      // below. A close-retry's own removal check runs off the capture
+      // chain, on its own timer, and a chain busy with reconciliation or a
+      // version op can leave the cleanup task queued behind that work for
+      // as long as it runs. A retry firing inside that window used to find
+      // no tombstone at all — nothing had recorded it yet — and resurrect
+      // the file. `detachedLockedDebts` and `expectedEvents` are plain
+      // maps a synchronous read sees exactly as fresh as the enqueued
+      // read would, so recording immediately only narrows the window.
+      //
+      // A retrying entry also gets armed directly (codex P1-C follow-up):
+      // the tombstone's own TTL (`EXPECTED_ENGINE_EVENT_EXPIRY_MS`) caps at
+      // the same 10s the close-retry ladder's doubling delay eventually
+      // reaches, so a delete landing right after one retry can otherwise
+      // expire before the next one arrives to consume it. Calling the
+      // session's own door bypasses the TTL for that session entirely —
+      // nothing here can expire, because nothing here is a map entry.
+      for (const event of batch) {
+        if (event.operation !== "delete") continue;
+        const expected = peekExpectedEvent(event.path);
+        if (!detachedLockedDebts.has(event.path)) {
+          noteExternalDeleteWithNoDebt(event.path, expected);
+        }
+        const live = liveYDocSessions.get(event.path);
+        if (live?.status === "failing-close") {
+          live.armRemovalSuppression(expected, now());
+        }
+      }
+      // Registry maintenance, not capture: the daemon performs the
+      // disk-to-engine write, but a detached debt is JS-side bookkeeping
+      // about a Y.Doc session's own close failure, and its cleanup must run
+      // for every batch (see `cleanupDetachedDebtForEvent`).
+      enqueue("detached-debt cleanup", async () => {
+        for (const event of batch) {
+          try {
+            await cleanupDetachedDebtForEvent(event);
+          } catch (error) {
+            onError(`detached-debt cleanup of ${event.path}`, error);
+          }
+        }
+      });
+    },
+
+    setActiveAgentRun(run) {
+      const pinnedAuthor = run === null ? Promise.resolve(null) : pinAuthor({ kind: "agent",
+        agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId,
+        ...(run.depth > 0 ? { depth: run.depth } : {}) });
+      return enqueueResult("daemon capture authorship", async () => {
+        const engine = await engineStore();
+        if (run === null) await engine.flushCapture?.();
+        const author = await pinnedAuthor;
+        if (author !== null && author.kind !== "agent") throw new Error("Invalid captured agent author.");
+        await engine.setCaptureAuthor?.(author);
+      });
+    },
+
+    registerExpectedEngineEvents,
+
+    writeAuthoredFile(absolutePath, content, author, writeOptions = {}) {
+      const pinnedAuthor = pinAuthor(author);
+      return enqueueResult("write authored file", async () => {
+        if (writeOptions.signal?.aborted) {
+          throw new Error("The write was cancelled.");
+        }
+        const { relative: resolvedRelative, resolvedAbsolute } =
+          await assertResolvedWorkspacePath({
+            rootPath,
+            absolutePath: resolve(absolutePath),
+            spelled: absolutePath,
+            label: "Authored text path",
+            access: "write",
+          });
+        const path = resolvedRelative.replaceAll("\\", "/");
+        await writeOptions.beforeWrite?.(resolvedAbsolute);
+        if (
+          path.length === 0 ||
+          isAbsolute(path) ||
+          path === ".." ||
+          path.startsWith("../")
+        ) {
+          throw new Error(`Authored text path escapes the workspace: ${absolutePath}.`);
+        }
+        const policy = await readPolicyForTask();
+        assertEngineWritablePath(path, policy);
+        if (writeOptions.signal?.aborted) {
+          throw new Error("The write was cancelled.");
+        }
+        const engine = await engineStore();
+        await engine.flushCapture?.();
+        const versionId = await activeVersionIdOf(engine);
+        const metadata: ActorNeutralWriteMetadata = {
+          origin: "api",
+          summary: `Updated ${pathBasename(path)}`,
+          correlationId: writeOptions.correlationId ?? `authored-write-${writeOptions.requestId ?? createId()}`,
+        };
+        try {
+          let decoded = content;
+          if (typeof content !== "string" && !content.includes(0)) {
+            try { decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content); }
+            catch { /* Invalid UTF-8 is stored as bytes. */ }
+          }
+          const input = {
+            workspaceId,
+            versionId,
+            path,
+            ...(writeOptions.requestId !== undefined ? { requestId: writeOptions.requestId } : {}),
+            ...(writeOptions.expectedContentHash !== undefined ? { expectedSha256: writeOptions.expectedContentHash } : {}),
+            ...(writeOptions.createOnly ? { createOnly: true } : {}),
+            metadata,
+            author: await pinnedAuthor,
+          };
+          const result = typeof decoded === "string"
+            ? await engine.writeTextFile({ ...input, text: decoded, publish: true })
+            : await engine.writeBinaryFile({ ...input, bytes: decoded });
+          return { resolvedAbsolutePath: resolvedAbsolute, materializeOutcome: result.materializeOutcome };
+        } catch (error) {
+          if (error instanceof VersionedTextStoreError && error.code === "write-precondition-failed") {
+            throw new AuthoredTextChangedError(path);
+          }
+          if (writeOptions.createOnly && error instanceof VersionedTextStoreError && error.code === "target-path-exists") {
+            throw new VersionedTextStoreError("target-path-exists", `File already exists: ${path}`);
+          }
+          throw error;
+        }
+      });
+    },
+
+    openYDocSession: input => openSession(input),
+    openRecordSession: path => openSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined }, true),
 
     settleAndCloseLiveSessionsForPath(pathOrPrefix) {
       // Public seam for destructive ops that DON'T run through the capture chain

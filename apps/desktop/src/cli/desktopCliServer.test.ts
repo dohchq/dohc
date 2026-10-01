@@ -362,7 +362,7 @@ describe("desktop CLI workspace context", () => {
       operation.assertCurrent(); admitted.push(operation.workspace.attachmentId);
       return desktopRecordEditContext({
       personAuthor: () => ({ kind: "human", humanId: "local:test" }), workspaceRoot: operation.workspace.rootPath,
-        capture: { openYDocSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
+        capture: { openRecordSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal });
     };
     const context = await f.create().openCliWorkspace(f.workspace);
@@ -496,7 +496,7 @@ describe("desktop CLI workspace context", () => {
       entered.release(); await held.promise; operation.assertCurrent();
       return desktopRecordEditContext({
       personAuthor: () => ({ kind: "human", humanId: "local:test" }), workspaceRoot: operation.workspace.rootPath,
-        capture: { openYDocSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
+        capture: { openRecordSession: opened, writeAuthoredFile: vi.fn() }, withAdapter: async () => null,
         onCaptureSettled: () => () => undefined, signal });
     };
     const context = await f.create().openCliWorkspace(f.workspace);

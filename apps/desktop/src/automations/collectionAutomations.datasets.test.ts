@@ -613,9 +613,9 @@ describe("Collection automations on a dataset", () => {
     // The automation's own write claims nothing more for it.
     expect(f.host.history({ datasetId: definition.datasetId }).entries[0]).toMatchObject({ automation: { automationId: AUTOMATION, depth: 1 } });
     const [run] = (await createAutomationRunStore(f.root, resolveWorkspaceMetadataDir).runsOf(AUTOMATION, f.claims()[0]!.claimId)).runs;
-    expect(run!.applied).toEqual([{ ordinal: 0, writes: [expect.objectContaining({
+    expect(run!.applied).toEqual([expect.objectContaining({ ordinal: 0, writes: [expect.objectContaining({
       kind: "dataset-edit", operationId: STATUS_ONLY, recordId: invoice, fields: [{ fieldId: STATUS, field: "Status", before: "Open", after: "Closed" }],
-    })] }]);
+    })] })]);
     // Reading the run, as the CLI does, names the change that started it and step 1's edit.
     expect(await f.executor.run(AUTOMATION, f.claims()[0]!.claimId)).toMatchObject({
       state: "done",

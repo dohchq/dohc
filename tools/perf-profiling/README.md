@@ -89,12 +89,16 @@ Before the first document case, the harness scrolls the table until it holds eve
 
 - the time from the trusted mousedown to the first animation-frame callback after the settle text appeared;
 - `startMs`, from that mousedown to the run header's `startedAtMs`, which the executor sets when it creates the run, before any Find. It covers the press, the claim and loading the automation;
-- `runMs`, from `startedAtMs` to `finishedAtMs`, which covers every Find, formula evaluation and write. The executor saves no time between these, so the harness cannot split them;
+- `runMs`, from `startedAtMs` to `finishedAtMs`, which covers every Find, formula evaluation and write;
+- `findMs`, the sum of saved steps' reads and Finds, and `planMs`, their planning and formula evaluation;
+- `writeMs`, the sum of saved effects' application times, and `writes`, their completed application count. One Set effect can change several fields on one record. Kept or skipped results still count as completed applications;
 - the saved run's header and progress bytes, and the header's sampled peak;
-- CPU per process kind until the run settles. The formula evaluator runs on a worker thread in main, so its CPU is part of main CPU. The executor saves no evaluation time, so the harness reports no separate evaluator cost;
+- CPU per process kind until the run settles. The formula evaluator runs on a worker thread in main, so its CPU is part of main CPU;
 - sampled peak memory per process kind, and renderer long tasks until the settle text painted.
 
-A refused run saves no plan, so its planning and write times stay missing. Snapshots come about once a second, so a short memory or header peak can be missed.
+Stage times use the executor's clock. Step lines carry `findMs` and `planMs`; effect lines carry `writeMs` and `writeCount`. Reads include acquiring read access and checking permissions. Each effect's result append and run-level setup remain outside stage totals. Created-record and replan lines saved during effect application count toward `writeMs`. Timing adds no journal writes or flushes.
+
+A run refused before saving its first plan leaves its times and count missing. A later refusal retains measurements only for saved stages. Older journals without timing fields, and totals with an unmeasured saved stage, stay missing. The summary reports sample count, p50, p95 and maximum for each metric. Snapshots come about once a second, so a short memory or header peak can be missed.
 Soak growth includes allocator and garbage-collector timing. It is not a leak proof.
 A chat lane with a long history has no seeding path outside the product UI or the engine daemon, so the benchmark does not measure it.
 

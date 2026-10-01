@@ -225,7 +225,15 @@ export function registerAutomationButtonsIpc<
    * computer; anything less than Edit on the Collection's folder refuses all.
    */
   async function documentButtons(operation: Operation, collectionPath: string, describe: (datasetId: string) => Promise<DatasetDescription>): Promise<CollectionAutomationButton[]> {
-    const fields = await dependencies.buttonFields(operation, collectionPath);
+    let fields: string[];
+    try {
+      fields = await dependencies.buttonFields(operation, collectionPath);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "collection-not-found") throw error;
+      const schema = await dependencies.readText(operation.workspace.rootPath, `${collectionPath}/collection.yaml`);
+      if (schema === null) throw error;
+      return [];
+    }
     if (fields.length === 0) return [];
     const access = documentButtonAccess(operation.workspace.shareView, collectionPath);
     if (access === "no-access") {

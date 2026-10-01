@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
 import { bridgeMock, channel, message, thread } from "./ChatsView.testHarness";
 import { ChatLane } from "./ChatLane";
+import { ReactionStoreProvider } from "./reactionStore";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import type { WorkspaceActivityEvent } from "../../ipc/bridgeContract";
 import { configureDemoDesktopBridge } from "../../../../site/src/demoDesktopBridge";
@@ -14,9 +15,10 @@ let activity: (event: WorkspaceActivityEvent) => void;
 const onError = vi.fn();
 const onThreadRead = vi.fn();
 function lane(id = "channel-1", workspaceId = "workspace-a") {
-  return <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat" })}
-    locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0}
-    pendingReactions={{ current: new Map() }} />;
+  return <ReactionStoreProvider workspaceId={workspaceId}>
+    <ChatLane workspaceId={workspaceId} channel={channel({ id, type: "chat" })}
+      locked={false} mentionCandidates={[]} onError={onError} onThreadRead={onThreadRead} revision={0} />
+  </ReactionStoreProvider>;
 }
 function send(body: string) {
   const composer = screen.getByTestId("chats-lane-composer");

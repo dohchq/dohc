@@ -14,7 +14,6 @@ import { AUTOMATION_SWITCHED_OFF_BODY } from "@dohc/automation-executor/automati
 import { parseReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { desktopRecordEditContext, type DesktopRecordEditHost } from "../workspaces/desktopRecordEdits";
-import type { WorkspaceEngineYDocProviderSession } from "../workspaces/workspaceEngineCapture";
 import { createTestScratch } from "../workspaces/testTemp";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
@@ -414,7 +413,7 @@ async function world(options: {
   };
 
   const capture: DesktopRecordEditHost["capture"] = {
-    async openYDocSession({ path }) {
+    async openRecordSession(path) {
       opens += 1;
       if (failures.openSession > 0 || opens === failOpenAt) {
         failures.openSession = Math.max(0, failures.openSession - 1);
@@ -447,7 +446,7 @@ async function world(options: {
         async settleNow() { return { materialized: true }; },
         async close() {},
       };
-      return session as unknown as WorkspaceEngineYDocProviderSession;
+      return session;
     },
     async writeAuthoredFile(absolutePath, content, author, writeOptions) {
       const text = typeof content === "string" ? content : Buffer.from(content).toString("utf8");
@@ -2065,6 +2064,7 @@ describe("Collection automations", () => {
       claimId: claim.claimId,
       state: "failed",
       error: "The record is open in a live session elsewhere.",
+      findMs: expect.any(Number), planMs: expect.any(Number), writeMs: expect.any(Number), writeCount: 1,
       trigger: { kind: "changed", recordId: task.id, by: "agent", sharedAuthor: null, depth: 0 },
       steps: [{ step: 1, writes: [{ kind: "field", recordId: task.id, path: task.path, field: "Count", before: 0, after: 1 }] }],
       failedStep: 2,

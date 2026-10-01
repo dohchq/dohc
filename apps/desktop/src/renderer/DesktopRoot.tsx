@@ -18,6 +18,7 @@ import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useSentNotices } from "./shell/useSentNotices";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import { useStatesPageOpen } from "./dev/statesRoute";
+import { ReactionStoreProvider } from "./workbench/reactionStore";
 
 // Development only, and its own chunk: the app's bundle does not carry it.
 const LazyStatesPage = lazy(() =>
@@ -294,60 +295,63 @@ export function DesktopRoot() {
       />
     );
   }
-  if (!workspace) {
-    return (
-      <>
-        <WorkspaceManager
-          workspaces={workspaces}
-          current={null}
-          handoffStatus={shareHandoffStatus}
-          onDismissShareHandoff={dismissShareHandoff}
-          onShareHandoffOpened={dismissShareHandoff}
-          onForgot={refreshWorkspaceRegistry}
-          onOpenWorkspace={(next) => {
-            setWorkspaces((known) =>
-              known.some((entry) => entry.workspaceId === next.workspaceId)
-                ? known
-                : [...known, next],
-            );
-            setWorkspace(next);
-          }}
-        />
-        <DevPanel />
-      </>
-    );
-  }
+  // The reaction owner stays mounted across first run and every workspace
+  // switch, so a return finds its writes still in order.
   return (
-    <>
-    <DesktopWorkspaceShell
-      // Remount on switch: file list and selection are workspace-local and
-      // must never leak from workspace A into workspace B.
-      key={workspace.workspaceId}
-      workspace={workspace}
-      workspaces={workspaces}
-      userSettings={userSettings}
-      handoffStatus={shareHandoffStatus}
-      onDismissShareHandoff={dismissShareHandoff}
-      onShareHandoffOpened={dismissShareHandoff}
-      refreshWorkspaceRegistry={refreshWorkspaceRegistry}
-      onManageWorkspaces={() => bridge().openWorkspaceManager()}
-      sentNotices={sentNotices}
-      {...(openOnSwitch?.workspaceId === workspace.workspaceId
-        ? { openOnReady: openOnSwitch.open }
-        : {})}
-      onSwitchWorkspace={(next, open) => {
-        // File ▸ Open Workspace… can hand us a workspace the registry list
-        // didn't know yet — keep the switcher list complete.
-        setWorkspaces((known) =>
-          known.some((entry) => entry.workspaceId === next.workspaceId)
-            ? known
-            : [...known, next],
-        );
-        setOpenOnSwitch(open ? { workspaceId: next.workspaceId, open } : null);
-        setWorkspace(next);
-      }}
-    />
-    <DevPanel workspaceId={workspace.workspaceId} />
-    </>
+    <ReactionStoreProvider workspaceId={workspace?.workspaceId ?? null}>
+      {!workspace ? (
+        <>
+          <WorkspaceManager
+            workspaces={workspaces}
+            current={null}
+            handoffStatus={shareHandoffStatus}
+            onDismissShareHandoff={dismissShareHandoff}
+            onShareHandoffOpened={dismissShareHandoff}
+            onForgot={refreshWorkspaceRegistry}
+            onOpenWorkspace={(next) => {
+              setWorkspaces((known) =>
+                known.some((entry) => entry.workspaceId === next.workspaceId)
+                  ? known
+                  : [...known, next],
+              );
+              setWorkspace(next);
+            }}
+          />
+          <DevPanel />
+        </>
+      ) : (
+        <>
+          <DesktopWorkspaceShell
+            // Remount on switch: file list and selection are workspace-local and
+            // must never leak from workspace A into workspace B.
+            key={workspace.workspaceId}
+            workspace={workspace}
+            workspaces={workspaces}
+            userSettings={userSettings}
+            handoffStatus={shareHandoffStatus}
+            onDismissShareHandoff={dismissShareHandoff}
+            onShareHandoffOpened={dismissShareHandoff}
+            refreshWorkspaceRegistry={refreshWorkspaceRegistry}
+            onManageWorkspaces={() => bridge().openWorkspaceManager()}
+            sentNotices={sentNotices}
+            {...(openOnSwitch?.workspaceId === workspace.workspaceId
+              ? { openOnReady: openOnSwitch.open }
+              : {})}
+            onSwitchWorkspace={(next, open) => {
+              // File ▸ Open Workspace… can hand us a workspace the registry list
+              // didn't know yet — keep the switcher list complete.
+              setWorkspaces((known) =>
+                known.some((entry) => entry.workspaceId === next.workspaceId)
+                  ? known
+                  : [...known, next],
+              );
+              setOpenOnSwitch(open ? { workspaceId: next.workspaceId, open } : null);
+              setWorkspace(next);
+            }}
+          />
+          <DevPanel workspaceId={workspace.workspaceId} />
+        </>
+      )}
+    </ReactionStoreProvider>
   );
 }

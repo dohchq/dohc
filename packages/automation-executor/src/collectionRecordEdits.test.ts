@@ -152,6 +152,20 @@ function contextFor(
   };
 }
 
+it("rejects an unkeyed field write when the session declines the decided update", async () => {
+  const root = await createTestScratch("dohc-record-declined-");
+  const { session, log } = fakeSession();
+  vi.spyOn(session, "applyDecidedLocalUpdate").mockImplementationOnce(async decide => {
+    decide(log.doc);
+    return false;
+  });
+  await expect(setCollectionRecordFields(contextFor(root, session), {
+    recordPath: "tasks/a.md", fields: { status: "done" }, author: AGENT,
+  })).rejects.toThrow("did not accept the field change");
+  expect(log.order).toEqual(["close"]);
+  expect(log.doc.getMap("frontmatter").get("status")).toBeUndefined();
+});
+
 /**
  * The engine side of a create: records it has adopted, keyed by id, and its
  * news of adopted records. A lookup of an id it has not adopted answers the

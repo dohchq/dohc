@@ -9,11 +9,11 @@ import { markdownToYDoc } from "@dohc/ydoc-projection";
 import type { ReadWorkspaceTextPayload, RefreshSharedViewResult, SyncDmsResult, WriteWorkspaceTextPayload, WorkspaceUiState } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { rendererMarks } from "../performance/rendererMarks";
-import { DesktopWorkspaceShell, pendingHeadingTargetForOpen, type Workspace } from "./DesktopWorkspaceShell";
+import { pendingHeadingTargetForOpen, type Workspace } from "./DesktopWorkspaceShell";
 import { WORKSPACE_ACTIVITY_REFRESH_DELAY_MS } from "./workspaceActivityCoalescer";
 import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
-import { WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, isFileOpenStartMark, DM_GRAPH_NODE, CANONICAL_DM, dmSyncResult, makeBridge, renderShell, enterMarkdownSource, holdHistory, shellBootstrapProps, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
+import { DesktopWorkspaceShell, WORKSPACE, OTHER_WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, storedTabs, isFileOpenStartMark, DM_GRAPH_NODE, CANONICAL_DM, dmSyncResult, makeBridge, renderShell, enterMarkdownSource, holdHistory, shellBootstrapProps, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
 // One share's durable skip record, as the registry holds it.
 const SKIPPED_RECORD = {

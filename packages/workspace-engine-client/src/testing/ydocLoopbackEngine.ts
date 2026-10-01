@@ -240,7 +240,7 @@ function resurrectedDoc(lineage: Y.Doc, contentKind: YdocContentKind): Y.Doc {
   return doc;
 }
 
-function project(session: LoopbackSession): string {
+function project(session: LoopbackSession, richdoc?: (doc: Y.Doc) => string): string {
   if (session.contentKind === "plaintext") {
     return session.doc.getText("plainText").toString();
   }
@@ -249,6 +249,7 @@ function project(session: LoopbackSession): string {
       "The Y.Doc loopback cannot project scene documents. Use the workspace engine to settle scenes.",
     );
   }
+  if (richdoc) return richdoc(session.doc);
   return session.doc
     .getXmlFragment("body")
     .toArray()
@@ -266,6 +267,8 @@ function project(session: LoopbackSession): string {
 }
 
 export interface YdocLoopbackEngineOptions {
+  // Hosts can supply their Markdown projector, including record frontmatter.
+  projectRichdoc?: (doc: Y.Doc) => string;
   // The daemon writes the projected content to the workspace file as part of
   // settle, which is what its `materialized: true` reports. A loopback with no
   // materializer reports that same flag while nothing reaches disk — a caller
@@ -452,7 +455,7 @@ export class YdocLoopbackEngine implements EngineTransport {
   }
 
   sessionText(sessionId: string): string {
-    return project(this.requireSession(sessionId));
+    return project(this.requireSession(sessionId), this.options.projectRichdoc);
   }
 
   // Inject loss of a generation's native state while the adapter still owns
@@ -718,7 +721,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       entry.settledUpdates = entry.journaledUpdates;
       return { content: capturedFile.content, sha256: entry.seedSourceSha };
     }
-    const content = project(session);
+    const content = project(session, this.options.projectRichdoc);
     const digest = sha256(content);
     this.options.materialize?.({ path: session.path, content });
     if (entry) {
@@ -800,7 +803,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       // replicated lineage never takes this branch — its close compacts
       // and keeps the rows regardless of settle state (see
       // `markSessionReplicated`).
-      const currentSha = settled?.sha256 ?? sha256(project(session));
+      const currentSha = settled?.sha256 ?? sha256(project(session, this.options.projectRichdoc));
       const capturedFile = this.capturedFileFor(
         session.workspace,
         session.versionId,

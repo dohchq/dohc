@@ -329,6 +329,7 @@ export async function setCollectionRecordFields(
       const idempotencyKey = input.idempotencyKeyPrefix === undefined
         ? undefined : `${input.idempotencyKeyPrefix}/${field}`;
       let fieldArmed = false;
+      let fieldDecided = false;
       return session.applyDecidedLocalUpdate(
         (doc) => {
           const current = doc.getMap(FRONTMATTER_FIELD).get(field);
@@ -346,6 +347,7 @@ export async function setCollectionRecordFields(
           }
           if (frontmatterEditsRefused(doc)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
           replaced[field] = currentValue;
+          fieldDecided = true;
           return frontmatterUpdate(doc, field, value);
         },
         () => {
@@ -357,7 +359,12 @@ export async function setCollectionRecordFields(
           attribution: attributionFor(input.author),
           ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         },
-      ).catch(async error => {
+      ).then(written => {
+        if (fieldDecided && !written) {
+          throw new Error(`The engine session did not accept the field change for ${input.recordPath}.`);
+        }
+        return written;
+      }).catch(async error => {
         if (!input.preserveCompletedSeeds || idempotencyKey === undefined || !isIdempotencyKeyReuseRefusal(error)) throw error;
         // This typed refusal proves the creation key already landed. The session
         // restores canonical state before rejecting; no new seed was recorded.

@@ -865,10 +865,31 @@ test('run journal reads saved headers and progress, and a refused run leaves non
   const [run, ...others] = await readRunJournal(root, automation);
   assert.deepEqual(others, []);
   assert.deepEqual(run, { claimId: 'c1', startedAtMs: 1000, finishedAtMs: 1600, outcome: { state: 'done' }, headerBytes: Buffer.byteLength(header),
+    findMs: null, planMs: null, writeMs: null, writes: null,
     progressBytes: Buffer.byteLength(progress), progressLines: 3, fieldWrites: 5, created: 2, createdPaths: ['p'] });
   const bytes = await journalBytes(root, automation);
   assert.equal(bytes.progressBytes, Buffer.byteLength(progress));
   assert.ok(bytes.headerBytes > Buffer.byteLength(header));
+  const measured = [
+    { kind: 'step', ordinal: 0, effects: [], findMs: 12, planMs: 3 },
+    { kind: 'step', ordinal: 1, effects: [{}, {}], findMs: 8, planMs: 7 },
+    { kind: 'effect', ordinal: 1, writes: [{ kind: 'field' }, { kind: 'field' }], writeMs: 25, writeCount: 1 },
+    { kind: 'effect', ordinal: 1, writes: [], writeMs: 0, writeCount: 1 },
+  ];
+  const timing = async lines => {
+    await writeFile(join(folder, 'run-c1.progress.jsonl'), lines.map(line => `${JSON.stringify(line)}\n`).join(''));
+    const [saved] = await readRunJournal(root, automation);
+    return { findMs: saved.findMs, planMs: saved.planMs, writeMs: saved.writeMs, writes: saved.writes };
+  };
+  assert.deepEqual(await timing(measured), { findMs: 20, planMs: 10, writeMs: 25, writes: 2 });
+  assert.deepEqual(await timing([measured[0]]), { findMs: 12, planMs: 3, writeMs: 0, writes: 0 });
+  assert.deepEqual(await timing([]), { findMs: null, planMs: null, writeMs: null, writes: null });
+  assert.deepEqual(await timing([{ kind: 'step', ordinal: 0, effects: [] }]), { findMs: null, planMs: null, writeMs: null, writes: null });
+  // A mixed journal cannot turn unmeasured stages into zeros or partial totals.
+  assert.deepEqual(await timing([...measured, { kind: 'step', ordinal: 2, effects: [], findMs: 2 }]),
+    { findMs: 22, planMs: null, writeMs: 25, writes: 2 });
+  assert.deepEqual(await timing([...measured, { kind: 'effect', ordinal: 1, writes: [] }]),
+    { findMs: 20, planMs: 10, writeMs: null, writes: null });
 });
 
 const proc = (pid, name, cpuMs, workingSetBytes = 0, commandLine = 'dohc.exe') => ({ pid, name, commandLine, createdAt: `t${pid}`, cpuMs, workingSetBytes, privateBytes: workingSetBytes / 2 });
@@ -947,9 +968,11 @@ test('automation observer reads changed text and rejects a run that never settle
 test('summary reports automation cases per kind and keeps missing measurements missing', async () => {
   const sample = (start, inputToNextPaintMs) => ({ start, dispatchToTwoRafMs: 20, inputToNextPaintMs });
   const row = (name, fields) => ({ name, expected: 'done', outcome: 'done', pass: true, visibility: null, verification: { ok: true, settledOnDiskObservedMs: 300 },
-    triggerToSettledPaintedMs: 900, startMs: 400, runMs: 450, journal: { headerPeakBytesSampled: 8000, runs: [{ headerBytes: 700, progressBytes: 5000, fieldWrites: 200, created: 0 }] },
+    triggerToSettledPaintedMs: 900, startMs: 400, runMs: 450, findMs: 25, planMs: 15, writeMs: 300, writes: 50,
+    journal: { headerPeakBytesSampled: 8000, runs: [{ headerBytes: 700, progressBytes: 5000, fieldWrites: 200, created: 0 }] },
     cpuMs: { main: 300, engine: 200, renderer: 50 }, peakBytes: { main: { privateBytes: 1e8 } }, longTasks: [{ duration: 60 }, { duration: 80 }], typing: null, ...fields });
-  const refused = row('find-500', { expected: 'refused', outcome: 'refused', startMs: null, runMs: null, journal: { headerPeakBytesSampled: 0, runs: [] } });
+  const refused = row('find-500', { expected: 'refused', outcome: 'refused', startMs: null, runMs: null,
+    findMs: null, planMs: null, writeMs: null, writes: null, journal: { headerPeakBytesSampled: 0, runs: [] } });
   const summary = await summarize({ label: 'baseline', status: 'failed', settings: {}, limits: [], runs: [
     { index: 1, collectionAutomations: { findCap: 50, writeCap: 200, fixtureSha256: 'f', document: { cases: [row('baseline'), refused] },
       dataset: { cases: [row('baseline-typing', { pass: false, typing: { samplesDuringRun: 2, samples: [sample(1, 24), sample(2, null), sample(3, 99)] } })] } } },
@@ -960,6 +983,10 @@ test('summary reports automation cases per kind and keeps missing measurements m
   assert.deepEqual(automations.document.baseline.triggerToSettledPaintedMs, { count: 1, p50: 900, p95: 900, max: 900 });
   assert.deepEqual([automations.document.baseline.longTaskCount.max, automations.document.baseline.longTaskTotalMs.max, automations.document.baseline.fieldWrites], [2, 140, [200]]);
   assert.deepEqual(automations.document['find-500'].startMs, { count: 0, p50: null, p95: null, max: null });
+  for (const [field, value] of Object.entries({ findMs: 25, planMs: 15, writeMs: 300, writes: 50 })) {
+    assert.deepEqual(automations.document.baseline[field], { count: 1, p50: value, p95: value, max: value });
+    assert.deepEqual(automations.document['find-500'][field], { count: 0, p50: null, p95: null, max: null });
+  }
   assert.deepEqual([automations.document['find-500'].outcomes, automations.document['find-500'].fieldWrites, automations.document['find-500'].runMs.count], [['refused'], [], 0]);
   assert.deepEqual([automations.dataset['baseline-typing'].failures, automations.dataset['baseline-typing'].typingDuringRun.samplesDuringRun], [1, 2]);
   assert.deepEqual(automations.dataset['baseline-typing'].typingDuringRun.inputToNextPaintReportedOnlyMs, { count: 1, p50: 24, p95: 24, max: 24 });

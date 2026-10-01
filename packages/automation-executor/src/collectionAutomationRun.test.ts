@@ -236,6 +236,88 @@ async function runToEnd(
 const valuesOf = (space: ReturnType<typeof workspace>) =>
   Object.fromEntries([...space.records.values()].map((doc) => [doc.collection === "Log" ? "log" : doc.id, doc.values]));
 
+function timedDependencies(space: ReturnType<typeof workspace>, store: AutomationRunStore): CollectionAutomationRunDependencies {
+  const base = space.dependencies(store);
+  let now = 1_000;
+  return {
+    ...base,
+    nowMs: () => now,
+    withReads: (work) => base.withReads((reads) => work({
+      ...reads,
+      getCollectionRecord: async (input) => { now += 3; return reads.getCollectionRecord(input); },
+      queryCollectionRecords: async (input) => { now += 11; return reads.queryCollectionRecords(input); },
+    })),
+    withRecordWrites: (signal, work) => base.withRecordWrites(signal, (writes) => work({
+      ...writes,
+      setFields: async (input) => { now += 17; return writes.setFields(input); },
+    })),
+    evaluator: {
+      ...base.evaluator,
+      evaluate: async (...args) => { now += 7; return base.evaluator.evaluate(...args); },
+    },
+    store: {
+      ...base.store,
+      save: async (run) => { now += 100; await base.store.save(run); },
+      appendStep: async (run, step) => { now += 100; await base.store.appendStep(run, step); },
+      appendEffect: async (run, effect) => { now += 100; await base.store.appendEffect(run, effect); },
+    },
+  };
+}
+
+describe("run stage timing", () => {
+  it("saves read, Find, formula and effect times without counting journal saves", async () => {
+    const definition = automation('id: chain\nname: Chain\nwhen: record-added\ndo:\n  - find: record.Project == trigger.record.Project + ""\n    as: team\n  - set: {Count: "=record.Count + 1", Twice: "=record.Count * 2"}\n    records: team');
+    const space = workspace([task("rec_t", { Project: "A", Count: 1 }), task("rec_o", { Project: "A", Count: 2 })]);
+    const store = await scratchStore();
+    const signal = new AbortController().signal;
+    await expect(runCollectionAutomation(timedDependencies(space, store), {
+      claim: added(), automation: definition, collection: { path: "Tasks", name: "Tasks" },
+      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal,
+    })).resolves.toEqual({ kind: "done" });
+    const [run] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+    expect(run!.steps.map(({ ordinal, findMs, planMs }) => ({ ordinal, findMs, planMs }))).toEqual([
+      { ordinal: 0, findMs: 14, planMs: 7 }, { ordinal: 1, findMs: 6, planMs: 7 },
+    ]);
+    expect(run!.applied.map(({ writeMs, writeCount, writes }) => ({ writeMs, writeCount, fields: writes.length }))).toEqual([
+      { writeMs: 20, writeCount: 1, fields: 2 }, { writeMs: 20, writeCount: 1, fields: 2 },
+    ]);
+    // Two effect applications, plus the existing initial and final saves.
+    expect(space.events()).toBe(6);
+  });
+
+  it("leaves timing missing when a Find refuses before saving a plan", async () => {
+    const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{find: 'true', as: all}, {set: {Count: 1}, records: all}]");
+    const space = workspace(Array.from({ length: MAX_FOUND_RECORDS + 1 }, (_, index) => task(index === 0 ? "rec_t" : `rec_${index}`, {})));
+    const store = await scratchStore();
+    const signal = new AbortController().signal;
+    await expect(runCollectionAutomation(timedDependencies(space, store), {
+      claim: added(), automation: definition, collection: { path: "Tasks", name: "Tasks" },
+      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal,
+    })).resolves.toMatchObject({ kind: "failed", error: expect.stringContaining("The Find in step 1 matched more than") });
+    expect(await store.runsOf("collection:Tasks#chain", "atc_one")).toEqual({ runs: [], unreadable: false });
+    expect(space.events()).toBe(0);
+  });
+
+  it("keeps saved stage times when a later step exceeds the write limit", async () => {
+    const fields = Array.from({ length: 5 }, (_, index) => `F${index}: 1`).join(", ");
+    const definition = automation(`id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Early: 1}}, {find: 'true', as: all}, {set: {${fields}}, records: all}]`);
+    const space = workspace(Array.from({ length: 45 }, (_, index) => task(index === 0 ? "rec_t" : `rec_${index}`, {})));
+    const store = await scratchStore();
+    const signal = new AbortController().signal;
+    await expect(runCollectionAutomation(timedDependencies(space, store), {
+      claim: added(), automation: definition, collection: { path: "Tasks", name: "Tasks" },
+      roster: { kind: "owner", ownerUserId: null, grants: [] }, signal, stopped: signal,
+    })).resolves.toMatchObject({ kind: "failed", error: expect.stringContaining("more than 200 fields") });
+    const [run] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+    expect(run!.steps.map(({ ordinal, findMs, planMs }) => ({ ordinal, findMs, planMs }))).toEqual([
+      { ordinal: 0, findMs: 3, planMs: 0 }, { ordinal: 1, findMs: 14, planMs: 0 },
+    ]);
+    expect(run!.applied).toMatchObject([{ ordinal: 0, writeMs: 20, writeCount: 1 }]);
+    expect(space.records.get("rec_1")!.values).toEqual({});
+    expect(space.events()).toBe(5);
+  });
+});
+
 describe("a stepwise run", () => {
   it("resolves each destination once while ten later steps reread a full Find", async () => {
     const space = workspace([task("rec_t", {}), ...Array.from({ length: MAX_FOUND_RECORDS }, (_, index) => ({

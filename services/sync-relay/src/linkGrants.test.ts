@@ -2225,12 +2225,58 @@ describe("owner link inventory and impact preconditions", () => {
       { grantId: "aaa-share-z-a", shareId: "share-z-tail", createdAtMs: 4_001 },
     ];
     const originalIds = linkSeeds.map((seed) => seed.grantId);
+    const fixture = inspectDatabase(storagePath(storage), { foreignKeys: true });
+    try {
+      fixture.exec("BEGIN IMMEDIATE");
+      const insertGrant = fixture.prepare(
+        `INSERT INTO sync_relay_share_grants (
+           grant_id, share_id, principal_kind, principal_user_id, principal_email,
+           access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+         ) VALUES (?, ?, 'link', NULL, NULL, ?, 1, 'active', ?, NULL, NULL)`,
+      );
+      const insertCredential = fixture.prepare(
+        `INSERT INTO sync_relay_link_credentials (
+           credential_id, grant_id, secret_hash, generation, minted_at_ms, retired_at_ms
+         ) VALUES (?, ?, ?, 1, ?, NULL)`,
+      );
+      for (const [index, seed] of linkSeeds.entries()) {
+        const access = index % 3 === 0 ? "view" : index % 3 === 1 ? "comment" : "edit";
+        expect(Number(insertGrant.run(
+          seed.grantId, seed.shareId, access, seed.createdAtMs,
+        ).changes)).toBe(1);
+        expect(Number(insertCredential.run(
+          `${seed.grantId}-credential`, seed.grantId,
+          hmac(defaultStorageLinkSecret(seed.grantId)), seed.createdAtMs,
+        ).changes)).toBe(1);
+      }
+      fixture.exec("COMMIT");
+    } catch (error) {
+      try { fixture.exec("ROLLBACK"); } catch { /* Preserve the setup failure. */ }
+      throw error;
+    } finally {
+      fixture.close();
+    }
     for (const [index, seed] of linkSeeds.entries()) {
-      seedStorageLink(storage, {
+      expect(storage.getShareGrant(seed.grantId)).toEqual({
         grantId: seed.grantId,
-        access: index % 3 === 0 ? "view" : index % 3 === 1 ? "comment" : "edit",
-        createdAtMs: seed.createdAtMs,
         shareId: seed.shareId,
+        principalKind: "link",
+        principalUserId: null,
+        principalEmail: null,
+        access: index % 3 === 0 ? "view" : index % 3 === 1 ? "comment" : "edit",
+        generation: 1,
+        status: "active",
+        createdAtMs: seed.createdAtMs,
+        revokedAtMs: null,
+        parentGrantId: null,
+      });
+      expect(storage.getCurrentLinkCredential(seed.grantId)).toEqual({
+        credentialId: `${seed.grantId}-credential`,
+        grantId: seed.grantId,
+        secretHash: hmac(defaultStorageLinkSecret(seed.grantId)),
+        generation: 1,
+        mintedAtMs: seed.createdAtMs,
+        retiredAtMs: null,
       });
     }
     const boundaryGrantId = originalIds[999]!;

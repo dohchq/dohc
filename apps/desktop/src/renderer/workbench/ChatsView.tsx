@@ -12,6 +12,7 @@ import { useIsOwnAuthor } from "./AgentBadge";
 import { ChatAvatar } from "./ChatAvatar";
 import { ChatLane } from "./ChatLane";
 import { usePersonalChatFeed } from "./usePersonalChatFeed";
+import { useReactions, type ReactionView } from "./reactionStore";
 import {
   AgentPresenceHint,
   UnreadPill,
@@ -88,9 +89,7 @@ import {
   type ChatMessageListHandle,
   MentionText,
   chatAuthorLabel,
-  runReactionToggle,
   type ChatReactionControls,
-  type PendingReactionCell,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
 import { AddAgentForm } from "./AddAgentForm";
@@ -203,13 +202,14 @@ export interface ChatsDrafts {
 
 interface ThreadSnapshot {
   messages: ChatMessageRecord[];
-  reactions: ChatReactionRecord[];
   decisions: ChatDecisionRecord[];
   attachments: ChatAttachmentRecord[];
   runRecords: Record<string, ChatRunRecord>;
   dispatchState: ChatDispatchStateForThreadResult;
-  viewerAuthorId: string;
 }
+
+const NO_POST: PostData = { openingMessage: null, reactions: [], viewerAuthorId: "" };
+const NO_REACTIONS: ReactionView = { reactions: [], viewerAuthorId: "" };
 
 export function reconcileResolvedChatDecision(
   current: ChatDecisionRecord[],
@@ -578,7 +578,6 @@ export function ChatsView(props: {
   const [threadsLoading, setThreadsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
-  const [reactions, setReactions] = useState<ChatReactionRecord[]>([]);
   const [decisions, setDecisions] = useState<ChatDecisionRecord[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachmentRecord[]>([]);
   const [runRecords, setRunRecords] = useState<Record<string, ChatRunRecord>>({});
@@ -586,7 +585,6 @@ export function ChatsView(props: {
     IDLE_DISPATCH_STATE,
   );
   const [dispatchActionBusy, setDispatchActionBusy] = useState(false);
-  const [viewerAuthorId, setViewerAuthorId] = useState("");
   const [composer, setComposer] = useState("");
   const [replyTarget, setReplyTarget] = useState<ComposerReplyTarget | null>(null);
   const [resolveTargetMessageId, setResolveTargetMessageId] = useState<string | null>(null);
@@ -666,6 +664,9 @@ export function ChatsView(props: {
   const inFlightSendByContext = useRef(new Map<string, number>());
   const startingThreadRef = useRef(false);
   const liveToken = useRef(0);
+  // Every reaction surface in this view (thread, DM, chat lane, post
+  // previews, Home) writes and paints through the workspace's one store.
+  const reactions = useReactions();
   const {
     personalFeed,
     personalFeedLoading,
@@ -674,9 +675,7 @@ export function ChatsView(props: {
     resetForWorkspace,
     prepareOpen,
     invalidate,
-    pendingReactionMessageIds,
-    toggleMessageReaction,
-  } = usePersonalChatFeed({ workspaceId, liveToken, onError: props.onError });
+  } = usePersonalChatFeed({ workspaceId, liveToken, reactions, onError: props.onError });
   // A live thread can refresh repeatedly without changing navigation. Keep a
   // request sequence separate from the workspace/navigation liveness token so
   // an older activity response can never overwrite a newer one.
@@ -688,9 +687,6 @@ export function ChatsView(props: {
     threadId: string;
     revision: number;
   } | null>(null);
-  // The viewer's reaction writes in flight, one entry per (message, emoji)
-  // cell (see runReactionToggle).
-  const pendingReactions = useRef(new Map<string, PendingReactionCell>());
   // Each Home item's Add reaction trigger, by message id: where focus goes
   // when the activated pill was the viewer's only row and unmounts.
   const homeLikeTriggers = useRef(new Map<string, HTMLButtonElement>());
@@ -1310,7 +1306,6 @@ export function ChatsView(props: {
     setChannelThreads([]);
     setFeedPosts({});
     setMessages([]);
-    setReactions([]);
     setDecisions([]);
     setAttachments([]);
     setRunRecords({});
@@ -1496,7 +1491,22 @@ export function ChatsView(props: {
 
   const loadChannelSnapshot = useCallback(
     async (channelId: string): Promise<ChannelSnapshot> => {
+      const ticket = reactions.ticket();
       const result = await bridge().listChannelThreads({ workspaceId, channelId });
+      // Each preview answers for its opening message only.
+      reactions.ingest(
+        result.threads.flatMap((thread) =>
+          thread.openingMessage
+            ? [{
+                threadId: thread.id,
+                messageIds: [thread.openingMessage.id],
+                reactions: thread.openingMessage.reactions ?? [],
+                ...(result.viewerAuthorId ? { viewerAuthorId: result.viewerAuthorId } : {}),
+                ticket,
+              }]
+            : [],
+        ),
+      );
       return {
         threads: result.threads,
         feedPosts: Object.fromEntries(
@@ -1525,7 +1535,7 @@ export function ChatsView(props: {
         ),
       };
     },
-    [workspaceId],
+    [reactions, workspaceId],
   );
 
   const applyChannelSnapshot = useCallback((snapshot: ChannelSnapshot) => {
@@ -1569,6 +1579,7 @@ export function ChatsView(props: {
 
   const loadThreadSnapshot = useCallback(
     async (threadId: string): Promise<ThreadSnapshot> => {
+      const ticket = reactions.ticket();
       const [
         result,
         reactionResult,
@@ -1587,17 +1598,16 @@ export function ChatsView(props: {
             .catch(() => ({ runs: {} })),
           bridge().chatDispatchStateForThread({ workspaceId, threadId }),
         ]);
+      reactions.ingest([{ threadId, ...reactionResult, ticket }]);
       return {
         messages: result.messages,
-        reactions: reactionResult.reactions,
         decisions: decisionResult.decisions,
         attachments: attachmentResult.attachments,
         runRecords: runResult.runs,
         dispatchState: nextDispatchState,
-        viewerAuthorId: reactionResult.viewerAuthorId,
       };
     },
-    [workspaceId],
+    [reactions, workspaceId],
   );
 
   const loadDmConversation = useCallback(
@@ -1617,10 +1627,12 @@ export function ChatsView(props: {
             threadId: dm.threadId,
           })
         ).revision;
+      const ticket = reactions.ticket();
       const [result, reactionResult] = await Promise.all([
         bridge().listChatMessages({ workspaceId, threadId: dm.threadId }),
         bridge().listChatReactions({ workspaceId, threadId: dm.threadId }),
       ]);
+      reactions.ingest([{ threadId: dm.threadId, ...reactionResult, ticket }]);
       if (
         token !== liveToken.current ||
         request !== dmRefreshSeq.current ||
@@ -1629,8 +1641,6 @@ export function ChatsView(props: {
         return;
       }
       setMessages(keepIfUnchanged(result.messages));
-      setReactions(keepIfUnchanged(reactionResult.reactions));
-      setViewerAuthorId(reactionResult.viewerAuthorId);
       paintedDmRevision.current = {
         workspaceId,
         threadId: dm.threadId,
@@ -1659,7 +1669,7 @@ export function ChatsView(props: {
           );
       }
     },
-    [onDmRead, workspaceId],
+    [onDmRead, reactions, workspaceId],
   );
 
   const syncOpenDm = useCallback(
@@ -1801,12 +1811,10 @@ export function ChatsView(props: {
   const applyThreadSnapshot = useCallback(
     (threadId: string, snapshot: ThreadSnapshot, markRead: boolean) => {
       setMessages(snapshot.messages);
-      setReactions(snapshot.reactions);
       setDecisions(snapshot.decisions);
       setAttachments(snapshot.attachments);
       setRunRecords(snapshot.runRecords);
       setDispatchState(snapshot.dispatchState);
-      setViewerAuthorId(snapshot.viewerAuthorId);
       // Everything on screen is read: advance the monotonic cursor and clear
       // this thread's badge locally so back-navigation is immediately honest.
       const upToSequence = snapshot.messages.length;
@@ -1848,7 +1856,6 @@ export function ChatsView(props: {
       });
       focusedMessageJump.current = null;
       setMessages([]);
-      setReactions([]);
       setDecisions([]);
       setAttachments([]);
       setRunRecords({});
@@ -2026,6 +2033,7 @@ export function ChatsView(props: {
     startingThreadRef.current = true;
     setStartingThread(true);
     try {
+      const ticket = reactions.ticket();
       const result = await bridge().startChannelThread({
         workspaceId,
         channelId: channel.id,
@@ -2034,6 +2042,14 @@ export function ChatsView(props: {
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
       });
+      // The new message has no reactions yet; the start names the viewer.
+      reactions.ingest([{
+        threadId: result.thread.id,
+        messageIds: [result.message.id],
+        reactions: [],
+        viewerAuthorId: result.viewerAuthorId,
+        ticket,
+      }]);
       if (token !== liveToken.current) return;
       props.onThreadStarted?.();
       setNewThreadBody("");
@@ -2042,8 +2058,6 @@ export function ChatsView(props: {
       props.onNavCommand?.({ level: "thread", channel, thread: result.thread });
       setNav({ level: "thread", channel, thread: result.thread });
       setMessages([result.message]);
-      setReactions([]);
-      setViewerAuthorId(result.viewerAuthorId);
       setDecisions([]);
       setAttachments(result.message.attachments ?? []);
       setRunRecords({});
@@ -2060,7 +2074,7 @@ export function ChatsView(props: {
       startingThreadRef.current = false;
       setStartingThread(false);
     }
-  }, [nav, newThreadBody, props.onError, props.onNavCommand, props.onThreadStarted, startingThread, workspaceId]);
+  }, [nav, newThreadBody, props.onError, props.onNavCommand, props.onThreadStarted, reactions, startingThread, workspaceId]);
 
   const sendMessage = useCallback(async () => {
     if (nav.level !== "thread") return;
@@ -2211,98 +2225,70 @@ export function ChatsView(props: {
     workspaceId,
   ]);
 
-  // Reactions (WS-MU-C2): optimistic add/remove of the viewer's own reaction,
-  // then reconcile to the server's canonical list (which carries the real
-  // reactionId and any peer reactions). Guarded by the liveness token so a
-  // slow response never repaints a thread the user already left.
+  // Reactions (WS-MU-C2) write and paint through the workspace's reaction
+  // store. Errors reach the user only while this view is still where the
+  // toggle happened.
+  const reactionThreadId =
+    nav.level === "thread" ? nav.thread.id : nav.level === "dm" ? nav.dm.threadId ?? null : null;
+  const threadReactions = reactionThreadId ? reactions.view(reactionThreadId) : NO_REACTIONS;
+  const toggleInView = useCallback(
+    (input: {
+      threadId: string;
+      messageId: string;
+      emoji: string;
+      nextState: "added" | "removed";
+      viewerAuthorId: string;
+      viewerLabel?: string;
+    }) => {
+      const token = liveToken.current;
+      reactions.toggle({
+        ...input,
+        onError: (message, cause) => {
+          if (token === liveToken.current) props.onError(message, cause);
+        },
+      });
+    },
+    [props.onError, reactions],
+  );
   const toggleReaction = useCallback(
     (input: { messageId: string; emoji: string; nextState: "added" | "removed" }) => {
-      const threadId =
-        nav.level === "thread"
-          ? nav.thread.id
-          : nav.level === "dm" && nav.dm.connected
-            ? nav.dm.threadId
-            : null;
-      if (!threadId) return;
-      runReactionToggle(
-        {
-          workspaceId,
-          threadId,
-          viewerAuthorId,
-          liveToken,
-          pendingReactions,
-          setReactions,
-          setViewerAuthorId,
-          onError: props.onError,
-        },
-        input,
-      );
+      const threadId = nav.level === "dm" && !nav.dm.connected ? null : reactionThreadId;
+      if (!threadId || !threadReactions.viewerAuthorId) return;
+      toggleInView({ ...input, threadId, viewerAuthorId: threadReactions.viewerAuthorId });
     },
-    [nav, props.onError, viewerAuthorId, workspaceId],
+    [nav, reactionThreadId, threadReactions.viewerAuthorId, toggleInView],
   );
 
-  // Like from Home. The item's own viewer id (per thread, from the feed
-  // listing) paints the change at once; the feed hook owns the write. The
-  // painted row carries the name the composer shows for you, never an id.
+  // Like from Home. The item's own viewer (per thread) paints the change at
+  // once, under the name the composer shows for you, never an id. An item
+  // that names no viewer still writes, and its listing names them. One write
+  // per message at a time: its controls rest until it settles.
   const viewerLabel = collaboration?.displayName || props.agentSetup?.preferredName || "You";
   const toggleHomeReaction = useCallback(
-    (item: ChatFeedItemRecord, emoji: string, nextState: "added" | "removed") => {
-      if (nav.level !== "feed") return;
-      toggleMessageReaction({
+    (item: ChatFeedItemRecord, viewerAuthorId: string, emoji: string, nextState: "added" | "removed") => {
+      if (nav.level !== "feed" || reactions.pending(item.thread.id, item.message.id)) return;
+      toggleInView({
         threadId: item.thread.id,
         messageId: item.message.id,
         emoji,
         nextState,
-        viewerAuthorId: item.viewerAuthorId,
+        viewerAuthorId,
         viewerLabel,
       });
     },
-    [nav.level, toggleMessageReaction, viewerLabel],
+    [nav.level, reactions, toggleInView, viewerLabel],
   );
 
   const toggleFeedReaction = useCallback(
     (
       threadId: string,
+      viewerAuthorId: string,
       input: { messageId: string; emoji: string; nextState: "added" | "removed" },
     ) => {
-      if (nav.level !== "channel") return;
-      const post = feedPosts[threadId];
-      if (!post) return;
-      runReactionToggle(
-        {
-          workspaceId,
-          threadId,
-          viewerAuthorId: post.viewerAuthorId,
-          liveToken,
-          pendingReactions,
-          setReactions: (next) =>
-            setFeedPosts((current) => {
-              const entry = current[threadId];
-              if (!entry) return current;
-              const nextReactions =
-                typeof next === "function" ? next(entry.reactions) : next;
-              return {
-                ...current,
-                [threadId]: { ...entry, reactions: nextReactions },
-              };
-            }),
-          setViewerAuthorId: (next) =>
-            setFeedPosts((current) => {
-              const entry = current[threadId];
-              if (!entry) return current;
-              const nextViewerAuthorId =
-                typeof next === "function" ? next(entry.viewerAuthorId) : next;
-              return {
-                ...current,
-                [threadId]: { ...entry, viewerAuthorId: nextViewerAuthorId },
-              };
-            }),
-          onError: props.onError,
-        },
-        input,
-      );
+      if (nav.level !== "channel" || !viewerAuthorId) return;
+      toggleInView({ ...input, threadId, viewerAuthorId });
     },
-    [feedPosts, nav.level, props.onError, workspaceId],
+    [nav.level, toggleInView],
   );
 
   // --- Direct messages (WS-MU-C3) -----------------------------------------
@@ -2319,7 +2305,6 @@ export function ChatsView(props: {
       });
       focusedMessageJump.current = null;
       setMessages([]);
-      setReactions([]);
       setDecisions([]);
       setAttachments([]);
       setRunRecords({});
@@ -3050,8 +3035,6 @@ export function ChatsView(props: {
         );
         setMessages([]);
         setMessagesLoading(false);
-        setReactions([]);
-        setViewerAuthorId("");
         setComposer("");
         void refreshDms("person");
         void refreshShares();
@@ -3357,13 +3340,13 @@ export function ChatsView(props: {
 
   const reactionsByMessage = useMemo(() => {
     const result = new Map<string, ChatReactionRecord[]>();
-    for (const reaction of reactions) {
+    for (const reaction of threadReactions.reactions) {
       const current = result.get(reaction.messageId);
       if (current) current.push(reaction);
       else result.set(reaction.messageId, [reaction]);
     }
     return result;
-  }, [reactions]);
+  }, [threadReactions.reactions]);
 
   // Memoized reaction controls: an inline object literal would change
   // identity on every keystroke and defeat the message-list memo boundaries.
@@ -3375,12 +3358,12 @@ export function ChatsView(props: {
     nav.level === "dm" ? !nav.dm.connected : threadLocked;
   const reactionControls = useMemo<ChatReactionControls>(
     () => ({
-      reactions,
-      viewerAuthorId,
+      reactions: threadReactions.reactions,
+      viewerAuthorId: threadReactions.viewerAuthorId,
       onToggle: toggleReaction,
       readOnly: reactionReadOnly,
     }),
-    [reactions, reactionReadOnly, toggleReaction, viewerAuthorId],
+    [threadReactions.reactions, reactionReadOnly, toggleReaction, threadReactions.viewerAuthorId],
   );
 
   const decisionsByMessage = useMemo(
@@ -3681,18 +3664,19 @@ export function ChatsView(props: {
                 const hasFileMentions = extractChatFileReferences(item.message.body).length > 0;
                 const isAgent = item.message.authorKind === "agent";
                 const time = formatChatTime(item.message.createdAtMs);
-                const itemReactions = item.reactions.filter(
+                const itemView = reactions.view(item.thread.id, item.message.id);
+                const itemReactions = itemView.reactions.filter(
                   (reaction) => reaction.messageId === item.message.id,
                 );
                 const byEmoji = new Map<string, number>();
                 for (const reaction of itemReactions) {
                   byEmoji.set(reaction.emoji, (byEmoji.get(reaction.emoji) ?? 0) + 1);
                 }
-                const itemViewer = item.viewerAuthorId ?? "";
+                const itemViewer = itemView.viewerAuthorId;
                 // One reaction write per message at a time: its controls
                 // refuse another write, but keep focus, until it settles.
                 // Other items stay live.
-                const reactionPending = pendingReactionMessageIds.has(item.message.id);
+                const reactionPending = reactions.pending(item.thread.id, item.message.id);
                 const where = item.channel
                   ? item.channel.kind === "dm"
                     ? feedDm?.peerLabel ?? item.channel.name
@@ -3809,7 +3793,7 @@ export function ChatsView(props: {
                               if (mine && count === 1 && document.activeElement === event.currentTarget) {
                                 homeLikeTriggers.current.get(item.message.id)?.focus();
                               }
-                              toggleHomeReaction(item, emoji, mine ? "removed" : "added");
+                              toggleHomeReaction(item, itemViewer, emoji, mine ? "removed" : "added");
                             }}
                             key={emoji}
                             data-testid="chats-feed-reaction-pill"
@@ -3832,7 +3816,7 @@ export function ChatsView(props: {
                           else homeLikeTriggers.current.delete(item.message.id);
                         }}
                         controls={{ reactions: itemReactions, viewerAuthorId: itemViewer, readOnly: locked, pending: reactionPending,
-                          onToggle: ({ emoji, nextState }) => toggleHomeReaction(item, emoji, nextState) }} />
+                          onToggle: ({ emoji, nextState }) => toggleHomeReaction(item, itemViewer, emoji, nextState) }} />
                       <ActionButton
                         label={isComment ? "Reply" : "Comment"}
                         icon={<MessageSquare size={15} strokeWidth={1.9} aria-hidden />}
@@ -4552,7 +4536,6 @@ export function ChatsView(props: {
             onError={props.onError}
             onThreadRead={props.onThreadRead}
             revision={props.threadRevision ?? 0}
-            pendingReactions={pendingReactions}
           />
         ) : (
         <PostFeedList
@@ -4606,22 +4589,20 @@ export function ChatsView(props: {
               </div>
             )}
           renderItem={(thread) => {
-                  const post = feedPosts[thread.id] ?? {
-                    openingMessage: null,
-                    reactions: [],
-                    viewerAuthorId: "",
-                  };
+                  const post = feedPosts[thread.id] ?? NO_POST;
+                  // A preview covers its opening message only.
+                  const postView = reactions.view(thread.id, post.openingMessage?.id ?? "");
                   const bookmark = bookmarkFor("thread", thread.id);
                   const bookmarkKey = `thread:${thread.id}`;
                   return (
                     <PostCard
                       key={thread.id}
                       thread={thread}
-                      data={post}
+                      data={{ ...post, ...postView }}
                       reactionControls={{
-                        reactions: post.reactions,
-                        viewerAuthorId: post.viewerAuthorId,
-                        onToggle: (input) => toggleFeedReaction(thread.id, input),
+                        reactions: postView.reactions,
+                        viewerAuthorId: postView.viewerAuthorId,
+                        onToggle: (input) => toggleFeedReaction(thread.id, postView.viewerAuthorId, input),
                         readOnly: channelLocked,
                       }}
                       onOpen={() =>

@@ -9,6 +9,7 @@ import type {
   FileChatThreadRecord,
 } from "../../ipc/bridgeContract";
 import { ChatsView as ProductionChatsView } from "./ChatsView";
+import { ReactionStoreProvider } from "./reactionStore";
 
 type TestChatsViewProps = Omit<
   Parameters<typeof ProductionChatsView>[0],
@@ -17,12 +18,15 @@ type TestChatsViewProps = Omit<
   workspaces?: Parameters<typeof ProductionChatsView>[0]["workspaces"];
 };
 
+// The workspace shell provides the reaction store in production.
 export function ChatsView(props: TestChatsViewProps) {
   return (
-    <ProductionChatsView
-      workspaces={[{ workspaceId: props.workspaceId, label: "Work" }]}
-      {...props}
-    />
+    <ReactionStoreProvider workspaceId={props.workspaceId}>
+      <ProductionChatsView
+        workspaces={[{ workspaceId: props.workspaceId, label: "Work" }]}
+        {...props}
+      />
+    </ReactionStoreProvider>
   );
 }
 
@@ -169,6 +173,8 @@ export const bridgeMock = {
   setChatFollow: vi.fn(),
   listPersonalChatFeed: vi.fn(),
   markPersonalChatFeedSeen: vi.fn(),
+  // The file rail's Chats, for tests that mount it beside this view.
+  listFileChats: vi.fn(),
   onWorkspaceActivity: vi.fn(),
   onCloudSessionChanged: vi.fn(),
 };
@@ -343,6 +349,7 @@ beforeEach(() => {
       }),
   );
   bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [] });
+  bridgeMock.listFileChats.mockResolvedValue({ fileObjectId: "object-1", threads: [] });
   bridgeMock.markPersonalChatFeedSeen.mockResolvedValue({
     readState: {
       lastSeenCreatedAtMs: NOW,

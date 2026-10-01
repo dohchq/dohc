@@ -13,6 +13,7 @@ import {
   ChatsView as ProductionChatsView,
   type ChatPresenceCollaboration,
 } from "./ChatsView";
+import { ReactionStoreProvider } from "./reactionStore";
 import type {
   PresencePeer,
   PresenceSnapshot,
@@ -31,10 +32,12 @@ type TestChatsViewProps = Omit<
 
 function ChatsView(props: TestChatsViewProps) {
   return (
-    <ProductionChatsView
-      workspaces={[{ workspaceId: props.workspaceId, label: "Work" }]}
-      {...props}
-    />
+    <ReactionStoreProvider workspaceId={props.workspaceId}>
+      <ProductionChatsView
+        workspaces={[{ workspaceId: props.workspaceId, label: "Work" }]}
+        {...props}
+      />
+    </ReactionStoreProvider>
   );
 }
 

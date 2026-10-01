@@ -166,6 +166,7 @@ function makeBridge(
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
   const settledCallbacks = new Set<(event: AutomationRunSettledEvent) => void>();
   const waitingCallbacks = new Set<(event: AutomationRunWaitingEvent) => void>();
+  const automationsCallbacks = new Set<(event: { workspaceId: string }) => void>();
   // The schema round-trips through the stub the way it does through the
   // engine: reads serve the last written text's parse, writes conflict on a
   // stale expected identity.
@@ -173,6 +174,13 @@ function makeBridge(
   let contentHash = hashFor(0);
   let writes = 0;
   return {
+    emitAutomationsChanged: (workspaceId: string) => {
+      for (const callback of [...automationsCallbacks]) callback({ workspaceId });
+    },
+    onCollectionAutomationsChanged: (callback: (event: { workspaceId: string }) => void) => {
+      automationsCallbacks.add(callback);
+      return () => { automationsCallbacks.delete(callback); };
+    },
     emitWorkspaceActivity: (event: WorkspaceActivityEvent) => {
       for (const callback of [...activityCallbacks]) callback(event);
     },
@@ -310,6 +318,7 @@ function renderPage(
   view?: {
     activeViewName?: string | null;
     onActiveViewChange?: (viewName: string | null) => void;
+    onError?: CollectionPageProps["onError"];
   },
 ) {
   vi.stubGlobal("dohcDesktop", bridge);
@@ -317,6 +326,36 @@ function renderPage(
 }
 
 describe("CollectionPage", () => {
+  it("reloads initially empty Buttons when the automation index changes in this workspace", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], {
+      ...SCHEMA, fields: [...SCHEMA.fields, { name: "Finish", type: "button" }],
+    });
+    renderPage(bridge);
+    await screen.findByText("Plan");
+    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1));
+    bridge.listAutomationButtons.mockResolvedValue({ buttons: [
+      { field: "Finish", state: { kind: "ready", automationId: "collection:tasks#finish" } },
+    ] });
+    act(() => bridge.emitAutomationsChanged("ws-2"));
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1);
+    act(() => bridge.emitAutomationsChanged("ws-1"));
+    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Finish for Plan" }).getAttribute("aria-disabled")).toBeNull());
+  });
+
+  it("reports real Buttons read errors through the shell error hook with retry", async () => {
+    const bridge = makeBridge([]);
+    const error = new Error("The workspace engine is not running.");
+    bridge.listAutomationButtons.mockRejectedValueOnce(error);
+    const onError = vi.fn();
+    renderPage(bridge, undefined, undefined, { onError });
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "dohc could not read this Collection's buttons.", error, expect.any(Function),
+    ));
+    act(() => onError.mock.calls[0]![2]());
+    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2));
+  });
+
   it("names a newer Collection file and asks to update dohc", async () => {
     const bridge = makeBridge([]);
     bridge.getCollection.mockResolvedValue({ path: "tasks", objectId: "object-test", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }],
@@ -1967,23 +2006,22 @@ describe("Button fields", () => {
     expect(first.defaultPrevented).toBe(false);
   });
 
-  it("reports a failed run with Try again, which runs the same claim again", async () => {
+  it("frees the button when its run fails, and files no row of its own beside the failure's notice", async () => {
     const bridge = buttonsWith();
     vi.stubGlobal("dohcDesktop", bridge);
-    const onError = vi.fn();
-    render(pageWithHost(undefined, undefined, { onError }));
+    const onError = vi.fn(), onNotice = vi.fn();
+    render(pageWithHost(undefined, undefined, { onError, onNotice }));
     const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     fireEvent.click(button);
     await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
     await act(async () => undefined);
-    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "failed", error: "Total is not a number." }));
-    expect(onError).toHaveBeenCalledWith("Mark paid did not finish.", new Error("Total is not a number."), expect.any(Function));
-    act(() => (onError.mock.calls[0]![2] as () => void)());
-    await waitFor(() => expect(bridge.retryCollectionAutomation).toHaveBeenCalledWith({
-      workspaceId: "ws-1", automationId: "collection:tasks#paid", claimId: "atc_press", startOver: false, onServer: false,
-    }));
     expect(button.getAttribute("aria-busy")).toBe("true");
+    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "failed", error: "Total is not a number." }));
+    expect(button.getAttribute("aria-busy")).toBeNull();
+    // Main sends this person the failure's one notice, with Try again, and takes it back once a run succeeds.
+    expect(onError).not.toHaveBeenCalled();
+    expect(onNotice).not.toHaveBeenCalled();
   });
 
   it("settles a run whose end arrived before the press answer", async () => {
@@ -2067,7 +2105,7 @@ describe("Button fields", () => {
     expect(button.closest("[role=row]")?.contains(words)).toBe(false);
   });
 
-  it("drops a closed workspace's runs, so neither their end nor a Try again reports", async () => {
+  it("drops a closed workspace's runs, so their end does not report", async () => {
     const bridge = buttonsWith();
     vi.stubGlobal("dohcDesktop", bridge);
     const onNotice = vi.fn(), onError = vi.fn();
@@ -2076,41 +2114,12 @@ describe("Button fields", () => {
     await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
     fireEvent.click(button);
     await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
-    await act(async () => undefined);
-    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "failed", error: "No." }));
-    const retry = onError.mock.calls[0]![2] as () => void;
-    fireEvent.click(button);
-    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalledTimes(2));
     await act(async () => undefined);
     page.unmount();
     disposeAutomationButtons("ws-1");
     act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
-    retry();
     expect(onNotice).not.toHaveBeenCalled();
-    expect(bridge.retryCollectionAutomation).not.toHaveBeenCalled();
-  });
-
-  it("runs Try again through the live store after the old one was dropped, and reports its end", async () => {
-    const bridge = buttonsWith();
-    vi.stubGlobal("dohcDesktop", bridge);
-    const onNotice = vi.fn(), onError = vi.fn();
-    const page = render(pageWithHost(undefined, undefined, { onNotice, onError }));
-    const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
-    await waitFor(() => expect(button.getAttribute("aria-disabled")).toBeNull());
-    fireEvent.click(button);
-    await waitFor(() => expect(bridge.pressAutomationButton).toHaveBeenCalled());
-    await act(async () => undefined);
-    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "failed", error: "No." }));
-    const retry = onError.mock.calls[0]![2] as () => void;
-    page.unmount();
-    // Other Collections push this idle one out of the window.
-    const dropped = automationButtonsFor("ws-1", { collectionPath: "tasks" });
-    for (let index = 0; index < 25; index += 1) automationButtonsFor("ws-1", { collectionPath: `other-${index}` });
-    expect(automationButtonsFor("ws-1", { collectionPath: "tasks" })).not.toBe(dropped);
-    await act(async () => retry());
-    await waitFor(() => expect(bridge.retryCollectionAutomation).toHaveBeenCalled());
-    act(() => bridge.emitRunSettled({ workspaceId: "ws-1", claimId: "atc_press", outcome: "done", error: null }));
-    expect(onNotice).toHaveBeenCalledWith("Ran Mark paid on Invoice 12");
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("retries a press that did not start through the live store after its store was dropped, and a dropped store presses nothing", async () => {

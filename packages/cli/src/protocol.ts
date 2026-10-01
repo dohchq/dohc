@@ -1071,6 +1071,10 @@ const automationRunResultSchema = z.discriminatedUnion("ok", [
       run: z
         .object({
           ...automationRunFields,
+          findMs: z.number().nonnegative().optional(),
+          planMs: z.number().nonnegative().optional(),
+          writeMs: z.number().nonnegative().optional(),
+          writeCount: z.number().int().nonnegative().optional(),
           // Steps count from 1 in the order the file lists them, including
           // the steps inside If and Otherwise. A step that changed nothing
           // is not listed.

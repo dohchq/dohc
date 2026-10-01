@@ -356,6 +356,7 @@ describe("engine Y.Doc IPC adapter", () => {
     const payload = {sessionId: openPayload.sessionId,lineageGeneration: 1};
     const prepared = owner.prepareHandoff(new AbortController().signal);
     expect(sender.sent.at(-1)?.payload).toEqual(payload);
+    expect(() => h.capturedOpen()?.assertRecordWritable?.()).toThrow("Try again");
     await expect(h.ipc.prepareOwnerHandoff(new FakeSender(9),payload)).rejects.toThrow();
     await expect(h.ipc.prepareOwnerHandoff(sender,{...payload,lineageGeneration: 2})).rejects.toThrow();
     let released = false;
@@ -365,6 +366,7 @@ describe("engine Y.Doc IPC adapter", () => {
     expect(released).toBe(false);
     await owner.finishHandoff(true); await holding;
     expect(released).toBe(true);
+    expect(() => h.capturedOpen()?.assertRecordWritable?.()).not.toThrow();
     const updates = Array.from({length: 100}, (_, index) => new Uint8Array([index, 0]));
     for (const update of updates) await owner.remoteApplied(update);
     expect(nativeOwner.refresh).not.toHaveBeenCalled();
