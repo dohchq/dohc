@@ -1587,6 +1587,7 @@ describe("markdown document opening state", () => {
       await screen.findByTestId("markdown-editor"),
       "Draft!",
     );
+    await advanceAutosaveDebounce();
     // The 800ms timer fires; the write is now in flight, held by the mock.
     await waitFor(
       () =>
@@ -1677,6 +1678,7 @@ describe("markdown document opening state", () => {
       await screen.findByTestId("markdown-editor"),
       "One",
     );
+    await advanceAutosaveDebounce();
     await waitFor(
       () =>
         expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
@@ -1793,6 +1795,7 @@ describe("markdown document opening state", () => {
       await screen.findByTestId("markdown-editor"),
       "One",
     );
+    await advanceAutosaveDebounce();
     await waitFor(
       () =>
         expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
