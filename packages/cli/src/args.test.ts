@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { parseCliArguments } from "./args";
 
 describe("parseCliArguments", () => {
+  it("parses automation list and an explicit switch base, consent, and retry id", () => {
+    expect(parseCliArguments(["automation", "list", "Tasks"], {})).toMatchObject({ verb: "automationList", collectionPath: "Tasks" });
+    expect(parseCliArguments(["automation", "switch", "Tasks", "stamp", "off", "--base", "a".repeat(64), "--submit-id", "switch-1", "--reformat"], {}))
+      .toMatchObject({ verb: "automationSwitch", collectionPath: "Tasks", automation: "stamp", enabled: false, expectedContentHash: "a".repeat(64), submitId: "switch-1", reformat: true });
+    expect(() => parseCliArguments(["automation", "switch", "Tasks", "stamp", "off"], {})).toThrow("--base");
+  });
   it("parses the read verbs and global actor options", () => {
     expect(parseCliArguments(["chat", "groups"], {})).toEqual({
       actor: "human",

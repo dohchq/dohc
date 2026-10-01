@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
 import { ENGINE_STORE_BACKUP_DIR } from "../ipc/bridgeContract";
-import type { OwnerLiveDocumentsResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
+import type { OwnerLiveDocumentsResult, McpConfigResult, NoticeRow, RebuildEngineStoreResult, ResolveAutomationControlsResult, SyncStatusResult, EngineYDocSaveStateEvent } from "../ipc/bridgeContract";
 import type { SentNotices } from "./shell/useSentNotices";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import type { Workspace } from "./DesktopWorkspaceShell";
@@ -1016,15 +1016,15 @@ describe("notices sent to you", () => {
 
   function renderWithNotices(
     bridge: ReturnType<typeof makeBridge>,
-    extra: { sentNotices?: SentNotices; openOnReady?: OpenOnSwitch; onSwitchWorkspace?: (workspace: Workspace, open?: OpenOnSwitch) => void },
-    workspaces: Workspace[] = [WORKSPACE],
+    extra: { sentNotices?: SentNotices; openOnReady?: OpenOnSwitch; onSwitchWorkspace?: (workspace: Workspace, open?: OpenOnSwitch) => void; workspace?: Workspace },
+    workspaces: Workspace[] = [extra.workspace ?? WORKSPACE],
   ) {
     vi.stubGlobal("dohcDesktop", bridge);
     return render(
       <>
         <CollectionFieldWriteHost />
         <DesktopWorkspaceShell
-          workspace={WORKSPACE}
+          workspace={extra.workspace ?? WORKSPACE}
           workspaces={workspaces}
           {...shellBootstrapProps(bridge)}
           onSwitchWorkspace={extra.onSwitchWorkspace ?? (() => {})}
@@ -1146,6 +1146,32 @@ describe("notices sent to you", () => {
     await screen.findByTestId("tab-b.md");
   });
 
+  it("opens no runs for a notice whose Open was cancelled while main looked the automation up", async () => {
+    const user = userEvent.setup();
+    const bridge = withRuns(makeBridge(Promise.resolve(null)));
+    const found = deferred<{ status: "found"; collectionPath: string }>();
+    bridge.findAutomationCollection.mockReturnValueOnce(found.promise);
+    renderWithNotices(bridge, { sentNotices: sentNotices([FAILED("first", "atc_first")]) });
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await user.click(await screen.findByTestId("sent-notice-automation-failed:first-open"));
+    // Closing Notices cancels the Open.
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await act(async () => found.resolve({ status: "found", collectionPath: "tasks" }));
+    expect(screen.queryByTestId("tab-dohc://collection/tasks")).toBeNull();
+  });
+
+  it("offers Try again when it cannot open a switched-off automation once the workspace is ready", async () => {
+    const user = userEvent.setup();
+    const bridge = withRuns(makeBridge(Promise.resolve(null)));
+    bridge.findAutomationCollection.mockRejectedValueOnce(new Error("The workspace engine is not running."));
+    renderWithNotices(bridge, { openOnReady: { automationControls: "collection:tasks#first" } });
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not open this automation.");
+    await user.click(within(toast).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+    expect(bridge.findAutomationCollection).toHaveBeenCalledTimes(2);
+  });
+
   it("opens a switched-off automation's switch once the workspace it switched to is ready", async () => {
     const bridge = withRuns(makeBridge(Promise.resolve(null)));
     const automation = {
@@ -1162,6 +1188,78 @@ describe("notices sent to you", () => {
     await waitFor(() => expect(document.activeElement).toBe(toggle));
     expect(bridge.findAutomationCollection).toHaveBeenCalledWith({ workspaceId: WORKSPACE.workspaceId, automationId: "collection:tasks#first" });
     expect(bridge.listCollectionAutomationRuns).not.toHaveBeenCalled();
+  });
+
+  describe("through an Edit share view", () => {
+    const EDIT_VIEW: Workspace = { ...WORKSPACE, shareView: { shareId: "share-1", granterEmail: "owner@dohc.test", access: "edit" } };
+    const SWITCHED_OFF = { automationControls: "collection:object-tasks#first", sharedFile: "tasks/automations.yaml" };
+    const automation = {
+      id: "first", name: "Stamp the date", enabled: false, when: { kind: "record-added" as const, table: null }, if: null,
+      do: [{ kind: "set" as const, values: [{ field: "Done", value: { kind: "literal" as const, value: true } }], records: null, operation: null }],
+    };
+
+    it("opens a switched-off automation's switch in the shared panel", async () => {
+      const bridge = withRuns(makeBridge(Promise.resolve(null)));
+      bridge.resolveAutomationControls.mockResolvedValue({ status: "found", collectionPath: "tasks", automation: "first" });
+      bridge.listCollectionAutomations.mockResolvedValue({ status: "shared", definitions: {
+        file: { status: "read", entries: [{ status: "valid", automation, enabledInFile: false, canSwitch: true }] },
+        contentHash: "a".repeat(64), canSwitch: true, sync: "accepted",
+      } });
+      renderWithNotices(bridge, { openOnReady: SWITCHED_OFF, workspace: EDIT_VIEW });
+      expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+      const toggle = within(await screen.findByTestId("automation-first", undefined, { timeout: 15_000 })).getByRole("switch");
+      await waitFor(() => expect(document.activeElement).toBe(toggle));
+      expect(bridge.resolveAutomationControls).toHaveBeenCalledWith({
+        workspaceId: EDIT_VIEW.workspaceId, path: "tasks/automations.yaml", automationId: "collection:object-tasks#first",
+      });
+      expect(bridge.findAutomationCollection).not.toHaveBeenCalled();
+      expect(bridge.listCollectionAutomationRuns).not.toHaveBeenCalled();
+    });
+
+    it("opens automations.yaml when the shared panel cannot show the automation", async () => {
+      const bridge = withRuns(makeBridge(Promise.resolve(null)));
+      renderWithNotices(bridge, { openOnReady: SWITCHED_OFF, workspace: EDIT_VIEW });
+      expect(await screen.findByTestId("tab-tasks/automations.yaml")).toBeTruthy();
+      expect(screen.queryByTestId("tab-dohc://collection/tasks")).toBeNull();
+    });
+
+    it("opens automations.yaml when main cannot look the automation up", async () => {
+      const bridge = withRuns(makeBridge(Promise.resolve(null)));
+      bridge.resolveAutomationControls.mockRejectedValue(new Error("The workspace engine is not running."));
+      renderWithNotices(bridge, { openOnReady: SWITCHED_OFF, workspace: EDIT_VIEW });
+      expect(await screen.findByTestId("tab-tasks/automations.yaml")).toBeTruthy();
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    });
+
+    it("lets a later Open win over an earlier one still waiting on main", async () => {
+      const user = userEvent.setup();
+      const bridge = withRuns(makeBridge(Promise.resolve(null)));
+      const first = deferred<ResolveAutomationControlsResult>();
+      bridge.resolveAutomationControls.mockReturnValueOnce(first.promise)
+        .mockResolvedValueOnce({ status: "found", collectionPath: "chores", automation: "second" });
+      const later: NoticeRow = {
+        ...MENTION, noticeId: "automation-failed:second", kind: "automation-failed", senderKind: "automation", workspaceId: null,
+        recipientShareId: "share-1", title: 'Automation "second" switched off',
+        target: { recovery: "automation-controls", automation: "collection:object-chores#second", path: "chores/automations.yaml" },
+      };
+      renderWithNotices(bridge, { openOnReady: SWITCHED_OFF, workspace: EDIT_VIEW, sentNotices: sentNotices([later]) });
+      await waitFor(() => expect(bridge.resolveAutomationControls).toHaveBeenCalledTimes(1));
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(await screen.findByTestId("sent-notice-automation-failed:second-open"));
+      expect(await screen.findByTestId("tab-dohc://collection/chores")).toBeTruthy();
+      await act(async () => first.resolve({ status: "found", collectionPath: "tasks", automation: "first" }));
+      expect(screen.queryByTestId("tab-dohc://collection/tasks")).toBeNull();
+      expect(screen.queryByTestId("tab-tasks/automations.yaml")).toBeNull();
+    });
+
+    it("opens automations.yaml in a share view that shows no Collections", async () => {
+      const bridge = withRuns(makeBridge(Promise.resolve(null)));
+      bridge.resolveAutomationControls.mockResolvedValue({ status: "found", collectionPath: "tasks", automation: "first" });
+      const view: Workspace = { ...WORKSPACE, shareView: { shareId: "share-1", granterEmail: "owner@dohc.test", access: "view" } };
+      renderWithNotices(bridge, { openOnReady: SWITCHED_OFF, workspace: view });
+      expect(await screen.findByTestId("tab-tasks/automations.yaml")).toBeTruthy();
+      expect(screen.queryByTestId("tab-dohc://collection/tasks")).toBeNull();
+    });
   });
 
   describe("through a share this computer has not added", () => {
@@ -1217,6 +1315,24 @@ describe("notices sent to you", () => {
       await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
       await user.click(start);
       await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(VIEW, "Trips/Japan/report.md"));
+    });
+
+    it("opens it as its own workspace on a switched-off automation's switch", async () => {
+      const user = userEvent.setup();
+      const bridge = shareBridge("edit");
+      const onSwitchWorkspace = vi.fn();
+      const switchedOff: NoticeRow = { ...THROUGH_SHARE, kind: "automation-failed",
+        target: { recovery: "automation-controls", automation: "collection:object-tasks#stamp", path: "Trips/tasks/automations.yaml" } };
+      renderWithNotices(bridge, { sentNotices: sentNotices([switchedOff]), onSwitchWorkspace });
+
+      await user.click(await screen.findByTestId("notice-center-toggle"));
+      await user.click(await screen.findByTestId("sent-notice-mention:1-open"));
+      const start = await screen.findByTestId("open-share-start");
+      await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
+      await user.click(start);
+      await waitFor(() => expect(onSwitchWorkspace).toHaveBeenCalledWith(VIEW, {
+        automationControls: "collection:object-tasks#stamp", sharedFile: "Trips/tasks/automations.yaml",
+      }));
     });
   });
 });

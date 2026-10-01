@@ -1544,6 +1544,7 @@ describe("Collection automations", () => {
       collectionPath: "Tasks",
       startedBy: null,
       replaces: null,
+      ownerSwitchesOnly: false,
     });
 
     // Failing the same way sends a new notice. The old one goes once: Try
@@ -1976,11 +1977,15 @@ describe("Collection automations", () => {
     expect(w.fieldsOf(task).Mark).toBe("first");
   });
 
-  it("switches off an automation after three runs in a row time out, and says so in the failure", async () => {
+  it.each([
+    ["", false],
+    // No share can switch an automation that wakes an agent.
+    [", {wake-agent: Plan, person: user-owner}", true],
+  ] as const)("switches off an automation after three runs in a row time out, and says so in the failure (%s)", async (step, ownerSwitchesOnly) => {
     const timedOut: AutomationEvaluator["evaluate"] = async (_scope, formulas) =>
       formulas.map(() => ({ ok: false, error: { code: "timeout", message: "The formula ran longer than 100 ms." } }));
     const w = await world({
-      automations: { Tasks: "  - id: slow\n    name: Slow\n    when: {field-changed: Status}\n    do: [{set: {X: '=spin()'}}]\n" },
+      automations: { Tasks: `  - id: slow\n    name: Slow\n    when: {field-changed: Status}\n    do: [{set: {X: '=spin()'}}${step}]\n` },
       evaluator: createAutomationFormulaEvaluator(() => ({ evaluate: timedOut, runCode: async () => { throw new Error("unused"); }, close: async () => undefined })).forWorkspace("workspace"),
     });
     const task = w.addRecord("Tasks", "one", { Status: "Done" });
@@ -1995,6 +2000,7 @@ describe("Collection automations", () => {
     expect(w.failureReports.find((report) => report.failure.claimId === claims[1]!.claimId)?.failure.switchedOff).toBeUndefined();
     expect(w.failureReports.find((report) => report.failure.claimId === claims[2]!.claimId)?.failure.switchedOff)
       .toEqual({ reason: "consecutive-timeouts", collectionPath: "Tasks" });
+    expect(w.failureReports.find((report) => report.failure.claimId === claims[2]!.claimId)?.ownerSwitchesOnly).toBe(ownerSwitchesOnly);
     expect(await readFile(join(w.root, "Tasks", "automations.yaml"), "utf8")).toContain("enabled: false");
     expect(w.writtenAs).toEqual([{ path: "Tasks/automations.yaml", automationId: "collection:Tasks#slow" }]);
     // Its own switch off is no person's, so nobody hears who did it.

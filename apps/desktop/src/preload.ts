@@ -321,6 +321,8 @@ const bridge: DohcDesktopBridge = {
   dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
   listCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
+  switchCollectionAutomation: (payload) => ipcRenderer.invoke(CHANNELS.switchCollectionAutomation, payload),
+  resolveAutomationControls: (payload) => ipcRenderer.invoke(CHANNELS.resolveAutomationControls, payload),
   listCollectionAutomationRuns: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomationRuns, payload),
   getCollectionAutomationRun: (payload) =>

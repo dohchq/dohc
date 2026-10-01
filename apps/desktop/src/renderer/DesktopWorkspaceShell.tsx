@@ -19,6 +19,7 @@ import {
   useState,
 } from "react";
 import type {
+  ResolveAutomationControlsResult,
   ChatFileMentionRecord,
   ChatThreadRecord,
   DesktopUserSettingsResult,
@@ -2073,14 +2074,18 @@ export function DesktopWorkspaceShell(props: {
   // counter keeps rising after a clear, so each ask is new to the panel.
   const [automationFocus, setAutomationFocus] = useState<(AutomationFocus & { collectionPath: string }) | null>(null);
   const automationFocusSeq = useRef(0);
+  // Each Open rises: only the latest one, still wanted in this workspace,
+  // moves the window once main answers.
+  const automationOpens = useRef(0);
   // Main finds the Collection by its id, so a Collection that moved still
   // opens. Resolves to a sentence for the notice's row when it cannot open.
   const openAutomation = useCallback(
     // `name` is how the asker already names the automation, for the panel's title before its file is read.
-    async (automationId: string, run: string | null, name: string | null = null, controls = false): Promise<string | null> => {
+    async (automationId: string, run: string | null, name: string | null = null, controls = false, signal?: AbortSignal): Promise<string | null> => {
       const owner = workspaceId;
+      const request = ++automationOpens.current;
       const found = await bridge().findAutomationCollection({ workspaceId: owner, automationId });
-      if (workspaceIdRef.current !== owner) return null;
+      if (workspaceIdRef.current !== owner || automationOpens.current !== request || signal?.aborted) return null;
       if (found.status !== "found") return AUTOMATION_NOT_HERE_NOTE;
       openCollectionTab(found.collectionPath);
       automationFocusSeq.current += 1;
@@ -2096,9 +2101,37 @@ export function DesktopWorkspaceShell(props: {
     },
     [openCollectionTab, workspaceId],
   );
-  const openAutomationControls = useCallback(
-    (automationId: string) => openAutomation(automationId, null, null, true),
+  // Through a share, main finds the automation in the automations.yaml there.
+  // Where this window does not show that Collection, the file opens instead.
+  const collectionFoldersRef = useRef(collectionFolders);
+  collectionFoldersRef.current = collectionFolders;
+  const openNoticeAutomation = useCallback(
+    (automationId: string, run: string | null, signal: AbortSignal) => openAutomation(automationId, run, null, false, signal),
     [openAutomation],
+  );
+  const openAutomationControls = useCallback(
+    async (automationId: string, { sharedFile, signal }: { sharedFile?: string | undefined; signal?: AbortSignal } = {}): Promise<string | null> => {
+      if (sharedFile === undefined) return openAutomation(automationId, null, null, true, signal);
+      const owner = workspaceId;
+      const request = ++automationOpens.current;
+      // A lookup that fails still leaves the file, which holds the switch.
+      const found = await bridge().resolveAutomationControls({ workspaceId: owner, path: sharedFile, automationId })
+        .catch((): ResolveAutomationControlsResult => ({ status: "missing" }));
+      if (workspaceIdRef.current !== owner || automationOpens.current !== request || signal?.aborted) return null;
+      const shown = found.status === "found" &&
+        (isShareView ? shareViewEditsCollections : collectionFoldersRef.current.has(found.collectionPath));
+      if (!shown) {
+        openFile(sharedFile);
+        return null;
+      }
+      openCollectionTab(found.collectionPath);
+      automationFocusSeq.current += 1;
+      setAutomationFocus({
+        collectionPath: found.collectionPath, automationId: found.automation, run: null, controls: true, name: null, seq: automationFocusSeq.current,
+      });
+      return null;
+    },
+    [isShareView, openAutomation, openCollectionTab, openFile, shareViewEditsCollections, workspaceId],
   );
   // Read once: the shell remounts for each workspace.
   const openOnReady = useRef(props.openOnReady);
@@ -2110,12 +2143,15 @@ export function DesktopWorkspaceShell(props: {
       openFile(open);
       return;
     }
-    void openAutomationControls(open.automationControls).then(
-      (note) => {
-        if (note !== null) reportShellError(note, new Error(note));
-      },
-      (error: unknown) => reportShellError("dohc could not open this automation.", error),
-    );
+    const openSwitch = () => {
+      void openAutomationControls(open.automationControls, { sharedFile: open.sharedFile }).then(
+        (note) => {
+          if (note !== null) reportShellError(note, new Error(note), openSwitch);
+        },
+        (error: unknown) => reportShellError("dohc could not open this automation.", error, openSwitch),
+      );
+    };
+    openSwitch();
   }, [openAutomationControls, openFile, reportShellError, workspaceIsReady]);
   const clearAutomationFocus = useCallback(() => setAutomationFocus(null), []);
   const recordHistory = useRecordHistory(workspaceId, { reportShellError, clearKind, openAutomationRun: openAutomation });
@@ -3970,7 +4006,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceId,
     workspaces: props.workspaces,
     openFile,
-    openAutomation,
+    openAutomation: openNoticeAutomation,
     openAutomationControls,
     onSwitchWorkspace: props.onSwitchWorkspace,
     onOpenShare: setOpenShare,
@@ -5804,7 +5840,8 @@ export function DesktopWorkspaceShell(props: {
                 })}
             onWorkspaceReady={(workspace) => {
               setOpenShare(null);
-              props.onSwitchWorkspace(workspace, openSharePath);
+              // A share opened as its own workspace can show an automation's switch.
+              props.onSwitchWorkspace(workspace, (openShare !== "blank" ? openShare.controls : undefined) ?? openSharePath);
             }}
             onBack={() => setOpenShare(null)}
             onConnectionError={reportConnectionError}

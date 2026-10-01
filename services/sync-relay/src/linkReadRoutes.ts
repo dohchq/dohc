@@ -29,6 +29,7 @@ export function createLinkReadRoutes(
     | "readCurrentFileState"
     | "currentFileBlobByteLength"
     | "getBlob"
+    | "automationSwitchableFolder"
   >,
   nowMs: () => number,
   linkCurrentFileLimit: number,
@@ -110,6 +111,7 @@ export function createLinkReadRoutes(
       const presentation = createAccountlessPathProjection(
         fresh.effectiveSelector,
       );
+      const requestedFolder = new URL(request.url).searchParams.get("collectionPath");
       const files = snapshot.files.map((file) => {
         const path = presentation.projectPath(file.path);
         if (path === null) throw notFound();
@@ -117,6 +119,11 @@ export function createLinkReadRoutes(
           path,
           blobSha256: file.blobSha256,
           contentKind: file.contentKind,
+          ...(requestedFolder !== null && path === `${requestedFolder}/automations.yaml` ? { automationSwitchable: fresh.access === "edit"
+            && fresh.effectiveSelector.versionId === null
+            && fresh.effectiveSelector.paths.some(root => file.path.slice(0, -"/automations.yaml".length) === root
+              || file.path.startsWith(`${root}/`))
+            && storage.automationSwitchableFolder(share.workspaceId, file.path.slice(0, -"/automations.yaml".length)) } : {}),
         };
       });
       return linkJsonResponse(fresh.shareId, fresh.grantId, {

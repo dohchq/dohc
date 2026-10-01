@@ -3,6 +3,8 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { serveFetchHandler, TokenBucketLimiter } from "@dohc/service-http";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
+import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
+import type { DatasetDefinition } from "@dohc/security-contract/dataset";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { MAX_COLLECTION_WRITE_BODY_BYTES, MAX_LINK_COLLECTION_WRITE_BODY_BYTES } from "./collectionWriteRoutes";
 import { hashLinkBearer } from "./linkSecurity";
@@ -58,6 +60,27 @@ const SCHEMA_TWO = "name: Packing\nfields:\n  Title:\n    type: text\n  Count:\n
 const STAMP = "  - id: stamp\n    name: Stamp\n    when: record-added\n    do:\n      - set:\n          Title: Packed\n";
 const NUDGE = "  - id: nudge\n    name: Nudge\n    when: record-added\n    do:\n      - wake-agent: Look\n        person: user_ana\n";
 const automations = (...items: string[]) => `version: 1\nautomations:\n${items.join("")}`;
+
+async function datasetFolder(r: Relay, descriptorChange: "matching" | "different" | "wrong-folder" | "unapproved" | "malformed" = "matching") {
+  const folder = "trip/dataset", id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const definition: DatasetDefinition = { formatVersion: 1, datasetId: id(1), name: "People",
+    schemaPath: `${descriptorChange === "wrong-folder" ? "other" : folder}/schema.sql`, operationsPath: `${folder}/operations.js`,
+    tables: [{ tableId: id(2), name: "People", sqlName: "people", primaryKey: "id", fields: [
+      { fieldId: id(3), name: "ID", sqlColumn: "id", type: "text", required: true, unique: true },
+      { fieldId: id(4), name: "Title", sqlColumn: "title", type: "text", required: false, unique: false },
+    ] }], operations: [{ operationId: id(5), name: "read", label: "Read", tableId: id(2), kind: "read", access: "helper", readOnly: true, fieldIds: [id(3), id(4)] }],
+  };
+  const revision = describeDatasetRevision({ definition, revision: 1, schemaSql: "CREATE TABLE people(id TEXT PRIMARY KEY NOT NULL,title TEXT);",
+    operationSource: "globalThis.operations={read(ctx){return ctx.db.query('SELECT * FROM people');}};" });
+  const db = inspectDatabase(storagePath(r.storage));
+  try {
+    db.exec("CREATE TABLE IF NOT EXISTS dohc_dataset_catalog(workspace_id TEXT NOT NULL,dataset_id TEXT NOT NULL,revision_json TEXT NOT NULL,artifacts_json TEXT NOT NULL,PRIMARY KEY(workspace_id,dataset_id))");
+    if (descriptorChange !== "unapproved") db.prepare("INSERT INTO dohc_dataset_catalog VALUES(?,?,?,?)").run(WORKSPACE, definition.datasetId, JSON.stringify(revision), "{}");
+  } finally { db.close(); }
+  const text = descriptorChange === "malformed" ? "{" : JSON.stringify(descriptorChange === "different" ? { ...definition, name: "Changed" } : definition);
+  await r.owner.write("dataset-descriptor", `${folder}/dataset.json`, text);
+  return folder;
+}
 
 interface Relay {
   h: SyncRelayHandler;
@@ -154,6 +177,16 @@ class Owner {
     }>;
     return ops.filter((op) => op.originId.startsWith("relay:collection-file:"));
   }
+
+  async savedVersion(versionId: string, path: string, text: string): Promise<void> {
+    const blobSha256 = await putBlob(this.h, OWNER, WORKSPACE, text);
+    const response = await this.h(request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: "origin-owner", ops: [{
+      originSeq: this.seq++, opKind: "version.create", recordedAtMs: CLOCK,
+      payload: { versionId, name: "Saved", kind: "named", createdAtMs: CLOCK,
+        forkSnapshots: [{ objectId: "object-automations", path, blobSha256, updatedAtMs: CLOCK, latestMomentId: "saved-definition", metadata: {} }] },
+    }] })));
+    expect(response.status, await response.clone().text()).toBe(200);
+  }
 }
 
 function bytes(text: string): number {
@@ -216,6 +249,112 @@ describe("the fixtures", () => {
 });
 
 describe("direct writes to a Collection's own files", () => {
+  it.each(["view", "comment", "edit"] as const)("reads definitions through the named %s log and blob transport", async access => {
+    const r = await relay({ access }), text = automations(STAMP), path = `${PACKING}/automations.yaml`;
+    await r.owner.write("object-automations", path, text);
+    const response = await r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/log?since=0`));
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(await json(response))).toContain(path);
+    const blob = await r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/blobs/${sha256(text)}`));
+    expect(await blob.text()).toBe(text);
+  });
+  it("keeps file selectors from reading siblings and version selectors on saved definitions", async () => {
+    const path = `${PACKING}/automations.yaml`, saved = automations(STAMP), newer = automations(STAMP.replace("Packed", "Changed"));
+    const file = await relay({ paths: [`${PACKING}/collection.yaml`] });
+    await file.owner.write("object-automations", path, saved);
+    expect(JSON.stringify(await json(await file.h(request(RECIPIENT, `/sync/shares/${file.shareId}/log?since=0`))))).not.toContain(path);
+    expect((await file.h(request(RECIPIENT, `/sync/shares/${file.shareId}/blobs/${sha256(saved)}`))).status).toBe(404);
+    const r = await relay();
+    await r.owner.savedVersion("saved", path, saved);
+    await r.owner.write("object-automations", path, newer);
+    const shareId = await createShare(r.h, OWNER, WORKSPACE, { recipientUserId: RECIPIENT, paths: [PACKING], versionId: "saved", access: "edit" });
+    const page = JSON.stringify(await json(await r.h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0`))));
+    expect(page).toContain(sha256(saved)); expect(page).not.toContain(sha256(newer));
+    expect(await (await r.h(request(RECIPIENT, `/sync/shares/${shareId}/blobs/${sha256(saved)}`))).text()).toBe(saved);
+  });
+  it("accepts only automations in an approved dataset folder, with normal provenance and history", async () => {
+    const r = await relay(), folder = await datasetFolder(r), one = automations(STAMP);
+    const preflight = await r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/collection-writes?${new URLSearchParams({ collectionPath: folder })}`));
+    expect(preflight.status).toBe(200);
+    expect(await json(preflight)).toEqual({ ok: true, canSwitch: true });
+    await upload(r, one);
+    const response = await write(r, [create(`${folder}/automations.yaml`, one)]);
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect((await r.owner.directMoments())[0]?.payload).toMatchObject({ path: `${folder}/automations.yaml`, authors: [{ kind: "named", userId: RECIPIENT }] });
+    await expectCode(await write(r, [create(`${folder}/schema.sql`, "changed")], { submitId: "rules" }), 403, "share_op_rejected");
+  });
+  it.each(["different", "wrong-folder", "unapproved", "malformed"] as const)("refuses dataset automations for a %s descriptor", async problem => {
+    const r = await relay(), folder = await datasetFolder(r, problem), one = automations(STAMP);
+    const preflight = await r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/collection-writes?${new URLSearchParams({ collectionPath: folder })}`));
+    expect(await json(preflight)).toEqual({ ok: true, canSwitch: false });
+    await upload(r, one);
+    await expectCode(await write(r, [create(`${folder}/automations.yaml`, one)]), 403, "share_op_rejected");
+    expect(await r.owner.directMoments()).toEqual([]);
+  });
+  it("scopes switch preflights to current named Edit folder grants", async () => {
+    const r = await relay();
+    const path = (folder: string) => `/sync/shares/${r.shareId}/collection-writes?${new URLSearchParams({ collectionPath: folder })}`;
+    expect(await json(await r.h(request(RECIPIENT, path(PACKING))))).toEqual({ ok: true, canSwitch: true });
+    expect((await r.h(request(RECIPIENT, path("private")))).status).toBe(404);
+    expect((await r.h(request("stranger", path(PACKING)))).status).toBe(404);
+    for (const access of ["view", "comment"] as const) {
+      const view = await relay({ access });
+      expect((await view.h(request(RECIPIENT, `/sync/shares/${view.shareId}/collection-writes?collectionPath=${PACKING}`))).status).toBe(403);
+    }
+    const file = await relay({ paths: [`${PACKING}/automations.yaml`] });
+    expect((await file.h(request(RECIPIENT, `/sync/shares/${file.shareId}/collection-writes?collectionPath=${PACKING}`))).status).toBe(404);
+  });
+  it("bounds switch preflights without spending the grant's write tokens", async () => {
+    const r = await relay({ overrides: { collectionWriteRateLimiter: new TokenBucketLimiter(1, 0.001, 10) } });
+    const path = `/sync/shares/${r.shareId}/collection-writes?collectionPath=${PACKING}`;
+    const check = vi.spyOn(r.storage, "automationSwitchableFolder");
+    for (let i = 0; i < 30; i++) expect((await r.h(request(RECIPIENT, path))).status).toBe(200);
+    await expectCode(await r.h(request(RECIPIENT, path)), 429, "collection_write_rate_limited");
+    await upload(r, SCHEMA_TWO);
+    const response = await write(r, [edit(`${PACKING}/collection.yaml`, SCHEMA, SCHEMA_TWO)]);
+    expect(response.status, await response.clone().text()).toBe(200);
+    await expectCode(await write(r, []), 429, "collection_write_rate_limited");
+    expect(check).toHaveBeenCalledTimes(30);
+  });
+  it("rechecks dataset content and approval during cached preflights", async () => {
+    const r = await relay(), folder = await datasetFolder(r);
+    const catalogDb = inspectDatabase(storagePath(r.storage));
+    let revisionJson: string;
+    try {
+      revisionJson = String(catalogDb.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=?").get(WORKSPACE)?.revision_json);
+    } finally { catalogDb.close(); }
+    const readBlob = vi.spyOn(r.storage, "getBlob");
+    const parseJson = vi.spyOn(JSON, "parse");
+    let now = CLOCK;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const path = `/sync/shares/${r.shareId}/collection-writes?collectionPath=${folder}`;
+    const check = async (canSwitch: boolean) => {
+      expect(await json(await r.h(request(RECIPIENT, path)))).toEqual({ ok: true, canSwitch });
+    };
+    try {
+      await check(true);
+      await check(true);
+      expect(readBlob).toHaveBeenCalledTimes(1);
+      expect(parseJson.mock.calls.filter(([text]) => text === revisionJson)).toHaveLength(1);
+      now += 2_000;
+      await check(true);
+      expect(readBlob).toHaveBeenCalledTimes(2);
+      const db = inspectDatabase(storagePath(r.storage));
+      try {
+        const revision = db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=?").get(WORKSPACE);
+        db.prepare("UPDATE dohc_dataset_catalog SET revision_json=? WHERE workspace_id=?").run("{}", WORKSPACE);
+        await check(false);
+        db.prepare("UPDATE dohc_dataset_catalog SET revision_json=? WHERE workspace_id=?").run(String(revision?.revision_json), WORKSPACE);
+      } finally { db.close(); }
+      await check(true);
+      await r.owner.write("dataset-descriptor", `${folder}/dataset.json`, "{");
+      await check(false);
+    } finally {
+      clock.mockRestore();
+      readBlob.mockRestore();
+      parseJson.mockRestore();
+    }
+  });
   it("mints the owner's moment for a schema edit, naming the recipient", async () => {
     const r = await relay();
     await upload(r, SCHEMA_TWO);
@@ -1009,6 +1148,26 @@ describe("the direct-write decision", () => {
 // An Edit share link writes the same files through its own route (ADR 0013),
 // with its content in the request and its authority from the capability.
 describe("direct writes through an Edit share link", () => {
+  it.each(["matching", "different", "wrong-folder", "unapproved", "malformed"] as const)("advertises catalog permission for a %s dataset through the link inventory", async problem => {
+    const r = await linkRelay(), folder = await datasetFolder(r, problem);
+    await r.owner.write("object-automations", `${folder}/automations.yaml`, automations(STAMP));
+    await r.owner.write("other-automations", `${PACKING}/automations.yaml`, automations(STAMP));
+    const check = vi.spyOn(r.storage, "automationSwitchableFolder");
+    const inventory = await r.h(linkRequest(TOKEN, "/sync/link/current"));
+    expect(inventory.status).toBe(200);
+    expect((await json(inventory)).files).toContainEqual(expect.objectContaining({ path: "trip/dataset/automations.yaml" }));
+    expect(check).not.toHaveBeenCalled();
+    const response = await r.h(linkRequest(TOKEN, `/sync/link/current?${new URLSearchParams({ collectionPath: folder })}`));
+    expect(response.status).toBe(200);
+    expect((await json(response)).files).toContainEqual(expect.objectContaining({ path: "trip/dataset/automations.yaml", automationSwitchable: problem === "matching" }));
+    expect(check).toHaveBeenCalledExactlyOnceWith(WORKSPACE, folder);
+  });
+  it("uses the same approved dataset automation lane for a link author", async () => {
+    const r = await linkRelay(), folder = await datasetFolder(r);
+    const response = await linkWrite(r, [linkCreate(`${folder}/automations.yaml`, automations(STAMP))]);
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect((await r.owner.directMoments())[0]?.payload).toMatchObject({ path: `${folder}/automations.yaml`, authors: [{ kind: "link", grantId: LINK_GRANT }] });
+  });
   async function expectOpaque(response: Response) {
     expect(response.status).toBe(404);
     expect(await json(response)).toEqual({ ok: false, error: "not found" });

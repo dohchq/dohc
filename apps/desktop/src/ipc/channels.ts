@@ -228,6 +228,8 @@ export const CHANNELS = {
   chatDispatchNotices: "desktop:chat-dispatch-notices",
   // Collection automations: main parses and writes automations.yaml.
   listCollectionAutomations: "desktop:list-collection-automations",
+  switchCollectionAutomation: "desktop:switch-collection-automation",
+  resolveAutomationControls: "desktop:resolve-automation-controls",
   listCollectionAutomationRuns: "desktop:list-collection-automation-runs",
   getCollectionAutomationRun: "desktop:get-collection-automation-run",
   listServerAutomationRuns: "desktop:list-server-automation-runs",

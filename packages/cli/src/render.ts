@@ -256,6 +256,9 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
   options: { grepFilesWithMatches?: boolean; grepContext?: number; momentSide?: "before" | "after" } = {},
 ): string {
   switch (verb) {
+    case "automationList":
+    case "automationSwitch":
+      return JSON.stringify(result, null, 2);
     case "documentRead": {
       const document = result as CliResultByVerb["documentRead"];
       if (!document.ok) throw new DohcCliError(document.reason);

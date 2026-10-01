@@ -25,7 +25,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import type { MomentAuthor, VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { ListNoticesResult, RetryAutomationNoticeResult } from "../ipc/bridgeContract";
-import { FAILED_ELSEWHERE_BODY, AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_EDIT_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
+import { FAILED_ELSEWHERE_BODY, AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import {
   RETRY_ELSEWHERE,
   retryAutomationRun,
@@ -1173,7 +1173,7 @@ describe("automation notices reach the people involved", () => {
       .resolves.toEqual({ status: "switched-off", target });
     expect(remoteRetry).not.toHaveBeenCalled();
     const [received] = await failedIn(ana);
-    expect(received?.body).toBe(access === "edit" ? AUTOMATION_SWITCHED_OFF_EDIT_BODY : AUTOMATION_SWITCHED_OFF_VIEW_BODY);
+    expect(received?.body).toBe(access === "edit" ? AUTOMATION_SWITCHED_OFF_BODY : AUTOMATION_SWITCHED_OFF_VIEW_BODY);
     expect((await failedIn(owner))[0]!.body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)).toBe(true);
     expect(received?.target).toEqual(target);
     const retry = vi.fn(async () => ({ status: "queued" as const, press: false }));

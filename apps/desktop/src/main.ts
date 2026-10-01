@@ -1,4 +1,5 @@
 import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
+import { createDesktopAutomationControls } from "./workspaces/desktopAutomationControls";
 import {parseDohcSiteConfig} from "@dohc/workspace-core";
 import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh} from "./workspaces/ownerShareLabels";
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
@@ -330,7 +331,7 @@ import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import { SharedChannelReadOnlyError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { type ShareAccess } from "@dohc/security-contract/share-selector";
 import {
-  fetchShareViewInfo,
+  fetchShareViewInfo, fetchShareAutomationSwitchable,
 } from "./workspaces/shareViewInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
@@ -4246,6 +4247,8 @@ const { startDesktopCliServer } = createDesktopCliServer({
       return automations;
     };
     return {
+      list: collectionPath => withPhysicalWorkspaceOperation(workspace.workspaceId, operation => automationControlsFor(operation).list(collectionPath)),
+      switch: (collectionPath, input) => withPhysicalWorkspaceOperation(workspace.workspaceId, operation => automationControlsFor(operation).switch(collectionPath, input)),
       automationIdAt: async (collectionPath, id) => (await opened()).automationIdAt(collectionPath, id),
       runs: async (automationId, before) => (await opened()).runs(automationId, before),
       run: async (automationId, claimId) => (await opened()).run(automationId, claimId),
@@ -4494,6 +4497,26 @@ const receivedShareEngine = createReceivedShareEngineAccess({
     return desktopEngine.relayClient;
   },
 });
+
+function automationControlsFor(operation: DesktopWorkspaceOperation) {
+  return createDesktopAutomationControls({ operation, files: createShareViewFilesForOperation(operation), sessions: requireEngineSessions,
+    canSwitch: async (target, collectionPath) => {
+      await warmCredentialCache();
+      operation.assertCurrent();
+      const credentials = cachedCredentials;
+      if (!credentials?.relayUrl || target.relayUrl && !relayUrlsMatch(target.relayUrl, credentials.relayUrl)) {
+        throw new Error("Sign in to the server that shared this Collection.");
+      }
+      const generation = credentialCacheGeneration;
+      const canSwitch = await fetchShareAutomationSwitchable({ relay: { baseUrl: credentials.relayUrl, token: credentials.token },
+        shareId: target.shareId!, collectionPath });
+      operation.assertCurrent();
+      if (generation !== credentialCacheGeneration) throw new Error("The shared file session changed.");
+      return canSwitch;
+    },
+    edited: target => shareDirectWrites?.shareViewEdited(target.workspaceId),
+  });
+}
 
 function engineWorkspaceForAuthority(
   lease: DesktopWorkspaceAuthorityLease,
@@ -5766,6 +5789,7 @@ function registerIpcHandlers(): void {
   registerCollectionAutomationsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, sharedViewOf,
+    controls: automationControlsFor,
     readText: readWorkspaceTextIfPresent,
     createFile: (event, payload) => workspaceFileMutations.createFile(event, payload),
     writeText: (event, payload) => workspaceFileMutations.writeText(event, payload),
@@ -5873,6 +5897,7 @@ function registerIpcHandlers(): void {
         assertCurrent: () => lease.assertCurrent(),
       })),
     reportDirectWrites: notifyShareDirectWritesPushed,
+    automationDefinitionsChanged: notifyCollectionAutomationsChanged,
     currentCredentials: () => cachedCredentials,
     currentCredentialGeneration: () => credentialCacheGeneration,
     normalizeServerUrl, isRecordValue, readOwnedWorkspaceTextFor, activity,

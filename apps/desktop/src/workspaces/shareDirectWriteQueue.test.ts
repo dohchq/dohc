@@ -37,6 +37,23 @@ it("reports nothing when every write went", async () => {
   expect(f.report).not.toHaveBeenCalled();
 });
 
+it("refreshes delivery status for acceptance and offline failure", async () => {
+  const settled = vi.fn(), push = vi.fn(async (): Promise<PushShareDirectWritesResult> => ({ status: "pushed", writes: [{ result: "written", paths: ["Tasks/automations.yaml"] }] }));
+  const queue = createShareDirectWriteQueue({ push, report: () => true, settled });
+  await queue.pushNow("a");
+  expect(settled).toHaveBeenCalledWith("a");
+  push.mockRejectedValueOnce(new Error("offline"));
+  await queue.pushNow("a");
+  expect(settled).toHaveBeenCalledTimes(2);
+});
+
+it("does not refresh definitions after an empty mount poll", async () => {
+  const settled = vi.fn();
+  const queue = createShareDirectWriteQueue({ push: async () => NOTHING, report: () => true, settled });
+  await queue.pushNow("a");
+  expect(settled).not.toHaveBeenCalled();
+});
+
 it("runs one push per view at a time, and one more after it for a request during it", async () => {
   const f = fixture();
   let finish!: (result: PushShareDirectWritesResult) => void;

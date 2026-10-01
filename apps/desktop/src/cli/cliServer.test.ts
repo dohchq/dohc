@@ -1571,11 +1571,24 @@ describe("CLI socket server", () => {
     context.readOnly = true;
     await expect(invoke("automationRetry", { ...args, run: "atc_1", startOver: true })).resolves.toEqual({
       ok: false,
-      reason: "A shared view has no automation runs. The owner's computer runs this workspace's automations.",
+      reason: "Run history is unavailable through shares. Each host keeps the runs it made.",
     });
     expect(retries).toHaveLength(3);
   });
 
+
+  it("gives share agents the definition list and switch seam, including pending results", async () => {
+    context.readOnly = true;
+    const definitions = { file: { status: "read" as const, entries: [] }, contentHash: "a".repeat(64), canSwitch: true,
+      sync: "pending" as const };
+    const switched = { status: "written" as const, contentHash: "b".repeat(64), sync: "pending" as const };
+    const list = vi.fn(async () => definitions), toggle = vi.fn(async () => switched);
+    context.automations = { automationIdAt: vi.fn(), runs: vi.fn(), run: vi.fn(), retry: vi.fn(), list, switch: toggle };
+    const args = { cwd: workspaceRoot, actor: "agent" as const, collectionPath: "tasks" };
+    await expect(invoke("automationList", args)).resolves.toEqual({ ok: true, definitions });
+    await expect(invoke("automationSwitch", { ...args, automation: "stamp", enabled: false, expectedContentHash: "a".repeat(64), reformat: true, submitId: "switch-1" })).resolves.toEqual({ ok: true, result: switched });
+    expect(toggle).toHaveBeenCalledWith("tasks", expect.objectContaining({ automation: "stamp", enabled: false, reformat: true, submitId: "switch-1" }));
+  });
 
   it("returns partial record facts and passes the retry identity to the write seam", async () => {
     const partial = {

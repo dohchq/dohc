@@ -1,5 +1,6 @@
 import { createMcpHandler, McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
+import { createSharedAutomationControls } from "./automationControls";
 import { readBoundedJson } from "@dohc/service-http";
 import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
 import {relayLinkRefusal} from "./linkRefusal";
@@ -59,9 +60,9 @@ const collectionWriteSchema = z.object({
   ])).min(1).max(MAX_COLLECTION_WRITE_FILES),
 }).refine(value => collectionWriteContentBytes(value.files) <= MAX_COLLECTION_WRITE_CONTENT_BYTES,
   "The files' content exceeds 4 MiB in all.");
-const fileInventorySchema = z.object({
+export const fileInventorySchema = z.object({
   ok: z.literal(true),
-  files: z.array(z.object({blobSha256: z.string(), contentKind: z.enum(["text", "binary"])})),
+  files: z.array(z.object({path: z.string(), blobSha256: z.string(), contentKind: z.enum(["text", "binary"]), automationSwitchable: z.boolean().optional()})),
 });
 
 const logSha = z.string().regex(/^[0-9a-f]{64}$/u);
@@ -122,6 +123,23 @@ const json = async (response: Response, signal: AbortSignal): Promise<unknown> =
 function buildServer(options: RemoteOptions, metadata: Record<string, unknown>): McpServer {
   const jsonResponse = (response: Response) => json(response, options.signal);
   const server = new McpServer({ name: "dohc-share", version: "0.1.0" }, { capabilities: { tools: {} } });
+  const controls = createSharedAutomationControls({ ...options, metadata });
+  server.registerTool("dohc_list_automations", {
+    description: "Read automation definitions and on/off file state in a shared Collection. Host runtime and run history are unavailable.",
+    inputSchema: z.object({ collectionPath: z.string().min(1).max(4096) }),
+  }, async ({ collectionPath }) => {
+    try { return text({ ok: true, definitions: await controls.list(collectionPath) }); }
+    catch (e) { return error(e instanceof Error ? e.message : String(e)); }
+  });
+  if (collectionWritesAllowed(metadata)) server.registerTool("dohc_switch_automation", {
+    description: "Change only one automation's enabled value. Read definitions first and provide their contentHash. Reformat confirms losing comments and hand formatting. Retry an unknown result with the same submitId and input. Acceptance records workspace history; it does not acknowledge host execution.",
+    inputSchema: z.object({ collectionPath: z.string().min(1).max(4096), automation: z.string().min(1).max(64),
+      enabled: z.boolean(), expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/u), reformat: z.boolean().default(false),
+      submitId: z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u) }),
+  }, async ({ collectionPath, ...input }) => {
+    try { return text({ ok: true, result: await controls.switch(collectionPath, input) }); }
+    catch (e) { return error(e instanceof Error ? e.message : String(e)); }
+  });
   server.registerTool("dohc_share_status", { description: "Read the current share permissions and release state.", inputSchema: z.object({}) }, async () => {
     const summary = shareLinkSummary(metadata, Boolean(options.linkLive && options.liveLimits));
     return text({ ...metadata, summary: `${summary.subject}. ${summary.permissions} ${summary.included} ${summary.history}` });
@@ -223,9 +241,11 @@ export async function serveRemoteMcp(request: Request, options: RemoteOptions): 
     const parsedBody = body.value;
     // A write goes in a request of its own, so its answer never waits on, or
     // shares a deadline or a body slot with, another call.
-    if (Array.isArray(parsedBody) && parsedBody.some(message => asRecord(message)?.method === "tools/call" &&
-        asRecord(asRecord(message)?.params)?.name === COLLECTION_WRITE_TOOL)) {
-      const result = Response.json({jsonrpc: "2.0", id: null, error: {code: -32600, message: `Send ${COLLECTION_WRITE_TOOL} in a request of its own, not in a batch.`}});
+    const batchedWrite = Array.isArray(parsedBody) ? parsedBody.find(message => asRecord(message)?.method === "tools/call" &&
+      [COLLECTION_WRITE_TOOL, "dohc_switch_automation"].includes(String(asRecord(asRecord(message)?.params)?.name))) : undefined;
+    if (batchedWrite) {
+      const name = String(asRecord(asRecord(batchedWrite)?.params)?.name);
+      const result = Response.json({jsonrpc: "2.0", id: null, error: {code: -32600, message: `Send ${name} in a request of its own, not in a batch.`}});
       return {body: result.body, status: result.status, headers: result.headers};
     }
     if (parsedBody && typeof parsedBody === "object" && "method" in parsedBody && parsedBody.method === "subscriptions/listen") {
@@ -277,8 +297,13 @@ function collectionWritesAllowed(metadata: Record<string, unknown>): boolean {
   return metadata.access === "edit" && selector?.versionId === null;
 }
 
-async function boundedBytes(response: Response, maxBytes: number, signal: AbortSignal): Promise<Buffer<ArrayBuffer>> {
-  const reader = response.body!.getReader();
+export class ResponseTooLargeError extends Error {
+  constructor() { super("The response exceeds the size limit."); }
+}
+
+export async function boundedBytes(response: Response, maxBytes: number, signal: AbortSignal): Promise<Buffer<ArrayBuffer>> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("The response has no content.");
   const chunks: Uint8Array[] = []; let size = 0;
   const abort = () => {void reader.cancel().catch(() => {});};
   signal.addEventListener("abort", abort, {once: true});
@@ -286,7 +311,7 @@ async function boundedBytes(response: Response, maxBytes: number, signal: AbortS
     signal.throwIfAborted();
     while (true) {
       const next = await reader.read(); signal.throwIfAborted(); if (next.done) break;
-      size += next.value.length; if (size > maxBytes) throw new Error("The response exceeds the size limit.");
+      size += next.value.length; if (size > maxBytes) throw new ResponseTooLargeError();
       chunks.push(next.value);
     }
     return Buffer.concat(chunks, size);

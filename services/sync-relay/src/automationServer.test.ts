@@ -5,7 +5,7 @@ import type { ScheduledAutomation, CollectionAutomationsOptions, DatasetAutomati
 import { AUTOMATION_SERVER_MAX_WORKSPACES } from "@dohc/workspace-contracts/relay";
 import type { ReachHandover } from "@dohc/automation-executor/reach-verdicts";
 import { DaemonRefusalError, VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover, type MomentRecord } from "@dohc/workspace-engine-client";
-import { AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_EDIT_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
+import { AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { AutomationReplica, startAutomationReplicas } from "./automationReplicas";
 import type { LiveClaimLedger } from "./automationLiveClaims";
@@ -258,7 +258,7 @@ describe("a server that runs a workspace's automations", () => {
     expect(notices(storage, OWNER)[0]!.body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)).toBe(true);
     for (const person of ["starter", "editor"]) {
       expect(notices(storage, person)).toHaveLength(1);
-      expect(notices(storage, person)[0]).toMatchObject({ body: AUTOMATION_SWITCHED_OFF_EDIT_BODY,
+      expect(notices(storage, person)[0]).toMatchObject({ body: AUTOMATION_SWITCHED_OFF_BODY,
         target: { recovery: "automation-controls", path: "Tasks/automations.yaml", automation: HOURLY.automationId } });
       expect(notices(storage, person)[0]!.target).not.toHaveProperty("run");
     }
@@ -290,7 +290,7 @@ describe("a server that runs a workspace's automations", () => {
       datasetInstance: null, neverStarted: false, chainStopped: false, error: "private-step-token", updatedAtMs: clock,
       switchedOff: { reason: "consecutive-timeouts", collectionPath: "Tasks" } },
       name: "Hourly", collectionPath: "Tasks", startedBy: "viewer", replaces: null });
-    expect(notices(storage, "viewer")[1]!.body).toBe(AUTOMATION_SWITCHED_OFF_EDIT_BODY);
+    expect(notices(storage, "viewer")[1]!.body).toBe(AUTOMATION_SWITCHED_OFF_BODY);
   });
 
   it.each(["x".repeat(2_000), "界".repeat(700)])("delivers the owner's Notice when controls exceed the wire limit (%#)", async (collectionPath) => {

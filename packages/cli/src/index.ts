@@ -215,6 +215,12 @@ function buildCliRequest(
           ...(command.page === undefined ? {} : { page: command.page }),
         },
       };
+    case "automationList":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, collectionPath: command.collectionPath } };
+    case "automationSwitch":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor,
+        collectionPath: command.collectionPath, automation: command.automation, enabled: command.enabled,
+        expectedContentHash: command.expectedContentHash, reformat: command.reformat, submitId: command.submitId } };
     case "automationRun":
       return {
         verb: command.verb,

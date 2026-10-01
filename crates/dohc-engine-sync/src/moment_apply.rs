@@ -1390,7 +1390,7 @@ fn verify_direct_write_author(
 }
 
 /// An in-place text write to `<C>/collection.yaml`, or to `<C>/automations.yaml`
-/// beside it, or the creation of a record directly inside a folder that holds
+/// beside it or `dataset.json`, or the creation of a record directly inside a folder that holds
 /// `collection.yaml`. A new Collection's `collection.yaml` goes only into a
 /// folder that holds nothing yet, and has to arrive before its records.
 fn writes_collection_own_file(
@@ -1443,7 +1443,16 @@ fn writes_collection_own_file(
         COLLECTION_SCHEMA_FILENAME => {
             !creates || !folder_holds_any_file(tx, workspace_id, version_id, folder)?
         }
-        AUTOMATIONS_FILENAME => folder_holds_schema()?,
+        AUTOMATIONS_FILENAME => {
+            folder_holds_schema()?
+                || select_snapshot_by_path(
+                    tx,
+                    workspace_id,
+                    version_id,
+                    &format!("{folder}/dataset.json"),
+                )?
+                .is_some()
+        }
         _ => creates && is_collection_markdown_path(path) && folder_holds_schema()?,
     })
 }

@@ -1,4 +1,4 @@
-import { SERVER_HOLD_NOTICE_PREFIX, SERVER_RUN_FAILED_NOTICE_PREFIX } from "@dohc/workspace-contracts/relay";
+import { isAutomationControlsTarget, SERVER_HOLD_NOTICE_PREFIX, SERVER_RUN_FAILED_NOTICE_PREFIX } from "@dohc/workspace-contracts/relay";
 import type { NoticeRow, WorkspaceSummary } from "../../ipc/bridgeContract";
 
 // Where Open takes a notice sent to you, on this computer.
@@ -37,6 +37,16 @@ export function sentNoticePlace(
     ...workspaces.filter((candidate) => candidate.workspaceId === currentWorkspaceId),
     ...workspaces.filter((candidate) => candidate.workspaceId !== currentWorkspaceId),
   ];
+  // Only a separate Edit view can switch an automation. A shared-with-me
+  // folder is read-only, so an Edit share there opens as its own workspace.
+  if (isAutomationControlsTarget(notice.target)) {
+    const editView = ordered.find(({ shareView }) => shareView?.shareId === shareId && shareView.access === "edit" &&
+      !shareView.ended && !shareView.damaged);
+    if (editView) return { kind: "workspace", workspace: editView, path, mount: null };
+    if (ordered.some(({ shareMounts }) => shareMounts?.some((mount) => mount.shareId === shareId && mount.access === "edit"))) {
+      return { kind: "share", shareId, path };
+    }
+  }
   for (const workspace of ordered) {
     if (workspace.shareView?.shareId === shareId) return { kind: "workspace", workspace, path, mount: null };
     const mount = workspace.shareMounts?.find((candidate) => candidate.shareId === shareId);

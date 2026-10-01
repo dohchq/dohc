@@ -58,18 +58,26 @@ export function automationControlsTarget(automationId: string, collectionPath: s
 export const AUTOMATION_SWITCHED_OFF_BODY =
   "dohc switched this automation off after 3 runs in a row took too long. Open the automation to turn it back on.";
 
-export const AUTOMATION_SWITCHED_OFF_EDIT_BODY =
-  "dohc switched this automation off after 3 runs in a row took too long. Open its automations file to turn it back on.";
-
 export const AUTOMATION_SWITCHED_OFF_VIEW_BODY =
   "dohc switched this automation off after 3 runs in a row took too long. Ask someone who can edit the Collection to turn it back on.";
 
-/** The relay chooses the next step from the recipient's current permission. */
+/** Whether a body says dohc switched the automation off, which the relay words for each recipient. */
+export function isSwitchedOffBody(body: string): boolean {
+  return body.startsWith(AUTOMATION_SWITCHED_OFF_BODY) || body.startsWith(AUTOMATION_SWITCHED_OFF_VIEW_BODY);
+}
+
+/**
+ * The relay chooses the next step from the recipient's current permission.
+ * Open takes an editor through a share to the automation's switch too. A
+ * sender words a switch-off as the view body when no share can switch the
+ * automation, and then only its owner gets Open.
+ */
 export function automationFailureBodyForPermission(body: string, canEdit: boolean, isOwner: boolean): string {
-  const next = isOwner ? AUTOMATION_SWITCHED_OFF_BODY : canEdit ? AUTOMATION_SWITCHED_OFF_EDIT_BODY : AUTOMATION_SWITCHED_OFF_VIEW_BODY;
-  return body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)
-    ? cutText(next + body.slice(AUTOMATION_SWITCHED_OFF_BODY.length), NOTICE_BODY_MAX_CHARS)
-    : body;
+  const ownerOnly = body.startsWith(AUTOMATION_SWITCHED_OFF_VIEW_BODY);
+  if (!ownerOnly && !body.startsWith(AUTOMATION_SWITCHED_OFF_BODY)) return body;
+  const sent = ownerOnly ? AUTOMATION_SWITCHED_OFF_VIEW_BODY : AUTOMATION_SWITCHED_OFF_BODY;
+  const next = isOwner || (canEdit && !ownerOnly) ? AUTOMATION_SWITCHED_OFF_BODY : AUTOMATION_SWITCHED_OFF_VIEW_BODY;
+  return cutText(next + body.slice(sent.length), NOTICE_BODY_MAX_CHARS);
 }
 
 /** The computer that ran the automation. Only it holds the run, so only it can try the run again. */
@@ -214,10 +222,11 @@ export function automationFailedNotice(input: {
 
 /**
  * The body the other people involved get, in place of the step's error and
- * the computer's name. It promises a retry only when one can run.
+ * the computer's name. It promises a retry only when one can run, and a
+ * switch only when a share can switch the automation.
  */
-export function automationFailedElsewhereBody(failure: AutomationFailure, name: string | null): string {
-  if (failure.switchedOff !== undefined) return AUTOMATION_SWITCHED_OFF_BODY;
+export function automationFailedElsewhereBody(failure: AutomationFailure, name: string | null, ownerSwitchesOnly = false): string {
+  if (failure.switchedOff !== undefined) return ownerSwitchesOnly ? AUTOMATION_SWITCHED_OFF_VIEW_BODY : AUTOMATION_SWITCHED_OFF_BODY;
   if (failure.chainStopped) return chainStopped(failure, name);
   return failure.neverStarted ? NEVER_STARTED_ELSEWHERE_BODY : FAILED_ELSEWHERE_BODY;
 }

@@ -1540,7 +1540,9 @@ export function createShareWebApplication({
         return await callRelay(request, authenticated, { path: "/sync/link/share" });
       }
       if (pathname === "/api/view/current") {
-        return await callRelay(request, authenticated, { path: "/sync/link/current" });
+        const collectionPath = new URL(request.url).searchParams.get("collectionPath");
+        const query = collectionPath === null ? "" : `?${new URLSearchParams({ collectionPath })}`;
+        return await callRelay(request, authenticated, { path: `/sync/link/current${query}` });
       }
       if (pathname === "/api/view/log") {
         const hold = new URL(request.url).searchParams.get("hold") ?? "0";

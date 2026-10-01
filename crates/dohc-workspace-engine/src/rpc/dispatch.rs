@@ -351,6 +351,10 @@ impl EngineService {
             "share.direct.push" => {
                 Box::pin(self.share_direct_push(&ctx, request.workspace, request.params)).await?
             }
+            "share.direct.status" => {
+                self.share_direct_status(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "versionedText.writeBlob" => {
                 self.versioned_text_write_blob(&ctx, &request, request.params.clone())
                     .await?
@@ -1352,6 +1356,7 @@ mod tests {
             "share.channel.pull",
             "share.channel.push",
             "share.direct.push",
+            "share.direct.status",
             "share.proposal.submit",
             "share.view.pull",
             "share.view.recordIdentity",
