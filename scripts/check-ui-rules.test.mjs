@@ -104,6 +104,30 @@ test("comments do not count; quoted URLs and template classes still count", () =
   assert.equal(scanSource(path, '\n\nconst color = "#fff";')[0].line, 3);
 });
 
+test("source literals survive dead branches and keep JSX expression context", () => {
+  const source = `
+    const classes = false && "bg-blue-500";
+    const css = \`color: #abc; /* text-white */\`;
+    const url = "https://example.test/*bg-zinc-900*/";
+    <div>It's // text-white{/* bg-red-500 */}{"#def"}</div>;
+  `;
+  const findings = scanSource(path, source);
+  assert.deepEqual(findings.filter(finding => finding.rule === "palette").map(finding => finding.value), ["bg-blue-500", "text-white", "bg-zinc-900", "text-white"]);
+  assert.deepEqual(findings.filter(finding => finding.rule === "raw-hex").map(finding => finding.value), ["#abc", "#def"]);
+  assert.deepEqual(scanSource(path, "<div>#abc</div>"), []);
+});
+
+test("comments between syntax nodes preserve import and hex context", () => {
+  for (const source of [
+    'require(/* text-white */ "react-icons/fa");',
+    'import(/* text-white */ `@mdi/${pack}`);',
+    'export { Icon } from /* text-white */ "react-icons/fa";',
+  ]) assert.deepEqual(scanSource(path, source).map(finding => finding.rule), ["icon-library"], source);
+  assert.deepEqual(scanSource(path, 'export default "react-icons/fa";'), []);
+  assert.deepEqual(scanSource(path, 'const color = /* text-white */ "#1579";').map(finding => finding.value), ["#1579"]);
+  assert.deepEqual(scanSource(path, 'node.style.setProperty(/* text-white */ "color", "#1579");').map(finding => finding.value), ["#1579"]);
+});
+
 test("renderer TS and TSX are scanned, including untracked files; tests are exempt", t => {
   const { directory, put } = fixture(t);
   for (const excluded of [`${renderer}Sample.test.tsx`, `${renderer}Sample.focus.test.ts`, `${renderer}Sample.spec.tsx`, `${renderer}__tests__/Sample.ts`, "apps/site/src/Sample.tsx", `${renderer}DesktopWorkspaceShell.testSupport.tsx`, `${renderer}EditorTestHarness.tsx`, `${renderer}editor/fixture.ts`, `${renderer}FileInspector.draft-fixture.ts`, `${renderer}editor/testDocs.ts`]) {

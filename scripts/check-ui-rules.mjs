@@ -7,8 +7,7 @@ import { pathToFileURL } from "node:url";
 const repoRoot = resolve(import.meta.dirname, "..");
 const allowlistPath = "scripts/ui-rules-allowlist.json";
 const renderer = "apps/desktop/src/renderer/";
-// TypeScript 7's parser requires a native server; use the pinned JS parser.
-const ts = createRequire(join(repoRoot, "apps/desktop/package.json"))("typescript-parser");
+const { typescriptLanguage, tsxLanguage } = createRequire(join(repoRoot, "apps/desktop/package.json"))("@codemirror/lang-javascript");
 const palette = "slate|gray|grey|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose|mauve|olive|mist|taupe";
 const colorUtility = new RegExp(`(?<![\\w-])(?:bg|text|border(?:-[xytrblse])?|divide(?:-[xy])?|outline|ring(?:-offset)?|inset-ring|(?:inset-|drop-|text-)?shadow|fill|stroke|accent|caret|decoration|placeholder|from|via|to)-(?:black|white|\\[(?:black|white)\\]|(?:${palette})-\\d{2,3})(?:\\/(?:\\d+|\\[[^\\]]+\\]))?(?![\\w/-])`, "gu");
 const iconLibrary = /(?:^|[/@-])(?:icons?|iconify|icon-park|heroicons|lucide|phosphor|feather|fontawesome|fortawesome|octicons|ionicons|remixicon|mdi|boxicons|iconoir|hugeicons)(?:$|[/@-])/iu;
@@ -23,72 +22,94 @@ export function isRendererSource(path) {
     && path !== `${renderer}editor/testDocs.ts`;
 }
 
-// Parser tokens preserve JSX text, regex literals, and template expressions.
-function withoutComments(file, source) {
-  const chunks = [];
-  let end = 0;
-  const visit = node => {
-    if (node.kind >= ts.SyntaxKind.FirstJSDocNode && node.kind <= ts.SyntaxKind.LastJSDocNode) return;
-    const children = node.getChildren(file);
-    if (children.length) {
-      children.forEach(visit);
-    } else if (node.kind !== ts.SyntaxKind.EndOfFileToken) {
-      const start = node.getStart(file);
-      chunks.push(source.slice(end, start).replace(/[^\r\n]/gu, " "), source.slice(start, node.end));
-      end = node.end;
-    }
-  };
-  visit(file);
-  chunks.push(source.slice(end).replace(/[^\r\n]/gu, " "));
-  return chunks.join("");
+const isComment = node => node?.name === "LineComment" || node?.name === "BlockComment";
+function sibling(node, direction) {
+  let next = node?.[direction];
+  while (isComment(next)) next = next[direction];
+  return next;
 }
 
-function literalContext(node) {
+function literalContext(node, source) {
+  const text = node => node ? source.slice(node.from, node.to).replace(/^["']|["']$/gu, "") : "";
   const parent = node.parent;
-  if (ts.isJsxAttribute(parent) || ts.isPropertyAssignment(parent) || ts.isVariableDeclaration(parent)) return parent.name.getText();
-  if (ts.isJsxExpression(parent) && ts.isJsxAttribute(parent.parent)) return parent.parent.name.getText();
-  if (ts.isBinaryExpression(parent) && parent.right === node && ts.isPropertyAccessExpression(parent.left)) return parent.left.name.text;
-  if (ts.isCallExpression(parent)) {
-    const callee = parent.expression;
-    if (ts.isPropertyAccessExpression(callee) && callee.name.text === "setProperty" && parent.arguments[1] === node && ts.isStringLiteral(parent.arguments[0])) return parent.arguments[0].text;
-    return ts.isPropertyAccessExpression(callee) ? callee.name.text : callee.getText();
+  if (parent.name === "JSXAttribute" || parent.name === "Property") return text(parent.firstChild);
+  if (parent.name === "JSXEscape" && parent.parent.name === "JSXAttribute") return text(parent.parent.firstChild);
+  const previous = sibling(node, "prevSibling");
+  if (parent.name === "VariableDeclaration" && previous?.name === "Equals") return text(sibling(previous, "prevSibling"));
+  if (parent.name === "AssignmentExpression" && parent.firstChild.name === "MemberExpression") return text(parent.firstChild.lastChild);
+  if (parent.name === "ArgList" && parent.parent.name === "CallExpression") {
+    const callee = parent.parent.firstChild;
+    const name = text(callee.name === "MemberExpression" ? callee.lastChild : callee);
+    const firstArgument = sibling(parent.firstChild, "nextSibling");
+    if (name === "setProperty" && firstArgument.name === "String" && node !== firstArgument) return text(firstArgument);
+    return name;
   }
   return "";
 }
 
 export function scanSource(path, source) {
   const findings = [];
+  const comments = [];
   const add = (offset, rule, value) => findings.push({
     rule, value, line: source.slice(0, offset).split("\n").length,
   });
-  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
-  const uncommented = withoutComments(file, source);
+  // The editor's parser retains source syntax, including literals in dead code.
+  // A compiler transform can erase those literals before the guard sees them.
+  const language = path.endsWith(".tsx") ? tsxLanguage : typescriptLanguage;
+  const file = language.parser.parse(source);
   const visit = node => {
-    if (path !== `${renderer}tokens.ts` && (ts.isStringLiteral(node) || ts.isTemplateLiteralToken(node))) {
-      const start = node.getStart(file);
-      const value = source.slice(start + 1, node.end - (node.kind === ts.SyntaxKind.TemplateHead || node.kind === ts.SyntaxKind.TemplateMiddle ? 2 : 1));
-      const context = literalContext(node).replace(/^["']|["']$/gu, "");
-      const colorContext = /(?:color|background|fill|stroke)/iu.test(context);
-      for (const match of value.matchAll(hex)) {
-        const before = value.slice(0, match.index);
-        const after = value.slice(match.index + match[0].length);
-        const entireColor = match[0] === value && !nonColorNames.test(context)
-          && (colorContext || !/^#\d{3,4}$/u.test(value));
-        const cssValue = /:\s*$/u.test(before) || /\bvar\([^)]*,\s*$/u.test(before);
-        const arbitraryColor = before.endsWith("[") && /^\s*(?:\/[^\]]+)?\]/u.test(after);
-        if (entireColor || cssValue || arbitraryColor) add(start + 1 + match.index, "raw-hex", match[0]);
+    if (isComment(node)) {
+      comments.push(node);
+      return;
+    }
+    if (["String", "JSXAttributeValue", "TemplateString"].includes(node.name)) {
+      const segments = [];
+      let start = node.from + 1;
+      for (let child = node.firstChild; child; child = child.nextSibling) {
+        if (child.name !== "Interpolation") continue;
+        segments.push([start, child.from]);
+        start = child.to;
+      }
+      segments.push([start, node.to - 1]);
+      if (path !== `${renderer}tokens.ts`) {
+        const context = literalContext(node, source);
+        const colorContext = /(?:color|background|fill|stroke)/iu.test(context);
+        for (const [start, end] of segments) {
+          const value = source.slice(start, end);
+          for (const match of value.matchAll(hex)) {
+            const before = value.slice(0, match.index);
+            const after = value.slice(match.index + match[0].length);
+            const entireColor = match[0] === value && !nonColorNames.test(context)
+              && (colorContext || !/^#\d{3,4}$/u.test(value));
+            const cssValue = /:\s*$/u.test(before) || /\bvar\([^)]*,\s*$/u.test(before);
+            const arbitraryColor = before.endsWith("[") && /^\s*(?:\/[^\]]+)?\]/u.test(after);
+            if (entireColor || cssValue || arbitraryColor) add(start + match.index, "raw-hex", match[0]);
+          }
+        }
+      }
+      const parent = node.parent;
+      const staticImport = parent.name === "ImportDeclaration"
+        || (parent.name === "ExportDeclaration" && sibling(node, "prevSibling")?.name === "from");
+      const requireCall = parent.name === "ArgList" && parent.parent.name === "CallExpression"
+        && source.slice(parent.parent.firstChild.from, parent.parent.firstChild.to) === "require"
+        && sibling(parent.firstChild, "nextSibling")?.from === node.from;
+      const dynamicImport = parent.name === "DynamicImport" && sibling(parent.getChild("("), "nextSibling")?.from === node.from;
+      if (staticImport || requireCall || dynamicImport) {
+        const module = source.slice(...segments[0]);
+        if (module !== "lucide-react" && !module.startsWith("lucide-react/") && iconLibrary.test(module) && !module.startsWith(".")) add(node.from, "icon-library", module);
       }
     }
-    let specifier;
-    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) specifier = node.moduleSpecifier;
-    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(node.expression) && node.expression.text === "require"))) specifier = node.arguments[0];
-    if (specifier && (ts.isStringLiteral(specifier) || ts.isNoSubstitutionTemplateLiteral(specifier) || ts.isTemplateExpression(specifier))) {
-      const module = ts.isTemplateExpression(specifier) ? specifier.head.text : specifier.text;
-      if (module !== "lucide-react" && !module.startsWith("lucide-react/") && iconLibrary.test(module) && !module.startsWith(".")) add(specifier.getStart(file), "icon-library", module);
-    }
-    ts.forEachChild(node, visit);
+    for (let child = node.firstChild; child; child = child.nextSibling) visit(child);
   };
-  visit(file);
+  visit(file.topNode);
+  const chunks = [];
+  let end = 0;
+  for (const comment of comments) {
+    chunks.push(source.slice(end, comment.from), source.slice(comment.from, comment.to).replace(/[^\r\n]/gu, " "));
+    end = comment.to;
+  }
+  chunks.push(source.slice(end));
+  const uncommented = chunks.join("");
   for (const match of uncommented.matchAll(colorUtility)) add(match.index, "palette", match[0]);
   for (const match of uncommented.matchAll(/(?<![\w-])backdrop-blur(?:-[\w.]+|-\[[^\]]+\])?(?![\w-])|(?:-webkit-)?backdrop-filter(?=["']?\s*:|["'`]\s*,)|\b(?:backdropFilter|WebkitBackdropFilter)(?=["']?\s*[:,}=])/gu)) add(match.index, "backdrop", match[0]);
   return findings;
