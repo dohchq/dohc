@@ -16,8 +16,9 @@ type MarkdownEditorLoad =
 let markdownEditorPromise: Promise<MarkdownEditorComponent> | null = null;
 
 // Read during render, so an editor that finished loading mounts in the first
-// commit. React.lazy suspends even on a resolved promise, and React holds the
-// reveal of a Suspense retry for up to 300ms.
+// commit. A shared React.lazy payload suspends on its first render after
+// renderer start even when the promise has resolved, and React holds the
+// reveal of that Suspense retry for up to 300ms.
 let markdownEditorLoad: MarkdownEditorLoad = { status: "loading" };
 
 function loadMarkdownEditor(): Promise<MarkdownEditorComponent> {
