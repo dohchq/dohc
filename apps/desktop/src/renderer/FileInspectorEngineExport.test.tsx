@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 
 // The editor module never resolves here, so `LazyMarkdownEditor` stays
-// suspended for the whole file and `wysiwygRef.current` is null while the
+// loading for the whole file and `wysiwygRef.current` is null while the
 // engine document is live and bound. That is the state this file is about,
-// and it is a real one: the Suspense window on open, an editor chunk that
+// and it is a real one: the loading window on open, an editor chunk that
 // fails to load, and the error boundary a crashed editor falls back to all
 // leave the document header — and its export menu — over an unmounted
 // serializer. It is mocked at module scope because that is the only way to
