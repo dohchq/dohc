@@ -63,7 +63,7 @@ pub(in crate::live_update_application) fn read_saved(
     budget: &mut Budget,
 ) -> Result<Option<NativeRestoreApplicationReceipt>, ApplicationError> {
     let b = &held.binding;
-    let length:Option<i64>=conn.query_row("SELECT length(CAST(application_json AS BLOB)) FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,operation_id],|row|row.get(0)).map_err(read_sql)?;
+    let length:Option<i64>=conn.query_row("SELECT length(CAST(application_json AS BLOB))+coalesce(length(CAST(application_delivery_id AS BLOB)),0) FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,operation_id],|row|row.get(0)).map_err(read_sql)?;
     let Some(length) = length else {
         return Ok(None);
     };
@@ -224,7 +224,8 @@ fn read_restore_application(
     budget: &mut Budget,
 ) -> Result<Option<ApplicationRecord>, ApplicationError> {
     let receipt = &expected.accepted.receipt;
-    // The record's text columns and its pinned count of ranges, charged before reading them.
+    // The record's text columns, each first-seen child's stored workspace, and
+    // the pinned count of ranges, charged before reading them.
     let text = [
         "workspace_id",
         "delivery_id",
@@ -243,7 +244,7 @@ fn read_restore_application(
     ]
     .map(|column| format!("coalesce(length(CAST(a.{column} AS BLOB)),0)"))
     .join("+");
-    let mut query = conn.prepare(&format!("SELECT selector_paths_json=?4 AND update_digest=?5 AND update_byte_length=?6 AND first_seen_count=?7 AND (SELECT count(*) FROM live_device_application_first_seen f WHERE f.relay_database_namespace=a.relay_database_namespace AND f.delivery_id=a.delivery_id)=?7,{text} FROM live_device_update_applications a WHERE a.relay_database_namespace=?1 AND (a.delivery_id=?2 OR a.journal_cursor=?3)")).map_err(read_sql)?;
+    let mut query = conn.prepare(&format!("SELECT selector_paths_json=?4 AND update_digest=?5 AND update_byte_length=?6 AND first_seen_count=?7 AND (SELECT count(*) FROM live_device_application_first_seen f WHERE f.relay_database_namespace=a.relay_database_namespace AND f.delivery_id=a.delivery_id)=?7,{text}+(SELECT coalesce(sum(length(CAST(f.workspace_id AS BLOB))),0) FROM live_device_application_first_seen f WHERE f.relay_database_namespace=a.relay_database_namespace AND f.delivery_id=a.delivery_id) FROM live_device_update_applications a WHERE a.relay_database_namespace=?1 AND (a.delivery_id=?2 OR a.journal_cursor=?3)")).map_err(read_sql)?;
     let mut rows = query
         .query(params![
             namespace,

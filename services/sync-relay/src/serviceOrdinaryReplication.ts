@@ -149,12 +149,32 @@ export class ServiceOrdinaryReplication {
       return {nextCursor: previous!, hasMore: true, pages};
     });
   }
+  async #push(signal: AbortSignal) {
+    const result = await this.#request("sync.push", {}, signal);
+    if (result.status !== "complete" || typeof result.hasMore !== "boolean") throw new Error("Ordinary push did not complete.");
+    return {pushed: integer(result.pushed), hasMore: result.hasMore, sharingDeclined: declines(result.sharingDeclined),
+      admissionPending: array(result.ownerAdmissionPending).length > 0};
+  }
   async push(callerSignal?: AbortSignal) {
     return this.#run(callerSignal, async signal => {
-      const result = await this.#request("sync.push", {}, signal);
-      if (result.status !== "complete" || typeof result.hasMore !== "boolean") throw new Error("Ordinary push did not complete.");
-      if (array(result.ownerAdmissionPending).length > 0) throw new Error("Ordinary publication is waiting for owner admission.");
-      return {pushed: integer(result.pushed), hasMore: result.hasMore, sharingDeclined: declines(result.sharingDeclined)};
+      const {admissionPending, ...page} = await this.#push(signal);
+      if (admissionPending) throw new Error("Ordinary publication is waiting for owner admission.");
+      return page;
+    });
+  }
+  /**
+   * Pushes up to maxPagesPerPull pages, stopping once a page pushes nothing or
+   * waits for owner admission. The caller checks what it needed reached the relay.
+   */
+  async publish(callerSignal?: AbortSignal) {
+    return this.#run(callerSignal, async signal => {
+      let pushed = 0, hasMore = true;
+      for (let index = 0; index < this.#config.maxPagesPerPull && hasMore; index++) {
+        const page = await this.#push(signal);
+        pushed += page.pushed; hasMore = page.hasMore;
+        if (page.pushed === 0 || page.admissionPending) break;
+      }
+      return {pushed, hasMore};
     });
   }
 }

@@ -62,31 +62,83 @@ fn next_digest(
     ))
 }
 
+/// Checkpoint insertion stamps its own write without a shared read budget.
 pub(super) fn origin_stamp(
     conn: &Connection,
     held: &Registration,
 ) -> Result<String, ApplicationError> {
-    if let Some(record) = bootstrap::read_bootstrap(conn, held)? {
-        return Ok(hex_sha256(
-            &serde_json::to_vec(&record).map_err(|_| ApplicationError::Corrupt)?,
-        ));
-    }
-    let p = parameters(held);
-    let json: String = conn
-        .query_row(ADOPTION_STAMP, p, |r| r.get(0))
-        .map_err(read_sql)?;
-    Ok(hex_sha256(json.as_bytes()))
+    origin_stamp_in(
+        conn,
+        held,
+        &mut restore_content::Budget {
+            remaining: usize::MAX,
+        },
+    )
 }
 
-const ADOPTION_STAMP: &str = "SELECT json_array(adoption_id,evidence_digest,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms) AS stamp FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5";
-
-/// The stored bytes `origin_stamp` reads, so a bounded proof can charge them first.
-pub(super) fn origin_stamp_length(
+/// Bounds the origin row's raw columns before reading them, then charges the
+/// stamp's JSON as it is written. The adoption array matches SQLite's former
+/// `json_array` of the same columns byte for byte.
+pub(super) fn origin_stamp_in(
     conn: &Connection,
     held: &Registration,
-) -> Result<usize, ApplicationError> {
-    let length: i64 = conn.query_row(&format!("SELECT coalesce((SELECT length(CAST(bootstrap_id AS BLOB))+length(CAST(bootstrap_moment_id AS BLOB))+length(CAST(baseline_digest AS BLOB))+length(CAST(projected_markdown_digest AS BLOB))+length(CAST(binding_json AS BLOB))+length(CAST(host_coordinate_json AS BLOB)) FROM live_device_bootstraps WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5),(SELECT length(CAST(stamp AS BLOB)) FROM ({ADOPTION_STAMP})),0)"), parameters(held), |r| r.get(0)).map_err(read_sql)?;
-    usize::try_from(length).map_err(|_| ApplicationError::Corrupt)
+    budget: &mut restore_content::Budget,
+) -> Result<String, ApplicationError> {
+    let p = parameters(held);
+    let lengths = [
+        "bootstrap_id",
+        "bootstrap_moment_id",
+        "baseline_moment_relay_sequence",
+        "baseline_registered_at_ms",
+        "baseline_digest",
+        "baseline_byte_length",
+        "projected_markdown_digest",
+        "projected_markdown_byte_length",
+        "binding_json",
+        "host_coordinate_json",
+        "local_ydoc_sequence",
+    ]
+    .map(|column| format!("coalesce(length(CAST({column} AS BLOB)),0)"))
+    .join("+");
+    let bootstrap: Option<i64> = conn
+        .query_row(
+            &format!("SELECT {lengths} FROM live_device_bootstraps WHERE {DOCUMENT}"),
+            p,
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(read_sql)?;
+    if let Some(length) = bootstrap {
+        if usize::try_from(length).map_err(|_| ApplicationError::Corrupt)? > budget.remaining {
+            return Err(ApplicationError::ConfiguredByteBudgetExceeded);
+        }
+        let record = bootstrap::read_bootstrap(conn, held)?.ok_or(ApplicationError::Corrupt)?;
+        return Ok(hex_sha256(&budget.json(&record)?));
+    }
+    let json = budget.sql_json_array(
+        conn,
+        &[
+            "adoption_id",
+            "evidence_digest",
+            "binding_json",
+            "source_moment_id",
+            "source_digest",
+            "source_byte_length",
+            "baseline_moment_relay_sequence",
+            "baseline_registered_at_ms",
+            "coverage_digest",
+            "covered_outbox_sequence",
+            "local_ydoc_sequence",
+            "terminal_cursor",
+            "terminal_receipt_json",
+            "host_coordinate_json",
+            "max_pending_bytes",
+            "max_pending_age_ms",
+        ],
+        &format!("FROM live_owner_adoptions WHERE {DOCUMENT}"),
+        params![p[0], p[1], p[2], p[3], p[4]],
+    )?;
+    Ok(hex_sha256(json.as_bytes()))
 }
 
 pub(super) fn initialize(
@@ -157,7 +209,7 @@ fn checkpoint(
 ) -> Result<NativeAcceptedCheckpoint, ApplicationError> {
     let p = parameters(held);
     let sql = format!(
-        "SELECT event_count,journal_cursor,length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB))+coalesce(length(CAST(restore_operation_id AS BLOB)),0) FROM live_accepted_checkpoints WHERE {DOCUMENT} AND journal_cursor<=?6 ORDER BY journal_cursor DESC LIMIT 1"
+        "SELECT event_count,journal_cursor,length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB))+length(CAST(state_sha256 AS BLOB))+length(CAST(evidence_digest AS BLOB))+length(CAST(origin_stamp AS BLOB))+coalesce(length(CAST(restore_operation_id AS BLOB)),0)+coalesce(length(CAST(restore_stamp AS BLOB)),0) FROM live_accepted_checkpoints WHERE {DOCUMENT} AND journal_cursor<=?6 ORDER BY journal_cursor DESC LIMIT 1"
     );
     let (count, cursor, length): (i64, i64, i64) = conn
         .query_row(&sql, params![p[0], p[1], p[2], p[3], p[4], through], |r| {
@@ -199,7 +251,7 @@ fn checkpoint(
             ))
         })
         .map_err(read_sql)?;
-    if stamp != origin_stamp(conn, held)? {
+    if stamp != origin_stamp_in(conn, held, budget)? {
         return Err(ApplicationError::Corrupt);
     }
     let terminal: Option<LiveUpdateReceipt> =

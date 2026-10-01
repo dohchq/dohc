@@ -195,6 +195,12 @@ export function startExistingOwnerDeviceTransport(options: {
         const params = configRecord(operation.params,["operation"]), fence = parseNativeRestoreFence(params.operation);
         if (workspaces.get(operation.workspace) !== fence.oldBinding.workspaceId || fence.relayDatabaseNamespace !== start.relayNamespace || fence.hostId !== start.host.hostId) throw new Error("Restore host identity mismatch.");
         const response = await config.client.sendRequest({...request, method: operation.method, params: {operation: fence as never}}, signal);
+        const refused = configRecord(response.result,["status"],["receipt","reason"]);
+        // The desktop publishes its own journal; a refused fence changed nothing here.
+        if (refused.status === "pending" && typeof refused.reason === "string") {
+          await send({type: "response",id: operation.id,result: {status: "pending",reason: refused.reason}},signal);
+          return;
+        }
         const value = configRecord(response.result,["status","receipt"]);
         if (value.status !== "fenced") throw new Error("Native restore fence did not commit.");
         const receipt = parseNativeRestoreFenceReceipt(value.receipt);

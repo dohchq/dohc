@@ -45,7 +45,7 @@ fn evidence(
         "FROM live_restore_fences f JOIN live_device_settlements s ON s.relay_database_namespace=f.relay_database_namespace AND s.restore_operation_id=f.operation_id LEFT JOIN live_restore_fences p ON p.relay_database_namespace=f.relay_database_namespace AND p.operation_id=f.previous_operation_id WHERE f.relay_database_namespace=?1 AND f.operation_id=?2 AND s.settlement_id=?3",
         params![held.namespace,operation,settlement],
     )?;
-    budget.charge(accepted_history::origin_stamp_length(conn, held)?)?;
+    let origin = accepted_history::origin_stamp_in(conn, held, budget)?;
     use sha2::Digest;
     struct Hasher(sha2::Sha256);
     impl std::io::Write for Hasher {
@@ -58,11 +58,7 @@ fn evidence(
         }
     }
     let mut hasher = Hasher(sha2::Sha256::new());
-    serde_json::to_writer(
-        &mut hasher,
-        &(json, accepted_history::origin_stamp(conn, held)?),
-    )
-    .map_err(|_| ApplicationError::Corrupt)?;
+    serde_json::to_writer(&mut hasher, &(json, origin)).map_err(|_| ApplicationError::Corrupt)?;
     Ok(hasher
         .0
         .finalize()
@@ -182,7 +178,7 @@ fn saved_in(
     )>,
     ApplicationError,
 > {
-    let length:Option<i64>=conn.query_row("SELECT length(CAST(resume_receipt_json AS BLOB)) FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5",params![held.namespace,operation,held.workspace_id,held.binding.main_version_id,held.binding.object_id],|r|r.get(0)).optional().map_err(read_sql)?.flatten();
+    let length:Option<i64>=conn.query_row("SELECT length(CAST(resume_receipt_json AS BLOB))+coalesce(length(CAST(resume_settlement_id AS BLOB)),0)+coalesce(length(CAST(resume_evidence_digest AS BLOB)),0) FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5",params![held.namespace,operation,held.workspace_id,held.binding.main_version_id,held.binding.object_id],|r|r.get(0)).optional().map_err(read_sql)?.flatten();
     let Some(length) = length else {
         return Ok(None);
     };
@@ -242,13 +238,50 @@ pub(super) fn generation(
     conn: &Connection,
     held: &Registration,
 ) -> Result<Option<NativeRestoreResumeReceipt>, ApplicationError> {
+    generation_with(conn, held, None)
+}
+
+/// Without a budget, the resume keeps its separate stage budgets. With one,
+/// every read, including the fence replay, is charged to it.
+fn generation_with(
+    conn: &Connection,
+    held: &Registration,
+    mut budget: Option<&mut Budget>,
+) -> Result<Option<NativeRestoreResumeReceipt>, ApplicationError> {
     let b = &held.binding;
-    let id:Option<String>=conn.query_row("SELECT operation_id FROM live_restore_fences WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND new_generation=?6",params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation],|r|r.get(0)).optional().map_err(read_sql)?;
-    id.map(|id| {
-        saved(conn, held, &id, crate::limits::MAX_YDOC_UPDATE_BYTES)?
-            .ok_or(ApplicationError::Conflict)
-    })
-    .transpose()
+    let generation = "FROM live_restore_fences WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND new_generation=?6";
+    let p = params![
+        held.namespace,
+        b.workspace_id,
+        b.main_version_id,
+        b.object_id,
+        b.lineage_claim_id,
+        b.restore_fence_generation
+    ];
+    if let Some(budget) = budget.as_deref_mut() {
+        let length: i64 = conn
+            .query_row(
+                &format!("SELECT coalesce(sum(length(CAST(operation_id AS BLOB))),0) {generation}"),
+                p,
+                |r| r.get(0),
+            )
+            .map_err(read_sql)?;
+        budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+    }
+    let id: Option<String> = conn
+        .query_row(&format!("SELECT operation_id {generation}"), p, |r| {
+            r.get(0)
+        })
+        .optional()
+        .map_err(read_sql)?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let receipt = match budget {
+        Some(budget) => saved_in(conn, held, &id, budget, None)?.map(|(receipt, ..)| receipt),
+        None => saved(conn, held, &id, crate::limits::MAX_YDOC_UPDATE_BYTES)?,
+    };
+    receipt.ok_or(ApplicationError::Conflict).map(Some)
 }
 
 pub(super) fn validate_origin_binding(
@@ -256,10 +289,19 @@ pub(super) fn validate_origin_binding(
     held: &Registration,
     original: &LiveObjectBinding,
 ) -> Result<(), ApplicationError> {
+    validate_origin_binding_with(conn, held, original, None)
+}
+
+pub(super) fn validate_origin_binding_with(
+    conn: &Connection,
+    held: &Registration,
+    original: &LiveObjectBinding,
+    budget: Option<&mut Budget>,
+) -> Result<(), ApplicationError> {
     if original.restore_fence_generation == held.binding.restore_fence_generation {
         return settlement::validate_historical_binding(original, &held.binding);
     }
-    let resumed = generation(conn, held)?.ok_or(ApplicationError::Conflict)?;
+    let resumed = generation_with(conn, held, budget)?.ok_or(ApplicationError::Conflict)?;
     let mut same = original.clone();
     same.restore_fence_generation = held.binding.restore_fence_generation;
     settlement::validate_historical_binding(&same, &held.binding)?;

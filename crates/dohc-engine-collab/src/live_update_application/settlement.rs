@@ -87,15 +87,24 @@ impl LiveSettlementAudit {
     /// An unchanged projection may name the current head moment only when that
     /// moment is already this document's latest audited settlement. Any other
     /// head, such as a pre-live imported projection, would publish its own
-    /// historical before-image. Restore and replay keep their exact
-    /// record-time checks.
+    /// historical before-image. A restore reuses only its own saved settlement,
+    /// so its first settlement records the restore transition. Replay keeps its
+    /// exact record-time checks.
     pub fn reuses_head_in(
         &self,
         conn: &Connection,
         moment: &str,
         markdown: &str,
     ) -> Result<bool, StorageError> {
-        if self.restore.is_some() || self.replay_anchor.is_some() {
+        if let Some(restore) = &self.restore {
+            let b = &self.binding;
+            return conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor=?6 AND settlement_kind='restore' AND restore_operation_id=?7 AND moment_id=?8 AND markdown_digest=?9 AND binding_json=?10)",
+                params![self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.terminal_cursor,restore.operation_id(),moment,markdown,serde_json::to_string(b).map_err(StorageError::persist_public)?],
+                |row| row.get(0),
+            ).map_err(StorageError::persist_public);
+        }
+        if self.replay_anchor.is_some() {
             return Ok(true);
         }
         self.covers_projection_in(conn, moment, markdown)
@@ -367,11 +376,34 @@ pub(super) fn latest_receipt(
     conn: &Connection,
     registration: &Registration,
 ) -> Result<Option<LiveUpdateReceipt>, ApplicationError> {
+    latest_receipt_with(conn, registration, None)
+}
+
+/// The same receipt, with each raw text read charged to a publication proof's budget.
+pub(super) fn latest_receipt_in(
+    conn: &Connection,
+    registration: &Registration,
+    budget: &mut restore_content::Budget,
+) -> Result<Option<LiveUpdateReceipt>, ApplicationError> {
+    latest_receipt_with(conn, registration, Some(budget))
+}
+
+fn latest_receipt_with(
+    conn: &Connection,
+    registration: &Registration,
+    mut budget: Option<&mut restore_content::Budget>,
+) -> Result<Option<LiveUpdateReceipt>, ApplicationError> {
     let b = &registration.binding;
+    if let Some(budget) = budget.as_deref_mut() {
+        let length: i64 = conn.query_row("SELECT coalesce((SELECT length(CAST(delivery_id AS BLOB))+length(CAST(update_digest AS BLOB)) FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY journal_cursor DESC LIMIT 1),0)",
+            params![registration.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row| row.get(0)).map_err(read_sql)?;
+        budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+    }
     let applied: Option<LiveUpdateReceipt> = conn.query_row("SELECT delivery_id,update_digest,journal_cursor,accepting_host_epoch FROM live_device_update_applications WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY journal_cursor DESC LIMIT 1",
         params![registration.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
         |row| Ok(LiveUpdateReceipt { delivery_id:row.get(0)?,update_digest:row.get(1)?,journal_cursor:row.get(2)?,accepting_host_epoch:row.get(3)? })).optional().map_err(read_sql)?;
-    let adopted = adoption::read_origin(conn, registration)?.and_then(|origin| origin.terminal);
+    let adopted =
+        adoption::read_origin_with(conn, registration, budget)?.and_then(|origin| origin.terminal);
     match (applied, adopted) {
         (Some(applied), Some(adopted)) if applied.journal_cursor <= adopted.journal_cursor => {
             Ok(Some(adopted))

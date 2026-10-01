@@ -1542,7 +1542,29 @@ pub(super) fn read_origin(
     conn: &Connection,
     held: &Registration,
 ) -> Result<Option<AdoptedOrigin>, ApplicationError> {
+    read_origin_with(conn, held, None)
+}
+
+/// With a budget, the adoption row, its source metadata, the original
+/// snapshot, and any resumed generation are charged before they are read.
+pub(super) fn read_origin_with(
+    conn: &Connection,
+    held: &Registration,
+    mut budget: Option<&mut restore_content::Budget>,
+) -> Result<Option<AdoptedOrigin>, ApplicationError> {
     let b = &held.binding;
+    if let Some(budget) = budget.as_deref_mut() {
+        let length: i64 = conn.query_row(
+            "SELECT coalesce((SELECT length(CAST(a.binding_json AS BLOB))+length(CAST(a.source_moment_id AS BLOB))+length(CAST(a.source_digest AS BLOB))+length(CAST(a.terminal_receipt_json AS BLOB))+length(CAST(a.adoption_id AS BLOB))
+               +coalesce((SELECT sum(length(CAST(s.descriptor_json AS BLOB))) FROM ydoc_owner_activation_sources s WHERE s.activation_id=a.adoption_id),0)
+               +coalesce((SELECT sum(length(CAST(o.source_moment_id AS BLOB))+length(CAST(o.source_blob_sha256 AS BLOB))) FROM ydoc_owner_base_sources o WHERE o.workspace_id=a.workspace_id AND o.version_id=a.main_version_id AND o.object_id=a.object_id AND o.lineage_claim_id=a.lineage_claim_id),0)
+               +coalesce((SELECT sum(length(CAST(n.snapshot_blob_sha256 AS BLOB))) FROM ydoc_snapshots n WHERE n.workspace_id=a.workspace_id AND n.version_id=a.main_version_id AND n.object_id=a.object_id AND n.up_to_seq=0),0)
+             FROM live_owner_adoptions a WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5),0)",
+            params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
+            |r| r.get(0),
+        ).map_err(read_sql)?;
+        budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+    }
     let raw: Option<(String,String,String,i64,i64,String,String)> = conn.query_row(
         "SELECT binding_json,source_moment_id,source_digest,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,adoption_id FROM live_owner_adoptions
          WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
@@ -1568,7 +1590,7 @@ pub(super) fn read_origin(
     if original.as_deref() != Some(b.lineage_claim_id.as_str()) {
         return Err(ApplicationError::Corrupt);
     }
-    restore_resume::validate_origin_binding(conn, held, &binding)?;
+    restore_resume::validate_origin_binding_with(conn, held, &binding, budget)?;
     let terminal: Option<LiveUpdateReceipt> =
         serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?;
     if let Some(receipt) = &terminal {

@@ -278,7 +278,7 @@ async fn restore_settlement_keeps_pending_artifact_and_rejects_damaged_anchor_be
 }
 
 #[tokio::test]
-async fn restore_settlement_checks_old_anchor_and_retains_exact_same_content_moment() {
+async fn restore_settlement_checks_old_anchor_and_records_its_own_same_content_moment() {
     for damage in [false, true] {
         let f = Fixture::new().await;
         let original = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
@@ -293,15 +293,41 @@ async fn restore_settlement_checks_old_anchor_and_retains_exact_same_content_mom
                 )
                 .unwrap();
         }
-        let result = settle_restore(&f, input, Arc::new(NoFaults)).await;
+        let result = settle_restore(&f, input.clone(), Arc::new(NoFaults)).await;
         if damage {
             assert!(result.is_err());
             assert_eq!(f.counts(), (1, 2));
         } else {
             let result = result.unwrap();
             assert!(result.materialized);
-            assert_eq!(result.moment_id, original.moment_id);
-            assert_eq!(f.counts(), (2, 2));
+            // Restoring B over B still records the restore transition from the
+            // accepted head, never the older moment that produced B.
+            assert_ne!(result.moment_id, original.moment_id);
+            assert_eq!(f.counts(), (2, 3));
+            let (before_moment, before_digest, after_digest): (String, String, String) = f.read(|db| {
+                db.query_row(
+                    "SELECT before_latest_moment_id,before_blob_sha256,after_blob_sha256 FROM moments WHERE moment_id=?1",
+                    [&result.moment_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap()
+            });
+            assert_eq!(before_moment, original.moment_id);
+            assert_eq!(
+                (before_digest.as_str(), after_digest.as_str()),
+                (
+                    original.markdown_digest.as_str(),
+                    result.markdown_digest.as_str()
+                )
+            );
+            assert_eq!(result.markdown_digest, original.markdown_digest);
+            // A retry reuses exactly the saved restore settlement and its moment.
+            let retried = settle_restore(&f, input, Arc::new(NoFaults)).await.unwrap();
+            assert_eq!(
+                (retried.settlement_id, retried.moment_id),
+                (result.settlement_id, result.moment_id)
+            );
+            assert_eq!(f.counts(), (2, 3));
         }
         assert_eq!(
             std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap(),
@@ -877,6 +903,53 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
     let second = f
         .settle(Some(terminal.clone()), 100, Arc::new(NoFaults))
         .await
+        .unwrap();
+    // The relay has not acknowledged either settlement moment. Their
+    // before-images publish only while this generation is current.
+    let fence_state = |f: &Fixture| {
+        f.read(|db| {
+            db.query_row(
+                "SELECT (SELECT count(*) FROM live_restore_fences),(SELECT available FROM live_device_application_bindings),(SELECT restore_fence_generation FROM live_device_application_bindings)",
+                [],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+            )
+            .unwrap()
+        })
+    };
+    assert_eq!(fence_state(&f), (0, 1, 0));
+    assert!(matches!(
+        f.owner
+            .fence_restore(
+                NativeRestoreFence {
+                    operation_id: "restore-settlement".into(),
+                    relay_database_namespace: "relay".into(),
+                    old_binding: f.binding.clone(),
+                    host_id: "host".into(),
+                    new_fence: 1,
+                    origin: RestoreDeliveryOrigin::Bootstrap {
+                        id: "bootstrap".into(),
+                    },
+                    terminal: Some(terminal.clone()),
+                    applied_sequence: 1,
+                },
+                restore_coordinate(),
+                20,
+                Arc::new(NoFaults),
+            )
+            .await,
+        Err(RuntimeError::LiveApplication(
+            ApplicationError::PublicationPending
+        ))
+    ));
+    assert_eq!(fence_state(&f), (0, 1, 0));
+    // Ordinary publication reaches the relay: it acknowledges the local
+    // origin through the journal's high-water mark, as a completed push does.
+    rusqlite::Connection::open(&f.db)
+        .unwrap()
+        .execute(
+            "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) SELECT workspace_id,origin_id,max(origin_seq) FROM replication_log WHERE workspace_id='workspace' AND origin_id='owner-origin' GROUP BY workspace_id,origin_id ON CONFLICT(workspace_id,origin_id) DO UPDATE SET pushed_seq=MAX(pushed_seq,excluded.pushed_seq)",
+            [],
+        )
         .unwrap();
     let restore = applied_restore(&f, Some(terminal), 1).await;
     let final_settlement = settle_restore(&f, restore.clone(), Arc::new(NoFaults))

@@ -39,6 +39,22 @@ pub fn contains_in(
             super::draft::descriptor_for_key_in(conn, key)?
         {
             let observed = super::accepted::current(conn, &draft.binding)?;
+            // An active restore fence refuses; a resumed one publishes only its own
+            // generation. The native reader below checks this as part of its current state.
+            crate::live_update_application::require_restore_registration_in(
+                conn,
+                key,
+                &observed.relay_database_namespace,
+                &observed.binding,
+                remaining,
+            )
+            .map_err(|error| {
+                budget_exhausted = matches!(
+                    error,
+                    crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded
+                );
+                OwnerOutboxError::Frozen
+            })?;
             let checkpoint = read_blob(
                 conn,
                 &observed.checkpoint_digest,
@@ -62,11 +78,6 @@ pub fn contains_in(
         {
             return Ok(false);
         }
-        // An active restore fence refuses; a resumed one publishes only its own generation.
-        crate::live_update_application::require_restore_registration(
-            conn, key, &namespace, &binding,
-        )
-        .map_err(|_| OwnerOutboxError::Frozen)?;
         match kind {
             PublicationContentKind::Ydoc => {
                 let update = read_blob(conn, digest, remaining, &mut budget_exhausted)?;

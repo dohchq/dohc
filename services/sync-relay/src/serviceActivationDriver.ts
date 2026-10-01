@@ -75,6 +75,7 @@ export class ServiceActivationDriver {
     const existing=this.#restoreConsumers.get(key);if(existing)return existing;
     const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:o.client,workspace:workspace.handle,host:o.host,
       deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
+      publishOrdinary:signal=>workspace.ordinary.publish(signal),
       ownerAdmission:{shares:new Map([[target.workspaceId,target.shareId]]),maxEntriesPerDrain:o.config.maxEntriesPerDrain,
         maxBytesPerDrain:o.config.maxBytesPerDrain,validate:o.config.validateAdmission}});
     this.#restoreConsumers.set(key,consumer);return consumer;
@@ -150,6 +151,7 @@ export class ServiceActivationDriver {
         nextRequestId:o.nextRequestId,assertCurrent:o.assertCurrent});
       const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
         host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
+        publishOrdinary:signal=>workspace.ordinary.publish(signal),
         ownerAdmission:{activation:resumed.access,shares:new Map([[target.workspaceId,target.shareId]]),
           maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,validate:c.validateAdmission}});
       owner={consumer,transport,binding:resumed.binding,completed:false,activationPending:!resumed.completed};

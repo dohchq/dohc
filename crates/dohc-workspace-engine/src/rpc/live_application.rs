@@ -696,9 +696,29 @@ impl EngineService {
             }
         };
         retirement.0 = None;
-        let receipt = outcome
+        let receipt = match outcome
             .map_err(|_| WireError::new(ErrorCode::Internal, "live-application-interrupted"))?
-            .map_err(map_runtime)?;
+        {
+            Ok(receipt) => receipt,
+            // Nothing committed. The host publishes ordinary work and asks again.
+            Err(dohc_engine_runtime::RuntimeError::LiveApplication(
+                dohc_engine_collab::live_update_application::ApplicationError::PublicationPending,
+            )) => {
+                check_interruption()?;
+                if !guard.is_current() {
+                    return Err(workspace_unavailable());
+                }
+                return Ok(ServiceResponse {
+                    response: Response {
+                        id: request.id,
+                        result: json!({"status":"pending", "reason":"publication-pending"}),
+                    },
+                    blob_egress: None,
+                    output_guard: Some(guard),
+                });
+            }
+            Err(error) => return Err(map_runtime(error)),
+        };
         {
             let mut registry = lock(&self.live_applications);
             let _fence = lock(&host.output_fence);

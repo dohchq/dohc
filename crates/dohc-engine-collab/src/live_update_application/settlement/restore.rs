@@ -278,7 +278,7 @@ pub(in crate::live_update_application) fn read_anchor_in(
 ) -> Result<Option<PriorAnchor>, ApplicationError> {
     let b = &held.binding;
     let length: Option<i64> = conn.query_row(
-        "SELECT length(CAST(binding_json AS BLOB))+length(CAST(settlement_id AS BLOB))+length(CAST(moment_id AS BLOB))+192 FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor<=?6 ORDER BY terminal_cursor DESC LIMIT 1",
+        "SELECT length(CAST(binding_json AS BLOB))+length(CAST(settlement_id AS BLOB))+length(CAST(moment_id AS BLOB))+length(CAST(markdown_digest AS BLOB))+length(CAST(interval_digest AS BLOB))+length(CAST(source_state_vector_digest AS BLOB)) FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND terminal_cursor<=?6 ORDER BY terminal_cursor DESC LIMIT 1",
         params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,terminal], |row| row.get(0),
     ).optional().map_err(read_sql)?;
     let Some(length) = length else {
