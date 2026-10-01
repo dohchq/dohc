@@ -231,6 +231,7 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
               if (signal.aborted) return null;
               await settle(relay, input);
             }
+            if (signal.aborted) return null;
             const presses = await relay.list(signal);
             for (const request of relay.inspections()) {
               const generation = host.generation();

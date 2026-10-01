@@ -1,3 +1,4 @@
+import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RelayAutomationPress } from "@dohc/workspace-contracts/relay";
 import {
@@ -137,6 +138,7 @@ describe("relay polling lifetime", () => {
     host.stop();
     host.start();
     await polls.next();
+    await setImmediate();
     expect(accept).not.toHaveBeenCalled();
     expect(press).not.toHaveBeenCalled();
   });
@@ -150,18 +152,22 @@ describe("relay polling lifetime", () => {
     host.start();
     host.start();
     const first = await polls.next();
+    await setImmediate();
     expect(list).toHaveBeenCalledTimes(1);
     host.stop();
     expect(first.signal.aborted).toBe(true);
     host.start();
     const second = await polls.next();
     first.finish([pendingPress]);
+    await setImmediate();
     host.start();
+    await setImmediate();
     expect(list).toHaveBeenCalledTimes(2);
     host.stop();
     expect(second.signal.aborted).toBe(true);
     host.start();
     const third = await polls.next();
+    await setImmediate();
     expect(third.signal.aborted).toBe(false);
     expect(list).toHaveBeenCalledTimes(3);
   });
@@ -198,9 +204,31 @@ describe("relay polling lifetime", () => {
     accepting.resolve(["p1"]);
     await pressed.next();
     await released.next();
+    await setImmediate();
     expect(holds).toBe(0);
     expect(accept).toHaveBeenCalledTimes(1);
     expect(press).toHaveBeenCalledTimes(1);
     expect(settle).toHaveBeenCalledWith({ hostPressId: "p1", outcome: "busy", error: null });
+  });
+
+  it("does not list after stopping during the final unsent settlement", async () => {
+    const settling = Promise.withResolvers<void>();
+    const settlementStarted = channel<void>();
+    const list = vi.fn(async () => [pendingPress]);
+    let settleCalls = 0;
+    const settle = vi.fn(async () => {
+      settleCalls += 1;
+      if (settleCalls === 1) throw new Error("relay offline");
+      settlementStarted.send();
+      await settling.promise;
+    });
+    const host = hostWith({ list, accept: async () => ["p1"], settle });
+    host.start();
+    await settlementStarted.next();
+    expect(settle).toHaveBeenCalledTimes(2);
+    host.stop();
+    settling.resolve();
+    await setImmediate();
+    expect(list).toHaveBeenCalledTimes(1);
   });
 });
