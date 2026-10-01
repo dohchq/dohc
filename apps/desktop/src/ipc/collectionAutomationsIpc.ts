@@ -218,7 +218,7 @@ export function registerCollectionAutomationsIpc<
         const written = writeAutomationsFile([{ status: "valid", automation: input.automation }]);
         diagnostics = written.status === "refused" ? written.diagnostics : [];
       } catch {
-        return { diagnostics: [{ code: "changed-on-reread", path: "/automations/0" }], formulaProblems: [], cannotRun: null, missingFiles: [] };
+        return { diagnostics: [{ code: "changed-on-reread", path: "/automations/0" }], formulaProblems: [], findProblems: [], cannotRun: null, missingFiles: [] };
       }
       // Whether it would run needs a readable automation, and says nothing in a shared view, whose automations run elsewhere.
       // A status dohc cannot give, as before the executor opens, leaves the syntax and file checks standing.
@@ -229,7 +229,11 @@ export function registerCollectionAutomationsIpc<
       const missingFiles = dependencies.sharedViewOf(input.workspaceId)
         ? []
         : await operation.state.collectionAutomations.missingCodeFiles(input.collectionPath, input.automation).catch(() => []);
-      return { diagnostics, formulaProblems: formulaProblems(input.automation), cannotRun, missingFiles };
+      // Each Find read as a run reads it, by the planner's rule for its Collection.
+      const findProblems = dependencies.sharedViewOf(input.workspaceId)
+        ? []
+        : await operation.state.collectionAutomations.draftFindProblems(input.collectionPath, input.automation).catch(() => []);
+      return { diagnostics, formulaProblems: formulaProblems(input.automation), findProblems, cannotRun, missingFiles };
     });
   });
 

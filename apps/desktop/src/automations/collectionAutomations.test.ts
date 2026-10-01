@@ -2710,6 +2710,21 @@ describe("Collection automations", () => {
     expect(w.fieldsOf(task)["Done on"]).toBe(localIsoTime(claim.createdAtMs).slice(0, 10));
   });
 
+  it("names a draft's Find its Collection cannot query, and none while dohc cannot read that Collection's fields", async () => {
+    const w = await world({ automations: { Tasks: "  - id: done\n    name: Done\n    when: {field-changed: Status}\n    do: [{set: {Status: Done}}]\n" } });
+    await writeFile(join(w.root, "Tasks", "collection.yaml"), "fields: [unclosed\n");
+    await w.executor.open();
+    const draft: Automation = { id: "items", name: "Items", enabled: true, when: { kind: "record-added", table: null }, if: null,
+      do: [{ kind: "find", condition: 'record.Title == "a" || record.Title == "b"', collection: null, as: "items", operation: null }] };
+    // As a press reads it: with no fields to read, dohc cannot tell how Tasks keeps its records, so the run decides.
+    await expect(w.executor.draftFindProblems("Tasks", draft)).resolves.toEqual([]);
+    await writeFile(join(w.root, "Tasks", "collection.yaml"), SCHEMA);
+    w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/collection.yaml" }]);
+    await vi.waitFor(async () => expect(await w.executor.draftFindProblems("Tasks", draft)).toEqual([
+      { path: "/do/0/find", problem: expect.stringContaining("A Find can check one field") },
+    ]));
+  });
+
   it("keeps an automation off when its Collection uses a newer version", async () => {
     const w = await world({ automations: { Tasks: "  - id: done\n    name: Done\n    when: {field-changed: Status}\n    do: [{set: {Status: Done}}]\n" } });
     await writeFile(join(w.root, "Tasks", "collection.yaml"), `version: 2\n${SCHEMA}`);

@@ -48,6 +48,7 @@ import {
   directMessageReach,
   fieldWritesOf,
   fieldsNamedBy,
+  findProblems,
   parseCollectionAutomationId,
   scheduleHash,
   stepsInOrder,
@@ -1901,6 +1902,21 @@ export class CollectionAutomations {
   }
 
   /**
+   * Each Find in a draft whose condition its Collection cannot query, as a
+   * run reads it, at its JSON Pointer. A Find in a Collection dohc has not
+   * indexed has none to give.
+   */
+  async draftFindProblems(collectionPath: string, automation: Automation): Promise<Array<{ path: string; problem: string }>> {
+    await this.ready();
+    return findProblems(automation, (collection) => this.keptIn(collection ?? collectionPath));
+  }
+
+  /** How an indexed Collection keeps its records, or null when dohc cannot tell, as for one whose schema it cannot read. */
+  private keptIn(path: string): "dataset" | "document" | null {
+    return this.datasets.has(path) ? "dataset" : this.collections.has(path) && typeof this.schemaFields.get(path) !== "string" ? "document" : null;
+  }
+
+  /**
    * The code files a draft's steps name that this Collection's folder
    * lacks, as each step names them. It looks for each file and reads none.
    */
@@ -2928,8 +2944,7 @@ export class CollectionAutomations {
     if (resolved.kind === "one" && resolved.automation.id !== automation.id) {
       throw new Error(`${field} now runs another automation. Press it again.`);
     }
-    const datasetReason = await relayedDatasetReason(automation, id.collectionPath, async (path) =>
-      this.datasets.has(path) ? "dataset" : this.collections.has(path) && typeof this.schemaFields.get(path) !== "string" ? "document" : null);
+    const datasetReason = await relayedDatasetReason(automation, id.collectionPath, async (path) => this.keptIn(path));
     if (datasetReason !== null) throw new Error(datasetReason);
     // The engine's press id carries that definition, so the claim stays
     // bound to it through a restart; the run refuses any other.

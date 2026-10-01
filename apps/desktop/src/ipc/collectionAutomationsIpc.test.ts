@@ -38,6 +38,7 @@ function fixture(options: {
   const pinOperations = vi.fn(async (_path: string, automations: readonly Automation[], _saved: readonly Automation[]) => [...automations]);
   const draftCannotRun = vi.fn(async (_path: string, _automation: Automation): Promise<string | null> => "Budget has no approved operation named gone.");
   const missingCodeFiles = vi.fn(async (_path: string, _automation: Automation): Promise<string[]> => []);
+  const draftFindProblems = vi.fn(async (_path: string, _automation: Automation): Promise<Array<{ path: string; problem: string }>> => []);
   const groupsFor = vi.fn(async (_path: string) => [{ name: "Trip", slug: "trip", ref: "Trip", readStopped: null, postStopped: "ana@dohc.test cannot post in Trip." }]);
   const peopleFor = vi.fn(async (_path: string) => ({ status: "listed" as const, people: [
     { userId: "user-ana", name: "ana@dohc.test", you: false, dmStopped: null, noticeStopped: "ana@dohc.test cannot view Tasks." },
@@ -62,7 +63,7 @@ function fixture(options: {
     return reply && { ...reply, asker: { account: "owner", current: () => true } };
   });
   const executor = {
-    runs, listedRun, retry, undo, confirmReach, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, peopleFor, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false, unprovenPaths: [] }), dismissStops, shareImpact } as unknown as CollectionAutomations;
+    runs, listedRun, retry, undo, confirmReach, pinOperations, draftCannotRun, missingCodeFiles, draftFindProblems, groupsFor, peopleFor, handleWatcherEvents: (events: unknown) => { reindexed.push(events); }, fieldMarks, datasetFieldMarks, datasetCollection, holdState: () => ({ holds: [], stops: [stop], unreadable: false, unprovenPaths: [] }), dismissStops, shareImpact } as unknown as CollectionAutomations;
   registerCollectionAutomationsIpc<string, { sender: string }, {
     workspace: { workspaceId: string; rootPath: string };
     state: { collectionAutomations: CollectionAutomations };
@@ -90,7 +91,7 @@ function fixture(options: {
   const marks = (collectionPath: string) =>
     handlers.get(CHANNELS.listCollectionFieldMarks)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, collectionPath });
   const check = (payload: Record<string, unknown>) => call(CHANNELS.checkCollectionAutomation, payload);
-  return { asked, retry, undo, confirmReach, write, call, marks, runs, oldRun, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, draftCannotRun, missingCodeFiles, groupsFor, peopleFor, dismissStops, shareImpact, check, createFile, writeText, reindexed };
+  return { asked, retry, undo, confirmReach, write, call, marks, runs, oldRun, stop, shareStop, fieldMarks, datasetFieldMarks, datasetCollection, pinOperations, draftCannotRun, missingCodeFiles, draftFindProblems, groupsFor, peopleFor, dismissStops, shareImpact, check, createFile, writeText, reindexed };
 }
 
 describe("steps a share stops", () => {
@@ -220,6 +221,7 @@ describe("writing automations.yaml from the panel", () => {
     await expect(f.check({ collectionPath: "Tasks", automation: { ...stamp, if: "record.Status ==" } })).resolves.toEqual({
       diagnostics: [],
       formulaProblems: [{ path: "/if", problem: "Unexpected token." }],
+      findProblems: [],
       cannotRun: "Budget has no approved operation named gone.",
       missingFiles: [],
     });
@@ -233,7 +235,7 @@ describe("writing automations.yaml from the panel", () => {
     // An executor that is not open yet gives no status, and the rest of the check still answers.
     f.draftCannotRun.mockRejectedValueOnce(new Error("The executor is not open."));
     await expect(f.check({ collectionPath: "Tasks", automation: { ...stamp, if: "record.Status ==" } })).resolves.toEqual({
-      diagnostics: [], formulaProblems: [{ path: "/if", problem: "Unexpected token." }], cannotRun: null, missingFiles: [],
+      diagnostics: [], formulaProblems: [{ path: "/if", problem: "Unexpected token." }], findProblems: [], cannotRun: null, missingFiles: [],
     });
     // Main names the code files the executor cannot find, and a failed look names none.
     const coded = { ...stamp, do: [{ kind: "run-file", file: "total.js", as: null }] };
@@ -247,6 +249,18 @@ describe("writing automations.yaml from the panel", () => {
     f.missingCodeFiles.mockRejectedValueOnce(new Error("The executor is not open."));
     await expect(f.check({ collectionPath: "Tasks", automation: coded })).resolves.toMatchObject({ missingFiles: [] });
     expect(f.createFile).not.toHaveBeenCalled();
+  });
+
+  it("names each Find the executor cannot query, and none when it cannot say", async () => {
+    const f = fixture();
+    const either = { ...stamp, do: [{ kind: "find", collection: null, condition: 'record.Status == "A" || record.Status == "B"', as: "found", operation: null }] };
+    const problem = { path: "/do/0/find", problem: 'A Find can check one field, such as record.Status == "Doing" or contains(record.Tags, "urgent").' };
+    f.draftFindProblems.mockResolvedValueOnce([problem]);
+    await expect(f.check({ collectionPath: "Tasks", automation: either })).resolves.toMatchObject({ findProblems: [problem] });
+    expect(f.draftFindProblems).toHaveBeenLastCalledWith("Tasks", either);
+    f.draftFindProblems.mockRejectedValueOnce(new Error("The executor is not open."));
+    await expect(f.check({ collectionPath: "Tasks", automation: either })).resolves.toMatchObject({ findProblems: [] });
+    await expect(fixture({ sharedView: true }).check({ collectionPath: "Tasks", automation: either })).resolves.toMatchObject({ findProblems: [] });
   });
 });
 

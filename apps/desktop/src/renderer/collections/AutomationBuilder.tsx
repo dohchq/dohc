@@ -1147,6 +1147,7 @@ export function AutomationBuilder(props: {
     key: string;
     diagnostics: AutomationDiagnostic[];
     formulaProblems: CheckCollectionAutomationResult["formulaProblems"];
+    findProblems: CheckCollectionAutomationResult["findProblems"];
     cannotRun: string | null;
     missingFiles: readonly string[];
   } | null>(null);
@@ -1536,10 +1537,10 @@ export function AutomationBuilder(props: {
     }
   }, [targetPaths.join("\n"), targets]);
 
-  /** Main's check of this exact automation: what the file contract refuses, and each formula's syntax. */
+  /** Main's check of this exact automation: what the file contract refuses, each formula's syntax, and each Find its Collection cannot query. */
   const check = async (target: Automation, key: string) => {
     const result = await bridge().checkCollectionAutomation({ workspaceId, collectionPath, automation: target });
-    return { key, diagnostics: result.diagnostics, formulaProblems: result.formulaProblems, cannotRun: result.cannotRun, missingFiles: result.missingFiles };
+    return { key, diagnostics: result.diagnostics, formulaProblems: result.formulaProblems, findProblems: result.findProblems, cannotRun: result.cannotRun, missingFiles: result.missingFiles };
   };
   // Checked a moment after the person stops typing, so a formula's syntax
   // error shows as it happens.
@@ -1705,15 +1706,21 @@ export function AutomationBuilder(props: {
       }
     });
   }
-  // A syntax error shows as the person types; the rest once they try to save.
-  const syntaxKeys = new Set<string>();
+  // A syntax error, or a Find its Collection cannot query, shows as the person types; the rest once they try to save.
+  const liveKeys = new Set<string>();
   for (const found of current?.formulaProblems ?? []) {
     const { key, name, step: kind } = placeOf(found.path, draft.steps, edits);
     if (problems.has(key)) continue;
     problems.set(key, "code" in found ? unsaved(found.code)
       : kind === "run" ? `The code has a syntax error. ${found.problem}`
       : `${name === null ? "This formula" : `The formula for ${name}`} has a syntax error. ${found.problem}`);
-    syntaxKeys.add(key);
+    liveKeys.add(key);
+  }
+  for (const found of current?.findProblems ?? []) {
+    const { key } = placeOf(found.path, draft.steps, edits);
+    if (problems.has(key)) continue;
+    problems.set(key, found.problem);
+    liveKeys.add(key);
   }
   // What main's check found that the builder did not: shown once the person tries to save.
   for (const diagnostic of current?.diagnostics ?? []) {
@@ -1723,7 +1730,7 @@ export function AutomationBuilder(props: {
   }
   const problem = (key: string): Shown => {
     const text = problems.get(key);
-    return text !== undefined && (attempted || syntaxKeys.has(key)) ? { id: `${problemIds}${key.replace(/[^\w-]/gu, "_")}`, text } : null;
+    return text !== undefined && (attempted || liveKeys.has(key)) ? { id: `${problemIds}${key.replace(/[^\w-]/gu, "_")}`, text } : null;
   };
   // A Save that found a problem moves focus to the first one on screen:
   // the control it describes, or else the first control of its step.
@@ -1764,7 +1771,7 @@ export function AutomationBuilder(props: {
       if (!scope.isCurrent(epoch)) return false;
       setChecked(answer);
     }
-    if (answer.diagnostics.length > 0 || answer.formulaProblems.length > 0) return refuse();
+    if (answer.diagnostics.length > 0 || answer.formulaProblems.length > 0 || answer.findProblems.length > 0) return refuse();
     props.onSave(candidate);
     return true;
   };
@@ -2678,7 +2685,9 @@ export function AutomationBuilder(props: {
 
   // Main's answer for this draft; until it comes, what it said of the saved version, while nothing changed.
   // An unchanged automation keeps what the list said when main gives no reason, as for a dataset whose rules are not approved, which main's check cannot see.
-  const cannotRun = current?.cannotRun ?? (dirty ? null : props.cannotRun);
+  const reason = current?.cannotRun ?? (dirty ? null : props.cannotRun);
+  // A Find its Collection cannot query says so beside the Find, so the same reason does not show twice.
+  const cannotRun = current?.findProblems.some((found) => found.problem === reason) ? null : reason;
   // Code files a step names that main could not find, from its last answer for this draft.
   const missing = new Set(current?.missingFiles ?? []);
   /** Creates a code file in this Collection's folder with the code the step held, if any, then opens it. */

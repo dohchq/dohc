@@ -482,6 +482,33 @@ export function datasetFindOf(condition: string): DatasetFindFilter[] | { proble
   return visit(node) ? filters : { problem: DATASET_FIND_SHAPE };
 }
 
+/**
+ * Each Find whose condition its Collection cannot query, at its JSON
+ * Pointer from the automation, as `findQueryOf` or `datasetFindOf` reads it
+ * for a run. `keptIn` says how a Find's Collection keeps its records, or
+ * null when dohc does not know, which leaves that Find to the run. A syntax
+ * error is left to `formulaProblems`, and an empty condition to the builder.
+ */
+export function findProblems(
+  automation: Automation,
+  keptIn: (collection: string | null) => "dataset" | "document" | null,
+): Array<{ path: string; problem: string }> {
+  const problems: Array<{ path: string; problem: string }> = [];
+  const steps = (path: string, list: readonly AutomationStep[]) => list.forEach((step, index) => {
+    const at = `${path}/${index}`;
+    if (step.kind === "if") {
+      steps(`${at}/do`, step.do);
+      steps(`${at}/otherwise`, step.otherwise);
+    }
+    if (step.kind !== "find" || step.condition.trim() === "" || expressionProblem(step.condition) !== null) return;
+    const kept = keptIn(step.collection);
+    const query = kept === "dataset" ? datasetFindOf(step.condition) : kept === "document" ? findQueryOf(step.condition) : null;
+    if (query !== null && "problem" in query) problems.push({ path: `${at}/find`, problem: query.problem });
+  });
+  steps("/do", automation.do);
+  return problems;
+}
+
 /** The dataset operations an automation's steps invoke, by name, once each. */
 export function operationsOf(automation: Automation): string[] {
   const names = new Set<string>();
