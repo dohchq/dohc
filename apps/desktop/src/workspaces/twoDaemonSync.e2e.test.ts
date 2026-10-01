@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { buildRelay } from "../../../../services/sync-relay/scripts/build.mjs";
 import * as Y from "yjs";
-import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
+import { createLocalChangeAuthor } from "@dohc/workspace-core";
+import { VersionedLiveAdapter, WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
@@ -17,6 +18,7 @@ import {
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import { waitForPathMoments } from "./waitForPathMoments";
+import { createRecordByHand, desktopRecordEditContext } from "./desktopRecordEdits";
 import { createTestScratch } from "./testTemp";
 import {
   installWorkspaceDataKey,
@@ -339,6 +341,61 @@ async function expectTwoDaemonFileSync(input: {
     await relay.stop();
   }
 }
+
+it.skipIf(engine.missing)(
+  "syncs a hand-made Collection record with local human History through the real relay",
+  async () => {
+    const workspaceId = "two-daemon-human-record";
+    const rootA = await createTestScratch("dohc-human-record-a-");
+    const rootB = await createTestScratch("dohc-human-record-b-");
+    const relayRoot = await createTestScratch("dohc-human-record-relay-");
+    const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relayConnection = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
+    let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+    let capture: WorkspaceEngineCapture | undefined;
+    let peer: LiveDaemonCapture | undefined;
+    try {
+      owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0 });
+      const source = owner;
+      capture = createWorkspaceEngineCapture({ ...source.workspace, rustEngineSessions: source.sessions });
+      const relay = source.relay.bind({ ...source.workspace, relay: relayConnection });
+      await relay.claim();
+      await source.chats.ensureGeneralChannel({ workspaceId });
+      await relay.push();
+      await capture.writeAuthoredFile(join(rootA, "tasks/collection.yaml"), "fields: {}\n", { kind: "human", humanId: "local-person" });
+      const person = { kind: "human", humanId: "local-person" } as const;
+      const context = desktopRecordEditContext({
+        capture, workspaceRoot: rootA, person, signal: new AbortController().signal,
+        withAdapter: work => source.sessions.run(source.workspace, ({ client, workspace }) =>
+          work(new VersionedLiveAdapter(client, workspace, { workspaceId }))),
+        onCaptureSettled: () => () => undefined,
+      });
+      const record = await createRecordByHand({ collectionPath: "tasks", name: "hand-made" }, {
+        author: createLocalChangeAuthor("Local person"),
+        localPerson: async () => person,
+        withWorkspaceOperation: work => work(undefined),
+        editContext: async () => context,
+      });
+      expect(record).not.toHaveProperty("kind");
+      if ("kind" in record) throw new Error(record.reason);
+      const local = (await capture.listMoments({ limit: 100 })).moments.find(moment => moment.path === record.path);
+      expect(local?.authors).toEqual([person]);
+      expect((await relay.push()).pushed).toBeGreaterThan(0);
+      peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection });
+      await pullAndExpect(peer, rootB, record.path, await readFile(join(rootA, record.path)), "text");
+      expect((await peer.capture.listMoments({ limit: 100 })).moments.some(moment => moment.path === record.path)).toBe(true);
+      await capture.runRelaySync(materializePage => relay.pull(materializePage));
+      const afterEcho = (await capture.listMoments({ limit: 100 })).moments.find(moment => moment.path === record.path);
+      expect(afterEcho?.authors).toEqual([person]);
+    } finally {
+      await peer?.close();
+      await capture?.stop();
+      await owner?.close();
+      await relayServer.stop();
+    }
+  },
+  REAL_DAEMON_DEADLINE_MS,
+);
 
 it.skipIf(engine.missing)(
   "syncs a captured file between two real daemons through one real relay",

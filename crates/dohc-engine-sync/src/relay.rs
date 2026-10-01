@@ -1118,7 +1118,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let mut attempt = 0_u8;
 
             loop {
-                let ops = list_replication_ops(
+                let mut ops = list_replication_ops(
                     store,
                     workspace_id,
                     &origin_id,
@@ -1128,6 +1128,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .map_err(local)?;
                 if ops.is_empty() {
                     break;
+                }
+                match crate::outbound::repair_queued_moment_authors(store, &mut ops, faults)
+                    .map_err(local)?
+                {
+                    TxnOutcome::Committed(()) => {}
+                    TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
                 }
                 let prefix =
                     crate::owner_publication_prefix(store, workspace_id, &ops, max_read_bytes)

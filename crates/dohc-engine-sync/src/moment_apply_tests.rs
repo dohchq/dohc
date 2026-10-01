@@ -115,7 +115,7 @@ fn maximum_live_author_summary_journals_with_payload_headroom() {
 }
 
 #[test]
-fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history() {
+fn outbound_moment_authors_keep_local_people_and_replicate_agents_and_automations() {
     use dohc_engine_domain::{ChangeActorKind, ChangeAttribution, moment_author_json};
     for kind in [
         ChangeActorKind::Human,
@@ -194,6 +194,19 @@ fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history(
                     )
                 })
                 .expect("read outbound journal");
+            let local_history = VersionedTextStore::new(&mut source)
+                .get_moment("ws", "created-moment")
+                .unwrap()
+                .unwrap();
+            assert_eq!(local_history.author_json.as_deref(), Some(author.as_str()));
+            if kind == ChangeActorKind::Human {
+                assert!(op.payload.get("authors").is_none());
+            } else {
+                assert_eq!(
+                    op.payload["authors"],
+                    serde_json::from_str::<Value>(&author).unwrap()
+                );
+            }
             hydrate_texts(&mut peer, &["created by a live document"]);
             assert_eq!(
                 apply_moment_envelope(&mut peer, &op, &NoFaults).expect("peer apply"),
@@ -204,11 +217,14 @@ fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history(
                 .get_moment("ws", "created-moment")
                 .expect("peer history")
                 .expect("replicated moment");
-            assert_eq!(
-                serde_json::from_str::<Value>(history.author_json.as_deref().expect("author"))
-                    .unwrap(),
-                serde_json::from_str::<Value>(&author).unwrap(),
-            );
+            if kind == ChangeActorKind::Human {
+                assert!(history.author_json.is_none());
+            } else {
+                assert_eq!(
+                    serde_json::from_str::<Value>(history.author_json.as_deref().unwrap()).unwrap(),
+                    serde_json::from_str::<Value>(&author).unwrap(),
+                );
+            }
         }
     }
 }
