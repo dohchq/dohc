@@ -4,7 +4,7 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import * as Y from "yjs";
 import { Duplex, PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { parseRelayAcceptedLiveUpdate } from "@dohc/live-session-contract";
+import { parseHostEpoch, parseRelayAcceptedLiveUpdate } from "@dohc/live-session-contract";
 import type { Envelope, Request, JsonValue } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
 import { encodeNativeRestoreInput } from "./nativeRestore";
@@ -1536,6 +1536,120 @@ describe("private application range ordering", () => {
         expect(finished).toBe(0);
       }
     } finally { transport.close(); }
+  });
+});
+
+describe("private application v2 metadata transport", () => {
+  function event(withCoverage = true) {
+    const updateBytes = Buffer.alloc(16, 7);
+    const human = { kind: "human" as const, humanId: "owner", humanName: "Sam 🐈" };
+    const firstSeen = [{ clientId: 7, startClock: 0, endClock: 3 }, { clientId: 7, startClock: 5, endClock: 7 }];
+    const firstSeenDeletes = [{ clientId: 7, startClock: 1, endClock: 2 }];
+    return {
+      updateBytes,
+      metadata: {
+        accepted: {
+          receipt: { deliveryId: "v2-delivery", updateDigest: createHash("sha256").update(updateBytes).digest("hex"), journalCursor: 1, acceptingHostEpoch: parseHostEpoch(1) },
+          binding: { workspaceId: "workspace", mainVersionId: "main", objectId: "one", lineageClaimId: "a".repeat(64), currentPath: "one.md", selectorPaths: ["one.md"], restoreFenceGeneration: 0 },
+          authority: { principalKind: "owner" as const, principalId: "owner", grantId: null, grantGeneration: null }, receivedAtMs: 0,
+        },
+        firstSeen, canonicalVersion: 2 as const, authorSnapshot: [human], firstSeenDeletes,
+        ...(withCoverage ? { checkpointCoverage: [{ author: { ...human }, structRanges: firstSeen.map(range => ({ ...range })), deletionRanges: firstSeenDeletes.map(range => ({ ...range })) }] } : {}),
+      },
+    };
+  }
+  async function recorder(hold = false) {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge(); await transport.ready();
+    const entered = Promise.withResolvers<void>();
+    const headers: Request[] = [];
+    const starts = new Map<number, Extract<Envelope, { type: "blobStart" }>>();
+    const chunks = new Map<number, Buffer[]>();
+    peer.onEnvelope = envelope => {
+      if (envelope.type === "request") {
+        headers.push(envelope);
+        if (hold) peer.backpressured = true;
+        entered.resolve();
+      } else if (envelope.type === "blobStart") { starts.set(envelope.streamId, envelope); chunks.set(envelope.streamId, []); }
+    };
+    peer.onBlobChunk = frame => {
+      expect(frame.payload.length).toBeLessThanOrEqual(LIMITS.maxBlobChunkBytes);
+      chunks.get(frame.streamId)!.push(Buffer.from(frame.payload));
+      if (frame.fin && frame.streamId === 2) peer.send({ type: "response", id: starts.get(2)!.requestId, result: { status: "applied" } });
+    };
+    return { peer, transport, entered, headers, starts, chunks };
+  }
+  const uploadRequest = { id: 74, workspace: "ws-0000000000000001", registrationId: 1, deadlineMs: 30_000 };
+
+  it.each([false, true])("appends exact author and deletion metadata after packed ranges, coverage=%s", async withCoverage => {
+    const input = event(withCoverage), f = await recorder();
+    const { accepted: _accepted, firstSeen: _firstSeen, ...extensions } = input.metadata;
+    const expectedTail = Buffer.from(JSON.stringify(extensions));
+    const expectedPrefix = Buffer.from([7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,
+      7, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 7, 0, 0, 0]);
+    try {
+      await expect(f.transport.sendLiveApplication(uploadRequest, input)).resolves.toMatchObject({ result: { status: "applied" } });
+      const wire = Buffer.concat(f.chunks.get(2)!);
+      expect(wire).toEqual(Buffer.concat([expectedPrefix, expectedTail]));
+      expect(Buffer.concat(f.chunks.get(1)!)).toEqual(input.updateBytes);
+      const digest = createHash("sha256").update(wire).digest("hex");
+      expect(f.headers[0]!.params).toEqual({ accepted: input.metadata.accepted, registrationId: 1,
+        rangeCount: 2, metadataByteLength: expectedTail.length, rangeStreamId: 2, rangeDigest: digest, updateStreamId: 1, updateByteLength: 16 });
+      expect(f.starts.get(2)).toMatchObject({ totalBytes: wire.length, sha256: digest });
+    } finally { f.transport.close(); }
+  });
+
+  it("streams checkpoint coverage larger than a control frame without embedding it in JSON envelopes", async () => {
+    const input = event(), f = await recorder();
+    input.metadata.checkpointCoverage![0]!.structRanges = Array.from({ length: 25_000 }, (_, index) => ({ clientId: index + 1, startClock: 0, endClock: 1 }));
+    const { accepted: _accepted, firstSeen: _firstSeen, ...extensions } = input.metadata;
+    const expectedTail = Buffer.from(JSON.stringify(extensions));
+    expect(expectedTail.length).toBeGreaterThan(LIMITS.maxFrameBytes);
+    try {
+      await f.transport.sendLiveApplication(uploadRequest, input);
+      expect(Buffer.concat(f.chunks.get(2)!).subarray(32)).toEqual(expectedTail);
+      for (const envelope of f.peer.received) {
+        expect(Buffer.byteLength(JSON.stringify(envelope))).toBeLessThan(4096);
+        expect(envelope).not.toHaveProperty("checkpointCoverage");
+        if (envelope.type === "request") {
+          expect(envelope.params).not.toHaveProperty("authorSnapshot");
+          expect(envelope.params).not.toHaveProperty("firstSeenDeletes");
+          expect(envelope.params).not.toHaveProperty("checkpointCoverage");
+          expect(envelope.params).toHaveProperty("metadataByteLength", expectedTail.length);
+        }
+      }
+    } finally { f.transport.close(); }
+  });
+
+  it("captures update bytes, authors, deletions, and checkpoint coverage before backpressure", async () => {
+    const input = event(), f = await recorder(true);
+    const expected = JSON.parse(JSON.stringify(input.metadata)) as typeof input.metadata;
+    const expectedUpdate = Buffer.from(input.updateBytes);
+    const { accepted: _accepted, firstSeen: _firstSeen, ...extensions } = expected;
+    const expectedTail = Buffer.from(JSON.stringify(extensions));
+    const pending = f.transport.sendLiveApplication(uploadRequest, input);
+    try {
+      await f.entered.promise;
+      input.updateBytes.fill(9);
+      input.metadata.accepted.receipt.deliveryId = "changed";
+      input.metadata.accepted.binding.selectorPaths[0] = "changed.md";
+      input.metadata.firstSeen[0]!.endClock = 1;
+      input.metadata.authorSnapshot[0]!.humanName = "Changed";
+      input.metadata.firstSeenDeletes[0]!.endClock = 3;
+      input.metadata.checkpointCoverage![0]!.author.humanName = "Changed checkpoint";
+      input.metadata.checkpointCoverage![0]!.structRanges[0]!.endClock = 1;
+      input.metadata.checkpointCoverage![0]!.deletionRanges.length = 0;
+      f.peer.drain();
+      await expect(pending).resolves.toMatchObject({ result: { status: "applied" } });
+      expect(Buffer.concat(f.chunks.get(1)!)).toEqual(expectedUpdate);
+      const wire = Buffer.concat(f.chunks.get(2)!);
+      expect(wire.readUInt32LE(12)).toBe(3);
+      expect(wire.subarray(32)).toEqual(expectedTail);
+      expect(f.headers[0]!.params).toHaveProperty("accepted", expected.accepted);
+      expect(f.headers[0]!.params).toHaveProperty("metadataByteLength", expectedTail.length);
+      expect(f.starts.get(2)).toHaveProperty("sha256", createHash("sha256").update(wire).digest("hex"));
+    } finally { f.peer.drain(); f.transport.close(); await pending.catch(() => undefined); }
   });
 });
 

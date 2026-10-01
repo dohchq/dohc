@@ -100,6 +100,10 @@ async fn applied_restore(
                 received_at_ms: 21,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
     };
     f.owner
@@ -715,6 +719,10 @@ impl Fixture {
                     received_at_ms,
                 },
                 first_seen: vec![],
+                canonical_version: None,
+                author_snapshot: None,
+                first_seen_deletes: None,
+                checkpoint_coverage: None,
             },
             update_bytes: bytes,
         };
@@ -762,6 +770,10 @@ impl Fixture {
                     received_at_ms: 2,
                 },
                 first_seen: vec![],
+                canonical_version: None,
+                author_snapshot: None,
+                first_seen_deletes: None,
+                checkpoint_coverage: None,
             },
             update_bytes: vec![0, 0],
         };
@@ -859,6 +871,10 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
             received_at_ms: 2,
         },
         first_seen,
+        canonical_version: None,
+        author_snapshot: None,
+        first_seen_deletes: None,
+        checkpoint_coverage: None,
     };
     assert!(matches!(
         f.handle
@@ -1427,6 +1443,10 @@ async fn restore_fence_serializes_queued_writes_and_preserves_other_documents() 
                 received_at_ms: 4,
             },
             first_seen: vec![],
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
         update_bytes: vec![0, 0],
     };
@@ -2404,6 +2424,10 @@ async fn restore_application_keeps_queued_memory_and_replays_after_cancelled_or_
                     received_at_ms: 25,
                 },
                 first_seen: proposal.receipt().replacement_ranges.clone(),
+                canonical_version: None,
+                author_snapshot: None,
+                first_seen_deletes: None,
+                checkpoint_coverage: None,
             },
         };
         let (entered, at_commit) = tokio::sync::oneshot::channel();

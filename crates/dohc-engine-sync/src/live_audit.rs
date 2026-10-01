@@ -275,6 +275,7 @@ pub fn journal_live_base_in_tx(
     let make_record = |base_coordinate| BaseRecord {
         relay_database_namespace: namespace.to_owned(),
         checkpoint: NativeAcceptedCheckpoint {
+            canonical_version: None,
             restore_operation_id: None,
             event_count: 0,
             terminal: None,

@@ -4,7 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
 import { Duplex } from "node:stream";
 import { TextDecoder } from "node:util";
-import { parseRelayAcceptedLiveUpdate, parseLiveUpdateIdentifier, parseLiveUpdateDigest, parseLiveUpdateHostApplicationAck, type LiveUpdateHostApplicationAck, type AdmittedLiveUpdate, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract";
+import { parseAdmittedLiveUpdateMetadata, parseRelayAcceptedLiveUpdate, parseLiveUpdateIdentifier, parseLiveUpdateDigest, parseLiveUpdateHostApplicationAck, type LiveUpdateHostApplicationAck, type AdmittedLiveUpdate, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract";
 import type { BlobStart, Envelope, Event, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { OwnerYDocOutboxAppendResult } from "../ydoc/ownerYDocOutbox";
@@ -1273,7 +1273,8 @@ export class EngineClient implements EngineTransport {
     signal?: AbortSignal,
   ): Promise<Response> {
     const byteLength = event.updateBytes.byteLength;
-    const ranges = event.metadata.firstSeen;
+    const metadata = parseAdmittedLiveUpdateMetadata(event.metadata);
+    const ranges = metadata.firstSeen;
     if (
       byteLength < 2 ||
       byteLength > MAX_LIVE_UPDATE_BYTES ||
@@ -1282,8 +1283,9 @@ export class EngineClient implements EngineTransport {
       throw new TypeError("Invalid live application attachment bounds.");
     }
     const accepted = parseRelayAcceptedLiveUpdate(event.metadata.accepted);
-    const charge =
-      byteLength + ranges.length * PACKED_LIVE_RANGE_BYTES + 3 * 1024 * 1024;
+    const { accepted: _accepted, firstSeen: _firstSeen, ...extensions } = metadata;
+    const extensionBytes = metadata.canonicalVersion === 2 ? Buffer.from(JSON.stringify(extensions)) : Buffer.alloc(0);
+    const charge = byteLength + ranges.length * PACKED_LIVE_RANGE_BYTES + extensionBytes.length * 4 + 3 * 1024 * 1024;
     return this.sendLiveUpload(
       request,
       "liveApplication.apply",
@@ -1291,7 +1293,7 @@ export class EngineClient implements EngineTransport {
       () => {
         // Capture bytes once. Caller mutations cannot change a queued upload.
         const update = Buffer.from(event.updateBytes);
-        const packed = Buffer.allocUnsafe(
+        let packed = Buffer.allocUnsafe(
           ranges.length * PACKED_LIVE_RANGE_BYTES,
         );
         let previous = -1;
@@ -1324,6 +1326,7 @@ export class EngineClient implements EngineTransport {
         ) {
           throw new TypeError("Live application update digest mismatch.");
         }
+        if (extensionBytes.length > 0) packed = Buffer.concat([packed, extensionBytes]);
         const rangeDigest = createHash("sha256").update(packed).digest("hex");
         const updateStreamId = this.nextLiveStreamId++;
         const rangeStreamId = this.nextLiveStreamId++;
@@ -1334,6 +1337,7 @@ export class EngineClient implements EngineTransport {
           params: JSON.parse(
             JSON.stringify({
               accepted,
+              ...(extensionBytes.length === 0 ? {} : { metadataByteLength: extensionBytes.length }),
               registrationId: request.registrationId,
               rangeCount: ranges.length,
               rangeStreamId,

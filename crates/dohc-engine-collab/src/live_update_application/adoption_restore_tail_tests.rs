@@ -76,6 +76,10 @@ fn native_tail_apply(
                 received_at_ms: cursor,
             },
             first_seen: vec![],
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
         update_bytes: bytes.clone(),
     };
@@ -194,6 +198,10 @@ fn native_restore_classifies_a_lost_ack_before_the_accepted_checkpoint() {
                             received_at_ms: ordinal,
                         },
                         first_seen: vec![],
+                        canonical_version: None,
+                        author_snapshot: None,
+                        first_seen_deletes: None,
+                        checkpoint_coverage: None,
                     },
                     update_bytes: vec![0, 0],
                 };
@@ -354,7 +362,7 @@ fn native_restore_tail_retains_interleaved_pending_context_with_descending_termi
             expected,
             serde_json::to_vec(&native_tail_prepare(&mut f, input.clone()).unwrap()).unwrap()
         );
-        use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, RealFreeSpace};
+        use dohc_engine_storage::backup::{BackupOutcome, RealFreeSpace, create_verified_backup};
         let BackupOutcome::Verified(backup) = create_verified_backup(
             &f.store,
             &f._scratch.join("recovery"),
@@ -417,15 +425,17 @@ fn native_restore_tail_retains_adoption_seed_without_admitting_it() {
         proposal.receipt().native_sources[0].source.origin,
         owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
     ));
-    assert!(proposal.receipt().native_sources[0]
-        .accepted_receipt
-        .is_none());
+    assert!(
+        proposal.receipt().native_sources[0]
+            .accepted_receipt
+            .is_none()
+    );
     assert_eq!(before, native_tail_inventory(&f.store));
 }
 
 #[test]
 fn native_restore_tail_refuses_missing_or_changed_provenance_without_mutating_canonical_state() {
-    let mutations=[
+    let mutations = [
         "UPDATE owner_ydoc_outbox_entries SET native_source_json=NULL",
         "UPDATE owner_ydoc_outbox_entries SET native_source_json=json_set(native_source_json,'$.binding.objectId','other')",
         "UPDATE owner_ydoc_outbox_entries SET native_source_json=json_set(native_source_json,'$.adoptionId','other')",
@@ -585,17 +595,18 @@ fn native_restore_tail_budgets_count_pending_sources_on_first_prepare_and_replay
         }
         for (bytes, events) in [(2_000_000, 1), (1, 100)] {
             let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
-            assert!(f
-                ._owner
-                .prepare_restore(
-                    &mut f.store,
-                    input.clone(),
-                    coordinate,
-                    bytes,
-                    events,
-                    &NoFaults
-                )
-                .is_err());
+            assert!(
+                f._owner
+                    .prepare_restore(
+                        &mut f.store,
+                        input.clone(),
+                        coordinate,
+                        bytes,
+                        events,
+                        &NoFaults
+                    )
+                    .is_err()
+            );
         }
     }
 }
@@ -723,11 +734,13 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
         proposal.receipt().native_sources[1].source.origin,
         owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate { .. }
     ));
-    assert!(proposal
-        .receipt()
-        .native_sources
-        .iter()
-        .all(|source| source.accepted_receipt.is_none()));
+    assert!(
+        proposal
+            .receipt()
+            .native_sources
+            .iter()
+            .all(|source| source.accepted_receipt.is_none())
+    );
     assert!(proposal.receipt().accepted_history.suffix.is_empty());
     assert_eq!(inventory, native_tail_inventory(&f.store));
 }
@@ -761,6 +774,10 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
                 received_at_ms: 80,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
     };
     let inventory = native_tail_inventory(&f.store);
@@ -829,7 +846,7 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
             .unwrap(),
         prep.fence
     );
-    use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, RealFreeSpace};
+    use dohc_engine_storage::backup::{BackupOutcome, RealFreeSpace, create_verified_backup};
     let BackupOutcome::Verified(backup) = create_verified_backup(
         &f.store,
         &f._scratch.join("applied-recovery"),
@@ -931,6 +948,10 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
                 received_at_ms: 80,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
     };
     f._owner

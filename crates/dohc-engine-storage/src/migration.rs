@@ -2855,6 +2855,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_YDOC_LIVE_EDIT_AUTHORS_DDL,
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 27,
+        id: "v2-live-admitted-metadata-receipts",
+        sql: "ALTER TABLE live_device_update_applications ADD COLUMN admitted_metadata_json TEXT CHECK (admitted_metadata_json IS NULL OR json_valid(admitted_metadata_json)); ALTER TABLE live_audit_events ADD COLUMN canonical_version INTEGER NOT NULL DEFAULT 1 CHECK (canonical_version IN (1,2));",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -3215,6 +3221,10 @@ mod tests {
             (
                 "v2-ydoc-live-edit-authors",
                 "33ec61e3e1f37d0908e6e5eac829e9e5a749e2834e4ce42729716fc32fe5d938",
+            ),
+            (
+                "v2-live-admitted-metadata-receipts",
+                "38b94a5201c516660137d7f28c61747e373a03621ae2add162f11eaf3a43889f",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

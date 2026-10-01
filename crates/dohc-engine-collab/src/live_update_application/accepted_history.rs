@@ -9,6 +9,8 @@ const DOCUMENT: &str = "relay_database_namespace=?1 AND workspace_id=?2 AND main
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeAcceptedCheckpoint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_version: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restore_operation_id: Option<String>,
     pub event_count: i64,
@@ -51,17 +53,37 @@ pub(super) fn initial_digest(held: &Registration) -> Result<String, ApplicationE
     ))
 }
 
-fn next_digest(
+pub(super) fn next_digest(
     previous: &str,
     count: i64,
     metadata: &AdmittedLiveUpdateMetadata,
 ) -> Result<String, ApplicationError> {
     Ok(hex_sha256(
-        &serde_json::to_vec(&("accepted-event-v1", previous, count, metadata))
-            .map_err(|_| ApplicationError::Corrupt)?,
+        &serde_json::to_vec(&(
+            if metadata.canonical_version == Some(2) {
+                "accepted-event-v2"
+            } else {
+                "accepted-event-v1"
+            },
+            previous,
+            count,
+            metadata,
+        ))
+        .map_err(|_| ApplicationError::Corrupt)?,
     ))
 }
 
+pub(super) fn require_version_transition(
+    previous: &AdmittedLiveUpdateMetadata,
+    next: &AdmittedLiveUpdateMetadata,
+) -> Result<(), ApplicationError> {
+    previous.validate_extensions()?;
+    next.validate_extensions()?;
+    if previous.canonical_version == Some(2) && next.canonical_version != Some(2) {
+        return Err(invalid("accepted history version downgrade"));
+    }
+    Ok(())
+}
 pub(super) fn origin_stamp(
     conn: &Connection,
     held: &Registration,
@@ -88,6 +110,7 @@ pub(super) fn initialize(
     doc.apply(baseline)?;
     doc.validate_public_baseline(baseline)?;
     let checkpoint = NativeAcceptedCheckpoint {
+        canonical_version: None,
         restore_operation_id: None,
         event_count: 0,
         terminal: None,
@@ -230,6 +253,7 @@ fn checkpoint(
     } else if saved_restore_stamp.is_some() {
         return Err(ApplicationError::Corrupt);
     };
+    let mut canonical_version = None;
     if count > 0 {
         let sql = format!(
             "SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND journal_cursor=?7"
@@ -254,6 +278,8 @@ fn checkpoint(
             .map_err(read_sql)?;
         let metadata: AdmittedLiveUpdateMetadata =
             serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+        metadata.validate_extensions()?;
+        canonical_version = metadata.canonical_version;
         if Some(&metadata.accepted.receipt) != terminal.as_ref()
             || metadata.accepted.binding != binding
             || expected != evidence_digest
@@ -272,6 +298,7 @@ fn checkpoint(
                 .map_err(read_sql)?;
             let (events, bytes) = segment_position(conn, held, previous, count)?;
             if restore_operation_id.is_none()
+                && metadata.checkpoint_coverage.is_none()
                 && events != CHECKPOINT_EVENTS
                 && bytes < CHECKPOINT_BYTES
             {
@@ -280,6 +307,7 @@ fn checkpoint(
         }
     }
     Ok(NativeAcceptedCheckpoint {
+        canonical_version,
         restore_operation_id,
         event_count: count,
         terminal,
@@ -422,6 +450,7 @@ fn append_inner(
         Some((count, cursor, json, digest, events, bytes)) => {
             let metadata: AdmittedLiveUpdateMetadata =
                 serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+            require_version_transition(&metadata, &event.metadata)?;
             (
                 count,
                 cursor,
@@ -474,7 +503,11 @@ fn append_inner(
         ],
     )
     .map_err(write_sql)?;
-    if restored.is_some() || events == CHECKPOINT_EVENTS || bytes >= CHECKPOINT_BYTES {
+    if restored.is_some()
+        || events == CHECKPOINT_EVENTS
+        || bytes >= CHECKPOINT_BYTES
+        || event.metadata.checkpoint_coverage.is_some()
+    {
         let history = if restored.is_none() {
             Some(read_inner(
                 tx,
@@ -506,6 +539,7 @@ fn append_inner(
             tx,
             held,
             &NativeAcceptedCheckpoint {
+                canonical_version: event.metadata.canonical_version,
                 restore_operation_id: restored.map(|(id, _)| id.to_owned()),
                 event_count: count,
                 terminal: Some(event.metadata.accepted.receipt.clone()),
@@ -590,6 +624,13 @@ pub(super) fn read_inner(
     let mut terminal = c.terminal.clone();
     let mut evidence = c.evidence_digest.clone();
     let mut binding = c.binding.clone();
+    let mut previous_metadata: Option<AdmittedLiveUpdateMetadata> = if c.event_count > 0 {
+        let json: String = conn.query_row(&format!("SELECT metadata_json FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6"),
+            params![p[0],p[1],p[2],p[3],p[4],c.event_count], |row| row.get(0)).map_err(read_sql)?;
+        Some(serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?)
+    } else {
+        None
+    };
     let mut bytes = 0;
     while let Some(row) = rows.next().map_err(read_sql)? {
         if count - c.event_count >= max_events as i64
@@ -631,6 +672,10 @@ pub(super) fn read_inner(
             update_bytes: update,
         };
         event.validate()?;
+        if let Some(previous) = &previous_metadata {
+            require_version_transition(previous, &event.metadata)?;
+        }
+        previous_metadata = Some(event.metadata.clone());
         require_document(held, &event.metadata.accepted.binding)?;
         require_transition(conn, held, &binding, &event.metadata)?;
         let next = next_digest(&evidence, ordinal, &event.metadata)?;
@@ -687,14 +732,19 @@ pub(super) fn accepted_source(
     } else {
         let p = parameters(held);
         let sql = format!(
-            "SELECT evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6"
+            "SELECT evidence_digest,metadata_json FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6"
         );
-        conn.query_row(
-            &sql,
-            params![p[0], p[1], p[2], p[3], p[4], count - 1],
-            |r| r.get::<_, String>(0),
-        )
-        .map_err(read_sql)?
+        let (digest, json): (String, String) = conn
+            .query_row(
+                &sql,
+                params![p[0], p[1], p[2], p[3], p[4], count - 1],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(read_sql)?;
+        let prior: AdmittedLiveUpdateMetadata =
+            serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+        require_version_transition(&prior, &metadata)?;
+        digest
     };
     if count <= 0
         || metadata.accepted.receipt.delivery_id != delivery

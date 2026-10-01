@@ -12,11 +12,11 @@
 
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
 use crate::live_object_binding::LiveObjectBinding;
-use crate::{durable, CollabError, DocKey, Regime, WriterDocCache};
+use crate::{CollabError, DocKey, Regime, WriterDocCache, durable};
 use dohc_engine_storage::{
-    get_binary_blob, hex_sha256, EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
+    EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome, get_binary_blob, hex_sha256,
 };
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -28,26 +28,26 @@ mod publication;
 pub(crate) use publication::read_native_accepted_in;
 mod ack_read;
 mod sync;
-pub use ack_read::{read_application_ack, LiveApplicationAckIdentity};
+pub use ack_read::{LiveApplicationAckIdentity, read_application_ack};
 pub use sync::{
-    read_applied_sync, read_next_applied, AppliedPosition, AppliedSyncCut, AppliedSyncPolicy,
-    NextAppliedUpdate,
+    AppliedPosition, AppliedSyncCut, AppliedSyncPolicy, NextAppliedUpdate, read_applied_sync,
+    read_next_applied,
 };
 mod activation;
 pub use activation::{
-    capture_imported_owner_activation, release_imported_owner_activation,
-    resume_imported_owner_activation, ImportedOwnerActivation, ImportedOwnerSource,
+    ImportedOwnerActivation, ImportedOwnerSource, capture_imported_owner_activation,
+    release_imported_owner_activation, resume_imported_owner_activation,
 };
 mod adoption;
 pub use accepted_history::{NativeAcceptedCheckpoint, NativeRestoreHistoryProof};
 mod bootstrap;
-pub use adoption::{adopt_owner_committed, OwnerAdoptionAck, OwnerAdoptionCut};
+pub use adoption::{OwnerAdoptionAck, OwnerAdoptionCut, adopt_owner_committed};
 mod restore_content;
 pub(crate) mod restore_fence;
 mod restore_resume;
 mod settlement;
 pub use bootstrap::{
-    bootstrap_committed, BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck,
+    BootstrapResult, LiveApplicationBootstrap, LiveApplicationBootstrapAck, bootstrap_committed,
 };
 pub use restore_content::{
     NativeRestoreApplication, NativeRestoreApplicationReceipt, NativeRestorePoint,
@@ -55,12 +55,12 @@ pub use restore_content::{
     NativeRestoreSource,
 };
 pub use restore_fence::require_open as require_restore_open;
+pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
 pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };
-pub use restore_fence::{NativeRestoreFence, NativeRestoreFenceReceipt, RestoreDeliveryOrigin};
 pub use restore_resume::{NativeRestoreResume, NativeRestoreResumeReceipt};
-pub use settlement::{with_settlement, LiveSettlementAudit, LiveSettlementResult};
+pub use settlement::{LiveSettlementAudit, LiveSettlementResult, with_settlement};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApplicationError {
@@ -334,11 +334,197 @@ impl LiveUpdateStructRange {
         Ok(())
     }
 }
+pub fn nonnull_optional<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    decoder: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(decoder).map(Some)
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum LiveAuthorEntry {
+    Human {
+        human_id: String,
+        human_name: String,
+    },
+    Link {
+        public_principal_id: String,
+        label: String,
+    },
+    Agent {
+        agent_id: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "nonnull_optional"
+        )]
+        agent_name: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "nonnull_optional"
+        )]
+        on_behalf_of: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "nonnull_optional"
+        )]
+        depth: Option<u8>,
+    },
+}
+impl LiveAuthorEntry {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        match self {
+            Self::Human {
+                human_id,
+                human_name,
+            } => {
+                identifier(human_id, 512)?;
+                identifier(human_name, 512)?;
+            }
+            Self::Link {
+                public_principal_id,
+                label,
+            } => {
+                identifier(public_principal_id, 512)?;
+                identifier(label, 512)?;
+            }
+            Self::Agent {
+                agent_id,
+                agent_name,
+                on_behalf_of,
+                depth,
+            } => {
+                identifier(agent_id, 512)?;
+                if let Some(name) = agent_name {
+                    identifier(name, 512)?;
+                }
+                if let Some(person) = on_behalf_of {
+                    identifier(person, 512)?;
+                }
+                if depth.is_some_and(|depth| depth > 64) {
+                    return Err(invalid("invalid agent depth"));
+                }
+            }
+        }
+        if serde_json::to_vec(self)
+            .map_err(|_| invalid("author JSON"))?
+            .len()
+            > 2114
+        {
+            return Err(invalid("author entry exceeds byte bound"));
+        }
+        Ok(())
+    }
+    pub fn identity(&self) -> (&'static str, Option<&str>, &str) {
+        match self {
+            Self::Human { human_id, .. } => ("human", None, human_id),
+            Self::Link {
+                public_principal_id,
+                ..
+            } => ("link", None, public_principal_id),
+            Self::Agent {
+                agent_id,
+                on_behalf_of,
+                ..
+            } => ("agent", on_behalf_of.as_deref(), agent_id),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AdmittedLiveUpdateMetadata {
     pub accepted: RelayAcceptedLiveUpdate,
     pub first_seen: Vec<LiveUpdateStructRange>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nonnull_optional"
+    )]
+    pub canonical_version: Option<u8>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nonnull_optional"
+    )]
+    pub author_snapshot: Option<Vec<LiveAuthorEntry>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nonnull_optional"
+    )]
+    pub first_seen_deletes: Option<Vec<LiveUpdateStructRange>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nonnull_optional"
+    )]
+    pub checkpoint_coverage: Option<Vec<LiveCheckpointAuthorCoverage>>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LiveCheckpointAuthorCoverage {
+    pub author: LiveAuthorEntry,
+    pub struct_ranges: Vec<LiveUpdateStructRange>,
+    pub deletion_ranges: Vec<LiveUpdateStructRange>,
+}
+pub fn validate_checkpoint_coverage(
+    coverage: &[LiveCheckpointAuthorCoverage],
+) -> Result<(), ApplicationError> {
+    let mut identities = std::collections::BTreeSet::new();
+    for entry in coverage {
+        entry.author.validate()?;
+        canonical_ranges(&entry.struct_ranges)?;
+        canonical_ranges(&entry.deletion_ranges)?;
+        if !identities.insert(entry.author.identity()) {
+            return Err(invalid("duplicate checkpoint author"));
+        }
+    }
+    let authors: Vec<&LiveAuthorEntry> = coverage.iter().map(|entry| &entry.author).collect();
+    if identities.len() > 1024
+        || serde_json::to_vec(&authors)
+            .map_err(|_| invalid("checkpoint authors JSON"))?
+            .len()
+            > 128 * 1024
+    {
+        return Err(invalid("checkpoint authors exceed bound"));
+    }
+    Ok(())
+}
+impl AdmittedLiveUpdateMetadata {
+    pub fn validate_extensions(&self) -> Result<(), ApplicationError> {
+        match (
+            self.canonical_version,
+            &self.author_snapshot,
+            &self.first_seen_deletes,
+        ) {
+            (None, None, None) if self.checkpoint_coverage.is_none() => Ok(()),
+            (Some(2), Some(authors), Some(deletes)) => {
+                if authors.len() > 2
+                    || (authors.len() == 2
+                        && (matches!(authors[0], LiveAuthorEntry::Agent { .. })
+                            || !matches!(authors[1], LiveAuthorEntry::Agent { .. })))
+                {
+                    return Err(invalid("noncanonical author snapshot"));
+                }
+                for author in authors {
+                    author.validate()?;
+                }
+                canonical_ranges(deletes)?;
+                if let Some(coverage) = &self.checkpoint_coverage {
+                    validate_checkpoint_coverage(coverage)?;
+                }
+                Ok(())
+            }
+            _ => Err(invalid("invalid admitted metadata version")),
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedLiveUpdate {
@@ -397,6 +583,7 @@ impl AdmittedLiveUpdate {
         let accepted = &self.metadata.accepted;
         accepted.validate()?;
         canonical_ranges(&self.metadata.first_seen)?;
+        self.metadata.validate_extensions()?;
         if self.update_bytes.is_empty()
             || hex_sha256(&self.update_bytes) != accepted.receipt.update_digest
         {
@@ -434,14 +621,26 @@ pub fn parse_admitted_metadata(
     a.authority.validate()?;
     integer(a.received_at_ms, 0, SAFE)?;
     a.binding = a.binding.clone().normalized().map_err(invalid)?;
-    for range in &metadata.first_seen {
+    normalize_ranges(&mut metadata.first_seen)?;
+    if let Some(deletes) = &mut metadata.first_seen_deletes {
+        normalize_ranges(deletes)?;
+    }
+    if let Some(coverage) = &mut metadata.checkpoint_coverage {
+        for entry in coverage {
+            normalize_ranges(&mut entry.struct_ranges)?;
+            normalize_ranges(&mut entry.deletion_ranges)?;
+        }
+    }
+    metadata.validate_extensions()?;
+    Ok(metadata)
+}
+fn normalize_ranges(ranges: &mut Vec<LiveUpdateStructRange>) -> Result<(), ApplicationError> {
+    for range in ranges.iter() {
         range.validate()?;
     }
-    metadata
-        .first_seen
-        .sort_by_key(|range| (range.client_id, range.start_clock));
+    ranges.sort_by_key(|range| (range.client_id, range.start_clock));
     let mut merged: Vec<LiveUpdateStructRange> = Vec::new();
-    for range in metadata.first_seen {
+    for range in ranges.drain(..) {
         if let Some(previous) = merged.last_mut() {
             if previous.client_id == range.client_id && range.start_clock <= previous.end_clock {
                 previous.end_clock = previous.end_clock.max(range.end_clock);
@@ -450,8 +649,8 @@ pub fn parse_admitted_metadata(
         }
         merged.push(range);
     }
-    metadata.first_seen = merged;
-    Ok(metadata)
+    *ranges = merged;
+    Ok(())
 }
 pub fn parse_application_ack(
     input: Value,
@@ -1009,7 +1208,7 @@ fn read_application(
     namespace: &str,
     receipt: &LiveUpdateReceipt,
 ) -> Result<Option<ApplicationRecord>, ApplicationError> {
-    let mut query = conn.prepare("SELECT workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id FROM live_device_update_applications WHERE relay_database_namespace=?1 AND (delivery_id=?2 OR journal_cursor=?3)").map_err(read_sql)?;
+    let mut query = conn.prepare("SELECT workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id,admitted_metadata_json FROM live_device_update_applications WHERE relay_database_namespace=?1 AND (delivery_id=?2 OR journal_cursor=?3)").map_err(read_sql)?;
     let mut rows = query
         .query(params![
             namespace,
@@ -1041,6 +1240,7 @@ fn read_application(
     };
     let length: i64 = row.get(9).map_err(read_sql)?;
     let authority: ServerDerivedLiveUpdateAuthority = serde_json::from_value(serde_json::json!({"principalKind":row.get::<_,String>(12).map_err(read_sql)?,"principalId":row.get::<_,String>(13).map_err(read_sql)?,"grantId":row.get::<_,Option<String>>(14).map_err(read_sql)?,"grantGeneration":row.get::<_,Option<i64>>(15).map_err(read_sql)?})).map_err(|_| ApplicationError::Corrupt)?;
+    let retained_metadata: Option<String> = row.get(23).map_err(read_sql)?;
     let received_at_ms = row.get(16).map_err(read_sql)?;
     let count: i64 = row.get(17).map_err(read_sql)?;
     let sequence: i64 = row.get(18).map_err(read_sql)?;
@@ -1059,7 +1259,7 @@ fn read_application(
     if i64::try_from(update_bytes.len()).ok() != Some(length) {
         return Err(ApplicationError::Corrupt);
     }
-    let event = AdmittedLiveUpdate {
+    let mut event = AdmittedLiveUpdate {
         metadata: AdmittedLiveUpdateMetadata {
             accepted: RelayAcceptedLiveUpdate {
                 receipt,
@@ -1068,9 +1268,23 @@ fn read_application(
                 received_at_ms,
             },
             first_seen,
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
         update_bytes,
     };
+    if let Some(json) = retained_metadata {
+        let metadata: AdmittedLiveUpdateMetadata =
+            serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+        if metadata.accepted != event.metadata.accepted
+            || metadata.first_seen != event.metadata.first_seen
+        {
+            return Err(ApplicationError::Corrupt);
+        }
+        event.metadata = metadata;
+    }
     event.validate().map_err(|_| ApplicationError::Corrupt)?;
     coordinate
         .validate()
@@ -1205,8 +1419,8 @@ fn insert_application(
     let b = &a.binding;
     let c = &r.coordinate;
     let (kind, principal, grant, generation) = a.authority.fields();
-    tx.execute("INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
-        params![r.namespace,b.workspace_id,a.receipt.delivery_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| invalid("selector JSON"))?,b.restore_fence_generation,a.receipt.update_digest,event.update_bytes.len() as i64,a.receipt.journal_cursor,a.receipt.accepting_host_epoch,kind,principal,grant,generation,a.received_at_ms,event.metadata.first_seen.len() as i64,sequence,c.host_id,c.host_epoch,c.instance_id,c.connection_id]).map_err(write_sql)?;
+    tx.execute("INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id,admitted_metadata_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+        params![r.namespace,b.workspace_id,a.receipt.delivery_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| invalid("selector JSON"))?,b.restore_fence_generation,a.receipt.update_digest,event.update_bytes.len() as i64,a.receipt.journal_cursor,a.receipt.accepting_host_epoch,kind,principal,grant,generation,a.received_at_ms,event.metadata.first_seen.len() as i64,sequence,c.host_id,c.host_epoch,c.instance_id,c.connection_id,serde_json::to_string(&event.metadata).map_err(|_| invalid("admitted metadata JSON"))?]).map_err(write_sql)?;
     for (ordinal, range) in event.metadata.first_seen.iter().enumerate() {
         tx.execute("INSERT INTO live_device_application_first_seen (relay_database_namespace,workspace_id,delivery_id,ordinal,client_id,start_clock,end_clock) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![r.namespace,b.workspace_id,a.receipt.delivery_id,ordinal as i64,range.client_id,range.start_clock,range.end_clock]).map_err(write_sql)?;
     }
@@ -1421,6 +1635,10 @@ mod tests {
                     received_at_ms: 10,
                 },
                 first_seen: Vec::new(),
+                canonical_version: None,
+                author_snapshot: None,
+                first_seen_deletes: None,
+                checkpoint_coverage: None,
             },
             update_bytes: bytes,
         }
@@ -1464,6 +1682,75 @@ mod tests {
     }
 
     #[test]
+    fn admitted_metadata_v1_bytes_and_v2_digest_versions() {
+        let source = Ydoc::wire();
+        let legacy = event("versioned", 1, source.plaintext_insert(0, "text"));
+        let json = serde_json::to_string(&legacy.metadata).unwrap();
+        assert!(json.ends_with(",\"firstSeen\":[]}"));
+        assert!(!json.contains("canonicalVersion"));
+        let expected = hex_sha256(
+            &serde_json::to_vec(&("accepted-event-v1", "previous", 1, &legacy.metadata)).unwrap(),
+        );
+        assert_eq!(
+            accepted_history::next_digest("previous", 1, &legacy.metadata).unwrap(),
+            expected
+        );
+        let mut modern = legacy.metadata.clone();
+        modern.canonical_version = Some(2);
+        modern.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+            human_id: "alice".into(),
+            human_name: "Alice".into(),
+        }]);
+        modern.first_seen_deletes = Some(vec![]);
+        assert!(accepted_history::require_version_transition(&legacy.metadata, &modern).is_ok());
+        assert!(accepted_history::require_version_transition(&modern, &legacy.metadata).is_err());
+        let expected = hex_sha256(
+            &serde_json::to_vec(&("accepted-event-v2", "previous", 1, &modern)).unwrap(),
+        );
+        assert_eq!(
+            accepted_history::next_digest("previous", 1, &modern).unwrap(),
+            expected
+        );
+        let mut malformed = serde_json::to_value(&modern).unwrap();
+        malformed["firstSeenDeletes"] = Value::Null;
+        assert!(parse_admitted_metadata(malformed).is_err());
+    }
+
+    #[test]
+    fn v2_receipt_retains_metadata_and_rejects_renamed_retries() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        let source = Ydoc::wire();
+        let mut update = event("v2-retry", 1, source.plaintext_insert(0, "text"));
+        update.metadata.canonical_version = Some(2);
+        update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+            human_id: "alice".into(),
+            human_name: "Alice".into(),
+        }]);
+        update.metadata.first_seen_deletes = Some(vec![]);
+        assert!(!ack(apply(&mut store, &mut cache, &handle, update.clone())).application_replayed);
+        assert!(ack(apply(&mut store, &mut cache, &handle, update.clone())).application_replayed);
+        let retained = store
+            .read_with(|conn| read_application(conn, "relay-A", &update.metadata.accepted.receipt))
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.event.metadata, update.metadata);
+        update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+            human_id: "alice".into(),
+            human_name: "Renamed".into(),
+        }]);
+        let result = apply_committed(
+            &mut store,
+            &mut cache,
+            &handle,
+            update,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        );
+        assert!(matches!(result, Err(ApplicationError::Conflict)));
+    }
+
+    #[test]
     fn ack_read_preserves_historical_identity_after_restart_without_mutation() {
         let (dir, mut store, mut cache, owner, handle) = fixture();
         let source = Ydoc::wire();
@@ -1472,9 +1759,11 @@ mod tests {
             delivery_id: first.metadata.accepted.receipt.delivery_id.clone(),
             update_digest: first.metadata.accepted.receipt.update_digest.clone(),
         };
-        assert!(read_application_ack(&store, &handle, &identity)
-            .unwrap()
-            .is_none());
+        assert!(
+            read_application_ack(&store, &handle, &identity)
+                .unwrap()
+                .is_none()
+        );
         let mut expected = ack(apply(&mut store, &mut cache, &handle, first));
         expected.application_replayed = true;
         apply(
@@ -1514,9 +1803,11 @@ mod tests {
             delivery_id: "absent".into(),
             update_digest: identity.update_digest.clone(),
         };
-        assert!(read_application_ack(&store, &handle, &absent)
-            .unwrap()
-            .is_none());
+        assert!(
+            read_application_ack(&store, &handle, &absent)
+                .unwrap()
+                .is_none()
+        );
         let wrong_digest = LiveApplicationAckIdentity {
             update_digest: "00".repeat(32),
             ..identity.clone()
@@ -1584,9 +1875,11 @@ mod tests {
                 binding(),
             )
             .unwrap();
-        assert!(read_application_ack(&store, &other_namespace, &identity)
-            .unwrap()
-            .is_none());
+        assert!(
+            read_application_ack(&store, &other_namespace, &identity)
+                .unwrap()
+                .is_none()
+        );
         let current = owner
             .register(
                 &mut store,
@@ -1764,11 +2057,13 @@ mod tests {
             |_, _, _| Ok(()),
         )
         .unwrap();
-        assert!(store
-            .read_with(|conn| cache
-                .doc_for_consumer(conn, &key())
-                .map(|doc| doc.is_some()))
-            .unwrap());
+        assert!(
+            store
+                .read_with(|conn| cache
+                    .doc_for_consumer(conn, &key())
+                    .map(|doc| doc.is_some()))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -1839,11 +2134,10 @@ mod tests {
                 assert_eq!(count(&store, "live_device_update_applications"), 65);
             }
             store = reopen(store, &dir);
-            assert!(crate::replay_parity::structurally_equal_v2_for_test(
-                &document(&store),
-                &source
-            )
-            .unwrap());
+            assert!(
+                crate::replay_parity::structurally_equal_v2_for_test(&document(&store), &source)
+                    .unwrap()
+            );
             for (index, update) in deliveries.into_iter().enumerate() {
                 let replay = ack(apply(&mut store, &mut cache, &handle, update));
                 assert!(replay.application_replayed);
@@ -1864,11 +2158,13 @@ mod tests {
             apply(&mut store, &mut cache, &handle, update),
             ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
         );
-        assert!(store
-            .read_with(|conn| cache
-                .doc_for_consumer(conn, &key())
-                .map(|doc| doc.is_none()))
-            .unwrap());
+        assert!(
+            store
+                .read_with(|conn| cache
+                    .doc_for_consumer(conn, &key())
+                    .map(|doc| doc.is_none()))
+                .unwrap()
+        );
         assert_eq!(count(&store, "ydoc_updates"), 1);
         store = reopen(store, &dir);
         assert_eq!(document(&store).encode_full_state(), before);
@@ -1958,7 +2254,7 @@ mod tests {
 
     #[test]
     fn populated_verified_backup_restores_application_fragments_and_compacted_replay() {
-        use dohc_engine_storage::backup::{create_verified_backup, BackupOutcome, FreeSpaceProbe};
+        use dohc_engine_storage::backup::{BackupOutcome, FreeSpaceProbe, create_verified_backup};
         struct Space;
         impl FreeSpaceProbe for Space {
             fn available_bytes(&self, _: &std::path::Path) -> Result<u64, StorageError> {
@@ -2168,11 +2464,13 @@ mod tests {
                     apply(&mut store, &mut cache, &handle, update.clone()),
                     ApplicationResult::Pending(ApplicationPending::DependenciesUnresolved)
                 );
-                assert!(store
-                    .read_with(|conn| cache
-                        .doc_for_consumer(conn, &key())
-                        .map(|doc| doc.is_none()))
-                    .unwrap());
+                assert!(
+                    store
+                        .read_with(|conn| cache
+                            .doc_for_consumer(conn, &key())
+                            .map(|doc| doc.is_none()))
+                        .unwrap()
+                );
                 store = reopen(store, &dir);
                 assert_eq!(count(&store, "ydoc_updates"), before);
                 assert_eq!(count(&store, "live_device_update_applications"), 0);
@@ -2200,11 +2498,13 @@ mod tests {
                         ),
                         Err(ApplicationError::Interrupted)
                     ));
-                    assert!(store
-                        .read_with(|conn| cache
-                            .doc_for_consumer(conn, &key())
-                            .map(|doc| doc.is_none()))
-                        .unwrap());
+                    assert!(
+                        store
+                            .read_with(|conn| cache
+                                .doc_for_consumer(conn, &key())
+                                .map(|doc| doc.is_none()))
+                            .unwrap()
+                    );
                     store = reopen(store, &dir);
                     let persisted_sequence = store
                         .read_with(|conn| {
@@ -2388,8 +2688,9 @@ mod tests {
                     &handle,
                     conflict,
                     &NoFaults,
-                    100_000_000
-                , |_,_,_,_| Ok(())),
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                ),
                 Err(ApplicationError::Conflict)
             ));
             store
@@ -2408,8 +2709,9 @@ mod tests {
                         &handle,
                         event("noop", 3, vec![0, 0]),
                         &NoFaults,
-                        100_000_000
-                    , |_,_,_,_| Ok(())),
+                        100_000_000,
+                        |_, _, _, _| Ok(())
+                    ),
                     Err(ApplicationError::Corrupt)
                 ),
                 "{damage}"
@@ -2423,8 +2725,9 @@ mod tests {
                         &handle,
                         first,
                         &NoFaults,
-                        100_000_000
-                    , |_,_,_,_| Ok(())),
+                        100_000_000,
+                        |_, _, _, _| Ok(())
+                    ),
                     Err(ApplicationError::Corrupt)
                 ));
             }
@@ -2568,8 +2871,9 @@ mod tests {
                         &handle,
                         update,
                         &NoFaults,
-                        100_000_000
-                    , |_,_,_,_| Ok(())),
+                        100_000_000,
+                        |_, _, _, _| Ok(())
+                    ),
                     Ok(ApplicationResult::Applied(..))
                 ),
                 "{damage}"
@@ -2594,16 +2898,18 @@ mod tests {
                 start_clock: 0,
                 end_clock: 1,
             }];
-            assert!(apply_committed(
-                &mut store,
-                &mut cache,
-                &handle,
-                update,
-                &NoFaults,
-                100_000_000,
-                |_, _, _, _| Ok(())
-            )
-            .is_err());
+            assert!(
+                apply_committed(
+                    &mut store,
+                    &mut cache,
+                    &handle,
+                    update,
+                    &NoFaults,
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                )
+                .is_err()
+            );
             store = reopen(store, &dir);
             assert_eq!(count(&store, "ydoc_updates"), 0);
             assert_eq!(count(&store, "live_device_update_applications"), 0);
@@ -2635,8 +2941,9 @@ mod tests {
                     &handle,
                     update,
                     &NoFaults,
-                    100_000_000
-                , |_,_,_,_| Ok(()))
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                )
                 .is_err(),
                 "{damage}"
             );
@@ -2665,11 +2972,13 @@ mod tests {
                 ),
                 Err(ApplicationError::Interrupted)
             ));
-            assert!(store
-                .read_with(|conn| cache
-                    .doc_for_consumer(conn, &key())
-                    .map(|doc| doc.is_none()))
-                .unwrap());
+            assert!(
+                store
+                    .read_with(|conn| cache
+                        .doc_for_consumer(conn, &key())
+                        .map(|doc| doc.is_none()))
+                    .unwrap()
+            );
             store = reopen(store, &dir);
             let committed = point == FaultPoint::StorageAfterCommitBeforeAck;
             assert_eq!(
@@ -2916,8 +3225,12 @@ mod tests {
             shared_authors(&store),
             vec![
                 None,
-                Some(serde_json::json!({"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1})),
-                Some(serde_json::json!({"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"})),
+                Some(
+                    serde_json::json!({"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1})
+                ),
+                Some(
+                    serde_json::json!({"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"})
+                ),
             ],
             "a collaborator's or a link's edit names who the relay accepted it from; the owner's names nobody"
         );

@@ -1,7 +1,9 @@
 use super::chunks::{ChunkReader, ChunkWriter, Manifest};
 use super::*;
 use dohc_engine_collab::live_update_application::{
-    ApplicationHostCoordinate, LiveUpdateStructRange, RelayAcceptedLiveUpdate,
+    AdmittedLiveUpdateMetadata, ApplicationHostCoordinate, LiveAuthorEntry,
+    LiveCheckpointAuthorCoverage, LiveUpdateStructRange, RelayAcceptedLiveUpdate,
+    validate_checkpoint_coverage,
 };
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use std::fmt;
@@ -40,6 +42,7 @@ struct ParsedRecord {
     accepted: RelayAcceptedLiveUpdate,
     suffix: Suffix,
     canonical_digest: String,
+    canonical_version: u8,
 }
 
 fn accepted_header(head: &[u8]) -> Result<RelayAcceptedLiveUpdate, SyncError> {
@@ -144,7 +147,7 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
         if map.next_key::<String>()?.as_deref() != Some("metadata") {
             return Err(serde::de::Error::custom("missing live audit metadata"));
         }
-        let accepted = map.next_value_seed(MetadataSeed {
+        let (accepted, canonical_version) = map.next_value_seed(MetadataSeed {
             conn: self.conn,
             workspace: self.workspace,
             header: &header,
@@ -203,6 +206,7 @@ impl<'de> Visitor<'de> for RecordVisitor<'_> {
             accepted,
             suffix,
             canonical_digest: dohc_engine_storage::hex(&canonical.finalize()),
+            canonical_version,
         })
     }
 }
@@ -214,13 +218,13 @@ struct MetadataSeed<'a> {
     canonical: &'a mut Sha256,
 }
 impl<'de> DeserializeSeed<'de> for MetadataSeed<'_> {
-    type Value = RelayAcceptedLiveUpdate;
+    type Value = (RelayAcceptedLiveUpdate, u8);
     fn deserialize<D: serde::Deserializer<'de>>(self, decoder: D) -> Result<Self::Value, D::Error> {
         decoder.deserialize_map(self)
     }
 }
 impl<'de> Visitor<'de> for MetadataSeed<'_> {
-    type Value = RelayAcceptedLiveUpdate;
+    type Value = (RelayAcceptedLiveUpdate, u8);
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("accepted metadata and ordered first-seen ranges")
     }
@@ -246,40 +250,112 @@ impl<'de> Visitor<'de> for MetadataSeed<'_> {
             }
         }
         let mut chain = Sha256::new();
-        let mut lead =
-            serde_json::to_vec(&("accepted-event-v1", previous, self.header.event_count))
+        let mut chain_v2 = Sha256::new();
+        for (tag, hash) in [
+            ("accepted-event-v1", &mut chain),
+            ("accepted-event-v2", &mut chain_v2),
+        ] {
+            let mut lead = serde_json::to_vec(&(tag, &previous, self.header.event_count))
                 .map_err(serde::de::Error::custom)?;
-        lead.pop();
-        lead.push(b',');
-        chain.update(lead);
+            lead.pop();
+            lead.push(b',');
+            hash.update(lead);
+        }
         let mut metadata = b"{\"accepted\":".to_vec();
         serde_json::to_writer(&mut metadata, &accepted).map_err(serde::de::Error::custom)?;
         metadata.extend_from_slice(b",\"firstSeen\":[");
         self.canonical.update(&metadata);
         chain.update(&metadata);
+        chain_v2.update(&metadata);
         if map.next_key::<String>()?.as_deref() != Some("firstSeen") {
             return Err(serde::de::Error::custom("missing firstSeen"));
         }
         map.next_value_seed(RangesSeed {
             canonical: self.canonical,
             chain: &mut chain,
+            chain_v2: &mut chain_v2,
             max_ranges: self.header.update_byte_length.saturating_sub(2) / 5,
         })?;
-        end_fields(&mut map)?;
-        self.canonical.update(b"]}");
-        chain.update(b"]}]");
-        if dohc_engine_storage::hex(&chain.finalize()) != self.header.evidence_digest {
+        self.canonical.update(b"]");
+        chain.update(b"]");
+        chain_v2.update(b"]");
+        let mut version = 1;
+        if let Some(key) = map.next_key::<String>()? {
+            if key != "canonicalVersion" || map.next_value::<u8>()? != 2 {
+                return Err(serde::de::Error::custom("invalid metadata version"));
+            }
+            version = 2;
+            let authors: Vec<LiveAuthorEntry> = next_field(&mut map, "authorSnapshot")?;
+            AdmittedLiveUpdateMetadata {
+                accepted: accepted.clone(),
+                first_seen: Vec::new(),
+                canonical_version: Some(2),
+                author_snapshot: Some(authors.clone()),
+                first_seen_deletes: Some(Vec::new()),
+                checkpoint_coverage: None,
+            }
+            .validate_extensions()
+            .map_err(serde::de::Error::custom)?;
+            let mut tail = b",\"canonicalVersion\":2,\"authorSnapshot\":".to_vec();
+            serde_json::to_writer(&mut tail, &authors).map_err(serde::de::Error::custom)?;
+            tail.extend_from_slice(b",\"firstSeenDeletes\":[");
+            self.canonical.update(&tail);
+            chain_v2.update(&tail);
+            if map.next_key::<String>()?.as_deref() != Some("firstSeenDeletes") {
+                return Err(serde::de::Error::custom("missing deletions"));
+            }
+            map.next_value_seed(RangesSeed {
+                canonical: self.canonical,
+                chain: &mut chain,
+                chain_v2: &mut chain_v2,
+                max_ranges: self.header.update_byte_length,
+            })?;
+            self.canonical.update(b"]");
+            chain_v2.update(b"]");
+            if let Some(key) = map.next_key::<String>()? {
+                if key != "checkpointCoverage" {
+                    return Err(serde::de::Error::custom("unexpected metadata field"));
+                }
+                let coverage: Vec<LiveCheckpointAuthorCoverage> = map.next_value()?;
+                validate_checkpoint_coverage(&coverage).map_err(serde::de::Error::custom)?;
+                let mut tail = b",\"checkpointCoverage\":".to_vec();
+                serde_json::to_writer(&mut tail, &coverage).map_err(serde::de::Error::custom)?;
+                self.canonical.update(&tail);
+                chain_v2.update(&tail);
+                end_fields(&mut map)?;
+            }
+        }
+        if self.header.event_count > 1 {
+            let p = scope(&self.header.relay_database_namespace, &accepted.binding);
+            let prior: u8 = self.conn.query_row(&format!("SELECT canonical_version FROM live_audit_events WHERE {SCOPE} AND event_count=?6"),
+                params![p[0],p[1],p[2],p[3],p[4],self.header.event_count-1], |row|row.get(0)).map_err(serde::de::Error::custom)?;
+            if prior == 2 && version == 1 {
+                return Err(serde::de::Error::custom(
+                    "accepted history version downgrade",
+                ));
+            }
+        }
+        self.canonical.update(b"}");
+        chain.update(b"}]");
+        chain_v2.update(b"}]");
+        let evidence = if version == 2 {
+            chain_v2.finalize()
+        } else {
+            chain.finalize()
+        };
+        if dohc_engine_storage::hex(&evidence) != self.header.evidence_digest {
             return Err(serde::de::Error::custom(
                 "live audit evidence chain differs",
             ));
         }
-        Ok(accepted)
+        Ok((accepted, version))
     }
 }
 
 struct RangesSeed<'a> {
     canonical: &'a mut Sha256,
     chain: &'a mut Sha256,
+    chain_v2: &'a mut Sha256,
     max_ranges: usize,
 }
 impl<'de> DeserializeSeed<'de> for RangesSeed<'_> {
@@ -312,11 +388,13 @@ impl<'de> Visitor<'de> for RangesSeed<'_> {
             if previous.is_some() {
                 self.canonical.update(b",");
                 self.chain.update(b",");
+                self.chain_v2.update(b",");
             }
             bytes.clear();
             serde_json::to_writer(&mut bytes, &range).map_err(serde::de::Error::custom)?;
             self.canonical.update(&bytes);
             self.chain.update(&bytes);
+            self.chain_v2.update(&bytes);
             previous = Some(range);
         }
         Ok(())
@@ -480,7 +558,7 @@ fn insert_event(
             .iter()
             .all(|saved| saved == &manifest.record_digest));
     }
-    tx.execute("INSERT INTO live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,record_digest,evidence_digest,journal_cursor,delivery_id,accepting_host_epoch,restore_operation_id,restore_markdown_digest) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![p[0],p[1],p[2],p[3],p[4],record.header.event_count,manifest.record_digest,record.header.evidence_digest,record.accepted.receipt.journal_cursor,record.accepted.receipt.delivery_id,record.accepted.receipt.accepting_host_epoch,record.suffix.source_restore.as_ref().map(|s|&s.operation_id),record.suffix.source_restore.as_ref().map(|s|&s.point.markdown_digest)]).map_err(SyncError::persist)?;
+    tx.execute("INSERT INTO live_audit_events(relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,record_digest,evidence_digest,journal_cursor,delivery_id,accepting_host_epoch,restore_operation_id,restore_markdown_digest,canonical_version) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",params![p[0],p[1],p[2],p[3],p[4],record.header.event_count,manifest.record_digest,record.header.evidence_digest,record.accepted.receipt.journal_cursor,record.accepted.receipt.delivery_id,record.accepted.receipt.accepting_host_epoch,record.suffix.source_restore.as_ref().map(|s|&s.operation_id),record.suffix.source_restore.as_ref().map(|s|&s.point.markdown_digest),record.canonical_version]).map_err(SyncError::persist)?;
     Ok(true)
 }
 
@@ -686,10 +764,12 @@ mod tests {
         for (max_ranges, expected) in [(1, false), (2, true)] {
             let mut canonical = Sha256::new();
             let mut chain = Sha256::new();
+            let mut chain_v2 = Sha256::new();
             let mut decoder = serde_json::Deserializer::from_str(ranges);
             let result = RangesSeed {
                 canonical: &mut canonical,
                 chain: &mut chain,
+                chain_v2: &mut chain_v2,
                 max_ranges,
             }
             .deserialize(&mut decoder);
@@ -697,10 +777,12 @@ mod tests {
         }
         let mut canonical = Sha256::new();
         let mut chain = Sha256::new();
+        let mut chain_v2 = Sha256::new();
         let mut decoder = serde_json::Deserializer::from_str("[]");
         RangesSeed {
             canonical: &mut canonical,
             chain: &mut chain,
+            chain_v2: &mut chain_v2,
             max_ranges: 0,
         }
         .deserialize(&mut decoder)

@@ -335,6 +335,10 @@ fn accept_enrollment_event(f: &mut Fixture, cursor: i64) {
                 received_at_ms: cursor,
             },
             first_seen: Vec::new(),
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
         update_bytes: f.bytes.clone(),
     };
@@ -682,6 +686,10 @@ fn admitted_link_history_roundtrips_without_creating_native_authority() {
                 received_at_ms: 200,
             },
             first_seen: Vec::new(),
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
         update_bytes: f.bytes.clone(),
     };

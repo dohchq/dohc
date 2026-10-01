@@ -97,6 +97,10 @@ fn event(delivery: &str, cursor: i64, object: &str, bytes: Vec<u8>) -> AdmittedL
                 received_at_ms: 2,
             },
             first_seen: vec![],
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
         update_bytes: bytes,
     }
