@@ -1,4 +1,5 @@
 use super::*;
+use dohc_engine_domain::WriteText;
 
 #[test]
 fn outbound_authors_filter_only_people_and_omit_a_human_only_list() {
@@ -22,20 +23,43 @@ fn outbound_authors_filter_only_people_and_omit_a_human_only_list() {
     }
 }
 
-fn queue_legacy_moment(engine: &mut EngineStore, authors: serde_json::Value) {
+fn queue_legacy_moment(engine: &mut EngineStore, authors: serde_json::Value) -> serde_json::Value {
     seed_identity(engine);
+    VersionedTextStore::new(engine)
+        .ensure_main_version("ws", "main", 1000, &NoFaults)
+        .unwrap();
+    VersionedTextStore::new(engine)
+        .write_text(
+            &WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "record".into(),
+                path: "tasks/record.md".into(),
+                text: "hand-made record".into(),
+                moment_id: "record-moment".into(),
+                metadata_origin: "local-file".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: Some(serde_json::to_string(&authors).unwrap()),
+                now_ms: 2000,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let mut legacy = serde_json::Value::Null;
     engine
         .write_with(&NoFaults, |tx| {
-            // A queued wire payload from the affected build, independent of History.
-            journal_local_op_in_tx(
-                tx,
-                "ws",
-                "moment.append",
-                &json!({"versionId":"main","objectId":"record","authors":authors}),
-                2000,
-            )
+            let (mut payload, recorded_at_ms) =
+                crate::outbound::moment_append_payload_in_tx(tx, "ws", "record-moment")?;
+            // Restore the affected build's already-serialized author list.
+            payload["authors"] = authors;
+            journal_local_op_in_tx(tx, "ws", "moment.append", &payload, recorded_at_ms)?;
+            legacy = payload;
+            Ok::<_, SyncError>(())
         })
         .unwrap();
+    legacy
 }
 
 #[test]
@@ -45,9 +69,9 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
         json!([{"kind":"human","humanId":"person"},{"kind":"agent","agentId":"agent","onBehalfOf":"owner"}]),
     ] {
         let (_scratch, path, mut engine) = open_store();
-        let mut expected = json!({"versionId":"main","objectId":"record","authors":authors});
+        let original_authors = authors.clone();
+        let mut expected = queue_legacy_moment(&mut engine, authors);
         crate::outbound::omit_human_authors(&mut expected);
-        queue_legacy_moment(&mut engine, authors);
         let client = RelaySyncClient::new(FakeRelay::default());
         let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
         assert_eq!(
@@ -63,6 +87,15 @@ fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
         let mut engine = EngineStore::open(&path, 2002).unwrap();
         let stored = list_replication_ops(&engine, "ws", "local", 0, 10).unwrap();
         assert_eq!(&stored[0].payload, repaired);
+        let history = VersionedTextStore::new(&mut engine)
+            .get_moment("ws", "record-moment")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(history.author_json.as_deref().unwrap())
+                .unwrap(),
+            original_authors
+        );
         client
             .push_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 2003, 0)
             .unwrap();
