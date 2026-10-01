@@ -14,6 +14,7 @@ import {
 import { z } from "zod";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
+import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
 import type {
   CollectionAutomationHolds,
   CollectionAutomationButton,
@@ -4667,8 +4668,7 @@ export type DismissShareSkipsPayload = z.infer<typeof DismissShareSkipsPayload>;
 
 // ---- Collection automations (the ⚡ panel) ----
 // Main parses and writes automations.yaml, so the renderer never loads the
-// file contract. A shared view holds no executor, so it answers
-// "unavailable": its automations run on the owner's computer.
+// file contract. Shared views expose definitions without executor state.
 const COLLECTION_AUTOMATION_ID = z.string().min(1).max(4096);
 
 export const ListCollectionAutomationsPayload = z.object({
@@ -4676,7 +4676,21 @@ export const ListCollectionAutomationsPayload = z.object({
   collectionPath: PATH_STRING,
 });
 export type ListCollectionAutomationsPayload = z.infer<typeof ListCollectionAutomationsPayload>;
-export type ListCollectionAutomationsResult = CollectionAutomationsFile | { status: "unavailable" };
+export type ListCollectionAutomationsResult = CollectionAutomationsFile | { status: "unavailable" } | { status: "shared"; definitions: AutomationDefinitionList };
+
+export const SwitchCollectionAutomationPayload = z.strictObject({
+  workspaceId: WORKSPACE_ID, collectionPath: PATH_STRING,
+  automation: z.string().min(1).max(64), enabled: z.boolean(),
+  expectedContentHash: WORKSPACE_TEXT_CONTENT_HASH, reformat: z.boolean(),
+  submitId: z.string().min(1).max(64).regex(/^[\x20-\x7e]+$/u),
+});
+export type SwitchCollectionAutomationPayload = z.infer<typeof SwitchCollectionAutomationPayload>;
+export type SwitchCollectionAutomationResult = AutomationSwitchResult;
+export const ResolveAutomationControlsPayload = z.strictObject({
+  workspaceId: WORKSPACE_ID, path: PATH_STRING, automationId: z.string().min(1).max(4096),
+});
+export type ResolveAutomationControlsPayload = z.infer<typeof ResolveAutomationControlsPayload>;
+export type ResolveAutomationControlsResult = { status: "found"; collectionPath: string; automation: string } | { status: "missing" };
 
 // One page of an automation's runs, newest first. `before` is the `next`
 // of the page before; `next` is null after the oldest.
@@ -4689,7 +4703,7 @@ export type ListCollectionAutomationRunsPayload = z.infer<typeof ListCollectionA
 // A shared view keeps no runs: its automations run on the owner's computer.
 export type ListCollectionAutomationRunsResult =
   | { status: "listed"; runs: CollectionAutomationRun[]; next: string | null }
-  | { status: "unavailable" };
+  | { status: "unavailable"; reason?: string };
 
 // One run however old, as run history lists it, such as the run a notice opens.
 export const GetCollectionAutomationRunPayload = z.object({
@@ -4702,7 +4716,7 @@ export type GetCollectionAutomationRunPayload = z.infer<typeof GetCollectionAuto
 export type GetCollectionAutomationRunResult =
   | { status: "found"; run: CollectionAutomationRun }
   | { status: "missing" }
-  | { status: "unavailable" };
+  | { status: "unavailable"; reason?: string };
 
 // Where a record's History can open a run it could not place from this
 // computer. Main asks the owner's server through the relay's owner-only
@@ -4723,7 +4737,7 @@ export type LocateRecordHistoryRunResult = z.infer<typeof LocateRecordHistoryRun
 // as its owner.
 export const ListServerAutomationRunsPayload = ListCollectionAutomationRunsPayload;
 export type ListServerAutomationRunsPayload = z.infer<typeof ListServerAutomationRunsPayload>;
-export type ListServerAutomationRunsResult = { runs: CollectionAutomationRun[] | null; next: string | null };
+export type ListServerAutomationRunsResult = { runs: CollectionAutomationRun[] | null; next: string | null; reason?: string };
 
 // Try again for a failed run. `startOver` confirms running an automation
 // that changed since the run began from its first step. `onServer` names a
@@ -6334,6 +6348,8 @@ export interface DohcDesktopBridge
   dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
   // Collection automations, for the ⚡ panel.
   listCollectionAutomations(payload: ListCollectionAutomationsPayload): Promise<ListCollectionAutomationsResult>;
+  switchCollectionAutomation(payload: SwitchCollectionAutomationPayload): Promise<SwitchCollectionAutomationResult>;
+  resolveAutomationControls(payload: ResolveAutomationControlsPayload): Promise<ResolveAutomationControlsResult>;
   listCollectionAutomationRuns(payload: ListCollectionAutomationRunsPayload): Promise<ListCollectionAutomationRunsResult>;
   getCollectionAutomationRun(payload: GetCollectionAutomationRunPayload): Promise<GetCollectionAutomationRunResult>;
   listServerAutomationRuns(payload: ListServerAutomationRunsPayload): Promise<ListServerAutomationRunsResult>;

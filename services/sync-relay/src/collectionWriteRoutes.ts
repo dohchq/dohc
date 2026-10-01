@@ -7,7 +7,7 @@ import { badRequest, errorResponse, notFound, relayError, RelayError, RELAY_ERRO
 import { hashLinkProfileSecret, isPublicLinkAccess, type ValidatedLinkCapability } from "./linkSecurity";
 import { readStreamedBytes } from "./relayBytes";
 import { parseString } from "./requestInputs";
-import { namedCollectionEditGrant } from "./collectionEditGrant";
+import { grantEditsCollection, namedCollectionEditGrant } from "./collectionEditGrant";
 import { collectionEditSelector, filterCollectionWriteForShare, MAX_COLLECTION_WRITE_BYTES, MAX_NEW_COLLECTION_RECORDS, pathVisibleThroughShare } from "./shareFilter";
 import { CollectionWriteStaleError, type CommitCollectionWriteInput, type SyncRelayStorage } from "./storage";
 
@@ -15,7 +15,7 @@ export type CollectionWriteRoute = { route: "share-collection-writes"; shareId: 
 export type LinkCollectionWriteRoute = { route: "link-collection-writes" };
 export type OwnerCollectionWriteRoute = { route: "owner-collection-writes"; workspaceId: string; grantId: string };
 
-// A burst of 30 direct writes per grant, then one every two seconds.
+// A burst of 30 requests per grant, then one every two seconds.
 const COLLECTION_WRITE_BUCKET_CAPACITY = 30;
 const COLLECTION_WRITE_REFILL_PER_SECOND = 0.5;
 const COLLECTION_WRITE_MAX_GRANTS = 10_000;
@@ -54,20 +54,27 @@ export function createCollectionWriteRoutes(input: {
   discussionActivity: Pick<DiscussionActivityHub, "wake">;
 }) {
   const { storage } = input;
+  // Preflights have their own bounded budget and cannot spend write tokens.
+  const preflightRateLimiter = createCollectionWriteRateLimiter();
 
   return async function respondToCollectionWrites(
     request: Request,
     route: CollectionWriteRoute,
     actorUserId: string,
   ): Promise<Response> {
-    if (request.method !== "POST") throw relayError("method_not_allowed");
+    if (request.method !== "POST" && request.method !== "GET") throw relayError("method_not_allowed");
     await input.claimPendingShares(actorUserId);
     const authorized = namedCollectionEditGrant(storage, route.shareId, actorUserId);
     const { share, grant } = authorized;
-    // Every admitted request spends a token before its body is read, so a
-    // refused request costs its sender the same as a written one.
-    if (!input.rateLimiter.allow(grant.grantId, input.nowMs())) {
+    const rateLimiter = request.method === "GET" ? preflightRateLimiter : input.rateLimiter;
+    if (!rateLimiter.allow(grant.grantId, input.nowMs())) {
       throw relayError("collection_write_rate_limited");
+    }
+    if (request.method === "GET") {
+      const collectionPath = parseString(new URL(request.url).searchParams.get("collectionPath"), "collectionPath", 4096);
+      if (!grantEditsCollection(storage, authorized, collectionPath)) throw notFound();
+      return jsonResponse({ ok: true, canSwitch: storage.automationSwitchableFolder(share.workspaceId, collectionPath) }, 200,
+        { "cache-control": "private, no-store" });
     }
     const body = await readBody(request);
     const submitId = parseString(body.submitId, "submitId", MAX_SUBMIT_ID_CHARS);

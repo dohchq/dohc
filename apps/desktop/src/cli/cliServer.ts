@@ -1,5 +1,6 @@
 import { creationPartialMessage } from "@dohc/cli/creation";
 import { nameSlug } from "@dohc/workspace-contracts/names";
+import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
   CLI_PROTOCOL_VERSION,
@@ -236,6 +237,8 @@ export interface CliKeptCopiesPort {
 // verbs. Main answers with the same executor calls the panel's IPC makes,
 // so a run is listed, read, and tried again under the same rules.
 export interface CliAutomationsPort {
+  list?(collectionPath: string): Promise<import("@dohc/workspace-contracts/automation-controls").AutomationDefinitionList>;
+  switch?(collectionPath: string, input: import("@dohc/workspace-contracts/automation-controls").AutomationSwitchInput): Promise<import("@dohc/workspace-contracts/automation-controls").AutomationSwitchResult>;
   /** The engine id of an automation in the Collection at a path, or null when no Collection is there. */
   automationIdAt(collectionPath: string, id: string): Promise<string | null>;
   /** One page of runs, newest first, after `before`, and the `before` of the next page or null. */
@@ -669,9 +672,7 @@ function keptCopiesUnavailable() {
   };
 }
 
-// A shared view keeps no runs: the owner's computer runs its automations.
-const SHARED_VIEW_AUTOMATIONS =
-  "A shared view has no automation runs. The owner's computer runs this workspace's automations.";
+const SHARED_VIEW_AUTOMATIONS = SHARED_AUTOMATION_HISTORY_REASON;
 
 // Try again as the panel answers it, in words for an agent: a run that
 // would start over needs startOver, as the panel's confirmation asks.
@@ -2059,7 +2060,7 @@ async function callerPaths(context: CliWorkspaceContext, cwd: string) {
     result(value: unknown, changeSnapshots = false): unknown {
       const paths = new Set(["fromPath", "toPath", "path", "recordPath", "collectionPath", "datasetPath", "savedPath", "appRoot", "pathHint", "linkedPathHint", "schemaPath", "operationsPath"]);
       const lists = new Set(["paths", "sourcePaths", "created", "written", "deleted", "withoutHistory"]);
-      const data = new Set(["values", "fields", "kept", "input", "result", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
+      const data = new Set(["values", "fields", "kept", "input", "result", "definitions", "value", "previous", "next", "sortValues", "validation", "reasons", "default", "before", "after", "key", "recordId", "planned", "current", "undo"]);
       if (changeSnapshots) { data.delete("before"); data.delete("after"); }
       const collect = (entry: unknown, key = ""): void => {
         if (typeof entry === "string" && (paths.has(key) || lists.has(key)) && workspacePath(entry)) {
@@ -2104,7 +2105,7 @@ async function dispatch(
   context: CliWorkspaceContext,
   options: CliServerOptions,
 ): Promise<unknown> {
-  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "appPublication"]);
+  const pathVerbs = new Set(["moment", "moments", "fileChats", "fileChatStart", "documentRead", "documentEdit", "documentCreate", "collectionQuery", "collectionRecord", "collectionSetFields", "collectionCreateRecord", "automationList", "automationSwitch", "automationRuns", "automationRun", "automationRetry", "automationPress", "dataset", "keptCopies", "saveKeptCopy", "fileWrite", "fileMove", "fileDelete", "appPublication"]);
   if (!pathVerbs.has(request.verb)) {
     validateRequestPathSpellings(request);
     return dispatchWorkspace(request, context, options);
@@ -2166,7 +2167,9 @@ async function dispatch(
         rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
         break;
       case "automationRuns":
-        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
+      case "automationList":
+      case "automationSwitch":
+        rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } } as typeof request;
         break;
       case "automationRun":
         rebased = { ...request, args: { ...request.args, collectionPath: paths.rebase(request.args.collectionPath, "read") } };
@@ -2592,6 +2595,21 @@ async function dispatchWorkspace(
       }
     }
 
+    case "automationList":
+    case "automationSwitch": {
+      const automations = context.automations;
+      if (!automations?.list || !automations.switch) return { ok: false, reason: "Automation controls are unavailable in this workspace." };
+      const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
+      if (!validated.ok) return cliPathRejected(validated.reason, request.args.collectionPath);
+      try {
+        if (request.verb === "automationList") return { ok: true, definitions: await automations.list(validated.normalized) };
+        const { automation, enabled, expectedContentHash, reformat, submitId } = request.args;
+        const result = await automations.switch(validated.normalized, { automation, enabled, expectedContentHash, reformat, submitId });
+        if (result.status === "written") await notifyWrite(options, context);
+        return { ok: true, result };
+      } catch (error) { return mcpFailure(error, "dohc could not read or switch this automation."); }
+    }
+
     case "automationRuns":
     case "automationRun":
     case "automationRetry": {
@@ -2601,7 +2619,7 @@ async function dispatchWorkspace(
       const validated = validateUserReadPath(request.args.collectionPath, { platform: process.platform });
       if (!validated.ok) return cliPathRejected(validated.reason, request.args.collectionPath);
       if (isSharedWithMePath(validated.normalized)) {
-        return { ok: false as const, reason: `"${validated.normalized}" is not a Collection in this workspace.` };
+        return { ok: false as const, reason: SHARED_AUTOMATION_HISTORY_REASON };
       }
       try {
         const automationId = await automations.automationIdAt(validated.normalized, request.args.automation);

@@ -184,6 +184,15 @@ struct ShareDirectPushParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareDirectStatusParams {
+    workspace_id: String,
+    share_id: String,
+    path: String,
+    granted_selector: GrantedSelectorParams,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GrantedSelectorParams {
     paths: Vec<String>,
     #[serde(default)]
@@ -1435,6 +1444,36 @@ impl EngineService {
             .await?;
         relay_outcome_json(outcome)
     }
+
+    pub(super) async fn share_direct_status(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareDirectStatusParams = parse(params)?;
+        let granted = share_grant(params.granted_selector)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let status = Self::read_under_ctx(
+            &cancellation,
+            "share.direct.status",
+            open.actor.share_direct_status(
+                open.workspace_id.clone(),
+                params.share_id,
+                params.path,
+                granted,
+            ),
+        )
+        .await?;
+        serde_json::to_value(status).map_err(|_| {
+            WireError::new(
+                ErrorCode::Internal,
+                "direct-write-status-serialization-failed",
+            )
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1444,6 +1483,76 @@ mod tests {
     use dohc_engine_sync::ShareCursor;
     use dohc_engine_sync::SyncPassOutcome;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn direct_status_reads_offline_and_preserves_workspace_and_path_fences() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().expect("scratch");
+        let supervisor: &'static dohc_engine_runtime::WorkspaceSupervisor =
+            Box::leak(Box::new(dohc_engine_runtime::WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(), "workspaceId": "offline-share",
+                    "captureMode": "none",
+                }),
+            )
+            .await
+            .expect("open without relay");
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let params = json!({
+            "workspaceId": "offline-share", "shareId": "share", "path": "data/automations.yaml",
+            "grantedSelector": {"paths": ["data"], "access": "edit"},
+        });
+        assert_eq!(
+            service
+                .share_direct_status(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    params.clone()
+                )
+                .await
+                .expect("offline status"),
+            json!({"contentHash": null, "state": "accepted"})
+        );
+        let mut wrong_workspace = params.clone();
+        wrong_workspace["workspaceId"] = json!("other");
+        assert!(matches!(
+            service
+                .share_direct_status(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    wrong_workspace
+                )
+                .await,
+            Err(WireError {
+                code: ErrorCode::InvalidParams,
+                ..
+            })
+        ));
+        let mut outside = params.clone();
+        outside["path"] = json!("private/automations.yaml");
+        assert!(
+            service
+                .share_direct_status(&RequestContext::unbounded(), Some(handle.clone()), outside)
+                .await
+                .is_err()
+        );
+        service
+            .workspace_close(Some(handle.clone()))
+            .await
+            .expect("close");
+        assert!(matches!(
+            service
+                .share_direct_status(&RequestContext::unbounded(), Some(handle), params)
+                .await,
+            Err(WireError {
+                code: ErrorCode::WorkspaceUnavailable,
+                ..
+            })
+        ));
+    }
 
     #[tokio::test]
     async fn relay_access_shares_the_open_binding_and_preserves_scope_refusals() {

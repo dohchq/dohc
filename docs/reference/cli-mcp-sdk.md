@@ -25,6 +25,14 @@ Partial form creation returns `{ kind: "partial", created, failedStage, reason, 
 
 ## Desktop MCP tools
 
+### `dohc_list_automations`
+
+Read automation definitions and on/off file state in a Collection, including shares. Shared run history and host runtime are unavailable.
+
+- `collectionPath`: `string`. Required.
+
+Returns `{ ok: true, definitions } | { ok: false, reason }`.
+
 ### `dohc_dataset`
 
 Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
@@ -427,6 +435,21 @@ Changes the workspace, so a shared view does not offer it.
 - `requestId`: `string`
 
 Returns `{ ok: true, run, outcome, error, waiting } | { ok: true, relayed: true } | { ok: false, reason, confirm: { name, label }[] } | { ok: false, reason }`.
+
+### `dohc_switch_automation`
+
+Change only one automation's enabled value. Read definitions first and provide their contentHash. Reformat confirms losing comments and hand formatting. After an unknown desktop save, read definitions and sync state before retrying; a stale base remains a conflict. A pending save is waiting to sync; acceptance records history, not host execution.
+
+Available only in a shared workspace with edit access.
+
+- `collectionPath`: `string`. Required.
+- `automation`: `string`. Required.
+- `enabled`: `boolean`. Required.
+- `expectedContentHash`: `SHA-256 hex`. Required.
+- `reformat`: `boolean`
+- `submitId`: `string`. Required.
+
+Returns `{ ok: true, result } | { ok: false, reason }`.
 
 ## CLI
 
@@ -1263,6 +1286,30 @@ With `--json`, prints `{ schemaVersion, ok: true, change: { id, recordedAtMs, so
 Press Button fields, read an automation's runs, and try a failed run again.
 
 Name a Collection by its folder in the workspace, and an automation by its id in the Collection's automations.yaml. Each computer keeps the runs of the automations it ran. Try again follows the same rules as in dohc.
+
+#### `dohc automation list`
+
+```sh
+dohc automation list <collection> [options]
+```
+
+Read a Collection's automation definitions and on/off file state.
+
+With `--json`, prints `{ schemaVersion, ok: true, definitions }`.
+
+#### `dohc automation switch`
+
+```sh
+dohc automation switch <collection> <automation> <on|off> [options]
+```
+
+Switch one automation on or off in its file.
+
+- `--base <hash>`: Use the contentHash returned by automation list.
+- `--submit-id <id>`: Identify this switch. After an unknown save, read definitions and sync state before retrying.
+- `--reformat`: Confirm losing comments and hand formatting in automations.yaml.
+
+With `--json`, prints `{ schemaVersion, ok: true, result }`.
 
 #### `dohc automation runs`
 

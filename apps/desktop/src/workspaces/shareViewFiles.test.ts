@@ -299,6 +299,32 @@ const unusedReconcilePorts: Pick<
 };
 
 describe("ShareViewFiles", () => {
+  it("refuses automation saves on mounted shares", async () => {
+    const rootPath = await workspaceRoot();
+    const initial = "version: 1\nautomations: []\n";
+    const store = mutableTextStore({ initial: [{ path: "Tasks/automations.yaml", text: initial }] });
+    const registered = { ...mountTarget(rootPath), grantedSelector: { paths: ["Tasks"], versionId: null as string | null, access: "edit" as "edit" | "view" | "comment" } };
+    const requested = { kind: "mount" as const, workspaceId: registered.workspaceId, shareId: registered.shareId! };
+    const files = createShareViewFiles({ ...unusedReconcilePorts, resolveTarget: () => registered, openStore: () => store });
+    const save = (path: string) => withStaleSensitiveWorkspaceOperation(rootPath, lease =>
+      files.change(lease, requested, { kind: "save", path, text: initial, expectedContentHash: createHash("sha256").update(initial).digest("hex") }));
+    await expect(save("Tasks/automations.yaml")).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+    await expect(save("Tasks/collection.yaml")).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+    for (const access of ["view", "comment"] as const) {
+      registered.grantedSelector.access = access;
+      await expect(save("Tasks/automations.yaml")).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+    }
+    registered.grantedSelector.access = "edit";
+    registered.grantedSelector.versionId = "saved";
+    await expect(save("Tasks/automations.yaml")).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+    registered.grantedSelector.versionId = null;
+    registered.grantedSelector.paths = ["Tasks/one.md"];
+    await expect(save("Tasks/automations.yaml")).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+    registered.grantedSelector.paths = ["Tasks"];
+    await expect(save("Tasks/automations.yaml")).rejects.toBeInstanceOf(SharedFileReadOnlyError);
+    expect(store.writeTextFile).not.toHaveBeenCalled();
+  });
+
   it("does not expose raw share-view mutations and rejects forged ownership", async () => {
     const [sharedView, fileChanges, shareMounts] = await Promise.all([
       import("./sharedView"),

@@ -28,7 +28,19 @@ describe("CLI, MCP, and app channel reference", () => {
   });
 
   it("says what every registered MCP tool returns, and nothing more", async () => {
-    expect(Object.keys(MCP_RETURNS).sort()).toEqual((await mcpToolNames()).sort());
+    const contexts = [undefined, "view", "comment", "edit"] as const;
+    const registered = await Promise.all(contexts.map((context) => mcpToolNames(context)));
+    expect(Object.keys(MCP_RETURNS).sort()).toEqual([...new Set(registered.flat())].sort());
+    const page = await renderReference();
+    for (const name of registered.flat()) expect(page).toContain(`### \`${name}\``);
+  });
+
+  it("documents tools available only in editable shares", async () => {
+    const page = await renderReference();
+    const section = page.split("### `dohc_switch_automation`")[1]!.split(/\n#{2,3} /)[0]!;
+    expect(section).toContain("Available only in a shared workspace with edit access.");
+    expect(section).toContain("`expectedContentHash`");
+    expect(section).toContain("Returns ");
   });
 
   it("gives every dataset and app verb in CLI_COMMANDS a result, and no other verb", () => {

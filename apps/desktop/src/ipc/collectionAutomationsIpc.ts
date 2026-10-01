@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { isSharedWithMePath } from "@dohc/workspace-core";
-import { parseAutomationsFile, writeAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
+import { writeAutomationsFile } from "@dohc/workspace-contracts/automations";
+import { serializeAutomationSave, SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
+import type { createAutomationControls } from "../workspaces/automationControls";
+import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
 import {
   AutomationShareImpactPayload,
@@ -24,6 +27,8 @@ import {
   RetryCollectionAutomationPayload,
   UndoCollectionAutomationRunPayload,
   WriteCollectionAutomationsPayload,
+  SwitchCollectionAutomationPayload, ResolveAutomationControlsPayload,
+  type ResolveAutomationControlsResult,
   type AutomationShareImpactResult,
   type CheckCollectionAutomationResult,
   type FindDatasetCollectionResult,
@@ -75,6 +80,7 @@ export function registerCollectionAutomationsIpc<
   ): Promise<Result>;
   /** A shared view holds no executor: its automations run on the owner's computer. */
   sharedViewOf(workspaceId: string): unknown;
+  controls?(operation: Operation): ReturnType<typeof createAutomationControls>;
   readText(rootPath: string, relativePath: string): Promise<{ text: string; truncated: boolean; contentHash: string | null } | null>;
   createFile(event: Event, payload: CreateWorkspaceFilePayload): Promise<unknown>;
   writeText(event: Event, payload: WriteWorkspaceTextPayload): Promise<{ status: "written"; contentHash: string } | { status: "conflict" }>;
@@ -99,8 +105,8 @@ export function registerCollectionAutomationsIpc<
   const { registerHandler, assertTrustedSender, withRendererWorkspaceOperation } = dependencies;
   const stale = "Automations stopped loading because this window changed workspaces.";
 
-  function assertCollectionPath(path: string): void {
-    if (!isNormalizedRelativePath(path) || isSharedWithMePath(path)) {
+  function assertCollectionPath(path: string, shared = false): void {
+    if (!isNormalizedRelativePath(path) || (!shared && isSharedWithMePath(path))) {
       throw new Error(`"${path}" is not a Collection in this workspace.`);
     }
   }
@@ -108,11 +114,38 @@ export function registerCollectionAutomationsIpc<
   registerHandler(CHANNELS.listCollectionAutomations, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListCollectionAutomationsPayload.parse(payload);
-    assertCollectionPath(input.collectionPath);
+    assertCollectionPath(input.collectionPath, true);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListCollectionAutomationsResult> =>
-      dependencies.sharedViewOf(input.workspaceId)
-        ? { status: "unavailable" }
+      dependencies.sharedViewOf(input.workspaceId) || isSharedWithMePath(input.collectionPath)
+        ? dependencies.controls ? { status: "shared", definitions: await dependencies.controls(operation).list(input.collectionPath) } : { status: "unavailable" }
         : await operation.state.collectionAutomations.automationsIn(input.collectionPath));
+  });
+
+  registerHandler(CHANNELS.switchCollectionAutomation, async (event, payload) => {
+    assertTrustedSender(event);
+    const { workspaceId, collectionPath, ...input } = SwitchCollectionAutomationPayload.parse(payload);
+    assertCollectionPath(collectionPath, true);
+    if (!dependencies.sharedViewOf(workspaceId) && !isSharedWithMePath(collectionPath)) {
+      return { status: "unavailable", reason: "Use the Collection's automation editor to change its definition." };
+    }
+    return withRendererWorkspaceOperation(event.sender, workspaceId, stale, async operation =>
+      dependencies.controls ? dependencies.controls(operation).switch(collectionPath, input)
+        : { status: "unavailable", reason: "Automation switches are unavailable." });
+  });
+
+  registerHandler(CHANNELS.resolveAutomationControls, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ResolveAutomationControlsPayload.parse(payload);
+    return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ResolveAutomationControlsResult> => {
+      const parsed = parseCollectionAutomationId(input.automationId);
+      if (!parsed || !input.path.endsWith("/automations.yaml") || !dependencies.controls) return { status: "missing" };
+      const collectionPath = input.path.slice(0, -"/automations.yaml".length);
+      assertCollectionPath(collectionPath, true);
+      const listed = await dependencies.controls(operation).list(collectionPath);
+      if (listed.file.status !== "read" || !listed.file.entries.some(entry => entry.status === "valid"
+        ? entry.automation.id === parsed.id : entry.id === parsed.id)) return { status: "missing" };
+      return { status: "found", collectionPath, automation: parsed.id };
+    });
   });
 
   registerHandler(CHANNELS.listCollectionAutomationRuns, async (event, payload) => {
@@ -120,7 +153,7 @@ export function registerCollectionAutomationsIpc<
     const input = ListCollectionAutomationRunsPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListCollectionAutomationRunsResult> =>
       dependencies.sharedViewOf(input.workspaceId)
-        ? { status: "unavailable" }
+        ? { status: "unavailable", reason: SHARED_AUTOMATION_HISTORY_REASON }
         : { status: "listed", ...await operation.state.collectionAutomations.runs(input.automationId, input.before) });
   });
 
@@ -128,7 +161,7 @@ export function registerCollectionAutomationsIpc<
     assertTrustedSender(event);
     const input = GetCollectionAutomationRunPayload.parse(payload);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<GetCollectionAutomationRunResult> => {
-      if (dependencies.sharedViewOf(input.workspaceId)) return { status: "unavailable" };
+      if (dependencies.sharedViewOf(input.workspaceId)) return { status: "unavailable", reason: SHARED_AUTOMATION_HISTORY_REASON };
       const run = input.onServer
         ? await serverRuns.get(input.workspaceId, input.automationId, input.claimId)
         : await operation.state.collectionAutomations.listedRun(input.automationId, input.claimId);
@@ -142,7 +175,8 @@ export function registerCollectionAutomationsIpc<
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (): Promise<ListServerAutomationRunsResult> =>
       (dependencies.sharedViewOf(input.workspaceId)
         ? null
-        : await serverRuns.runs(input.workspaceId, input.automationId, input.before).catch(unlessOffline(null))) ?? { runs: null, next: null });
+        : await serverRuns.runs(input.workspaceId, input.automationId, input.before).catch(unlessOffline(null))) ?? { runs: null, next: null,
+          ...(dependencies.sharedViewOf(input.workspaceId) ? { reason: SHARED_AUTOMATION_HISTORY_REASON } : {}) });
   });
 
   // Try again. The executor wakes its drain and the failure notices after
@@ -356,29 +390,11 @@ export function registerCollectionAutomationsIpc<
       const relativePath = `${input.collectionPath}/${AUTOMATIONS_FILE_NAME}`;
       const current = await dependencies.readText(operation.workspace.rootPath, relativePath);
       if ((current?.contentHash ?? null) !== input.expectedContentHash) return { status: "conflict" };
-      // What the file holds now, so a save pins only what the person changed.
-      let saved: Automation[] = [];
-      if (current) {
-        const parsed = parseAutomationsFile(current.text);
-        // The writer cannot keep what it could not read, so editing waits
-        // until the file is fixed by hand.
-        if (current.truncated || parsed.status !== "read" || parsed.entries.some((entry) => entry.status === "invalid")) {
-          return { status: "unreadable" };
-        }
-        const laidOut = writeAutomationsFile(parsed.entries);
-        if (!input.reformat && (laidOut.status !== "ok" || laidOut.text !== current.text)) return { status: "reformats" };
-        saved = parsed.entries.flatMap((entry) => (entry.status === "valid" ? [entry.automation] : []));
-      }
-      let written: ReturnType<typeof writeAutomationsFile>;
-      try {
-        // The writer reads its own text back, so a shape the file contract
-        // would not produce is refused rather than written.
-        const pinned = await operation.state.collectionAutomations.pinOperations(input.collectionPath, input.automations, saved);
-        written = writeAutomationsFile(pinned.map((automation) => ({ status: "valid", automation })));
-      } catch {
-        return { status: "refused", diagnostics: [{ code: "changed-on-reread", path: "/automations" }] };
-      }
-      if (written.status === "refused") return { status: "refused", diagnostics: written.diagnostics };
+      const written = await serializeAutomationSave({ current, expectedContentHash: input.expectedContentHash,
+        reformat: input.reformat, automations: input.automations,
+        pinOperations: (automations, saved) => operation.state.collectionAutomations.pinOperations(input.collectionPath, automations, saved),
+      });
+      if (written.status !== "prepared") return written;
       // The index reads the new file before the panel lists it again.
       const reindex = () => operation.state.collectionAutomations.handleWatcherEvents([{ operation: "update", path: relativePath }]);
       if (current === null) {

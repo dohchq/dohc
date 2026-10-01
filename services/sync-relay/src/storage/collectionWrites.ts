@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { posix } from "node:path";
+import { DATASET_METADATA_MAX_BYTES, datasetDefinitionDigestContent, parseDatasetDefinition, parseDatasetRevision } from "@dohc/security-contract/dataset";
 import {
   MAX_AUTOMATIONS_FILE_BYTES,
   parseAutomationsFile,
@@ -418,7 +420,7 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
   const schema = currentFile(storage, workspaceId, schemaPath);
   // A folder that stopped being a Collection takes no direct write. A
   // schema stored as binary is still the Collection's schema.
-  if (schema === null) {
+  if (schema === null && !(write.kind === "automations" && approvedDatasetFolder(storage, workspaceId, write.collectionPath))) {
     if (write.kind === "schema") throw new CollectionWriteStaleError(schemaPath, null);
     throw relayError("share_op_rejected");
   }
@@ -432,6 +434,74 @@ function checkBases(storage: StorageContext, workspaceId: string, write: Collect
   if (current === null && spellingTaken(storage, workspaceId, change.afterPath!)) {
     throw new CollectionWriteStaleError(change.afterPath!, null);
   }
+}
+
+/** Only automations may use a dataset folder. Rule files keep their approval lane. */
+export function automationSwitchableFolder(storage: StorageContext, workspaceId: string, folder: string): boolean {
+  return currentFile(storage, workspaceId, `${folder}/${COLLECTION_SCHEMA_FILE}`) !== null
+    || approvedDatasetFolder(storage, workspaceId, folder);
+}
+
+const DATASET_PREFLIGHT_CACHE_MS = 2_000;
+const DATASET_PREFLIGHT_CACHE_ENTRIES = 256;
+type CachedDatasetDescriptor = {
+  blobSha256: string;
+  expiresAtMs: number;
+  datasetId: string;
+  definitionSha256: string;
+  approval?: { revisionSha256: string; canSwitch: boolean };
+};
+const datasetDescriptors = new WeakMap<StorageContext, Map<string, CachedDatasetDescriptor>>();
+
+function datasetDescriptor(storage: StorageContext, workspaceId: string, folder: string): CachedDatasetDescriptor | null {
+  const descriptor = currentFile(storage, workspaceId, `${folder}/dataset.json`);
+  if (!descriptor) return null;
+  let cache = datasetDescriptors.get(storage);
+  if (!cache) {
+    cache = new Map();
+    datasetDescriptors.set(storage, cache);
+  }
+  const key = JSON.stringify([workspaceId, folder]);
+  const now = Date.now();
+  const cached = cache.get(key);
+  if (cached?.blobSha256 === descriptor.blobSha256 && cached.expiresAtMs > now) return cached;
+  const row = storage.db.prepare("SELECT byte_length FROM sync_relay_blobs WHERE workspace_id=? AND sha256=?").get(workspaceId, descriptor.blobSha256);
+  const size = Number(row?.byte_length);
+  if (!Number.isSafeInteger(size) || size < 0 || size > DATASET_METADATA_MAX_BYTES) return null;
+  const bytes = storedBlob(storage, workspaceId, descriptor.blobSha256, size);
+  const text = bytes && utf8(bytes);
+  if (text === null) return null;
+  const definition = parseDatasetDefinition(JSON.parse(text));
+  const result = {
+    blobSha256: descriptor.blobSha256,
+    expiresAtMs: now + DATASET_PREFLIGHT_CACHE_MS,
+    datasetId: definition.datasetId,
+    definitionSha256: createHash("sha256").update(datasetDefinitionDigestContent(definition)).digest("hex"),
+  };
+  cache.delete(key);
+  if (cache.size >= DATASET_PREFLIGHT_CACHE_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey !== undefined) cache.delete(oldestKey);
+  }
+  cache.set(key, result);
+  return result;
+}
+
+function approvedDatasetFolder(storage: StorageContext, workspaceId: string, folder: string): boolean {
+  try {
+    const descriptor = datasetDescriptor(storage, workspaceId, folder);
+    if (!descriptor) return false;
+    const catalog = storage.db.prepare("SELECT revision_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(workspaceId, descriptor.datasetId);
+    if (!catalog) return false;
+    const revisionJson = String(catalog.revision_json);
+    const revisionSha256 = createHash("sha256").update(revisionJson).digest("hex");
+    if (descriptor.approval?.revisionSha256 === revisionSha256) return descriptor.approval.canSwitch;
+    const approved = parseDatasetRevision(JSON.parse(revisionJson));
+    const canSwitch = approved.datasetId === descriptor.datasetId && posix.dirname(approved.definition.schemaPath) === folder
+      && descriptor.definitionSha256 === approved.definitionSha256;
+    descriptor.approval = { revisionSha256, canSwitch };
+    return canSwitch;
+  } catch { return false; }
 }
 
 // Whether the owner has a file at `path`, under it, or at one of its

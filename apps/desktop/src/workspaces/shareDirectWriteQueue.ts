@@ -17,6 +17,8 @@ export function createShareDirectWriteQueue(dependencies: {
    * Answers false when no window shows the view.
    */
   report(workspaceId: string, result: PushShareDirectWritesResult): boolean;
+  /** Refresh definition delivery status when a push has writes or cannot finish. */
+  settled?(workspaceId: string): void;
   delayMs?: number;
 }) {
   const delayMs = dependencies.delayMs ?? DIRECT_WRITE_PUSH_DELAY_MS;
@@ -46,6 +48,7 @@ export function createShareDirectWriteQueue(dependencies: {
         lasting: false,
       };
     }
+    if (result.status !== "pushed" || result.writes.length > 0) dependencies.settled?.(workspaceId);
     return result;
   }
 

@@ -1002,6 +1002,140 @@ fn seed_trip_collection(store: &mut EngineStore) {
 }
 
 #[test]
+fn direct_write_authors_write_only_automations_beside_a_dataset_manifest() {
+    for author in direct_write_authors("grant") {
+        let (_scratch, mut store) = test_store();
+        seed_text_moment(
+            &mut store,
+            "dataset",
+            "data/dataset.json",
+            "{}",
+            "dataset-1",
+            None,
+            true,
+        );
+        seed_text_moment(
+            &mut store,
+            "record",
+            "data/row.md",
+            "row",
+            "record-1",
+            None,
+            true,
+        );
+        seed_text_moment(
+            &mut store,
+            "rules",
+            "data/rules.yaml",
+            "rules",
+            "rules-1",
+            None,
+            true,
+        );
+        hydrate_texts(
+            &mut store,
+            &["version: 1\n", "version: 2\n", "changed", "name: Data\n"],
+        );
+        let writes = [
+            absent_text_payload(
+                "auto-create",
+                "auto",
+                "data/automations.yaml",
+                "version: 1\n",
+            ),
+            present_text_payload(
+                "auto-edit",
+                "auto",
+                "write",
+                "data/automations.yaml",
+                "data/automations.yaml",
+                "version: 1\n",
+                "auto-create",
+                "version: 2\n",
+            ),
+        ];
+        for (seq, payload) in (0_i64..).zip(writes) {
+            let op = envelope(
+                NAMED_ORIGIN,
+                seq,
+                "ws",
+                with_author(payload, author.clone()),
+            );
+            assert_eq!(
+                apply_moment_envelope(&mut store, &op, &NoFaults).expect("apply automations"),
+                ApplyOutcome::new(ApplyDisposition::Applied(0))
+            );
+        }
+        let refused = [
+            present_text_payload(
+                "dataset-edit",
+                "dataset",
+                "write",
+                "data/dataset.json",
+                "data/dataset.json",
+                "{}",
+                "dataset-1",
+                "changed",
+            ),
+            present_text_payload(
+                "rules-edit",
+                "rules",
+                "write",
+                "data/rules.yaml",
+                "data/rules.yaml",
+                "rules",
+                "rules-1",
+                "changed",
+            ),
+            present_text_payload(
+                "record-edit",
+                "record",
+                "write",
+                "data/row.md",
+                "data/row.md",
+                "row",
+                "record-1",
+                "changed",
+            ),
+            absent_text_payload("record-create", "new-record", "data/new.md", "changed"),
+            absent_text_payload(
+                "schema-create",
+                "schema",
+                "data/collection.yaml",
+                "name: Data\n",
+            ),
+        ];
+        for (seq, payload) in (2_i64..).zip(refused) {
+            let op = envelope(
+                NAMED_ORIGIN,
+                seq,
+                "ws",
+                with_author(payload, author.clone()),
+            );
+            assert_eq!(
+                refusal_reason(
+                    apply_moment_envelope(&mut store, &op, &NoFaults).expect("record refusal")
+                ),
+                "direct-write author may write only a Collection's own files"
+            );
+        }
+        assert_eq!(
+            snapshot(&store, "auto").map(|head| head.3),
+            Some("auto-edit".to_owned())
+        );
+        assert_eq!(
+            snapshot(&store, "dataset").map(|head| head.3),
+            Some("dataset-1".to_owned())
+        );
+        assert_eq!(
+            snapshot(&store, "record").map(|head| head.3),
+            Some("record-1".to_owned())
+        );
+        assert!(snapshot(&store, "schema").is_none());
+    }
+}
+
+#[test]
 fn direct_write_authors_write_a_collections_own_files_from_their_grant_origin() {
     let (_scratch, mut store) = test_store();
     seed_trip_collection(&mut store);

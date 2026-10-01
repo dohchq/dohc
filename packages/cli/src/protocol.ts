@@ -3,6 +3,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
 import { CreationPartial } from "./creation";
 import { DatasetRequest, DatasetResult } from "./dataset";
 import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
@@ -344,6 +345,10 @@ const automationArgs = {
   automation: z.string().min(1).max(200),
 };
 const automationRunIdArg = z.string().min(1).max(256);
+const automationListArgsSchema = z.object({ ...argsBase, collectionPath: collectionPathArg }).strict();
+const automationSwitchArgsSchema = z.object({ ...automationArgs, enabled: z.boolean(),
+  expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/u), reformat: z.boolean(), submitId: requestIdSchema,
+}).strict();
 // `page` is the `next` of an earlier listing: the runs older than it.
 const automationRunsArgsSchema = z.object({ ...automationArgs, page: z.string().min(1).max(512).optional() }).strict();
 const automationRunArgsSchema = z
@@ -422,6 +427,8 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("documentCreate"), args: documentCreateArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("fileChatStart"), args: fileChatStartArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationRuns"), args: automationRunsArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("automationList"), args: automationListArgsSchema }).strict(),
+  z.object({ ...requestBase, verb: z.literal("automationSwitch"), args: automationSwitchArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationRun"), args: automationRunArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationRetry"), args: automationRetryArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("automationPress"), args: automationPressArgsSchema }).strict(),
@@ -1194,6 +1201,14 @@ const automationPressResultSchema = z.union([
 ]);
 
 export const cliResultSchemas = {
+  automationList: z.discriminatedUnion("ok", [
+    z.object({ ok: z.literal(true), definitions: z.custom<AutomationDefinitionList>(value => value !== null && typeof value === "object" && "file" in value && "canSwitch" in value && "contentHash" in value) }).strict(),
+    z.object({ ok: z.literal(false), reason: z.string() }).strict(),
+  ]),
+  automationSwitch: z.discriminatedUnion("ok", [
+    z.object({ ok: z.literal(true), result: z.custom<AutomationSwitchResult>(value => value !== null && typeof value === "object" && "status" in value) }).strict(),
+    z.object({ ok: z.literal(false), reason: z.string() }).strict(),
+  ]),
   fileWrite: fileWriteResultSchema,
   fileMove: fileMoveResultSchema,
   fileDelete: fileDeleteResultSchema,

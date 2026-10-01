@@ -9,6 +9,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
+import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { CLI_COMMANDS, DASH_RULE, GLOBAL_FLAGS, type CliCommandSpec, type CliFlag, type CliVerbSpec } from "@dohc/cli/args";
 import { DatasetResult, type DatasetRequest } from "@dohc/cli/dataset";
 import { OwnerAppPublicationResult, type OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
@@ -113,6 +114,8 @@ const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
 
 // The socket verb whose result each `dohc automation` verb prints.
 export const AUTOMATION_RESULTS: Record<string, CliSocketVerb> = {
+  list: "automationList",
+  switch: "automationSwitch",
   runs: "automationRuns",
   run: "automationRun",
   retry: "automationRetry",
@@ -175,6 +178,8 @@ export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_read_record: { cli: "collectionRecord" },
   dohc_set_record_fields: { cli: "collectionSetFields" },
   dohc_create_record: { cli: "collectionCreateRecord" },
+  dohc_list_automations: { cli: "automationList" },
+  dohc_switch_automation: { cli: "automationSwitch" },
   dohc_list_automation_runs: { cli: "automationRuns" },
   dohc_read_automation_run: { cli: "automationRun" },
   dohc_retry_automation_run: { cli: "automationRetry" },
@@ -317,7 +322,7 @@ interface ListedTool {
   inputSchema: JsonSchema;
 }
 
-async function listTools(shareAccess?: "view"): Promise<{ tools: ListedTool[]; version: string }> {
+async function listTools(shareAccess?: ShareAccess): Promise<{ tools: ListedTool[]; version: string }> {
   const server = createDohcMcpServer({ root: "/workspace", home: "/home", ...(shareAccess ? { shareAccess } : {}) });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "dohc-reference", version: "0" });
@@ -334,8 +339,8 @@ async function listTools(shareAccess?: "view"): Promise<{ tools: ListedTool[]; v
   }
 }
 
-export async function mcpToolNames(): Promise<string[]> {
-  return (await listTools()).tools.map((tool) => tool.name);
+export async function mcpToolNames(shareAccess?: ShareAccess): Promise<string[]> {
+  return (await listTools(shareAccess)).tools.map((tool) => tool.name);
 }
 
 // Why a shared view does not offer a tool that reads. Every other tool it
@@ -347,8 +352,16 @@ const NOT_SHARED_READS: Record<string, string> = {
 
 async function mcpSection(): Promise<{ text: string; version: string }> {
   const { tools, version } = await listTools();
-  const shared = new Set((await listTools("view")).tools.map((tool) => tool.name));
-  const parts = tools.map((tool) => {
+  const sharedTools = (await listTools("view")).tools;
+  const commentTools = (await listTools("comment")).tools;
+  const editableTools = (await listTools("edit")).tools;
+  const owned = new Set(tools.map((tool) => tool.name));
+  const shared = new Set(sharedTools.map((tool) => tool.name));
+  const allTools = new Map([...tools, ...sharedTools, ...commentTools, ...editableTools].map((tool) => [tool.name, tool]));
+  const parts = [...allTools.values()].map((tool) => {
+    const shareLevels = ([["view", sharedTools], ["comment", commentTools], ["edit", editableTools]] as const)
+      .filter(([, registered]) => registered.some((entry) => entry.name === tool.name))
+      .map(([access]) => access);
     const returns = MCP_RETURNS[tool.name];
     if (returns === undefined) throw new Error(`MCP_RETURNS has no entry for ${tool.name}.`);
     const returnsText = typeof returns === "string"
@@ -360,7 +373,8 @@ async function mcpSection(): Promise<{ text: string; version: string }> {
     return [
       `### \`${tool.name}\``,
       tool.description ?? "",
-      shared.has(tool.name) ? "" : NOT_SHARED_READS[tool.name] ?? "Changes the workspace, so a shared view does not offer it.",
+      !owned.has(tool.name) ? `Available only in a shared workspace with ${shareLevels.join(" or ")} access.`
+        : shared.has(tool.name) ? "" : NOT_SHARED_READS[tool.name] ?? "Changes the workspace, so a shared view does not offer it.",
       args,
       returnsText,
     ].filter(Boolean).join("\n\n");
