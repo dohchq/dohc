@@ -250,7 +250,7 @@ async fn flush_until_settled(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_active_settles_live_ydoc_into_old_version_and_closes_session() {
-    let (scratch, transport, handle, workspace_id) = fixture("ydoc", authored_service()).await;
+    let (scratch, transport, handle, workspace_id) = fixture("ydoc", EngineService::new()).await;
     let feature = create_feature(&transport, &handle, &workspace_id, 2).await;
     switch_to(&transport, &handle, &workspace_id, &feature, 3)
         .await
@@ -324,7 +324,7 @@ async fn set_active_settles_live_ydoc_into_old_version_and_closes_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn version_fence_uses_the_latest_plaintext_settlement_as_its_preimage() {
     let (_scratch, transport, handle, workspace_id) =
-        fixture("latest-settle-preimage", authored_service()).await;
+        fixture("latest-settle-preimage", EngineService::new()).await;
     let opened = call(
         &transport,
         &handle,
@@ -1058,9 +1058,6 @@ async fn create_named_fences_live_ydoc_and_unannounced_disk_edits_into_fork() {
 async fn forced_pre_fork_capture_retains_the_active_agent_author() {
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
-    service
-        .provision_author_context_secret(AUTHOR_CONTEXT_SECRET.into())
-        .unwrap();
     let (scratch, transport, handle, workspace_id) = fixture("forced-scan-author", service).await;
     let author = json!({
         "kind": "agent",
@@ -1068,22 +1065,12 @@ async fn forced_pre_fork_capture_retains_the_active_agent_author() {
         "onBehalfOf": "local",
         "agentRunId": "run-switch",
     });
-    // The agent works for the person the desktop host signed for.
-    let context = call(
-        &transport,
-        &handle,
-        1,
-        "harness.authorContext",
-        json!({ "personId": "local" }),
-    )
-    .await["authorContext"]
-        .clone();
     call(
         &transport,
         &handle,
         2,
         "capture.setAuthor",
-        json!({ "author": author, "authorContext": context }),
+        json!({ "author": author }),
     )
     .await;
 
@@ -1148,7 +1135,7 @@ async fn forced_pre_fork_capture_retains_the_active_agent_author() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_active_leaves_sessions_for_unrelated_versions_open_and_unprojected() {
     let (scratch, transport, handle, workspace_id) =
-        fixture("switch-session-scope", authored_service()).await;
+        fixture("switch-session-scope", EngineService::new()).await;
     let unrelated = create_feature(&transport, &handle, &workspace_id, 2).await;
     let destination = create_feature(&transport, &handle, &workspace_id, 3).await;
     let opened = call(
@@ -1204,7 +1191,7 @@ async fn set_active_leaves_sessions_for_unrelated_versions_open_and_unprojected(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_named_ignores_and_preserves_an_unrelated_richdoc_session() {
     let (_scratch, transport, handle, workspace_id) =
-        fixture("fork-session-scope", authored_service()).await;
+        fixture("fork-session-scope", EngineService::new()).await;
     let unrelated = create_feature(&transport, &handle, &workspace_id, 2).await;
     let opened = call(
         &transport,
@@ -1258,7 +1245,7 @@ async fn create_named_ignores_and_preserves_an_unrelated_richdoc_session() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_named_from_an_inactive_version_leaves_its_live_session_open() {
     let (scratch, transport, handle, workspace_id) =
-        fixture("inactive-fork-source", authored_service()).await;
+        fixture("inactive-fork-source", EngineService::new()).await;
     let inactive = create_feature(&transport, &handle, &workspace_id, 2).await;
     let opened = call(
         &transport,
@@ -1308,7 +1295,7 @@ async fn create_named_from_an_inactive_version_leaves_its_live_session_open() {
 async fn dropping_engine_service_releases_its_single_actor_attachment() {
     let scratch = ScratchDir::new().expect("scratch");
     let workspace_id = "ws-switch-barrier-drop-release";
-    let transport = Arc::new(InProcessTransport::new(Arc::new(authored_service())));
+    let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
     transport
         .call(
             RequestContext::unbounded(),
@@ -1327,7 +1314,7 @@ async fn dropping_engine_service_releases_its_single_actor_attachment() {
     drop(transport);
 
     for id in 2..42 {
-        let replacement = Arc::new(InProcessTransport::new(Arc::new(authored_service())));
+        let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
         match replacement
             .call(
                 RequestContext::unbounded(),
@@ -1369,7 +1356,7 @@ fn dropping_engine_service_after_its_runtime_stops_releases_the_actor() {
     let scratch = ScratchDir::new().expect("scratch");
     std::fs::write(scratch.path().join("notes.md"), "main base").expect("seed disk");
     let workspace_id = "ws-switch-barrier-stopped-runtime-drop";
-    let transport = Arc::new(InProcessTransport::new(Arc::new(authored_service())));
+    let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1396,7 +1383,7 @@ fn dropping_engine_service_after_its_runtime_stops_releases_the_actor() {
         .build()
         .expect("replacement runtime");
     for id in 2..42 {
-        let replacement = Arc::new(InProcessTransport::new(Arc::new(authored_service())));
+        let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
         match replacement_runtime.block_on(replacement.call(
             RequestContext::unbounded(),
             request(
@@ -1439,7 +1426,7 @@ fn dropping_engine_service_in_the_final_runtime_future_releases_the_actor() {
         .build()
         .expect("scoped runtime");
     runtime.block_on(async {
-        let transport = Arc::new(InProcessTransport::new(Arc::new(authored_service())));
+        let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
         transport
             .call(
                 RequestContext::unbounded(),
@@ -1464,7 +1451,7 @@ fn dropping_engine_service_in_the_final_runtime_future_releases_the_actor() {
         .build()
         .expect("replacement runtime");
     for id in 2..42 {
-        let replacement = Arc::new(InProcessTransport::new(Arc::new(authored_service())));
+        let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
         match replacement_runtime.block_on(replacement.call(
             RequestContext::unbounded(),
             request(

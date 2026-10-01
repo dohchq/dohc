@@ -44,7 +44,6 @@ import {
   type AutomationWatchGroupsResult,
   type CaptureFlushResult,
   type CaptureMoveFileResult,
-  type CaptureRestoreTrashedResult,
   type CollectionGetParams,
   type CollectionGetRecordParams,
   type CollectionGetRecordResult,
@@ -178,15 +177,6 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-function withAuthorContext(params: JsonValue): JsonValue {
-  if (typeof params !== "object" || params === null || Array.isArray(params)) return params;
-  const author = params.author;
-  if (typeof author !== "object" || author === null || Array.isArray(author) ||
-    typeof author.authorContext !== "string") return params;
-  const { authorContext, ...declaration } = author;
-  return { ...params, author: declaration, authorContext: params.authorContext ?? authorContext };
-}
-
 export class VersionedLiveAdapter {
   readonly workspace: WorkspaceHandle;
   readonly workspaceId: string;
@@ -233,7 +223,7 @@ export class VersionedLiveAdapter {
     params: VersionedMethodParamsMap[M],
     options?: { idempotencyKey?: string; deadlineMs?: number },
   ): Promise<VersionedMethodResultMap[M]> {
-    const raw = await this.requester.request(method, withAuthorContext(params), {
+    const raw = await this.requester.request(method, params, {
       workspace: this.workspace,
       ...options,
     });
@@ -262,7 +252,7 @@ export class VersionedLiveAdapter {
         options,
       ) as Promise<WorkspaceMethodResultMap[M]>;
     }
-    const raw = await this.requester.request(method, withAuthorContext(params as JsonValue), {
+    const raw = await this.requester.request(method, params as JsonValue, {
       workspace: this.workspace,
       ...options,
     });
@@ -1601,8 +1591,7 @@ export class VersionedLiveAdapter {
   }
 
   async setCaptureAuthor(author: AgentAuthor | null): Promise<void> {
-    await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author,
-      ...(author?.authorContext ? { authorContext: author.authorContext } : {}), });
+    await this.workspaceRequest(WORKSPACE_METHOD.captureSetAuthor, { author });
   }
 
   // Capture records nothing until the hold is released, its lease runs out
@@ -1622,12 +1611,6 @@ export class VersionedLiveAdapter {
   // One rename that refuses to replace, of a visible regular file, under a hold.
   async moveFileUnderHold(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult> {
     return await this.workspaceRequest(WORKSPACE_METHOD.captureMoveFile, input);
-  }
-
-  // One workspace trash entry back at its place, whole, in one rename that
-  // refuses to replace, under a hold.
-  async restoreTrashedUnderHold(input: { holdId: string; trashName: string; toPath: string }): Promise<CaptureRestoreTrashedResult> {
-    return await this.workspaceRequest(WORKSPACE_METHOD.captureRestoreTrashed, input);
   }
 
   async close(): Promise<void> {

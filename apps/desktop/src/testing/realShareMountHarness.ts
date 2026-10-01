@@ -109,8 +109,8 @@ export function createRealShareMountHarness(input: {
       });
     },
     shareViewFiles: files,
+    trashItem: unexpected,
     localPerson: async () => ({ kind: "human", humanId: "local:harness" }),
-    deleteLocalPath: unexpected,
     notifyRenderer: () => undefined,
     shareViewEdited: () => undefined,
     logError,

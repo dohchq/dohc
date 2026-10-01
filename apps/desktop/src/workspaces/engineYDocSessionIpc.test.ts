@@ -132,6 +132,7 @@ function harness(
   let generation = 1;
   let retired = false;
   let readOnly = false;
+  let person = "person-local";
   let capturedOpen:
     | Parameters<EngineYDocSessionCapture["openYDocSession"]>[0]
     | undefined;
@@ -143,8 +144,7 @@ function harness(
   };
   const onError = vi.fn();
   const ipc = createEngineYDocSessionIpc({
-    localPersonId: () => "person-local",
-    localAuthorContext: () => ({ authorContext: "host-person-context", authorContextGeneration: 0 }),
+    localPersonId: () => person,
     sessionFor: () =>
       retired
         ? undefined
@@ -176,6 +176,9 @@ function harness(
     setReadOnly: (next: boolean) => {
       readOnly = next;
     },
+    setPerson: (next: string) => {
+      person = next;
+    },
   };
 }
 
@@ -199,14 +202,29 @@ describe("engine Y.Doc IPC adapter", () => {
     });
     await h.ipc.shutdown();
   });
-  it("keeps the host context captured by the renderer original", async () => {
+  it("names main's person when each request first arrives and keeps that person for its retries", async () => {
     const h = harness(providerSession());
     const sender = new FakeSender(7);
-    const opened = await h.ipc.open(sender, openPayload);
-    expect(opened).toMatchObject({ authorContext: "host-person-context", authorContextGeneration: 0 });
+    await h.ipc.open(sender, openPayload);
+    h.setPerson("account-alice");
     const update = new Uint8Array([0, 0]);
-    expect(h.ipc.applyUpdate(sender, {sessionId: openPayload.sessionId, update, seq: 1, lineageGeneration: 1, authorContext: "host-person-context", requestId: "11111111-1111-4111-8111-111111111111"})).toEqual({accepted: true});
-    expect(h.session.applyLocalUpdate).toHaveBeenCalledWith(update, expect.any(Function), {idempotencyKey: "11111111-1111-4111-8111-111111111111", authorContext: "host-person-context"});
+    const first = "11111111-1111-4111-8111-111111111111";
+    const second = "22222222-2222-4222-8222-222222222222";
+    const apply = (requestId: string, claims: Record<string, unknown> = {}) =>
+      h.ipc.applyUpdate(sender, { ...claims, sessionId: openPayload.sessionId, update, seq: 1, lineageGeneration: 1, requestId });
+    expect(apply(first)).toEqual({ accepted: true });
+    // The account changes while the renderer still retries its first request.
+    h.setPerson("account-bob");
+    expect(apply(first)).toEqual({ accepted: true });
+    // A new request is the person main has now. What the renderer says, an
+    // old context, an earlier generation, or a person, names no one.
+    expect(apply(second, { authorContext: "account-alice-context", authorContextGeneration: 0, actorOriginId: "account-alice",
+      attribution: { actorKind: "human", onBehalfOf: "account-alice", depth: 0 } })).toEqual({ accepted: true });
+    const typedBy = (personId: string, idempotencyKey: string) =>
+      ({ idempotencyKey, actorOriginId: personId, attribution: { actorKind: "human", onBehalfOf: personId, depth: 0 } });
+    expect(vi.mocked(h.session.applyLocalUpdate).mock.calls.map(call => call[2])).toEqual([
+      typedBy("account-alice", first), typedBy("account-alice", first), typedBy("account-bob", second),
+    ]);
     await h.ipc.shutdown();
   });
 

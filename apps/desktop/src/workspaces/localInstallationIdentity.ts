@@ -1,53 +1,62 @@
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
-import { closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
-export interface LocalInstallationIdentity {
-  readonly id: string;
-  readonly authorContextSecret: string;
-}
+const errorCode = (error: unknown) => (error instanceof Error && "code" in error ? error.code : undefined);
 
-/** Main's durable signed-out subject and private author-admission credential. */
-export function readOrCreateLocalInstallationIdentity(file: string): LocalInstallationIdentity {
-  let existing: { id?: unknown; authorContextSecret?: unknown } | undefined;
+const validId = (value: unknown): value is string =>
+  typeof value === "string" && value.length > 0 && value.length <= 1024 && !/[\u0000-\u001f\u007f]/u.test(value);
+
+/**
+ * This installation's signed-out subject: a stable opaque id, never the
+ * email, so History and reactions name the same person across restarts.
+ * Never throws, because unrelated callers read it. A file dohc cannot use is
+ * kept beside it under a `.corrupt-` name and a fresh id is saved. When the
+ * id cannot be read or saved, the caller keeps the returned id for its
+ * process; `onError` says why.
+ */
+export function readOrCreateLocalInstallationId(file: string, onError: (message: string, error: unknown) => void): string {
+  let text: string;
   try {
-    existing = JSON.parse(readFileSync(file, "utf8")) as typeof existing;
+    text = readFileSync(file, "utf8");
   } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    if (errorCode(error) === "ENOENT") return saveNewId(file, onError);
+    onError("dohc could not read this installation's id. It uses an unsaved one until it restarts.", error);
+    return `local:${randomUUID()}`;
   }
-  if (existing !== undefined && (typeof existing.id !== "string" || !existing.id ||
-      existing.id.length > 1024 || /[\u0000-\u001f\u007f]/u.test(existing.id))) {
-    throw new Error("The local installation identity is invalid.");
-  }
-  if (existing?.authorContextSecret !== undefined &&
-      (typeof existing.authorContextSecret !== "string" || !/^[a-f0-9]{64}$/u.test(existing.authorContextSecret))) {
-    throw new Error("The local author credential is invalid.");
-  }
-  const identity = {
-    id: existing?.id as string | undefined ?? `local:${randomUUID()}`,
-    authorContextSecret: existing?.authorContextSecret as string | undefined ?? randomBytes(32).toString("hex"),
-  };
-  if (existing?.authorContextSecret !== undefined) return identity;
-  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
-  let descriptor: number | undefined;
   try {
-    descriptor = openSync(temporary, "wx", 0o600);
-    writeFileSync(descriptor, `${JSON.stringify(identity, null, 2)}\n`);
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = undefined;
-    renameSync(temporary, file);
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-    try { unlinkSync(temporary); } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-    }
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed === "object" && parsed !== null && "id" in parsed && validId(parsed.id)) return parsed.id;
+  } catch {
+    // Truncated or not JSON. Kept below, like an invalid id.
   }
-  return identity;
+  try {
+    renameSync(file, `${file}.corrupt-${Date.now()}-${randomUUID()}`);
+  } catch (error) {
+    onError("dohc could not set aside this installation's unreadable id file. It uses an unsaved id until it restarts.", error);
+    return `local:${randomUUID()}`;
+  }
+  return saveNewId(file, onError);
 }
 
-/** Opaque local author evidence. The private credential never reaches a renderer. */
-export function captureLocalAuthorContext(identity: LocalInstallationIdentity, workspaceId: string, personId: string): string {
-  const payload = Buffer.from(JSON.stringify({ workspaceId, personId }));
-  const stamp = createHmac("sha256", identity.authorContextSecret).update(payload).digest("base64url");
-  return payload.toString("base64url") + "." + stamp;
+// Written whole to a private temporary file, flushed, then renamed over the
+// target, so a crash leaves the old file or the complete new one.
+function saveNewId(file: string, onError: (message: string, error: unknown) => void): string {
+  const id = `local:${randomUUID()}`;
+  const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    const descriptor = openSync(temporary, "wx", 0o600);
+    try {
+      writeFileSync(descriptor, `${JSON.stringify({ id }, null, 2)}\n`);
+      fsyncSync(descriptor);
+    } finally {
+      closeSync(descriptor);
+    }
+    renameSync(temporary, file);
+  } catch (error) {
+    try { unlinkSync(temporary); } catch { /* Never created, or already renamed. */ }
+    onError("dohc could not save this installation's id. It uses an unsaved one until it restarts.", error);
+  }
+  return id;
 }

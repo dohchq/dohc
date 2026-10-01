@@ -5,13 +5,13 @@ export interface LocalAuthorship {
   credentialsSettled(accountId: string | null): void;
   /** Resolves once the first credential load has settled. */
   settled(): Promise<void>;
-  /** The engine's signed evidence of this computer's person in one workspace. */
-  authorContext(workspaceId: string): string;
+  /** The person now: the last settled account, or this installation. */
+  personId(): string;
   /**
    * The person a request is made by. Read when the request arrives once an
    * account has settled; before the first one has, after it settles.
    */
-  person(workspaceId: string): Promise<LocalPersonAuthor>;
+  person(): Promise<LocalPersonAuthor>;
 }
 
 /**
@@ -22,16 +22,13 @@ export interface LocalAuthorship {
  */
 export function createLocalAuthorship(options: {
   installationId(): string;
-  sign(workspaceId: string, personId: string): string;
   /** Starts or joins the first credential load. Never rejects. */
   loadCredentials(): Promise<unknown>;
 }): LocalAuthorship {
   let account: string | null = null;
   let settled = false;
   const personId = () => account ?? options.installationId();
-  const authorContext = (workspaceId: string) => options.sign(workspaceId, personId());
-  const personNow = (workspaceId: string): LocalPersonAuthor =>
-    ({ kind: "human", humanId: personId(), authorContext: authorContext(workspaceId) });
+  const personNow = (): LocalPersonAuthor => ({ kind: "human", humanId: personId() });
   return {
     credentialsSettled(accountId) {
       account = accountId;
@@ -40,10 +37,10 @@ export function createLocalAuthorship(options: {
     settled: async () => {
       if (!settled) await options.loadCredentials();
     },
-    authorContext,
-    person(workspaceId) {
-      if (settled) return Promise.resolve(personNow(workspaceId));
-      return options.loadCredentials().then(() => personNow(workspaceId));
+    personId,
+    person() {
+      if (settled) return Promise.resolve(personNow());
+      return options.loadCredentials().then(personNow);
     },
   };
 }

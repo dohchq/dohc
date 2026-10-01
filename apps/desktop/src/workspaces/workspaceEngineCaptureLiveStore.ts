@@ -33,7 +33,6 @@ import {
   type VersionedTextReadValue,
   type KeptCopy,
   type CaptureMoveFileResult,
-  type CaptureRestoreTrashedResult,
   type KeptCopySaveResult,
   type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
@@ -179,9 +178,6 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   releaseCapture?(holdId: string): Promise<boolean>;
   // One rename that refuses to replace, of a visible regular file, under a hold.
   moveFileUnderHold?(input: { holdId: string; fromPath: string; toPath: string }): Promise<CaptureMoveFileResult>;
-  // One workspace trash entry back at its place, whole, in one rename that
-  // refuses to replace, under a hold.
-  restoreTrashedUnderHold?(input: { holdId: string; trashName: string; toPath: string }): Promise<CaptureRestoreTrashedResult>;
 };
 
 export interface CaptureLiveStores {
@@ -577,18 +573,15 @@ function adapterMetadata(metadata: ActorNeutralWriteMetadata) {
   };
 }
 
-// A file write's author. A public or named author arrives only through
-// relay replication, never from this computer.
+// A file write's author. A person is the one desktop main read. A public or
+// named author arrives only through relay replication, never from this
+// computer.
 function adapterAuthor(author: MomentWriteAuthor): WriteAuthor {
-  if (author.kind === "human") {
-    return { kind: "human", humanId: author.humanId,
-      ...(author.authorContext !== undefined ? { authorContext: author.authorContext } : {}) };
-  }
+  if (author.kind === "human") return { kind: "human", humanId: author.humanId };
   if (author.kind === "automation") {
     return {
       kind: "automation",
       automationId: author.automationId,
-      ...(author.authorContext !== undefined ? { authorContext: author.authorContext } : {}),
       ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
       depth: author.depth,
     };
@@ -603,7 +596,6 @@ function captureAuthor(author: MomentWriteAuthor): AgentAuthor {
   return {
     kind: "agent",
     agentId: author.agentId,
-    ...(author.authorContext !== undefined ? { authorContext: author.authorContext } : {}),
     onBehalfOf: author.onBehalfOf,
     ...(author.agentRunId !== undefined
       ? { agentRunId: author.agentRunId }
@@ -1446,9 +1438,6 @@ export function createCaptureLiveStores(
 
     moveFileUnderHold: async (input: { holdId: string; fromPath: string; toPath: string }) =>
       await runMutation(async (adapter) => await adapter.moveFileUnderHold(input)),
-
-    restoreTrashedUnderHold: async (input: { holdId: string; trashName: string; toPath: string }) =>
-      await runMutation(async (adapter) => await adapter.restoreTrashedUnderHold(input)),
 
     async setCaptureAuthor(author: Extract<MomentWriteAuthor, { kind: "agent" }> | null) {
       const desired = author === null ? null : captureAuthor(author);

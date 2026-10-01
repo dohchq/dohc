@@ -102,6 +102,9 @@ describe("engineMomentSourceLabel", () => {
 
   it("keeps unattributed moments on their actor-neutral origin label", () => {
     expect(engineMomentSourceLabel(moment({ id: "m1" }))).toBe("Local file edit");
+    // A record a person made or deleted by hand reads as their file edit.
+    expect(engineMomentSourceLabel(moment({ id: "hand", operation: "delete",
+      authors: [{ kind: "human", humanId: "local:installation" }] }))).toBe("Local file edit");
     expect(
       engineMomentSourceLabel(moment({ id: "m2", origin: "restore" })),
     ).toBe("Restore");

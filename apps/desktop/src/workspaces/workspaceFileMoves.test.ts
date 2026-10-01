@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, readlink, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -11,9 +11,11 @@ import { createTestScratch } from "./testTemp";
 import { withExclusiveWorkspaceOperation } from "./workspaceAssets";
 import { createWorkspaceEngineCapture, type AuthoredPathChanges, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
-import { prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
+import { deleteWorkspacePathByHand, prepareDeleteWorkspacePathAs, prepareMoveWorkspacePathAs, type PathChangeOptions } from "./workspaceFileMoves";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { desktopRecordEditContext } from "./desktopRecordEdits";
+import { listEngineMomentsForIpc } from "../ipc/engineHistoryIpc";
+import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 
 // Filesystem refusals a test switches on for chosen paths.
 const faults = vi.hoisted(() => ({} as {
@@ -58,6 +60,8 @@ vi.mock("node:fs/promises", async importOriginal => {
 });
 
 const named = { kind: "agent", agentId: "Client name", onBehalfOf: "person-local" } as const;
+// The person desktop main read: signed out, this installation.
+const person = { kind: "human", humanId: "local:installation" } as const;
 const unnamed = { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "person-local" } as const;
 
 async function write(root: string, path: string, contents: string | Uint8Array) {
@@ -86,12 +90,10 @@ async function fixture(options: {
   const operation = { workspace: { rootPath, attachmentId: Symbol(), readOnly: false, shareView: undefined as unknown },
     state: {}, signal: new AbortController().signal, assertCurrent: vi.fn() };
   const workspaceId = "file-moves-test";
-  const loopback = new VersionedLoopbackEngine();
-  loopback.admitAuthorContextForTest("host-person-context", "local:installation");
   let capture: WorkspaceEngineCapture | undefined;
   const engine = () => {
     capture ??= createWorkspaceEngineCapture({ workspaceId, rootPath, attachmentId: Symbol("attachment"),
-      rustEngineSessions: mockDaemonSessions({ rootPath, workspaceId, loopback, nativeMove: options.nativeMove ?? true,
+      rustEngineSessions: mockDaemonSessions({ rootPath, workspaceId, loopback: new VersionedLoopbackEngine(), nativeMove: options.nativeMove ?? true,
         ...(options.beforeRequest ? { beforeRequest: options.beforeRequest } : {}),
         ...(options.afterRequest ? { afterRequest: options.afterRequest } : {}) }) });
     return capture;
@@ -117,10 +119,12 @@ async function fixture(options: {
     if (entry === undefined) throw new Error(`${name} is not in the system trash`);
     return join(systemTrash, entry);
   };
-  return { rootPath, systemTrash, systemTrashed, operation, engine, loopback, trashItem, markDeleted, settle, rows, start, added, workspaceTrash,
+  return { rootPath, systemTrash, systemTrashed, operation, engine, trashItem, markDeleted, settle, rows, start, added, workspaceTrash,
     move: (fromPath: string, toPath: string, by: MomentWriteAuthor = named, overwrite?: boolean) =>
       prepareMoveWorkspacePathAs(operation, { fromPath, toPath, ...(overwrite ? { overwrite } : {}) }, by, pathOptions()).then(finish => finish()),
-    remove: (path: string, by: MomentWriteAuthor = named) => prepareDeleteWorkspacePathAs(operation, path, by, pathOptions()).then(finish => finish()) };
+    remove: (path: string, by: MomentWriteAuthor = named) => prepareDeleteWorkspacePathAs(operation, path, by, pathOptions()).then(finish => finish()),
+    removeByHand: (path: string, capture: PathChangeOptions["capture"] | null = engine()) =>
+      deleteWorkspacePathByHand(operation, path, person, { capture, requestId: "request", trashItem, markDeleted }) };
 }
 
 describe("agent moves and deletes", () => {
@@ -793,7 +797,6 @@ describe("agent move and delete admission", () => {
     const engine: Omit<AuthoredPathChanges, "policy"> = {
       recordDisk: vi.fn(async () => []),
       moveFile: vi.fn(async () => false),
-      restoreTrashed: vi.fn(async () => { throw new Error("Admission should have refused"); }),
       rename: vi.fn(async () => { throw new Error("Admission should have refused"); }),
       delete: vi.fn(async () => { throw new Error("Admission should have refused"); }),
       undoDelete: vi.fn(async () => undefined),
@@ -898,212 +901,176 @@ describe("agent move and delete admission", () => {
   });
 });
 
-it("records a hand delete under the installation person and leaves outside edits unattributed", async () => {
-  const f = await fixture();
-  await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
-  const seen = await f.start();
-  try {
-    await write(f.rootPath, "tasks/hand.md", "# Outside edit\n");
-    await f.settle();
-    const outside = (await f.rows()).filter(row => !seen.has(row.id));
-    expect(outside.length).toBeGreaterThan(0);
-    expect(outside.every(row => row.authors === undefined)).toBe(true);
-    for (const row of outside) seen.add(row.id);
-    expect(await f.remove("tasks/hand.md", {
-      kind: "human", humanId: "forged-person", authorContext: "host-person-context",
-    })).toMatchObject({ ok: true });
-    const deleted = (await f.rows()).filter(row => !seen.has(row.id));
-    expect(deleted).toHaveLength(1);
-    expect(deleted[0]).toMatchObject({
-      operation: "delete", path: "tasks/hand.md",
-      authors: [{ kind: "human", humanId: "local:installation" }],
-    });
-    expect(f.markDeleted).toHaveBeenCalledWith("tasks/hand.md");
-    expect(existsSync(join(f.rootPath, "tasks/hand.md"))).toBe(false);
-  } finally {
-    await f.engine().stop();
-  }
-});
-
-describe("a person's delete reaches the system trash from its own place", () => {
-  const person = { kind: "human", humanId: "local:installation", authorContext: "host-person-context" } as const;
-
-  it("trashes the original path, so the system's Restore returns it there", async () => {
-    const f = await fixture();
+describe("a person's delete", () => {
+  it("settles, trashes the entry from its own place, then records the delete under the person", async () => {
+    const trace: string[] = [];
+    const f = await fixture({ beforeRequest: request => { trace.push(request.method); } });
     await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
     const seen = await f.start();
     try {
-      expect(await f.remove("tasks/hand.md", person)).toEqual({ ok: true, path: "tasks/hand.md", trashed: true });
+      // An outside edit stays nobody's.
+      await write(f.rootPath, "tasks/hand.md", "# Outside edit\n");
+      await f.settle();
+      const outside = (await f.rows()).filter(row => !seen.has(row.id));
+      expect(outside.length).toBeGreaterThan(0);
+      expect(outside.every(row => row.authors === undefined)).toBe(true);
+      for (const row of outside) seen.add(row.id);
+      trace.length = 0;
+      f.trashItem.mockImplementationOnce(async (absolute: string) => {
+        trace.push("trash");
+        await rename(absolute, join(f.systemTrash, basename(absolute)));
+      });
+      expect(await f.removeByHand("tasks/hand.md")).toEqual({ trashed: true });
+      // The system trash holds it from its own place, so its Restore returns it there.
       expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks/hand.md")]]);
-      expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
+      expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Outside edit\n");
       expect(existsSync(join(f.rootPath, "tasks/hand.md"))).toBe(false);
       expect(await f.workspaceTrash()).toEqual([]);
+      expect(trace.indexOf("capture.hold")).toBeLessThan(trace.indexOf("trash"));
+      expect(trace.indexOf("trash")).toBeLessThan(trace.indexOf(VERSIONED_METHOD.textDelete));
       expect((await f.rows()).filter(row => !seen.has(row.id))).toMatchObject([
-        { operation: "delete", path: "tasks/hand.md", authors: [{ kind: "human", humanId: "local:installation" }] },
+        { operation: "delete", path: "tasks/hand.md", metadata: { origin: "local-file" }, authors: [person] },
       ]);
+      // History shows it as the person's own file edit.
+      const history = await listEngineMomentsForIpc(() => f.engine().listMoments(),
+        { agent: () => undefined, automation: () => null, named: () => "" });
+      if (!("moments" in history)) throw new Error("History was updating.");
+      const shown = history.moments.find(moment => moment.operation === "delete" && moment.path === "tasks/hand.md");
+      expect(shown).toMatchObject({ origin: "local-file", authors: [person] });
+      expect(engineMomentSourceLabel(shown!)).toBe("Local file edit");
+      expect(f.markDeleted).toHaveBeenCalledWith("tasks/hand.md");
     } finally { await f.engine().stop(); }
   });
 
-  it("leaves what appears at the place after the system trash took the entry", async () => {
+  it("records the author as submitted, whatever its caller changes while the change waits", async () => {
     const f = await fixture();
-    await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
-    await f.start();
-    f.trashItem.mockImplementationOnce(async (absolute: string) => {
-      await rename(absolute, join(f.systemTrash, basename(absolute)));
-      await write(f.rootPath, "tasks/hand.md", "new");
-    });
-    try {
-      expect(await f.remove("tasks/hand.md", person)).toEqual({ ok: true, path: "tasks/hand.md", trashed: true });
-      expect(await readFile(join(f.rootPath, "tasks/hand.md"), "utf8")).toBe("new");
-      expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
-      expect(await f.workspaceTrash()).toEqual([]);
-    } finally { await f.engine().stop(); }
-  });
-
-  it("finishes the delete when the restore landed but its answer was lost", async () => {
-    let lost = false;
-    const f = await fixture({
-      afterRequest: request => {
-        if (request.method === "capture.restoreTrashed" && !lost) {
-          lost = true;
-          throw new Error("The engine client is closed: transport closed.");
-        }
-      },
-    });
-    await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
-    await f.start();
-    try {
-      expect(await f.remove("tasks/hand.md", person)).toEqual({ ok: true, path: "tasks/hand.md", trashed: true });
-      expect(lost).toBe(true);
-      expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks/hand.md")]]);
-      expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
-      expect(await f.workspaceTrash()).toEqual([]);
-    } finally { await f.engine().stop(); }
-  });
-
-  it("finishes the delete when an earlier restore landed and this one finds the entry gone", async () => {
-    const f = await fixture({
-      // The entry already reached its place, so the engine answers source-missing.
-      beforeRequest: async request => {
-        if (request.method !== "capture.restoreTrashed") return;
-        const params = request.params as { trashName: string; toPath: string };
-        await rename(join(f.rootPath, ".dohc/trash", params.trashName), join(f.rootPath, params.toPath));
-      },
-    });
-    await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
-    await f.start();
-    try {
-      expect(await f.remove("tasks/hand.md", person)).toEqual({ ok: true, path: "tasks/hand.md", trashed: true });
-      expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks/hand.md")]]);
-      expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
-    } finally { await f.engine().stop(); }
-  });
-
-  it("moves nothing when the restore's answer was lost and something else is at the place", async () => {
-    let lost = false;
-    const f = await fixture({
-      afterRequest: async request => {
-        if (request.method !== "capture.restoreTrashed" || lost) return;
-        lost = true;
-        // The entry left the trash, and another program replaced it at its place.
-        await rm(join(f.rootPath, "tasks/hand.md"));
-        await write(f.rootPath, "tasks/hand.md", "someone else's");
-        throw new Error("The engine client is closed: transport closed.");
-      },
-    });
     await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
     const seen = await f.start();
     try {
-      const result = await f.remove("tasks/hand.md", person);
-      expect(result).toMatchObject({ ok: false, path: "tasks/hand.md", deleted: ["tasks/hand.md"] });
-      if (result.ok) throw new Error("The delete must not claim the replacement.");
-      expect(result.reason).toContain("cannot confirm");
-      expect(f.trashItem).not.toHaveBeenCalled();
-      expect(await readFile(join(f.rootPath, "tasks/hand.md"), "utf8")).toBe("someone else's");
-      expect(await f.workspaceTrash()).toEqual([]);
-      expect((await f.rows()).filter(row => !seen.has(row.id) && row.operation === "delete")).toMatchObject([
-        { path: "tasks/hand.md", authors: [{ kind: "human", humanId: "local:installation" }] },
+      const authored = { operation: "delete" as const,
+        author: { kind: "human" as const, humanId: "local:installation" }, correlationId: "snapshot" };
+      const changing = f.engine().changePathsAs(["tasks/hand.md"], authored, async engine => {
+        await rm(join(f.rootPath, "tasks/hand.md"));
+        return await engine.delete("tasks/hand.md");
+      }, () => ["tasks/hand.md"]);
+      authored.author.humanId = "account-mallory";
+      await changing;
+      expect((await f.rows()).filter(row => !seen.has(row.id))).toMatchObject([
+        { operation: "delete", path: "tasks/hand.md", authors: [person] },
       ]);
     } finally { await f.engine().stop(); }
   });
 
-  it("keeps a folder whole in the workspace trash when a new folder takes its place", async () => {
+  it("refuses, moving nothing, when the path leads somewhere else once capture is held", async () => {
+    let swapped = false;
     const f = await fixture({
-      // A new, empty folder appears at the place while History records the delete.
-      afterRequest: async request => {
-        if (request.method === VERSIONED_METHOD.textDelete) await mkdir(join(f.rootPath, "tasks"), { recursive: true });
+      beforeRequest: async request => {
+        if (request.method !== "capture.hold" || swapped) return;
+        swapped = true;
+        // Another program points the alias at another folder while the open document settles.
+        await rename(join(f.rootPath, "alias"), join(f.rootPath, "alias-before"));
+        await symlink(join(f.rootPath, "other"), join(f.rootPath, "alias"), process.platform === "win32" ? "junction" : "dir");
       },
     });
-    await write(f.rootPath, "tasks/a.md", "first");
-    await write(f.rootPath, "tasks/b.md", "second");
-    await f.start();
+    await write(f.rootPath, "notes/a.md", "notes");
+    await write(f.rootPath, "other/a.md", "other");
+    await symlink(join(f.rootPath, "notes"), join(f.rootPath, "alias"), process.platform === "win32" ? "junction" : "dir");
+    const seen = await f.start();
     try {
-      expect(await f.remove("tasks", person)).toMatchObject({ ok: true, path: "tasks", trashed: false, trashPath: expect.any(String) });
+      await expect(f.removeByHand("alias/a.md")).rejects.toThrow("alias/a.md now leads somewhere else.");
+      expect(swapped).toBe(true);
       expect(f.trashItem).not.toHaveBeenCalled();
-      expect(await readdir(join(f.rootPath, "tasks"))).toEqual([]);
-      const [staged] = await f.workspaceTrash();
-      expect(await readFile(join(f.rootPath, ".dohc/trash", staged!, "a.md"), "utf8")).toBe("first");
-      expect(await readFile(join(f.rootPath, ".dohc/trash", staged!, "b.md"), "utf8")).toBe("second");
-      expect(f.markDeleted.mock.calls).toEqual([["tasks"]]);
+      expect(f.markDeleted).not.toHaveBeenCalled();
+      expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("notes");
+      expect(await readFile(join(f.rootPath, "other/a.md"), "utf8")).toBe("other");
+      expect((await f.rows()).filter(row => !seen.has(row.id) && row.authors !== undefined)).toEqual([]);
+    } finally { await f.engine().stop(); }
+  });
+
+  it("leaves the entry in the trash, whole, when History refuses its delete", async () => {
+    const f = await fixture({ beforeRequest: refusedFor(VERSIONED_METHOD.textDelete, "tasks/hand.md") });
+    await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
+    const seen = await f.start();
+    try {
+      await expect(f.removeByHand("tasks/hand.md")).rejects.toThrow("tasks/hand.md is in the trash.");
+      expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
+      expect(existsSync(join(f.rootPath, "tasks/hand.md"))).toBe(false);
+      expect(f.markDeleted).toHaveBeenCalledWith("tasks/hand.md");
+      expect((await f.rows()).filter(row => !seen.has(row.id) && row.authors !== undefined)).toEqual([]);
     } finally { await f.engine().stop(); }
   });
 
   it("keeps the entry in the workspace trash when the system trash refuses", async () => {
     const f = await fixture();
     await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
-    await f.start();
+    const seen = await f.start();
     f.trashItem.mockRejectedValueOnce(new Error("No system trash here."));
     try {
-      const result = await f.remove("tasks/hand.md", person);
-      expect(result).toMatchObject({ ok: true, path: "tasks/hand.md", trashed: false, trashPath: expect.stringMatching(/^\.dohc\/trash\//u) });
-      expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks/hand.md")]]);
+      expect(await f.removeByHand("tasks/hand.md")).toEqual({ trashed: false });
       expect(existsSync(join(f.rootPath, "tasks/hand.md"))).toBe(false);
       const [staged] = await f.workspaceTrash();
       expect(await readFile(join(f.rootPath, ".dohc/trash", staged!), "utf8")).toBe("# Hand made\n");
+      expect((await f.rows()).filter(row => !seen.has(row.id))).toMatchObject([
+        { operation: "delete", path: "tasks/hand.md", authors: [person] },
+      ]);
     } finally { await f.engine().stop(); }
   });
 
-  // From the capture hold on, reading a folder named build fails, wherever it
-  // is: at its place, or staged in the workspace trash.
+  it("trashes the entry recoverably without History when capture is unavailable", async () => {
+    const f = await fixture();
+    await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
+    const seen = await f.start();
+    try {
+      expect(await f.removeByHand("tasks/hand.md", null)).toEqual({ trashed: true });
+      expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
+      expect(f.markDeleted).toHaveBeenCalledWith("tasks/hand.md");
+      expect((await f.rows()).filter(row => !seen.has(row.id) && row.authors !== undefined)).toEqual([]);
+    } finally { await f.engine().stop(); }
+  });
+
+  it("trashes a link as itself and never reaches what it leads to", async () => {
+    const f = await fixture();
+    const external = await createTestScratch("dohc-delete-link-");
+    await write(external, "kept.txt", "outside");
+    await mkdir(join(f.rootPath, "tasks"));
+    await symlink(external, join(f.rootPath, "tasks/link"), process.platform === "win32" ? "junction" : "dir");
+    const seen = await f.start();
+    try {
+      expect(await f.removeByHand("tasks/link")).toEqual({ trashed: true });
+      expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks/link")]]);
+      expect((await lstat(join(f.systemTrash, "link"))).isSymbolicLink()).toBe(true);
+      expect(await readFile(join(external, "kept.txt"), "utf8")).toBe("outside");
+      expect((await f.rows()).filter(row => !seen.has(row.id) && row.authors !== undefined)).toEqual([]);
+    } finally { await f.engine().stop(); }
+  });
+
+  // From the capture hold on, reading a folder named build fails.
   const unreadableBuild = (request: Request) => {
     if (request.method === "capture.hold") faults.readdir = path => path.endsWith(`${sep}build`);
   };
 
-  it("moves a mixed folder whole, never reading the folder files.toml excludes", async () => {
+  it("trashes a mixed folder whole, never following a link or reading a folder History excludes", async () => {
     const f = await fixture({ beforeRequest: unreadableBuild });
     const external = await createTestScratch("dohc-delete-excluded-link-");
     await write(external, "kept.txt", "outside");
     await write(f.rootPath, ".dohc/files.toml", '[[rule]]\npath = "tasks/build/**"\ntracked = false\n');
     await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
+    await write(f.rootPath, "tasks/.env", "SECRET=kept private");
+    await write(f.rootPath, "tasks/node_modules/pkg.js", "excluded");
     await write(f.rootPath, "tasks/build/out.js", "built");
-    await symlink(external, join(f.rootPath, "tasks/build/link"), process.platform === "win32" ? "junction" : "dir");
+    await symlink(external, join(f.rootPath, "tasks/link"), process.platform === "win32" ? "junction" : "dir");
     const seen = await f.start();
     try {
-      expect(await f.remove("tasks", person)).toEqual({ ok: true, path: "tasks", trashed: true, withoutHistory: ["tasks/build"] });
+      expect(await f.removeByHand("tasks")).toEqual({ trashed: true });
       expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks")]]);
       expect(await readFile(join(f.systemTrash, "tasks", "build", "out.js"), "utf8")).toBe("built");
-      expect((await lstat(join(f.systemTrash, "tasks", "build", "link"))).isSymbolicLink()).toBe(true);
+      expect(await readFile(join(f.systemTrash, "tasks", ".env"), "utf8")).toBe("SECRET=kept private");
+      expect((await lstat(join(f.systemTrash, "tasks", "link"))).isSymbolicLink()).toBe(true);
       expect(await readFile(join(external, "kept.txt"), "utf8")).toBe("outside");
-      expect(await f.workspaceTrash()).toEqual([]);
+      expect(existsSync(join(f.rootPath, "tasks"))).toBe(false);
       expect((await f.rows()).filter(row => !seen.has(row.id))).toMatchObject([
-        { operation: "delete", path: "tasks/hand.md", authors: [{ kind: "human", humanId: "local:installation" }] },
+        { operation: "delete", path: "tasks/hand.md", authors: [person] },
       ]);
-    } finally {
-      delete faults.readdir;
-      await f.engine().stop();
-    }
-  });
-
-  it("moves a folder files.toml wholly excludes to the trash from its place, unread", async () => {
-    const f = await fixture({ beforeRequest: unreadableBuild });
-    await write(f.rootPath, ".dohc/files.toml", '[[rule]]\npath = "tasks/build/**"\ntracked = false\n');
-    await write(f.rootPath, "tasks/build/out.js", "built");
-    const seen = await f.start();
-    try {
-      expect(await f.remove("tasks/build", person)).toEqual({ ok: true, path: "tasks/build", trashed: true, withoutHistory: ["tasks/build"] });
-      expect(f.trashItem.mock.calls).toEqual([[join(f.rootPath, "tasks/build")]]);
-      expect(await readFile(join(f.systemTrash, "build", "out.js"), "utf8")).toBe("built");
-      expect((await f.rows()).filter(row => !seen.has(row.id))).toEqual([]);
     } finally {
       delete faults.readdir;
       await f.engine().stop();
@@ -1111,12 +1078,12 @@ describe("a person's delete reaches the system trash from its own place", () => 
   });
 
   // Windows refuses control characters in names, so only other hosts can hold one.
-  it.skipIf(process.platform === "win32")("moves a path the engine cannot address to the trash, as before History", async () => {
+  it.skipIf(process.platform === "win32")("trashes a path the engine cannot address, as before History", async () => {
     const f = await fixture();
     const seen = await f.start();
     await write(f.rootPath, "notes/bell\u0007.md", "ring");
     try {
-      expect(await f.remove("notes/bell\u0007.md", person)).toMatchObject({ ok: true, trashed: true });
+      expect(await f.removeByHand("notes/bell\u0007.md")).toEqual({ trashed: true });
       expect(f.trashItem.mock.calls).toHaveLength(1);
       expect(f.trashItem.mock.calls[0]?.[0].endsWith("bell\u0007.md")).toBe(true);
       expect(existsSync(join(f.rootPath, "notes/bell\u0007.md"))).toBe(false);
@@ -1124,7 +1091,7 @@ describe("a person's delete reaches the system trash from its own place", () => 
     } finally { await f.engine().stop(); }
   });
 
-  it("leaves a new entry at the place alone and keeps the deleted one in the workspace trash", async () => {
+  it("leaves a new entry that appears at the place alone", async () => {
     const f = await fixture({
       afterRequest: async request => {
         if (request.method === VERSIONED_METHOD.textDelete) await write(f.rootPath, "tasks/hand.md", "new");
@@ -1133,96 +1100,36 @@ describe("a person's delete reaches the system trash from its own place", () => 
     await write(f.rootPath, "tasks/hand.md", "# Hand made\n");
     const seen = await f.start();
     try {
-      expect(await f.remove("tasks/hand.md", person)).toMatchObject({ ok: true, trashed: false, trashPath: expect.any(String) });
-      expect(f.trashItem).not.toHaveBeenCalled();
+      expect(await f.removeByHand("tasks/hand.md")).toEqual({ trashed: true });
       expect(await readFile(join(f.rootPath, "tasks/hand.md"), "utf8")).toBe("new");
-      const [staged] = await f.workspaceTrash();
-      expect(await readFile(join(f.rootPath, ".dohc/trash", staged!), "utf8")).toBe("# Hand made\n");
+      expect(await readFile(join(f.systemTrash, "hand.md"), "utf8")).toBe("# Hand made\n");
       expect((await f.rows()).filter(row => !seen.has(row.id) && row.operation === "delete")).toMatchObject([
-        { path: "tasks/hand.md", authors: [{ kind: "human", humanId: "local:installation" }] },
+        { path: "tasks/hand.md", authors: [person] },
       ]);
     } finally { await f.engine().stop(); }
   });
 });
 
-it("records a hand-made record under the person main captured, signed out or in", async () => {
+it("records a hand-made record as a local file edit under the person main read, signed out or in", async () => {
   const f = await fixture();
   await mkdir(join(f.rootPath, "tasks"));
   const seen = await f.start();
-  let person = { humanId: "local:installation", authorContext: "host-person-context" };
-  const context = () => desktopRecordEditContext({
+  const context = (humanId: string) => desktopRecordEditContext({
     capture: f.engine(), workspaceRoot: f.rootPath,
-    person: { kind: "human", ...person },
+    person: { kind: "human", humanId },
     withAdapter: async () => null, onCaptureSettled: () => () => undefined, signal: new AbortController().signal,
   });
   try {
     // The renderer's caller names a display label, never the person.
-    await context().createFile("tasks/offline.md", "# Offline\n", createLocalChangeAuthor("Someone else"));
-    f.loopback.admitAuthorContextForTest("account-context", "account-alice");
-    person = { humanId: "forged-person", authorContext: "account-context" };
-    await context().createFile("tasks/signed-in.md", "# Signed in\n", createLocalChangeAuthor("Someone else"));
+    await context("local:installation").createFile("tasks/offline.md", "# Offline\n", createLocalChangeAuthor("Someone else"));
+    await context("account-alice").createFile("tasks/signed-in.md", "# Signed in\n", createLocalChangeAuthor("Someone else"));
     const created = (await f.rows()).filter(row => !seen.has(row.id))
       .sort((a, b) => a.path.localeCompare(b.path));
     expect(created).toMatchObject([
-      { path: "tasks/offline.md", authors: [{ kind: "human", humanId: "local:installation" }] },
-      { path: "tasks/signed-in.md", authors: [{ kind: "human", humanId: "account-alice" }] },
+      { path: "tasks/offline.md", metadata: { origin: "local-file" }, authors: [{ kind: "human", humanId: "local:installation" }] },
+      { path: "tasks/signed-in.md", metadata: { origin: "local-file" }, authors: [{ kind: "human", humanId: "account-alice" }] },
     ]);
   } finally {
     await f.engine().stop();
   }
-});
-
-it("a person's mixed folder delete preserves neutral excluded files and link targets", async () => {
-  const f = await fixture();
-  const external = await createTestScratch("dohc-delete-outside-");
-  await write(external, "kept.txt", "outside");
-  await write(f.rootPath, "tasks/hand.md", "record");
-  await write(f.rootPath, "tasks/.env", "SECRET=kept private");
-  await write(f.rootPath, "tasks/node_modules/pkg.js", "excluded");
-  await symlink(external, join(f.rootPath, "tasks/link"), process.platform === "win32" ? "junction" : "dir");
-  const seen = await f.start();
-  try {
-    expect(await f.remove("tasks", { kind: "human", humanId: "local:installation", authorContext: "host-person-context" }))
-      .toMatchObject({ ok: true });
-    const deleted = (await f.rows()).filter(row => !seen.has(row.id));
-    expect(deleted.filter(row => row.operation === "delete")).toMatchObject([{
-      path: "tasks/hand.md", authors: [{ kind: "human", humanId: "local:installation" }],
-    }]);
-    expect(existsSync(join(f.rootPath, "tasks"))).toBe(false);
-    expect(await readFile(join(external, "kept.txt"), "utf8")).toBe("outside");
-  } finally { await f.engine().stop(); }
-});
-
-it("a refused person delete restores its link entry without copying the target", async () => {
-  const f = await fixture({ beforeRequest: refusedFor(VERSIONED_METHOD.textDelete, "tasks/z.md") });
-  const external = await createTestScratch("dohc-delete-link-restore-");
-  await write(external, "kept.txt", "outside");
-  await write(f.rootPath, "tasks/a.md", "first");
-  await symlink(external, join(f.rootPath, "tasks/zzlink"), process.platform === "win32" ? "junction" : "dir");
-  await write(f.rootPath, "tasks/z.md", "last");
-  await f.start();
-  try {
-    expect(await f.remove("tasks", { kind: "human", humanId: "local:installation", authorContext: "host-person-context" }))
-      .toMatchObject({ ok: false });
-    expect(await readFile(join(external, "kept.txt"), "utf8")).toBe("outside");
-    expect(await readFile(join(f.rootPath, "tasks/z.md"), "utf8")).toBe("last");
-    expect((await lstat(join(f.rootPath, "tasks/zzlink"))).isSymbolicLink()).toBe(true);
-    expect(await readlink(join(f.rootPath, "tasks/zzlink"))).toContain(external);
-  } finally { await f.engine().stop(); }
-});
-
-it("restores admitted excluded subtrees when the first person tombstone is refused", async () => {
-  const f = await fixture({ beforeRequest: refusedFor(VERSIONED_METHOD.textDelete, "tasks/a.md") });
-  await write(f.rootPath, "tasks/a.md", "record");
-  await write(f.rootPath, "tasks/zzz/node_modules/pkg.js", "excluded");
-  await write(f.rootPath, "tasks/zzz/.env", "SECRET=private");
-  await f.start();
-  try {
-    expect(await f.remove("tasks", { kind: "human", humanId: "local:installation", authorContext: "host-person-context" }))
-      .toMatchObject({ ok: false, deleted: [] });
-    expect(await readFile(join(f.rootPath, "tasks/a.md"), "utf8")).toBe("record");
-    expect(await readFile(join(f.rootPath, "tasks/zzz/node_modules/pkg.js"), "utf8")).toBe("excluded");
-    expect(await readFile(join(f.rootPath, "tasks/zzz/.env"), "utf8")).toBe("SECRET=private");
-    expect(await f.workspaceTrash()).toEqual([]);
-  } finally { await f.engine().stop(); }
 });

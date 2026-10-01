@@ -30,7 +30,6 @@ import {
   createRealDaemonWorkspaceSessions,
 } from "../testing/realDaemonWorkspaceSessions";
 import { createTestScratch } from "./testTemp";
-import { captureLocalAuthorContext } from "./localInstallationIdentity";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { encodeFixtureBigInts } from "@dohc/workspace-engine-client/testing";
 import { decodeCollectionValue } from "../../../../packages/workspace-engine-client/src/workspace/workspaceWireContract";
@@ -321,12 +320,9 @@ it.skipIf(engine.missing)(
   "drives watcher-batch capture, readback, and version-switch materialization through the real daemon",
   async () => {
     const root = await createTestScratch("dohc-capture-rust-e2e-");
-    // The profile's private credential, as main gives the daemon and signs with.
-    const identity = { id: "local:test", authorContextSecret: "a".repeat(64) };
     const lifecycle = createRealDaemonLifecycle({
       command: engine.require(),
       maxRestarts: 0,
-      authorContextSecret: identity.authorContextSecret,
     });
     await lifecycle.start();
     const sessions = createRealDaemonWorkspaceSessions(lifecycle);
@@ -334,7 +330,6 @@ it.skipIf(engine.missing)(
       workspaceId: "capture-rust-e2e",
       rootPath: root,
       rustEngineSessions: sessions,
-      localAuthorContext: () => captureLocalAuthorContext(identity, "capture-rust-e2e", "local"),
     });
     try {
       const mainText = `main\n${"m".repeat(64 * 1024)}`;

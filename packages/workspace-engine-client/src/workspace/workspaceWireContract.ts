@@ -40,7 +40,6 @@ export const WORKSPACE_METHOD = {
   captureRenew: "capture.renew",
   captureRelease: "capture.release",
   captureMoveFile: "capture.moveFile",
-  captureRestoreTrashed: "capture.restoreTrashed",
   automationsSubscribe: "automations.subscribe",
   automationsUnsubscribe: "automations.unsubscribe",
   automationsReleaseGroups: "automations.releaseGroups",
@@ -78,7 +77,6 @@ type WorkspaceJsonObject = {
 export type WorkspaceOpenParams = WorkspaceJsonObject & {
   rootDir: string;
   workspaceId: string;
-  authorContext?: string;
   captureAuthor?:
     | (WorkspaceJsonObject & {
         kind: "agent";
@@ -191,8 +189,6 @@ export type KeptCopySaveResult =
 export type CaptureFlushResult = typeof CaptureFlushResultSchema.Type;
 export type CaptureMoveFileResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.captureMoveFile];
-export type CaptureRestoreTrashedResult =
-  WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.captureRestoreTrashed];
 /** A kind of record change a subscription wants and a claim runs for. */
 export type AutomationChangeKind = "added" | "changed" | "removed";
 
@@ -417,7 +413,6 @@ export type AutomationRunNowResult =
   WorkspaceMethodResultMap[typeof WORKSPACE_METHOD.automationsRunNow];
 
 type CaptureSetAuthorParams = WorkspaceJsonObject & {
-  authorContext?: string;
   author:
     | (WorkspaceJsonObject & {
         kind: "agent";
@@ -452,7 +447,6 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.captureRenew]: WorkspaceJsonObject & { holdId: string };
   [WORKSPACE_METHOD.captureRelease]: WorkspaceJsonObject & { holdId: string };
   [WORKSPACE_METHOD.captureMoveFile]: WorkspaceJsonObject & { holdId: string; fromPath: string; toPath: string };
-  [WORKSPACE_METHOD.captureRestoreTrashed]: WorkspaceJsonObject & { holdId: string; trashName: string; toPath: string };
   [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeParams;
   [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeParams;
   [WORKSPACE_METHOD.automationsReleaseGroups]: WorkspaceEmptyParams;
@@ -1296,19 +1290,6 @@ const WorkspaceResultSchemas = {
     mutableStruct({ moved: Schema.Literal(true) }),
     mutableStruct({
       moved: Schema.Literal(false),
-      reason: Schema.Literals(["destination-exists", "source-missing", "no-replace-unsupported"]),
-    }),
-  ]),
-  /**
-   * One workspace trash entry back at its place, whole, in one rename that
-   * refuses to replace, under a hold. `restored: false` says why it stayed in
-   * the trash: its place is taken, it is gone, or this filesystem has no such
-   * rename.
-   */
-  [WORKSPACE_METHOD.captureRestoreTrashed]: Schema.Union([
-    mutableStruct({ restored: Schema.Literal(true) }),
-    mutableStruct({
-      restored: Schema.Literal(false),
       reason: Schema.Literals(["destination-exists", "source-missing", "no-replace-unsupported"]),
     }),
   ]),

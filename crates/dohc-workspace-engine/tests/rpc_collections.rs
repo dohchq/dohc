@@ -140,7 +140,7 @@ async fn every_collection_request_answers_for_a_degraded_schema() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_collection_state(&scratch);
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -275,7 +275,7 @@ async fn collections_get_caps_schema_arrays_at_the_wire_collection_limit() {
     }
     seed_schema(&scratch, &schema);
 
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -365,7 +365,7 @@ async fn get_record_pages_all_history_past_the_per_request_limit() {
     assert!(expected_count > 500);
     drop(connection);
 
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -432,7 +432,7 @@ async fn assert_capture_authored_record_edit(human: bool) {
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -547,8 +547,8 @@ async fn assert_capture_authored_record_edit(human: bool) {
         .expect("read adopted record")
         .replace("status: open", "status: done");
     if human {
-        // A person's edit is their own write. Capture never takes a person
-        // as its author, and the engine replaces the declared one.
+        // A person's edit is their own write, named by desktop main. Capture
+        // never takes a person as its author.
         call(
             &transport,
             &handle,
@@ -559,8 +559,8 @@ async fn assert_capture_authored_record_edit(human: bool) {
                 "versionId": "main",
                 "path": "tasks/alpha.md",
                 "text": edited,
-                "origin": "api",
-                "author": {"kind":"human", "humanId":"forged-person", "onBehalfOf":"local"},
+                "origin": "local-file",
+                "author": {"kind":"human", "humanId":"local"},
             }),
         )
         .await;
@@ -687,7 +687,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
     drop(store);
     std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
 
-    let service = Arc::new(authored_service());
+    let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let opened = transport
         .call(
@@ -912,7 +912,7 @@ async fn an_automation_write_names_its_run_in_record_history() {
     drop(store);
     std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
 
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -1157,7 +1157,7 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
         drop(connection);
         std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
 
-        let service = Arc::new(authored_service());
+        let service = Arc::new(EngineService::new());
         let transport = InProcessTransport::new(Arc::clone(&service));
         let opened = transport
             .call(
@@ -1353,7 +1353,7 @@ async fn capture_adopts_whitespace_delimited_frontmatter_without_losing_fields()
         &scratch,
         "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n",
     );
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -1411,7 +1411,7 @@ async fn capture_adopts_uppercase_markdown_extension_without_rewriting_structure
         &scratch,
         "name: Tasks\nfields:\n  done:\n    type: checkbox\n  priority:\n    type: number\n  status:\n    type: text\n",
     );
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -1474,7 +1474,7 @@ async fn capture_adoption_leaves_rich_markdown_unmodified_until_shared_import() 
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -1582,7 +1582,7 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
     assert!(matches!(reconciled, TxnOutcome::Committed(_)));
     drop(store);
 
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -1680,7 +1680,7 @@ async fn overdepth_sort_values_page_without_gaps_or_duplicates() {
     assert!(matches!(reconciled, TxnOutcome::Committed(_)));
     drop(store);
 
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -1867,7 +1867,7 @@ async fn big_collection_numbers_cross_every_request_and_response_surface() {
     }
     drop(connection);
 
-    let service = Arc::new(authored_service());
+    let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let opened = transport
         .call(
@@ -2062,7 +2062,7 @@ async fn near_limit_record_round_trips_via_query_and_get_record_blob_egress() {
     std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
     std::fs::write(collection_dir.join("record.md"), &record).expect("record file");
 
-    let service = Arc::new(authored_service());
+    let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let opened = transport
         .call(
@@ -2205,7 +2205,7 @@ async fn collection_get_uses_blob_egress_only_above_inband_limit() {
         std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
     }
 
-    let service = Arc::new(authored_service());
+    let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let opened = transport
         .call(
@@ -2299,7 +2299,7 @@ async fn collection_query_refuses_a_ninth_sort_clause() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_schema(&scratch, "fields:\n  title:\n    type: text\n");
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -2390,7 +2390,7 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     drop(connection);
     std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
 
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -2571,7 +2571,7 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
     drop(connection);
     std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
 
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -2735,7 +2735,7 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
     drop(connection);
     std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
 
-    let service = Arc::new(authored_service());
+    let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let opened = transport
         .call(
@@ -3245,7 +3245,7 @@ async fn get_record_history_pages_cut_by_bytes_and_continue_from_the_cursor() {
     tx.commit().expect("commit history seed");
     drop(connection);
 
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -3371,7 +3371,7 @@ async fn collections_list_pages_with_the_exclusive_cursor() {
     assert!(matches!(reconciled, TxnOutcome::Committed(_)));
     drop(store);
 
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -3498,7 +3498,7 @@ async fn collections_list_byte_bounds_degradation_reasons_and_the_page() {
     );
     drop(store);
 
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -3609,7 +3609,7 @@ async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default()
     std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
     std::fs::write(collection_dir.join("record.md"), &record).expect("record file");
 
-    let service = Arc::new(authored_service());
+    let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let opened = transport
         .call(
@@ -3773,7 +3773,7 @@ automations: []
     }
     drop(store);
 
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -3957,7 +3957,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         std::fs::read_to_string(scratch.path().join(PATH)).expect("materialized accepted response"),
         text
     );
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -4159,7 +4159,7 @@ async fn native_public_trip_poll_moment_materializes_adopts_and_dedupes() {
         std::fs::read_to_string(scratch.path().join(PATH)).expect("restarted Markdown"),
         settled
     );
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
             RequestContext::unbounded(),

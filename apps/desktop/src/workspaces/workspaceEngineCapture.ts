@@ -1,4 +1,4 @@
-import type { RecordEditSession, RecordUpdateOptions } from "@dohc/automation-executor/collection-record-edits";
+import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { errorMessage } from "./workspaceError";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
 import type { WatcherEvent } from "@dohc/workspace-core";
@@ -339,12 +339,6 @@ export interface AuthoredPathChanges {
   // rename, and the caller moves the file another way. Throws when the
   // destination is taken or the source is gone.
   moveFile(fromPath: string, toPath: string): Promise<boolean>;
-  // Puts `trashName`, one entry this change staged in the workspace trash,
-  // back at `toPath`, whole and unread, in one rename that refuses to
-  // replace anything there. Answers "restored", or why it did not move: its
-  // place is taken, it is gone from the trash, or this filesystem has no
-  // such rename.
-  restoreTrashed(trashName: string, toPath: string): Promise<"restored" | "destination-exists" | "source-missing" | "no-replace-unsupported">;
   rename(fromPath: string, toPath: string): Promise<void>;
   // Records a delete of a file already gone from disk. Answers its row's id.
   delete(path: string): Promise<string>;
@@ -443,7 +437,6 @@ export type WorkspaceEngineYDocProviderSession = Omit<
     onArmed?: () => void,
     options?: {
       actorOriginId?: string;
-      authorContext?: string;
       attribution?: ChangeAttributionWire;
       idempotencyKey?: string;
     },
@@ -464,7 +457,6 @@ export type WorkspaceEngineYDocProviderSession = Omit<
     onArmed?: () => void,
     options?: {
       actorOriginId?: string;
-      authorContext?: string;
       attribution?: ChangeAttributionWire;
       idempotencyKey?: string;
     },
@@ -553,6 +545,7 @@ export interface WorkspaceEngineCapture {
   // the switch just deleted, and the first keystroke settles a phantom file
   // into the entered version. The disk check runs on the capture chain
   // with the version binding, so a switch cannot land between them.
+  openRecordSession(path: string): Promise<RecordEditSession>;
   openYDocSession(input: {
     path: string;
     assertRecordWritable?: () => void;
@@ -575,11 +568,6 @@ export interface WorkspaceEngineCapture {
     // Opening and corrective status reports claim no edits.
     onSaveState?: (state: EngineYDocSaveState, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean) => void;
   }): Promise<WorkspaceEngineYDocProviderSession>;
-  // A record write's session. A live editor's session is borrowed rather
-  // than opened twice. Every update carries `authorContext`, main's person
-  // captured when the write was requested; without one, the person is
-  // captured at each update.
-  openRecordSession(path: string, authorContext?: string): Promise<RecordEditSession>;
   // WS-G2-C-2: flush + release any live Y.Doc session at OR under a
   // path before a destructive op that does not run through the capture chain
   // itself (the delete IPC deletes on disk directly). Without this, a later
@@ -748,12 +736,6 @@ export interface WorkspaceEngineCaptureOptions {
   workspaceId: string;
   rootPath: string;
   attachmentId: symbol;
-  /**
-   * Main's signed evidence of this computer's person in this workspace. Read
-   * when an edit arrives, before queued work runs, so the engine stamps the
-   * person who made it.
-   */
-  localAuthorContext?: () => string;
   // Injectable for tests; production uses the required Rust workspace sessions.
   store?: CaptureVersionedTextStore;
   // Injectable for tests; production uses the daemon's encrypted secret store.
@@ -1627,15 +1609,17 @@ export function createDefaultDiskWriter(rootPath: string): EngineDiskWriter {
   };
 }
 
+// A person's own file change reads as a local file edit in History, as their
+// disk edits always have; the author names them. Agents and automations write
+// through dohc.
+function localFileOrApi(author: MomentWriteAuthor): "local-file" | "api" {
+  return author.kind === "human" ? "local-file" : "api";
+}
+
 export function createWorkspaceEngineCapture(
   options: WorkspaceEngineCaptureOptions,
 ): WorkspaceEngineCapture {
   const { workspaceId, rootPath, attachmentId } = options;
-  function pinAuthor(author: MomentWriteAuthor): MomentWriteAuthor {
-    const captured = structuredClone(author);
-    const authorContext = captured.authorContext ?? options.localAuthorContext?.();
-    return authorContext === undefined ? captured : { ...captured, authorContext };
-  }
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
   const teardownRetry = options.teardownRetryMs ?? {
@@ -1772,21 +1756,7 @@ export function createWorkspaceEngineCapture(
   }
   const liveYDocSessions = new Map<string, LiveYDocSession>();
 
-  // A record update is always keyed, so the caller hears its refusal and the
-  // editor hears only its late acknowledgement. It carries the person pinned
-  // when the write was requested.
-  function recordUpdateOptions(
-    applyOptions: RecordUpdateOptions | undefined,
-    authorContext: string | undefined,
-  ): NonNullable<Parameters<WorkspaceEngineYDocProviderSession["applyDecidedLocalUpdate"]>[2]> {
-    return {
-      ...applyOptions,
-      idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
-      ...(authorContext !== undefined ? { authorContext } : {}),
-    };
-  }
-
-  function borrowRecordSession(entry: LiveYDocSession, authorContext: string | undefined): RecordEditSession {
+  function borrowRecordSession(entry: LiveYDocSession): RecordEditSession {
     const owner = entry.publicSession;
     if (owner === null || entry.closing || entry.orphaned || entry.status === "failing-close") {
       throw new Error("The record is closing. Try again after it closes.");
@@ -1799,9 +1769,12 @@ export function createWorkspaceEngineCapture(
       if (closing !== null) return Promise.reject(new Error(`Y.Doc session for ${entry.path} is closed.`));
       return operation();
     };
+    const applyDecidedLocalUpdate: WorkspaceEngineYDocProviderSession["applyDecidedLocalUpdate"] =
+      (decide, onArmed, applyOptions) => run(() => owner.applyDecidedLocalUpdate(decide, onArmed, {
+        ...applyOptions, idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
+      }));
     return {
-      applyDecidedLocalUpdate: (decide, onArmed, applyOptions) => run(() =>
-        owner.applyDecidedLocalUpdate(decide, onArmed, recordUpdateOptions(applyOptions, authorContext))),
+      applyDecidedLocalUpdate,
       settleNow: opts => run(() => owner.settleNow(opts)),
       close() {
         closing ??= (async () => {
@@ -2994,21 +2967,10 @@ export function createWorkspaceEngineCapture(
       // another settle). #514, and its two review rounds.
       const armed = announceOnce(onArmed);
       const keyed = confirmRecording && applyOptions?.idempotencyKey !== undefined;
-      // The person is pinned now, when the edit arrives, never when its turn
-      // comes. With a context the engine stamps the person itself, so a
-      // declared person is dropped rather than claimed.
-      const capturedOptions: NonNullable<Parameters<WorkspaceEngineYDocProviderSession["applyLocalUpdate"]>[2]> = {
+      const capturedOptions = {
         ...structuredClone(applyOptions ?? {}),
         idempotencyKey: applyOptions?.idempotencyKey ?? createId(),
       };
-      const authorContext = capturedOptions.authorContext ?? options.localAuthorContext?.();
-      if (authorContext !== undefined) {
-        capturedOptions.authorContext = authorContext;
-        if (capturedOptions.attribution?.actorKind === "human") {
-          delete capturedOptions.attribution;
-          delete capturedOptions.actorOriginId;
-        }
-      }
       let decided = false;
       return append(async () => {
         if (canonicalDoc === null || closed) throw closedError();
@@ -3894,10 +3856,9 @@ export function createWorkspaceEngineCapture(
     );
   }
 
-  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite: { authorContext?: string }): Promise<RecordEditSession>;
-  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0]): Promise<WorkspaceEngineYDocProviderSession>;
-  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite?: { authorContext?: string }): Promise<WorkspaceEngineYDocProviderSession | RecordEditSession> {
-
+  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite: true): Promise<RecordEditSession>;
+  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite?: false): Promise<WorkspaceEngineYDocProviderSession>;
+  function openSession(input: Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], recordWrite = false): Promise<WorkspaceEngineYDocProviderSession | RecordEditSession> {
       // ON THE CAPTURE CHAIN, deliberately. The version this session
       // binds to is read here and the registry entry is written at the end,
       // with a daemon round trip in between. Off the chain, a switch/merge/
@@ -3968,7 +3929,7 @@ export function createWorkspaceEngineCapture(
         // of it must keep refusing.
         const retained = liveYDocSessions.get(input.path);
         if (recordWrite && retained && !retained.orphaned) {
-          return borrowRecordSession(retained, recordWrite.authorContext);
+          return borrowRecordSession(retained);
         }
         if (retained?.status === "failing-close" && retained.orphaned) {
           try {
@@ -5333,14 +5294,14 @@ export function createWorkspaceEngineCapture(
           close: closeEntry,
         };
         liveEntry.publicSession = publicSession;
-        if (!recordWrite) return publicSession;
-        const { authorContext } = recordWrite;
-        return {
-          applyDecidedLocalUpdate: (decide, onArmed, applyOptions) => publicSession.applyDecidedLocalUpdate(decide, onArmed,
-            recordUpdateOptions(applyOptions, authorContext)),
+        if (recordWrite) return {
+          applyDecidedLocalUpdate: (decide, onArmed, applyOptions) => publicSession.applyDecidedLocalUpdate(decide, onArmed, {
+            ...applyOptions, idempotencyKey: applyOptions.idempotencyKey ?? createId(),
+          }),
           settleNow: opts => publicSession.settleNow(opts),
           close: () => publicSession.close(),
         } satisfies RecordEditSession;
+        return publicSession;
       }
   }
 
@@ -5396,22 +5357,31 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    setActiveAgentRun(run) {
-      const author = run === null ? null : pinAuthor({ kind: "agent",
-        agentId: run.agentId, onBehalfOf: run.onBehalfOf, agentRunId: run.agentRunId,
-        ...(run.depth > 0 ? { depth: run.depth } : {}) });
+    setActiveAgentRun(submitted) {
+      // The run as submitted; a caller changing its object later changes nothing here.
+      const run = structuredClone(submitted);
       return enqueueResult("daemon capture authorship", async () => {
         const engine = await engineStore();
         if (run === null) await engine.flushCapture?.();
-        if (author !== null && author.kind !== "agent") throw new Error("Invalid captured agent author.");
-        await engine.setCaptureAuthor?.(author);
+        await engine.setCaptureAuthor?.(
+          run === null
+            ? null
+            : {
+                kind: "agent",
+                agentId: run.agentId,
+                onBehalfOf: run.onBehalfOf,
+                agentRunId: run.agentRunId,
+                ...(run.depth > 0 ? { depth: run.depth } : {}),
+              },
+        );
       });
     },
 
     registerExpectedEngineEvents,
 
-    writeAuthoredFile(absolutePath, content, author, writeOptions = {}) {
-      const pinnedAuthor = pinAuthor(author);
+    writeAuthoredFile(absolutePath, content, submittedAuthor, writeOptions = {}) {
+      // The author as submitted, before the write waits for its turn.
+      const author = structuredClone(submittedAuthor);
       return enqueueResult("write authored file", async () => {
         if (writeOptions.signal?.aborted) {
           throw new Error("The write was cancelled.");
@@ -5443,7 +5413,7 @@ export function createWorkspaceEngineCapture(
         await engine.flushCapture?.();
         const versionId = await activeVersionIdOf(engine);
         const metadata: ActorNeutralWriteMetadata = {
-          origin: "api",
+          origin: localFileOrApi(author),
           summary: `Updated ${pathBasename(path)}`,
           correlationId: writeOptions.correlationId ?? `authored-write-${writeOptions.requestId ?? createId()}`,
         };
@@ -5461,7 +5431,7 @@ export function createWorkspaceEngineCapture(
             ...(writeOptions.expectedContentHash !== undefined ? { expectedSha256: writeOptions.expectedContentHash } : {}),
             ...(writeOptions.createOnly ? { createOnly: true } : {}),
             metadata,
-            author: pinnedAuthor,
+            author,
           };
           const result = typeof decoded === "string"
             ? await engine.writeTextFile({ ...input, text: decoded, publish: true })
@@ -5480,8 +5450,7 @@ export function createWorkspaceEngineCapture(
     },
 
     openYDocSession: input => openSession(input),
-    openRecordSession: (path, authorContext) =>
-      openSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined }, { authorContext }),
+    openRecordSession: path => openSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined }, true),
 
     settleAndCloseLiveSessionsForPath(pathOrPrefix) {
       // Public seam for destructive ops that DON'T run through the capture chain
@@ -5554,8 +5523,9 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    changePathsAs(paths, authored, work, removed) {
-      authored = { ...authored, author: pinAuthor(authored.author) };
+    changePathsAs(paths, submitted, work, removed) {
+      // The author as submitted, before the change waits for its turn.
+      const authored = structuredClone(submitted);
       const match = (candidate: string) => paths.some(path => pathIsAtOrUnder(candidate, path));
       return enqueueResult("authored path change", async () => {
         const engine = await engineStore();
@@ -5585,8 +5555,8 @@ export function createWorkspaceEngineCapture(
         let result: { value: Awaited<ReturnType<typeof work>> } | undefined;
         try {
           await ensureAllowed();
-          const { holdCapture, renewCapture, releaseCapture, moveFileUnderHold, restoreTrashedUnderHold } = engine;
-          if (!holdCapture || !renewCapture || !releaseCapture || !moveFileUnderHold || !restoreTrashedUnderHold) {
+          const { holdCapture, renewCapture, releaseCapture, moveFileUnderHold } = engine;
+          if (!holdCapture || !renewCapture || !releaseCapture || !moveFileUnderHold) {
             throw new Error("This engine cannot record the change under its author. Restart dohc to try again.");
           }
           // Changes capture has seen land as their own rows first. Changes it
@@ -5596,7 +5566,7 @@ export function createWorkspaceEngineCapture(
           const lease = keepCaptureHold(holdId => renewCapture.call(engine, holdId), holdId, leaseMs);
           try {
             const authoredMetadata = (summary: string): ActorNeutralWriteMetadata =>
-              ({ origin: "api", summary, correlationId: authored.correlationId });
+              ({ origin: localFileOrApi(authored.author), summary, correlationId: authored.correlationId });
             const policy = await readPolicyForTask();
             result = { value: await work({
               policy,
@@ -5639,10 +5609,6 @@ export function createWorkspaceEngineCapture(
                 throw new Error(outcome.reason === "destination-exists"
                   ? `Something new is at ${toPath}. Choose another destination.`
                   : `${fromPath} changed while dohc prepared the change. Try again.`);
-              },
-              restoreTrashed: async (trashName, toPath) => {
-                const outcome = await restoreTrashedUnderHold.call(engine, { holdId, trashName, toPath });
-                return outcome.restored ? "restored" : outcome.reason;
               },
               rename: async (fromPath, toPath) => {
                 assertEngineWritablePath(toPath, policy);

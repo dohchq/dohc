@@ -27,7 +27,7 @@ import {
   type WorkspaceFileMutationYDocPort,
 } from "./workspaceFileMutationOwner";
 import { deferred } from "../testing/deferred";
-import { deletePath } from "./workspaceFiles";
+import { readWorkspaceEnginePolicy } from "./workspaceEnginePolicyFile";
 
 interface TestEvent {
   trusted: boolean;
@@ -41,10 +41,10 @@ interface TestWorkspace {
   shareMounts?: unknown;
 }
 
-type MutationCapture = Pick<
-  WorkspaceEngineCapture,
-  "beginFileRename" | "settleAndCloseLiveSessionsForPath" | "changePathsAs"
->;
+type MutationCapture = Pick<WorkspaceEngineCapture, "beginFileRename" | "changePathsAs">;
+// What a test gives the harness: changePathsAs settles through this
+// settleAndCloseLiveSessionsForPath as the real capture settles first.
+type TestCapture = Pick<WorkspaceEngineCapture, "beginFileRename" | "settleAndCloseLiveSessionsForPath">;
 
 const roots: string[] = [];
 const trustedEvent: TestEvent = { trusted: true };
@@ -211,17 +211,8 @@ async function harness(options: {
     assertTrustedSender,
     withRendererWorkspaceOperation,
     shareViewFiles: { change },
-    localPerson: async () => ({ kind: "human", humanId: account, authorContext: `context:${account}` }),
-    deleteLocalPath: async ({ capture, authorityId, yDocSessions }, path, person) => {
-      deletedBy.push(person.humanId);
-      const finish = await capture?.settleAndCloseLiveSessionsForPath(path);
-      try {
-        const result = await deletePath(rootPath, path, trashItem);
-        yDocSessions.markDeletedUnderPath(authorityId, path);
-        finish?.(true);
-        return result;
-      } catch (error) { finish?.(false); throw error; }
-    },
+    trashItem,
+    localPerson: async () => ({ kind: "human", humanId: account }),
     notifyRenderer,
     shareViewEdited,
     logError,
@@ -262,8 +253,24 @@ async function harness(options: {
     setAuthorityId(next: symbol) {
       authorityId = next;
     },
-    setCapture(next: Omit<MutationCapture, "changePathsAs"> | null) {
-      capture = next === null ? null : { ...next, changePathsAs: async () => { throw new Error("Not used in mutation-owner tests."); } };
+    setCapture(next: TestCapture | null) {
+      capture = next === null ? null : {
+        beginFileRename: next.beginFileRename,
+        changePathsAs: async (paths, authored, work, removed) => {
+          if (authored.author.kind === "human") deletedBy.push(authored.author.humanId);
+          const finishDebts = await next.settleAndCloseLiveSessionsForPath(paths[0]!);
+          let gone = false;
+          try {
+            const value = await work({ policy: await readWorkspaceEnginePolicy(rootPath),
+              recordDisk: async (_path, files) => [...files], moveFile: async () => false,
+              rename: async () => undefined, delete: async () => "moment", undoDelete: async () => undefined });
+            gone = removed(value).length > 0;
+            return value;
+          } finally {
+            finishDebts(gone);
+          }
+        },
+      };
     },
   };
 }
@@ -1225,6 +1232,10 @@ describe("WorkspaceFileMutationOwner", () => {
     const test = await harness({
       beforeOperation: async () => { entered.resolve(); await release.promise; },
     });
+    test.setCapture({
+      beginFileRename: vi.fn(async () => vi.fn(async () => undefined)),
+      settleAndCloseLiveSessionsForPath: vi.fn(async () => () => undefined),
+    });
     await writeFile(join(test.rootPath, "alice.md"), "text\n");
     const deleting = test.owner.deletePath(trustedEvent, {
       workspaceId: test.workspace.workspaceId,
@@ -1235,6 +1246,26 @@ describe("WorkspaceFileMutationOwner", () => {
     release.resolve();
     await expect(deleting).resolves.toMatchObject({ trashed: true });
     expect(test.deletedBy).toEqual(["account-alice"]);
+  });
+
+  it("still trashes a person's delete recoverably when History is unavailable", async () => {
+    const test = await harness({
+      trashItem: async () => {
+        throw new Error("OS trash unavailable");
+      },
+    });
+    await mkdir(join(test.rootPath, "notes"));
+    await writeFile(join(test.rootPath, "notes/a.md"), "text\n");
+    // No engine capture: nothing records the delete, and nothing refuses it.
+    await expect(test.owner.deletePath(trustedEvent, {
+      workspaceId: test.workspace.workspaceId,
+      relativePath: "notes",
+    })).resolves.toEqual({ trashed: false });
+    await expect(access(join(test.rootPath, "notes"))).rejects.toThrow();
+    const [entry] = await readdir(join(test.rootPath, ".dohc/trash"));
+    expect(await readFile(join(test.rootPath, ".dohc/trash", entry!, "a.md"), "utf8")).toBe("text\n");
+    expect(test.markDeletedUnderPath).toHaveBeenCalledWith(test.authorityId, "notes");
+    expect(test.deletedBy).toEqual([]);
   });
 
   it("settles and marks an alias delete by its physical path", async () => {

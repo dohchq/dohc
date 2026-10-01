@@ -178,9 +178,13 @@ export type MomentAuthor =
   | LinkMomentAuthor
   | AutomationMomentAuthor;
 
-// A local agent write names the person the agent works for. An automation
-// names its run's person, and none when its run has none.
-export type MomentWriteAuthor = ((AgentMomentAuthor & { onBehalfOf: string }) | HumanMomentAuthor | AutomationMomentAuthor) & { authorContext?: string };
+// A person's own write names them, as desktop main reads them. A local agent
+// write names the person the agent works for. An automation names its run's
+// person, and none when its run has none.
+export type MomentWriteAuthor =
+  | (AgentMomentAuthor & { onBehalfOf: string })
+  | Omit<HumanMomentAuthor, "onBehalfOf">
+  | AutomationMomentAuthor;
 
 type VersionedFileContentKind = "text" | "binary";
 

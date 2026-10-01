@@ -66,7 +66,6 @@ function refusingBridge(initialUpdate: Uint8Array) {
       return { accepted: false as const, reason: "test-refusal" };
     },
     onEngineYDocRemoteUpdate: () => () => undefined,
-    onEngineYDocAuthorContextChanged: () => () => undefined,
     onEngineYDocOwnerHandoff: () => () => undefined,
     prepareEngineYDocOwnerHandoff: async () => undefined,
     onEngineYDocLineageReplacement: () => () => undefined,

@@ -32,7 +32,6 @@ import {
   EngineYDocRemoteUpdateEvent,
   EngineYDocOwnerHandoff,
   EngineYDocSaveStateEvent,
-  EngineYDocAuthorContextEvent,
   ExitRoundAnswerPayload,
   ExitRoundMessage,
   ExplorerMenuCommand,
@@ -666,8 +665,6 @@ const bridge: DohcDesktopBridge = {
       EngineYDocLineageReplacementEvent,
       listener,
     ),
-  onEngineYDocAuthorContextChanged: (listener) =>
-    onEvent(CHANNELS.engineYDocAuthorContextChanged, EngineYDocAuthorContextEvent, listener),
   onEngineYDocSaveState: (listener) =>
     onEvent(CHANNELS.engineYDocSaveState, EngineYDocSaveStateEvent, listener),
 };

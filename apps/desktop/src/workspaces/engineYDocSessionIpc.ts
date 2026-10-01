@@ -6,6 +6,7 @@ import {
   type ChangeAttributionWire,
 } from "@dohc/workspace-engine-client";
 import { isEngineWorkspaceOpenRefusedError } from "@dohc/workspace-engine-client/daemon";
+import { YDOC_PENDING_MAX_RECORDS } from "@dohc/workspace-engine-client/ydoc-limits";
 import * as Y from "yjs";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 
@@ -116,7 +117,6 @@ interface EngineYDocSessionIpcOptions {
   onError: (message: string, error?: unknown) => void;
   /** The person typing on this computer: the account, or this installation's id when signed out. */
   localPersonId: () => string;
-  localAuthorContext?: (workspaceId: string) => { authorContext: string; authorContextGeneration: number };
 }
 
 interface SessionEvent {
@@ -139,6 +139,10 @@ interface EngineYDocIpcOwnedSession {
   saveSeq: EngineYDocSaveSeqState;
   artifactAssetsById: Map<string, ArtifactAssetDescriptor>;
   retiredArtifactAssets: ArtifactAssetDescriptor[];
+  // The person behind each renderer request, by request id: main's account
+  // when the request first arrived. A retry keeps that person, so an account
+  // change cannot relabel an edit main already took.
+  arrivals: Map<string, string>;
   deleted: boolean;
   // Another object took this document's path. Implies `deleted`: the
   // session is gone from this path either way, only the reason differs.
@@ -148,6 +152,17 @@ interface EngineYDocIpcOwnedSession {
   show(update: Uint8Array): void;
   markDeleted(): void;
   close: WorkspaceEngineYDocProviderSession["close"];
+}
+
+// The renderer holds no more unacknowledged records than the pending limit for
+// one document, so a request it can still retry is never forgotten here.
+function arrivalPerson(arrivals: Map<string, string>, requestId: string, current: () => string): string {
+  const pinned = arrivals.get(requestId);
+  if (pinned !== undefined) return pinned;
+  const person = current();
+  arrivals.set(requestId, person);
+  if (arrivals.size > YDOC_PENDING_MAX_RECORDS) arrivals.delete(arrivals.keys().next().value!);
+  return person;
 }
 
 /**
@@ -328,7 +343,6 @@ class DocumentMutationReservations {
 }
 
 class EngineYDocSessionIpc implements LiveDocumentSessions {
-  readonly #localAuthorContext: EngineYDocSessionIpcOptions["localAuthorContext"];
   readonly #sessionFor: EngineYDocSessionIpcOptions["sessionFor"];
   readonly #acquireWorkspace: EngineYDocSessionIpcOptions["acquireWorkspace"];
   readonly #captureFor: EngineYDocSessionIpcOptions["captureFor"];
@@ -358,7 +372,6 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
     this.#resolveDocumentPath = options.resolveDocumentPath;
     this.#onError = options.onError;
     this.#localPersonId = options.localPersonId;
-    this.#localAuthorContext = options.localAuthorContext;
     this.#documentReservations = new DocumentMutationReservations();
     this.#owner = new EngineYDocSessionOwner({
       onOutbound: (outbound) => this.#send(outbound),
@@ -619,6 +632,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
             ]),
           ),
           retiredArtifactAssets: [],
+          arrivals: new Map(),
           deleted: false,
           objectChanged: false,
           emit: signals.emit,
@@ -670,7 +684,6 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       }
       return OpenEngineYDocSessionResult.parse({
         available: true,
-        ...(!this.#isSharedView(owned.workspace) ? this.#localAuthorContext?.(owned.workspace.workspaceId) : {}),
         initialUpdate: Y.encodeStateAsUpdate(owned.provider.doc),
         ...(owned.provider.objectId ? { objectId: owned.provider.objectId } : {}),
         ...(owned.provider.versionId
@@ -755,14 +768,18 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           owned.emit({ state: "read-only", seq: input.seq });
           return { accepted: false, reason: "read-only" };
         }
+        // A renderer editor update is this computer's person typing: agent
+        // and automation writes take the collection write seam, never this
+        // IPC. Main names the person; the renderer names no one.
+        const person = arrivalPerson(owned.arrivals, input.requestId, this.#localPersonId);
         owned.provider.applyLocalUpdate(
           input.update,
           () => noteLocalEdit(owned.saveSeq, input.seq),
-          // Local edits retain main's opaque context from the original edit.
           // Shared-view admission keeps its current contract until A2.
           this.#isSharedView(owned.workspace)
-            ? { idempotencyKey: input.requestId, attribution: { actorKind: "human", onBehalfOf: this.#localPersonId() } }
-            : { idempotencyKey: input.requestId, ...(input.authorContext ? { authorContext: input.authorContext } : {}) },
+            ? { idempotencyKey: input.requestId, attribution: { actorKind: "human", onBehalfOf: person } }
+            : { idempotencyKey: input.requestId, actorOriginId: person,
+                attribution: { actorKind: "human", onBehalfOf: person, depth: 0 } },
         );
         return { accepted: true };
       },

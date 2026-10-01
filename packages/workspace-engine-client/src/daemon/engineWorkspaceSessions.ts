@@ -1219,7 +1219,6 @@ export class EngineWorkspaceSessions {
           ? {
               captureAuthor:
                 this.captureAuthors.get(sessionKey) ?? null,
-              ...(this.captureAuthors.get(sessionKey)?.authorContext ? { authorContext: this.captureAuthors.get(sessionKey)?.authorContext } : {}),
             }
           : {}),
       },

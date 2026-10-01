@@ -21,7 +21,7 @@ export function captureForWorkspace(
   },
   hooks: WorkspaceCaptureHooks,
   rustEngineSessions: EngineWorkspaceSessions,
-  options: Pick<WorkspaceEngineCaptureOptions, "settleDebounceMs" | "openSettleGate" | "localAuthorContext"> = {},
+  testSeams: Pick<WorkspaceEngineCaptureOptions, "settleDebounceMs" | "openSettleGate"> = {},
 ): WorkspaceCaptureDecision {
   // A shared view never gets a recorder: it is fed exclusively by
   // the share's filtered pull, and a watcher would re-journal materialized
@@ -43,7 +43,7 @@ export function captureForWorkspace(
       onKeptFiles: hooks.onKeptFiles,
       onRecoveryUnavailable: hooks.onRecoveryUnavailable,
       rustEngineSessions,
-      ...options,
+      ...testSeams,
     }),
   };
 }

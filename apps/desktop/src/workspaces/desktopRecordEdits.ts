@@ -4,12 +4,13 @@ import {
   type CollectionRecordEditAdapter,
   type CollectionRecordEditContext,
   type CreateCollectionRecordInput,
+  type RecordEditSession,
 } from "@dohc/automation-executor/collection-record-edits";
 import { readWorkspaceText } from "./workspaceAssets";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
 import { requirePublishedWrite, type WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
-/** This computer's person, with main's signed evidence for one workspace. */
+/** This computer's person, as desktop main read them. */
 export type LocalPersonAuthor = Extract<MomentWriteAuthor, { kind: "human" }>;
 
 /** What this desktop's record writes in one workspace run over. Main supplies it. */
@@ -31,22 +32,33 @@ export interface DesktopRecordEditHost {
   signal: AbortSignal;
 }
 
+// A person's field edit names the person main read. An agent's or an
+// automation's keeps the person its run names.
+function byPerson(session: RecordEditSession, personId: string): RecordEditSession {
+  return {
+    applyDecidedLocalUpdate: (decide, onArmed, options) => session.applyDecidedLocalUpdate(decide, onArmed,
+      options.attribution?.actorKind === "human"
+        ? { ...options, actorOriginId: personId, attribution: { actorKind: "human", onBehalfOf: personId, depth: 0 } }
+        : options),
+    settleNow: options => session.settleNow(options),
+    close: () => session.close(),
+  };
+}
+
 /**
  * The record edit context over this desktop's capture. A record opens as the
- * capture's live document session. Creation goes through the engine with the
- * author main admitted. Each settled capture pass announces record adoption.
- * Every write in the context carries the one person the host read, so an
- * account change during the write cannot relabel any of its updates.
+ * capture's live document session. Creation goes through the engine. Each
+ * settled capture pass announces record adoption. A person's writes in the
+ * context name the one person the host read, so an account change during the
+ * write cannot relabel them.
  */
 export function desktopRecordEditContext(host: DesktopRecordEditHost): CollectionRecordEditContext {
   const { capture, workspaceRoot, signal, person } = host;
-  const pinned = person.authorContext === undefined ? {} : { authorContext: person.authorContext };
   return {
-    openRecord: (path) => capture.openRecordSession(path, person.authorContext),
+    openRecord: async (path) => byPerson(await capture.openRecordSession(path), person.humanId),
     async createFile(path, text, author) {
-      const admittedAuthor = author.kind === "automation" || author.kind === "agent"
-        ? { ...author, ...pinned } : person;
-      requirePublishedWrite(path, await capture.writeAuthoredFile(join(workspaceRoot, path), text, admittedAuthor, {
+      const named = author.kind === "automation" || author.kind === "agent" ? author : person;
+      requirePublishedWrite(path, await capture.writeAuthoredFile(join(workspaceRoot, path), text, named, {
         createOnly: true,
         signal,
       }));
@@ -64,15 +76,15 @@ export function desktopRecordEditContext(host: DesktopRecordEditHost): Collectio
  * request arrives, before it waits for its workspace and engine capture.
  */
 export async function createRecordByHand<Operation>(
-  input: Omit<CreateCollectionRecordInput, "author"> & { workspaceId: string },
+  input: Omit<CreateCollectionRecordInput, "author">,
   host: {
     author: CreateCollectionRecordInput["author"];
-    localPerson(workspaceId: string): Promise<LocalPersonAuthor>;
+    localPerson(): Promise<LocalPersonAuthor>;
     withWorkspaceOperation<T>(work: (operation: Operation) => Promise<T>): Promise<T>;
     editContext(operation: Operation, person: LocalPersonAuthor): Promise<CollectionRecordEditContext>;
   },
 ): ReturnType<typeof runCollectionRecordCreation> {
-  const person = await host.localPerson(input.workspaceId);
+  const person = await host.localPerson();
   return runCollectionRecordCreation(work => host.withWorkspaceOperation(async operation =>
     work(await host.editContext(operation, person))), { ...input, author: host.author });
 }

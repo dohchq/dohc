@@ -142,7 +142,6 @@ import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
 import { collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
 import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./workspaces/desktopRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
-import { prepareDeleteWorkspacePathAs } from "./workspaces/workspaceFileMoves";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
 
@@ -305,7 +304,7 @@ import { createWorkspaceRefusalNotices } from "./notices/workspaceRefusalNotices
 import { noticeReachFor } from "./notices/noticeReach";
 import { createCloudCredentialStore } from "./workspaces/cloudCredentialStore";
 import { createLastKnownDmRequestLanesCache } from "./workspaces/dmRequests";
-import { captureLocalAuthorContext, readOrCreateLocalInstallationIdentity, type LocalInstallationIdentity } from "./workspaces/localInstallationIdentity";
+import { readOrCreateLocalInstallationId } from "./workspaces/localInstallationIdentity";
 import { createLocalAuthorship } from "./workspaces/localAuthorship";
 import {
   createCloudLogin,
@@ -808,28 +807,6 @@ function notifyCloudSessionChangedWithKey(
   }
 }
 
-// Runs inside every credential change. An identity it cannot read must not
-// stop the rest of that change; editors keep their earlier context, and each
-// edit that needs a new one refuses on its own.
-function notifyLocalAuthorContextChanged(): void {
-  let events: Array<{ workspaceId: string; authorContext: string; authorContextGeneration: number }>;
-  try {
-    events = listWorkspaces().filter(workspace => !workspace.shareView).map(workspace => ({
-      workspaceId: workspace.workspaceId,
-      authorContext: localAuthorContext(workspace.workspaceId),
-      authorContextGeneration: localAuthorContextGeneration,
-    }));
-  } catch (error) {
-    console.error("[desktop] could not tell editors who is editing after the account changed", error);
-    return;
-  }
-  for (const event of events) {
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send(CHANNELS.engineYDocAuthorContextChanged, event);
-    }
-  }
-}
-
 function workspaceSummaries(): WorkspaceSummary[] {
   return workspaceSummariesFrom(listWorkspaces());
 }
@@ -879,10 +856,8 @@ let credentialCacheGeneration = 0;
 // placeholder null never relabels edits made meanwhile.
 const localAuthorship = createLocalAuthorship({
   installationId: () => localInstallationId(),
-  sign: (workspaceId, personId) => captureLocalAuthorContext(localInstallationIdentity(), workspaceId, personId),
   loadCredentials: () => credentialSessionCache.warm(() => cloudLogin().credentials()),
 });
-let localAuthorContextGeneration = 0;
 let ownerDeliveryCredentialLifetime = new AbortController();
 // Share kind is relay/account-scoped, not workspace-scoped. Keep one cache
 // across physical workspaces in the same session, and clear it whenever that
@@ -894,11 +869,7 @@ const credentialSessionCache =
     ownerDeliveryCredentialLifetime = new AbortController();
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
-    if (settled) {
-      localAuthorship.credentialsSettled(snapshot.credentials?.userId ?? null);
-      localAuthorContextGeneration += 1;
-      notifyLocalAuthorContextChanged();
-    }
+    if (settled) localAuthorship.credentialsSettled(snapshot.credentials?.userId ?? null);
     void ownerDatasetCopies.credentialsChanged(snapshot.credentials ? datasetCopyOwnerKey(snapshot.credentials) : null)
       .catch(error => console.error("Collection copy cleanup failed", error));
     // A credential load publishes a temporary null first. Keep saved pages until the account is known.
@@ -2074,7 +2045,7 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       },
       hooks,
       requireEngineSessions(),
-      { ...testCaptureSeams(), localAuthorContext: () => localAuthorContext(workspace.workspaceId) },
+      testCaptureSeams(),
     ),
   onWatcherBatch,
 });
@@ -2609,13 +2580,12 @@ function localUserDisplayName(): string {
 // The opaque per-install reactor id used when signed out (no cloud user id). A
 // stable uuid persisted in stateDir — never the email — so a signed-out
 // reaction cell is stable across restarts without leaking PII into the CRDT.
-// Memoized after the first read; the sync fs touch happens at most once.
-let cachedLocalInstallationIdentity: LocalInstallationIdentity | null = null;
-function localInstallationIdentity(): LocalInstallationIdentity {
-  return cachedLocalInstallationIdentity ??= readOrCreateLocalInstallationIdentity(join(stateDir(), "dohc-local-id.json"));
-}
+// Memoized after the first read, so the sync fs touch happens at most once
+// and an id that could not be saved stays the same for this process.
+let cachedLocalInstallationId: string | null = null;
 function localInstallationId(): string {
-  return localInstallationIdentity().id;
+  return cachedLocalInstallationId ??= readOrCreateLocalInstallationId(join(stateDir(), "dohc-local-id.json"),
+    (message, error) => console.error(`[desktop] ${message}`, error));
 }
 
 // The local user's stable, OPAQUE reactor identity (WS-MU-C2). This value
@@ -2625,22 +2595,17 @@ function localInstallationId(): string {
 // when signed in; that is forward-compatible with MU-C0, which verifies
 // authorId === actor.userId server-side. Signed out falls back to a persisted
 // per-install uuid. The email→display-name mapping stays LOCAL in
-// localUserDisplayName().
+// localUserDisplayName(). It is the account the credential cache last settled
+// on, so the null a credential reload publishes while it reads the store never
+// credits this person's work to the installation.
 function localUserId(): string {
-  return cachedCredentials?.userId ?? localInstallationId();
-}
-
-// The engine's evidence that this computer's person made an edit in one
-// workspace. Taken when the edit occurs, so a later account change cannot
-// relabel it.
-function localAuthorContext(workspaceId: string): string {
-  return localAuthorship.authorContext(workspaceId);
+  return localAuthorship.personId();
 }
 
 // The person a request is made by, read when it arrives, before it waits for
 // its workspace.
-function localPerson(workspaceId: string): Promise<LocalPersonAuthor> {
-  return localAuthorship.person(workspaceId);
+function localPerson(): Promise<LocalPersonAuthor> {
+  return localAuthorship.person();
 }
 
 // The verified relay identity for a signed-in chat message (WS-MU-C0). A
@@ -3992,7 +3957,7 @@ function createCollectionAutomationsFor(
   const { workspaceId, canonicalRootPath: rootPath, attachmentId } = binding;
   const workspace = { workspaceId, rootPath, attachmentId };
   const recordWrites: CollectionAutomationsOptions["withRecordWrites"] = async (signal, work) => {
-    const person = await localPerson(workspaceId);
+    const person = await localPerson();
     return await withPhysicalWorkspaceOperation(workspaceId, async (operation) => {
       if (operation.workspace.attachmentId !== attachmentId) {
         throw new Error("This workspace was closed.");
@@ -4316,8 +4281,6 @@ const { startDesktopCliServer } = createDesktopCliServer({
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
   localPersonId: localUserId,
-  localAuthorContext: workspaceId => ({ authorContext: localAuthorContext(workspaceId),
-    authorContextGeneration: localAuthorContextGeneration }),
   sessionFor: (sender) =>
     rendererWorkspaceSessions.current(sender as WebContents),
   acquireWorkspace: (workspaceId) => {
@@ -4450,7 +4413,6 @@ const { refreshDispatchTray, refreshSystemThemeDesktopIcons, dispatchKeepsRunnin
 });
 
 const desktopEngine = createDesktopEngine({
-  authorContextSecret: () => localInstallationIdentity().authorContextSecret,
   onWorkspaceOpened: workspaceId => {
     void noticeStore().refreshRefusals(workspaceId).catch(error => {
       console.warn("[notices] could not refresh workspace sync refusals after open", error);
@@ -4789,18 +4751,8 @@ const workspaceFileMutations = createWorkspaceFileMutationOwner({
       },
     ),
   shareViewFiles,
+  trashItem: (path) => shell.trashItem(path),
   localPerson,
-  deleteLocalPath: async ({ workspace, authorityId, capture, yDocSessions, assertCurrent }, path, person) => {
-    if (!capture) throw new Error("dohc could not record this delete in History. Restart dohc to try again.");
-    const complete = await prepareDeleteWorkspacePathAs(
-      { workspace: { ...workspace, attachmentId: authorityId }, assertCurrent }, path, person,
-      { capture, requestId: randomUUID(), trashItem: target => shell.trashItem(target),
-        markDeleted: target => yDocSessions.markDeletedUnderPath(authorityId, target) },
-    );
-    const result = await complete();
-    if (!result.ok) throw new Error(result.reason);
-    return { trashed: result.trashed };
-  },
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
   shareViewEdited: (workspaceId) => shareDirectWrites?.shareViewEdited(workspaceId),
   logError: (message, error) => console.error(message, error),

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
+import type { RecordEditSession, RecordUpdateOptions } from "@dohc/automation-executor/collection-record-edits";
 import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./desktopRecordEdits";
 import { AuthoredTextChangedError } from "./workspaceEngineCapture";
 import { deferred } from "../testing/deferred";
@@ -17,7 +18,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-const personNamed = (humanId: string): LocalPersonAuthor => ({ kind: "human", humanId, authorContext: `context:${humanId}` });
+const personNamed = (humanId: string): LocalPersonAuthor => ({ kind: "human", humanId });
 
 async function scratchRoot(): Promise<string> {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "dohc-record-edits-"));
@@ -57,15 +58,11 @@ describe("desktopRecordEditContext createFile for an automation", () => {
   });
 });
 
-it("hand creation uses the person main captured instead of a caller's claim", async () => {
+it("names main's person on a hand-made record and the run's person on an automation's or agent's", async () => {
   const writes: Array<Parameters<DesktopRecordEditHost["capture"]["writeAuthoredFile"]>> = [];
-  const opened: Array<Parameters<DesktopRecordEditHost["capture"]["openRecordSession"]>> = [];
   const context = desktopRecordEditContext({
     capture: {
-      openRecordSession: (...args) => {
-        opened.push(args);
-        return Promise.reject(new Error("not used"));
-      },
+      openRecordSession: () => Promise.reject(new Error("not used")),
       writeAuthoredFile: async (...args) => {
         writes.push(args);
         return { resolvedAbsolutePath: args[0], materializeOutcome: "applied" };
@@ -77,14 +74,46 @@ it("hand creation uses the person main captured instead of a caller's claim", as
     onCaptureSettled: () => () => undefined,
     signal: new AbortController().signal,
   });
-  await context.createFile("tasks/hand.md", "hand made", createLocalChangeAuthor("Hand edit"));
-  await context.createFile("tasks/run.md", "run made", automation);
-  await expect(context.openRecord("tasks/hand.md")).rejects.toThrow("not used");
-  expect(writes[0]?.[2]).toEqual(personNamed("local:installation"));
-  expect(writes[0]?.[3]?.createOnly).toBe(true);
-  // An automation keeps its declared provenance under the same person.
-  expect(writes[1]?.[2]).toEqual({ ...automation, authorContext: "context:local:installation" });
-  expect(opened).toEqual([["tasks/hand.md", "context:local:installation"]]);
+  // A run Bob's synced edit started, a scheduled run, and an agent working for this person.
+  const forBob = { ...automation, onBehalfOf: "bob" };
+  const scheduled = { kind: "automation", automationId: "collection:tasks#weekly", depth: 0,
+    run: { claimId: "atc_weekly", automationName: "Weekly" } } as const;
+  const agent = { kind: "agent", agentId: "cli-agent", onBehalfOf: "local:installation", depth: 0 } as const;
+  await context.createFile("tasks/hand.md", "hand made", createLocalChangeAuthor("Someone else"));
+  await context.createFile("tasks/bob.md", "run made", forBob);
+  await context.createFile("tasks/weekly.md", "run made", scheduled);
+  await context.createFile("tasks/agent.md", "agent made", agent);
+  expect(writes.map(write => write[2])).toEqual([personNamed("local:installation"), forBob, scheduled, agent]);
+  expect(writes.every(write => write[3]?.createOnly === true)).toBe(true);
+});
+
+it("names main's person on a person's field edit and keeps an automation's or agent's own", async () => {
+  const applied: RecordUpdateOptions[] = [];
+  const session: RecordEditSession = {
+    applyDecidedLocalUpdate: async (_decide, _onArmed, options) => { applied.push(options); return true; },
+    settleNow: async () => undefined,
+    close: async () => undefined,
+  };
+  const context = desktopRecordEditContext({
+    capture: { openRecordSession: async () => session, writeAuthoredFile: () => Promise.reject(new Error("not used")) },
+    workspaceRoot: await scratchRoot(),
+    person: personNamed("account-alice"),
+    withAdapter: async () => null,
+    onCaptureSettled: () => () => undefined,
+    signal: new AbortController().signal,
+  });
+  const record = await context.openRecord("tasks/one.md");
+  const forBob = { actorOriginId: automation.automationId,
+    attribution: { actorKind: "automation" as const, onBehalfOf: "bob", depth: 1, run: automation.run } };
+  const agent = { actorOriginId: "cli-agent", attribution: { actorKind: "agent" as const, onBehalfOf: "account-alice", depth: 0 } };
+  await record.applyDecidedLocalUpdate(() => null, () => undefined, { attribution: { actorKind: "human" }, idempotencyKey: "typed" });
+  await record.applyDecidedLocalUpdate(() => null, () => undefined, forBob);
+  await record.applyDecidedLocalUpdate(() => null, () => undefined, agent);
+  expect(applied).toEqual([
+    { actorOriginId: "account-alice", attribution: { actorKind: "human", onBehalfOf: "account-alice", depth: 0 }, idempotencyKey: "typed" },
+    forBob,
+    agent,
+  ]);
 });
 
 it("a hand-made record keeps the person who asked while it waits for its workspace", async () => {
@@ -93,7 +122,7 @@ it("a hand-made record keeps the person who asked while it waits for its workspa
   const entered = deferred();
   const release = deferred();
   const writes: Array<Parameters<DesktopRecordEditHost["capture"]["writeAuthoredFile"]>> = [];
-  const creating = createRecordByHand({ workspaceId: "workspace", collectionPath: "tasks", name: "hand" }, {
+  const creating = createRecordByHand({ collectionPath: "tasks", name: "hand" }, {
     author: createLocalChangeAuthor("Alice"),
     localPerson: async () => personNamed(account),
     // The workspace operation and its engine capture are still opening.

@@ -87,7 +87,6 @@ async function harness() {
   const openYDocSession = vi.fn<WorkspaceEngineCapture["openYDocSession"]>(async () => provider);
   const ydoc = createEngineYDocSessionIpc({
     localPersonId: () => "person-local",
-    localAuthorContext: (workspaceId) => ({ authorContext: `context:${workspaceId}`, authorContextGeneration: 0 }),
     sessionFor: (value) => value === sender ? renderers.current(sender) : undefined,
     acquireWorkspace: (id) => {
       const lease = authority.acquire(id);
@@ -743,14 +742,12 @@ describe("registered engine-store repair", () => {
 describe("registered engine Y.Doc ownership", () => {
   it("uses the same document owner for IPC, file mutation, artifact reads, lineage and close", async () => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.engineYDocOpen, openPayload)).resolves.toMatchObject({
-      available: true, lineageGeneration: 1, authorContext: "context:workspace", authorContextGeneration: 0,
-    });
+    await expect(h.invoke(CHANNELS.engineYDocOpen, openPayload)).resolves.toMatchObject({ available: true, lineageGeneration: 1 });
     await expect(h.ydoc.fileMutationPort().withDocumentUnowned(h.physical.attachmentId, openPayload.path, async () => true)).rejects.toThrow("engine owns this live document");
     const update = new Uint8Array([1]);
-    expect(h.invoke(CHANNELS.engineYDocApplyUpdate, { sessionId: openPayload.sessionId, update, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111", seq: 1, authorContext: "context:workspace" })).toEqual({ accepted: true });
-    // A local editor's update carries main's context and claims no person of its own.
-    expect(h.provider.applyLocalUpdate).toHaveBeenCalledWith(update, expect.any(Function), { idempotencyKey: "11111111-1111-4111-8111-111111111111", authorContext: "context:workspace" });
+    expect(h.invoke(CHANNELS.engineYDocApplyUpdate, { sessionId: openPayload.sessionId, update, lineageGeneration: 1, requestId: "11111111-1111-4111-8111-111111111111", seq: 1 })).toEqual({ accepted: true });
+    expect(h.provider.applyLocalUpdate).toHaveBeenCalledWith(update, expect.any(Function), { idempotencyKey: "11111111-1111-4111-8111-111111111111",
+      actorOriginId: "person-local", attribution: { actorKind: "human", onBehalfOf: "person-local", depth: 0 } });
     await expect(h.invoke(CHANNELS.engineYDocReadArtifactAsset, { sessionId: openPayload.sessionId, descriptor })).resolves.toEqual({ descriptor, bytes: new Uint8Array([1, 2, 3]) });
     h.openYDocSession.mock.calls[0]![0].onLineageReplaced?.(new Uint8Array([9]), []);
     expect(h.invoke(CHANNELS.engineYDocAcknowledgeLineageReplacement, { sessionId: openPayload.sessionId, lineageGeneration: 2 })).toEqual({ accepted: true, updates: [] });

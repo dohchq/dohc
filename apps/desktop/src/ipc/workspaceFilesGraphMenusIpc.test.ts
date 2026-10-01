@@ -75,8 +75,8 @@ async function harness() {
         markDeletedUnderPath: () => undefined,
       },
     })),
-    shareViewFiles: shareFiles, localPerson: async () => ({ kind: "human", humanId: "local:test" }),
-    deleteLocalPath: async () => { throw new Error("trash unavailable"); },
+    shareViewFiles: shareFiles, trashItem: async () => { throw new Error("trash unavailable"); },
+    localPerson: async () => ({ kind: "human", humanId: "local:test" }),
     notifyRenderer: () => undefined, shareViewEdited: () => undefined, logError: () => undefined,
   });
   const openDialog = vi.fn(async () => ({ canceled: true, filePaths: [] as string[] }));

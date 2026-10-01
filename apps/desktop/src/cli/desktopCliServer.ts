@@ -94,7 +94,7 @@ interface DesktopCliServerDependencies<State> {
     signal: AbortSignal,
   ): Promise<CollectionRecordEditContext>;
   /** This computer's person, read when a write is requested. */
-  localPerson(workspaceId: string): Promise<LocalPersonAuthor>;
+  localPerson(): Promise<LocalPersonAuthor>;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
     work: (adapter: VersionedLiveAdapter) => Promise<Result>,
@@ -175,7 +175,7 @@ export function createDesktopCliServer<State>(
     const cliCollectionEdit = async <T>(
       work: (context: CollectionRecordEditContext) => Promise<T>,
     ): Promise<T> => {
-      const person = await localPerson(workspace.workspaceId);
+      const person = await localPerson();
       return await withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
         await work(
           await collectionEditContextFor(

@@ -188,17 +188,14 @@ async function startupSmokeDone(client: FakeClient): Promise<void> {
 }
 
 describe("Rust engine daemon lifecycle", () => {
-  it("rotates transport credentials while preserving the private author context credential", async () => {
+  it("generates a distinct auth token for every launch", async () => {
     const tokens: string[] = [];
-    const authorSecrets: Array<string | undefined> = [];
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
       initialBackoffMs: 0,
-      authorContextSecret: "a".repeat(64),
       launch: async (options) => {
         tokens.push(options.authToken);
-        authorSecrets.push(options.authorContextSecret);
         exits.push(options.onExit);
         return new FakeClient();
       },
@@ -211,7 +208,6 @@ describe("Rust engine daemon lifecycle", () => {
     expect(tokens[0]).toMatch(/^[0-9a-f]{64}$/);
     expect(tokens[1]).toMatch(/^[0-9a-f]{64}$/);
     expect(tokens[1]).not.toBe(tokens[0]);
-    expect(authorSecrets).toEqual(["a".repeat(64), "a".repeat(64)]);
     await lifecycle.stop();
   });
 

@@ -145,7 +145,6 @@ describe("engine markdown source view", () => {
         },
       ),
       onEngineYDocOwnerHandoff: () => () => undefined,
-      onEngineYDocAuthorContextChanged: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       // The engine editor subscribes to real settle outcomes on mount (the

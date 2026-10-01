@@ -151,10 +151,10 @@ impl EngineService {
     pub(crate) async fn dispatch(
         &self,
         ctx: RequestContext,
-        mut request: Request,
+        request: Request,
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
-        self.stamp_local_authorship(&mut request)?;
+        self.ensure_admissible_author(&request)?;
         self.ensure_configured_host_method(&ctx, &request)?;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
         self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
@@ -274,10 +274,6 @@ impl EngineService {
             "liveApplication.register" => {
                 self.live_application_register(&ctx, request.workspace, request.params)
                     .await?
-            }
-            #[cfg(feature = "harness")]
-            "harness.authorContext" => {
-                self.harness_author_context(request.workspace.as_ref(), request.params)?
             }
             "engine.ping" => engine_ping(),
             "workspace.open" => self.workspace_open(&ctx, request.params).await?,
@@ -506,10 +502,6 @@ impl EngineService {
             }
             "capture.moveFile" => {
                 self.capture_move_file(request.workspace, request.params)
-                    .await?
-            }
-            "capture.restoreTrashed" => {
-                self.capture_restore_trashed(request.workspace, request.params)
                     .await?
             }
             "versions.active" => {
@@ -1257,7 +1249,6 @@ mod tests {
             "capture.reconcile",
             "capture.release",
             "capture.renew",
-            "capture.restoreTrashed",
             "capture.setAuthor",
             "chats.agentReadState.listUnreadThreads",
             "chats.agentReadState.markThreadRead",

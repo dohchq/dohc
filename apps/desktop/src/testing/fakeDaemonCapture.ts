@@ -388,19 +388,6 @@ export function createFakeDaemonCapture(input: {
           await rename(from, to);
           return { id: request.id, result: { moved: true } };
         }
-        case "capture.restoreTrashed": {
-          if (!nativeMove) return null;
-          // The engine's one no-replace rename of the whole staged entry;
-          // nothing races it on a test's scratch disk.
-          const from = join(rootPath, ".dohc", "trash", String(params.trashName));
-          const to = join(rootPath, String(params.toPath));
-          const present = (absolute: string) => lstat(absolute).then(() => true, () => false);
-          // The source first, as the engine reads it before the rename.
-          if (!(await present(from))) return { id: request.id, result: { restored: false, reason: "source-missing" } };
-          if (await present(to)) return { id: request.id, result: { restored: false, reason: "destination-exists" } };
-          await rename(from, to);
-          return { id: request.id, result: { restored: true } };
-        }
         case "ydoc.open": {
           if (!ydoc) return null;
           const response = await ydoc.sendRequest(request);

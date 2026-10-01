@@ -354,7 +354,6 @@ export const CHANNELS = {
   engineYDocRemoteUpdate: "desktop:engine-ydoc-remote-update",
   engineYDocLineageReplacement: "desktop:engine-ydoc-lineage-replacement",
   engineYDocSaveState: "desktop:engine-ydoc-save-state",
-  engineYDocAuthorContextChanged: "desktop:engine-ydoc-author-context-changed",
   menuCommand: "desktop:menu-command",
   workspaceActivated: "desktop:workspace-activated",
   updateState: "desktop:update-state",

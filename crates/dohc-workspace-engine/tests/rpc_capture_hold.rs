@@ -18,7 +18,7 @@ use std::time::Duration;
 const WORKSPACE_ID: &str = "ws-capture-hold";
 
 async fn open(scratch: &ScratchDir) -> (InProcessTransport<EngineService>, WorkspaceHandle) {
-    let transport = InProcessTransport::new(Arc::new(authored_service()));
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let params =
         json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID });
     let opened = transport
@@ -155,59 +155,6 @@ async fn a_hold_keeps_capture_out_until_release_and_a_write_under_an_ended_hold_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_trashed_entry_returns_to_its_place_only_under_a_live_hold() {
-    let scratch = ScratchDir::new().expect("scratch");
-    write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let root = scratch.path();
-    write_file(root, ".dohc/trash/1-a-tasks/hand.md", b"hand");
-    write_file(root, ".dohc/trash/1-a-tasks/build/out.js", b"built");
-    let (transport, handle) = open(&scratch).await;
-    let hold = call(&transport, &handle, 10, "capture.hold", json!({})).await["holdId"].clone();
-    let params = json!({ "holdId": hold, "trashName": "1-a-tasks", "toPath": "tasks" });
-    let restored = call(
-        &transport,
-        &handle,
-        11,
-        "capture.restoreTrashed",
-        params.clone(),
-    )
-    .await;
-    assert_eq!(restored, json!({ "restored": true }));
-    assert_eq!(
-        std::fs::read(root.join("tasks/build/out.js")).unwrap(),
-        b"built"
-    );
-    assert!(!root.join(".dohc/trash/1-a-tasks").exists());
-    let again = call(
-        &transport,
-        &handle,
-        12,
-        "capture.restoreTrashed",
-        params.clone(),
-    )
-    .await;
-    assert_eq!(
-        again,
-        json!({ "restored": false, "reason": "source-missing" })
-    );
-    call(
-        &transport,
-        &handle,
-        13,
-        "capture.release",
-        json!({ "holdId": hold }),
-    )
-    .await;
-
-    write_file(root, ".dohc/trash/2-b-note.md", b"note");
-    let params = json!({ "holdId": hold, "trashName": "2-b-note.md", "toPath": "note.md" });
-    let refused = call_error(&transport, &handle, 14, "capture.restoreTrashed", params).await;
-    assert_eq!(refused.message, "capture-hold-ended");
-    assert!(root.join(".dohc/trash/2-b-note.md").exists());
-    assert!(!root.join("note.md").exists());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn check_move_refuses_an_author_history_would_refuse_before_anything_changes() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
@@ -231,15 +178,7 @@ async fn check_move_refuses_an_author_history_would_refuse_before_anything_chang
             params.clone(),
         )
         .await;
-        assert_eq!(
-            refused.message,
-            if author["onBehalfOf"] == "person\n1" {
-                "author-context-required"
-            } else {
-                "invalid-metadata"
-            },
-            "{params}"
-        );
+        assert_eq!(refused.message, "invalid-metadata", "{params}");
     }
     let author = json!({ "kind": "agent", "agentId": "Test agent", "onBehalfOf": "person-1" });
     let params = json!({ "versionId": "main", "path": "notes.txt", "author": author });

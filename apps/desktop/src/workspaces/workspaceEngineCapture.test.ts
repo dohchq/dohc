@@ -85,7 +85,6 @@ const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
 interface CaptureOptions {
-  localAuthorContext?: () => string;
   store?: CaptureVersionedTextStore;
   now?: () => number;
   createId?: () => string;
@@ -4136,82 +4135,37 @@ it.each(["agent", "typing"])("reopens after a daemon crash by replaying original
   seed.destroy(); source.destroy();
 });
 
-it("pins main's person before edits wait in the document queue", async () => {
-  const root = await createTestScratch("dohc-person-queue-");
-  const loopback = new VersionedLoopbackEngine();
-  const path = "notes/people.txt";
-  loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, text: "seed" });
-  const seed = new Y.Doc();
-  seed.getText("plainText").insert(0, "seed");
-  const initial = Y.encodeStateAsUpdate(seed);
-  const source = new Y.Doc();
-  Y.applyUpdate(source, initial);
-  const originals: Uint8Array[] = [];
-  source.on("update", update => originals.push(new Uint8Array(update)));
-  for (const text of ["offline", "alice", "bob", "offline again"]) {
-    source.getText("plainText").insert(source.getText("plainText").length, text);
-  }
-  const entered = deferred<void>();
-  const release = deferred<void>();
-  const recorded: Array<Parameters<EngineYdocProviderSession["applyLocalUpdate"]>[1]> = [];
-  const sessions = mockLiveSessions(loopback);
-  let personId = "local:installation";
-  const engine = capture(root, {
-    rustEngineSessions: sessions,
-    localAuthorContext: () => "context:" + personId,
-    openRustYDocProviderSession: async options => {
-      const doc = new Y.Doc();
-      Y.applyUpdate(doc, initial);
-      return {
-        doc, initialUpdate: initial, contentKind: "plaintext", path: options.path,
-        head: "present", lineage: "existing", unsettled: false,
-        async applyLocalUpdate(update, originalOptions) {
-          recorded.push(structuredClone(originalOptions));
-          if (recorded.length === 1) { entered.resolve(); await release.promise; }
-          Y.applyUpdate(doc, update);
-        },
-        settleNow: async () => ({ momentId: "person-moment", path: options.path, sha256: "a".repeat(64),
-          content: doc.getText("plainText").toString(), materialized: true,
-          projection: { contentKind: "plaintext", sourceStateVectorSha256: "b".repeat(64), destructive: false } }),
-        close: async () => undefined, evict: async () => undefined,
-      } satisfies EngineYdocProviderSession;
-    },
-  });
-  const session = await engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
-  const pending = [session.applyDecidedLocalUpdate(() => originals[0]!)];
-  await entered.promise;
-  personId = "alice";
-  pending.push(session.applyDecidedLocalUpdate(() => originals[1]!));
-  personId = "bob";
-  pending.push(session.applyDecidedLocalUpdate(() => originals[2]!));
-  personId = "local:installation";
-  pending.push(session.applyDecidedLocalUpdate(() => originals[3]!));
-  release.resolve();
-  await Promise.all(pending);
-  expect(recorded.map(original => original?.authorContext)).toEqual([
-    "context:local:installation", "context:alice", "context:bob", "context:local:installation",
-  ]);
-  await session.close({ settle: false });
+it("records a person's own write as a local file edit, and an agent's under its run's person", async () => {
+  const root = await createTestScratch("dohc-person-authored-");
+  const requests: Request[] = [];
+  const engine = capture(root, { rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine(), requests) });
+  const person = { kind: "human", humanId: "local:installation" } as const;
+  // A run Bob's synced edit started works for Bob, whoever is signed in here.
+  const agent = { kind: "agent" as const, agentId: "agent-a", onBehalfOf: "bob", agentRunId: "run-a" };
+  await engine.writeAuthoredFile(join(root, "hand.md"), "hand\n", person, { createOnly: true });
+  const written = engine.writeAuthoredFile(join(root, "agent.txt"), "agent text\n", agent);
+  // The caller changes its object while the write waits for its turn.
+  Object.assign(agent, { onBehalfOf: "mallory", agentRunId: "run-other" });
+  await written;
+  expect(requests.filter(request => request.method === VERSIONED_METHOD.textWrite)
+    .map(request => [(request.params as { path: string }).path, (request.params as { origin: string }).origin]))
+    .toEqual([["hand.md", "local-file"], ["agent.txt", "api"]]);
+  expect(await liveMomentAuthors(engine)).toEqual([[person],
+    [{ kind: "agent", agentId: "agent-a", onBehalfOf: "bob", agentRunId: "run-a" }]]);
   await engine.stop();
-  seed.destroy(); source.destroy();
 });
 
-it("pins main's person when an authored write is requested, not when it runs", async () => {
-  const root = await createTestScratch("dohc-person-authored-");
-  const loopback = new VersionedLoopbackEngine();
-  loopback.admitAuthorContextForTest("context:alice", "alice");
+it("names the run's person as capture's author, whoever is signed in here", async () => {
+  const root = await createTestScratch("dohc-run-person-");
   const requests: Request[] = [];
-  const sessions = mockLiveSessions(loopback, requests);
-  let personId = "alice";
-  const engine = capture(root, { rustEngineSessions: sessions, localAuthorContext: () => "context:" + personId });
-  const written = engine.writeAuthoredFile(join(root, "agent.txt"), "agent text\n",
-    { kind: "agent", agentId: "agent-a", onBehalfOf: "mallory", agentRunId: "run-a" });
-  // The write waits for its turn on the capture chain; the account changes first.
-  personId = "bob";
-  await written;
-  expect(requests.find(request => request.method === VERSIONED_METHOD.textWrite)?.params)
-    .toMatchObject({ authorContext: "context:alice" });
-  // The engine replaces the declared person; the agent stays declared provenance.
-  expect(await liveMomentAuthors(engine)).toEqual([[{ kind: "agent", agentId: "agent-a", onBehalfOf: "alice", agentRunId: "run-a" }]]);
+  const engine = capture(root, { rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine(), requests) });
+  const run = { agentId: "dohc-mcp", onBehalfOf: "bob", agentRunId: "run-bob", depth: 2 };
+  const setting = engine.setActiveAgentRun(run);
+  // The caller changes its object while the change waits for its turn.
+  Object.assign(run, { onBehalfOf: "mallory", agentRunId: "run-other", depth: 0 });
+  await setting;
+  expect(requests.find(request => request.method === "capture.setAuthor")?.params).toEqual({
+    author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "bob", agentRunId: "run-bob", depth: 2 },
+  });
   await engine.stop();
 });

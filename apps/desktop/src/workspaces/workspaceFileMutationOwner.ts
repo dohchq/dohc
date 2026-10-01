@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 
 import {
@@ -37,12 +38,12 @@ import {
 } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import type { LocalPersonAuthor } from "./desktopRecordEdits";
+import { deleteWorkspacePathByHand } from "./workspaceFileMoves";
 import {
   createFile,
   createFolder,
   movePath,
   normalizeWorkspaceMovePaths,
-  prepareWorkspaceDelete,
   prepareWorkspaceMove,
 } from "./workspaceFiles";
 
@@ -98,10 +99,7 @@ export interface WorkspaceFileMutationAuthority<
   assertCurrent(): void;
 }
 
-type MutationCapture = Pick<
-  WorkspaceEngineCapture,
-  "beginFileRename" | "settleAndCloseLiveSessionsForPath" | "changePathsAs"
->;
+type MutationCapture = Pick<WorkspaceEngineCapture, "beginFileRename" | "changePathsAs">;
 
 function assertWritableWorkspace(
   workspace: WorkspaceFileMutationWorkspace,
@@ -128,13 +126,9 @@ export function createWorkspaceFileMutationOwner<
     ) => Promise<Result>,
   ): Promise<Result>;
   shareViewFiles: Pick<ShareViewFiles, "change">;
+  trashItem(path: string): Promise<void>;
   /** This computer's person, read when a request arrives. */
-  localPerson(workspaceId: string): Promise<LocalPersonAuthor>;
-  deleteLocalPath(
-    authority: WorkspaceFileMutationAuthority<Workspace>,
-    path: string,
-    person: LocalPersonAuthor,
-  ): Promise<{ trashed: boolean }>;
+  localPerson(): Promise<LocalPersonAuthor>;
   notifyRenderer(workspaceId: string): void;
   // A file in a share view was created or saved, and its change is in the
   // share view's journal. The shell answers with a direct push.
@@ -396,15 +390,14 @@ export function createWorkspaceFileMutationOwner<
     deletePath: async (event, payload) => {
       const request = admitMutation(event, payload, DeleteWorkspacePathPayload.parse);
       // History credits whoever asked, read before the delete waits for its workspace.
-      const person = await dependencies.localPerson(request.workspaceId);
+      const person = await dependencies.localPerson();
       return await runAdmittedMutation(event, request,
         async ({ input, workspace, receivedShare, authorityId, capture, yDocSessions, assertCurrent }) => {
           if (!receivedShare) {
             assertWritableWorkspace(workspace);
-            const path = await prepareWorkspaceDelete(workspace.rootPath, input.relativePath);
-            return DeleteWorkspacePathResult.parse(await dependencies.deleteLocalPath(
-              { authorityId, workspace, capture, yDocSessions, assertCurrent }, path, person,
-            ));
+            return DeleteWorkspacePathResult.parse(await deleteWorkspacePathByHand({ workspace, assertCurrent },
+              input.relativePath, person, { capture, requestId: randomUUID(), trashItem: dependencies.trashItem,
+                markDeleted: path => yDocSessions.markDeletedUnderPath(authorityId, path) }));
           }
           return await withExclusiveWorkspaceOperation(workspace.rootPath, async (markWorkspaceChanged, lease) => {
             const result = structuralShareViewChangeValue(workspace.workspaceId,

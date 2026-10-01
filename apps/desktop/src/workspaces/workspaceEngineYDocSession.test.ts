@@ -44,7 +44,8 @@ import {
 } from "../testing/fakeDaemonCapture";
 import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
 import { desktopRecordEditContext } from "./desktopRecordEdits";
-import { prepareDeleteWorkspacePathAs } from "./workspaceFileMoves";
+import { deleteWorkspacePathByHand } from "./workspaceFileMoves";
+import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { setCollectionRecordFields } from "@dohc/automation-executor/collection-record-edits";
 
 const WORKSPACE_ID = "engine-ydoc-session-test";
@@ -94,8 +95,6 @@ let ydoc: YdocLoopbackEngine;
 let daemon: FakeDaemonCapture;
 let sessions: EngineWorkspaceSessions;
 let capture: ReturnType<typeof createWorkspaceEngineCapture>;
-// Main's person: the account, or the installation id when signed out.
-let personId = "person";
 
 function daemonSessions(): EngineWorkspaceSessions {
   const client: EngineDaemonClient & EngineTransport = {
@@ -185,15 +184,6 @@ function daemonSessions(): EngineWorkspaceSessions {
     },
   };
   return new EngineWorkspaceSessions({ currentClient: () => client });
-}
-
-// Main's signed context for the current person. Both loopbacks verify it as
-// the engine does and stamp that person.
-function localAuthorContext(): string {
-  const authorContext = `context:${personId}`;
-  ydoc.admitAuthorContextForTest(authorContext, personId);
-  versioned.admitAuthorContextForTest(authorContext, personId);
-  return authorContext;
 }
 
 function seedYdoc(versionId: string, content = INITIAL_MARKDOWN): void {
@@ -293,17 +283,13 @@ beforeEach(async () => {
     workspaceId: WORKSPACE_ID,
     loopback: versioned,
     ydoc,
-    // A person's delete puts its staged entry back through the engine's rename.
-    nativeMove: true,
   });
   sessions = daemonSessions();
-  personId = "person";
   capture = createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
     rootPath: root,
     attachmentId: ATTACHMENT_ID,
     rustEngineSessions: sessions,
-    localAuthorContext,
     onError: (context) => captureErrors.push(context),
   });
 });
@@ -319,11 +305,11 @@ const recordAutomation = {
   run: { claimId: "finish-run", automationName: "Finish" },
 } as const;
 
-// Main's record edit context, which captures the person when it is created.
-function recordContext() {
+// Main's record edit context for the person main read when the write was requested.
+function recordContext(personId = "person") {
   return desktopRecordEditContext({
     capture, workspaceRoot: root, signal: new AbortController().signal,
-    person: { kind: "human", humanId: personId, authorContext: localAuthorContext() },
+    person: { kind: "human", humanId: personId },
     withAdapter: async () => null, onCaptureSettled: () => () => undefined,
   });
 }
@@ -375,44 +361,33 @@ it("writes automation fields through an open session and updates its editor once
   typeIntoBody(editor, "Still editable.");
   await owner.settleNow();
   expect(await readFile(join(root, PATH), "utf8")).toContain("Still editable.");
-  // The automation and the person typing beside it are each credited.
-  expect(ydoc.recordedAuthors.slice(-2)).toEqual([
-    { actorOriginId: recordAutomation.automationId,
-      attribution: { actorKind: "automation", onBehalfOf: "person", depth: 1, run: recordAutomation.run } },
-    { actorOriginId: "person", attribution: { actorKind: "human", onBehalfOf: "person", depth: 0 } },
-  ]);
   await owner.close();
   editor.destroy();
 });
 
-it.each(["borrowed", "opened"])("pins main's person for a %s record write when the account changes", async mode => {
+it.each(["borrowed", "opened"])("names the person who asked for a %s record write, and an automation's run person", async mode => {
   const opened = mode === "borrowed" ? await openRecordEditor() : null;
-  personId = "alice";
-  const context = recordContext();
-  personId = "bob";
+  const context = recordContext("account-alice");
   await expect(setCollectionRecordFields(context, {
-    recordPath: PATH, fields: { "Finished on": "2026-10-01", Owner: "Alice" },
-    author: { ...recordAutomation, onBehalfOf: "mallory" },
-  })).resolves.toMatchObject({ replaced: { "Finished on": null, Owner: null } });
+    recordPath: PATH, fields: { Owner: "Alice" }, author: createLocalChangeAuthor("Alice"),
+  })).resolves.toMatchObject({ replaced: { Owner: null } });
+  // A run Bob's synced edit started works for Bob, whoever is signed in here.
+  await expect(setCollectionRecordFields(context, {
+    recordPath: PATH, fields: { "Finished on": "2026-10-01" }, author: { ...recordAutomation, onBehalfOf: "bob" },
+  })).resolves.toMatchObject({ replaced: { "Finished on": null } });
+  // A closed record reopens with a seed, which names nobody, before each write.
   const fieldWrites = requests.filter(request => request.method === YDOC_METHOD.recordUpdate &&
-    (request.params as { actorOriginId?: string }).actorOriginId === recordAutomation.automationId);
-  expect(fieldWrites).toHaveLength(2);
-  for (const request of fieldWrites) {
-    expect(request.params).toMatchObject({ authorContext: "context:alice" });
-    // A generated key still names the write, so a refusal reaches only this caller.
-    expect(request.idempotencyKey).toEqual(expect.any(String));
-  }
-  expect(new Set(fieldWrites.map(request => request.idempotencyKey)).size).toBe(2);
-  expect(ydoc.recordedAuthors.slice(-2)).toEqual(Array.from({ length: 2 }, () => ({
-    actorOriginId: recordAutomation.automationId,
-    attribution: { actorKind: "automation", onBehalfOf: "alice", depth: 1, run: recordAutomation.run },
-  })));
+    (request.params as { seed?: boolean }).seed !== true).slice(-2);
+  // A generated key still names each write, so a refusal reaches only its caller.
+  for (const request of fieldWrites) expect(request.idempotencyKey).toEqual(expect.any(String));
+  const params = (request: Request) => request.params as { actorOriginId?: string; attribution?: unknown };
+  expect(fieldWrites.map(request => ({ actorOriginId: params(request).actorOriginId, attribution: params(request).attribution }))).toEqual([
+    { actorOriginId: "account-alice", attribution: { actorKind: "human", onBehalfOf: "account-alice", depth: 0 } },
+    { actorOriginId: recordAutomation.automationId,
+      attribution: { actorKind: "automation", onBehalfOf: "bob", depth: 1, run: recordAutomation.run } },
+  ]);
   if (opened) {
     expect(opened.editor.getMap("frontmatter").get("Owner")).toBe("Alice");
-    typeIntoBody(opened.editor, "Typed by Bob.");
-    await opened.owner.settleNow();
-    expect(ydoc.recordedAuthors.at(-1)).toEqual({ actorOriginId: "bob",
-      attribution: { actorKind: "human", onBehalfOf: "bob", depth: 0 } });
     await opened.owner.close();
     opened.editor.destroy();
   }
@@ -508,8 +483,6 @@ it("keeps typing and attribution when a borrowed keyed write meets a busy store"
   nextRecordRefusal = wireRefusal("engine-store-busy", "OVERLOADED");
   const write = writeFinished();
   await entered.promise;
-  // The account changes while the write retries. The retries keep its person.
-  personId = "bob";
   typeIntoBody(editor, "Typed while the keyed write recovered.");
   release.resolve();
   await write;
@@ -519,16 +492,11 @@ it("keeps typing and attribution when a borrowed keyed write meets a busy store"
   const fieldWrites = requests.filter(request => request.idempotencyKey === "finish-run/set/Finished on");
   expect(fieldWrites.length).toBeGreaterThan(1);
   for (const request of fieldWrites) {
-    expect(request.params).toMatchObject({ authorContext: "context:person", actorOriginId: recordAutomation.automationId,
+    expect(request.params).toMatchObject({ actorOriginId: recordAutomation.automationId,
       attribution: { actorKind: "automation", onBehalfOf: "person", depth: 1, run: recordAutomation.run },
     });
   }
   expect(ydoc.recordedUpdates).toHaveLength(3);
-  expect(ydoc.recordedAuthors.slice(-2)).toEqual(expect.arrayContaining([
-    { actorOriginId: recordAutomation.automationId,
-      attribution: { actorKind: "automation", onBehalfOf: "person", depth: 1, run: recordAutomation.run } },
-    { actorOriginId: "bob", attribution: { actorKind: "human", onBehalfOf: "bob", depth: 0 } },
-  ]));
   await owner.close();
   expect(await readFile(join(root, PATH), "utf8")).toContain("Typed while the keyed write recovered.");
   editor.destroy();
@@ -594,26 +562,27 @@ it("settles an open record before a person's delete and credits the person in Hi
   const { editor } = await openRecordEditor();
   typeIntoBody(editor, "Typed before the delete.");
   let trashedText = "";
-  const trashed: string[] = [];
-  const finish = await prepareDeleteWorkspacePathAs(
-    { workspace: { rootPath: root, attachmentId: ATTACHMENT_ID }, assertCurrent: () => undefined }, PATH,
-    { kind: "human", humanId: "forged-person", authorContext: localAuthorContext() },
+  const trashed: Array<{ target: string; requestsBefore: number }> = [];
+  await expect(deleteWorkspacePathByHand(
+    { workspace: { rootPath: root }, assertCurrent: () => undefined }, PATH,
+    { kind: "human", humanId: "person" },
     { capture, requestId: "hand-delete", markDeleted: () => undefined,
       trashItem: async target => {
-        trashed.push(target);
+        trashed.push({ target, requestsBefore: requests.length });
         trashedText = await readFile(target, "utf8");
         await rm(target);
       } },
-  );
-  await expect(finish()).resolves.toMatchObject({ ok: true, path: PATH, trashed: true });
-  expect(trashed).toEqual([join(root, PATH)]);
+  )).resolves.toEqual({ trashed: true });
+  // The system trash takes it from its own place, so its Restore returns it there.
+  expect(trashed.map(entry => entry.target)).toEqual([join(root, PATH)]);
   const methods = requests.map(request => request.method);
-  expect(methods).toContain(YDOC_METHOD.close);
-  expect(methods.lastIndexOf(YDOC_METHOD.close)).toBeLessThan(methods.indexOf(VERSIONED_METHOD.textDelete));
+  // Settled and closed, then trashed, then recorded as deleted.
+  expect(methods.lastIndexOf(YDOC_METHOD.close)).toBeLessThan(trashed[0]!.requestsBefore);
+  expect(methods.indexOf(VERSIONED_METHOD.textDelete)).toBeGreaterThanOrEqual(trashed[0]!.requestsBefore);
   // The trash holds the settled document, not the artifact from before the typing.
   expect(trashedText).toContain("Typed before the delete.");
   const deleted = (await capture.listMoments()).moments.filter(row => row.operation === "delete" && row.path === PATH);
-  expect(deleted).toMatchObject([{ authors: [{ kind: "human", humanId: "person" }] }]);
+  expect(deleted).toMatchObject([{ metadata: { origin: "local-file" }, authors: [{ kind: "human", humanId: "person" }] }]);
   editor.destroy();
 });
 
@@ -1875,9 +1844,10 @@ it("keeps typing records pending through a busy store without reopening or relab
   typeIntoBody(scratch, "Busy typing.");
   const opens = methodCount(YDOC_METHOD.open);
   busyRecordAttempts = 2;
-  personId = "alice";
-  session.applyLocalUpdate(original!, undefined, { idempotencyKey: "renderer-busy" });
-  personId = "bob";
+  // As main's IPC names the person when the update arrives.
+  const attribution = { actorKind: "human" as const, onBehalfOf: "alice", depth: 0 };
+  session.applyLocalUpdate(original!, undefined, { idempotencyKey: "renderer-busy", actorOriginId: "alice", attribution });
+  attribution.onBehalfOf = "bob";
   // Drain main's queue. The provider still holds the two refused attempts.
   await session.applyDecidedLocalUpdate(() => null);
   expect(documentMarkdown(Y.encodeStateAsUpdate(session.doc))).toContain("Busy typing.");
@@ -1885,8 +1855,7 @@ it("keeps typing records pending through a busy store without reopening or relab
   const records = requests.filter(request => request.idempotencyKey === "renderer-busy");
   expect(records).toHaveLength(3);
   expect(records.map(request => request.params)).toEqual([records[0]!.params, records[0]!.params, records[0]!.params]);
-  expect(records[0]!.params).toMatchObject({ authorContext: "context:alice" });
-  expect(records[0]!.params).not.toHaveProperty("attribution");
+  expect(records[0]!.params).toMatchObject({ attribution: { onBehalfOf: "alice" } });
   expect(ydoc.recordedAuthors.at(-1)).toEqual({ actorOriginId: "alice",
     attribution: { actorKind: "human", onBehalfOf: "alice", depth: 0 } });
   expect(methodCount(YDOC_METHOD.open)).toBe(opens);

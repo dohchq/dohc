@@ -984,34 +984,6 @@ function mergeMarkdown(base: string, local: string, remote: string): MarkdownMer
 
 export class VersionedLoopbackEngine implements EngineTransport {
   readonly requests: Request[] = [];
-  private readonly authorContextsForTest = new Map<string, string>();
-
-  // Test fixtures declare host admission explicitly. Native RPC tests prove its authority.
-  admitAuthorContextForTest(authorContext: string, personId: string): void {
-    this.authorContextsForTest.set(authorContext, personId);
-  }
-
-  private stampAuthorContextForTest(params: JsonObject): JsonObject {
-    const { authorContext, ...stamped } = params;
-    if (authorContext === undefined) {
-      const author = params.author;
-      if (author && typeof author === "object" && !Array.isArray(author) && author.kind === "human") {
-        throw new Error("author-context-required");
-      }
-      return params;
-    }
-    const personId = typeof authorContext === "string" ? this.authorContextsForTest.get(authorContext) : undefined;
-    if (personId === undefined) throw new Error("author-context-required");
-    const author = stamped.author;
-    if (author === undefined || author === null) {
-      stamped.author = {kind: "human", humanId: personId};
-    } else if (typeof author === "object" && !Array.isArray(author)) {
-      stamped.author = author.kind === "human"
-        ? {kind: "human", humanId: personId}
-        : {...author, onBehalfOf: personId};
-    }
-    return stamped;
-  }
   readonly responses: Response[] = [];
 
   private readonly workspaces = new Map<string, WorkspaceState>();
@@ -1142,7 +1114,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     this.requests.push(request);
     let result: JsonValue;
     try {
-      const params = this.stampAuthorContextForTest(asObject(request.params, `${request.method} params`));
+      const params = asObject(request.params, `${request.method} params`);
       const parsed = parseTextWriteFields(params, request);
       const workspace = this.requireWorkspaceHandle(request);
       this.validateWorkspaceParam(params, workspace);
@@ -1156,7 +1128,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private handleRequest(request: Request): JsonValue {
-    const params = this.stampAuthorContextForTest(asObject(request.params, `${request.method} params`));
+    const params = asObject(request.params, `${request.method} params`);
     validateVersionedParams(request.method, params, request);
     validatePreWorkspaceSemantics(request.method, params);
     let parsedTextWrite: ParsedTextWriteFields | undefined;
