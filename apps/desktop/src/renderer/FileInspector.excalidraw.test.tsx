@@ -198,6 +198,7 @@ function bridgeFor(
     }),
     onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
     onEngineYDocOwnerHandoff: () => () => undefined,
+    onEngineYDocAuthorContextChanged: () => () => undefined,
     prepareEngineYDocOwnerHandoff: async () => undefined,
     onEngineYDocLineageReplacement: vi.fn(
       (listener: (event: EngineYDocLineageReplacementEvent) => void) => {

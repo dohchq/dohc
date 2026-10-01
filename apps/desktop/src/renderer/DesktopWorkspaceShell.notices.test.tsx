@@ -331,6 +331,7 @@ describe("engine store recovery", () => {
         onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
         onEngineYDocSaveState: vi.fn(() => () => undefined),
         onEngineYDocOwnerHandoff: () => () => undefined,
+        onEngineYDocAuthorContextChanged: () => () => undefined,
         prepareEngineYDocOwnerHandoff: async () => undefined,
         onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
         acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
@@ -422,6 +423,7 @@ describe("engine store recovery", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocOwnerHandoff: () => () => undefined,
+      onEngineYDocAuthorContextChanged: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
@@ -536,6 +538,7 @@ describe("engine store recovery", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocOwnerHandoff: () => () => undefined,
+      onEngineYDocAuthorContextChanged: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({
@@ -603,6 +606,7 @@ describe("engine store recovery", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocOwnerHandoff: () => () => undefined,
+      onEngineYDocAuthorContextChanged: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({

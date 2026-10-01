@@ -1191,6 +1191,7 @@ describe("editor groups", () => {
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(() => () => undefined),
       onEngineYDocOwnerHandoff: () => () => undefined,
+      onEngineYDocAuthorContextChanged: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       acknowledgeEngineYDocLineageReplacement: vi.fn(async () => ({

@@ -10,6 +10,7 @@ import { onWorkspaceCaptureSettled } from "../workspaces/captureActivityBridge";
 import { collectionRecordWrites, setCollectionRecordFields, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
 import { desktopRecordEditContext } from "../workspaces/desktopRecordEdits";
 import { createTestScratch } from "../workspaces/testTemp";
+import { captureLocalAuthorContext } from "../workspaces/localInstallationIdentity";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { waitForPathMoments } from "../workspaces/waitForPathMoments";
 import { createWorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
@@ -42,11 +43,16 @@ async function harness(automations: string, run: (context: {
   await writeFile(join(root, "Tasks", "one.md"), "---\nStatus: Doing\n---\n\nPack the car.\n", "utf8");
   await writeFile(join(root, "Tasks", "automations.yaml"), `version: 1\nautomations:\n${automations}`, "utf8");
 
-  const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+  // The profile's private credential, as main gives the daemon and signs with.
+  const identity = { id: "local:test", authorContextSecret: "a".repeat(64) };
+  const lifecycle = createRealDaemonLifecycle({
+    command: engine.require(), maxRestarts: 0, authorContextSecret: identity.authorContextSecret,
+  });
   await lifecycle.start();
   const sessions = createRealDaemonWorkspaceSessions(lifecycle);
   const workspace = { workspaceId: "collection-automation-e2e", rootPath: root, attachmentId: Symbol("collection-automation-e2e") };
-  const capture = createWorkspaceEngineCapture({ ...workspace, rustEngineSessions: sessions });
+  const authorContext = captureLocalAuthorContext(identity, workspace.workspaceId, identity.id);
+  const capture = createWorkspaceEngineCapture({ ...workspace, rustEngineSessions: sessions, localAuthorContext: () => authorContext });
   const settles: Array<{ claimId: string; state: string; error?: string }> = [];
   const waiting: Array<() => void> = [];
   const withEngine = <T>(work: (adapter: CollectionAutomationEngine & VersionedLiveAdapter) => Promise<T>) =>
@@ -62,7 +68,7 @@ async function harness(automations: string, run: (context: {
       return await work(adapter);
     });
   const editContext = (signal: AbortSignal): CollectionRecordEditContext => desktopRecordEditContext({
-    person: { kind: "human", humanId: "local:test" },
+    person: { kind: "human", humanId: identity.id, authorContext },
     capture, workspaceRoot: root, signal,
     withAdapter: withEngine,
     onCaptureSettled: (listener) => onWorkspaceCaptureSettled(lifecycle, workspace.workspaceId, listener),

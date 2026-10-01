@@ -1068,12 +1068,22 @@ async fn forced_pre_fork_capture_retains_the_active_agent_author() {
         "onBehalfOf": "local",
         "agentRunId": "run-switch",
     });
+    // The agent works for the person the desktop host signed for.
+    let context = call(
+        &transport,
+        &handle,
+        1,
+        "harness.authorContext",
+        json!({ "personId": "local" }),
+    )
+    .await["authorContext"]
+        .clone();
     call(
         &transport,
         &handle,
         2,
         "capture.setAuthor",
-        json!({ "author": author }),
+        json!({ "author": author, "authorContext": context }),
     )
     .await;
 

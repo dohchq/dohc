@@ -190,7 +190,8 @@ async function harness(options: {
     }) => Promise<Result>,
   ): Promise<Result> => {
     rendererOperationCalls(event, workspaceId);
-    await options.beforeOperation?.();
+    // Only a gated test waits; every other change is admitted in its own turn.
+    if (options.beforeOperation) await options.beforeOperation();
     if (event.authorityId !== undefined && event.authorityId !== authorityId) {
       throw new Error(
         "File change stopped because this window changed workspaces.",

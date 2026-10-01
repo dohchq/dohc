@@ -596,7 +596,7 @@ it("settles an open record before a person's delete and credits the person in Hi
   let trashedText = "";
   const trashed: string[] = [];
   const finish = await prepareDeleteWorkspacePathAs(
-    { workspace: { rootPath: root }, assertCurrent: () => undefined }, PATH,
+    { workspace: { rootPath: root, attachmentId: ATTACHMENT_ID }, assertCurrent: () => undefined }, PATH,
     { kind: "human", humanId: "forged-person", authorContext: localAuthorContext() },
     { capture, requestId: "hand-delete", markDeleted: () => undefined,
       trashItem: async target => {

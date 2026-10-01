@@ -135,6 +135,7 @@ export function harnessBridge(kind: "richdoc" | "scene" = "richdoc") {
       return () => remoteUpdateListeners.delete(listener);
     },
     onEngineYDocOwnerHandoff: () => () => undefined,
+    onEngineYDocAuthorContextChanged: () => () => undefined,
     prepareEngineYDocOwnerHandoff: async () => undefined,
     onEngineYDocLineageReplacement: (listener: LineageReplacementListener) => {
       lineageReplacementListeners.add(listener);

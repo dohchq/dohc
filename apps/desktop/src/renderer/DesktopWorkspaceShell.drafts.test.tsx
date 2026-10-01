@@ -175,6 +175,7 @@ describe("workspace admission over collection writes", () => {
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocOwnerHandoff: () => () => undefined,
+      onEngineYDocAuthorContextChanged: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(
@@ -2089,6 +2090,7 @@ describe("set-aside draft recovery", () => {
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
       onEngineYDocOwnerHandoff: () => () => undefined,
+      onEngineYDocAuthorContextChanged: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
       onEngineYDocSaveState: vi.fn(

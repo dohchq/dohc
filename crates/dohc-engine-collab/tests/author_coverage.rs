@@ -2,8 +2,8 @@ mod common;
 
 use common::*;
 use dohc_engine_collab::{
-    CollabError, ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
-    author_coverage, maybe_compact, record_local_update,
+    author_coverage, maybe_compact, record_local_update, CollabError, ContentKind, LocalAppend,
+    MarkerCreation, Regime, WriterDocCache, Ydoc,
 };
 use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
 use dohc_engine_storage::{FaultPoint, NoFaults, TxnOutcome};
@@ -56,12 +56,11 @@ fn declared_seed_is_not_an_author_and_coverage_tracks_fold_reset_and_consumption
     )
     .expect("declared seed");
     assert_eq!(covered_count(&ts.store, &key), 0);
-    assert!(
-        ts.store
-            .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
-            .expect("seed coverage")
-            .is_empty()
-    );
+    assert!(ts
+        .store
+        .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+        .expect("seed coverage")
+        .is_empty());
     record(
         &mut ts.store,
         &mut ts.cache,
@@ -396,12 +395,11 @@ fn winning_base_replacement_clears_compacted_losing_authors() {
         outcome,
         TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Replaced { .. })
     ));
-    assert!(
-        ts.store
-            .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
-            .expect("after")
-            .is_empty()
-    );
+    assert!(ts
+        .store
+        .read_with(|conn| author_coverage::interval_in(conn, &key, i64::MAX))
+        .expect("after")
+        .is_empty());
     assert_eq!(
         dohc_engine_collab::load_persisted(&ts.store, &key)
             .expect("load")
@@ -971,11 +969,9 @@ fn control_character_author_fields_are_refused_before_admission() {
             Err(CollabError::InvalidIdentifier { .. })
         ));
     }
-    assert!(
-        dohc_engine_collab::read_marker(&ts.store, &key)
-            .expect("marker query")
-            .is_none()
-    );
+    assert!(dohc_engine_collab::read_marker(&ts.store, &key)
+        .expect("marker query")
+        .is_none());
 }
 
 #[test]
