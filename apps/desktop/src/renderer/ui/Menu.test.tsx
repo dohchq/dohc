@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Menu, type MenuItem } from "./Menu";
+import { Overlay } from "../Overlay";
 
 function Harness(props: { items: readonly MenuItem[]; closeOnPick?: boolean; children?: ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -46,6 +47,57 @@ describe("Menu", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("menu")).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it("takes the Escape a dialog around it would otherwise close on", async () => {
+    const user = userEvent.setup();
+    const closeDialog = vi.fn();
+    render(
+      <Overlay onClose={closeDialog}>
+        <Harness items={items} />
+      </Overlay>,
+    );
+    await user.click(screen.getByTestId("row-menu"));
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Rename" }));
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(closeDialog).not.toHaveBeenCalled();
+
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("row-menu")));
+    await user.keyboard("{Escape}");
+    expect(closeDialog).toHaveBeenCalledOnce();
+  });
+
+  // The browser's own Tab then moves on from the trigger in the pressed
+  // direction, so the key's default must stay. user-event's Tab walker
+  // cannot stand in for it: it trips over rows this handler unmounts.
+  it("closes on Tab in either direction and hands the key on from the trigger", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={items} />);
+    const trigger = screen.getByTestId("row-menu");
+    for (const shiftKey of [true, false]) {
+      await user.click(trigger);
+      const row = screen.getByRole("menuitem", { name: "Rename" });
+      expect(fireEvent.keyDown(row, { key: "Tab", shiftKey })).toBe(true);
+      expect(screen.queryByRole("menu")).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    }
+  });
+
+  it("keeps focus on its rows when the list itself is pressed", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness items={items}>
+        <div role="status">Copied</div>
+      </Harness>,
+    );
+    await user.click(screen.getByTestId("row-menu"));
+    // Default prevented: the press does not move focus to the page.
+    expect(fireEvent.mouseDown(screen.getByRole("status"))).toBe(false);
+    expect(fireEvent.mouseDown(screen.getByRole("menu"))).toBe(false);
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Duplicate" }));
   });
 
   it("closes on a press outside and stays open for a press inside", async () => {

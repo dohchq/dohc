@@ -93,6 +93,10 @@ export function Menu(props: {
     } else if (event.key === "Escape") {
       // useDismiss already closed it; one Escape closes one surface.
       event.stopPropagation();
+    } else if (event.key === "Tab") {
+      // The trigger takes focus first, so the key then moves on from it in
+      // either direction instead of landing on the trigger with the menu open.
+      close();
     } else if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && event.key !== " ") {
       typeahead(event.key);
     }
@@ -122,6 +126,9 @@ export function Menu(props: {
           role="menu"
           aria-label={props.label}
           onKeyDown={onKeyDown}
+          // A press on the padding or on what the owner adds under the rows
+          // must not send focus to the page, where the keys stop working.
+          onMouseDown={(event) => event.preventDefault()}
           style={{ top: place.top, left: place.left, width }}
           className="dohc-popover dohc-pop-in fixed z-40 rounded-lg border border-line bg-panel p-1"
         >

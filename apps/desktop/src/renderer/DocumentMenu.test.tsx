@@ -46,10 +46,12 @@ function nextClipboardWrite(): Promise<string> {
 // component must not act on an attempt the user has moved past.
 function deferredWrite() {
   let resolve!: () => void;
-  const promise = new Promise<void>((r) => {
-    resolve = r;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function nextExport(): Promise<ExportDocumentFileCall> {
@@ -587,6 +589,91 @@ describe("DocumentMenu", () => {
     } finally {
       logged.mockRestore();
     }
+  });
+
+  // A menu that closes under a pending write has no row left to answer on.
+  // The person closed it, so a success says nothing; a failure still owes
+  // them a message, and it goes through the shell's error hook.
+  describe("a write that settles after the menu closed", () => {
+    function renderReporting() {
+      const reportError = vi.fn();
+      render(
+        <DocumentMenu
+          workspaceId="ws-1"
+          suggestedName="Plan"
+          getMarkdown={() => MARKDOWN}
+          reportError={reportError}
+        />,
+      );
+      return reportError;
+    }
+
+    it("reports a failure once", async () => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const reportError = renderReporting();
+      const write = deferredWrite();
+      writeText.mockImplementationOnce(() => write.promise);
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await user.keyboard("{Escape}");
+      expect(screen.queryByRole("menu")).toBeNull();
+
+      const failure = new Error("clipboard refused");
+      await act(async () => {
+        write.reject(failure);
+        await write.promise.catch(() => undefined);
+      });
+      expect(reportError).toHaveBeenCalledExactlyOnceWith(
+        "dohc could not copy this document. Open the document menu to try again.",
+        failure,
+        null,
+      );
+      // Reopening says nothing about it either.
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      expect(screen.queryByText("Couldn't copy")).toBeNull();
+    });
+
+    it("reports nothing for a success", async () => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const reportError = renderReporting();
+      const write = deferredWrite();
+      writeText.mockImplementationOnce(() => write.promise);
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await user.keyboard("{Escape}");
+
+      await act(async () => {
+        write.resolve();
+        await write.promise;
+      });
+      expect(reportError).not.toHaveBeenCalled();
+    });
+
+    it("reports nothing for an attempt a later action superseded", async () => {
+      const user = userEvent.setup();
+      stubClipboard();
+      const reportError = renderReporting();
+      const first = deferredWrite();
+      const second = deferredWrite();
+      writeText.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+      await user.click(screen.getByTestId("document-menu-trigger"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
+      await user.keyboard("{Escape}");
+
+      await act(async () => {
+        first.reject(new Error("clipboard refused"));
+        await first.promise.catch(() => undefined);
+      });
+      expect(reportError).not.toHaveBeenCalled();
+      await act(async () => {
+        second.resolve();
+        await second.promise;
+      });
+      expect(reportError).not.toHaveBeenCalled();
+    });
   });
 
   it("exports as PDF through the bridge with kind: pdf", async () => {

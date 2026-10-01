@@ -1944,6 +1944,7 @@ export function MarkdownView(props: {
               </button>
               <DocumentMenu
                 workspaceId={props.workspaceId}
+                reportError={props.onButtonError}
                 suggestedName={filenameStem(props.path)}
                 // Always live, even in source view: the WYSIWYG editor stays
                 // MOUNTED (hidden) while source is shown, so its ref keeps
@@ -2146,6 +2147,7 @@ export function MarkdownView(props: {
             {!props.truncated ? (
               <DocumentMenu
                 workspaceId={props.workspaceId}
+                reportError={props.onButtonError}
                 suggestedName={filenameStem(props.path)}
                 // The same rule the engine branch answers to: emit the
                 // document, or refuse. This branch shows the disk, and until

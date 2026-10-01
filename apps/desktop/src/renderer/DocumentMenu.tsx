@@ -3,6 +3,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import { Menu } from "./ui/Menu";
 import { bridge } from "./bridge";
 import { CustomizeContext } from "./settings/customize";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 
 // The document header's "…" menu (ViewHeader): copy the raw markdown, export
 // it as a .md file, or export a self-contained HTML/PDF render. The Menu part
@@ -52,6 +53,9 @@ export function DocumentMenu(props: {
   // copy or an export that silently produces nothing is a file the user
   // believes is their document.
   getMarkdown: () => string | null;
+  // The shell's error hook. A copy that fails after the menu has closed has
+  // no row left to say so, and reaches the person through this instead.
+  reportError?: ReportButtonError;
 }) {
   const customize = useContext(CustomizeContext)?.customize;
   const items = customize ? [...ITEMS, CUSTOMIZE_ITEM] : ITEMS;
@@ -73,6 +77,12 @@ export function DocumentMenu(props: {
   // can land on a menu that has moved on — over a refusal the user is still
   // reading, on a menu that closed, or on the next one they open.
   const attempts = useRequestSequence();
+  // Actions count separately from attempts: closing the menu retires an
+  // attempt but not the action behind it. A write that settles after the
+  // close can then tell the two apart. The person closed the menu, so a
+  // success needs no message, but a failure still owes them one, unless a
+  // later action took over or the document went away.
+  const actions = useRequestSequence();
 
   useEffect(() => {
     if (!open) return;
@@ -135,7 +145,7 @@ export function DocumentMenu(props: {
     }
   }
 
-  async function copyAsMarkdown(attempt: number) {
+  async function copyAsMarkdown(attempt: number, action: number) {
     const serialized = serializeOrFail(
       "copy-markdown",
       "Couldn't copy",
@@ -153,16 +163,26 @@ export function DocumentMenu(props: {
     }
     const write = navigator.clipboard?.writeText(markdown);
     if (!write) return;
-    let label = "Copied";
+    let failure: unknown = null;
     try {
       await write;
-    } catch {
-      label = "Couldn't copy";
+    } catch (error) {
+      failure = error ?? new Error("clipboard write failed");
+    }
+    if (attempts.isCurrent(attempt)) {
+      showFeedback("copy-markdown", failure ? "Couldn't copy" : "Copied");
+      return;
     }
     // A later attempt already answered. Its answer is what the menu shows,
-    // and this one describes a click the user has moved past.
-    if (!attempts.isCurrent(attempt)) return;
-    showFeedback("copy-markdown", label);
+    // and this one describes a click the user has moved past. If instead the
+    // menu closed under this write, a failure still reaches the person.
+    if (failure && actions.isCurrent(action)) {
+      props.reportError?.(
+        "dohc could not copy this document. Open the document menu to try again.",
+        failure,
+        null,
+      );
+    }
   }
 
   async function exportDocument(kind: "markdown" | "html" | "pdf") {
@@ -221,6 +241,7 @@ export function DocumentMenu(props: {
 
   function runItem(id: DocumentMenuItemId) {
     const attempt = attempts.next();
+    const action = actions.next();
     // The token says who may speak next. This says the last one has stopped —
     // a new action retires its predecessor's answer when it starts, not when
     // it finishes. Its own result can be a while away (a clipboard write can
@@ -231,7 +252,7 @@ export function DocumentMenu(props: {
     setInstruction("");
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     if (id === "copy-markdown") {
-      void copyAsMarkdown(attempt);
+      void copyAsMarkdown(attempt, action);
       return;
     }
     if (id === "customize") {
