@@ -93,14 +93,15 @@ function fixture(options: {
     workspace: { workspaceId: WORKSPACE_ID, rootPath: "/workspace", ...(options.shareView === undefined ? {} : { shareView: options.shareView }) },
     state: { collectionAutomations: executor as unknown as CollectionAutomations },
   });
+  const readText = vi.fn(async (_root: string, path: string) => {
+    const text = options.files?.[path] ?? (["Invoices/collection.yaml", "Billing/Invoices/collection.yaml"].includes(path) ? "fields:\n  Mark paid:\n    type: button\n" : undefined);
+    return text === undefined ? null : { text, truncated: false, contentHash: "hash" };
+  });
   const presses = registerAutomationButtonsIpc<FakeWindow, { sender: FakeWindow }, Operation>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) => await work(operation()),
-    readText: async (_root, path) => {
-      const text = options.files?.[path] ?? (["Invoices/collection.yaml", "Billing/Invoices/collection.yaml"].includes(path) ? "fields:\n  Mark paid:\n    type: button\n" : undefined);
-      return text === undefined ? null : { text, truncated: false, contentHash: "hash" };
-    },
+    readText,
     buttonFields,
     collectionId: async (_operation, collectionPath) => collectionPath.replaceAll("/", "-"),
     relayPress,
@@ -129,7 +130,7 @@ function fixture(options: {
       watch: (_claimId, waiting) => { waits.push(waiting); },
     },
   );
-  return { call, press, callDataset, pressDataset, named, waits, executor, buttonFields, relayPress, describeDataset, window, pressWindows, invoice };
+  return { call, press, callDataset, pressDataset, named, waits, executor, buttonFields, readText, relayPress, describeDataset, window, pressWindows, invoice };
 }
 
 async function expectCallerDescriptions(
@@ -184,6 +185,56 @@ describe("dataset operations from shared document buttons", () => {
 });
 
 describe("listing a Collection's buttons", () => {
+  it("shows no buttons before an existing Collection is indexed, then lists them", async () => {
+    const f = fixture();
+    f.buttonFields.mockRejectedValueOnce(new Error("collection-not-found"));
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({ buttons: [] });
+    expect(f.executor.buttons).not.toHaveBeenCalled();
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({
+      buttons: [{ field: "Mark paid", state: { kind: "ready" } }],
+    });
+  });
+
+  it("keeps the missing Collection error", async () => {
+    const f = fixture();
+    f.buttonFields.mockRejectedValueOnce(new Error("collection-not-found"));
+    await expect(f.call(CHANNELS.listAutomationButtons, { collectionPath: "Missing" })).rejects.toThrow("collection-not-found");
+  });
+
+  it("keeps the missing Collection error after its schema is deleted", async () => {
+    const f = fixture();
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ field: "Mark paid" }] });
+    f.buttonFields.mockRejectedValueOnce(new Error("collection-not-found"));
+    f.readText.mockResolvedValueOnce(null);
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).rejects.toThrow("collection-not-found");
+  });
+
+  it("keeps real engine failures for an existing Collection", async () => {
+    const f = fixture();
+    f.buttonFields.mockRejectedValueOnce(new Error("The workspace engine is not running."));
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).rejects.toThrow("The workspace engine is not running.");
+  });
+
+  it.each(["[", "version: 999\nfields: {}\n"])("shows no buttons before a degraded Collection is indexed: %s", async (schema) => {
+    const f = fixture({ files: { "Invoices/collection.yaml": schema } });
+    f.buttonFields.mockRejectedValueOnce(new Error("collection-not-found"));
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({ buttons: [] });
+  });
+
+  it("shows no buttons before a Collection with a truncated schema is indexed", async () => {
+    const f = fixture();
+    f.buttonFields.mockRejectedValueOnce(new Error("collection-not-found"));
+    f.readText.mockResolvedValueOnce({ text: "fields:", truncated: true, contentHash: "hash" });
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({ buttons: [] });
+  });
+
+  it("keeps a real file-read failure when checking an unindexed Collection", async () => {
+    const f = fixture();
+    f.buttonFields.mockRejectedValueOnce(new Error("collection-not-found"));
+    f.readText.mockRejectedValueOnce(new Error("Permission denied"));
+    await expect(f.call(CHANNELS.listAutomationButtons, {})).rejects.toThrow("Permission denied");
+  });
+
   it("asks the executor about each Button field the engine's schema names", async () => {
     const f = fixture();
     await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toEqual({

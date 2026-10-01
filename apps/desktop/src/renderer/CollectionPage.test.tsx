@@ -166,6 +166,7 @@ function makeBridge(
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
   const settledCallbacks = new Set<(event: AutomationRunSettledEvent) => void>();
   const waitingCallbacks = new Set<(event: AutomationRunWaitingEvent) => void>();
+  const automationsCallbacks = new Set<(event: { workspaceId: string }) => void>();
   // The schema round-trips through the stub the way it does through the
   // engine: reads serve the last written text's parse, writes conflict on a
   // stale expected identity.
@@ -173,6 +174,13 @@ function makeBridge(
   let contentHash = hashFor(0);
   let writes = 0;
   return {
+    emitAutomationsChanged: (workspaceId: string) => {
+      for (const callback of [...automationsCallbacks]) callback({ workspaceId });
+    },
+    onCollectionAutomationsChanged: (callback: (event: { workspaceId: string }) => void) => {
+      automationsCallbacks.add(callback);
+      return () => { automationsCallbacks.delete(callback); };
+    },
     emitWorkspaceActivity: (event: WorkspaceActivityEvent) => {
       for (const callback of [...activityCallbacks]) callback(event);
     },
@@ -310,6 +318,7 @@ function renderPage(
   view?: {
     activeViewName?: string | null;
     onActiveViewChange?: (viewName: string | null) => void;
+    onError?: CollectionPageProps["onError"];
   },
 ) {
   vi.stubGlobal("dohcDesktop", bridge);
@@ -317,6 +326,36 @@ function renderPage(
 }
 
 describe("CollectionPage", () => {
+  it("reloads initially empty Buttons when the automation index changes in this workspace", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], {
+      ...SCHEMA, fields: [...SCHEMA.fields, { name: "Finish", type: "button" }],
+    });
+    renderPage(bridge);
+    await screen.findByText("Plan");
+    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1));
+    bridge.listAutomationButtons.mockResolvedValue({ buttons: [
+      { field: "Finish", state: { kind: "ready", automationId: "collection:tasks#finish" } },
+    ] });
+    act(() => bridge.emitAutomationsChanged("ws-2"));
+    expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(1);
+    act(() => bridge.emitAutomationsChanged("ws-1"));
+    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Finish for Plan" }).getAttribute("aria-disabled")).toBeNull());
+  });
+
+  it("reports real Buttons read errors through the shell error hook with retry", async () => {
+    const bridge = makeBridge([]);
+    const error = new Error("The workspace engine is not running.");
+    bridge.listAutomationButtons.mockRejectedValueOnce(error);
+    const onError = vi.fn();
+    renderPage(bridge, undefined, undefined, { onError });
+    await waitFor(() => expect(onError).toHaveBeenCalledWith(
+      "dohc could not read this Collection's buttons.", error, expect.any(Function),
+    ));
+    act(() => onError.mock.calls[0]![2]());
+    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledTimes(2));
+  });
+
   it("names a newer Collection file and asks to update dohc", async () => {
     const bridge = makeBridge([]);
     bridge.getCollection.mockResolvedValue({ path: "tasks", objectId: "object-test", status: "degraded", reasons: [{ code: "unsupported-version", path: "/version" }],
