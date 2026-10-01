@@ -153,6 +153,27 @@ function settlementEvidence(directory: string) {
         journaled: cursors(db, `SELECT json_extract(payload_json,'$.record.terminalCursor') AS cursor FROM replication_log
           WHERE imported=0 AND op_kind='live.audit.settlement' ORDER BY cursor`),
         acceptedEvents: Number(db.prepare("SELECT COUNT(*) AS n FROM live_accepted_updates").get()?.n ?? 0),
+        // The registration the publication proof reads, and whether the proof
+        // rows agree on one binding.
+        registrations: db.prepare(
+          "SELECT available, restore_fence_generation AS fence, selector_paths_json AS selectors FROM live_device_application_bindings",
+        ).all().map((row) => ({ available: Number(row.available) === 1, fence: Number(row.fence), selectors: String(row.selectors) })),
+        ownerBound: Number(db.prepare("SELECT EXISTS(SELECT 1 FROM ydoc_owner_bindings) AS n").get()?.n ?? 0) === 1,
+        proofBindings: Number(db.prepare(
+          "SELECT COUNT(DISTINCT binding_json) AS n FROM (SELECT binding_json FROM live_device_settlements UNION ALL SELECT binding_json FROM live_owner_adoptions UNION ALL SELECT binding_json FROM live_device_bootstraps)",
+        ).get()?.n ?? 0),
+        // The first unpublished local operations, and which proof row holds each
+        // digest a moment references. Digests and kinds only.
+        unpublished: db.prepare(
+          `SELECT l.origin_seq AS seq, l.op_kind AS kind, ${["payloadBeforeBlobSha256", "payloadAfterBlobSha256", "beforeBlobSha256"].map((field) => `
+             (SELECT CASE WHEN json_extract(l.payload_json,'$.${field}') IS NULL THEN 'none'
+               WHEN EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.markdown_digest=json_extract(l.payload_json,'$.${field}')) THEN 'settlement'
+               WHEN EXISTS(SELECT 1 FROM live_owner_adoptions a WHERE a.source_digest=json_extract(l.payload_json,'$.${field}')) THEN 'adoption'
+               WHEN EXISTS(SELECT 1 FROM live_device_bootstraps b WHERE b.projected_markdown_digest=json_extract(l.payload_json,'$.${field}')) THEN 'bootstrap'
+               ELSE 'unproved' END) AS ${field}`).join(",")}
+           FROM replication_log l LEFT JOIN sync_relay_push_state p ON p.workspace_id=l.workspace_id AND p.origin_id=l.origin_id
+           WHERE l.imported=0 AND l.origin_seq>COALESCE(p.pushed_seq,-1) ORDER BY l.origin_seq LIMIT 4`,
+        ).all(),
       }))),
     relay: read(join(directory, "relay-data", "relay.sqlite"), (db) => db.prepare(
       `SELECT json_extract(s.payload_json,'$.record.terminalCursor') AS cursor,
