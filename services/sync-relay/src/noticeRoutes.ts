@@ -156,7 +156,7 @@ function parseReach(body: Record<string, unknown>): NoticeReach {
   return { shareId };
 }
 
-function parseMarks(value: unknown): { noticeId: string; mark: NoticeMark }[] {
+function parseMarks(value: unknown): { noticeId: string; mark: NoticeMark; withdraw?: true }[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > NOTICE_MARKS_PER_REQUEST) {
     throw badRequest(`marks must list 1 to ${NOTICE_MARKS_PER_REQUEST} notices`);
   }
@@ -166,7 +166,8 @@ function parseMarks(value: unknown): { noticeId: string; mark: NoticeMark }[] {
       throw badRequest("mark must be read or dismissed");
     }
     if (!isNoticeLine(mark.noticeId, NOTICE_ID_MAX_CHARS)) throw badRequest("noticeId is invalid");
-    return { noticeId: mark.noticeId, mark: mark.mark };
+    if (mark.withdraw !== undefined && (mark.withdraw !== true || mark.mark !== "dismissed")) throw badRequest("withdraw requires a dismissal");
+    return { noticeId: mark.noticeId, mark: mark.mark, ...(mark.withdraw ? { withdraw: true as const } : {}) };
   });
 }
 

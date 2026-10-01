@@ -376,6 +376,7 @@ const automationPressArgsSchema = z
   .strict();
 
 export const cliRequestSchema = z.discriminatedUnion("verb", [
+  z.object({ ...requestBase, verb: z.literal("automationButtons"), args: z.object({ ...argsBase, collectionPath: collectionPathArg, table: z.string().min(1).max(256).optional() }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("dataset"), args: z.object({ ...argsBase, request: DatasetRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("appPublication"), args: z.object({ ...argsBase, request: OwnerAppPublicationRequest }).strict() }).strict(),
   z.object({ ...requestBase, verb: z.literal("ownerAppResponses"), args: z.object({ ...argsBase, request: OwnerAppResponsesRequest }).strict() }).strict(),
@@ -1242,6 +1243,13 @@ export const cliResultSchemas = {
   automationRuns: automationRunsResultSchema,
   automationRun: automationRunResultSchema,
   automationRetry: automationRetryResultSchema,
+  automationButtons: z.union([
+    z.object({ ok: z.literal(true), buttons: z.array(z.object({ field: z.string(), table: z.string().optional(), state: z.union([
+      z.object({ kind: z.literal("ready"), automationId: z.string(), irreversible: z.array(z.object({ name: z.string(), label: z.string() })).optional() }),
+      z.object({ kind: z.enum(["disabled", "unchecked", "no-automation"]), reason: z.string() }),
+    ]) })) }),
+    rawFailureSchema,
+  ]),
   automationPress: automationPressResultSchema,
 } as const;
 

@@ -1,7 +1,11 @@
 import type {
   AutomationPressOutcome,
   RelayAutomationPress,
+  RelayButtonInspection,
+  RelayButtonInspectionRequest,
 } from "@dohc/workspace-contracts/relay";
+import { AutomationRunWait } from "./automationRunWait";
+import { SHARED_BUTTON_DENIED, SHARED_BUTTON_FAILED } from "./buttonPresser";
 import type { CollectionAutomationPress, PressSettled } from "./collectionAutomations";
 
 // Button presses from shared views (ADR 0012). A recipient's computer sends
@@ -13,13 +17,14 @@ import type { CollectionAutomationPress, PressSettled } from "./collectionAutoma
 // After a failed request the loop waits this long, doubling to the cap.
 const RETRY_FIRST_MS = 2_000;
 const RETRY_MAX_MS = 60_000;
-const ERROR_MAX_CHARS = 1_000;
 
 /**
  * The relay's press routes for one workspace, as its host calls them: over
  * HTTP from a computer, in process on the server.
  */
 export interface PressTransport {
+  inspections(): RelayButtonInspectionRequest[];
+  answerInspection(generation: number, inspectionId: string, result: RelayButtonInspection): Promise<void>;
   /** The presses this host has not settled, waiting a while for one when there are none. */
   list(signal: AbortSignal): Promise<RelayAutomationPress[]>;
   /** Accepts presses at the host generation this host read; answers the ones accepted. */
@@ -82,18 +87,14 @@ export interface RelayedPressHostOptions {
   /** The claim the engine already holds for this press, found without making one. */
   heldClaim(press: RelayAutomationPress): Promise<HeldClaim>;
   press(
-    input: { automationId: string; collectionPath: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string },
+    input: { automationId: string; collectionPath: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string; confirmed: readonly string[] },
     watch: (claimId: string) => void,
   ): Promise<{ pressed: CollectionAutomationPress; field: string | null }>;
+  inspect(inspectionId: string): Promise<RelayButtonInspection>;
   notifyFailure(failure: RelayedPressFailure): Promise<void>;
   onError(context: string, error: unknown): void;
   /** Waits before a retry; a test drives it. */
   delay?: (ms: number, signal: AbortSignal) => Promise<void>;
-}
-
-function errorText(error: unknown): string {
-  const message = (error instanceof Error ? error.message : String(error)).trim().slice(0, ERROR_MAX_CHARS);
-  return message.length > 0 ? message : "The button did not finish.";
 }
 
 function wait(ms: number, signal: AbortSignal): Promise<void> {
@@ -133,13 +134,14 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
     taken.delete(input.hostPressId);
   }
 
-  async function ended(relay: PressTransport, press: RelayAutomationPress, field: string | null, outcome: AutomationPressOutcome, error: string | null) {
+  async function ended(relay: PressTransport, press: RelayAutomationPress, field: string | null, outcome: AutomationPressOutcome, error: string | null, claimed = false) {
+    if (outcome === "failed" && error !== SHARED_BUTTON_DENIED) error = SHARED_BUTTON_FAILED;
     try {
       await settle(relay, { hostPressId: press.hostPressId, outcome, error });
     } catch (settleError) {
       options.onError(`settle relayed press "${press.hostPressId}"`, settleError);
     }
-    if (outcome === "failed" || outcome === "busy") {
+    if (!claimed && (outcome === "failed" || outcome === "busy")) {
       await options.notifyFailure({ press, field, outcome, error }).catch((notifyError: unknown) =>
         options.onError(`tell the person who pressed "${press.hostPressId}"`, notifyError));
     }
@@ -166,7 +168,7 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
       }
       if (settled === null || !byClaim.delete(held.claimId)) return;
     }
-    await ended(relay, press, null, settled.outcome, settled.error);
+    await ended(relay, press, null, settled.outcome, settled.error, true);
   }
 
   async function take(relay: PressTransport, press: RelayAutomationPress): Promise<void> {
@@ -193,17 +195,19 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
       if (!accepted.includes(press.hostPressId) || !host.stillRuns()) return;
       taken.add(press.hostPressId);
       let result: Awaited<ReturnType<RelayedPressHostOptions["press"]>>;
+      let claimed = false;
       try {
         result = await options.press(
           {
             automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, recordId: press.recordId,
-            pressId: press.hostPressId, pressedBy: press.pressedBy,
+            pressId: press.hostPressId, pressedBy: press.pressedBy, confirmed: press.confirmed,
           },
           // Watched before its run can start, so a run that settles at once is still told.
-          (claimId) => byClaim.set(claimId, { press, field: null }),
+          (claimId) => { claimed = true; byClaim.set(claimId, { press, field: null }); },
         );
       } catch (error) {
-        await ended(relay, press, null, "failed", errorText(error));
+        if (error instanceof AutomationRunWait) { taken.delete(press.hostPressId); return; }
+        await ended(relay, press, null, "failed", error instanceof Error && error.message === SHARED_BUTTON_DENIED ? SHARED_BUTTON_DENIED : SHARED_BUTTON_FAILED, claimed);
         return;
       }
       const { pressed, field } = result;
@@ -212,7 +216,7 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
         return;
       }
       if (pressed.settled) {
-        await ended(relay, press, field, pressed.settled.outcome, pressed.settled.error);
+        await ended(relay, press, field, pressed.settled.outcome, pressed.settled.error, true);
         return;
       }
       // Gone already when its run settled first.
@@ -232,6 +236,14 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
         if (relay === null) return;
         for (const input of [...unsent.values()]) await settle(relay, input);
         const presses = await relay.list(signal);
+        for (const request of relay.inspections()) {
+          const generation = host.generation();
+          if (signal.aborted || generation === null || !host.stillRuns()) break;
+          try {
+            const result = await options.inspect(request.inspectionId);
+            await relay.answerInspection(generation, request.inspectionId, result);
+          } catch (error) { options.onError("answer a shared Button inspection", error); }
+        }
         for (const press of presses) {
           if (signal.aborted) return;
           await take(relay, press);
@@ -264,10 +276,10 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
       byClaim.delete(event.claimId);
       void options.transport().then((relay) => {
         if (relay === null) {
-          unsent.set(found.press.hostPressId, { hostPressId: found.press.hostPressId, outcome: event.outcome, error: event.error });
+          unsent.set(found.press.hostPressId, { hostPressId: found.press.hostPressId, outcome: event.outcome, error: event.outcome === "failed" && event.error !== SHARED_BUTTON_DENIED ? SHARED_BUTTON_FAILED : event.error });
           return;
         }
-        return ended(relay, found.press, found.field, event.outcome, event.error);
+        return ended(relay, found.press, found.field, event.outcome, event.error, true);
       }).catch((error: unknown) => options.onError(`settle relayed press "${found.press.hostPressId}"`, error));
     },
 

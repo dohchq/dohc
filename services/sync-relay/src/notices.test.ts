@@ -313,6 +313,22 @@ describe("notice list", () => {
 });
 
 describe("notices for someone else", () => {
+  it("withdraws a sender's run failure copies without granting recipients that authority", async () => {
+    const { h } = await sharedTrip();
+    expect((await post(h, "owner", notice())).status).toBe(200);
+    expect((await post(h, "owner", notice({ recipientUserId: "ana" }))).status).toBe(200);
+    const ownerId = (await pull(h, "owner")).notices[0]!.noticeId;
+    const copyId = (await pull(h, "ana")).notices[0]!.noticeId;
+    // Supplying the sender's id as the recipient cannot take back their post.
+    expect((await h(request("ana", "/sync/notices/marks", jsonBody({ marks: [{ noticeId: ownerId, mark: "dismissed", withdraw: true }] })))).status).toBe(200);
+    expect((await pull(h, "owner")).notices[0]!.dismissedAtMs).toBeNull();
+    expect((await pull(h, "ana")).notices[0]!.dismissedAtMs).toBeNull();
+    // An ordinary dismissal changes only this person's list.
+    await h(request("owner", "/sync/notices/marks", jsonBody({ marks: [{ noticeId: ownerId, mark: "dismissed" }] })));
+    expect((await pull(h, "ana")).notices[0]!.dismissedAtMs).toBeNull();
+    await h(request("owner", "/sync/notices/marks", jsonBody({ marks: [{ noticeId: ownerId, mark: "dismissed", withdraw: true }] })));
+    expect((await pull(h, "ana")).notices.find(row => row.noticeId === copyId)?.dismissedAtMs).toBe(clock);
+  });
   it("lets the owner send to a grantee and never shows the grantee the workspace id", async () => {
     const { h, shareId } = await sharedTrip();
     expect((await post(h, "owner", notice({ recipientUserId: "ana" }))).status).toBe(200);

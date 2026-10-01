@@ -36,7 +36,7 @@ import {
   type AutomationWatchGroupsParams,
   type VersionedLiveAdapter,
 } from "@dohc/workspace-engine-client";
-import { changedSincePressed, datasetButtonAccess, namesButton, noAccessReason, relayedDatasetReason, resolveButton, type AutomationButtonState } from "./automationButtons";
+import { changedSincePressed, datasetButtonAccess, namesButton, noAccessReason, resolveButton, type AutomationButtonState } from "./automationButtons";
 import type { AutomationFormulaEvaluator } from "./automationEvaluatorHost";
 import {
   codeFilesOf,
@@ -81,6 +81,8 @@ import {
   LOST_COLLECTION_ERROR,
 } from "./collectionAutomationRun";
 import { automationInventory, canPressInventory, irreversibleActionsOf, type AutomationInventory } from "./automationInventory";
+import { describeButtonPresser, SHARED_BUTTON_DENIED, SHARED_BUTTON_UNCHECKED, type DatasetOperationCeiling } from "./buttonPresser";
+import type { RelayButtonAuthority, RelayButtonInspection } from "@dohc/workspace-contracts/relay";
 import { AutomationRunWait } from "./automationRunWait";
 import { automationUndoReach, undoAutomationRuns } from "./automationUndo";
 import {
@@ -127,6 +129,17 @@ import {
   type AutomationFailure,
   type ReportedRun,
 } from "./automationFailedNotice";
+
+interface RelayedPressAuthority extends RelayButtonAuthority {
+  /** The in-process relay host rechecks stored authority inside a dataset commit. */
+  current?: () => RelayButtonAuthority;
+}
+
+function buttonInspectionFailure(error: unknown): RelayButtonInspection {
+  return error instanceof Error && error.message === SHARED_BUTTON_DENIED
+    ? { kind: "denied", reason: SHARED_BUTTON_DENIED }
+    : { kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED };
+}
 
 // The Collection automation executor for one open workspace (ADR 0008, ADR
 // 0012). It keeps an index of every Collection's automations.yaml, keeps the
@@ -284,6 +297,8 @@ export interface DatasetAutomationHost extends DatasetRunHost, DatasetUndoHost {
 }
 
 export interface CollectionAutomationsOptions {
+  resolveRelayedPress?(hostPressId: string): Promise<RelayedPressAuthority>;
+  resolveButtonInspection?(inspectionId: string): Promise<RelayButtonAuthority>;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
   withEngine<T>(work: (engine: CollectionAutomationEngine) => Promise<T>): Promise<T | null>;
   withRecordWrites: CollectionAutomationRunDependencies["withRecordWrites"];
@@ -891,10 +906,10 @@ function relayedPressId(pressId: string, hash: string, collectionPath: string): 
  * What a relayed press's claim is bound to: the definition its presser saw,
  * and the folder the relay allowed it in. Null for any other claim.
  */
-function boundPress(claim: Pick<AutomationClaim, "trigger" | "change">): { definition: string; place: string } | null {
+function boundPress(claim: { trigger: AutomationClaim["trigger"]; change: { kind: AutomationClaim["change"]["kind"] } }): { hostPressId: string; definition: string; place: string } | null {
   if (claim.change.kind !== "button" || !("key" in claim.trigger)) return null;
-  const match = /^press:[^.]+\.([0-9a-f]{16})\.([0-9a-f]{16})$/u.exec(claim.trigger.key);
-  return match ? { definition: match[1]!, place: match[2]! } : null;
+  const match = /^press:([^.]+)\.([0-9a-f]{16})\.([0-9a-f]{16})$/u.exec(claim.trigger.key);
+  return match ? { hostPressId: match[1]!, definition: match[2]!, place: match[3]! } : null;
 }
 
 function collectionNamed(path: string): ReachCollection {
@@ -960,6 +975,7 @@ type ClaimPage = { claims: HistoryClaim[]; next: string | null };
  * is the person a press ran for, or undefined for anything but a press.
  */
 type LedgerClaim = {
+  hostPressId?: string;
   ledger: "dataset" | "engine";
   state: AutomationClaimSummary["state"];
   pressedBy: string | null | undefined;
@@ -2554,6 +2570,16 @@ export class CollectionAutomations {
       if (press && !(await this.options.mayRetryPress(known.pressedBy ?? null))) {
         return { status: "refused", reason: "Only the person who pressed this button, or the workspace's owner, can run it again." };
       }
+      if (known.hostPressId !== undefined) {
+        try {
+          const authority = await this.pressAuthority(known.hostPressId);
+          if (authority.definitionHash !== definitionHash(automation) || authority.collectionPath !== parsed.collectionPath) throw new Error(SHARED_BUTTON_DENIED);
+          const inspected = await this.inspectAuthority(authority);
+          if (inspected.kind !== "ready") return { status: "refused", reason: inspected.reason };
+        } catch (error) {
+          return { status: "refused", reason: error instanceof AutomationRunWait ? SHARED_BUTTON_UNCHECKED : "This shared press cannot be retried. Press the button again." };
+        }
+      }
       const runs = tryAgainOf(await runsForClaim(this.options.store, input, automation));
       if ("refused" in runs) return { status: "refused", reason: runs.refused };
       const { startsOver } = runs;
@@ -2616,7 +2642,7 @@ export class CollectionAutomations {
    * the drain wakes, so the pressing window hears how the run settles.
    */
   async press(
-    input: { collectionPath: string; field: string; recordId: string; pressId: string; pressedBy: string; by: AutomationPressActor; confirmed?: readonly string[] },
+    input: { collectionPath: string; field: string; recordId: string; pressId: string; pressedBy: string; by: AutomationPressActor; confirmed: readonly string[] },
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
     /** Checks a new press the way the caller must, such as that the field is still a button. */
     checkNew: () => Promise<void> = async () => undefined,
@@ -2635,7 +2661,7 @@ export class CollectionAutomations {
       await checkNew();
       const state = await this.buttonState(input.collectionPath, input.field, await this.options.cachedRoster(), describe);
       if (state.kind !== "ready") throw new Error(state.reason);
-      if ((state.irreversible ?? []).some((action) => !input.confirmed?.includes(action.name))) throw new Error(changedSincePressed(input.field));
+      if ((state.irreversible ?? []).some((action) => !input.confirmed.includes(action.name))) throw new Error(changedSincePressed(input.field));
       automationId = state.automationId;
     }
     const pressed = await this.withLiveEngine(async (engine) => {
@@ -2929,10 +2955,13 @@ export class CollectionAutomations {
    * Answers the press and the button's field, for the notice a failure sends.
    */
   async pressRelayed(
-    input: { automationId: string; collectionPath: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string },
+    input: { automationId: string; collectionPath: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string; confirmed: readonly string[] },
     watch: (claimId: string, waiting: PressWaitReason | null) => void,
   ): Promise<{ pressed: CollectionAutomationPress; field: string | null }> {
     await this.ready();
+    const authority = await this.pressAuthority(input.pressId);
+    if (authority.automationId !== input.automationId || authority.collectionPath !== input.collectionPath || authority.definitionHash !== input.definitionHash ||
+      authority.recordId !== input.recordId || authority.userId !== input.pressedBy || JSON.stringify(authority.confirmed) !== JSON.stringify([...input.confirmed].sort())) throw new Error(SHARED_BUTTON_DENIED);
     const id = this.locate(input.automationId);
     const automation = this.definitionFor(input.automationId);
     if (id === null || automation === null || automation.when.kind !== "button" || automation.when.table !== null) {
@@ -2948,15 +2977,64 @@ export class CollectionAutomations {
     if (resolved.kind === "one" && resolved.automation.id !== automation.id) {
       throw new Error(`${field} now runs another automation. Press it again.`);
     }
-    const datasetReason = await relayedDatasetReason(automation, id.collectionPath, async (path) => this.keptIn(path));
-    if (datasetReason !== null) throw new Error(datasetReason);
+    const inspection = await this.inspectAuthority(authority);
+    if (inspection.kind === "unchecked") throw new AutomationRunWait(inspection.reason);
+    if (inspection.kind !== "ready") throw new Error(inspection.reason);
+    if (inspection.irreversible.some(action => !authority.confirmed.includes(action.name))) throw new Error(changedSincePressed(field));
     // The engine's press id carries that definition, so the claim stays
     // bound to it through a restart; the run refuses any other.
     const pressId = relayedPressId(input.pressId, input.definitionHash, input.collectionPath);
     await this.markHostClaims();
-    // The relay carries a person's press; no agent presses through it.
-    const pressed = await this.press({ collectionPath: id.collectionPath, field, recordId: input.recordId, pressId, pressedBy: input.pressedBy, by: { kind: "human" } }, watch);
+    // People and local agents both press with the stored signed-in person's authority.
+    const pressed = await this.press({ collectionPath: id.collectionPath, field, recordId: authority.recordId!, pressId, pressedBy: authority.userId, by: { kind: "human" }, confirmed: authority.confirmed }, watch,
+      async () => { await this.pressAuthority(input.pressId); }, async datasetId => this.presserDescription(await this.pressAuthority(input.pressId), datasetId));
     return { pressed, field };
+  }
+
+  private async pressAuthority(hostPressId: string): Promise<RelayedPressAuthority> {
+    if (!this.options.resolveRelayedPress) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
+    return this.options.resolveRelayedPress(hostPressId);
+  }
+
+  private async presserDescription(authority: RelayButtonAuthority, datasetId: string): Promise<DatasetDescription> {
+    const result = await this.withLiveHost(host => describeButtonPresser(host, authority, datasetId), true);
+    if (result === null) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
+    return result;
+  }
+
+  /** A host-only request id binds inspection to relay-authenticated identity and the current host fence. */
+  async inspectRelayed(inspectionId: string): Promise<RelayButtonInspection> {
+    try {
+      if (!this.options.resolveButtonInspection) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
+      await this.ready();
+      return await this.inspectAuthority(await this.options.resolveButtonInspection(inspectionId));
+    } catch (error) { return buttonInspectionFailure(error); }
+  }
+
+  private async inspectAuthority(authority: RelayButtonAuthority): Promise<RelayButtonInspection> {
+    try {
+      const id = this.locate(authority.automationId), automation = this.definitionFor(authority.automationId);
+      if (!id || !automation || !automation.enabled || automation.when.kind !== "button" || automation.when.table !== null ||
+        id.collectionPath !== authority.collectionPath || definitionHash(automation) !== authority.definitionHash) return { kind: "denied", reason: SHARED_BUTTON_DENIED };
+      const roster = await this.options.roster();
+      if (roster.kind === "unknown") throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
+      let inventory: AutomationInventory;
+      try { inventory = this.inventory(id.collectionPath, automation); }
+      catch (error) {
+        if (error instanceof AutomationRunWait) throw error;
+        if (this.datasetStoreFailed) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
+        throw new Error(SHARED_BUTTON_DENIED);
+      }
+      if (this.cannotRun(id.collectionPath, automation) !== null) return { kind: "denied", reason: SHARED_BUTTON_DENIED };
+      const descriptions = new Map<string, DatasetDescription>();
+      for (const step of inventory.reach) if (step.kind === "dataset-operation" && !descriptions.has(step.datasetId)) {
+        descriptions.set(step.datasetId, await this.presserDescription(authority, step.datasetId));
+      }
+      if (!await canPressInventory(inventory, async datasetId => descriptions.get(datasetId)!)) return { kind: "denied", reason: SHARED_BUTTON_DENIED };
+      const state = await this.runnableButtonState(id.collectionPath, automation, roster, inventory.reach);
+      if (state.kind !== "ready") return { kind: "denied", reason: SHARED_BUTTON_DENIED };
+      return { kind: "ready", automationId: authority.automationId, definitionHash: authority.definitionHash, irreversible: irreversibleActionsOf(automation, id.collectionPath, inventory) };
+    } catch (error) { return buttonInspectionFailure(error); }
   }
 
   /**
@@ -3426,6 +3504,7 @@ export class CollectionAutomations {
     if (claim === null || claim.automationId !== automationId) return "missing";
     return {
       ledger: "engine",
+      ...(boundPress(claim) === null ? {} : { hostPressId: boundPress(claim)!.hostPressId }),
       state: claim.state,
       pressedBy: claim.change.kind === "button" ? claim.change.onBehalfOf : undefined,
       neverStarted: stopOf(claim).neverStarted,
@@ -4651,7 +4730,7 @@ export class CollectionAutomations {
     const collection = collectionNamed(id.collectionPath);
     const runner = runnerOf(held, definition?.datasetId);
     const outcome = await this.runWithDeadline(claim.claimId, stop, (signal) => runner.kind === "document"
-      ? runCollectionAutomation(this.runDependencies({ automationId: claim.automationId, collectionPath: collection.path, automation }), { claim: runner.claim, automation, collection, roster, signal, stopped: stop })
+      ? runCollectionAutomation(this.runDependencies({ automationId: claim.automationId, collectionPath: collection.path, automation }, bound?.hostPressId), { claim: runner.claim, automation, collection, roster, signal, stopped: stop })
       : runDatasetAutomation({ ...this.runDependencies({ automationId: claim.automationId, collectionPath: collection.path, automation }), withHost: (work) => this.withLiveHost(work), cachedRoster: () => this.options.cachedRoster() },
         { held: runner.held, automation, collection, roster, signal, stopped: stop }), hostHold);
     if (outcome === null) return null;
@@ -4902,8 +4981,38 @@ export class CollectionAutomations {
     });
   }
 
-  private runDependencies(owned?: OwnedAutomation): CollectionAutomationRunDependencies {
+  private runDependencies(owned?: OwnedAutomation, hostPressId?: string): CollectionAutomationRunDependencies {
+    let checkedAuthority: RelayedPressAuthority | undefined;
     return {
+      ...(hostPressId === undefined ? {} : {
+        checkPresser: async () => {
+          const authority = await this.pressAuthority(hostPressId);
+          if (!owned || authority.automationId !== owned.automationId || authority.collectionPath !== owned.collectionPath || authority.definitionHash !== definitionHash(owned.automation)) throw new Error(SHARED_BUTTON_DENIED);
+          checkedAuthority = authority;
+        },
+        authorizeDataset: async (datasetId: string, operationId: string): Promise<DatasetOperationCeiling> => {
+          const authority = checkedAuthority ?? await this.pressAuthority(hostPressId);
+          const roster = await this.options.roster();
+          if (roster.kind === "unknown") throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
+          const result = await this.withLiveHost(host => {
+            const authorize: DatasetOperationCeiling = (targetId, targetOperationId) => {
+              const currentAuthority = authority.current?.() ?? authority;
+              if (!owned || targetId !== datasetId) throw new Error(SHARED_BUTTON_DENIED);
+              const described = describeButtonPresser(host, currentAuthority, targetId);
+              if (!described.operations.some(operation => operation.operationId === targetOperationId)) throw new Error(SHARED_BUTTON_DENIED);
+              const revision = host.revision(targetId), operation = revision.definition.operations.find(value => value.operationId === targetOperationId);
+              if (!operation || !owned) throw new Error(SHARED_BUTTON_DENIED);
+              const target: ReachStep = { kind: "dataset-operation", collection: collectionNamed(posix.dirname(revision.definition.schemaPath)), datasetId: targetId,
+                operations: revision.definition.operations, grants: host.dataGrants(targetId), operation };
+              if (checkAutomationReach(roster, { id: owned.automation.id, collection: collectionNamed(owned.collectionPath), codeFiles: codeFilesOf(owned.automation, owned.collectionPath), steps: [target] }).some(verdict => !verdict.allowed)) throw new Error(SHARED_BUTTON_DENIED);
+            };
+            authorize(datasetId, operationId);
+            return authorize;
+          });
+          if (result === null) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
+          return result;
+        },
+      }),
       targets: this.targetResolver(),
       withHost: (work) => this.withLiveHost(work),
       cachedRoster: () => this.options.cachedRoster(),

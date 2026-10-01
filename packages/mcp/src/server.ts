@@ -26,6 +26,7 @@ import {
   listAutomations, switchAutomation,
   listGroups,
   pressButton,
+  inspectButtons,
   queryCollection,
   readAutomationRun,
   retryAutomationRun,
@@ -101,29 +102,16 @@ function text(structuredContent: Record<string, unknown>) {
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const server = new McpServer({ name: "dohc", version: "0.3.0" });
 
-  // A share view's write surface is its access level. The write tools
-  // come in two tiers, and a tier the level does not grant is never registered
-  // — an agent pointed at a share view is offered only what it may use. Read
-  // tools always register below.
-  //
-  //   no level  a workspace this machine owns: every write tool
-  //   any level a shared view: NO write tool of any kind
-  //
-  // #646 PR2 deliberately registers no chat write tool at any level. The two
-  // that exist — `dohc_start_group_chat` and `dohc_reply_to_chat` — are
-  // GROUP tools, and a shared view refuses every group write before the
-  // level is consulted (`apps/desktop/src/cli/cliServer.ts`). `comment`
-  // grants per-FILE chat, and `dohc_start_file_chat` writes it, but a shared
-  // view refuses every chat write in the desktop's chat write module. Offering
-  // an agent a tool its own workspace always refuses is a promise the surface
-  // cannot keep, so the level is carried here for the tiers PR3 adds and
-  // grants nothing today.
+  // Shared views expose reads and host-checked Button presses.
+  // Local document and chat writes register only in an owning workspace.
   const register = server.registerTool.bind(server);
   const skip = (() => undefined) as unknown as McpServer["registerTool"];
   // Every write tool, document and chat alike.
   const registerWrite: McpServer["registerTool"] =
     ctx.shareAccess === undefined ? register : skip;
-  // Run tools remain owner-only. File-backed controls use the share's access.
+  // Shared views inspect and press Buttons through the owner's host.
+  // Run history and retries belong to the host that holds the runs.
+  // File-backed controls use the share's access.
   const registerAutomation = registerWrite;
 
   register("dohc_list_automations", {
@@ -614,7 +602,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     async (args) => text(await retryAutomationRun(ctx, args)),
   );
 
-  registerWrite(
+  register(
     "dohc_press_button",
     {
       description:
@@ -630,6 +618,11 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     },
     async (args) => text(await pressButton(ctx, args)),
   );
+
+  register("dohc_inspect_buttons", {
+    description: "Inspect a Collection's Button fields, their current access, and any actions that need confirmation. Shared Collection buttons are checked on the owner's host.",
+    inputSchema: { collectionPath: z.string().min(1).max(4096), table: z.string().min(1).max(256).optional() },
+  }, async args => text(await inspectButtons(ctx, args)));
 
   return server;
 }

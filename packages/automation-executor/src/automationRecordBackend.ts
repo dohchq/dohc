@@ -70,7 +70,7 @@ import type { AutomationTarget } from "./automationTargets";
 export type RecordRunDependencies = Pick<CollectionAutomationRunDependencies,
   "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
 > & Partial<Pick<CollectionAutomationRunDependencies,
-  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "checkReach" | "localPersonId"
+  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset"
 >> & Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;
 export type RecordRunInput = Omit<CollectionAutomationRunInput, "claim"> & {
   claim: Pick<AutomationClaim, "automationId" | "claimId" | "run" | "depth" | "createdAtMs">;
@@ -96,6 +96,11 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   { backend: StepBackend; ctx: RunContext; state: StoredRun; resuming: boolean }
 > {
   const { automation, collection, claim, signal, roster } = input;
+  try { await deps.checkPresser?.(); }
+  catch (error) {
+    if (error instanceof AutomationRunWait) throw error;
+    return { outcome: failed(error instanceof Error ? error.message : String(error)) };
+  }
   const saved = await savedRunOf(deps.store, claim, automation);
   if ("outcome" in saved) return { outcome: saved.outcome };
   const current = saved.current;
@@ -212,6 +217,18 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
       : `The code in step ${request.ordinal + 1} changes records in ${request.collection}. Name its table when the Collection has several tables.`);
     return table;
   };
+  const presserHoldsCodeOperations = async (currentRoster: ReachRoster, steps: readonly Extract<ReachStep, { kind: "dataset-operation" }>[]) => {
+    if (automation.when.kind !== "button") return true;
+    for (const step of steps) {
+      if (deps.authorizeDataset === undefined) {
+        if (!personHoldsOperation(currentRoster, source.personId, step, deps.localPersonId?.())) return false;
+      } else {
+        try { await deps.authorizeDataset(step.datasetId, step.operation.operationId); }
+        catch (error) { if (error instanceof AutomationRunWait) throw error; return false; }
+      }
+    }
+    return true;
+  };
   const authorizeCode = async (requests: readonly CodeTarget[]) => {
     const authorized = new Map<CodeTarget, { table: DatasetTable; operation: DatasetOperation; reader?: DatasetOperation }>();
     if (requests.length === 0) return authorized;
@@ -271,7 +288,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
         // Schema errors disclose nothing until every editor can use the destination's operations.
         const schema = target.approved.definition.operations.map((operation): Extract<ReachStep, { kind: "dataset-operation" }> => ({ kind: "dataset-operation", collection: target.collection, datasetId: target.approved.datasetId, operations: target.approved.definition.operations, grants, operation }));
         const allowed = schema.length > 0 && checkAutomationReach(currentRoster, { id: automation.id, collection, codeFiles: codeFilesOf(automation, collection.path), steps: schema }).every((verdict) => verdict.allowed) &&
-          (automation.when.kind !== "button" || schema.every((step) => personHoldsOperation(currentRoster, source.personId, step, deps.localPersonId?.())));
+          await presserHoldsCodeOperations(currentRoster, schema);
         if (allowed) for (const reach of schema) addReach(request.ordinal, reach);
         else addReach(request.ordinal, { kind: "unavailable", reason: "This automation cannot use the requested Collection or fields.", identity: pathReach.identity });
         problems.push(error instanceof Error ? error.message : String(error));
@@ -294,7 +311,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     for (const [index, { ordinal, reach }] of checks.entries()) {
       const verdict = verdicts[index]!;
       if (!verdict.allowed) throw new Error(`The code in step ${ordinal + 1} changes records. This automation cannot use the requested Collection or fields.`);
-      if (automation.when.kind === "button" && reach.kind === "dataset-operation" && !personHoldsOperation(currentRoster, source.personId, reach, deps.localPersonId?.())) throw new Error("The person who pressed this button cannot use its destination operation.");
+      if (reach.kind === "dataset-operation" && !await presserHoldsCodeOperations(currentRoster, [reach])) throw new Error("The person who pressed this button cannot use its destination operation.");
     }
     if (kept.includes("held")) throw new AutomationRunWait("The automation is waiting for an editor.", "held");
     if (problems.length > 0) throw new Error(problems[0]);
@@ -353,6 +370,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
   };
   // Refresh grants and descriptor associations before reads and effects. Metadata stays local to this attempt.
   const checkNow = async (recordVerdicts = false) => {
+    await deps.checkPresser?.();
     checkLocations();
     const currentRoster = (await deps.cachedRoster?.()) ?? roster;
     if (currentRoster.kind === "unknown") throw new AutomationRunWait("The workspace roster is unavailable.", "roster");
@@ -412,13 +430,15 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
         return record;
       };
       const call = async (path: string, operationId: string, value: JsonValue) => {
+        await checkNow();
         await ensure(path);
         const target = inventory.targets.get(path)!;
         if (target.kind !== "dataset") throw new Error(RULES_CHANGED_ERROR);
+        const authorizeOperation = await deps.authorizeDataset?.(target.approved.datasetId, operationId);
         const result = await deps.withHost?.((host) => {
           const rules = association(path).rules!;
           if (!host.resolves(rules)) throw new Error(RULES_CHANGED_ERROR);
-          return host.invoke(host.context({ automationId: claim.automationId, claimId: claim.claimId, depth: claim.depth + 1, person: source.writeAuthorId }), { ...rules, operationId, input: value, idempotencyKey: "automation-read", signal });
+          return host.invoke(host.context({ automationId: claim.automationId, claimId: claim.claimId, depth: claim.depth + 1, person: source.writeAuthorId, authorizeOperation }), { ...rules, operationId, input: value, idempotencyKey: "automation-read", signal });
         });
         if (result == null) throw new AutomationRunWait("The dataset host is unavailable.");
         return result;
@@ -625,7 +645,8 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     },
     async apply(run, effect, place, chat) {
       await authorizeCode(savedCodeTargets({ ordinal: place.ordinal, effects: [effect] }));
-      await checkNow();
+      const datasetEffect = effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action";
+      if (!datasetEffect || deps.authorizeDataset === undefined) await checkNow();
       const effectPath = effect.kind === "set" ? effect.target.collectionPath : "collectionPath" in effect ? effect.collectionPath ?? pathOf(place.ordinal) : pathOf(place.ordinal);
       await verifyTarget(effectPath);
       if (effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action") {
@@ -633,7 +654,12 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
         const dataset = inventory.datasets.get(path)!;
         if (effect.rules.datasetId !== association(path).rules?.datasetId || !await resolves(effect.rules)) return { outcome: failed(RULES_CHANGED_ERROR) };
         const result = await deps.withHost?.((host) => applyDatasetEffect({
-          dependencies: deps as DatasetAutomationRunDependencies, host,
+          dependencies: deps as DatasetAutomationRunDependencies, host: deps.authorizeDataset === undefined ? host : { ...host,
+            invoke: async (context, invocation) => {
+              await checkNow();
+              const authorizeOperation = await deps.authorizeDataset!(invocation.datasetId, invocation.operationId);
+              return host.invoke(host.context({ ...context, authorizeOperation }), invocation);
+            } },
           context: host.context({ automationId: claim.automationId, claimId: claim.claimId, depth: claim.depth + 1, person: source.writeAuthorId }),
           run, index: place.index, ordinal: place.ordinal, part: place.part, signal,
           datasetRules: dataset.rules, reader: dataset.steps.rereads.get(place.ordinal),

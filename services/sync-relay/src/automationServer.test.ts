@@ -89,6 +89,7 @@ function fakeExecutor(
     releaseGroupSubscriptions: async () => ({ handover: groups(at(10, 30), "message-on-server"), watchedGeneration: 3 }),
     reachHandover: async () => reach("held", 9),
     relayedClaim: async () => null,
+    inspectRelayed: async () => ({ kind: "unchecked", reason: "Host unavailable" }),
     pressRelayed: async (input, watch) => {
       pressed.push({ pressId: input.pressId, pressedBy: input.pressedBy });
       watch(`claim-${input.pressId}`, null);
@@ -524,6 +525,41 @@ describe("a server that runs a workspace's automations", () => {
     expect(await fake.options.reachRelayRecord(7)).toEqual({ generation: 7, reach: reach("held", 6), everShared: false });
   });
 
+  it("keeps a server host with an initial press backlog available for inspections", async () => {
+    clock = at(8);
+    const { storage, h, host } = await relay();
+    await host("/check-in", { installId: "laptop", label: "Laptop", claim: true });
+    const shareId = await createShare(h, OWNER, WORKSPACE, { recipientUserId: "ana", paths: ["Tasks"], access: "edit" });
+    const grant = storage.listActiveShareGrantsForRecipient(shareId, "ana")[0]!;
+    const s = await server(storage, h);
+    expect((await h(request("ana", `/sync/shares/${shareId}/automation-presses`, jsonBody({
+      pressId: "initial", automationId: PRESSED, collectionPath: "Tasks", definitionHash: "0123456789abcdef", recordId: "rec-12", confirmed: [],
+    })))).status).toBe(200);
+    const list = storage.listAutomationPresses.bind(storage);
+    const controller = new AbortController();
+    let inspection: ReturnType<SyncRelayStorage["inspectAutomationButton"]> | undefined;
+    let queued = 0;
+    const spy = vi.spyOn(storage, "listAutomationPresses").mockImplementation(scope => {
+      const presses = list(scope);
+      if (presses.length > 0 && inspection === undefined) {
+        inspection = storage.inspectAutomationButton({
+          target: { automationId: PRESSED, collectionPath: "Tasks", definitionHash: "0123456789abcdef" },
+          source: { workspaceId: WORKSPACE, shareId, grantId: grant.grantId, grantGeneration: grant.generation, userId: "ana" },
+          id: "busy-server", signal: controller.signal, wake: () => {},
+        });
+        queued = storage.listButtonInspections(scope).length;
+      }
+      return presses;
+    });
+    try {
+      const fake = await s.openReplica();
+      await vi.waitFor(() => expect(fake.pressed).toHaveLength(1));
+      expect(queued).toBe(1);
+      // The fake executor answers unchecked; receiving it proves the request reached the host.
+      await expect(inspection).resolves.toMatchObject({ kind: "unchecked", reason: "Host unavailable" });
+    } finally { controller.abort(); spy.mockRestore(); }
+  });
+
   it("runs a press from a share view as the person who pressed, and tells them when it fails", async () => {
     clock = at(8);
     const { storage, h, host } = await relay();
@@ -533,19 +569,22 @@ describe("a server that runs a workspace's automations", () => {
     const fake = await s.openReplica();
 
     const pressed = await h(request("ana", `/sync/shares/${shareId}/automation-presses`, jsonBody({
-      pressId: "press-1", automationId: PRESSED, collectionPath: "Tasks", definitionHash: "0123456789abcdef", recordId: "rec-12",
+      pressId: "press-1", automationId: PRESSED, collectionPath: "Tasks", definitionHash: "0123456789abcdef", recordId: "rec-12", confirmed: [],
     })));
     expect(pressed.status).toBe(200);
     await vi.waitFor(() => expect(fake.pressed).toEqual([{ pressId: expect.any(String), pressedBy: "ana" }]));
     const [{ pressId }] = fake.pressed;
 
     fake.options.onPressSettled({ claimId: `claim-${pressId}`, outcome: "failed", error: "Tasks/one.md is not a record." });
-    await vi.waitFor(() => expect(notices(storage, "ana")).toEqual([expect.objectContaining({
-      kind: "automation-failed", title: "Mark paid did not finish", body: "Tasks/one.md is not a record.",
-      senderUserId: OWNER, target: { path: "Tasks", record: "rec-12", automation: PRESSED },
-    })]));
+    const failure = { automationId: PRESSED, claimId: `claim-${pressId}`, generation: 1, datasetInstance: null,
+      neverStarted: false, chainStopped: false, error: "Tasks/one.md is not a record.", updatedAtMs: clock };
+    await fake.options.reportFailure({ failure, name: "Mark paid", collectionPath: "Tasks", startedBy: "ana", replaces: null });
+    await vi.waitFor(() => expect(notices(storage, "ana")).toHaveLength(1));
+    expect(notices(storage, "ana")[0]!.noticeId).not.toContain("automation-press:");
     expect(inspectDatabase(storagePath(storage)).prepare("SELECT user_id, state, outcome FROM sync_relay_automation_presses").all())
       .toEqual([{ user_id: "ana", state: "settled", outcome: "failed" }]);
+    await fake.options.withdrawFailure(failure);
+    expect(notices(storage, "ana").filter(notice => notice.dismissedAtMs === null)).toEqual([]);
   });
 
   it("replaces the owner's failure notice by generation and withdraws it after a retry", async () => {

@@ -247,6 +247,7 @@ import { createRunNowIntents, type RunNowIntent } from "./automations/runNowInte
 import { provedNeverShared, readSyncHistory, recordSynced } from "./workspaces/syncHistory";
 import { closeActivity, holdBackground, leaveForeground, releaseBackground } from "./workspaces/activityRelease";
 import { automationPressRelay, relayPressTransport } from "./automations/relayedPresses";
+import { AutomationRunWait, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
 import {
   createRelayedPressHost,
   relayedPressFailureNotice,
@@ -848,6 +849,7 @@ type CloudSessionCredentials = NonNullable<
   Awaited<ReturnType<CloudLogin["credentials"]>>
 >;
 let cachedCredentials: CloudSessionCredentials | null = null;
+let clearButtonInspections: (() => void) | undefined;
 const ownerDatasetCopies = createOwnerDatasetCopyRegistry();
 const namedDatasetPages = createNamedDatasetCacheRegistry({ directory: () => join(stateDir(), "named-dataset-pages") });
 let credentialCacheGeneration = 0;
@@ -860,6 +862,7 @@ const credentialSessionCache =
   new CredentialSessionCache<CloudSessionCredentials>((snapshot) => {
     ownerDeliveryCredentialLifetime.abort();
     ownerDeliveryCredentialLifetime = new AbortController();
+    if (chatShareSessionKey(cachedCredentials) !== chatShareSessionKey(snapshot.credentials)) clearButtonInspections?.();
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
     void ownerDatasetCopies.credentialsChanged(snapshot.credentials ? datasetCopyOwnerKey(snapshot.credentials) : null)
@@ -3913,6 +3916,10 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
       if (!executor) throw new Error("This workspace was closed.");
       return await executor.relayedClaim({ automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, pressId: press.hostPressId });
     },
+    inspect: async (inspectionId) => {
+      const executor = collectionAutomationsOf(workspaceId);
+      return executor ? executor.inspectRelayed(inspectionId) : { kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED };
+    },
     press: async (input, watch) => {
       const executor = collectionAutomationsOf(workspaceId);
       if (!executor) throw new Error("This workspace was closed.");
@@ -3923,6 +3930,16 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
     },
     onError: (context, error) => console.warn(`[desktop] Relayed Button presses in ${workspaceId}: ${context}:`, error),
   });
+}
+
+async function hostButtonAuthority(workspaceId: string, id: string, inspection = false) {
+  await warmCredentialCache();
+  const credentials = cachedCredentials, entry = findWorkspace(workspaceId);
+  if (!credentials?.relayUrl || !entry?.remote || shareViewIsPresent(entry.shareView) ||
+    credentials.userId !== entry.remote.ownerUserId || !relayUrlsMatch(credentials.relayUrl, entry.remote.serverUrl) ||
+    !automationHosts.stillRuns(workspaceId) || !entry.automationHost) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED, "roster");
+  return automationPressRelay({ baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch })
+    .authority(workspaceId, localReactorFallbackId(), entry.automationHost.generation, id, inspection);
 }
 
 // An open workspace's Collection automations. Runs write through the same
@@ -4043,6 +4060,8 @@ function createCollectionAutomationsFor(
     },
     // A relayed press's run holds off a handover until its writes stop.
     holdForHost: () => automationHosts.hold(workspaceId),
+    resolveRelayedPress: (id) => hostButtonAuthority(workspaceId, id),
+    resolveButtonInspection: (id) => hostButtonAuthority(workspaceId, id, true),
     onError: (context, error) =>
       console.warn(`[desktop] Collection automations in ${workspaceId}: ${context}:`, error),
     withDatasetHost: async (work, open) => {
@@ -4087,6 +4106,7 @@ let describeDatasetForCli: ((workspaceId: string, datasetId: string) => ReturnTy
 let datasetForCli: ((input: DatasetRequest, agent: LocalDatasetAgent | null) => Promise<DatasetResult>) | undefined;
 // A window's press path; the CLI's presses take it too.
 let pressNamedForCli: ReturnType<typeof registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>>["pressNamed"] | undefined;
+let inspectNamedForCli: ReturnType<typeof registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>>["inspectNamed"] | undefined;
 const activeDatasetHosts = new Set<Promise<LocalDatasetHost>>();
 // Each workspace attachment's local dataset host, opened on first use and
 // closed when the attachment's state is disposed, after its automation
@@ -4206,6 +4226,19 @@ const { startDesktopCliServer } = createDesktopCliServer({
   // workspace's own operation. Internal dataset ids use the same authority
   // as renderer presses, and the executor opens before it is asked.
   buttons: (workspace) => ({
+    inspect: async (input, by) => {
+      if (!inspectNamedForCli || !describeDatasetForCli) throw new Error("Buttons are not ready. Try again.");
+      const describe = describeDatasetForCli;
+      return inspectNamedForCli(input, {
+        by,
+        withOperation: work => withPhysicalWorkspaceOperation(workspace.workspaceId, async operation => {
+          if (!shareViewIsPresent(operation.workspace.shareView)) await operation.state.collectionAutomations.open();
+          return work(operation);
+        }),
+        describeDataset: datasetId => describe(workspace.workspaceId, datasetId),
+        watch: () => undefined,
+      });
+    },
     press: async (input, by) => {
       if (!pressNamedForCli || !describeDatasetForCli) throw new Error("Buttons are not ready. Try again.");
       const describe = describeDatasetForCli;
@@ -5724,7 +5757,7 @@ function registerIpcHandlers(): void {
     relayUnreachable,
   });
 
-  pressNamedForCli = registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>({
+  const buttonsIpc = registerAutomationButtonsIpc<WebContents, IpcMainInvokeEvent, DesktopWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender, withRendererWorkspaceOperation,
     readText: readWorkspaceTextIfPresent,
@@ -5766,6 +5799,10 @@ function registerIpcHandlers(): void {
       "Collection changes stopped because this window changed workspaces.",
       operation => describeAutomationDataset(operation, datasetId, datasetDependencies)),
     pressedBy: pressingPerson,
+    inspectionAccount: async () => {
+      await credentialSessionCache.warm(() => cloudLogin().credentials());
+      return chatShareSessionKey(cachedCredentials);
+    },
     // A shared view's press goes to the relay it came from, for this
     // person's own grant; the relay checks the grant again.
     relayPress: async (operation, input) => {
@@ -5782,8 +5819,26 @@ function registerIpcHandlers(): void {
       await automationPressRelay({ baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch })
         .press(shareId, input);
     },
+    relayInspect: async (operation, input) => {
+      await warmCredentialCache();
+      const credentials = cachedCredentials, marker = operation.workspace.shareView;
+      const shareId = isRecordValue(marker) && typeof marker.shareId === "string" ? marker.shareId : null;
+      const relayUrl = isRecordValue(marker) && typeof marker.relayUrl === "string" ? marker.relayUrl : null;
+      if (!credentials?.relayUrl || shareId === null || (relayUrl !== null && !relayUrlsMatch(credentials.relayUrl, relayUrl))) {
+        return input.map(() => ({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED }));
+      }
+      return automationPressRelay({ baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch }).inspect(shareId, input);
+    },
+    inspectionChanged: operation => {
+      withWorkspaceAttachment({ workspaceId: operation.workspace.workspaceId }, lease => {
+        if (lease.binding.attachmentId === operation.workspace.attachmentId) notifyCollectionAutomationsChanged(operation.workspace.workspaceId);
+      });
+    },
     pressWindows,
-  }).pressNamed;
+  });
+  pressNamedForCli = buttonsIpc.pressNamed;
+  clearButtonInspections = buttonsIpc.clearInspections;
+  inspectNamedForCli = buttonsIpc.inspectNamed;
 
   registerStopAndRestoreIpc<
     WebContents,
