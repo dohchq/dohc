@@ -77,6 +77,7 @@ Account API and Postgres inputs retain desktop preparation and account and deskt
 Share-web inputs retain desktop preparation, desktop browser proofs, and the native delivery proof.
 Combined site changes retain both renderer compatibility files and those proofs.
 Desktop production changes and shared inputs retain the complete desktop suite, packaging tests, and proofs.
+Desktop renderer changes, and changes to the states page itself, also run the `@states-page` pixel gallery on Windows, where its baselines were taken.
 Desktop-only changes run the Y.Doc compatibility files that import desktop code.
 Changes to Y.Doc projection or its other inputs run the complete Y.Doc suite, including the checkpoint boundary test.
 Shared configuration and unclassified code inputs select the full JavaScript suite.

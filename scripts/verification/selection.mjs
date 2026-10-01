@@ -78,7 +78,13 @@ function sharedInput(path) {
     || /^apps\/desktop\/scripts\//u.test(path);
 }
 
-function result(selected, affected, full, reason) {
+// The states page compares every shared renderer part with its pixel
+// baselines, so a renderer change or a change to the gallery itself runs it.
+function statesPageInput(path) {
+  return /^apps\/desktop\/(?:src\/renderer\/|e2e\/states-page)/u.test(path);
+}
+
+function result(selected, affected, full, reason, statesPage = full) {
   const testFiles = {};
   if (!full) for (const name of selected) {
     if (affected.has(name)) continue;
@@ -93,6 +99,7 @@ function result(selected, affected, full, reason) {
     selfHostNative: selected.has("@dohc/share-web"),
     desktop: desktopScripts || Object.keys(desktopProofInputs).some(input => affected.has(input)),
   };
+  proofs.statesPage = proofs.desktop && statesPage;
   return {
     packages: [...selected].sort(), affected: [...affected].sort(), full, reason, proofs, testFiles, desktopScripts,
     repository: full ? "full" : "source",
@@ -131,7 +138,8 @@ export function selectJavaScript(files, packages, { full = false } = {}) {
   } while (affected.size !== previousSize);
   const selected = new Set(affected);
   for (const pkg of packages) if (testInputs[pkg.name]?.some(input => affected.has(input))) selected.add(pkg.name);
-  return result(selected, affected, false, files.length ? "Changed packages, production dependents, and external test consumers." : "No JavaScript inputs changed.");
+  return result(selected, affected, false, files.length ? "Changed packages, production dependents, and external test consumers." : "No JavaScript inputs changed.",
+    files.some(path => statesPageInput(path.replaceAll("\\", "/"))));
 }
 
 // This guard checks literal imports, CSS sources, and fixture paths. Computed
