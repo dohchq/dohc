@@ -1,10 +1,11 @@
 import { strict as assert } from "node:assert";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, realpathSync } from "node:fs";
+import { mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { createServer as createHttpServer, request as requestHttp, type IncomingMessage, type RequestListener, type Server } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import type { Duplex } from "node:stream";
+import { createRequire } from "node:module";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,6 +20,7 @@ import { resolveEngineBinary } from "../../src/testing/engineBinary";
 import type { LaunchedDesktopApp } from "./desktopApp";
 
 const relayRoot = fileURLToPath(new URL("../../../../services/sync-relay/", import.meta.url));
+const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 
 /**
  * `live` serves the stack over HTTPS from a fixture CA and runs the self-host
@@ -49,6 +51,12 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
       ca,
       trustEnv,
       relayUrl: proxy.origin,
+      // The relay's recent console output, such as a failed service host pass,
+      // for a failure report. Bearer values are removed.
+      relayOutput: () => relay!.output().replace(/(bearer\s+)\S+/giu, "$1[redacted]"),
+      // Counts and cursors only, for a failure report: the live settlements the
+      // service host made, held for export, or journaled, and those the relay holds.
+      settlementEvidence: () => settlementEvidence(directory),
       async close() {
         const results = await Promise.allSettled([proxy.close(), relay!.close(), account.close()]);
         const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
@@ -130,6 +138,31 @@ async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">) 
   };
 }
 
+function settlementEvidence(directory: string) {
+  const read = <T>(path: string, query: (db: InstanceType<typeof DatabaseSync>) => T) => {
+    const db = new DatabaseSync(path, { readOnly: true });
+    try { return query(db); } finally { db.close(); }
+  };
+  const cursors = (db: InstanceType<typeof DatabaseSync>, sql: string) => db.prepare(sql).all().map((row) => Number(row.cursor));
+  const hostRoot = join(directory, "relay-deployment", "live-host");
+  return {
+    host: readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
+      .map((entry) => read(join(hostRoot, entry.name, ".dohc", "engine", "engine.db"), (db) => ({
+        settled: cursors(db, "SELECT terminal_cursor AS cursor FROM live_device_settlements ORDER BY terminal_cursor"),
+        heldForExport: Number(db.prepare("SELECT COUNT(*) AS n FROM live_audit_pending_exports").get()?.n ?? 0),
+        journaled: cursors(db, `SELECT json_extract(payload_json,'$.record.terminalCursor') AS cursor FROM replication_log
+          WHERE imported=0 AND op_kind='live.audit.settlement' ORDER BY cursor`),
+        acceptedEvents: Number(db.prepare("SELECT COUNT(*) AS n FROM live_accepted_updates").get()?.n ?? 0),
+      }))),
+    relay: read(join(directory, "relay-data", "relay.sqlite"), (db) => db.prepare(
+      `SELECT json_extract(s.payload_json,'$.record.terminalCursor') AS cursor,
+         EXISTS(SELECT 1 FROM sync_relay_log m WHERE m.workspace_id=s.workspace_id AND m.op_kind='moment.append'
+           AND json_extract(m.payload_json,'$.momentId')=json_extract(s.payload_json,'$.record.momentId')) AS moment
+       FROM sync_relay_log s WHERE s.op_kind='live.audit.settlement' ORDER BY s.relay_seq`,
+    ).all().map((row) => ({ terminalCursor: Number(row.cursor), momentPublished: Number(row.moment) === 1 }))),
+  };
+}
+
 // The supported self-host profile: an initialized deployment whose service
 // host runs the native engine and replicates through the public HTTPS origin.
 function selfHostLiveEnv(directory: string, origin: string): NodeJS.ProcessEnv {
@@ -186,9 +219,10 @@ async function startAuthenticatedRelay(directory: string, authUrl: string, liveE
   });
   const { stdout, stderr } = child;
   assert.ok(stdout && stderr, "The relay's output pipes are configured.");
+  // Enough to keep a service host failure that is logged once behind later engine output.
   let output = "";
-  stdout.on("data", (chunk) => { output = (output + String(chunk)).slice(-16_384); });
-  stderr.on("data", (chunk) => { output = (output + String(chunk)).slice(-16_384); });
+  stdout.on("data", (chunk) => { output = (output + String(chunk)).slice(-262_144); });
+  stderr.on("data", (chunk) => { output = (output + String(chunk)).slice(-262_144); });
   const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
   const close = () => stopChild(child, exited);
   try {
@@ -204,7 +238,7 @@ async function startAuthenticatedRelay(directory: string, authUrl: string, liveE
         resolve(`http://${match[1]}:${match[2]}`);
       });
     });
-    return { url, close };
+    return { url, close, output: () => output };
   } catch (error) {
     await close();
     throw error;

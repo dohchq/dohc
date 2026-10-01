@@ -165,17 +165,27 @@ export function ydocUpdateAuthors(
   );
 }
 
-// Counts only: where this owner's copy of its host's live settlements stands.
-// Pulled settlement records and settlement moments, by disposition; settlements
+// Counts and cursors only: where this owner's copy of its host's live
+// settlements stands against its accepted cursor. Pulled settlement records
+// and settlement moments, by disposition; settlements
 // parked for a later accepted cursor; and any pulled operation deferred for a
 // retry, such as one waiting for an open document.
 export function ownerSettlementState(rootPath: string) {
   return withEngineDb(rootPath, (db) => {
     const count = (sql: string) => Number(db.prepare(sql).get()?.n ?? 0);
     return {
-      settlementRecords: count(
-        "SELECT COUNT(*) AS n FROM replication_log WHERE imported=1 AND op_kind='live.audit.settlement'",
-      ),
+      // The cursor each pulled settlement covers, and whether its moment is here.
+      settlementRecords: db
+        .prepare(
+          `SELECT json_extract(l.payload_json,'$.record.terminalCursor') AS cursor,
+             EXISTS(SELECT 1 FROM moments m
+               WHERE m.moment_id=json_extract(l.payload_json,'$.record.momentId')) AS moment_here
+           FROM replication_log l WHERE l.imported=1 AND l.op_kind='live.audit.settlement'
+           ORDER BY cursor`,
+        )
+        .all()
+        .map((row) => ({ terminalCursor: Number(row.cursor), momentHere: Number(row.moment_here) === 1 })),
+      acceptedCursor: count("SELECT COALESCE(MAX(accepted_cursor),-1) AS n FROM ydoc_owner_bindings"),
       settlementMoments: db
         .prepare(
           `SELECT apply_disposition AS disposition, COUNT(*) AS n FROM replication_log

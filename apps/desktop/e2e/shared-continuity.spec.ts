@@ -326,6 +326,17 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         contentType: "application/json", body: JSON.stringify(lastOwnerViews, null, 2),
       }).catch(() => undefined);
     }
+    if (stack) {
+      const relay = stack;
+      const settlements = (() => {
+        try { return relay.settlementEvidence(); }
+        catch (cause) { return { error: cause instanceof Error ? cause.message : String(cause) }; }
+      })();
+      await testInfo.attach("server settlements", { contentType: "application/json", body: JSON.stringify(settlements, null, 2) })
+        .catch(() => undefined);
+      await testInfo.attach("relay output", { contentType: "text/plain", body: relay.relayOutput() })
+        .catch(() => undefined);
+    }
     throw error;
   } finally {
     const cleanup = await Promise.allSettled([
