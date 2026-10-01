@@ -25,6 +25,8 @@ import {
   type DohcPathGuard,
 } from "@dohc/workspace-core";
 import { AsyncLocalStorage } from "node:async_hooks";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
 import { lstat, mkdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
@@ -90,7 +92,7 @@ interface SessionEntry {
   retiring: boolean;
   activeRuns: number;
   idleWaiters: Set<() => void>;
-  captureWaitCancels: Set<() => void>;
+  captureWaitController: AbortController;
 }
 
 export interface EngineWorkspaceRunOptions {
@@ -334,7 +336,7 @@ export class EngineWorkspaceSessions {
   // and a transport failure after this point is final. Operations themselves
   // still run — the quit teardown's closes go through run() too.
   private shuttingDown = false;
-  private readonly sleepCancels = new Set<() => void>();
+  private readonly shutdownController = new AbortController();
   // The ambient budget a caller put over a REGION of daemon work
   // (`withRetryBudget`). It bounds every run the region makes, together —
   // which is what a caller holding a shared resource across several daemon
@@ -617,21 +619,26 @@ export class EngineWorkspaceSessions {
       if (entry.closing || !current) throw new InitialCaptureBindingChangedError();
     };
     checkBinding();
-    let cancel!: () => void;
-    let rebind!: () => void;
-    let timer!: ReturnType<typeof setTimeout>;
-    const stopped = new Promise<"deadline">((resolve, reject) => {
-      cancel = () => reject(refusal);
-      rebind = () => reject(entry.retiring ? refusal : new InitialCaptureBindingChangedError());
+    const bindingSignal = entry.captureWaitController.signal;
+    try {
       // Settlement notifications are advisory. At the bound, allow one
       // final fenced read; another capture refusal cannot start a new wait.
-      timer = setTimeout(() => resolve("deadline"), deadline - started);
-    });
-    this.sleepCancels.add(cancel);
-    entry.captureWaitCancels.add(rebind);
-    signal?.addEventListener("abort", cancel, { once: true });
-    try {
-      const outcome = await Promise.race([wake, stopped]);
+      const exit = await Effect.runPromiseExit(Effect.raceFirst(
+        Effect.promise(() => wake),
+        Effect.as(Effect.sleep(deadline - started), "deadline" as const),
+      ), {
+        signal: AbortSignal.any([
+          this.shutdownController.signal,
+          bindingSignal,
+          ...(signal ? [signal] : []),
+        ]),
+      });
+      if (exit._tag === "Failure") {
+        if (!Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause);
+        if (signal?.aborted || this.shuttingDown || entry.retiring) throw refusal;
+        throw new InitialCaptureBindingChangedError();
+      }
+      const outcome = exit.value;
       if (signal?.aborted || this.shuttingDown || entry.retiring ||
           (outcome !== "deadline" && this.now() >= deadline)) {
         throw refusal;
@@ -640,10 +647,6 @@ export class EngineWorkspaceSessions {
       checkBinding();
       return outcome === "deadline";
     } finally {
-      clearTimeout(timer);
-      this.sleepCancels.delete(cancel);
-      entry.captureWaitCancels.delete(rebind);
-      signal?.removeEventListener("abort", cancel);
       // Capture is healthy work, not transport recovery. Preserve any
       // recovery time already spent without charging this wait to it.
       if (budget !== undefined && budget.failedAtMs !== null) {
@@ -660,7 +663,7 @@ export class EngineWorkspaceSessions {
    */
   beginShutdown(): void {
     this.shuttingDown = true;
-    for (const cancel of [...this.sleepCancels]) cancel();
+    this.shutdownController.abort();
   }
 
   /**
@@ -875,23 +878,14 @@ export class EngineWorkspaceSessions {
       await this.sleep(delayMs);
       return;
     }
-    let cancel!: () => void;
-    const cancelled = new Promise<void>((resolveCancel) => {
-      cancel = resolveCancel;
+    const sleep = this.sleep === defaultSleep
+      ? Effect.sleep(delayMs)
+      : Effect.promise(() => this.sleep(delayMs));
+    const exit = await Effect.runPromiseExit(sleep, {
+      signal: this.shutdownController.signal,
     });
-    this.sleepCancels.add(cancel);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const sleep = this.sleep === defaultSleep
-        ? new Promise<void>((resolve) => { timer = setTimeout(resolve, delayMs); })
-        : this.sleep(delayMs);
-      await Promise.race([
-        sleep,
-        cancelled,
-      ]);
-    } finally {
-      if (timer !== undefined) clearTimeout(timer);
-      this.sleepCancels.delete(cancel);
+    if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause)) {
+      throw Cause.squash(exit.cause);
     }
   }
 
@@ -1013,7 +1007,7 @@ export class EngineWorkspaceSessions {
         retiring: false,
         activeRuns: 0,
         idleWaiters: new Set(),
-        captureWaitCancels: new Set(),
+        captureWaitController: new AbortController(),
       };
       this.entries.set(key, entry);
       this.workspaceEntries.set(workspace.workspaceId, entry);
@@ -1062,7 +1056,8 @@ export class EngineWorkspaceSessions {
   }
 
   private async closeEntry(entry: SessionEntry): Promise<void> {
-    for (const cancel of entry.captureWaitCancels) cancel();
+    entry.captureWaitController.abort();
+    entry.captureWaitController = new AbortController();
     await this.waitForIdle(entry);
     let binding = entry.binding;
     if (!binding && entry.opening) {
