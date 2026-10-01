@@ -2814,9 +2814,11 @@ mod tests {
                 json!(base64::engine::general_purpose::STANDARD.encode(vec![23; 1_200_000]));
             params["limits"]["maxPendingBytes"] = json!(10_000_000);
             let binding: dohc_engine_collab::LiveObjectBinding =
-                serde_json::from_value(params["binding"].clone()).expect("fixture binding");
+                serde_json::from_value(params["binding"].clone())
+                    .map_err(|_| WireError::new(ErrorCode::Internal, "invalid-fixture-binding"))?;
             let limits: OwnerYDocOutboxLimitsParams =
-                serde_json::from_value(params["limits"].clone()).expect("fixture limits");
+                serde_json::from_value(params["limits"].clone())
+                    .map_err(|_| WireError::new(ErrorCode::Internal, "invalid-fixture-limits"))?;
             let first = service
                 .owner_ydoc_outbox_append(
                     &RequestContext::unbounded(),
@@ -2825,6 +2827,9 @@ mod tests {
                 )
                 .await?;
             let id = first["outboxId"].clone();
+            let outbox_id = id
+                .as_str()
+                .ok_or_else(|| WireError::new(ErrorCode::Internal, "missing-outbox-id"))?;
             let first_at_ms = first["oldestEntryAtMs"]
                 .as_i64()
                 .ok_or_else(|| WireError::new(ErrorCode::Internal, "missing-oldest-entry-time"))?;
@@ -2851,8 +2856,14 @@ mod tests {
                     .await
                     .map_err(map_runtime)?
                     .map_err(map_owner_outbox)?;
-                assert_eq!(appended.outbox_id, id.as_str().expect("outbox id"));
-                assert_eq!(appended.state, dohc_engine_collab::OwnerOutboxState::Active);
+                if appended.outbox_id != outbox_id
+                    || appended.state != dohc_engine_collab::OwnerOutboxState::Active
+                {
+                    return Err(WireError::new(
+                        ErrorCode::Internal,
+                        "fixture-append-mismatch",
+                    ));
+                }
             }
             let ctx = RequestContext::unbounded().with_max_frame_bytes(1_048_576);
             let mut cursor = Value::Null;
