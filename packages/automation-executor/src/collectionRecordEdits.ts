@@ -658,6 +658,7 @@ async function waitForRecord(
       unsubscribe => Effect.sync(unsubscribe),
     );
     onStage("index");
+    if (context.signal.aborted) return yield* Effect.fail(expired());
     yield* Queue.offer(changes, undefined);
     while (true) {
       yield* Queue.take(changes);

@@ -950,8 +950,8 @@ describe("createCollectionRecord", () => {
 
     await engine.adopt(root, "tasks/two.md");
     held.resolve(await context.readText("tasks/two.md"));
-    // The wait registered its continuation before this one.
     await held.promise;
+    await new Promise<void>(resolve => setImmediate(resolve));
     expect(engine.lookups).toHaveLength(0);
     expect(context.openedPaths).toEqual([]);
   });
@@ -1046,7 +1046,7 @@ describe("createCollectionRecord", () => {
     expect(engine.listeners.size).toBe(0);
   });
 
-  it("releases a subscription when the workspace ends during registration", async () => {
+  it.each(["creation", "registration"] as const)("releases a subscription when the workspace ends during %s", async when => {
     const root = await createTestScratch("dohc-record-subscribe-abort-");
     const { session } = fakeSession();
     const engine = fakeEngine();
@@ -1057,15 +1057,51 @@ describe("createCollectionRecord", () => {
       signal: controller.signal,
       onRecordsChanged(listener) {
         const remove = engine.overrides.onRecordsChanged!(listener);
-        controller.abort();
+        if (when === "registration") controller.abort();
         return () => { remove(); unsubscribe(); };
       },
     });
+    const createFile = context.createFile;
+    if (when === "creation") vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
+      const path = await createFile(...args);
+      controller.abort();
+      return path;
+    });
+    const read = vi.spyOn(context, "readText");
     expect(await createCollectionRecord(context, { collectionPath: "tasks", name: "two", author: AGENT }))
       .toMatchObject({ kind: "partial", failedStage: "index" });
     expect(unsubscribe).toHaveBeenCalledTimes(1);
     expect(engine.listeners.size).toBe(0);
     expect(context.openedPaths).toEqual([]);
+    // Only the outer creation's diagnostic read runs after cancellation.
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(engine.lookups).toEqual([]);
+  });
+
+  it("handles notifications during registration when the file is already indexed", async () => {
+    const root = await createTestScratch("dohc-record-register-news-");
+    const { session } = fakeSession();
+    const engine = fakeEngine();
+    const context = contextFor(root, session, {
+      ...engine.overrides,
+      onRecordsChanged(listener) {
+        const remove = engine.overrides.onRecordsChanged!(listener);
+        listener(null);
+        listener(["tasks/two.md"]);
+        return remove;
+      },
+    });
+    const createFile = context.createFile;
+    let recordId = "";
+    vi.spyOn(context, "createFile").mockImplementationOnce(async (...args) => {
+      const path = await createFile(...args);
+      recordId = await engine.adopt(root, path);
+      return path;
+    });
+    expect(await createCollectionRecord(context, { collectionPath: "tasks", name: "two", author: AGENT }))
+      .toEqual({ path: "tasks/two.md", recordId });
+    expect(engine.lookups).toEqual([recordId]);
+    expect(engine.listeners.size).toBe(0);
   });
 
   it("keeps a late read from the old workspace out of the next workspace's creation", async () => {
