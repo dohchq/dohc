@@ -557,6 +557,19 @@ export function createWorkspaceAuthorityOwner<
       return currentRecord(workspaceId).binding;
     },
 
+    // Whether work that outlives its lease still belongs to the attachment it
+    // started on. A lookup only: it never creates or retires an attachment.
+    isCurrentAttachment(workspaceId: string, attachmentId: symbol): boolean {
+      const record = slots.get(workspaceId)?.current;
+      if (record?.binding.attachmentId !== attachmentId) return false;
+      try {
+        assertRecordCurrent(record);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
     acquireBinding(
       binding: WorkspaceAuthorityBinding<Workspace>,
     ): WorkspaceAuthorityLease<Workspace, State> {

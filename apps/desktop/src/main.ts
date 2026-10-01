@@ -4345,10 +4345,13 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       preserveDraft: draft => preserveNamedLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft),
       credentials: {relayUrl: credentials.relayUrl, token: credentials.token, userId: credentials.userId,
         signal: ownerDeliveryCredentialLifetime.signal},
+      // The attachment, not the root's spelling: the registry keeps the root
+      // as registered, and this workspace carries its canonical form.
       assertCurrent() {
-        const current = findWorkspace(workspace.workspaceId);
         if (cachedCredentials?.token !== credentials.token || cachedCredentials?.userId !== credentials.userId ||
-          cachedCredentials?.relayUrl !== credentials.relayUrl || current?.rootPath !== workspace.rootPath || identity(current.shareView) !== pinned) {
+          cachedCredentials?.relayUrl !== credentials.relayUrl ||
+          !workspaceAuthorities.isCurrentAttachment(workspace.workspaceId, workspace.attachmentId) ||
+          identity(findWorkspace(workspace.workspaceId)?.shareView) !== pinned) {
           throw new Error("The shared file session changed.");
         }
       },

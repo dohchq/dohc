@@ -165,6 +165,33 @@ export function ydocUpdateAuthors(
   );
 }
 
+// Counts only: where this owner's copy of its host's live settlements stands.
+// Pulled settlement records and settlement moments, by disposition; settlements
+// parked for a later accepted cursor; and any pulled operation deferred for a
+// retry, such as one waiting for an open document.
+export function ownerSettlementState(rootPath: string) {
+  return withEngineDb(rootPath, (db) => {
+    const count = (sql: string) => Number(db.prepare(sql).get()?.n ?? 0);
+    return {
+      settlementRecords: count(
+        "SELECT COUNT(*) AS n FROM replication_log WHERE imported=1 AND op_kind='live.audit.settlement'",
+      ),
+      settlementMoments: db
+        .prepare(
+          `SELECT apply_disposition AS disposition, COUNT(*) AS n FROM replication_log
+           WHERE imported=1 AND op_kind='moment.append'
+             AND json_extract(payload_json,'$.momentId') LIKE 'moment-ydoc-%'
+           GROUP BY apply_disposition`,
+        )
+        .all()
+        .map((row) => ({ disposition: String(row.disposition), count: Number(row.n) })),
+      parked: count("SELECT COUNT(*) AS n FROM owner_pending_settlements WHERE applied=0"),
+      parkedApplied: count("SELECT COUNT(*) AS n FROM owner_pending_settlements WHERE applied=1"),
+      deferred: count("SELECT COUNT(*) AS n FROM relay_deferred_ops"),
+    };
+  });
+}
+
 // Every text-carrying moment with its blob text, ordered by moment_order.
 //
 // A moment's `payload_after_blob_sha256` holds a `blobs` digest for text and a
