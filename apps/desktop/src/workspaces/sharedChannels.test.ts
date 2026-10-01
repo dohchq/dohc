@@ -746,6 +746,42 @@ describe("relayApiFetch", () => {
     expect(other.status).toBe(400);
     expect(((await other.json()) as { code: string }).code).toBe("invalid_path");
   });
+
+  it("releases a version refusal's body before it rejects, and still names the side to update if that fails", async () => {
+    const refusals: Response[] = [];
+    const refusing: typeof fetch = async () => {
+      refusals.push(Response.json({ ok: false, code: "api_version_too_old" }, { status: 400 }));
+      return refusals.at(-1)!;
+    };
+    let release!: () => void;
+    const cancelled: unknown[] = [];
+    const cancel = vi.spyOn(ReadableStream.prototype, "cancel").mockImplementation(function (this: ReadableStream) {
+      cancelled.push(this);
+      return cancelled.length === 1
+        ? new Promise<void>((resolve) => { release = resolve; })
+        : Promise.reject(new Error("socket gone"));
+    });
+    try {
+      let settled = false;
+      const first = relayApiFetch(refusing)("http://relay.test/sync/shares").finally(() => { settled = true; });
+      await vi.waitFor(() => expect(cancelled).toHaveLength(1));
+      // The refused response the caller never sees is the one released.
+      expect(cancelled[0]).toBe(refusals[0]!.body);
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      release();
+      await expect(first).rejects.toBeInstanceOf(RelayApiVersionError);
+
+      const second = await relayApiFetch(refusing)("http://relay.test/sync/shares").catch((error: unknown) => error);
+      expect((second as RelayApiVersionError).update).toBe("app");
+      expect(cancelled).toEqual([refusals[0]!.body, refusals[1]!.body]);
+    } finally {
+      cancel.mockRestore();
+    }
+    // Unmocked, the refused body ends up released.
+    await expect(relayApiFetch(refusing)("http://relay.test/sync/shares")).rejects.toBeInstanceOf(RelayApiVersionError);
+    expect(refusals[2]!.bodyUsed).toBe(true);
+  });
 });
 
 describe("mergeJoinedChannel", () => {

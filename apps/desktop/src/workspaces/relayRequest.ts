@@ -32,9 +32,14 @@ export async function relayRequest(input: {
     ...input.init,
     headers,
   });
-  if (response.status === 401) throw new RelayUnauthorizedError();
   const mapped = input.errors?.[response.status];
-  if (mapped) throw mapped();
-  if (!response.ok) throw new Error(`${input.label} failed (${response.status})`);
-  return response;
+  const error = response.status === 401 ? new RelayUnauthorizedError()
+    : mapped ? mapped()
+    : response.ok ? undefined
+    : new Error(`${input.label} failed (${response.status})`);
+  if (!error) return response;
+  // Nobody reads a refused response, so its connection is released here. The
+  // refusal is still what the caller hears if releasing fails.
+  await response.body?.cancel().catch(() => undefined);
+  throw error;
 }
