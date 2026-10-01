@@ -46,7 +46,7 @@ export function ChatsPanel(props: {
       data-focus-surface="panel"
       data-testid="chats-panel"
       aria-label="Chats"
-      className="relative flex shrink-0 flex-col border-l border-line bg-panel-2"
+      className="relative flex shrink-0 flex-col border-l border-line bg-panel"
       style={{ width }}
     >
       <div

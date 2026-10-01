@@ -29,14 +29,14 @@
   --dohc-panel-2: #ebe8e0;
   --dohc-line: #e4e1d8;
   --dohc-ink: #1c1b18;
-  --dohc-hover: color-mix(in srgb, var(--dohc-ink) 5%, transparent);
-  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
-  --dohc-scrim: rgba(0, 0, 0, 0.20);
+  --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  --dohc-scrim: rgba(0, 0, 0, 0.40);
   --dohc-muted: #55524a;
   --dohc-subtle: #7f7b6e;
   --dohc-accent: #2d342e;
-  --dohc-agent: #5c6250;
-  --dohc-match: #397be4;
+  --dohc-agent: #666d2e;
+  --dohc-match: #326fce;
   --dohc-success: #38684e;
   --dohc-warning: #8a6420;
   --dohc-danger: #a6402c;
@@ -57,18 +57,18 @@
 
 [data-theme='dark'] {
   --dohc-bg: #131211;
-  --dohc-panel: #1b1d1a;
-  --dohc-panel-2: #181715;
+  --dohc-panel: #181715;
+  --dohc-panel-2: #201f1c;
   --dohc-line: #2a2925;
   --dohc-ink: #f6f4ee;
-  --dohc-hover: color-mix(in srgb, var(--dohc-ink) 5%, transparent);
-  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
-  --dohc-scrim: rgba(0, 0, 0, 0.20);
+  --dohc-hover: color-mix(in srgb, var(--dohc-ink) 7%, transparent);
+  --dohc-selected: color-mix(in srgb, var(--dohc-ink) 11%, transparent);
+  --dohc-scrim: rgba(0, 0, 0, 0.40);
   --dohc-muted: #a9a599;
   --dohc-subtle: #7d7a6e;
   --dohc-accent: #d7d0c0;
-  --dohc-agent: #b7b8a4;
-  --dohc-match: #2f6ce9;
+  --dohc-agent: #c0c585;
+  --dohc-match: #377afa;
   --dohc-success: #82c29b;
   --dohc-warning: #d9a94e;
   --dohc-danger: #e08065;
@@ -1415,7 +1415,7 @@ body {
  * panel's <mark> (SearchView.tsx) and the atom highlight above — one hue
  * means "your match", everywhere. Non-active matches get a soft tint so
  * the active one still reads as distinct; the active match gets the
- * search panel's opaque-mark treatment (ink text, bold) so it's
+ * search panel's opaque-mark treatment (paper text, bold) so it's
  * unmistakable while scanning a long document. */
 .dohc-find-match {
   border-radius: 2px;
@@ -1425,7 +1425,7 @@ body {
 .dohc-find-match--active {
   border-radius: 2px;
   background: var(--dohc-match);
-  color: var(--dohc-ink);
+  color: var(--dohc-bg);
   font-weight: 600;
 }
 

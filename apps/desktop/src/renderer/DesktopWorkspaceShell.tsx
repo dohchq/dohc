@@ -4520,7 +4520,7 @@ export function DesktopWorkspaceShell(props: {
           data-testid="shared-view-banner"
           data-ended={shareViewEnded || undefined}
           className={`flex min-h-8 items-center gap-2 border-b border-line px-3 text-[12px] ${
-            shareViewEnded ? "bg-warning/10 text-warning" : "bg-panel-2 text-muted"
+            shareViewEnded ? "bg-warning/10 text-warning" : "bg-panel text-muted"
           }`}
         >
           <Eye size={12} aria-hidden className="shrink-0" />
@@ -4799,7 +4799,7 @@ export function DesktopWorkspaceShell(props: {
             active editor groups. Each group can host any tab surface. */}
         <main className="flex min-w-0 flex-1 flex-col bg-bg">
           {captureAvailable ? (
-            <div className="flex h-9 shrink-0 items-center justify-end border-b border-line bg-panel-2 px-1.5">
+            <div className="flex h-9 shrink-0 items-center justify-end border-b border-line bg-panel px-1.5">
                 <VersionMenu
                   workspaceId={workspaceId}
                   activeTabDirty={anyTabDirty}

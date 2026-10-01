@@ -9,7 +9,61 @@ import {
   palette,
   type ThemeTokens,
 } from "./tokens";
-import { contrastRatio as contrast, mixHex as mix } from "./accentColor";
+import { contrastRatio as contrast, luminance, mixHex as mix } from "./accentColor";
+
+const SURFACES = ["bg", "panel", "panel2"] as const;
+
+// The ink alpha of a state fill, so the test can composite it on a surface.
+function inkAlpha(token: string, name: string): number {
+  const alpha = /^color-mix\(in srgb, var\(--dohc-ink\) (\d+)%, transparent\)$/.exec(token);
+  expect(alpha, name).not.toBeNull();
+  return Number(alpha![1]) / 100;
+}
+
+describe("the surface ladder", () => {
+  // Paper is one end of the ladder in both themes: chrome (panel) is one
+  // step away from it and insets (panel-2) two. Dark once had panel on the
+  // far side of panel-2, so a titlebar read lighter than the rail beside it.
+  it("steps away from paper in the same order in both themes", () => {
+    const light = SURFACES.map((surface) => luminance(palette.light[surface]));
+    const dark = SURFACES.map((surface) => luminance(palette.dark[surface]));
+    expect(light[0]).toBeGreaterThan(light[1]!);
+    expect(light[1]).toBeGreaterThan(light[2]!);
+    expect(dark[0]).toBeLessThan(dark[1]!);
+    expect(dark[1]).toBeLessThan(dark[2]!);
+  });
+
+  it("keeps every step visible", () => {
+    for (const mode of ["light", "dark"] as const) {
+      expect(contrast(palette[mode].bg, palette[mode].panel), `bg/panel (${mode})`).toBeGreaterThanOrEqual(1.04);
+      expect(contrast(palette[mode].panel, palette[mode].panel2), `panel/panel-2 (${mode})`).toBeGreaterThanOrEqual(1.04);
+    }
+  });
+});
+
+describe("state fills", () => {
+  // The decided alphas (MEGA-PLAN step 2): 7% hover and 11% selected,
+  // and one 40% scrim with no blur. Both themes share them.
+  it("are 7% hover, 11% selected and a 40% scrim in both themes", () => {
+    for (const mode of ["light", "dark"] as const) {
+      expect(inkAlpha(palette[mode].hover, "hover")).toBe(0.07);
+      expect(inkAlpha(palette[mode].selected, "selected")).toBe(0.11);
+      expect(palette[mode].scrim).toBe("rgba(0, 0, 0, 0.40)");
+    }
+  });
+
+  it("tell a hovered row from a selected one on every surface", () => {
+    for (const mode of ["light", "dark"] as const) {
+      for (const surface of SURFACES) {
+        const hover = mix(palette[mode].ink, palette[mode][surface], inkAlpha(palette[mode].hover, "hover"));
+        const selected = mix(palette[mode].ink, palette[mode][surface], inkAlpha(palette[mode].selected, "selected"));
+        expect(contrast(hover, palette[mode][surface]), `hover on ${surface} (${mode})`).toBeGreaterThanOrEqual(1.1);
+        expect(contrast(selected, palette[mode][surface]), `selected on ${surface} (${mode})`).toBeGreaterThanOrEqual(1.2);
+        expect(contrast(selected, hover), `selected vs hover on ${surface} (${mode})`).toBeGreaterThanOrEqual(1.06);
+      }
+    }
+  });
+});
 
 describe("WCAG AA contrast, both modes", () => {
   const PAIRS: Array<{
@@ -21,24 +75,25 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "muted", bg: "bg", min: 4.5 },
     { fg: "ink", bg: "panel", min: 4.5 },
     { fg: "ink", bg: "panel2", min: 4.5 },
+    // Olive is text (an agent's name) on every surface a chat or history
+    // row sits on.
     { fg: "agent", bg: "bg", min: 4.5 },
     { fg: "agent", bg: "panel", min: 4.5 },
     { fg: "agent", bg: "panel2", min: 4.5 },
     // subtle is decorative (kbd hints, timestamps): 3.0 is the bar — on
-    // every surface it actually sits on, not just bg (the sidebar, history
-    // timeline, and status bar all render text-subtle on panel-2).
+    // every surface it actually sits on, not just bg (count pills and
+    // section headers render text-subtle on panel-2).
     { fg: "subtle", bg: "bg", min: 3.0 },
     { fg: "subtle", bg: "panel", min: 3.0 },
     { fg: "subtle", bg: "panel2", min: 3.0 },
     // The find-match mark is an OPAQUE chip that must pop on every surface a
-    // result row renders on: the side panel and inset surfaces.
+    // result row renders on: paper, the side panel and inset surfaces.
     // 3:1 is the graphical-object bar.
+    { fg: "match", bg: "bg", min: 3.0 },
     { fg: "match", bg: "panel", min: 3.0 },
     { fg: "match", bg: "panel2", min: 3.0 },
-    // Bold ink text sits ON the mark. Light clears AA (4.62); dark tops out
-    // at 4.27 — the physical ceiling while the mark itself holds 3:1 against
-    // the selected-row bg (bold weight carries the remaining gap).
-    { fg: "ink", bg: "match", min: 4.2 },
+    // Paper-colored text sits ON the mark, at AA like any other text.
+    { fg: "bg", bg: "match", min: 4.5 },
     // Labels on filled buttons use the paper color: primary on accent, and
     // destructive confirms on danger. White on dark-theme danger was 2.7:1.
     { fg: "bg", bg: "accent", min: 4.5 },
@@ -58,19 +113,17 @@ describe("WCAG AA contrast, both modes", () => {
 
     it(`${mode} state fills keep row text and find matches readable`, () => {
       for (const state of ["hover", "selected"] as const) {
-        const token = palette[mode][state];
-        const alpha = /^color-mix\(in srgb, var\(--dohc-ink\) (\d+)%, transparent\)$/.exec(token);
-        expect(alpha, state).not.toBeNull();
-        const amount = Number(alpha![1]) / 100;
-        for (const surface of ["bg", "panel", "panel2"] as const) {
+        const amount = inkAlpha(palette[mode][state], state);
+        for (const surface of SURFACES) {
           const fill = mix(palette[mode].ink, palette[mode][surface], amount);
           for (const fg of ["ink", "muted"] as const) {
             expect(contrast(palette[mode][fg], fill), `${fg} on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(4.5);
           }
-          expect(contrast(fill, palette[mode][surface]), `${state} on ${surface} (${mode})`).toBeGreaterThanOrEqual(state === "hover" ? 1.04 : 1.1);
-          // Search uses full hover and 80% selected, and its opaque match chip keeps 3:1 on both.
-          const searchFill = mix(palette[mode].ink, palette[mode][surface], amount * (state === "hover" ? 1 : 0.8));
-          expect(contrast(palette[mode].match, searchFill), `match on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(3);
+          // The opaque match chip keeps the 3:1 graphical floor on the full
+          // fill. Search and multi-selection attenuate the selected fill
+          // (bg-selected/80, /85), which only moves it toward the surface,
+          // where the chip already clears the floor.
+          expect(contrast(palette[mode].match, fill), `match on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(3);
         }
       }
     });

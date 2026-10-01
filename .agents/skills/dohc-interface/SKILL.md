@@ -203,8 +203,8 @@ Defined in `apps/desktop/src/renderer/styles.css` (mirrored in `tokens.ts`, sync
 | Utility | Meaning |
 | --- | --- |
 | `bg-bg` | Document paper. The lightest surface; editors, inputs, popover tiles |
-| `bg-panel` | Sidebars, cards, menus. One step down from paper |
-| `bg-panel-2` | Insets, status/title bars, two steps down |
+| `bg-panel` | The chrome: title bar, rails, sidebars, tab strip, plus cards and menus. One step from paper in both themes |
+| `bg-panel-2` | Insets inside the chrome: pills, counts, segmented tracks, inline code, section bands. Two steps from paper |
 | `hover:bg-hover` | Hover fill, using ink alpha in both themes |
 | `bg-selected` | Selected-row fill, using ink alpha in both themes |
 | `bg-scrim` | Modal overlay dim |

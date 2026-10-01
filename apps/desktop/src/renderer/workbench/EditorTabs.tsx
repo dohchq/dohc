@@ -847,7 +847,7 @@ export const EditorTabs = memo(function EditorTabs(props: {
     <div
       ref={frameRef}
       data-testid="editor-tabs"
-      className="group/strip relative flex h-9 shrink-0 bg-panel-2"
+      className="group/strip relative flex h-9 shrink-0 bg-panel"
     >
       <div
         ref={stripRef}
