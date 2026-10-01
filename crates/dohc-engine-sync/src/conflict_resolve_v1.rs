@@ -105,7 +105,7 @@ pub(crate) struct MetadataV1 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentAuthorV1 {
     pub agent_id: String,
-    pub on_behalf_of: String,
+    pub on_behalf_of: Option<String>,
     pub agent_run_id: Option<String>,
 }
 
@@ -677,7 +677,11 @@ fn parse_author(value: &Value) -> Result<Option<AgentAuthorV1>, SyncError> {
     }
     Ok(Some(AgentAuthorV1 {
         agent_id: author_field(field(record, "agentId")?)?,
-        on_behalf_of: author_field(field(record, "onBehalfOf")?)?,
+        on_behalf_of: if field(record, "onBehalfOf")?.is_null() {
+            None
+        } else {
+            Some(author_field(field(record, "onBehalfOf")?)?)
+        },
         agent_run_id: if field(record, "agentRunId")?.is_null() {
             None
         } else {
@@ -1020,7 +1024,7 @@ fn wire_author_value(author: Option<&AgentAuthorV1>) -> Value {
     json!({
         "kind": "agent",
         "agentId": author.agent_id,
-        "onBehalfOf": author.on_behalf_of,
+        "onBehalfOf": author.on_behalf_of.as_deref().and_then(crate::outbound::relay_person_id),
         "agentRunId": author.agent_run_id,
     })
 }
@@ -1033,8 +1037,17 @@ fn authors_value(author: Option<&AgentAuthorV1>) -> Value {
     let mut value = json!({
         "kind": "agent",
         "agentId": author.agent_id,
-        "onBehalfOf": author.on_behalf_of,
     });
+    if let Some(person_id) = author
+        .on_behalf_of
+        .as_deref()
+        .and_then(crate::outbound::relay_person_id)
+    {
+        value
+            .as_object_mut()
+            .expect("agent author is an object")
+            .insert("onBehalfOf".to_owned(), json!(person_id));
+    }
     if let Some(agent_run_id) = author.agent_run_id.as_ref() {
         value
             .as_object_mut()
@@ -3601,7 +3614,7 @@ fn local_author(author_json: Option<&str>) -> Result<Option<AgentAuthorV1>, Sync
     };
     Ok(Some(AgentAuthorV1 {
         agent_id: required("agentId")?,
-        on_behalf_of: required("onBehalfOf")?,
+        on_behalf_of: Some(required("onBehalfOf")?),
         agent_run_id,
     }))
 }
@@ -3918,6 +3931,15 @@ mod tests {
         conflict_id: &str,
         ordinal: i64,
     ) -> BuiltConflictResolveV1 {
+        resolve_scene_conflict_with_author(store, conflict_id, ordinal, None)
+    }
+
+    fn resolve_scene_conflict_with_author(
+        store: &mut EngineStore,
+        conflict_id: &str,
+        ordinal: i64,
+        author_json: Option<String>,
+    ) -> BuiltConflictResolveV1 {
         let input = ResolveTextConflict {
             workspace_id: "ws".to_owned(),
             conflict_id: conflict_id.to_owned(),
@@ -3928,7 +3950,7 @@ mod tests {
             metadata_origin: "sync".to_owned(),
             metadata_summary: None,
             metadata_correlation_id: None,
-            author_json: None,
+            author_json,
             now_ms: ordinal,
             request_id: Some(format!("resolve-scene-{ordinal}")),
             conflict_answer_budget_bytes: usize::MAX,
@@ -4711,6 +4733,73 @@ mod tests {
                 .expect("read retired asset")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn signed_out_agent_resolution_preserves_local_history_and_syncs_without_installation_id() {
+        let current_text = canonical_scene("current");
+        let incoming_text = canonical_scene("incoming");
+        for person_id in ["local:installation", "account-person"] {
+            let (_scratch, mut sender, key) =
+                scene_conflict_store(&current_text, &incoming_text, None);
+            let predecessor_claim = dohc_engine_collab::read_marker(&sender, &key)
+                .unwrap()
+                .unwrap()
+                .lineage_claim_id
+                .unwrap();
+            let predecessor_update = sender.get_binary_blob(&predecessor_claim).unwrap().unwrap();
+            let (_peer_scratch, mut receiver, _peer_key) =
+                scene_conflict_store(&current_text, &incoming_text, Some(&predecessor_update));
+            let authors = json!([{
+                "kind": "agent", "agentId": "agent-1",
+                "onBehalfOf": person_id, "agentRunId": "run-1"
+            }]);
+            let built = resolve_scene_conflict_with_author(
+                &mut sender,
+                "scene-conflict",
+                20,
+                Some(authors.to_string()),
+            );
+            let expected_person = crate::outbound::relay_person_id(person_id);
+            assert_eq!(
+                built.value["effectContext"]["author"]["onBehalfOf"],
+                json!(expected_person)
+            );
+            let history = VersionedTextStore::new(&mut sender)
+                .get_moment("ws", "moment-resolved-20")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(history.author_json.as_deref().unwrap()).unwrap(),
+                authors
+            );
+            for shadow in &built.validated.shadows {
+                assert_eq!(
+                    shadow["authors"][0].get("onBehalfOf"),
+                    expected_person.map(|id| json!(id)).as_ref()
+                );
+                assert_eq!(shadow["authors"][0]["agentId"], "agent-1");
+            }
+            copy_resolution_roots(&sender, &mut receiver, &built);
+            let mut parent = imported_envelope(0, "conflict.resolve", built.value);
+            parent.recorded_at_ms = 20;
+            crate::apply_replication_envelope(
+                &mut receiver,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &parent,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+            .expect("peer accepts the agent's resolution");
+            assert_eq!(
+                VersionedTextStore::new(&mut receiver)
+                    .read_text("ws", "main", "drawing.excalidraw")
+                    .unwrap()
+                    .unwrap()
+                    .text,
+                incoming_text
+            );
+        }
     }
 
     #[test]
@@ -7003,7 +7092,7 @@ mod tests {
                 },
                 author: Some(AgentAuthorV1 {
                     agent_id: author_field.clone(),
-                    on_behalf_of: author_field.clone(),
+                    on_behalf_of: Some(author_field.clone()),
                     agent_run_id: Some(author_field),
                 }),
                 current_object_created_at_ms: Some(MAX_WIRE_INTEGER),

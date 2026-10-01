@@ -115,7 +115,7 @@ fn maximum_live_author_summary_journals_with_payload_headroom() {
 }
 
 #[test]
-fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history() {
+fn outbound_moment_authors_keep_local_people_and_replicate_agents_and_automations() {
     use dohc_engine_domain::{ChangeActorKind, ChangeAttribution, moment_author_json};
     for kind in [
         ChangeActorKind::Human,
@@ -194,6 +194,19 @@ fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history(
                     )
                 })
                 .expect("read outbound journal");
+            let local_history = VersionedTextStore::new(&mut source)
+                .get_moment("ws", "created-moment")
+                .unwrap()
+                .unwrap();
+            assert_eq!(local_history.author_json.as_deref(), Some(author.as_str()));
+            if kind == ChangeActorKind::Human {
+                assert!(op.payload.get("authors").is_none());
+            } else {
+                assert_eq!(
+                    op.payload["authors"],
+                    serde_json::from_str::<Value>(&author).unwrap()
+                );
+            }
             hydrate_texts(&mut peer, &["created by a live document"]);
             assert_eq!(
                 apply_moment_envelope(&mut peer, &op, &NoFaults).expect("peer apply"),
@@ -204,11 +217,14 @@ fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history(
                 .get_moment("ws", "created-moment")
                 .expect("peer history")
                 .expect("replicated moment");
-            assert_eq!(
-                serde_json::from_str::<Value>(history.author_json.as_deref().expect("author"))
-                    .unwrap(),
-                serde_json::from_str::<Value>(&author).unwrap(),
-            );
+            if kind == ChangeActorKind::Human {
+                assert!(history.author_json.is_none());
+            } else {
+                assert_eq!(
+                    serde_json::from_str::<Value>(history.author_json.as_deref().unwrap()).unwrap(),
+                    serde_json::from_str::<Value>(&author).unwrap(),
+                );
+            }
         }
     }
 }
@@ -611,8 +627,36 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             .unwrap(),
         1
     );
+    // An open owner editor does not defer the host's settlement, but a
+    // settlement at the accepted cursor must still equal accepted state.
+    let mismatch_text = "a settlement the host never accepted";
+    hydrate_texts(&mut store, &[mismatch_text]);
+    let mismatch_id = format!("moment-ydoc-{}", "f".repeat(64));
+    retain_audit(&store, &mismatch_id, mismatch_text, 2);
+    let mismatch = envelope(
+        "mismatch",
+        0,
+        "ws",
+        present_text_payload(
+            &mismatch_id,
+            "object",
+            "write",
+            "owner.md",
+            "owner.md",
+            &texts[0],
+            &old_id,
+            mismatch_text,
+        ),
+    );
+    assert!(matches!(
+        crate::apply_moment_envelope(&mut store, &mismatch, &NoFaults, &crate::AlwaysLive)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Refused(_)
+    ));
+    assert_eq!(snapshot(&store, "object"), before);
     assert_eq!(
-        apply_moment_envelope(&mut store, &latest, &NoFaults).unwrap(),
+        crate::apply_moment_envelope(&mut store, &latest, &NoFaults, &crate::AlwaysLive).unwrap(),
         ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(
@@ -661,6 +705,13 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             &texts[1],
         ),
     );
+    // Any other change to an open document still waits for its editor.
+    assert!(matches!(
+        crate::apply_moment_envelope(&mut store, &renamed, &NoFaults, &crate::AlwaysLive),
+        Err(SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    ));
     assert!(matches!(
         apply_moment_envelope(&mut store, &renamed, &NoFaults)
             .unwrap()
@@ -710,6 +761,19 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             "unrelated ordinary file",
         ),
     );
+    // So does an open document without an owner binding. Its own origin keeps
+    // the host's sequence out of it: host seq 2 has not arrived yet.
+    let unbound = ReplicationEnvelope {
+        origin_id: "unbound".into(),
+        origin_seq: 0,
+        ..unrelated.clone()
+    };
+    assert!(matches!(
+        crate::apply_moment_envelope(&mut store, &unbound, &NoFaults, &crate::AlwaysLive),
+        Err(SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    ));
     let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
     *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
         ops: vec![future_moment.clone(), unrelated],
@@ -797,6 +861,8 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
     let dohc_engine_storage::TxnOutcome::Committed(result) = result else {
         panic!("frame must commit")
     };
+    // The parked settlement no longer waits for the owner's open editor. It
+    // writes accepted state only; the pending draft stays out of the file.
     let leased = crate::moment_apply::pending::drain_and_claim(
         &mut store,
         "ws",
@@ -804,9 +870,20 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
         &crate::AlwaysLive,
     )
     .unwrap();
-    assert!(leased.changes.is_empty());
-    assert!(leased.report_id.is_none());
+    assert_eq!(leased.changes.len(), 1);
+    assert_eq!(leased.changes[0].path, "owner.md");
+    assert!(leased.report_id.is_some());
     assert!(!leased.has_more);
+    assert_eq!(
+        store
+            .read_with(|conn| conn.query_row(
+                "SELECT blob_sha256 FROM snapshots WHERE object_id='object'",
+                [],
+                |row| row.get::<_, String>(0)
+            ))
+            .unwrap(),
+        text_sha(&future_text)
+    );
     *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
         ops: vec![],
         next_cursor: 2,

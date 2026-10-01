@@ -4,6 +4,10 @@ import {realpathSync, statSync} from "node:fs";
 import {isAbsolute, join, posix, resolve} from "node:path";
 import type {Event} from "@dohc/workspace-engine-client";
 import {tmpdir} from "node:os";
+import {setTimeout as delay} from "node:timers/promises";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
 import type {LiveDocumentKey} from "@dohc/live-session-contract/live-update-admission";
 import type {SyncRelayStorage} from "./storage";
 import type {LiveJournalHistoryAuthority} from "./storage/liveJournalHistory";
@@ -15,6 +19,8 @@ import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {discoverServiceHostDocuments} from "./serviceHostEnrollmentRoutes";
 
 type Host = Awaited<ReturnType<typeof startServiceLiveHost>>;
+// Background reconciliation must not keep an otherwise idle Node process alive.
+const pause = (ms: number) => Effect.promise(signal => delay(ms, undefined, {signal, ref: false}));
 function canonicalPath(value: string, directory: boolean): string {
   if (!isAbsolute(value) || resolve(value) !== value) throw new Error("Self-host paths must be absolute and canonical.");
   const actual = realpathSync(value);
@@ -37,33 +43,28 @@ export async function startSelfHostedLiveHost(options: {
   const hostId = `self-host-${history.namespace}`, instanceId = "self-host-service";
   const provision = storage.provisionLiveHostControl({mode: "service", hostId, updatedAtMs: Date.now(), guard: storage.captureStanding()});
   if (!provision.ok || provision.snapshot.transition) throw new Error("Self-host live editing requires its provisioned service host. Existing device hosts must use the host transition procedure.");
-  let current: Host | undefined, closing = false, active: Promise<void> | undefined, timer: ReturnType<typeof setTimeout> | undefined;
+  let current: Host | undefined;
   let initialReconciliationComplete = false, selectedDocuments = false;
-  let signature = "", lastError: unknown, requested = false;
+  let signature = "", lastError: unknown;
   let discoveryCursor: {workspaceId: string; shareId: string} | undefined;
   let writeGeneration = 1, scanGeneration = 0, scannedGeneration = 0;
   const lifetime = new AbortController();
   const eventHandlers = new Set<(event: Event) => void>();
   const signal = AbortSignal.any([lifetime.signal, storage.unavailable]);
+  const changes = Effect.runSync(Queue.sliding<void>(1));
   const valid = (row: ServiceHostEnrollment) => row.enabled && storage.workspaceIsOwnedBy(row.workspaceId, row.ownerUserId) &&
     storage.verifyWorkspaceIdentity(row) === "matched" && storage.objectIdAtPathInVersion({workspaceId: row.workspaceId, versionId: "main", path: row.path}) === row.objectId;
   const selection = () => storage.listServiceHostEnrollments().filter(valid);
   const selectionSignature = (rows: readonly ServiceHostEnrollment[]) => JSON.stringify(rows.map(({workspaceId, path, shareId, ownerUserId, replicationEpoch, streamIdentity, credentialNonce}) =>
     ({workspaceId, path, shareId, ownerUserId, replicationEpoch, streamIdentity, credentialNonce})));
   function schedule() {
-    if (closing || signal.aborted) return;
-    requested = true;
-    if (!timer && !active) {
-      timer = setTimeout(() => { timer = undefined; active = reconcile().finally(() => {active = undefined; if (requested) schedule();}); }, 100);
-      timer.unref();
-    }
+    if (!signal.aborted) Queue.offerUnsafe(changes, undefined);
   }
   async function stopCurrent() {
     const previous = current; current = undefined;
     if (previous) await previous.close();
   }
   async function reconcile() {
-    requested = false;
     try {
       signal.throwIfAborted();
       if (discoveryCursor || scannedGeneration !== writeGeneration) {
@@ -116,9 +117,26 @@ export async function startSelfHostedLiveHost(options: {
       if (!signal.aborted) {lastError = error; options.onError?.(error);}
     }
   }
-  const stopWatching = observeRelayWrites(storage, () => {writeGeneration++; schedule();});
-  const retry = setInterval(schedule, 2_000); retry.unref();
-  schedule();
+  const finished = Effect.runPromiseExit(Effect.scoped(Effect.gen(function* () {
+    yield* Effect.acquireRelease(Effect.succeed(changes), Queue.shutdown);
+    yield* Effect.acquireRelease(
+      Effect.sync(() => observeRelayWrites(storage, () => {writeGeneration++; schedule();})),
+      stopWatching => Effect.gen(function* () {
+        stopWatching();
+        yield* Effect.promise(stopCurrent);
+      }),
+    );
+    yield* Effect.forkScoped(Effect.forever(pause(2_000).pipe(Effect.andThen(Effect.sync(schedule)))));
+    schedule();
+    while (true) {
+      yield* Queue.take(changes);
+      yield* pause(100);
+      yield* Queue.clear(changes);
+      // File operations and daemon starts may ignore cancellation. Drain them
+      // before finalization, so a late start cannot escape its owner's close.
+      yield* Effect.uninterruptible(Effect.promise(reconcile));
+    }
+  })), {signal});
   return {
     current: () => current,
     ready(document: LiveDocumentKey) {return current?.isDocumentReady(document) ?? false;},
@@ -146,9 +164,9 @@ export async function startSelfHostedLiveHost(options: {
       return () => { eventHandlers.delete(handler); };
     },
     async close() {
-      if (closing) return;
-      closing = true; lifetime.abort(); stopWatching(); clearInterval(retry); clearTimeout(timer);
-      await active; await stopCurrent();
+      lifetime.abort();
+      const exit = await finished;
+      if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause);
     },
   };
 }

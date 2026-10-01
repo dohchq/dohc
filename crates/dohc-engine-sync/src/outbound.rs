@@ -6,6 +6,84 @@ use rusqlite::{Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx};
 
+/// The relay derives person attribution; installation identities stay local.
+pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool {
+    let Some(authors) = payload
+        .get_mut("authors")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    let original_len = authors.len();
+    authors
+        .retain(|author| author.get("kind").and_then(serde_json::Value::as_str) != Some("human"));
+    if authors.len() == original_len {
+        return false;
+    }
+    if authors.is_empty() {
+        payload
+            .as_object_mut()
+            .expect("moment payload is an object")
+            .remove("authors");
+    }
+    true
+}
+
+pub(crate) fn relay_person_id(id: &str) -> Option<&str> {
+    (!id.starts_with("local:")).then_some(id)
+}
+
+/// Persist repaired wire payloads before sending, preserving exact echo checks.
+pub(crate) fn repair_queued_moment_authors(
+    store: &mut dohc_engine_storage::EngineStore,
+    ops: &mut [crate::ReplicationEnvelope],
+    faults: &dyn dohc_engine_storage::FaultInjector,
+) -> Result<dohc_engine_storage::TxnOutcome<()>, SyncError> {
+    use dohc_engine_storage::TxnOutcome;
+    let repairs: Vec<_> = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, op)| {
+            if op.op_kind != "moment.append" {
+                return None;
+            }
+            let mut payload = op.payload.clone();
+            omit_local_person_authors(&mut payload).then_some((index, payload))
+        })
+        .collect();
+    if repairs.is_empty() {
+        return Ok(TxnOutcome::Committed(()));
+    }
+    let outcome = store.write_with(faults, |tx| {
+        let mut repaired = Vec::new();
+        for (index, payload) in repairs {
+            let op = &ops[index];
+            let payload_json = serde_json::to_string(&payload).map_err(SyncError::corrupt)?;
+            let updated = tx
+                .execute(
+                    "UPDATE replication_log SET payload_json=?1 \
+                 WHERE workspace_id=?2 AND origin_id=?3 AND origin_seq=?4 \
+                   AND op_kind='moment.append' AND imported=0",
+                    params![payload_json, op.workspace_id, op.origin_id, op.origin_seq],
+                )
+                .map_err(SyncError::persist)?;
+            if updated == 1 {
+                repaired.push((index, payload));
+            }
+        }
+        Ok::<_, SyncError>(repaired)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(repaired) => {
+            for (index, payload) in repaired {
+                ops[index].payload = payload;
+            }
+            Ok(TxnOutcome::Committed(()))
+        }
+        TxnOutcome::Crashed { committed } => Ok(TxnOutcome::Crashed { committed }),
+    }
+}
+
 struct MomentPayloadRow {
     moment_id: String,
     version_id: String,
@@ -167,6 +245,27 @@ pub(crate) fn moment_append_payload_in_tx(
         "beforeLatestMomentId": row.before_latest_moment_id,
         "beforeMetadata": before_metadata,
     });
+    omit_local_person_authors(&mut payload);
+    if let Some(authors) = payload
+        .get_mut("authors")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for author in authors {
+            if matches!(
+                author.get("kind").and_then(serde_json::Value::as_str),
+                Some("agent" | "automation")
+            ) && author
+                .get("onBehalfOf")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| relay_person_id(id).is_none())
+            {
+                author
+                    .as_object_mut()
+                    .expect("author with kind is an object")
+                    .remove("onBehalfOf");
+            }
+        }
+    }
     if measured_json_len(&payload)? > PAYLOAD_PACKING_TARGET_BYTES {
         payload["beforeMetadata"] = serde_json::Value::Null;
     }

@@ -63,7 +63,7 @@ pub(in crate::live_update_application) fn read_saved(
     budget: &mut Budget,
 ) -> Result<Option<NativeRestoreApplicationReceipt>, ApplicationError> {
     let b = &held.binding;
-    let length:Option<i64>=conn.query_row("SELECT length(CAST(application_json AS BLOB)) FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,operation_id],|row|row.get(0)).map_err(read_sql)?;
+    let length:Option<i64>=conn.query_row("SELECT length(CAST(application_json AS BLOB))+coalesce(length(CAST(application_delivery_id AS BLOB)),0) FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND relay_database_namespace=?4 AND operation_id=?5",params![b.workspace_id,b.main_version_id,b.object_id,held.namespace,operation_id],|row|row.get(0)).map_err(read_sql)?;
     let Some(length) = length else {
         return Ok(None);
     };
@@ -117,6 +117,9 @@ pub(super) fn verify_saved(
         &held.namespace,
         &receipt.admitted,
         proposal.candidate_bytes.len(),
+        &mut Budget {
+            remaining: crate::limits::MAX_YDOC_UPDATE_BYTES,
+        },
     )?
     .ok_or(ApplicationError::Corrupt)?;
     if record.event.metadata != receipt.admitted
@@ -141,10 +144,23 @@ pub(in crate::live_update_application) fn fence_replay_head(
     held: &Registration,
     fence: &NativeRestoreFenceReceipt,
 ) -> Result<i64, ApplicationError> {
-    let mut budget = Budget {
-        remaining: crate::limits::MAX_YDOC_UPDATE_BYTES,
-    };
-    let Some(receipt) = read_saved(conn, held, &fence.operation.operation_id, &mut budget)? else {
+    fence_replay_head_in(
+        conn,
+        held,
+        fence,
+        &mut Budget {
+            remaining: crate::limits::MAX_YDOC_UPDATE_BYTES,
+        },
+    )
+}
+
+pub(in crate::live_update_application) fn fence_replay_head_in(
+    conn: &Connection,
+    held: &Registration,
+    fence: &NativeRestoreFenceReceipt,
+    budget: &mut Budget,
+) -> Result<i64, ApplicationError> {
+    let Some(receipt) = read_saved(conn, held, &fence.operation.operation_id, budget)? else {
         return Ok(fence.local_head_sequence);
     };
     let b = &held.binding;
@@ -183,9 +199,14 @@ pub(in crate::live_update_application) fn fence_replay_head(
         return Err(ApplicationError::Corrupt);
     }
     let candidate_length = budget.blob_length(conn, &receipt.candidate_digest)?;
-    let record =
-        read_restore_application(conn, &held.namespace, &receipt.admitted, candidate_length)?
-            .ok_or(ApplicationError::Corrupt)?;
+    let record = read_restore_application(
+        conn,
+        &held.namespace,
+        &receipt.admitted,
+        candidate_length,
+        budget,
+    )?
+    .ok_or(ApplicationError::Corrupt)?;
     if record.event.metadata != receipt.admitted
         || record.sequence != receipt.local_head_sequence
         || record.coordinate != receipt.host_coordinate
@@ -200,9 +221,30 @@ fn read_restore_application(
     namespace: &str,
     expected: &AdmittedLiveUpdateMetadata,
     candidate_length: usize,
+    budget: &mut Budget,
 ) -> Result<Option<ApplicationRecord>, ApplicationError> {
     let receipt = &expected.accepted.receipt;
-    let mut query = conn.prepare("SELECT selector_paths_json=?4 AND update_digest=?5 AND update_byte_length=?6 AND first_seen_count=?7 AND (SELECT count(*) FROM live_device_application_first_seen f WHERE f.relay_database_namespace=a.relay_database_namespace AND f.delivery_id=a.delivery_id)=?7 FROM live_device_update_applications a WHERE a.relay_database_namespace=?1 AND (a.delivery_id=?2 OR a.journal_cursor=?3)").map_err(read_sql)?;
+    // The record's text columns, each first-seen child's stored workspace, and
+    // the pinned count of ranges, charged before reading them.
+    let text = [
+        "workspace_id",
+        "delivery_id",
+        "main_version_id",
+        "object_id",
+        "lineage_claim_id",
+        "current_path",
+        "selector_paths_json",
+        "update_digest",
+        "principal_kind",
+        "principal_id",
+        "grant_id",
+        "applied_host_id",
+        "applied_instance_id",
+        "applied_connection_id",
+    ]
+    .map(|column| format!("coalesce(length(CAST(a.{column} AS BLOB)),0)"))
+    .join("+");
+    let mut query = conn.prepare(&format!("SELECT selector_paths_json=?4 AND update_digest=?5 AND update_byte_length=?6 AND first_seen_count=?7 AND (SELECT count(*) FROM live_device_application_first_seen f WHERE f.relay_database_namespace=a.relay_database_namespace AND f.delivery_id=a.delivery_id)=?7,{text}+(SELECT coalesce(sum(length(CAST(f.workspace_id AS BLOB))),0) FROM live_device_application_first_seen f WHERE f.relay_database_namespace=a.relay_database_namespace AND f.delivery_id=a.delivery_id) FROM live_device_update_applications a WHERE a.relay_database_namespace=?1 AND (a.delivery_id=?2 OR a.journal_cursor=?3)")).map_err(read_sql)?;
     let mut rows = query
         .query(params![
             namespace,
@@ -218,9 +260,20 @@ fn read_restore_application(
     let Some(row) = rows.next().map_err(read_sql)? else {
         return Ok(None);
     };
-    if !row.get::<_, bool>(0).map_err(read_sql)? || rows.next().map_err(read_sql)?.is_some() {
+    if !row.get::<_, bool>(0).map_err(read_sql)? {
         return Err(ApplicationError::Corrupt);
     }
+    let length: i64 = row.get(1).map_err(read_sql)?;
+    if rows.next().map_err(read_sql)?.is_some() {
+        return Err(ApplicationError::Corrupt);
+    }
+    budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+    budget.charge(
+        expected
+            .first_seen
+            .len()
+            .saturating_mul(std::mem::size_of::<LiveUpdateStructRange>()),
+    )?;
     read_application(conn, namespace, receipt)
 }
 

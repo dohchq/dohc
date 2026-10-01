@@ -25,7 +25,9 @@ const SAFE: i64 = 9_007_199_254_740_991;
 
 mod accepted_history;
 mod publication;
-pub(crate) use publication::read_native_accepted_in;
+pub(crate) use publication::{
+    read_native_accepted_in, read_restore_predecessor_in, require_restore_registration_in,
+};
 mod ack_read;
 mod sync;
 pub use ack_read::{read_application_ack, LiveApplicationAckIdentity};
@@ -55,6 +57,7 @@ pub use restore_content::{
     NativeRestoreSource,
 };
 pub use restore_fence::require_open as require_restore_open;
+pub(crate) use restore_fence::require_registration as require_restore_registration;
 pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };
@@ -80,6 +83,8 @@ pub enum ApplicationError {
     ConfiguredByteBudgetExceeded,
     #[error("live application commit acknowledgement was interrupted")]
     Interrupted,
+    #[error("this document's settlement moments must reach the relay before a restore fence")]
+    PublicationPending,
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]

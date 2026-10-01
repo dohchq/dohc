@@ -390,6 +390,302 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
     supervisor.close_all().unwrap();
 }
 
+/// The host's pre-live head is an imported projection: base, then H1 alone,
+/// then H1 with A1. Activation adopts that head and the accepted seed already
+/// projects to it, so the first audited settlement changes no text. It must
+/// still not republish the head moment's H1-only before-image.
+#[tokio::test]
+async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prelive_head() {
+    use dohc_engine_storage::StorageError;
+    use dohc_engine_sync::{
+        ApplyDisposition, NoLiveLeases, ReplicationEnvelope, apply_replication_envelope,
+        owner_publication_prefix,
+    };
+    let root = ScratchDir::new().unwrap();
+    let db = engine_db_path(&root).unwrap();
+    let mut store = EngineStore::open(&db, 0).unwrap();
+    let path = "notes/plan.md";
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let source: serde_json::Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let base: Vec<u8> = serde_json::from_value(source["bytes"].clone()).unwrap();
+    let lineage = hex_sha256(&base);
+    let doc = Ydoc::wire();
+    doc.apply(&base).unwrap();
+    let human = doc.richdoc_append_paragraph("Human first edit.");
+    let agent = doc.richdoc_append_paragraph("Agent revised this line.");
+    dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .ensure_main_version("workspace", "main", 0, &NoFaults)
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            for sql in [
+                "INSERT INTO sync_identity (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES ('workspace','origin','epoch','stream',1)",
+                "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) VALUES ('workspace','origin',0)",
+                "INSERT INTO sync_relay_cursors (workspace_id,cursor,replication_epoch,stream_identity) VALUES ('workspace','3','epoch','stream')",
+            ] {
+                tx.execute(sql, []).map_err(StorageError::persist_public)?;
+            }
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    // A peer's ordinary edits arrive before sharing; each import writes its
+    // own native projection moment.
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    for (seq, update, is_base) in [(0, &base, true), (1, &human, false), (2, &agent, false)] {
+        let digest = store.put_binary_blob(update).unwrap();
+        let op = ReplicationEnvelope {
+            workspace_id: "workspace".into(),
+            origin_id: "owner-peer".into(),
+            origin_seq: seq,
+            relay_seq: Some(seq + 1),
+            op_kind: "ydoc.update".into(),
+            payload: serde_json::json!({
+                "versionId":"main", "objectId":"object", "path":path, "contentKind":"richdoc",
+                "updateBlobSha256":digest, "lineageClaimId":lineage, "isBaseState":is_base
+            }),
+            recorded_at_ms: 10 + seq,
+        };
+        let applied =
+            apply_replication_envelope(&mut store, &mut cache, &op, &NoFaults, &NoLiveLeases)
+                .unwrap();
+        assert!(!matches!(applied.primary, ApplyDisposition::Refused(_)));
+    }
+    let head = dohc_engine_domain::VersionedTextStore::new(&mut store)
+        .read_text("workspace", "main", path)
+        .unwrap()
+        .unwrap();
+    assert!(head.latest_moment_id.starts_with("moment-ydoc-apply-"));
+    let human_only: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT before_blob_sha256 FROM moments WHERE moment_id=?1",
+                [&head.latest_moment_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    let human_moment: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT moment_id FROM moments WHERE after_blob_sha256=?1",
+                [&human_only],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert!(human_moment.starts_with("moment-ydoc-apply-"));
+    let journaled = |store: &EngineStore, sql: &str, value: &str| -> i64 {
+        store
+            .read_with(|conn| conn.query_row(sql, [value], |row| row.get(0)))
+            .unwrap()
+    };
+    let by_moment = "SELECT count(*) FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1";
+    let by_digest = "SELECT count(*) FROM replication_log WHERE op_kind='moment.append' AND instr(payload_json,?1)>0";
+    assert_eq!(journaled(&store, by_moment, &head.latest_moment_id), 0);
+
+    std::fs::create_dir(root.path().join("notes")).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 3).unwrap().actor;
+    actor
+        .materialize_replay_pending(root.path().to_owned(), "workspace".into(), 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.path().join(path)).unwrap(),
+        head.text
+    );
+    let captured = actor
+        .capture_imported_owner_activation(
+            "relay".into(),
+            key,
+            path.into(),
+            1_000_000,
+            None,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(captured.source.source_moment_id, head.latest_moment_id);
+    let binding = dohc_engine_collab::LiveObjectBinding {
+        workspace_id: "workspace".into(),
+        main_version_id: "main".into(),
+        object_id: "object".into(),
+        lineage_claim_id: lineage.clone(),
+        current_path: path.into(),
+        selector_paths: vec![path.into()],
+        restore_fence_generation: 0,
+    };
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = owner
+        .register(
+            "relay".into(),
+            ApplicationHostCoordinate {
+                host_id: "host".into(),
+                host_epoch: 1,
+                instance_id: "instance".into(),
+                connection_id: "connection".into(),
+            },
+            binding.clone(),
+        )
+        .await
+        .unwrap();
+    handle
+        .adopt_owner(
+            OwnerAdoptionCut {
+                relay_database_namespace: "relay".into(),
+                adoption_id: captured.activation_id.clone(),
+                source_moment_id: captured.source.source_moment_id.clone(),
+                source_digest: captured.source.source_digest.clone(),
+                source_byte_length: captured.source.source_byte_length,
+                baseline_moment_relay_sequence: 1,
+                baseline_registered_at_ms: 3,
+                baseline_bytes: captured.baseline_bytes.clone(),
+                expected_local_sequence: captured.source.native_head_sequence,
+                events: vec![],
+                terminal_receipt: None,
+                outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
+                    max_pending_bytes: 1_000_000,
+                    max_pending_age_ms: 100_000,
+                },
+            },
+            1_000_000,
+            100,
+            Arc::new(NoFaults),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    // Adoption queues the activation state as the owner's seed delivery.
+    let (outbox, delivery, digest): (String, String, String) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(digest, hex_sha256(&captured.full_state));
+    let receipt = LiveUpdateReceipt {
+        delivery_id: delivery.clone(),
+        update_digest: digest.clone(),
+        journal_cursor: 1,
+        accepting_host_epoch: 1,
+    };
+    let applied = handle
+        .apply(
+            AdmittedLiveUpdate {
+                metadata: AdmittedLiveUpdateMetadata {
+                    accepted: RelayAcceptedLiveUpdate {
+                        receipt: receipt.clone(),
+                        binding: binding.clone(),
+                        authority: ServerDerivedLiveUpdateAuthority::Owner {
+                            principal_id: "owner".into(),
+                        },
+                        received_at_ms: 21,
+                    },
+                    first_seen: vec![],
+                },
+                update_bytes: captured.full_state.clone(),
+            },
+            Arc::new(NoFaults),
+            100_000_000,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(applied, ApplicationResult::Applied(..)));
+    actor
+        .owner_ydoc_outbox_acknowledge(
+            "workspace".into(),
+            outbox,
+            vec![dohc_engine_collab::OwnerDeliveryReceipt {
+                delivery_id: delivery,
+                update_digest: digest,
+                journal_cursor: 1,
+                accepting_host_epoch: 1,
+            }],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let settle = || {
+        handle.settle(
+            Some(receipt.clone()),
+            100,
+            root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+    };
+    let settled = settle().await.unwrap();
+    assert_eq!(settled.markdown_digest, head.blob_sha256);
+    assert_ne!(settled.moment_id, head.latest_moment_id);
+    assert_eq!(journaled(&store, by_digest, &human_only), 0);
+
+    let (origin_id, origin_seq, recorded_at_ms, payload): (String, i64, i64, String) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT origin_id,origin_seq,recorded_at_ms,payload_json FROM replication_log WHERE imported=0 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",
+                [&settled.moment_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+        })
+        .unwrap();
+    let published = ReplicationEnvelope {
+        workspace_id: "workspace".into(),
+        origin_id,
+        origin_seq,
+        op_kind: "moment.append".into(),
+        recorded_at_ms,
+        relay_seq: None,
+        payload: serde_json::from_str(&payload).unwrap(),
+    };
+    assert_eq!(
+        published.payload["payloadBeforeBlobSha256"],
+        serde_json::json!(head.blob_sha256)
+    );
+    let allowed = |op: &ReplicationEnvelope| {
+        owner_publication_prefix(&store, "workspace", std::slice::from_ref(op), 1_000_000)
+            .unwrap()
+            .allowed_ops
+    };
+    assert_eq!(allowed(&published), 1);
+    // The H1-only state was never accepted, so it remains unpublishable.
+    let mut historical = published.clone();
+    historical.payload["payloadBeforeBlobSha256"] = serde_json::json!(human_only);
+    historical.payload["beforeBlobSha256"] = serde_json::json!(human_only);
+    assert_eq!(allowed(&historical), 0);
+
+    let counts = |store: &EngineStore| {
+        [
+            "moments",
+            "replication_log",
+            "materialization_jobs",
+            "live_device_settlements",
+        ]
+        .map(|table| store.table_row_count(table).unwrap())
+    };
+    let before = counts(&store);
+    let again = settle().await.unwrap();
+    assert_eq!(
+        (again.settlement_id, again.moment_id),
+        (settled.settlement_id, settled.moment_id)
+    );
+    assert_eq!(counts(&store), before);
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
 #[tokio::test]
 async fn observed_owner_cannot_use_ordinary_runtime_settlement() {
     let mut f = Fixture::new();

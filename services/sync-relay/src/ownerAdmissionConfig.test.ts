@@ -1,11 +1,15 @@
-import {mkdtempSync,writeFileSync} from "node:fs";
+import {mkdtempSync,rmSync,writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import {expect,it,vi} from "vitest";
+import {afterEach,expect,it,vi} from "vitest";
 import {readOwnerAdmissionConfig,startOwnerAdmission} from "./ownerAdmissionConfig.js";
+
+const fixtureRoots: string[] = [];
+afterEach(() => {for (const root of fixtureRoots.splice(0)) rmSync(root,{recursive: true,force: true});});
 
 it("requires a bounded explicit owner share map and every validation budget",() => {
   const root = mkdtempSync(join(tmpdir(),"dohc-owner-admission-")), path = join(root,"config.json");
+  fixtureRoots.push(root);
   const validation = {maxStructVisits: 100,maxValueNodeVisits: 100,maxDecodedPayloadByteVisits: 1000,maxStructClientGroupVisits: 100,
     maxDeleteClientGroupVisits: 100,maxDeleteIntervalVisits: 100,maxIndexOperations: 100};
   const value = {version: 1,shares: [{workspaceId: "workspace",shareId: "share"}],validation,maxEntriesPerDrain: 10,
@@ -42,9 +46,9 @@ it("resumes a bounded workspace scan and aborts the active pass on close",async 
     await vi.advanceTimersByTimeAsync(0); expect(calls).toEqual(["a1","a2"]);
     await vi.advanceTimersByTimeAsync(100); expect(calls).toEqual(["a1","a2","b1"]);
     await vi.advanceTimersByTimeAsync(100); expect(held?.aborted).toBe(false);
-    runner.close(); expect(held?.aborted).toBe(true);
+    const closed = runner.close(); expect(held?.aborted).toBe(true); await closed;
     await vi.advanceTimersByTimeAsync(1000); expect(calls).toHaveLength(4);
-  } finally {runner.close(); vi.useRealTimers();}
+  } finally {await runner.close(); vi.useRealTimers();}
 });
 
 it("reports a recurring failure again after a successful pass",async () => {
@@ -63,5 +67,97 @@ it("reports a recurring failure again after a successful pass",async () => {
     await vi.advanceTimersByTimeAsync(100); expect(onError).toHaveBeenCalledTimes(1);
     fails = false; await vi.advanceTimersByTimeAsync(100);
     fails = true; await vi.advanceTimersByTimeAsync(100); expect(onError).toHaveBeenCalledTimes(2);
-  } finally {runner.close(); vi.useRealTimers();}
+  } finally {await runner.close(); vi.useRealTimers();}
+});
+
+type Settle = Parameters<typeof startOwnerAdmission>[0]["control"]["settle"];
+function deferred() {let resolve!: () => void; const promise = new Promise<void>(done => {resolve = done;}); return {promise,resolve};}
+function admissionFixture(settle: Settle,onError = vi.fn()) {
+  const unavailable = new AbortController();
+  const nextOwnerDocument = vi.fn((_workspaceId: string,after: string) => after === "first"
+    ? {workspaceId: "a",mainVersionId: "main",objectId: "second",lineageClaimId: "a".repeat(64)}
+    : {workspaceId: "a",mainVersionId: "main",objectId: "first",lineageClaimId: "a".repeat(64)});
+  const runner = startOwnerAdmission({
+    storage: {unavailable: unavailable.signal,createLiveCommittedDeliveryStore: () => ({nextOwnerDocument})} as never,
+    history: {} as never,onError,control: {settle},
+    config: {admission: {shares: new Map([["a","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 1000,validate: vi.fn()},
+      maxDocumentsPerPass: 2,pollIntervalMs: 100,passDeadlineMs: 30_000},
+  });
+  return {runner,unavailable,nextOwnerDocument};
+}
+
+it.each(["close","storage"] as const)("waits for uncancellable settlement after %s and joins concurrent closes",async mode => {
+  vi.useFakeTimers();
+  const settlement = deferred();
+  let activeSignal: AbortSignal | undefined;
+  const settle = vi.fn<Settle>(async (_document,signal) => {activeSignal = signal; await settlement.promise; return {} as never;});
+  const {runner,unavailable,nextOwnerDocument} = admissionFixture(settle);
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settle).toHaveBeenCalledTimes(1);
+    if (mode === "storage") unavailable.abort();
+    const firstClose = Promise.resolve(runner.close()), secondClose = Promise.resolve(runner.close());
+    let closed = 0;
+    void firstClose.then(() => closed++); void secondClose.then(() => closed++);
+    expect(activeSignal?.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(closed).toBe(0);
+    expect(nextOwnerDocument).toHaveBeenCalledTimes(1);
+    settlement.resolve();
+    await Promise.all([firstClose,secondClose]);
+    expect(closed).toBe(2);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(settle).toHaveBeenCalledTimes(1);
+  } finally {settlement.resolve(); await runner.close(); vi.useRealTimers();}
+});
+
+it("keeps the pass occupied after its deadline until actual settlement",async () => {
+  vi.useFakeTimers();
+  const deadline = new AbortController(), settlement = deferred();
+  const timeout = vi.spyOn(AbortSignal,"timeout").mockReturnValue(deadline.signal);
+  let activeSignal: AbortSignal | undefined;
+  const settle = vi.fn<Settle>(async (_document,signal) => {activeSignal = signal; await settlement.promise; return {} as never;});
+  const {runner,nextOwnerDocument} = admissionFixture(settle);
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    deadline.abort(new Error("deadline"));
+    expect(activeSignal?.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(nextOwnerDocument).toHaveBeenCalledTimes(1);
+    settlement.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settle).toHaveBeenCalledTimes(1);
+  } finally {settlement.resolve(); await runner.close(); timeout.mockRestore(); vi.useRealTimers();}
+});
+
+it("advances past a failed document and keeps polling when the error reporter throws",async () => {
+  vi.useFakeTimers();
+  const onError = vi.fn(() => {throw new Error("logger failed");});
+  const settle = vi.fn<Settle>(async () => {throw new Error("offline");});
+  const {runner} = admissionFixture(settle,onError);
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settle.mock.calls[0]?.[0].objectId).toBe("first");
+    expect(onError).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(99);
+    expect(settle).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settle.mock.calls[1]?.[0].objectId).toBe("second");
+    expect(onError).toHaveBeenCalledTimes(1);
+  } finally {await runner.close(); vi.useRealTimers();}
+});
+
+it("cancels an idle poll on close",async () => {
+  vi.useFakeTimers();
+  const settle = vi.fn(async () => ({} as never));
+  const {runner} = admissionFixture(settle);
+  try {
+    expect(settle).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settle).toHaveBeenCalledTimes(2);
+    await runner.close();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(settle).toHaveBeenCalledTimes(2);
+  } finally {await runner.close(); vi.useRealTimers();}
 });

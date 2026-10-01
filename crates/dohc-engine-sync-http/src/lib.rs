@@ -145,6 +145,36 @@ impl HttpRelayTransport {
         Self::build(base_url, token, true)
     }
 
+    /// Explicit debug-profile opt-in for HTTPS to an IP-literal loopback relay
+    /// whose certificate chains to `ca_pem`, one test CA certificate.
+    ///
+    /// The agent trusts only that CA, not the WebPKI roots, and still verifies
+    /// signatures and the address, requires HTTPS, and refuses redirects.
+    /// `debug_assertions` is not a security boundary: callers must select this
+    /// only on an explicit runtime test opt-in.
+    #[cfg(debug_assertions)]
+    pub fn new_with_test_ca_for_tests(
+        base_url: impl Into<String>,
+        token: impl Into<String>,
+        ca_pem: &[u8],
+    ) -> Result<Self, RelayError> {
+        let mut transport = Self::build(base_url, token, false)?;
+        if !names_ip_loopback(&transport.base_url) {
+            return Err(RelayError::InvalidResponse);
+        }
+        let mut items = ureq::tls::parse_pem(ca_pem);
+        let (Some(Ok(ureq::tls::PemItem::Certificate(ca))), None) = (items.next(), items.next())
+        else {
+            return Err(RelayError::InvalidResponse);
+        };
+        let tls_config = ureq::tls::TlsConfig::builder()
+            .provider(ureq::tls::TlsProvider::Rustls)
+            .root_certs(ureq::tls::RootCerts::new_with_certs(&[ca]))
+            .build();
+        transport.agent = configured_agent(Duration::from_secs(30), false, Some(tls_config));
+        Ok(transport)
+    }
+
     fn build(
         base_url: impl Into<String>,
         token: impl Into<String>,
@@ -1032,6 +1062,15 @@ fn base_url_is_allowed(base_url: &str, allow_insecure_loopback: bool) -> bool {
         }
         _ => false,
     }
+}
+
+#[cfg(debug_assertions)]
+fn names_ip_loopback(base_url: &str) -> bool {
+    let Ok(uri) = base_url.parse::<Uri>() else {
+        return false;
+    };
+    let host = uri.host().unwrap_or_default().trim_matches(['[', ']']);
+    host.parse().is_ok_and(|ip: IpAddr| ip.is_loopback())
 }
 
 fn validate_outbound_payloads<'a>(
@@ -1987,6 +2026,145 @@ mod tests {
                 .expect("loopback transport");
         assert!(!transport.agent.config().https_only());
         assert_eq!(transport.agent.config().max_redirects(), 0);
+    }
+
+    /// The debug-only constructor that trusts one test CA, against a real TLS
+    /// server. The synthetic fixtures come from
+    /// services/share-web/src/testing/mintRelayTlsFixtures.ts; nothing outside
+    /// these tests trusts their CA or uses their key.
+    #[cfg(debug_assertions)]
+    mod test_ca {
+        use rustls::pki_types::pem::PemObject as _;
+
+        use super::*;
+
+        const CA: &str = include_str!("../tests/fixtures/tls/relay-test-ca.pem");
+        const LEAF: &str = include_str!("../tests/fixtures/tls/relay-test-leaf.pem");
+        const LEAF_KEY: &str = include_str!("../tests/fixtures/tls/relay-test-leaf-key.pem");
+        /// Signed by the CA for relay.invalid and 127.0.0.2.
+        const WRONG_HOST_LEAF: &str =
+            include_str!("../tests/fixtures/tls/relay-test-wrong-host-leaf.pem");
+        /// Signed by another key under the CA's name.
+        const IMPOSTOR_LEAF: &str =
+            include_str!("../tests/fixtures/tls/relay-test-impostor-leaf.pem");
+
+        /// Serves one TLS connection and answers 401. Hands back the request
+        /// it read, or `None` when the client refused the handshake.
+        fn answer_once(leaf: &str) -> (u16, thread::JoinHandle<Option<String>>) {
+            let leaf = CertificateDer::from_pem_slice(leaf.as_bytes()).expect("test leaf");
+            let key = PrivateKeyDer::from_pem_slice(LEAF_KEY.as_bytes()).expect("test key");
+            let server = ServerConfig::builder().with_no_client_auth();
+            let server = Arc::new(server.with_single_cert(vec![leaf], key).unwrap());
+            let listener = TcpListener::bind("127.0.0.1:0").expect("TLS listener");
+            let port = listener.local_addr().expect("TLS address").port();
+            let handle = thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("TLS accept");
+                let connection = ServerConnection::new(server).expect("TLS connection");
+                let mut stream = StreamOwned::new(connection, stream);
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).ok().filter(|read| *read > 0)?;
+                let answer = "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n";
+                stream.write_all(answer.as_bytes()).ok()?;
+                stream.flush().ok()?;
+                let request = String::from_utf8_lossy(&request[..read]);
+                Some(request.to_ascii_lowercase())
+            });
+            (port, handle)
+        }
+
+        /// The request's outcome, and what the server read of it.
+        type Probe = (Result<(), RelayError>, Option<String>);
+
+        /// Probes a server presenting `leaf` through `connect`'s transport.
+        fn probe(leaf: &str, connect: impl FnOnce(String) -> HttpRelayTransport) -> Probe {
+            let (port, server) = answer_once(leaf);
+            let transport = connect(format!("https://127.0.0.1:{port}"));
+            let outcome = transport.probe(ProbeRequest {
+                workspace_id: "ws".to_owned(),
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+            });
+            let request = server.join().expect("TLS server thread");
+            (outcome.map(drop), request)
+        }
+
+        fn trusting_the_test_ca(base_url: String) -> HttpRelayTransport {
+            HttpRelayTransport::new_with_test_ca_for_tests(base_url, "token", CA.as_bytes())
+                .expect("test CA transport")
+        }
+
+        /// A refusal is a failed request whose bearer never reached the
+        /// server. Which error names it depends on the platform's TLS stack.
+        fn assert_refused((outcome, request): Probe, case: &str) {
+            assert!(outcome.is_err(), "{case} was accepted");
+            assert_eq!(request, None, "{case} received the bearer");
+        }
+
+        #[test]
+        fn trusts_the_test_ca_and_still_verifies_the_server() {
+            let (outcome, request) = probe(LEAF, trusting_the_test_ca);
+            assert_eq!(outcome, Err(RelayError::Unauthorized));
+            let request = request.expect("the test CA's server was refused");
+            assert!(request.contains("authorization: bearer token"));
+
+            let wrong_host = probe(WRONG_HOST_LEAF, trusting_the_test_ca);
+            assert_refused(wrong_host, "a leaf for another address");
+            let impostor = probe(IMPOSTOR_LEAF, trusting_the_test_ca);
+            assert_refused(impostor, "a leaf the CA did not sign");
+        }
+
+        #[test]
+        fn the_production_constructor_refuses_the_test_ca() {
+            let production = |base_url: String| HttpRelayTransport::new(base_url, "token").unwrap();
+            assert_refused(probe(LEAF, production), "the test CA's leaf");
+        }
+
+        #[test]
+        fn requires_loopback_https_one_certificate_and_no_redirects() {
+            let ca_pem = CA.as_bytes();
+            let transport =
+                HttpRelayTransport::new_with_test_ca_for_tests("https://[::1]:1", "token", ca_pem)
+                    .expect("IPv6 loopback");
+            let config = transport.agent.config();
+            assert!(config.https_only());
+            assert_eq!(config.max_redirects(), 0);
+            assert!(!config.tls_config().disable_verification());
+            let roots = config.tls_config().root_certs();
+            assert!(
+                matches!(roots, ureq::tls::RootCerts::Specific(roots) if roots.len() == 1),
+                "the transport must trust the test CA alone, not the WebPKI roots"
+            );
+
+            for (base_url, token) in [
+                ("http://127.0.0.1:1", "token"),
+                ("https://localhost:1", "token"),
+                ("https://10.0.0.1:1", "token"),
+                ("https://example.com", "token"),
+                ("https://127.0.0.1:1", ""),
+            ] {
+                assert!(
+                    HttpRelayTransport::new_with_test_ca_for_tests(base_url, token, ca_pem)
+                        .is_err(),
+                    "{base_url} with token {token:?} must not reach the test CA transport"
+                );
+            }
+
+            let key_pem = LEAF_KEY.as_bytes();
+            let base_url = "https://127.0.0.1:1";
+            for malformed in [
+                Vec::new(),
+                b"not a certificate".to_vec(),
+                key_pem.to_vec(),
+                [ca_pem, key_pem].concat(),
+                [ca_pem, ca_pem].concat(),
+            ] {
+                assert!(
+                    HttpRelayTransport::new_with_test_ca_for_tests(base_url, "token", &malformed)
+                        .is_err(),
+                    "a CA file that is not exactly one certificate must be refused"
+                );
+            }
+        }
     }
 
     // The desktop names a partition "Server unreachable". A lookup that found

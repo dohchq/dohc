@@ -2647,15 +2647,24 @@ pub(super) fn ydoc_settle_on_store(
     } else {
         ydoc_settle_disk_preimage(root_dir, path, expected_head_sha.as_deref(), &projected_sha)?
     };
+    // A live settlement names its own moment unless the head already is its
+    // latest audited settlement.
+    let reuses_head = match (live_audit, head_probe.as_ref()) {
+        (Some(audit), Some(head)) => store.read_with(|conn| {
+            audit.reuses_head_in(conn, &head.latest_moment_id, &head.blob_sha256)
+        })?,
+        _ => true,
+    };
     // Idempotent no-op: when the lineage's last settled content is exactly
     // this projection, re-settling would mint a duplicate moment (the
     // fingerprint's previous-moment input changed) and a redundant
     // materialization job — the TS driver only settles when the projection
     // differs. Answer with the current head instead (its pending job, if
     // any, was replayed above).
-    if (dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
-        == Some(projected_sha.as_str())
-        || probe_sha.as_deref() == Some(projected_sha.as_str()))
+    if reuses_head
+        && (dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
+            == Some(projected_sha.as_str())
+            || probe_sha.as_deref() == Some(projected_sha.as_str()))
         && matches!(&disk_preimage, Some(Preimage::Present(disk_sha)) if *disk_sha == projected_sha)
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
