@@ -58,7 +58,7 @@ import type { SyncRelayStorage } from "./storage";
 import type { AutomationServer, AutomationServerSchedules } from "./storage/automationHosts";
 
 // This server runs the automations of every workspace whose host record
-// names it (ADR 0012, docs/plans relay host design item 5). Each workspace
+// names it (docs/engineering/security-boundaries.md). Each workspace
 // runs in the server's replica of it, through the same executor the owner's
 // computers run, with the owner's authority from the relay's own records:
 // its owner, its editors, and its host. The server follows the host record

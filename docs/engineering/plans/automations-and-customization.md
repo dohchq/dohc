@@ -2,7 +2,7 @@
 
 Reader: Ice, who agreed the decisions below, and the agents who build and review this work.
 
-Status: agreed with Ice on September 24, 2026, through a grilling session, and in progress. Nothing here is built except the removal of Agent chat. File and line references are to origin/main at 68cb8b315.
+This is the approved scope of the active malleability campaign, agreed September 24, 2026. It records the original design and work order, not current delivery status. File and line references describe `68cb8b315`. Keep this plan while its coordinating session needs it; remove it when that session finishes.
 
 ## Decisions
 
@@ -74,7 +74,7 @@ Automations fire only for document Collections today. Dataset Collections, which
 | Wake your agent with an @mention (personal step) | the chat runner | dispatch accepts only human messages from this computer's person (`dispatch.rs:121-144`); also accept this person's personal steps, inside the same budget of 10 runs per 10 minutes (`chatDispatchService.ts:26-27`) |
 | Run code | the QuickJS guest (`packages/app-backend-runtime/src/guest.ts:106-194`) | an automation API: the code receives the trigger facts and earlier results, and returns values and record changes; the executor applies the changes with the same checks as any other step |
 
-A step that changes a dataset record invokes one of that dataset's approved operations. An automation never goes around a dataset's rules, which keeps the one enforcement path of the app data work (`docs/plans/unified-app-data-campaign.md`). The code step keeps the guest's limits: no network, 1 second of evaluation, 16 MiB of memory, synchronous only (`packages/app-backend-runtime/src/protocol.ts:17-29`). Sending a webhook comes after launch.
+A step that changes a dataset record invokes one of that dataset's approved operations. An automation never goes around a dataset's rules, which keeps the dataset host as the enforcement path. The code step keeps the guest's limits: no network, 1 second of evaluation, 16 MiB of memory, synchronous only (`packages/app-backend-runtime/src/protocol.ts:17-29`). Sending a webhook comes after launch.
 
 ### Formulas
 
@@ -122,7 +122,7 @@ dohc has Notices, a list of problems and finished tasks on one computer. It beco
 - Items sent to a person sync to all of that person's computers, like chat messages do.
 - At launch, these send a notice: an automation's notify step, @mentions, a skipped schedule, a failed automation, a share sent to you, and a finished agent run.
 - Notices stay inside dohc at launch. There are no system pop-ups, email, or phone alerts yet.
-- The unified app data plan lists notification delivery as out of scope (`docs/plans/unified-app-data-campaign.md:310`). This plan takes it on.
+- This campaign includes notification delivery.
 
 ## Part 3: Settings and apps in the sidebar
 

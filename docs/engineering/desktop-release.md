@@ -22,6 +22,9 @@ release.
 Store signing and notarization secrets in the GitHub `desktop-release` environment.
 Do not store them as repository or organization secrets available to arbitrary branches.
 Restrict that environment to the `main` branch, with no tag rules.
+Review organization-level signing-secret access before adding credentials.
+Rotate any signing secrets that pull-request builds could have read.
+Confirm that changes reaching `main` receive review before enabling signing.
 
 The release workflow starts only when someone dispatches it.
 Dispatches can start on other refs, but the preflight guard permits release jobs only on `main`.

@@ -28,8 +28,7 @@ target-*/
 /.agent-worktrees/
 /CLAUDE.local.md
 
-# One home for throwaway agent prompts, reports, and CLI logs. Anything worth
-# keeping goes to docs/ under a real name instead of sitting at the repo root.
+# Task plans, prompts, reports, measurements, and CLI logs stay out of tracked docs.
 /.agent-artifacts/
 /.artifacts/
 /.codex-artifacts/

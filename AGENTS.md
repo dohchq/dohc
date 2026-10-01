@@ -141,6 +141,8 @@ Craft includes layout, interaction, loading, failure, and recovery. Evaluate the
 
 Name the reader before adding a document to main. If nobody will use it to make a decision or perform work, do not add it. Git records what happened. Tests should enforce rules that code can break.
 
+Keep `docs/` for people using dohc, including app authors and agents. Put essential maintainer procedures and security boundaries in `docs/engineering/`. Keep new task plans, campaigns, review logs, and measurements in ignored `.agent-artifacts/`. Remove them when the task ends. Existing tracked plans may stay in `docs/engineering/plans/` while their coordinating sessions still need them.
+
 Read [`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md) before writing docs, specs, plans, PR bodies, commit messages, or skills. Use [`.agents/skills/dohc-interface/SKILL.md`](.agents/skills/dohc-interface/SKILL.md) for anything a person sees inside the app.
 
 Use one name for one thing. [`CONTEXT.md`](CONTEXT.md) is the canonical term list; check terms against it and the surrounding code before defining them. If a paragraph-long code comment is needed to defend a workaround, fix the code instead.
@@ -166,7 +168,7 @@ Use Node 24.14 or newer and pnpm 11.20.0, as pinned in `package.json`.
 
 ## Verification
 
-Use [the agent verification procedure](docs/how-to/verify-agent-work.md) for worktree setup, desktop QA, debug access, and PR evidence.
+Use [the agent verification procedure](docs/engineering/verify-agent-work.md) for worktree setup, desktop QA, debug access, and PR evidence.
 For desktop QA, start with `pnpm doctor`. Use `pnpm qa:smoke` for boot, editing, persistence, and restart.
 
 Run the smallest check that proves the change.
@@ -184,7 +186,7 @@ Blacksmith stays off until Ice enables the repository variable `BLACKSMITH_ENABL
 While off, run PR verification locally. Manual GitHub checks use self-hosted Linux runners.
 When enabled, ready PRs from this repository use Blacksmith. Fork PRs still need local verification.
 Use passing cloud evidence instead of repeating full gates locally when it covers the change.
-Before changing CI activation, read [the Blacksmith setup procedure](docs/how-to/enable-blacksmith.md).
+Before changing CI activation, read [the Blacksmith setup procedure](docs/engineering/enable-blacksmith.md).
 Keep one concern per PR. Keep required contract, caller, and test changes together.
 Finish implementation, self-simplification, and focused checks before requesting independent review.
 
@@ -207,7 +209,7 @@ Shared configuration and unknown code inputs retain full verification.
 - Add focused platform verification when changed behavior depends on Windows or macOS.
 
 Use `pnpm verify:pr --base <target-ref>` as the single full-verification entry point.
-It owns the service setup, prebuilds, gate selection, and evidence. Follow [the verification procedure](docs/how-to/verify-agent-work.md#verify-a-pull-request).
+It owns the service setup, prebuilds, gate selection, and evidence. Follow [the verification procedure](docs/engineering/verify-agent-work.md#verify-a-pull-request).
 Keep the checkout unchanged during each run. Preserve the original commit and target in its `result.json`.
 The Rust gate retains its build budget and mandatory summary-verdict checks.
 
