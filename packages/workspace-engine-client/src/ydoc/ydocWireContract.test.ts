@@ -1,6 +1,95 @@
 import { ProtocolShapeError } from "../wireSchema";
-import { describe, expect, it } from "vitest";
-import { decodeOwnerYDocOutboxAppendResult, decodeYdocResult, YDOC_METHOD } from "./ydocWireContract";
+import { describe, expect, it, vi } from "vitest";
+import * as bindingContract from "@dohc/live-session-contract/live-object-binding";
+import { decodeOwnerYDocDraftDescriptor, decodeOwnerYDocOutboxAppendResult, decodeYdocResult, YDOC_METHOD } from "./ydocWireContract";
+import type { JsonValue } from "../protocol";
+
+describe("owner Y.Doc draft descriptor", () => {
+  const descriptor = {
+    binding: { workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "lineage", currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 0 },
+    relayDatabaseNamespace: "relay", revision: 1, acceptedCursor: 0, nativeHeadSequence: 0,
+    outboxId: null, pendingBytes: 0, state: null,
+  };
+  function open(ownerDraft: JsonValue, extra: Record<string, JsonValue> = {}) {
+    return { sessionId: "session", objectId: "object", path: "a.md", contentKind: "richdoc", head: "present", lineage: "existing", unsettled: true, lineageClaimId: "lineage", lineageOriginatedHere: false, ownerDraft, ...extra };
+  }
+  function resync(ownerDraft: JsonValue) {
+    return { lineageClaimId: "lineage", lineageOriginatedHere: false, recoveredPaths: [], artifactAssets: [], ownerDraft };
+  }
+  function refuse(value: JsonValue) {
+    expect(() => decodeOwnerYDocDraftDescriptor(value)).toThrow(TypeError);
+    expect(() => decodeYdocResult(YDOC_METHOD.open, open(value))).toThrow(ProtocolShapeError);
+    expect(() => decodeYdocResult(YDOC_METHOD.resync, resync(value))).toThrow(ProtocolShapeError);
+  }
+
+  it.each([null, "active", "sealed", "quarantined"])("accepts native parent state %s through both consumers", (state) => {
+    for (const pendingBytes of state === null ? [0] : [0, 2, Number.MAX_SAFE_INTEGER]) {
+      const value = { ...descriptor, outboxId: state === null ? null : "outbox", state, pendingBytes };
+      expect(decodeOwnerYDocDraftDescriptor(value)).toEqual(value);
+      expect(decodeYdocResult(YDOC_METHOD.open, open(value)).ownerDraft).toEqual(value);
+      expect(decodeYdocResult(YDOC_METHOD.resync, resync(value)).ownerDraft).toEqual(value);
+    }
+  });
+
+  it("accepts safe numeric and opaque identifier boundaries", () => {
+    const value = { ...descriptor, revision: Number.MAX_SAFE_INTEGER, acceptedCursor: Number.MAX_SAFE_INTEGER, nativeHeadSequence: Number.MAX_SAFE_INTEGER, relayDatabaseNamespace: "é".repeat(256), outboxId: "😀".repeat(128), state: "quarantined" };
+    expect(decodeOwnerYDocDraftDescriptor(value)).toEqual(value);
+    expect(decodeYdocResult(YDOC_METHOD.resync, resync(value)).ownerDraft).toEqual(value);
+  });
+
+  for (const field of ["revision", "acceptedCursor", "nativeHeadSequence", "pendingBytes"] as const) {
+    it.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1, "0", null, ...(field === "revision" ? [0] : [])])(`refuses invalid ${field}: %s`, (invalid) => {
+      refuse({ ...descriptor, [field]: invalid });
+    });
+  }
+  for (const field of ["relayDatabaseNamespace", "outboxId"] as const) {
+    it.each(["", "bad\u0000", "bad\u007f", "\ud800", "é".repeat(257), 1])(`refuses invalid ${field}`, (invalid) => {
+      refuse({ ...descriptor, outboxId: "outbox", state: "active", [field]: invalid });
+    });
+  }
+  it("refuses absent-parent bytes, inconsistent nulls and malformed shapes", () => {
+    for (const value of [
+      { ...descriptor, pendingBytes: 1 }, { ...descriptor, state: "active" },
+      { ...descriptor, outboxId: "outbox" }, { ...descriptor, state: "unknown" }, null, [],
+    ]) refuse(value);
+    for (const field of Object.keys(descriptor)) {
+      const value: Record<string, JsonValue> = { ...descriptor };
+      delete value[field];
+      refuse(value);
+    }
+  });
+  it("keeps canonical binding normalization and refuses malformed nested binding", () => {
+    const value = { ...descriptor, binding: { ...descriptor.binding, currentPath: "./a.md", selectorPaths: ["z.md", "./a.md", "z.md"] } };
+    const parser = vi.spyOn(bindingContract, "parseLiveObjectBinding");
+    let decoded;
+    try {
+      decoded = decodeOwnerYDocDraftDescriptor(value);
+      expect(parser).toHaveBeenCalledExactlyOnceWith(value.binding);
+      expect(decoded.binding).toBe(parser.mock.results[0]!.value);
+    } finally { parser.mockRestore(); }
+    expect(decoded.binding.currentPath).toBe("a.md");
+    expect(decoded.binding.selectorPaths).toEqual(["a.md", "z.md"]);
+    expect(decoded.binding.selectorPaths).not.toBe(value.binding.selectorPaths);
+    expect(decodeYdocResult(YDOC_METHOD.open, open(value)).ownerDraft).toEqual(decoded);
+    for (const binding of [
+      { ...descriptor.binding, extra: true }, { ...descriptor.binding, currentPath: "../outside.md" },
+      { ...descriptor.binding, objectId: "" }, { ...descriptor.binding, selectorPaths: [] },
+    ]) refuse({ ...descriptor, binding });
+    expect(() => decodeYdocResult(YDOC_METHOD.resync, resync({ ...descriptor, binding: { ...descriptor.binding, currentPath: "../outside.md" } }))).toThrow("ydoc.resync result.ownerDraft.binding");
+  });
+  it("strips ordinary enclosing extras and refuses private descriptor extras", () => {
+    const value = { ...descriptor, extra: true };
+    expect(() => decodeOwnerYDocDraftDescriptor(value)).toThrow(TypeError);
+    expect(decodeYdocResult(YDOC_METHOD.open, open(value, { extra: true }))).toEqual(open(descriptor));
+    expect(decodeYdocResult(YDOC_METHOD.resync, { ...resync(value), extra: true })).toEqual(resync(descriptor));
+  });
+  it("keeps ordinary editor comparisons outside structural decoding", () => {
+    const mismatches: Record<string, JsonValue>[] = [{ objectId: "other" }, { path: "b.md" }, { lineageClaimId: "other" }, { lineage: "absent" }, { contentKind: "plaintext" }];
+    for (const extra of mismatches) {
+      expect(() => decodeYdocResult(YDOC_METHOD.open, open(descriptor, extra))).toThrow("does not match the editor session");
+    }
+  });
+});
 
 const appendResult = {
   outboxId: "opaque-outbox", sequence: 1, deliveryId: "opaque-delivery",

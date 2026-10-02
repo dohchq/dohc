@@ -34,6 +34,60 @@ const LIMITS = {
 describe("private owner delivery transport", () => {
   const request={id:970,workspace:"workspace",deadlineMs:30_000};
   const target={binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"cd".repeat(32),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:0},relayDatabaseNamespace:"relay"};
+  it.each([null, "active", "sealed", "quarantined", "absent bytes", "extra", "binding extra", "cursor mismatch"])("decodes listed draft %s and retains page policy", async (scenario) => {
+    const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge(); await transport.ready();
+    const state = scenario === "active" || scenario === "sealed" || scenario === "quarantined" ? scenario : null;
+    const descriptor = { ...target, revision: 1, acceptedCursor: 0, nativeHeadSequence: 2, outboxId: state === null ? null : "outbox", pendingBytes: scenario === "absent bytes" ? 1 : 0, state };
+    const draft = scenario === "extra" ? { ...descriptor, extra: true }
+      : scenario === "binding extra" ? { ...descriptor, binding: { ...descriptor.binding, extra: true } } : descriptor;
+    const next = { mainVersionId: "main", objectId: scenario === "cursor mismatch" ? "other" : "object", lineageClaimId: target.binding.lineageClaimId };
+    peer.onEnvelope = e => { if (e.type === "request") peer.send({ type: "response", id: e.id, result: { drafts: [draft], next } }); };
+    try {
+      const pending = transport.ownerYDocListDrafts(request, { after: null, limit: 1 });
+      if ([null, "active", "sealed", "quarantined"].includes(scenario)) await expect(pending).resolves.toEqual({ drafts: [descriptor], next });
+      else await expect(pending).rejects.toThrow(scenario === "cursor mismatch" ? "Draft cursor differs from page" : TypeError);
+    } finally { transport.close(); }
+  });
+  it.each(["valid", "binding mismatch", "revision mismatch"])("preserves open-draft request comparisons: %s", async (scenario) => {
+    const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge(); await transport.ready();
+    const draft = { ...target, binding: { ...target.binding, objectId: scenario === "binding mismatch" ? "other" : "object" }, revision: scenario === "revision mismatch" ? 2 : 1, acceptedCursor: 0, nativeHeadSequence: 2, outboxId: null, pendingBytes: 0, state: null };
+    peer.onEnvelope = e => {
+      if (e.type !== "request") return;
+      const bytes = Buffer.from([0, 0]), digest = createHash("sha256").update(bytes).digest("hex");
+      peer.send({ type: "blobStart", requestId: e.id, streamId: e.id, totalBytes: 2, sha256: digest });
+      peer.sendRaw(blobChunkFrame(e.id, bytes, true));
+      peer.send({ type: "response", id: e.id, result: { status: "draft", draft, streamId: e.id, byteLength: 2, digest } });
+    };
+    try {
+      const pending = transport.ownerYDocOpenDraft(request, { binding: target.binding, expectedRevision: 1 });
+      if (scenario === "valid") await expect(pending).resolves.toEqual({ draft, initialUpdate: Buffer.from([0, 0]) });
+      else await expect(pending).rejects.toThrow("Draft open differs from requested binding");
+    } finally { transport.close(); }
+  });
+  it.each(["valid", "binding mismatch", "namespace mismatch"])("preserves observed-enrollment target comparisons: %s", async (scenario) => {
+    const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge(); await transport.ready();
+    const draft = { ...target, binding: { ...target.binding, objectId: scenario === "binding mismatch" ? "other" : "object" }, relayDatabaseNamespace: scenario === "namespace mismatch" ? "other" : "relay", revision: 1, acceptedCursor: 0, nativeHeadSequence: 2, outboxId: null, pendingBytes: 0, state: null };
+    peer.onEnvelope = e => { if (e.type === "request") peer.send({ type: "response", id: e.id, result: { status: "observed", draft } }); };
+    try {
+      const pending = transport.ownerYDocPrepareEnrollment(request, target);
+      if (scenario === "valid") await expect(pending).resolves.toEqual({ status: "observed", draft });
+      else await expect(pending).rejects.toThrow("Owner enrollment target changed");
+    } finally { transport.close(); }
+  });
+  it.each(["binding", "namespace", "cursor", "revision"])("preserves enrollment %s comparisons after upload", async (scenario) => {
+    const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge(); await transport.ready();
+    const draft = { ...target, binding: { ...target.binding, objectId: scenario === "binding" ? "other" : "object" }, relayDatabaseNamespace: scenario === "namespace" ? "other" : "relay", revision: scenario === "revision" ? 2 : 1, acceptedCursor: scenario === "cursor" ? 8 : 9, nativeHeadSequence: 3, outboxId: null, pendingBytes: 0, state: null };
+    let wireId = 0;
+    peer.onEnvelope = e => { if (e.type === "request") wireId = e.id; };
+    peer.onBlobChunk = frame => { if (frame.fin) peer.send({ type: "response", id: wireId, result: { draft } }); };
+    try {
+      await expect(transport.ownerYDocEnroll(request, { ...target, captured: { nativeHeadSequence: 2, localStateDigest: "ab".repeat(32) }, journalCursor: 9, hostVector: Uint8Array.of(0), checkpoint: Uint8Array.of(0, 0) })).rejects.toThrow("Owner enrollment differs from request");
+    } finally { transport.close(); }
+  });
   it.each(["active", "sealed", "extra", "wrong digest", "zero count", "invalid ID", "null", "array"])("checks draft append %s replies after binary upload", async (scenario) => {
     const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge(); await transport.ready();
