@@ -244,7 +244,7 @@ describe("RecordButtonsRow in an Edit share view", () => {
     render(row());
     const button = await screen.findByRole("button", { name: "Mark paid for Invoice 12" });
     expect(screen.getByRole("button", { name: "History" })).toBeTruthy();
-    expect(bridge.listAutomationButtons).toHaveBeenCalledWith({ workspaceId: "ws-1", collectionPath: "Invoices" });
+    await waitFor(() => expect(bridge.listAutomationButtons).toHaveBeenCalledWith({ workspaceId: "ws-1", collectionPath: "Invoices" }));
     expect(button.getAttribute("aria-disabled")).toBe("true");
     expect(wordsOf(button)).toBe(CHECKING_BUTTON);
     // dohc is already checking, so there is nothing to check again.
