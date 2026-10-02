@@ -2708,7 +2708,7 @@ fn history_corpus(len: usize) -> (Vec<Vec<u8>>, Vec<u8>, &'static str) {
 /// (first call on a new connection, then warm), and per actor restart the
 /// first replay and first publication. First calls run with the operating
 /// system's file cache warm. The default 16412 puts the latest checkpoint at
-/// event 16380 with the same 32-event suffix as the short case.
+/// event 16380, leaving a 32-event suffix like the short case.
 ///
 /// Build the executable once under the repository's cargo budget, then run
 /// it serially. The first run writes the corpus; later runs and other builds
@@ -2989,7 +2989,7 @@ async fn live_history_publication_and_settlement_benchmark() {
             )
             .unwrap()
         });
-        // The default sizes compare equal suffixes after their latest checkpoint.
+        // The default sizes compare equal suffix lengths after their latest checkpoint.
         if [32, 16412].contains(&size) {
             assert_eq!(storage[4], Some(HISTORY_INTERVAL as i64), "suffixEvents");
         }
