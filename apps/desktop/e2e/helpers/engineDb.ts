@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 
 // WS-G2-C-2 — the one source of truth for the e2e SQLite helpers that read the
 // workspace engine.db. These are load-bearing for the "no double-journal"
@@ -68,6 +70,8 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["replication_log", ["op_kind", "payload_json"]],
   ["ydoc_docs", ["workspace_id", "version_id", "object_id", "path", "regime", "head_update_seq", "head_snapshot_seq"]],
   ["ydoc_snapshots", ["workspace_id", "version_id", "object_id", "up_to_seq"]],
+  ["ydoc_owner_bindings", ["workspace_id", "main_version_id", "object_id", "lineage_claim_id",
+    "binding_json", "relay_database_namespace", "binding_revision", "accepted_cursor"]],
   ["live_audit_events", ["relay_database_namespace", "event_count", "evidence_digest", "journal_cursor", "delivery_id",
     "accepting_host_epoch", "record_digest"]],
   ["live_audit_record_manifests", ["record_digest", "manifest_json"]],
@@ -154,6 +158,37 @@ export function ydocUpdateCount(rootPath: string): number {
       return Number(row?.n ?? 0);
     }) ?? 0
   );
+}
+
+export interface OwnerEnrollment {
+  binding: LiveObjectBinding;
+  relayDatabaseNamespace: string;
+  revision: number;
+  acceptedCursor: number;
+}
+
+/** The owner's persisted row for this exact object and lineage, including an older restore fence while enrollment catches up. */
+export function ownerEnrollment(rootPath: string, expected: LiveObjectBinding): OwnerEnrollment | null {
+  return withEngineDb(rootPath, (db) => {
+    const row = db.prepare(
+      `SELECT binding_json, relay_database_namespace, binding_revision, accepted_cursor
+       FROM ydoc_owner_bindings
+       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`,
+    ).get(expected.workspaceId, expected.mainVersionId, expected.objectId, expected.lineageClaimId);
+    if (!row) return null;
+    if (typeof row.binding_json !== "string") throw new Error("Owner enrollment binding is not JSON text.");
+    const binding = parseLiveObjectBinding(JSON.parse(row.binding_json));
+    const relayDatabaseNamespace = parseLiveUpdateIdentifier(row.relay_database_namespace, "relayDatabaseNamespace");
+    const revision = row.binding_revision;
+    const acceptedCursor = row.accepted_cursor;
+    if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error("Owner enrollment revision must be a positive safe integer.");
+    }
+    if (typeof acceptedCursor !== "number" || !Number.isSafeInteger(acceptedCursor) || acceptedCursor < 0) {
+      throw new Error("Owner enrollment cursor must be a nonnegative safe integer.");
+    }
+    return { binding, relayDatabaseNamespace, revision, acceptedCursor };
+  });
 }
 
 // Who each journaled Y.Doc update is recorded under.

@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import type { DohcDesktopBridge, EngineMomentRecord } from "../src/ipc/bridgeContract";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
-import { liveDocumentFold, ownerAuditRecord, ownerOutboxDeclarations, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
+import { liveDocumentFold, ownerAuditRecord, ownerEnrollment, ownerOutboxDeclarations, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
 import {
   activeWorkspace, createTempWorkspace, explorerRow, openHistoryView, openWorkspaceFromFirstRun,
@@ -270,6 +271,33 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
   let foldEvidence: unknown;
   // Counts from the last check of a declared change's acceptance.
   let lastAcceptance: unknown;
+  let lastEnrollment: unknown;
+  const enrollments: unknown[] = [];
+  const waitForOwnerEnrollment = async (page: Page, temp: TempWorkspace, workspaceId: string, afterFence?: number) => {
+    const phase = afterFence === undefined ? "initial" : "post-restore";
+    await expect.poll(async () => {
+      const live = await page.evaluate(workspaceId =>
+        (window as unknown as { dohcDesktop: Api }).dohcDesktop.listOwnerLiveDocuments({ workspaceId }), workspaceId);
+      const status = live.documents.find(document => document.path === PATH)?.status ?? null;
+      const check = {
+        phase, checkedAt: new Date().toISOString(), status, afterFence,
+        expected: null as ReturnType<NonNullable<typeof stack>["ownerLiveBinding"]>,
+        actual: null as ReturnType<typeof ownerEnrollment>,
+      };
+      lastEnrollment = check;
+      // The bridge keeps binding coordinates in main. The fixture relay read
+      // supplies those coordinates; bridge readiness remains required.
+      check.expected = stack!.ownerLiveBinding(workspaceId, PATH);
+      check.actual = check.expected && ownerEnrollment(temp.rootPath, check.expected.binding);
+      const { expected, actual } = check;
+      return status === "ready" && expected !== null && actual !== null &&
+        (afterFence === undefined || expected.binding.restoreFenceGeneration > afterFence) &&
+        isDeepStrictEqual(actual.binding, expected.binding) &&
+        actual.relayDatabaseNamespace === expected.relayDatabaseNamespace;
+    }, { message: `The owner's ${phase} session enrolled in the exact ready host binding.`, timeout: 120_000, intervals: [1_000] }).toBe(true);
+    enrollments.push(lastEnrollment);
+    await testInfo.attach(`owner enrollment ${phase}`, { contentType: "application/json", body: JSON.stringify(lastEnrollment, null, 2) });
+  };
   const ownerAudit = (deliveryId: string) => ownerAuditRecord(ownerTemp.rootPath, deliveryId);
   /** The one accepted change that declared `agentId`, as the relay journaled it, the service host accepted and audited it, and the owner imported that audit. */
   const acceptedDeclaration = async (workspaceId: string, agentId: string): Promise<AcceptedDeclaration> => {
@@ -385,6 +413,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
 
     await test.step("an agent edits through the CLI while the server hosts the document, and history names it", async () => {
       const page = owner!.page;
+      await waitForOwnerEnrollment(page, ownerTemp, workspace.workspaceId);
       testInfo.annotations.push({ type: "hosted agent edit", description: await hostedAgentEdit(ownerTemp, A1, `${A1} ${HA}`, HOSTED_AGENT) });
       await expect.poll(() => cliRead(ownerTemp), { timeout: 30_000 }).toContain(HA);
       await expect(editor(page)).toContainText(HA);
@@ -544,6 +573,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     await test.step("the owner types and the agent edits through the CLI after the restore", async () => {
       const page = owner!.page;
       await openDocument(page);
+      await waitForOwnerEnrollment(page, ownerTemp, workspace.workspaceId, hosted!.change.restoreFenceGeneration);
       await typeAfter(page, H1, ` ${H2}`);
       // The server still hosts the document, so the owner's edit may finish as
       // saved locally or saved to the host. The settled-file check covers the disk.
@@ -606,7 +636,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       expectAuditKept(hosted!);
       expectAuditKept(next!);
     });
-    await testInfo.attach("hosted agent provenance", { contentType: "application/json", body: JSON.stringify({ hosted, next, provenance, foldEvidence }, null, 2) });
+    await testInfo.attach("hosted agent provenance", { contentType: "application/json", body: JSON.stringify({ hosted, next, provenance, foldEvidence, enrollments }, null, 2) });
 
     for (const app of launches) {
       expect(app.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
@@ -635,7 +665,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         try { return { agentId, evidence: relay.hostedAgentEvidence(ownerWorkspaceId!, PATH, agentId) }; }
         catch (cause) { return { agentId, error: cause instanceof Error ? cause.message : String(cause) }; }
       });
-      await testInfo.attach("hosted agent provenance", { contentType: "application/json", body: JSON.stringify({ lastAcceptance, declared, hosted, next, provenance, foldEvidence }, null, 2) })
+      await testInfo.attach("hosted agent provenance", { contentType: "application/json", body: JSON.stringify({ lastAcceptance, declared, hosted, next, provenance, foldEvidence, enrollments, lastEnrollment }, null, 2) })
         .catch(() => undefined);
     }
     throw error;
