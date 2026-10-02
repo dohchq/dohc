@@ -34,6 +34,36 @@ const LIMITS = {
 describe("private owner delivery transport", () => {
   const request={id:970,workspace:"workspace",deadlineMs:30_000};
   const target={binding:{workspaceId:"workspace",mainVersionId:"main",objectId:"object",lineageClaimId:"cd".repeat(32),currentPath:"a.md",selectorPaths:["a.md"],restoreFenceGeneration:0},relayDatabaseNamespace:"relay"};
+  it.each(["active", "sealed", "extra", "wrong digest", "zero count", "invalid ID", "null", "array"])("checks draft append %s replies after binary upload", async (scenario) => {
+    const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
+    peer.acknowledge(); await transport.ready();
+    let wireId = 0, digest = "";
+    const chunks: Buffer[] = [];
+    peer.onEnvelope = envelope => {
+      if (envelope.type !== "request") return;
+      expect(envelope.method).toBe("ydoc.ownerDelivery.appendDraft");
+      wireId = envelope.id;
+      digest = (envelope.params as Record<string, string>).digest;
+    };
+    peer.onBlobChunk = frame => {
+      chunks.push(Buffer.from(frame.payload));
+      if (!frame.fin) return;
+      expect(createHash("sha256").update(Buffer.concat(chunks)).digest("hex")).toBe(digest);
+      const result = { outboxId: "outbox", sequence: 1, deliveryId: "delivery", updateDigest: digest, pendingBytes: 2, oldestEntryAtMs: 0, state: scenario === "sealed" ? "sealed" : "active" };
+      const reply = scenario === "extra" ? { ...result, extra: true }
+        : scenario === "wrong digest" ? { ...result, updateDigest: "ab".repeat(32) }
+        : scenario === "zero count" ? { ...result, pendingBytes: 0 }
+        : scenario === "invalid ID" ? { ...result, deliveryId: "bad\u0000" }
+        : scenario === "null" ? null : scenario === "array" ? [] : result;
+      peer.send({ type: "response", id: wireId, result: reply });
+    };
+    try {
+      const pending = transport.ownerYDocAppendDraft(request, { binding: target.binding, expectedRevision: 1, appendKey: "edit", updateBytes: Uint8Array.of(0, 0) });
+      if (scenario === "active" || scenario === "sealed") await expect(pending).resolves.toMatchObject({ state: scenario, updateDigest: digest });
+      else await expect(pending).rejects.toThrow(TypeError);
+      expect(Buffer.concat(chunks)).toEqual(Buffer.from([0, 0]));
+    } finally { transport.close(); }
+  });
   it("discovers durable drafts, opens their binary state and appends without a caller base", async () => {
     const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
     peer.acknowledge();await transport.ready();

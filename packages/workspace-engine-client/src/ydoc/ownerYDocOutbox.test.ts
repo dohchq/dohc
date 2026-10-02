@@ -3,7 +3,7 @@ import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import { describe, expect, it } from "vitest";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter";
-import type { Request, Response, WorkspaceHandle } from "../protocol";
+import type { JsonValue, Request, Response, WorkspaceHandle } from "../protocol";
 import { OwnerYDocOutbox, OwnerYDocOutboxReadChangedError } from "./ownerYDocOutbox.js";
 
 const WORKSPACE = "owner-outbox-receipt-test" as WorkspaceHandle;
@@ -44,6 +44,33 @@ function receipt(
 function outbox(client: DaemonRequesterClient): OwnerYDocOutbox {
   return new OwnerYDocOutbox(client, WORKSPACE);
 }
+
+describe("OwnerYDocOutbox append boundary", () => {
+  const input = {
+    binding: { workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 0 },
+    baseUpdate: Uint8Array.of(1), appendKey: "edit", update: Uint8Array.of(2),
+    limits: { maxPendingBytes: 1000, maxPendingAgeMs: 1000 },
+  };
+  const result = { outboxId: "outbox", sequence: 1, deliveryId: "delivery", updateDigest: "b".repeat(64), pendingBytes: 1, oldestEntryAtMs: 0, state: "sealed" };
+
+  it("strips daemon extras and forwards append inputs without adding digest equality policy", async () => {
+    const requests: Request[] = [];
+    const client: DaemonRequesterClient = { async sendRequest(request) {
+      requests.push(request);
+      return { id: request.id, result: { ...result, extra: true } };
+    } };
+    expect(await outbox(client).append(input)).toEqual(result);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ workspace: WORKSPACE, method: "ydoc.ownerOutbox.append", params: {
+      binding: input.binding, baseUpdateBase64: "AQ==", appendKey: "edit", updateBase64: "Ag==", limits: input.limits,
+    } });
+  });
+
+  it.each([null, [], { ...result, pendingBytes: 0 }, { ...result, state: "quarantined" }, { ...result, outboxId: "bad\u0000" }, { ...result, updateDigest: "bad" }])("rejects malformed append replies with TypeError", async (reply) => {
+    const client: DaemonRequesterClient = { async sendRequest(request) { return { id: request.id, result: reply as JsonValue }; } };
+    await expect(outbox(client).append(input)).rejects.toThrow(TypeError);
+  });
+});
 
 describe("OwnerYDocOutbox receipt boundary", () => {
   it("forwards minimum and maximum safe receipt coordinates unchanged", async () => {
