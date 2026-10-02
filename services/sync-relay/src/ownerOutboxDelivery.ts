@@ -88,7 +88,7 @@ export async function drainOwnerOutbox(options: {
       if (cut.kind !== "cut") throw new Error("Owner journal is unavailable.");
       const validation = await admission.validate({document,currentPath: binding.currentPath,checkpoint: cut.cut.checkpoint.bytes,
         suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update,
-        retainStateUpdate: liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata))}, signal);
+        retainStateUpdate: liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata), [])}, signal);
       check();
       if (validation.kind === "retry") {
         await validation.waitForCapacity(signal); check();

@@ -45,11 +45,9 @@ export function deriveLiveAuthorSnapshot(storage: StorageContext, authority: Ser
     const mapping = storage.db.prepare("SELECT public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?")
       .get(authority.grantId,authority.principalId);
     if (!mapping || context.publicPrincipalId !== mapping.public_principal_id) return [];
-    const publicId = ensureLiveLinkPublicPrincipal(storage,authority);
-    if (context.publicPrincipalId !== publicId) return [];
     const principal = storage.getLinkPrincipal(authority.principalId);
     if (!principal || principal.grantId !== authority.grantId) throw new Error("The enrolled link principal changed.");
-    authors.push({kind: "link",publicPrincipalId: publicId,label: principal.displayName ?? "Anonymous"});
+    authors.push({kind: "link",publicPrincipalId: context.publicPrincipalId,label: principal.displayName ?? "Anonymous"});
   } else return [];
   if (context.agent) authors.push({kind: "agent",...context.agent});
   return parseLiveAuthorSnapshot(authors);

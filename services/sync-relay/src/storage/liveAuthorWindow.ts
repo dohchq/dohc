@@ -45,8 +45,8 @@ export function liveAuthorCoverageCheckpointDue(coverage: readonly LiveCheckpoin
     admissionBytes(coverage.map(entry => entry.author)) >= LIVE_AUTHOR_CHECKPOINT_BYTES;
 }
 
-/** Reserve enough validation state for a candidate with a principal and an agent. */
-export function liveAuthorCheckpointAnticipated(suffix: readonly AdmittedLiveUpdateMetadata[]): boolean {
+/** Reserve validation state near the checkpoint band only when the candidate can add an identity. */
+export function liveAuthorCheckpointAnticipated(suffix: readonly AdmittedLiveUpdateMetadata[], snapshot: LiveAuthorSnapshot): boolean {
   const authors = new Map<string, LiveAuthorEntry>();
   for (const metadata of suffix) {
     if (metadata.firstSeen.length === 0 && (metadata.firstSeenDeletes?.length ?? 0) === 0) continue;
@@ -57,11 +57,14 @@ export function liveAuthorCheckpointAnticipated(suffix: readonly AdmittedLiveUpd
       }
     }
   }
-  return authors.size >= LIVE_AUTHOR_CHECKPOINT_IDENTITIES - 2 ||
-    admissionBytes([...authors.values()]) >= LIVE_AUTHOR_CHECKPOINT_BYTES - 2 * (MAX_LIVE_AUTHOR_ENTRY_BYTES + 12);
+  const bytes = admissionBytes([...authors.values()]);
+  if (authors.size >= LIVE_AUTHOR_CHECKPOINT_IDENTITIES || bytes >= LIVE_AUTHOR_CHECKPOINT_BYTES) return true;
+  return snapshot.some(author => !authors.has(liveAuthorIdentity(author))) &&
+    (authors.size >= LIVE_AUTHOR_CHECKPOINT_IDENTITIES - 2 ||
+      bytes >= LIVE_AUTHOR_CHECKPOINT_BYTES - 2 * (MAX_LIVE_AUTHOR_ENTRY_BYTES + 12));
 }
 
-/** Each authenticated principal may introduce 16 declared-agent identities per window.
+/** Each account or link grant may introduce 16 declared-agent identities per window, with 32 across the document.
  * Further declarations keep the principal's credit but omit agent identity; content is still admitted.
  */
 export function limitLiveDeclaredAgents(suffix: readonly AdmittedLiveUpdateMetadata[],
@@ -70,13 +73,24 @@ export function limitLiveDeclaredAgents(suffix: readonly AdmittedLiveUpdateMetad
   if (!agent) return snapshot;
   const identities = new Set<string>();
   for (const metadata of suffix) {
+    if (metadata.firstSeen.length === 0 && (metadata.firstSeenDeletes?.length ?? 0) === 0) continue;
     const prior = metadata.accepted.authority;
-    if (prior.principalId !== authority.principalId || (prior.principalKind === "link") !== (authority.principalKind === "link") ||
-      (authority.principalKind === "link" && prior.grantId !== authority.grantId) ||
-      (metadata.firstSeen.length === 0 && (metadata.firstSeenDeletes?.length ?? 0) === 0)) continue;
+    const samePrincipal = (prior.principalKind === "link") === (authority.principalKind === "link") &&
+      (authority.principalKind === "link" ? prior.grantId === authority.grantId : prior.principalId === authority.principalId);
+    if (!samePrincipal) continue;
     for (const author of metadata.authorSnapshot ?? []) if (author.kind === "agent") identities.add(liveAuthorIdentity(author));
   }
-  return identities.has(liveAuthorIdentity(agent)) || identities.size < 16 ? snapshot : snapshot.filter(author => author.kind !== "agent");
+  const identity = liveAuthorIdentity(agent);
+  if (identities.has(identity)) return snapshot;
+  if (identities.size < 16) {
+    const documentIdentities = new Set<string>();
+    for (const metadata of suffix) {
+      if (metadata.firstSeen.length === 0 && (metadata.firstSeenDeletes?.length ?? 0) === 0) continue;
+      for (const author of metadata.authorSnapshot ?? []) if (author.kind === "agent") documentIdentities.add(liveAuthorIdentity(author));
+    }
+    if (documentIdentities.has(identity) || documentIdentities.size < 32) return snapshot;
+  }
+  return snapshot.filter(author => author.kind !== "agent");
 }
 
 /** Assess only the suffix after the consumed checkpoint boundary. */

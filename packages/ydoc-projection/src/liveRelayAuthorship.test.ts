@@ -166,6 +166,25 @@ it('admits fresh agent declarations beyond 16 unnamed without forcing an author 
   expect(f.journalRows().journal.every(row => row.validation_checkpoint_bytes === null)).toBe(true)
 })
 
+it('admits content beyond 32 declared agents across accounts without an author checkpoint', () => {
+  const f = setup()
+  f.raw.prepare("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('third-grant','share','user','third',NULL,'edit',4,'active',0,NULL,NULL)").run()
+  for (let index = 0; index < 40; index++) {
+    f.doc.clientID = 60_000 + index
+    const actor = index < 16 ? f.actor : index < 32 ? bobActor : {kind: 'named' as const, userId: 'third', grantId: 'third-grant'}
+    const input = authored(f.capture(f.update(`global-agent-${index}`), `global-agent-${index}`, actor),
+      {kind: 'account', accountId: actor.userId, agent: {agentId: `agent-${index}`}})
+    const result = f.storage.commitLiveUpdateJournal(input)
+    expect(result.result.kind).toBe('accepted')
+    expect(result.admitted?.metadata.authorSnapshot).toHaveLength(index < 32 ? 2 : 1)
+    expect(result.admitted?.metadata.checkpointCoverage).toBeUndefined()
+  }
+  f.doc.clientID = 60_000
+  const known = authored(f.capture(f.update('global-known'), 'global-known'),
+    {kind: 'account', accountId: 'owner', agent: {agentId: 'agent-0'}})
+  expect(f.storage.commitLiveUpdateJournal(known).admitted?.metadata.authorSnapshot).toHaveLength(2)
+})
+
 it('refuses validator firstSeen evidence overlapping retained coverage without writing', () => {
   const f = setup(), bytes = f.update()
   expect(f.storage.commitLiveUpdateJournal(authored(f.capture(bytes, 'original'))).result.kind).toBe('accepted')

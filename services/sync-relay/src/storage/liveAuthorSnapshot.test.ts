@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { LiveAuthorContext } from "@dohc/live-session-contract";
 import type { ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
 import { openSyncRelayStorage } from "../storage";
@@ -91,6 +91,14 @@ it("does not allocate a link mapping for absent or signed-out context", () => {
   expect(deriveLiveAuthorSnapshot(storage, link, undefined)).toEqual([]);
   expect(deriveLiveAuthorSnapshot(storage, link, { kind: "signed-out", agent })).toEqual([]);
   expect(storage.db.prepare("SELECT COUNT(*) AS count FROM sync_relay_app_public_principals").get()!.count).toBe(0);
+});
+
+it("checks the enrolled principal's grant when an existing mapping matches", () => {
+  const storage = fixture(), publicId = storage.tx(() => ensureLiveLinkPublicPrincipal(storage, link));
+  const principal = storage.getLinkPrincipal(link.principalId)!;
+  const read = vi.spyOn(storage, "getLinkPrincipal").mockReturnValue({...principal, grantId: "other-grant"});
+  expect(() => deriveLiveAuthorSnapshot(storage, link, {kind: "link", publicPrincipalId: publicId})).toThrow(/principal changed/);
+  read.mockRestore();
 });
 
 it("refuses a fresh mapping at quota without leaving a partial write", () => {

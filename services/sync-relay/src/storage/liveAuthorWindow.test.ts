@@ -67,8 +67,8 @@ it("deduplicates scoped identities, preserves names and reserves agent depth gro
 });
 
 it("checkpoints at 960 identities and refuses only a new identity beyond 1024", () => {
-  expect(liveAuthorCheckpointAnticipated(authors(957))).toBe(false);
-  expect(liveAuthorCheckpointAnticipated(authors(958))).toBe(true);
+  expect(liveAuthorCheckpointAnticipated(authors(957), [human("new")])).toBe(false);
+  expect(liveAuthorCheckpointAnticipated(authors(958), [human("new")])).toBe(true);
   expect(assessLiveAuthorWindow(authors(958), candidate([human("new")])).checkpointDue).toBe(false);
   const due = assessLiveAuthorWindow(authors(959), candidate([human("new")]));
   expect(due.identityCount).toBe(960);
@@ -102,8 +102,27 @@ it("uses escaped UTF-8 author bytes at the 96 KiB checkpoint threshold", () => {
   expect(liveAuthorCoverageCheckpointDue(at.coverage)).toBe(true);
   const smaller = author.kind === "human" ? {...author, humanName: author.humanName.slice(0, -1)} : author;
   expect(assessLiveAuthorWindow(suffix, candidate([smaller])).checkpointDue).toBe(false);
-  expect(liveAuthorCheckpointAnticipated([...suffix, admitted([smaller])])).toBe(true);
-  expect(liveAuthorCheckpointAnticipated([])).toBe(false);
+  const parked = [...suffix, admitted([smaller])];
+  expect(liveAuthorCheckpointAnticipated(parked, [human("new")])).toBe(true);
+  expect(liveAuthorCheckpointAnticipated(parked, [smaller])).toBe(false);
+  expect(liveAuthorCheckpointAnticipated(parked, [])).toBe(false);
+  expect(liveAuthorCheckpointAnticipated([], [human("new")])).toBe(false);
+});
+
+it("does not retain state in the identity band for known accounts, links or scoped agents", () => {
+  const link: LiveAuthorEntry = {kind: "link", publicPrincipalId: "public_link", label: "Sam"};
+  const agent: LiveAuthorEntry = {kind: "agent", agentId: "writer", onBehalfOf: "0", depth: 1};
+  const suffix = [...authors(956), admitted([link, agent])];
+  expect(liveAuthorCheckpointAnticipated(suffix, [])).toBe(false);
+  expect(liveAuthorCheckpointAnticipated(suffix, [human("0", "Renamed")])).toBe(false);
+  expect(liveAuthorCheckpointAnticipated(suffix, [{...link, label: "Renamed"}, {...agent, agentName: "Renamed", depth: 64}])).toBe(false);
+  expect(liveAuthorCheckpointAnticipated(suffix, [human("new")])).toBe(true);
+  expect(liveAuthorCheckpointAnticipated(suffix, [{...link, publicPrincipalId: "public_new"}])).toBe(true);
+  expect(liveAuthorCheckpointAnticipated(suffix, [human("0"), {...agent, onBehalfOf: "new"}])).toBe(true);
+});
+
+it("retains state if the existing window is already due, even without a new identity", () => {
+  expect(liveAuthorCheckpointAnticipated(authors(960), [])).toBe(true);
 });
 
 it("counts agent identities per authenticated principal and resets the cap with the consumed window", () => {
@@ -119,6 +138,34 @@ it("counts agent identities per authenticated principal and resets the cap with 
   expect(limitLiveDeclaredAgents([], authority, snapshot)).toEqual(snapshot);
   const changedScope = [human("alice"), {...agent, agentId: "writer-0", onBehalfOf: "bob"}];
   expect(limitLiveDeclaredAgents(suffix, authority, changedScope)).toEqual([human("alice")]);
+});
+
+it("shares a link grant's cap across all its principals, but not across grants", () => {
+  const authority = {principalKind: "link" as const, principalId: "principal-new", grantId: "grant", grantGeneration: 1};
+  const link: LiveAuthorEntry = {kind: "link", publicPrincipalId: "public_new", label: "Sam"};
+  const agent: LiveAuthorEntry = {kind: "agent", agentId: "new"};
+  const suffix = Array.from({length: 16}, (_, index) => ({...admitted([{kind: "agent" as const, agentId: `writer-${index}`}]),
+    accepted: {...admitted([]).accepted, authority: {...authority, principalId: `principal-${index}`}}}));
+  expect(limitLiveDeclaredAgents(suffix.slice(0, 15), authority, [link, agent])).toEqual([link, agent]);
+  expect(limitLiveDeclaredAgents(suffix, authority, [link, agent])).toEqual([link]);
+  expect(limitLiveDeclaredAgents(suffix, {...authority, grantId: "another-grant"}, [link, agent])).toEqual([link, agent]);
+  expect(limitLiveDeclaredAgents(suffix, authority, [link, {...agent, agentId: "writer-0"}])).toHaveLength(2);
+  expect(limitLiveDeclaredAgents([], authority, [link, agent])).toHaveLength(2);
+});
+
+it("caps new declared agents at 32 across the document and ignores rows with no new content", () => {
+  const authority = {principalKind: "owner" as const, principalId: "new-account", grantId: null, grantGeneration: null};
+  const agent: LiveAuthorEntry = {kind: "agent", agentId: "writer", onBehalfOf: "new-account"};
+  const snapshot: LiveAuthorSnapshot = [human("new-account"), agent];
+  const suffix = Array.from({length: 32}, (_, index) => ({...admitted([{...agent, onBehalfOf: `account-${index}`}],
+    index % 2 ? [] : [range(index)], index % 2 ? [range(index)] : []),
+    accepted: {...admitted([]).accepted, authority: {...authority, principalId: `account-${index}`}}}));
+  expect(limitLiveDeclaredAgents(suffix.slice(0, 31), authority, snapshot)).toEqual(snapshot);
+  expect(limitLiveDeclaredAgents(suffix, authority, snapshot)).toEqual([human("new-account")]);
+  expect(limitLiveDeclaredAgents(suffix, authority, [human("new-account"), {...agent, onBehalfOf: "account-0"}])).toHaveLength(2);
+  const noop = {...suffix[31]!, firstSeen: [], firstSeenDeletes: []};
+  expect(limitLiveDeclaredAgents([...suffix.slice(0, 31), noop], authority, snapshot)).toEqual(snapshot);
+  expect(limitLiveDeclaredAgents([], authority, snapshot)).toEqual(snapshot);
 });
 
 it("derives a stored coverage checkpoint trigger with the agent growth reserve", () => {
