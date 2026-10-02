@@ -80,6 +80,50 @@ pub enum OwnerOutboxNativeOrigin {
 }
 
 impl OwnerOutboxNativeSource {
+    /// The actor and attribution this engine recorded on the native update's
+    /// own journal row. Trusted local provenance; none for an adoption seed.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn native_author(
+        &self,
+    ) -> Result<
+        Option<(
+            Option<String>,
+            Option<dohc_engine_domain::ChangeAttribution>,
+        )>,
+        OwnerOutboxError,
+    > {
+        let OwnerOutboxNativeOrigin::NativeUpdate {
+            actor_origin_id,
+            actor_kind,
+            on_behalf_of,
+            chain_depth,
+            ..
+        } = &self.origin
+        else {
+            return Ok(None);
+        };
+        let attribution = match (actor_kind, chain_depth) {
+            (Some(kind), Some(depth)) => Some(dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::parse(kind)
+                    .ok_or(OwnerOutboxError::Corrupt)?,
+                on_behalf_of: on_behalf_of.clone(),
+                depth: u32::try_from(*depth).map_err(|_| OwnerOutboxError::Corrupt)?,
+                run: None,
+            }),
+            _ => None,
+        };
+        Ok(Some((actor_origin_id.clone(), attribution)))
+    }
+
+    /// The agent this native update's delivery declares: its recorded agent,
+    /// exactly as an editor's draft would declare it. A person's, an
+    /// automation's, an actorless update, and an adoption seed declare none.
+    pub fn agent_declaration(&self) -> Result<Option<AgentDeclaration>, OwnerOutboxError> {
+        Ok(self.native_author()?.and_then(|(actor, attribution)| {
+            AgentDeclaration::from_change(actor.as_deref(), attribution.as_ref())
+        }))
+    }
+
     pub(crate) fn validate(&self, append_key: &str) -> Result<(), OwnerOutboxError> {
         if append_key != self.append_key()? {
             return Err(OwnerOutboxError::Corrupt);

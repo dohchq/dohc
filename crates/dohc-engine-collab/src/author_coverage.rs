@@ -109,8 +109,24 @@ impl Authors {
     }
 }
 
+/// Whether this lineage belongs to an adopted owner. Its native log also holds
+/// the owner's private edits until the relay accepts them, so its interval
+/// names only authors admitted with accepted content, never a native row's
+/// author ahead of acceptance.
+pub fn accepted_only_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabError> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_docs d JOIN live_owner_adoptions a \
+         ON a.workspace_id=d.workspace_id AND a.main_version_id=d.version_id \
+         AND a.object_id=d.object_id AND a.lineage_claim_id=d.lineage_claim_id \
+         WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3)",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .map_err(sql)
+}
+
 /// Read only authors above the settled boundary, including rows a fold already
-/// consumed and agents that accepted deliveries declared.
+/// consumed and authors that accepted deliveries admitted.
 pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Authors, CollabError> {
     let (boundary, pending): (Option<i64>, String) = conn
         .query_row(
@@ -122,6 +138,9 @@ pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Auth
         .map_err(sql)?;
     let mut authors = Authors::default();
     authors.union_json(&pending)?;
+    if accepted_only_in(conn, key)? {
+        return Ok(authors);
+    }
     // Admission caps distinct identities, so this returns at most
     // MAX_INTERVAL_AUTHORS rows from the retained rows above the boundary.
     let mut stmt = conn
@@ -213,7 +232,8 @@ pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
     Ok(authors)
 }
 
-fn declared_json(declaration: &AgentDeclaration) -> Result<String, CollabError> {
+/// The author a declared agent's accepted delivery names.
+pub fn declared_json(declaration: &AgentDeclaration) -> Result<String, CollabError> {
     dohc_engine_domain::moment_author_json(
         Some(declaration.agent_id.as_str()),
         Some(&declaration.attribution()),
@@ -221,9 +241,8 @@ fn declared_json(declaration: &AgentDeclaration) -> Result<String, CollabError> 
     .ok_or_else(|| corrupt("declaration has no author"))
 }
 
-/// Adds one author to `covered`, refusing a new identity past the bounds.
-/// Returns the admission bytes of the result.
-fn admit(covered: &mut Authors, json: &str) -> Result<usize, CollabError> {
+/// One author entry within the size a moment can hold.
+fn entry(json: &str) -> Result<Authors, CollabError> {
     let mut incoming = Authors::default();
     incoming.union_json(json)?;
     if incoming
@@ -233,6 +252,13 @@ fn admit(covered: &mut Authors, json: &str) -> Result<usize, CollabError> {
     {
         return Err(CollabError::AuthorEntryTooLarge);
     }
+    Ok(incoming)
+}
+
+/// Adds one author to `covered`, refusing a new identity past the bounds.
+/// Returns the admission bytes of the result.
+fn admit(covered: &mut Authors, json: &str) -> Result<usize, CollabError> {
+    let incoming = entry(json)?;
     let identity = incoming
         .0
         .keys()
@@ -256,6 +282,13 @@ pub fn check_admission_in(
     let Some(json) = dohc_engine_domain::moment_author_json(actor, attribution) else {
         return Ok(false);
     };
+    // An adopted owner's edit is private until the relay accepts it. Its
+    // author joins the interval with that acceptance, where a settlement can
+    // always make room, so only the entry itself is bounded here.
+    if accepted_only_in(conn, key)? {
+        entry(&json)?;
+        return Ok(false);
+    }
     let mut covered = reserved_in(conn, key)?;
     let bytes = admit(&mut covered, &json)?;
     Ok(
@@ -264,19 +297,24 @@ pub fn check_admission_in(
     )
 }
 
-/// Admits the agent an accepted delivery declared to the current interval,
-/// under the bounds a local author meets. The delivery retains no attributed
-/// update row, so the interval keeps its agent with the authors compaction
-/// folded until a settlement names them. Local and accepted admission then
-/// count the same authors. Refuses before writing when the agent is new and
-/// the interval is full.
-pub fn admit_declared_in(
+/// Admits the authors of one accepted delivery to the current interval, under
+/// the bounds a local author meets: the agent it declared, and the trusted
+/// author of this owner's own native update. The delivery retains no
+/// attributed update row, so the interval keeps them with the authors
+/// compaction folded until a settlement names them. Refuses before writing
+/// when a new author would not fit.
+pub fn admit_accepted_in(
     conn: &Connection,
     key: &DocKey,
-    declaration: &AgentDeclaration,
+    authors: &[String],
 ) -> Result<(), CollabError> {
-    let json = declared_json(declaration)?;
-    admit(&mut reserved_in(conn, key)?, &json)?;
+    if authors.is_empty() {
+        return Ok(());
+    }
+    let mut covered = reserved_in(conn, key)?;
+    for json in authors {
+        admit(&mut covered, json)?;
+    }
     let pending: String = conn
         .query_row(
             "SELECT pending_authors_json FROM ydoc_docs \
@@ -285,9 +323,11 @@ pub fn admit_declared_in(
             |row| row.get(0),
         )
         .map_err(sql)?;
-    let mut authors = Authors::default();
-    authors.union_json(&pending)?;
-    authors.union_json(&json)?;
+    let mut admitted = Authors::default();
+    admitted.union_json(&pending)?;
+    for json in authors {
+        admitted.union_json(json)?;
+    }
     conn.execute(
         "UPDATE ydoc_docs SET pending_authors_json=?4 \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
@@ -295,7 +335,7 @@ pub fn admit_declared_in(
             key.workspace_id,
             key.version_id,
             key.object_id,
-            authors.json()
+            admitted.json()
         ],
     )
     .map_err(sql)?;
@@ -320,18 +360,41 @@ pub fn advance_in(
     key: &DocKey,
     reserve_attempt: bool,
 ) -> Result<(), CollabError> {
+    advance(conn, key, reserve_attempt, false)
+}
+
+/// Consume the current interval of an accepted prefix. Its file lacks the
+/// owner's private native tail, so the native settled boundary stays where it
+/// was: nothing may read this settlement as the file holding the native head.
+pub fn advance_accepted_prefix_in(
+    conn: &Connection,
+    key: &DocKey,
+    reserve_attempt: bool,
+) -> Result<(), CollabError> {
+    advance(conn, key, reserve_attempt, true)
+}
+
+fn advance(
+    conn: &Connection,
+    key: &DocKey,
+    reserve_attempt: bool,
+    keep_boundary: bool,
+) -> Result<(), CollabError> {
     if unresolved_in(conn, key)? {
         return Err(CollabError::UnsettledClose);
     }
     conn.execute(
-        "UPDATE ydoc_docs SET settled_update_seq=head_update_seq,pending_authors_json='[]', \
+        "UPDATE ydoc_docs SET \
+         settled_update_seq=CASE WHEN ?5 THEN settled_update_seq ELSE head_update_seq END, \
+         pending_authors_json='[]', \
          settle_prior_update_seq=CASE WHEN ?4 THEN COALESCE(settled_update_seq,-1) ELSE NULL END \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
         params![
             key.workspace_id,
             key.version_id,
             key.object_id,
-            reserve_attempt
+            reserve_attempt,
+            keep_boundary
         ],
     )
     .map_err(sql)?;
@@ -343,6 +406,7 @@ pub fn advance_moment_in(
     conn: &Connection,
     key: &DocKey,
     moment_id: &str,
+    accepted_prefix: bool,
 ) -> Result<(), CollabError> {
     let pending: bool = conn
         .query_row(
@@ -351,7 +415,7 @@ pub fn advance_moment_in(
             |row| row.get(0),
         )
         .map_err(sql)?;
-    advance_in(conn, key, pending)
+    advance(conn, key, pending, accepted_prefix)
 }
 
 /// Restore coverage once. The moment stays in history, even when its file write failed.

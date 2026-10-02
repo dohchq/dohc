@@ -247,8 +247,13 @@ pub(super) fn classify(
                 source
                     .verify_retained_row(conn)
                     .map_err(|_| ApplicationError::Corrupt)?;
-                // An adopted native update keeps its authors on its journal row.
-                if declaration.is_some() {
+                // An adopted native update declares exactly the agent its
+                // journal row recorded, and nothing else.
+                if declaration
+                    != source
+                        .agent_declaration()
+                        .map_err(|_| ApplicationError::Corrupt)?
+                {
                     return Err(ApplicationError::Corrupt);
                 }
                 let (id, covered) = owner.ok_or(ApplicationError::Conflict)?;

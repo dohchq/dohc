@@ -852,23 +852,42 @@ pub fn apply_committed(
                 return Err(ApplicationError::Conflict.into());
             }
             // The settlement that covers this delivery names its declared
-            // agent. A full interval refuses before anything is written, so
-            // nothing is truncated. Settling releases it, unless an earlier
-            // moment still reserves its authors until its file write lands.
+            // agent, and this owner's own native update names the author its
+            // journal row recorded. A full interval refuses before anything is
+            // written, so nothing is truncated. Settling releases it, unless an
+            // earlier moment still reserves its authors until its file write
+            // lands.
+            let own = own_draft(tx, &key, &event.metadata.accepted.receipt)?;
+            // This owner's own native update delivers exactly what its outbox
+            // entry declared.
+            if own
+                .as_ref()
+                .is_some_and(|own| own.declaration != event.metadata.accepted.agent_declaration)
+            {
+                return Err(ApplicationError::Conflict.into());
+            }
+            let mut authors = Vec::new();
             if let Some(declaration) = &event.metadata.accepted.agent_declaration {
-                match crate::author_coverage::admit_declared_in(tx, &key, declaration) {
-                    Err(CollabError::AuthorCapacity)
-                        if crate::author_coverage::unresolved_in(tx, &key)? =>
-                    {
-                        return Err(ApplicationError::MaterializationPending.into());
-                    }
-                    Err(CollabError::AuthorCapacity) => {
-                        return Ok(ApplicationResult::Pending(
-                            ApplicationPending::SettlementRequired,
-                        ));
-                    }
-                    result => result?,
+                authors.push(crate::author_coverage::declared_json(declaration)?);
+            }
+            if let Some((actor, attribution)) = own.as_ref().and_then(|own| own.author.as_ref()) {
+                authors.extend(dohc_engine_domain::moment_author_json(
+                    actor.as_deref(),
+                    attribution.as_ref(),
+                ));
+            }
+            match crate::author_coverage::admit_accepted_in(tx, &key, &authors) {
+                Err(CollabError::AuthorCapacity)
+                    if crate::author_coverage::unresolved_in(tx, &key)? =>
+                {
+                    return Err(ApplicationError::MaterializationPending.into());
                 }
+                Err(CollabError::AuthorCapacity) => {
+                    return Ok(ApplicationResult::Pending(
+                        ApplicationPending::SettlementRequired,
+                    ));
+                }
+                result => result?,
             }
             mutation_attempted = true;
             let append = durable::record_authorized_update_in_tx(
@@ -920,7 +939,7 @@ pub fn apply_committed(
                 // the relay's log. The claim keeps its history-row key, so it
                 // dedupes as before, and the cursor lets the relay place it.
                 facts.live_cursor = Some(event.metadata.accepted.receipt.journal_cursor);
-                match own_draft_attribution(tx, &key, &event.metadata.accepted.receipt)? {
+                match own.and_then(|own| own.author) {
                     Some((actor, attribution)) => {
                         facts.author_origin_id = actor;
                         facts.attribution = attribution;
@@ -995,24 +1014,28 @@ pub fn apply_committed(
     }
 }
 
-/// The actor and attribution this engine recorded for a native update it
-/// drafted, when the accepted frame is that draft: the relay accepted the
-/// draft's own delivery, with the same bytes, for the same document.
-#[allow(clippy::type_complexity)]
-fn own_draft_attribution(
-    tx: &Transaction<'_>,
-    key: &DocKey,
-    receipt: &LiveUpdateReceipt,
-) -> Result<
-    Option<(
+/// This engine's own adopted native update, when the accepted frame is its
+/// delivery: the relay accepted the entry's own delivery, with the same
+/// bytes, for the same document.
+struct OwnDraft {
+    /// The actor and attribution the native journal row recorded. Trusted
+    /// local provenance; none for an adoption seed.
+    author: Option<(
         Option<String>,
         Option<dohc_engine_domain::ChangeAttribution>,
     )>,
-    ApplicationError,
-> {
-    let source: Option<String> = tx
+    /// The agent the outbox entry declared for its delivery.
+    declaration: Option<AgentDeclaration>,
+}
+
+fn own_draft(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    receipt: &LiveUpdateReceipt,
+) -> Result<Option<OwnDraft>, ApplicationError> {
+    let entry: Option<(String, Option<String>)> = tx
         .query_row(
-            "SELECT e.native_source_json FROM owner_ydoc_outbox_entries e \
+            "SELECT e.native_source_json,e.agent_declaration_json FROM owner_ydoc_outbox_entries e \
              JOIN owner_ydoc_outboxes o ON o.outbox_id = e.outbox_id \
              WHERE e.delivery_id = ?1 AND e.update_digest = ?2 \
                AND o.workspace_id = ?3 AND o.main_version_id = ?4 AND o.object_id = ?5 \
@@ -1024,36 +1047,22 @@ fn own_draft_attribution(
                 key.version_id,
                 key.object_id
             ],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(read_sql)?;
-    let Some(source) = source else {
+    let Some((source, declaration)) = entry else {
         return Ok(None);
     };
     let source: crate::owner_outbox::OwnerOutboxNativeSource =
         serde_json::from_str(&source).map_err(|_| ApplicationError::Corrupt)?;
-    let crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
-        actor_origin_id,
-        actor_kind,
-        on_behalf_of,
-        chain_depth,
-        ..
-    } = source.origin
-    else {
-        return Ok(None);
-    };
-    let attribution = match (actor_kind, chain_depth) {
-        (Some(kind), Some(depth)) => Some(dohc_engine_domain::ChangeAttribution {
-            actor_kind: dohc_engine_domain::ChangeActorKind::parse(&kind)
-                .ok_or(ApplicationError::Corrupt)?,
-            on_behalf_of,
-            depth: u32::try_from(depth).map_err(|_| ApplicationError::Corrupt)?,
-            run: None,
-        }),
-        _ => None,
-    };
-    Ok(Some((actor_origin_id, attribution)))
+    Ok(Some(OwnDraft {
+        author: source
+            .native_author()
+            .map_err(|_| ApplicationError::Corrupt)?,
+        declaration: crate::owner_outbox::stored_declaration(declaration)
+            .map_err(|_| ApplicationError::Corrupt)?,
+    }))
 }
 
 struct ApplicationRecord {

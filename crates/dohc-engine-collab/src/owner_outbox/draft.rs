@@ -579,10 +579,8 @@ fn append_prepared_draft_in_tx(
             created_at_ms: now_ms,
         },
         None,
-        Some(super::DraftAppend {
-            binding_revision: draft.observed.revision,
-            agent_declaration,
-        }),
+        Some(draft.observed.revision),
+        agent_declaration,
     )?;
     Ok((result, encoded_len))
 }

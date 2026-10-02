@@ -60,6 +60,21 @@ fn native_tail_apply(
     delivery: String,
     cursor: i64,
 ) -> LiveUpdateHostApplicationAck {
+    // The relay accepts this owner's own delivery as its entry declared it.
+    let declared: Option<Option<String>> = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT agent_declaration_json FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                [&delivery],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .unwrap();
+    let agent_declaration = declared
+        .flatten()
+        .map(|json| serde_json::from_str(&json).unwrap());
     let event = AdmittedLiveUpdate {
         metadata: AdmittedLiveUpdateMetadata {
             accepted: RelayAcceptedLiveUpdate {
@@ -74,7 +89,7 @@ fn native_tail_apply(
                     principal_id: "owner".into(),
                 },
                 received_at_ms: cursor,
-                agent_declaration: None,
+                agent_declaration,
             },
             first_seen: vec![],
         },
@@ -640,6 +655,175 @@ fn native_restore_tail_does_not_infer_generic_pending_provenance_from_matching_b
     let inventory = native_tail_inventory(&f.store);
     assert!(native_tail_prepare(&mut f, input).is_err());
     assert_eq!(inventory, native_tail_inventory(&f.store));
+}
+
+/// An adopted owner's native agent edit declares the agent its journal row
+/// recorded, as an editor's draft declares it, with no draft proof. A retry
+/// reads back the same entry. The owner's own acceptance and restore require
+/// exactly that declaration. A person's or an automation's edit declares none.
+#[test]
+fn adopted_native_agent_edit_declares_its_recorded_agent() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let entry = native_tail_edit(&mut f, "Agent pending", 11);
+    let expected = dohc_engine_domain::AgentDeclaration {
+        agent_id: "native-agent".into(),
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+    };
+    assert_eq!(entry.agent_declaration, Some(expected.clone()));
+    let stored = |f: &Fixture| -> (Option<String>, Option<i64>, i64) {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT agent_declaration_json,draft_binding_revision,json_extract(native_source_json,'$.nativeSequence') FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                    [&entry.delivery_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap()
+    };
+    let (declaration, revision, native_sequence) = stored(&f);
+    assert_eq!(declaration, Some(serde_json::to_string(&expected).unwrap()));
+    assert_eq!(revision, None);
+    // The source derives the declaration, so a retry of the same native
+    // update finds its entry unchanged.
+    let key = f.key.clone();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            owner_outbox::append_adopted_local_update_in_tx(
+                tx,
+                &key,
+                "owner.md",
+                native_sequence,
+                &entry.update,
+                99,
+            )
+        })
+        .unwrap();
+    assert_eq!(stored(&f), (declaration, None, native_sequence));
+    assert_eq!(
+        f.store
+            .table_row_count("owner_ydoc_outbox_entries")
+            .unwrap(),
+        1
+    );
+    // Its delivery accepted without the declaration is not this entry's.
+    let undeclared = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: entry.delivery_id.clone(),
+                    update_digest: entry.update_digest.clone(),
+                    journal_cursor: 7,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 7,
+                agent_declaration: None,
+            },
+            first_seen: vec![],
+        },
+        update_bytes: entry.update.clone(),
+    };
+    assert!(matches!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            undeclared,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        ),
+        Err(ApplicationError::Conflict)
+    ));
+    assert_eq!(
+        f.store
+            .table_row_count("live_device_update_applications")
+            .unwrap(),
+        0
+    );
+    // Restore classifies the native source with its derived declaration, and
+    // refuses a stored one the source does not derive.
+    let input = native_tail_input(&mut f, None, 0);
+    let proposal = native_tail_prepare(&mut f, input.clone()).unwrap();
+    assert_eq!(
+        proposal.receipt().native_sources[0]
+            .source
+            .native()
+            .unwrap()
+            .agent_declaration()
+            .unwrap(),
+        Some(expected)
+    );
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE owner_ydoc_outbox_entries SET agent_declaration_json=json_set(agent_declaration_json,'$.agentId','other-agent')",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(native_tail_prepare(&mut f, input).is_err());
+
+    for kind in [
+        dohc_engine_domain::ChangeActorKind::Human,
+        dohc_engine_domain::ChangeActorKind::Automation,
+    ] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let update = f
+            .doc
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Not an agent")
+            .unwrap();
+        let key = f.key.clone();
+        let attribution = dohc_engine_domain::ChangeAttribution {
+            actor_kind: kind,
+            on_behalf_of: Some("owner".into()),
+            depth: 0,
+            run: None,
+        };
+        crate::record_local_update(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.key,
+            &update,
+            crate::LocalAppend {
+                actor_origin_id: Some("someone"),
+                attribution: Some(&attribution),
+                ..Default::default()
+            },
+            &NoFaults,
+            11,
+            |tx, outcome, _| {
+                owner_outbox::append_adopted_local_update_in_tx(
+                    tx,
+                    &key,
+                    "owner.md",
+                    outcome.seq,
+                    &update,
+                    11,
+                )
+            },
+        )
+        .unwrap();
+        let declared: Option<String> = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT agent_declaration_json FROM owner_ydoc_outbox_entries",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(declared, None);
+    }
 }
 
 /// An enrolled owner's pending draft names no native journal update. Restore

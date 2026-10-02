@@ -309,27 +309,23 @@ pub fn append_in_tx(
     {
         return Err(OwnerOutboxError::Frozen);
     };
-    append_with_retained_base(tx, workspace_id, input, None, None)
-}
-
-/// What only an enrolled owner's draft carries: the observed binding revision
-/// it was queued under, which proves the entry is a draft, and the agent its
-/// editor declared.
-pub(crate) struct DraftAppend<'a> {
-    pub binding_revision: i64,
-    pub agent_declaration: Option<&'a AgentDeclaration>,
+    append_with_retained_base(tx, workspace_id, input, None, None, None)
 }
 
 /// An append key names one exact entry: its binding, base, bytes, whether it
 /// is a draft, and its agent declaration. A retry that changes any of them,
 /// including adding or removing the declaration, refuses instead of returning
-/// the first entry.
+/// the first entry. Only an enrolled owner's draft carries
+/// `draft_revision`, the observed binding revision it was queued under. Its
+/// editor's declaration, or an adopted native update's recorded agent, rides
+/// in `agent_declaration`.
 fn append_with_retained_base(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     input: OwnerOutboxAppendInput,
     retained_base: Option<(String, i64)>,
-    draft: Option<DraftAppend<'_>>,
+    draft_revision: Option<i64>,
+    agent_declaration: Option<&AgentDeclaration>,
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
     let binding = input
         .binding
@@ -389,14 +385,12 @@ fn append_with_retained_base(
         )
     });
     let update_digest = hex_sha256(&input.update);
-    let draft_revision = draft.as_ref().map(|draft| draft.binding_revision);
     if draft_revision.is_some_and(|revision| revision < 1) {
         return Err(OwnerOutboxError::InvalidInput(
             "invalid draft binding revision",
         ));
     }
-    let declaration_json = draft
-        .and_then(|draft| draft.agent_declaration)
+    let declaration_json = agent_declaration
         .map(|declaration| {
             declaration
                 .validate()
@@ -658,6 +652,9 @@ pub fn append_adopted_local_update_in_tx(
         return Err(map(OwnerOutboxError::Corrupt));
     }
     let append_key = source.append_key().map_err(map)?;
+    // The delivery declares the agent the native row recorded. The source
+    // derives it, so a retry of this append key declares the same agent.
+    let agent_declaration = source.agent_declaration().map_err(map)?;
     let result = append_with_retained_base(
         tx,
         &key.workspace_id,
@@ -675,6 +672,7 @@ pub fn append_adopted_local_update_in_tx(
         Some((lineage, base_byte_length)),
         // Not a draft. The native source keeps this update's authors.
         None,
+        agent_declaration.as_ref(),
     )
     .map_err(map)?;
     retain_native_source(tx, &result, &source).map_err(map)?;
