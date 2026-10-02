@@ -358,12 +358,14 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       const page = owner!.page;
       await openDocument(page);
       await typeAfter(page, H1, ` ${H2}`);
-      await expect(saveState(page)).toHaveAttribute("data-state", "saved");
+      // The server still hosts the document, so the owner's edit may finish as
+      // saved locally or saved to the host. The settled-file check covers the disk.
+      await expect(saveState(page)).toHaveAttribute("data-state", /^(saved|saved-to-host)$/, { timeout: 60_000 });
       await expect.poll(() => cliRead(ownerTemp), { timeout: 30_000 }).toContain(H2);
       const edited = await runDohcCli(ownerTemp, ["--json", "document", "edit", PATH, "--find", A1, "--text", `${A1} ${A2}`, "--agent", NEXT_AGENT]);
       expect(JSON.parse(edited.stdout)).toMatchObject({ ok: true, path: PATH, changed: true });
       await expect(editor(page)).toContainText(A2);
-      await expect(saveState(page)).toHaveAttribute("data-state", "saved");
+      await expect(saveState(page)).toHaveAttribute("data-state", /^(saved|saved-to-host)$/, { timeout: 60_000 });
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, H2, A2], [R1]), { timeout: 30_000 }).toBe(true);
       expect(ydocUpdateAuthors(ownerTemp.rootPath)).toContainEqual({ actorOriginId: NEXT_AGENT, actorKind: "agent" });
       await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 60_000 });
