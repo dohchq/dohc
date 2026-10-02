@@ -579,6 +579,32 @@ it("authenticates bounded native pending identities and refuses a different adop
   } finally {f.close();}
 });
 
+it("authenticates an enrolled owner draft's identity and declaration without a native sequence", () => {
+  const f = proposalSourcesFixture("bootstrap", "service");
+  try {
+    const binding = f.proposal.fence.operation.oldBinding, updateDigest = "e".repeat(64);
+    const outboxId = `owner-outbox-${hash(Buffer.from(`${binding.workspaceId}\0${JSON.stringify(binding)}\0${binding.lineageClaimId}`))}`;
+    const draft = (origin: Record<string, unknown>, sequence = 1) => ({outboxId, outboxSequence: sequence, binding, appendKey: `editor-draft-${sequence}`,
+      deliveryId: `owner-delivery-${hash(Buffer.from(`${outboxId}\0${sequence}\0${updateDigest}`))}`, updateDigest,
+      byteLength: 2, createdAtMs: 100, source: {binding, updateDigest, origin}, acceptedReceipt: null});
+    const receipt = (sources: unknown[]) => JSON.stringify({...f.proposal, nativeSources: sources, nativeSourceManifestDigest: jsonHash([f.proposal.fence, sources])});
+    const agentDeclaration = {agentId: "trip-agent-ü", onBehalfOf: null, depth: 0};
+    const parsed = parseNativeRestoreProposalReceipt(receipt([draft({kind: "ownerDraft", agentDeclaration}), draft({kind: "ownerDraft"}, 2)]), f.input);
+    expect(parsed.nativeSources.map(source => source.source)).toEqual([
+      {binding, updateDigest, origin: {kind: "ownerDraft", agentDeclaration}}, {binding, updateDigest, origin: {kind: "ownerDraft"}}]);
+    expect(parsed.nativeSources.map(source => source.appendKey)).toEqual(["editor-draft-1", "editor-draft-2"]);
+    for (const origin of [{kind: "ownerDraft", agentDeclaration: null}, {kind: "ownerDraft", agentDeclaration: {...agentDeclaration, depth: 65}},
+      {kind: "ownerDraft", nativeSequence: 1}, {kind: "nativeUpdate"}]) {
+      expect(() => parseNativeRestoreProposalReceipt(receipt([draft(origin)]), f.input)).toThrow();
+    }
+    // A draft cannot carry an invented native coordinate, and one queue holds one source kind.
+    const invented = {...draft({kind: "ownerDraft"}), source: {binding, updateDigest, nativeSequence: 9, origin: {kind: "ownerDraft"}}};
+    expect(() => parseNativeRestoreProposalReceipt(receipt([invented]), f.input)).toThrow();
+    const otherBinding = {...draft({kind: "ownerDraft"}), source: {binding: {...binding, currentPath: "docs/other.md"}, updateDigest, origin: {kind: "ownerDraft"}}};
+    expect(() => parseNativeRestoreProposalReceipt(receipt([otherBinding]), f.input)).toThrow();
+  } finally {f.close();}
+});
+
 it.each(["service","device"] as const)("drains exact original bytes after fencing %s and retires all apply captures",mode=>{
   const f=fixture("bootstrap",mode);
   try {

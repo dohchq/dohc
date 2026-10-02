@@ -14,6 +14,8 @@ import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import {LiveHostRegistrations} from "./liveHostRegistration";
 
 type OwnerDeliveryOutcome = CommittedDeliveryOutcome & {continueDrain: boolean};
+// The host settled but its file write has not landed. The pass waits for the next wake instead of draining on.
+const SETTLEMENT_UNMATERIALIZED = "Owner settlement has not reached the file.";
 
 /** Relay-side delivery to an ordinary desktop owner through its curated bridge. */
 export class OwnerCommittedDelivery {
@@ -93,17 +95,20 @@ export class OwnerCommittedDelivery {
         this.#adopted.set(key,saved);
         this.#registrations.remember(saved.binding, saved.registrationId);
       }
-      const {registrationId} = saved;
+      const adopted = saved, {registrationId} = adopted;
       const current = this.#store.openOwnerDelivery({host: c.host,document,actor});
-      if (!isDeepStrictEqual(saved.binding,current.binding)) throw new Error("Owner binding requires reconciliation.");
+      if (!isDeepStrictEqual(adopted.binding,current.binding)) throw new Error("Owner binding requires reconciliation.");
       let latest = current;
       let progress = this.#store.ownerDeliveryProgress(latest);
       let appliedCount = 0;
-      let applicationPending = false;
+      // Set inside applyPending, so declared wide for the reads after it.
+      let pendingReason = null as string | null;
+      // A materialized settlement released the host's author coverage, and nothing applied since.
+      let settledSinceApply = false;
       const applyPending = async (through?: LiveUpdateReceipt) => {
         latest = this.#store.openOwnerDelivery({host: c.host,document,actor});
         progress = this.#store.ownerDeliveryProgress(latest);
-        while (!applicationPending && appliedCount < c.bounds.maxEvents &&
+        while (pendingReason === null && appliedCount < c.bounds.maxEvents &&
           (!through || (progress.terminal?.journalCursor ?? 0) < through.journalCursor)) {
           const event = this.#store.nextOwnerApplication(latest); if (!event) break;
           check(); latest.assertCurrent();
@@ -122,14 +127,26 @@ export class OwnerCommittedDelivery {
           }
           check(); latest.assertCurrent();
           const result = configRecord(applied.result,["status"],["ack","reason"]);
+          if (result.status === "pending" && result.reason === "settlement-required") {
+            // The host's author coverage is full. Settle what it applied once, then offer the identical event again.
+            if (settledSinceApply) throw new Error("The host still requires settlement after settling everything it applied.");
+            const response = await c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal);
+            check(); latest.assertCurrent();
+            const settled = settlementResult(response.result,progress.terminal);
+            if (!settled.materialized) { pendingReason = SETTLEMENT_UNMATERIALIZED; break; }
+            adopted.settled = settled;
+            settledSinceApply = true;
+            continue;
+          }
           if (result.status === "pending" && typeof result.reason === "string") {
-            applicationPending = true;
+            pendingReason = "Owner application did not commit.";
             break;
           }
           if (result.status !== "applied") throw new Error("Owner application did not commit.");
           this.#store.acknowledgeOwnerDeliveryApplication(latest,result.ack);
           progress = this.#store.ownerDeliveryProgress(latest);
           appliedCount++;
+          settledSinceApply = false;
         }
       };
       const outbox = await drainOwnerOutbox({storage: this.storage,admission: c.ownerAdmission,client: c.client,workspace: c.workspace,host: c.host,
@@ -144,15 +161,17 @@ export class OwnerCommittedDelivery {
         }});
       await applyPending();
       if (!settle) return outbox.hasMore || this.#store.nextOwnerApplication(latest)
-        ? {kind: "pending",reason: applicationPending ? "Owner application did not commit." : "Owner delivery pass reached its work budget.", continueDrain: outbox.retryReady === true || outbox.admittedEntries > 0 || appliedCount > 0}
+        ? {kind: "pending",reason: pendingReason ?? "Owner delivery pass reached its work budget.",
+          continueDrain: pendingReason !== SETTLEMENT_UNMATERIALIZED && (outbox.retryReady === true || outbox.admittedEntries > 0 || appliedCount > 0)}
         : { kind: "done",terminalReceipt: progress.terminal, continueDrain: false };
+      if (pendingReason) throw new Error(pendingReason);
       if (outbox.hasMore) throw new Error("Owner outbox delivery must finish before settlement.");
       if (this.#store.nextOwnerApplication(latest)) throw new Error("Owner application did not commit.");
-      if (saved.settled && saved.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return saved.settled;
+      if (adopted.settled && adopted.settled.terminalCursor === (progress.terminal?.journalCursor ?? 0)) return adopted.settled;
       const response = await c.client.sendRequest({ ...request(),method: "liveApplication.settle",params: { registrationId,terminalReceipt: progress.terminal ? { ...progress.terminal } : null } },signal);
       check(); latest.assertCurrent();
       const settled = settlementResult(response.result,progress.terminal);
-      if (settled.materialized) saved.settled = settled;
+      if (settled.materialized) adopted.settled = settled;
       return settled;
     } finally { this.#active.delete(key); }
   }

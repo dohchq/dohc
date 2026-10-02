@@ -25,7 +25,8 @@ import { parseNamedLiveConfig } from "./namedLiveConfig.js";
 import type { StorageContext } from "./storage/context.js";
 
 const exchangeKey = "test-exchange-key-".repeat(3), relayHost = "relay.example.test";
-const frames = { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096 },
+// The owner route must receive the largest declared submission, 1611 bytes.
+const frames = { receive: { maxFrameBytes: 2048, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096 },
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096 };
 const bounds = { maxClientVectorBytes: 1024, maxSyncOutputBytes: 4096, maxAppliedUpdateBytes: 4096, maxSubmissionBytes: 4096, maxAdmissionBytes: 16384 };
 const policy = { maxStructVisits: 10000, maxValueNodeVisits: 10000, maxDecodedPayloadByteVisits: 1000000, maxStructClientGroupVisits: 10000,
@@ -477,6 +478,14 @@ it("opens the owner bearer route without a recipient, browser cookie, ticket, or
   expect(client.received[0]).toMatchObject({kind: "welcome", hostEpoch: host.hostEpoch});
   expect(f.actor.mock.calls[0]![0].headers.get("cookie")).toBeNull();
   expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_session_tickets").get()).toEqual({count: 0});
+});
+
+it("refuses an owner route whose frames cannot carry the largest declared submission", () => {
+  type OwnerRoute = Parameters<typeof createOwnerLiveRoutes>[0];
+  expect(() => createOwnerLiveRoutes({ storage: {} as OwnerRoute["storage"], resolveActor: async () => { throw new UnauthorizedError(); },
+    captureNative: async () => { throw new Error("No host opens in this test."); },
+    hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames: { ...frames, receive: { ...frames.receive, maxFrameBytes: 1610 } },
+    bounds, limits, validate: createLiveMarkdownJournalValidator(policy) })).toThrow("The owner route must receive the largest declared submission.");
 });
 
 it.each<Record<string, string>>([{authorization: ""}, {authorization: "Bearer reader-token"}, {origin: "https://foreign.example"}, {host: "foreign.example"}])(

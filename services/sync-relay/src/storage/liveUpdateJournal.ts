@@ -6,13 +6,13 @@ import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHis
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual, types as nodeTypes } from "node:util";
 import { LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { parseLiveDocumentKey, parseLiveUpdateSubmissionMetadata, parseLiveUpdateReceipt, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateStructRange, parseLiveUpdateStructRanges, parseServerDerivedLiveUpdateAuthority, type LiveDocumentKey, type LiveUpdateStructRange, type AdmittedLiveUpdate } from "@dohc/live-session-contract/live-update-admission";
+import { parseAgentDeclaration, parseLiveDocumentKey, parseLiveUpdateSubmissionMetadata, parseLiveUpdateReceipt, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateStructRange, parseLiveUpdateStructRanges, parseServerDerivedLiveUpdateAuthority, type AgentDeclaration, type LiveDocumentKey, type LiveUpdateStructRange, type AdmittedLiveUpdate } from "@dohc/live-session-contract/live-update-admission";
 import type { HostControlSnapshot } from "@dohc/live-session-contract/host-control";
 import type { StorageContext } from "./context";
 import type { SqliteDb, CurrentLiveBindingRequest, LiveHostConnectionCoordinate, LiveUpdateJournalCut, LiveUpdateJournalCutResult, LiveUpdateJournalCommitInput, RelayLiveUpdateJournalResult, CommittedLiveUpdateResult, LiveJournalValidation, StoredLiveDocumentAuthority } from "./types";
 import { LiveJournalAdmittedCapacityError } from "./errors";
 import {LIVE_RESTORE_SOURCE_RANGES} from "./liveRestoreOperationSchema";
-import { LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE } from "./schema";
+import { LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE, LIVE_JOURNAL_AGENT_DECLARATIONS } from "./schema";
 import { snapshotHostCoordinate } from "../liveTicketInputs";
 import { readLiveHostControl } from "./hostControl";
 import { assertWorkspaceQuota } from "./workspaces";
@@ -79,6 +79,26 @@ function journalBinding(value: unknown, previous?: LiveObjectBinding): LiveObjec
 export function documentParams(document: LiveDocumentKey): [string, string, string, string] {
   return [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
 }
+/** Lists the optional member only when present. A proxy is left for baselineRecord to refuse untouched. */
+function withAgentDeclaration(value: unknown, fields: readonly string[]): readonly string[] {
+  return typeof value === "object" && value !== null && !nodeTypes.isProxy(value) && Object.hasOwn(value, "agentDeclaration")
+    ? [...fields, "agentDeclaration"] : fields;
+}
+function storedAgentDeclaration(row: Record<string, unknown>): AgentDeclaration {
+  return parseAgentDeclaration({ agentId: row.agent_id, onBehalfOf: row.on_behalf_of, depth: row.depth });
+}
+/** The agent declarations of the journal events `where` selects, by cursor. */
+export function readAgentDeclarations(db: SqliteDb, where: string, params: readonly unknown[]): Map<number, AgentDeclaration> {
+  const rows = db.prepare(`SELECT * FROM ${LIVE_JOURNAL_AGENT_DECLARATIONS} WHERE journal_cursor IN
+    (SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${where})`).all(...params);
+  return new Map(rows.map(row => [authorityInteger(row.journal_cursor, 1), storedAgentDeclaration(row)]));
+}
+/** Stored bytes of the declarations `where` selects, charged before they are read. */
+export const AGENT_DECLARATION_STORED_BYTES = "length(CAST(agent_id AS BLOB))+COALESCE(length(CAST(on_behalf_of AS BLOB)),0)+8*2";
+function readAgentDeclaration(db: SqliteDb, cursor: number): AgentDeclaration | undefined {
+  const row = db.prepare(`SELECT * FROM ${LIVE_JOURNAL_AGENT_DECLARATIONS} WHERE journal_cursor=?`).get(cursor);
+  return row ? storedAgentDeclaration(row) : undefined;
+}
 const JOURNAL_DOCUMENT_WHERE = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
 interface DecodedJournalRow {
   admitted: AdmittedLiveUpdate;
@@ -86,8 +106,10 @@ interface DecodedJournalRow {
   restoreOperationId: string | null;
   history: {namespace: string; eventCount: number; evidenceDigest: string; metadataBytes: number};
 }
-export function decodeJournalMetadata(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): AdmittedLiveUpdate["metadata"] {
-  return journalMetadataWithBinding(db, raw, journalBindingFromRow(raw), provenance);
+/** `declarations` covers this row when the caller loaded a range; otherwise the row's declaration is read here. */
+export function decodeJournalMetadata(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[],
+  declarations?: ReadonlyMap<number, AgentDeclaration>): AdmittedLiveUpdate["metadata"] {
+  return journalMetadataWithBinding(db, raw, journalBindingFromRow(raw), provenance, declarations);
 }
 function journalBindingFromRow(raw: Record<string, unknown>): LiveObjectBinding {
   const binding = parseLiveObjectBinding({ workspaceId: raw.workspace_id, mainVersionId: raw.main_version_id,
@@ -99,7 +121,7 @@ function journalBindingFromRow(raw: Record<string, unknown>): LiveObjectBinding 
   return binding;
 }
 function journalMetadataWithBinding(db: SqliteDb, raw: Record<string, unknown>, binding: LiveObjectBinding,
-  provenance?: Record<string, unknown>[]): AdmittedLiveUpdate["metadata"] {
+  provenance?: Record<string, unknown>[], declarations?: ReadonlyMap<number, AgentDeclaration>): AdmittedLiveUpdate["metadata"] {
   const cursor = authorityInteger(raw.journal_cursor, 1);
   const rows = provenance ?? db.prepare(`SELECT * FROM ${LIVE_JOURNAL_PROVENANCE} WHERE journal_cursor=? ORDER BY client_id,start_clock`).all(cursor);
   const firstSeen = rows.map(row => {
@@ -115,14 +137,17 @@ function journalMetadataWithBinding(db: SqliteDb, raw: Record<string, unknown>, 
   const authority = parseServerDerivedLiveUpdateAuthority({ principalKind: raw.principal_kind, principalId: raw.principal_id, grantId: raw.grant_id, grantGeneration: raw.grant_generation });
   const receivedAtMs = raw.received_at_ms;
   if (typeof receivedAtMs !== "number" || !Number.isSafeInteger(receivedAtMs) || receivedAtMs < 0) throw new TypeError("receivedAtMs must be a non-negative safe integer.");
-  return { accepted: { receipt, binding, authority, receivedAtMs }, firstSeen: parseLiveUpdateStructRanges(firstSeen) };
+  const agentDeclaration = declarations ? declarations.get(cursor) : readAgentDeclaration(db, cursor);
+  return { accepted: { receipt, binding, authority, receivedAtMs, ...(agentDeclaration ? { agentDeclaration } : {}) },
+    firstSeen: parseLiveUpdateStructRanges(firstSeen) };
 }
-export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): DecodedJournalRow {
-  return journalRowWithBinding(db, raw, journalBindingFromRow(raw), provenance);
+export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[],
+  declarations?: ReadonlyMap<number, AgentDeclaration>): DecodedJournalRow {
+  return journalRowWithBinding(db, raw, journalBindingFromRow(raw), provenance, declarations);
 }
 function journalRowWithBinding(db: SqliteDb, raw: Record<string, unknown>, binding: LiveObjectBinding,
-  provenance?: Record<string, unknown>[]): DecodedJournalRow {
-  const metadata=journalMetadataWithBinding(db,raw,binding,provenance);
+  provenance?: Record<string, unknown>[], declarations?: ReadonlyMap<number, AgentDeclaration>): DecodedJournalRow {
+  const metadata=journalMetadataWithBinding(db,raw,binding,provenance,declarations);
   journalIntegrity((raw.validation_checkpoint_sha256 === null) === (raw.validation_checkpoint_bytes === null));
   const checkpoint = raw.validation_checkpoint_sha256 === null ? null : {
     digest: parseLiveUpdateDigest(raw.validation_checkpoint_sha256), bytes: journalBytes(raw.validation_checkpoint_bytes),
@@ -206,7 +231,7 @@ function snapshotJournalCut(value: unknown): LiveUpdateJournalCut {
   const suffix = journalArray(outer.suffix, 4094, value => {
     const row = baselineRecord(value, ["cursor", "digest", "bytes", "metadata"]);
     const metadata = baselineRecord(row.metadata, ["accepted", "firstSeen"]);
-    const accepted = baselineRecord(metadata.accepted, ["receipt", "binding", "authority", "receivedAtMs"]);
+    const accepted = baselineRecord(metadata.accepted, withAgentDeclaration(metadata.accepted, ["receipt", "binding", "authority", "receivedAtMs"]));
     const receipt = parseLiveUpdateReceipt(baselineRecord(accepted.receipt, ["deliveryId", "updateDigest", "journalCursor", "acceptingHostEpoch"]));
     const binding = journalBinding(accepted.binding, previousBinding);
     const rawBinding = baselineRecord(accepted.binding, ["workspaceId", "mainVersionId", "objectId", "lineageClaimId", "currentPath", "selectorPaths", "restoreFenceGeneration"]);
@@ -217,7 +242,9 @@ function snapshotJournalCut(value: unknown): LiveUpdateJournalCut {
     const cursor = authorityInteger(row.cursor, 1), digest = parseLiveUpdateDigest(row.digest);
     journalIntegrity(cursor === receipt.journalCursor && digest === receipt.updateDigest);
     return { cursor, digest, bytes: journalBytes(row.bytes), metadata: {
-      accepted: { receipt, binding, authority, receivedAtMs: authorityInteger(accepted.receivedAtMs) },
+      accepted: { receipt, binding, authority, receivedAtMs: authorityInteger(accepted.receivedAtMs),
+        ...(Object.hasOwn(accepted, "agentDeclaration") ? { agentDeclaration: parseAgentDeclaration(
+          baselineRecord(accepted.agentDeclaration, ["agentId", "onBehalfOf", "depth"])) } : {}) },
       firstSeen: journalRanges(metadata.firstSeen),
     } };
   });
@@ -225,8 +252,9 @@ function snapshotJournalCut(value: unknown): LiveUpdateJournalCut {
 }
 
 function compareJournalSuffixRow(raw: Record<string, unknown>, expected: LiveUpdateJournalCut["suffix"][number],
-  provenance: readonly Record<string, unknown>[]): void {
-  const { receipt, binding, authority, receivedAtMs } = expected.metadata.accepted;
+  provenance: readonly Record<string, unknown>[], declaration: AgentDeclaration | undefined): void {
+  const { receipt, binding, authority, receivedAtMs, agentDeclaration } = expected.metadata.accepted;
+  journalIntegrity(isDeepStrictEqual(declaration, agentDeclaration));
   journalIntegrity(raw.journal_cursor === expected.cursor && raw.delivery_id === receipt.deliveryId &&
     raw.update_digest === expected.digest && raw.accepting_host_epoch === receipt.acceptingHostEpoch &&
     raw.workspace_id === binding.workspaceId && raw.main_version_id === binding.mainVersionId &&
@@ -338,7 +366,7 @@ export function readLiveUpdateJournalCut(storage: StorageContext, input: { docum
 export function appendValidatedLiveJournal(storage: StorageContext, input: {
   document: LiveDocumentKey; namespace: string; host: LiveHostConnectionCoordinate;
   current: {binding: LiveObjectBinding; authority: AdmittedLiveUpdate["metadata"]["accepted"]["authority"]};
-  metadata: {deliveryId: string; updateDigest: string}; updateBytes: Uint8Array; receivedAtMs: number;
+  metadata: {deliveryId: string; updateDigest: string; agentDeclaration?: AgentDeclaration}; updateBytes: Uint8Array; receivedAtMs: number;
   restoreOperationId?: string;
   firstSeen: AdmittedLiveUpdate["metadata"]["firstSeen"]; checkpointBytes: Uint8Array | null; checkpointDigest: string | null;
   priorMetadata: AdmittedLiveUpdate["metadata"] | null | undefined; onFirstWrite?: () => void;
@@ -370,8 +398,10 @@ export function appendValidatedLiveJournal(storage: StorageContext, input: {
     verifyJournalHistoryMetadata(storage.db, priorMetadata, {namespace, eventCount: previousCount, evidenceDigest: previousDigest,
       metadataBytes: authorityInteger(predecessor.accepted_metadata_bytes, 1)});
   }
+  const declared = metadata.agentDeclaration;
   const intended = {accepted: {receipt: {deliveryId: metadata.deliveryId, updateDigest: metadata.updateDigest, journalCursor: nextCursor,
-    acceptingHostEpoch: host.hostEpoch}, binding: current.binding, authority: current.authority, receivedAtMs}, firstSeen};
+    acceptingHostEpoch: host.hostEpoch}, binding: current.binding, authority: current.authority, receivedAtMs,
+    ...(declared ? {agentDeclaration: declared} : {})}, firstSeen};
   const evidenceDigest = nextAcceptedHistoryDigest(previousDigest, eventCount, intended);
   const acceptedMetadataBytes = Buffer.byteLength(JSON.stringify(canonicalAcceptedMetadata(intended)));
   const values = [metadata.deliveryId, metadata.updateDigest, ...documentParams(document),
@@ -383,7 +413,8 @@ export function appendValidatedLiveJournal(storage: StorageContext, input: {
   const provenanceBytes = firstSeen.reduce((total, range) => total + Buffer.byteLength(JSON.stringify([
     ...documentParams(document), range.clientId, range.startClock, range.endClock, nextCursor,
   ])), 0);
-  const charge = updateBytes.byteLength + (checkpointBytes?.byteLength ?? 0) + metadataBytes + provenanceBytes;
+  const declarationBytes = declared ? Buffer.byteLength(JSON.stringify([nextCursor, declared.agentId, declared.onBehalfOf, declared.depth])) : 0;
+  const charge = updateBytes.byteLength + (checkpointBytes?.byteLength ?? 0) + metadataBytes + provenanceBytes + declarationBytes;
   assertWorkspaceQuota(storage, document.workspaceId, charge);
   onFirstWrite?.();
   const insert = storage.db.prepare(`INSERT INTO ${LIVE_JOURNAL_TABLE}(delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,
@@ -395,6 +426,8 @@ export function appendValidatedLiveJournal(storage: StorageContext, input: {
   journalIntegrity(cursor === nextCursor);
   const insertRange = storage.db.prepare(`INSERT INTO ${LIVE_JOURNAL_PROVENANCE}(workspace_id,main_version_id,object_id,lineage_claim_id,client_id,start_clock,end_clock,journal_cursor) VALUES (?,?,?,?,?,?,?,?)`);
   for (const range of firstSeen) insertRange.run(...documentParams(document), range.clientId, range.startClock, range.endClock, cursor);
+  if (declared) storage.db.prepare(`INSERT INTO ${LIVE_JOURNAL_AGENT_DECLARATIONS}(journal_cursor,agent_id,on_behalf_of,depth) VALUES (?,?,?,?)`)
+    .run(cursor, declared.agentId, declared.onBehalfOf, declared.depth);
   const raw = storage.db.prepare(`SELECT journal_cursor,delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,
     current_path,selector_paths_json,restore_fence_generation,principal_kind,principal_id,grant_id,grant_generation,accepting_host_epoch,received_at_ms,
     validation_checkpoint_sha256,length(update_bytes) AS update_length,length(validation_checkpoint_bytes) AS checkpoint_length
@@ -412,14 +445,18 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
     requireLiveJournalHistory(storage);
     const outer = baselineRecord(input, ["host", "actor", "expectedAuthority", "metadata", "cutToken", "validation", "updateBytes", "receivedAtMs"]);
     const host = snapshotHostCoordinate(outer.host);
-    const rawMetadata = baselineRecord(outer.metadata, ["deliveryId", "updateDigest", "binding"]);
-    const metadata = parseLiveUpdateSubmissionMetadata({ ...rawMetadata, binding: journalBinding(rawMetadata.binding) });
+    const rawMetadata = baselineRecord(outer.metadata, withAgentDeclaration(outer.metadata, ["deliveryId", "updateDigest", "binding"]));
+    const metadata = parseLiveUpdateSubmissionMetadata({ ...rawMetadata, binding: journalBinding(rawMetadata.binding),
+      ...(Object.hasOwn(rawMetadata, "agentDeclaration")
+        ? { agentDeclaration: baselineRecord(rawMetadata.agentDeclaration, ["agentId", "onBehalfOf", "depth"]) } : {}) });
     const document = journalDocument({ workspaceId: metadata.binding.workspaceId, mainVersionId: metadata.binding.mainVersionId,
       objectId: metadata.binding.objectId, lineageClaimId: metadata.binding.lineageClaimId });
     const expectedAuthority = parseServerDerivedLiveUpdateAuthority(baselineRecord(outer.expectedAuthority,
       ["principalKind", "principalId", "grantId", "grantGeneration"]));
     const actorKind = baselineRecord(outer.actor, ["kind"], true).kind;
     if (actorKind !== "owner" && actorKind !== "named" && actorKind !== "link") return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
+    // Only the authenticated owner's lane carries the agent its edit declared.
+    if (metadata.agentDeclaration && actorKind !== "owner") return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
     const request = snapshotCurrentBindingRequest({ document, actor: outer.actor as CurrentLiveBindingRequest["actor"] });
     const token = snapshotJournalCut(outer.cutToken);
     verifyJournalCut(token);
@@ -460,8 +497,10 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
           journalIntegrity(row.history.namespace === namespace);
           verifyJournalHistoryRow(storage.db, row);
           const previous = row.admitted.metadata.accepted;
+          // A delivery names its bytes, binding, authority, and declared agent, including that it declared none.
           if (previous.receipt.updateDigest !== metadata.updateDigest || !isDeepStrictEqual(previous.binding, current.binding) ||
-            !isDeepStrictEqual(previous.authority, current.authority)) return refused({ kind: "refused", reason: "delivery-conflict" });
+            !isDeepStrictEqual(previous.authority, current.authority) ||
+            !isDeepStrictEqual(previous.agentDeclaration, metadata.agentDeclaration)) return refused({ kind: "refused", reason: "delivery-conflict" });
           liveJournalCoverage(storage, document, stored.ranges);
           return { reply: { result: { kind: "accepted" as const, receipt: { ...previous.receipt }, replayed: true }, admitted: row.admitted }, row, history };
         }
@@ -538,6 +577,8 @@ function readJournalCut(storage: StorageContext, document: LiveDocumentKey, expe
       const cursor = authorityInteger(row.journal_cursor, 1), rows = provenance.get(cursor) ?? [];
       rows.push(row); provenance.set(cursor, rows);
     }
+    const declarations = readAgentDeclarations(storage.db, `${JOURNAL_DOCUMENT_WHERE} AND journal_cursor>? AND journal_cursor<=?`,
+      [...documentParams(document), checkpoint.cursor ?? 0, highWater ?? 0]);
     let last = checkpoint.cursor ?? 0, suffixBytes = 0;
     let previousBinding: { raw: Record<string, unknown>; binding: LiveObjectBinding } | undefined;
     const matchingSuffix = expected?.highWater === highWater ? expected.suffix : undefined;
@@ -545,7 +586,7 @@ function readJournalCut(storage: StorageContext, document: LiveDocumentKey, expe
     const suffix = rawSuffix.map((raw, index) => {
       if (matchingSuffix) {
         const entry = matchingSuffix[index]!;
-        compareJournalSuffixRow(raw, entry, provenance.get(entry.cursor) ?? []);
+        compareJournalSuffixRow(raw, entry, provenance.get(entry.cursor) ?? [], declarations.get(entry.cursor));
         journalIntegrity(entry.cursor > last && entry.cursor <= (highWater ?? 0));
         last = entry.cursor; suffixBytes += entry.bytes.byteLength;
         return entry;
@@ -558,7 +599,8 @@ function readJournalCut(storage: StorageContext, document: LiveDocumentKey, expe
         raw.restore_fence_generation === prior.raw.restore_fence_generation
         ? { ...prior.binding, selectorPaths: [...prior.binding.selectorPaths] } : journalBindingFromRow(raw);
       previousBinding = { raw, binding };
-      const row = journalRowWithBinding(storage.db, raw, binding, provenance.get(authorityInteger(raw.journal_cursor, 1)) ?? []), receipt = row.admitted.metadata.accepted.receipt;
+      const row = journalRowWithBinding(storage.db, raw, binding, provenance.get(authorityInteger(raw.journal_cursor, 1)) ?? [], declarations),
+        receipt = row.admitted.metadata.accepted.receipt;
       journalIntegrity(receipt.journalCursor > last && receipt.journalCursor <= (highWater ?? 0) && row.checkpoint === null);
       last = receipt.journalCursor; suffixBytes += row.admitted.updateBytes.byteLength;
       return { cursor: receipt.journalCursor, digest: receipt.updateDigest, bytes: row.admitted.updateBytes, metadata: row.admitted.metadata };

@@ -92,7 +92,9 @@ export async function drainOwnerOutbox(options: {
         return {admittedEntries, hasMore: true, retryReady: true};
       }
       const committed = storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,
-        metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding},cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);
+        metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding,
+          ...(entry.agentDeclaration ? {agentDeclaration: entry.agentDeclaration} : {})},
+        cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);
       if (committed.result.kind === "retry") return {admittedEntries, hasMore: true, retryReady: true};
       if (committed.result.kind !== "accepted") throw new Error("Owner update admission refused.");
       const receipt = committed.result.receipt;

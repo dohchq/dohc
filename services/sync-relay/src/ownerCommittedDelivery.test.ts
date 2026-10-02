@@ -1,5 +1,6 @@
 import {beforeEach, expect, it, vi} from "vitest";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
+import {DaemonRefusalError} from "@dohc/workspace-engine-client";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import {OwnerCommittedDelivery} from "./ownerCommittedDelivery";
 import {drainOwnerOutbox} from "./ownerOutboxDelivery";
@@ -102,6 +103,96 @@ it("returns pending without spinning or clearing an unapplied owner entry", asyn
   expect(f.outboxAcks).toEqual([]);
   expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
   expect(f.outboxAcks).toEqual(f.ownerEntries);
+});
+
+const declaration = {agentId: "trip-agent-hosted",onBehalfOf: null,depth: 0};
+
+// The host refuses the chosen application calls as settlement-required, and
+// every event declares an agent so a retry can be compared whole.
+function settlementRequired(f: ReturnType<typeof fixture>, refusals: (call: number) => boolean,
+  {materialized = true, failure}: {materialized?: boolean; failure?: Error} = {}) {
+  const settled: (LiveUpdateReceipt | null)[] = [];
+  const next = f.store.nextOwnerApplication.getMockImplementation()!;
+  f.store.nextOwnerApplication.mockImplementation(value => {
+    const event = next(value);
+    if (!event) return undefined;
+    const accepted = {...event.metadata.accepted,agentDeclaration: declaration};
+    return {metadata: {accepted}};
+  });
+  f.client.sendRequest.mockImplementation(async input => {
+    if (input.method === "liveApplication.register") return {id: input.id,result: {registrationId: 1}};
+    expect(input.method).toBe("liveApplication.settle");
+    const terminal = (input.params as {terminalReceipt: LiveUpdateReceipt | null}).terminalReceipt;
+    settled.push(terminal);
+    if (failure) throw failure;
+    return {id: input.id,result: {status: "settled",settlement: {settlementId: `settlement-${settled.length}`,previousCursor: 0,
+      terminalCursor: terminal?.journalCursor ?? 0,applicationCount: terminal ? 1 : 0,localYDocSequence: 1,momentId: "moment-1",
+      markdownDigest: "c".repeat(64),materialized,collectionReconcileRequired: false}}};
+  });
+  const apply = f.client.sendLiveApplication.getMockImplementation()!;
+  let calls = 0;
+  f.client.sendLiveApplication.mockImplementation(async (input,event) => refusals(++calls)
+    ? {id: input.id,result: {status: "pending",reason: "settlement-required"}} : apply(input,event));
+  return settled;
+}
+const offered = (f: ReturnType<typeof fixture>) => f.client.sendLiveApplication.mock.calls.map(([,event]) => event);
+const declared = (cursor: number) => ({metadata: {accepted: {receipt: receipt(cursor),agentDeclaration: declaration}}});
+
+it("settles the applied interval when the host requires it and offers the identical owner event again", async () => {
+  const f = fixture({prefix: 1}), settled = settlementRequired(f, call => call === 2);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(settled).toEqual([receipt(1)]);
+  expect(offered(f)).toEqual([declared(1),declared(2),declared(2)]);
+  expect(f.outboxAcks).toEqual(f.ownerEntries);
+});
+
+it("settles again once a later interval applied and fills the host's coverage", async () => {
+  const f = fixture({prefix: 1, owners: 2}), settled = settlementRequired(f, call => call === 2 || call === 4);
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(settled).toEqual([receipt(1),receipt(2)]);
+  expect(offered(f)).toEqual([declared(1),declared(2),declared(2),declared(3),declared(3)]);
+  expect(f.outboxAcks).toEqual(f.ownerEntries);
+});
+
+it("fails a pass whose host still requires settlement after settling everything it applied", async () => {
+  const f = fixture({prefix: 1}), settled = settlementRequired(f, call => call >= 2);
+  await expect(f.consumer.drain(document)).rejects.toThrow("The host still requires settlement after settling everything it applied.");
+  expect(settled).toEqual([receipt(1)]);
+  expect(offered(f)).toEqual([declared(1),declared(2),declared(2)]);
+  expect(f.outboxAcks).toEqual([]);
+  expect(f.retained).toEqual(f.ownerEntries);
+});
+
+it("waits for the next wake when the settlement's file write has not landed", async () => {
+  const f = fixture({prefix: 1}), settled = settlementRequired(f, call => call === 2, {materialized: false});
+  expect(await f.consumer.drain(document)).toEqual({kind: "pending",reason: "Owner settlement has not reached the file.",continueDrain: false});
+  expect(settled).toEqual([receipt(1)]);
+  expect(offered(f)).toEqual([declared(1),declared(2)]);
+  expect(f.retained).toEqual(f.ownerEntries);
+});
+
+it("propagates a failed settlement and keeps the owner entry", async () => {
+  const failure = new Error("settle failed");
+  const f = fixture({prefix: 1}), settled = settlementRequired(f, call => call === 2, {failure});
+  await expect(f.consumer.drain(document)).rejects.toBe(failure);
+  expect(settled).toEqual([receipt(1)]);
+  expect(offered(f)).toEqual([declared(1),declared(2)]);
+  expect(f.outboxAcks).toEqual([]);
+  expect(f.retained).toEqual(f.ownerEntries);
+});
+
+it("leaves an earlier unresolved file write to backoff without settling", async () => {
+  const f = fixture({prefix: 1}), settled = settlementRequired(f, () => false);
+  const overloaded = new DaemonRefusalError({code: "OVERLOADED",message: "settlement-materialization-pending",retry: "afterBackoff"}, undefined);
+  const apply = f.client.sendLiveApplication.getMockImplementation()!;
+  f.client.sendLiveApplication.mockImplementation(async (input,event) => {
+    if (event.metadata.accepted.receipt.journalCursor === 2) throw overloaded;
+    return apply(input,event);
+  });
+  await expect(f.consumer.drain(document)).rejects.toBe(overloaded);
+  expect(settled).toEqual([]);
+  expect(f.outboxAcks).toEqual([]);
+  expect(f.retained).toEqual(f.ownerEntries);
 });
 
 it("retains a failed native application and retries its original receipt", async () => {

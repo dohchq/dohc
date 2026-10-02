@@ -163,84 +163,55 @@ describe("history page", () => {
     );
   });
 
-  // the class on this surface: a shared view records no history BY
-  // DESIGN — a capability, not a failure, so no Settings blame. The status
-  // is the one main really produces for a shared view (the decision carries
-  // historyShareView): with a
-  // causeless fixture the share branch would be reached through a status no
-  // real share view has, and demoting it below the status checks — the #540
-  // bug reborn as Settings copy — would survive this suite.
-  it("states the shared-view capability instead of blaming Settings", async () => {
+  // A shared view records nothing, but it reads the history its share
+  // imported, an ended share included. The status is the one main really
+  // produces for a shared view (historyShareView, no recorder).
+  it.each([["View", "view", false], ["Edit", "edit", false], ["ended View", "view", true]] as const)(
+    "lists a %s share's imported history and refreshes it on activity", async (_name, access, ended) => {
+      const bridge = makeBridge(Promise.resolve(null));
+      const shareStatus = { ...SYNC_STATUS, historyShareView: true };
+      bridge.openWorkspace = vi.fn(async () => shareStatus);
+      bridge.getSyncStatus = vi.fn(async () => shareStatus);
+      bridge.listEngineMoments = vi.fn(async () => historyPage([historyMoment("m-1", "Agent revised this line")]));
+      bridge.getTryInVersionState = vi.fn(async () => { throw new Error("A shared view has no versions."); });
+      const user = userEvent.setup();
+      renderShell(bridge, {
+        ...WORKSPACE,
+        shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", access, ...(ended ? { ended: true } : {}) },
+      });
+
+      await user.click(screen.getByTestId("activity-history"));
+      expect(await screen.findByTestId("engine-moment-open")).toBeTruthy();
+      expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
+      expect(bridge.listEngineMoments).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: WORKSPACE.workspaceId }));
+      const reads = bridge.listEngineMoments.mock.calls.length;
+      await act(async () => {
+        bridge.emitWorkspaceActivity();
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(bridge.listEngineMoments.mock.calls.length).toBeGreaterThan(reads));
+      // It has no versions, so the refresh asks for no try run.
+      expect(bridge.getTryInVersionState).not.toHaveBeenCalled();
+      expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    });
+
+  // The one cause a shared view's history can be off for: its store is
+  // refused. The line names that cause and its recovery, never a missing recorder.
+  it("names a shared view's refused store instead of reading its history", async () => {
     const bridge = makeBridge(Promise.resolve(null));
-    const shareStatus = {
-      ...SYNC_STATUS,
-      historyShareView: true,
-    };
+    const shareStatus = { ...SYNC_STATUS, historyShareView: true, historyCaptureFailed: true as const, engineStoreRefused: "foreign-database" as const };
     bridge.openWorkspace = vi.fn(async () => shareStatus);
     bridge.getSyncStatus = vi.fn(async () => shareStatus);
     const user = userEvent.setup();
     renderShell(bridge, {
       ...WORKSPACE,
-      shareView: {
-        shareId: "share-1",
-        granterEmail: "granter@dohc.test",
-        access: "view",
-      },
+      shareView: { shareId: "share-1", granterEmail: "granter@dohc.test", access: "view" },
     });
 
     await user.click(screen.getByTestId("activity-history"));
     const placeholder = await screen.findByTestId("history-off-placeholder");
-    await waitFor(() =>
-      expect(placeholder.textContent).toContain("A shared view records no history"),
-    );
-    expect(placeholder.textContent).not.toContain("Settings");
-  });
-
-  // #540 on the History surface itself: a shared view materializes no
-  // settings file, so the renderer's settings read comes back with the
-  // default flag ON — but the share's open deliberately installed no
-  // capture, so every engine call can only error. The surface must state
-  // the capability instead, and must never ask main for engine moments.
-  it("gives a shared view the capability truth and never asks for engine moments", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    // The status a real share view carries (capture === null, share cause).
-    const shareStatus = {
-      ...SYNC_STATUS,
-      historyShareView: true,
-    };
-    bridge.openWorkspace = vi.fn(async () => shareStatus);
-    bridge.getSyncStatus = vi.fn(async () => shareStatus);
-    const user = userEvent.setup();
-    renderShell(bridge, {
-      ...WORKSPACE,
-      shareView: {
-        shareId: "share-1",
-        granterEmail: "granter@dohc.test",
-        access: "view",
-      },
-    });
-
-    await user.click(screen.getByTestId("activity-history"));
-    const placeholder = await screen.findByTestId("history-off-placeholder");
-    // The empty-state recipe (copy.md): one text-sm text-muted line carrying
-    // the state and the Next together.
-    expect(placeholder.textContent).toContain(
-      "A shared view records no history. Refresh the shared view to get the latest shared changes.",
-    );
-    const lines = placeholder.querySelectorAll("span");
-    expect(lines).toHaveLength(1);
-    expect(lines[0]?.className).toContain("text-sm");
-    expect(lines[0]?.className).toContain("text-muted");
-    // The Next works on this surface: the share banner's Refresh control,
-    // pinned to exist alongside the instruction that names it.
-    expect(screen.getByTestId("shared-view-refresh")).toBeTruthy();
-    // The false cause this pins against: a Settings copy about a toggle
-    // nobody touched.
-    expect(placeholder.textContent).not.toContain("Settings");
-
-    // Activity pushes take the no-engine refresh path too — this is the pin
-    // that kills a regression to the recurring "Could not open history"
-    // error loop.
+    await waitFor(() => expect(placeholder.textContent).toContain("dohc cannot read this workspace's data store."));
+    expect(placeholder.textContent).not.toContain("records no history");
     await act(async () => {
       bridge.emitWorkspaceActivity();
       await Promise.resolve();
@@ -248,40 +219,6 @@ describe("history page", () => {
     expect(bridge.listEngineMoments).not.toHaveBeenCalled();
   });
 
-  // The ended share has no Refresh control, so its placeholder must not
-  // instruct one — the false-instruction class this lane exists to kill.
-  it("an ended share's placeholder does not name the Refresh it no longer has", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    // The status a real share view carries (capture === null, share cause).
-    const shareStatus = {
-      ...SYNC_STATUS,
-      historyShareView: true,
-    };
-    bridge.openWorkspace = vi.fn(async () => shareStatus);
-    bridge.getSyncStatus = vi.fn(async () => shareStatus);
-    const user = userEvent.setup();
-    renderShell(bridge, {
-      ...WORKSPACE,
-      shareView: {
-        shareId: "share-1",
-        granterEmail: "granter@dohc.test",
-        access: "view",
-        ended: true,
-      },
-    });
-
-    await user.click(screen.getByTestId("activity-history"));
-    const placeholder = await screen.findByTestId("history-off-placeholder");
-    // Same single-line shape, with the ended share's own true Next — and an
-    // active sentence naming who ended it (copy.md), not a passive
-    // "was ended" with no actor.
-    expect(placeholder.textContent).toContain(
-      "A shared view records no history. granter@dohc.test ended this share. You can still open the files it shared.",
-    );
-    expect(placeholder.textContent).not.toContain("was ended");
-    expect(placeholder.textContent).not.toContain("Refresh");
-    expect(screen.queryByTestId("shared-view-refresh")).toBeNull();
-  });
 
   function historyMoment(id: string, summary: string): EngineMomentRecord {
     return {
@@ -3395,29 +3332,29 @@ describe("versions surface after a failed capture build", () => {
   });
 });
 
-// Virtual tabs survive restore, so a moment-diff tab outlives the
-// History surface that opened it — and a shared view has no History surface
-// at all. The page asked main for a moment the share has none of and
-// fell into its own error state.
+// Virtual tabs survive restore, so a moment-diff tab outlives the History
+// surface that opened it. A shared view opens the change its share imported,
+// read-only: it has no recorder, so it offers no restore.
 describe("shared view moment-diff tab", () => {
   const MOMENT_TAB = momentDiffTabPath("m-1");
 
-  it("states the capability for a persisted moment-diff tab instead of a page that can only fail", async () => {
+  it("opens a persisted moment-diff tab read-only from the share's imported history", async () => {
     const bridge = makeShareBridge(
       Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
+    bridge.readEngineMoment = vi.fn(async (): Promise<ReadEngineMomentResult> => ({
+      moment: {
+        id: "m-1", versionId: "main", path: "notes/plan.md", recordedAtMs: 100,
+        operation: "write", origin: "local-file", beforeText: "old plan\n", afterText: "new plan\n",
+      },
+    }));
     renderShell(bridge, SHARE_VIEW);
 
-    const placeholder = await screen.findByTestId("moment-diff-share-view");
-    // The same sentence the History placeholder states for a shared view, plus
-    // the next step this surface really has.
-    expect(placeholder.textContent).toContain(
-      "A shared view records no history. Close this tab to go back to the shared files.",
-    );
-    expect(placeholder.className).toContain("text-sm");
-    expect(placeholder.className).toContain("text-muted");
-    expect(bridge.readEngineMoment).not.toHaveBeenCalled();
-    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
+    await screen.findByTestId("engine-moment-diff-page");
+    expect(bridge.readEngineMoment).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId, momentId: "m-1" });
+    for (const control of ["engine-diff-restore-file", "engine-diff-shared-restore", "engine-diff-stop-and-restore", "engine-diff-undo-restore"]) {
+      expect(screen.queryByTestId(control)).toBeNull();
+    }
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
@@ -3447,14 +3384,12 @@ describe("shared view moment-diff tab", () => {
     );
     const tab = await screen.findByRole("tab", { name: "Diff: plan.md" });
     expect(tab.title).toBe("History diff: notes/plan.md");
-    expect(screen.queryByTestId("moment-diff-share-view")).toBeNull();
     expect(screen.queryByTestId("moment-diff-off")).toBeNull();
+    expect(screen.getByTestId("engine-diff-restore-file")).toBeTruthy();
   });
 
-  // The ordering interaction #626 found. A shared view's status also says no
-  // recorder, so holding it pending is what isolates the synchronous share
-  // fact from the status clause that would otherwise mask it.
-  it("states the shared-view fact before any status arrives", async () => {
+  // Before main decides, the tab claims nothing and reads nothing.
+  it("waits for main's decision before a shared view reads a moment", async () => {
     const status = deferred<typeof SHARE_STATUS>();
     const bridge = makeShareBridge(
       Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
@@ -3463,9 +3398,9 @@ describe("shared view moment-diff tab", () => {
     bridge.getSyncStatus = vi.fn(() => status.promise);
     renderShell(bridge, SHARE_VIEW);
 
-    const placeholder = await screen.findByTestId("moment-diff-share-view");
+    await settleShareView();
     expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
-    expect(placeholder.textContent).toContain("A shared view records no history.");
+    expect(screen.queryByTestId("engine-moment-diff-page")).toBeNull();
     expect(bridge.readEngineMoment).not.toHaveBeenCalled();
   });
 });

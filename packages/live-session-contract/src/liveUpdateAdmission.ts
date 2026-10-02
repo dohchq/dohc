@@ -66,6 +66,8 @@ export interface LiveUpdateSubmissionMetadata {
   readonly deliveryId: string;
   readonly updateDigest: string;
   readonly binding: LiveObjectBinding;
+  /** Only the owner lane submits one. Absent when the edit declared no agent. */
+  readonly agentDeclaration?: AgentDeclaration;
 }
 
 export interface LiveUpdateSubmission {
@@ -85,6 +87,11 @@ export interface RelayAcceptedLiveUpdate {
   readonly binding: LiveObjectBinding;
   readonly authority: ServerDerivedLiveUpdateAuthority;
   readonly receivedAtMs: number;
+  /**
+   * What the authenticated owner declared about the agent that made this
+   * change. `authority` stays the authenticated submitter. Absent when none.
+   */
+  readonly agentDeclaration?: AgentDeclaration;
 }
 
 export interface LiveUpdateStructRange {
@@ -162,19 +169,30 @@ function exactRecord(
   value: unknown,
   name: string,
   fields: readonly string[],
+  optional?: string,
 ): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError(`${name} must be an object.`);
   }
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
+  const expected = optional !== undefined && Object.hasOwn(record, optional) ? [...fields, optional] : fields;
   if (
-    keys.length !== fields.length ||
-    keys.some((key) => !fields.includes(key))
+    keys.length !== expected.length ||
+    keys.some((key) => !expected.includes(key))
   ) {
     throw new TypeError(`${name} must contain exactly its defined fields.`);
   }
   return record;
+}
+
+/** A present member must be a declaration; `undefined` is not absence. */
+function optionalAgentDeclaration(
+  record: Record<string, unknown>,
+): { agentDeclaration?: AgentDeclaration } {
+  return Object.hasOwn(record, "agentDeclaration")
+    ? { agentDeclaration: parseAgentDeclaration(record.agentDeclaration) }
+    : {};
 }
 
 function isWellFormedUtf16(value: string): boolean {
@@ -326,11 +344,13 @@ export function parseLiveUpdateSubmissionMetadata(
     value,
     "LiveUpdateSubmissionMetadata",
     SUBMISSION_METADATA_FIELDS,
+    "agentDeclaration",
   );
   return {
     deliveryId: parseLiveUpdateIdentifier(record.deliveryId, "deliveryId"),
     updateDigest: parseLiveUpdateDigest(record.updateDigest),
     binding: parseLiveObjectBinding(record.binding),
+    ...optionalAgentDeclaration(record),
   };
 }
 
@@ -366,12 +386,19 @@ export function parseLiveUpdateReceipt(value: unknown): LiveUpdateReceipt {
 export function parseRelayAcceptedLiveUpdate(
   value: unknown,
 ): RelayAcceptedLiveUpdate {
-  const record = exactRecord(value, "RelayAcceptedLiveUpdate", ACCEPTED_FIELDS);
+  const record = exactRecord(value, "RelayAcceptedLiveUpdate", ACCEPTED_FIELDS, "agentDeclaration");
+  const authority = parseServerDerivedLiveUpdateAuthority(record.authority);
+  const declared = optionalAgentDeclaration(record);
+  // Only the owner lane carries the agent its edit declared.
+  if (declared.agentDeclaration && authority.principalKind !== "owner") {
+    throw new TypeError("Only an owner's accepted change declares an agent.");
+  }
   return {
     receipt: parseLiveUpdateReceipt(record.receipt),
     binding: parseLiveObjectBinding(record.binding),
-    authority: parseServerDerivedLiveUpdateAuthority(record.authority),
+    authority,
     receivedAtMs: nonNegativeSafeInteger(record.receivedAtMs, "receivedAtMs"),
+    ...declared,
   };
 }
 

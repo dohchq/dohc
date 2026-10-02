@@ -18,6 +18,7 @@ import { mailLinks } from "../../../../services/workspace-api/e2e/smtpCapture";
 import { mintLocalhostCa, type LocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
 import type { LaunchedDesktopApp } from "./desktopApp";
+import { readLiveAuditRecord, type LiveAuditRecord } from "./engineDb";
 
 const relayRoot = fileURLToPath(new URL("../../../../services/sync-relay/", import.meta.url));
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
@@ -61,6 +62,10 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
       // edit, the restore point that keeps everything the account did not write.
       acceptedCursorBefore: (workspaceId: string, path: string, principalId: string) =>
         acceptedCursorBefore(directory, workspaceId, path, principalId),
+      // Where one declared agent's accepted changes stand: the relay journal,
+      // the service host's accepted history and its durable audit. Read-only.
+      hostedAgentEvidence: (workspaceId: string, path: string, agentId: string) =>
+        hostedAgentEvidence(directory, workspaceId, path, agentId),
       async close() {
         const results = await Promise.allSettled([proxy.close(), relay!.close(), account.close()]);
         const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
@@ -154,6 +159,40 @@ function acceptedCursorBefore(directory: string, workspaceId: string, path: stri
     assert.ok(Number.isSafeInteger(cursor) && cursor >= 1, "An accepted change precedes the account's first live edit.");
     return cursor;
   } finally { db.close(); }
+}
+
+// The relay's accepted changes that declared this agent, and the service
+// host's copies. Accepted history can fold into a checkpoint, so its rows are
+// reported as found; the durable audit record is what must remain.
+function hostedAgentEvidence(directory: string, workspaceId: string, path: string, agentId: string) {
+  const read = <T>(file: string, query: (db: InstanceType<typeof DatabaseSync>) => T) => {
+    const db = new DatabaseSync(file, { readOnly: true });
+    try { return query(db); } finally { db.close(); }
+  };
+  const relay = read(join(directory, "relay-data", "relay.sqlite"), (db) => db.prepare(
+    `SELECT j.journal_cursor AS cursor, j.delivery_id AS deliveryId, j.update_digest AS updateDigest,
+       j.principal_kind AS principalKind, j.principal_id AS principalId, j.restore_fence_generation AS fence,
+       j.accepted_event_count AS eventCount, j.accepted_evidence_digest AS evidenceDigest, d.agent_id AS agentId, d.on_behalf_of AS onBehalfOf, d.depth AS depth
+     FROM sync_relay_live_update_journal j JOIN sync_relay_live_update_agent_declarations d ON d.journal_cursor=j.journal_cursor
+     WHERE j.workspace_id=? AND j.current_path=? AND d.agent_id=? ORDER BY j.journal_cursor LIMIT 16`,
+  ).all(workspaceId, path, agentId).map((row) => ({
+    journalCursor: Number(row.cursor), deliveryId: String(row.deliveryId), updateDigest: String(row.updateDigest),
+    principalKind: String(row.principalKind), principalId: String(row.principalId), restoreFenceGeneration: Number(row.fence),
+    eventCount: Number(row.eventCount), evidenceDigest: String(row.evidenceDigest),
+    agentDeclaration: { agentId: String(row.agentId), onBehalfOf: row.onBehalfOf === null ? null : String(row.onBehalfOf), depth: Number(row.depth) },
+  })));
+  const hostRoot = join(directory, "relay-deployment", "live-host");
+  const host = readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
+    .flatMap((entry) => read(join(hostRoot, entry.name, ".dohc", "engine", "engine.db"), (db) => relay.map((change) => ({
+      deliveryId: change.deliveryId,
+      accepted: db.prepare(`SELECT journal_cursor AS cursor, event_count AS eventCount, evidence_digest AS evidenceDigest,
+          json_extract(metadata_json,'$.accepted') AS accepted FROM live_accepted_updates
+          WHERE delivery_id=? AND json_extract(metadata_json,'$.accepted.binding.workspaceId')=?`)
+        .all(change.deliveryId, workspaceId).map((row) => ({ journalCursor: Number(row.cursor), eventCount: Number(row.eventCount),
+          evidenceDigest: String(row.evidenceDigest), accepted: JSON.parse(String(row.accepted)) as LiveAuditRecord["accepted"] })),
+      audit: readLiveAuditRecord(db, change.deliveryId),
+    }))));
+  return { relay, host };
 }
 
 function settlementEvidence(directory: string) {

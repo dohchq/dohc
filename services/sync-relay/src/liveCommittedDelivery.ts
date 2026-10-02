@@ -110,7 +110,7 @@ export class LiveCommittedDelivery {
     if (this.#active.has(key))
       throw new Error("A committed delivery drain already owns this document.");
     this.#active.add(key);
-    let drain;
+    let drain: ReturnType<LiveCommittedDeliveryStore["open"]> | undefined;
     const aborted = () => {
       if (signal?.aborted) throw signal.reason;
     };
@@ -118,6 +118,8 @@ export class LiveCommittedDelivery {
       aborted();
       drain = this.#store.open({ host: this.#connection.host, document });
       let registration = await this.#registrations.ensure(drain.baseline.binding, signal);
+      // A materialized settlement released the host's author coverage, and nothing applied since.
+      let settledSinceApply = false;
       for (;;) {
         aborted();
         const next = this.#store.next(drain);
@@ -161,6 +163,20 @@ export class LiveCommittedDelivery {
         if (result?.status === "pending") {
           if (typeof result.reason !== "string")
             throw new Error("Invalid committed delivery pending result.");
+          if (result.reason === "settlement-required" && next.kind !== "bootstrap") {
+            // The host's author coverage is full. Settle once through what it
+            // applied, then offer the identical event again.
+            if (settledSinceApply) throw new Error("The host still requires settlement after settling everything it applied.");
+            const settling = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.settle",
+              workspace: this.#connection.workspace, params: { registrationId: registration.id, terminalReceipt: next.predecessor ? { ...next.predecessor } : null },
+              deadlineMs: this.#connection.deadlineMs }, signal);
+            aborted();
+            const settled = settlementResult(settling.result, next.predecessor);
+            // Its file write has not landed; the next pass retries after it does.
+            if (!settled.materialized) return { kind: "pending", reason: "settlement-materialization-pending" };
+            settledSinceApply = true;
+            continue;
+          }
           return { kind: "pending", reason: result.reason };
         }
         if (next.kind === "bootstrap") {
@@ -172,6 +188,7 @@ export class LiveCommittedDelivery {
             throw new Error("Invalid durable application acknowledgement.");
           this.#store.acknowledge(drain, next.predecessor, result.ack);
         }
+        settledSinceApply = false;
       }
     } finally {
       if (drain) this.#store.close(drain);

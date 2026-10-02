@@ -52,6 +52,35 @@ it.each(objects)('refuses an unmarked reserved name %s without adoption', name =
     expect(f.snapshot()).toEqual(before);
   } finally { f.raw.close(); }
 });
+const declarations = 'sync_relay_live_update_agent_declarations';
+const declarationMarker = 'live-update-agent-declarations-v1';
+it('adds the agent declaration table to a marked journal once and reopens without mutation', () => {
+  const f = fixture();
+  try {
+    expect(f.raw.prepare('SELECT completed_at_ms FROM sync_relay_migrations WHERE migration_id=?').get(declarationMarker))
+      .toEqual({ completed_at_ms: expect.any(Number) });
+    expect(f.raw.prepare(`PRAGMA foreign_key_list(${declarations})`).all().map(row => [row.table, row.from, row.on_delete]))
+      .toEqual([[journal, 'journal_cursor', 'CASCADE']]);
+    // An existing journal store gains the table on its next open.
+    f.raw.exec(`DROP TABLE ${declarations}`);
+    f.raw.prepare('DELETE FROM sync_relay_migrations WHERE migration_id=?').run(declarationMarker);
+    openSyncRelayStorage(f.path).close();
+    expect(f.raw.prepare('SELECT name FROM sqlite_schema WHERE tbl_name=?').all(declarations)).toEqual([{ name: declarations }]);
+    const before = f.snapshot(); openSyncRelayStorage(f.path).close(); expect(f.snapshot()).toEqual(before);
+  } finally { f.raw.close(); }
+});
+it.each([
+  ['a missing marked table', (raw: InstanceType<typeof DatabaseSync>) => raw.exec(`DROP TABLE ${declarations}`), /agent declaration schema/],
+  ['an extra index', (raw: InstanceType<typeof DatabaseSync>) => raw.exec(`CREATE INDEX extra_declaration_index ON ${declarations}(agent_id)`), /agent declaration schema/],
+  ['an unmarked table', (raw: InstanceType<typeof DatabaseSync>) => raw.prepare('DELETE FROM sync_relay_migrations WHERE migration_id=?').run(declarationMarker), /unmarked live update agent declaration/],
+] as const)('refuses %s without repair', (_name, damage, error) => {
+  const f = fixture();
+  try {
+    damage(f.raw);
+    const before = f.snapshot(); expect(() => openSyncRelayStorage(f.path)).toThrow(error);
+    expect(f.snapshot()).toEqual(before);
+  } finally { f.raw.close(); }
+});
 it('refuses altered marked DDL even when columns still match', () => {
   const f = fixture();
   try {

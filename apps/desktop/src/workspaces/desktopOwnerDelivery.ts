@@ -1,6 +1,6 @@
 import {openSync, readSync, closeSync} from "node:fs";
 import {isAbsolute} from "node:path";
-import {createLiveFrameSession, type LiveFrameSessionPolicy} from "@dohc/live-session-contract/live-frame";
+import {createLiveFrameSession, LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, type LiveFrameSessionPolicy} from "@dohc/live-session-contract/live-frame";
 import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {canonicalRelayUrl} from "./syncCode";
@@ -39,6 +39,7 @@ export function parseDesktopOwnerDeliveryConfig(value: unknown): DesktopOwnerDel
   if (value.version !== 1 || !relayUrl || !Array.isArray(value.documents) || value.documents.length === 0) throw new TypeError("Invalid owner delivery targets.");
   const frames = structuredClone(value.frames) as LiveFrameSessionPolicy;
   createLiveFrameSession("client", frames).close();
+  if (frames.receive.maxFrameBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES) throw new TypeError("Owner delivery frames must carry the largest declared submission.");
   if (typeof value.nativeConfigPath !== "string" || !isAbsolute(value.nativeConfigPath)) throw new TypeError("Native owner ingress configuration path must be absolute.");
   fields(value.nativeClient, ["aggregateBytes", "maxUploads"]);
   const nativeClient = {aggregateBytes: value.nativeClient.aggregateBytes as number, maxUploads: value.nativeClient.maxUploads as number};

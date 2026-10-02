@@ -906,6 +906,10 @@ export const SHARE_VIEW: Workspace = {
 // capture-backed call is refused. A fake that resolved these would model more than main can do, and
 // every no-call pin below would pass even after the fix was reverted.
 //
+// History reads answer: main lists and opens the moments the share imported
+// from its own store, so the default listEngineMoments and readEngineMoment
+// stand. A shared moment page offers no restore, so the bridge has none to call.
+//
 // `listFileChats` is the one that answers: main resolves a chat
 // scope from the share instead of a capture, so the per-file chat surface is
 // served at every level. A fake that still refused it would model less than
@@ -918,9 +922,6 @@ export function makeShareBridge(
   bridge.getSyncStatus = vi.fn(async () => SHARE_STATUS);
   bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
     throw new Error("Versions are not enabled for this workspace.");
-  });
-  bridge.readEngineMoment = vi.fn(async (): Promise<never> => {
-    throw new Error("Engine history is not enabled for this workspace.");
   });
   // The granter's review channel is workspace-scoped and owner-only: main
   // refuses it for a share view. A fake that answered it would model more

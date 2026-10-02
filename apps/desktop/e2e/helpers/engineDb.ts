@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 
@@ -65,6 +66,12 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["snapshots", ["path"]],
   ["ydoc_updates", ["actor_origin_id", "actor_kind"]],
   ["replication_log", ["op_kind", "payload_json"]],
+  ["ydoc_docs", ["path", "head_update_seq", "head_snapshot_seq"]],
+  ["live_audit_events", ["relay_database_namespace", "event_count", "evidence_digest", "journal_cursor", "delivery_id",
+    "accepting_host_epoch", "record_digest"]],
+  ["live_audit_record_manifests", ["record_digest", "manifest_json"]],
+  ["live_audit_record_chunks", ["record_digest", "ordinal", "chunk_sha256"]],
+  ["binary_blobs", ["sha256", "bytes"]],
 ];
 
 // Presence is the read gate. The engine ships one transactional migration
@@ -287,6 +294,81 @@ export function replicationOpKindsMentioning(rootPath: string, needle: string): 
         .map((row) => row.opKind);
     }) ?? []
   );
+}
+
+// Where one path's live document stands against its last fold: the newest
+// journaled update and the update the stored snapshot covers. A fold happened
+// when the snapshot reaches a head it had not covered before.
+export function liveDocumentFold(rootPath: string, path: string): { head: number; snapshot: number } | null {
+  return withEngineDb(rootPath, (db) => {
+    const rows = db.prepare("SELECT head_update_seq AS head, head_snapshot_seq AS snapshot FROM ydoc_docs WHERE path = ?").all(path);
+    if (rows.length > 1) throw new Error(`engine.db holds ${rows.length} live documents at ${path}.`);
+    return rows[0] ? { head: Number(rows[0].head), snapshot: Number(rows[0].snapshot) } : null;
+  });
+}
+
+// The fixture document is small. A record past this bound is not one this test wrote.
+const MAX_AUDIT_RECORD_BYTES = 1024 * 1024;
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+/** One accepted change's durable audit record, with every stored length and hash verified before it is parsed. */
+export interface LiveAuditRecord {
+  namespace: string;
+  eventCount: number;
+  evidenceDigest: string;
+  journalCursor: number;
+  deliveryId: string;
+  acceptingHostEpoch: number;
+  recordDigest: string;
+  accepted: {
+    receipt: { deliveryId: string; updateDigest: string; journalCursor: number; acceptingHostEpoch: number };
+    binding: { restoreFenceGeneration: number; currentPath: string };
+    authority: { principalKind: string; principalId: string };
+    agentDeclaration?: { agentId: string; onBehalfOf: string | null; depth: number };
+  };
+}
+
+/** Reads from an owner's imported audit or the service host's own. Read-only; it never repairs a record. */
+export function readLiveAuditRecord(db: Pick<EngineDb, "prepare">, deliveryId: string): LiveAuditRecord | null {
+  const events = db.prepare(`SELECT relay_database_namespace AS namespace, event_count, evidence_digest, journal_cursor,
+      delivery_id, accepting_host_epoch, record_digest FROM live_audit_events WHERE delivery_id = ?`).all(deliveryId);
+  if (events.length > 1) throw new Error(`Audit holds ${events.length} events for delivery ${deliveryId}.`);
+  const event = events[0];
+  if (!event) return null;
+  const recordDigest = String(event.record_digest);
+  const manifestRow = db.prepare("SELECT manifest_json FROM live_audit_record_manifests WHERE record_digest = ?").get(recordDigest);
+  if (!manifestRow) throw new Error(`Audit event ${deliveryId} has no record manifest.`);
+  const manifest = JSON.parse(String(manifestRow.manifest_json)) as {
+    formatVersion: number; recordDigest: string; byteLength: number; chunks: { sha256: string; byteLength: number }[];
+  };
+  if (manifest.formatVersion !== 1 || manifest.recordDigest !== recordDigest || manifest.byteLength > MAX_AUDIT_RECORD_BYTES) {
+    throw new Error(`Audit record ${recordDigest} is not a bounded version 1 record.`);
+  }
+  const stored = db.prepare("SELECT ordinal, chunk_sha256 FROM live_audit_record_chunks WHERE record_digest = ? ORDER BY ordinal").all(recordDigest);
+  if (stored.length !== manifest.chunks.length) throw new Error(`Audit record ${recordDigest} has ${stored.length} of ${manifest.chunks.length} chunks.`);
+  const parts = manifest.chunks.map((chunk, ordinal) => {
+    const row = stored[ordinal]!;
+    if (Number(row.ordinal) !== ordinal || row.chunk_sha256 !== chunk.sha256) throw new Error(`Audit chunk ${ordinal} of ${recordDigest} differs from its manifest.`);
+    const blob = db.prepare("SELECT bytes FROM binary_blobs WHERE sha256 = ?").get(chunk.sha256)?.bytes;
+    if (!(blob instanceof Uint8Array) || blob.byteLength !== chunk.byteLength || sha256(blob) !== chunk.sha256) {
+      throw new Error(`Audit chunk ${ordinal} of ${recordDigest} is missing or damaged.`);
+    }
+    return blob;
+  });
+  const bytes = Buffer.concat(parts);
+  if (bytes.byteLength !== manifest.byteLength || sha256(bytes) !== recordDigest) throw new Error(`Audit record ${recordDigest} does not match its digest.`);
+  const record = JSON.parse(bytes.toString("utf8")) as { metadata?: { accepted?: LiveAuditRecord["accepted"] } };
+  const accepted = record.metadata?.accepted;
+  if (!accepted || accepted.receipt.deliveryId !== deliveryId) throw new Error(`Audit record ${recordDigest} names another delivery.`);
+  return {
+    namespace: String(event.namespace), eventCount: Number(event.event_count), evidenceDigest: String(event.evidence_digest),
+    journalCursor: Number(event.journal_cursor), deliveryId, acceptingHostEpoch: Number(event.accepting_host_epoch), recordDigest, accepted,
+  };
+}
+
+// The owner's imported copy of one accepted change's audit record.
+export function ownerAuditRecord(rootPath: string, deliveryId: string): LiveAuditRecord | null {
+  return withEngineDb(rootPath, (db) => readLiveAuditRecord(db, deliveryId));
 }
 
 export function replicationOpKindCount(rootPath: string, opKind: string): number {

@@ -424,7 +424,7 @@ export function startExistingOwnerDeviceTransport(options: {
     else if (restoring) operation.streams = [attachment(params.streamId,params.byteLength,params.digest,maxRestoreBytes!)];
     else if (method === "liveApplication.adoptOwner") operation.streams = [attachment(params.streamId,params.byteLength,params.digest,config.maxAdoptionBytes)];
     else if (method === "liveApplication.apply") {
-      const accepted = configRecord(params.accepted,["receipt","binding","authority","receivedAtMs"]);
+      const accepted = configRecord(params.accepted,["receipt","binding","authority","receivedAtMs"],["agentDeclaration"]);
       const receipt = configRecord(accepted.receipt,["deliveryId","updateDigest","journalCursor","acceptingHostEpoch"]);
       // The sender allocates the update stream first and the range stream second.
       operation.streams = [attachment(params.updateStreamId,updateBytes,receipt.updateDigest,20_971_520),attachment(params.rangeStreamId,rangeBytes,params.rangeDigest,Math.floor((updateBytes-2)/5)*16)];

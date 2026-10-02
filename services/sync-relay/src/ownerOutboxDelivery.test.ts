@@ -5,10 +5,11 @@ import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-s
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000) {
+function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclaration?: object) {
   const base = Buffer.alloc(1_048_576, 17);
   const binding = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: sha(base),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
-  const entries = [1,3,7].map(sequence => ({sequence,appendKey: `append-${sequence}`,deliveryId: `delivery-${sequence}`,updateDigest: sha(Buffer.from([sequence])),byteLength: 1,createdAtMs: sequence}));
+  const entries = [1,3,7].map(sequence => ({sequence,appendKey: `append-${sequence}`,deliveryId: `delivery-${sequence}`,updateDigest: sha(Buffer.from([sequence])),byteLength: 1,createdAtMs: sequence,
+    ...(sequence === 1 && agentDeclaration ? {agentDeclaration} : {})}));
   const host = {hostId: "host",hostEpoch: 1,instanceId: "instance",connectionId: "connection"};
   const requests: Array<{part: string; bytes: number}> = [], receipts: unknown[] = [];
   const state = {value: "active"};
@@ -58,6 +59,17 @@ it("drains small edits when their immutable base exceeds the aggregate drain bud
   expect(run.requests.filter(row => row.part === "base")).toHaveLength(0);
   expect(run.requests).toHaveLength(9);
   expect(run.requests.reduce((bytes, row) => bytes + row.bytes, 0)).toBeLessThan(10_000);
+});
+
+it("submits the agent each entry declared and none for an entry that declared none", async () => {
+  const agentDeclaration = {agentId: "trip-agent-ü",onBehalfOf: "local-person",depth: 2};
+  const run = fixture(2, 10_000, agentDeclaration);
+  expect(await run.run()).toEqual({admittedEntries: 2, hasMore: true});
+  const [first, second] = run.storage.commitLiveUpdateJournal.mock.calls.map(([input]) => (input as {metadata: Record<string, unknown>}).metadata);
+  expect(first).toMatchObject({deliveryId: "delivery-1",agentDeclaration});
+  expect(second).toMatchObject({deliveryId: "delivery-3"});
+  expect(second).not.toHaveProperty("agentDeclaration");
+  await expect(fixture(1, 10_000, {agentId: "",onBehalfOf: null,depth: 0}).run()).rejects.toThrow();
 });
 
 it("retains configured entry and byte limits without acknowledging unread updates", async () => {

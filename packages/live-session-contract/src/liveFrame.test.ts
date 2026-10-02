@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import vectors from "../vectors/live-frame-vectors.json";
 import { parseHostEpoch } from "./hostControl.js";
 import {
+  LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
   LIVE_FRAME_MINIMUM_MAX_BYTES,
   LiveFrameError,
   createLiveFrameSession,
@@ -121,6 +122,46 @@ describe("live frame codec", () => {
     expect(() => encodeLiveFrame(frame, 585)).toThrow();
     expect(() => createLiveFrameSession("client", { ...limits, receive: { ...receivePolicy, maxFrameBytes: 585 } })).toThrow();
     expect(encodeLiveFrame({ ...begin("submit-update"), deliveryId: "x".repeat(512) } as LiveFrame, 586)).toHaveLength(577);
+  });
+  it("appends an agent declaration after the delivery ID and leaves an undeclared submission unchanged", () => {
+    const plain = begin("submit-update");
+    const plainBytes = encodeLiveFrame(plain, 586);
+    expect(decodeLiveFrame(plainBytes, 586)).not.toHaveProperty("agentDeclaration");
+    const head = "0000000000000001" + "03" + "0000000000000002" + "00".repeat(32) + "0000000164";
+    expect(hex(plainBytes)).toBe("444c49560103000000000036" + head);
+    const literals = [
+      [{ agentId: "a", onBehalfOf: null, depth: 0 }, "444c4956010300000000003d" + head + "0000000161" + "00" + "00"],
+      [{ agentId: "a", onBehalfOf: "b", depth: 2 }, "444c49560103000000000042" + head + "0000000161" + "01" + "0000000162" + "02"],
+      [{ agentId: "ü", onBehalfOf: "人", depth: 64 }, "444c49560103000000000045" + head + "00000002c3bc" + "01" + "00000003e4baba" + "40"],
+    ] as const;
+    for (const [agentDeclaration, literal] of literals) {
+      const frame = { ...plain, agentDeclaration } as LiveFrame;
+      expect(hex(encodeLiveFrame(frame, 586))).toBe(literal);
+      expect(decodeLiveFrame(bytes(literal), 586)).toEqual(frame);
+    }
+  });
+  it("bounds a declared submission and refuses a malformed or undefined declaration", () => {
+    const largest = { ...begin("submit-update"), deliveryId: "x".repeat(512),
+      agentDeclaration: { agentId: "y".repeat(512), onBehalfOf: "z".repeat(512), depth: 64 } } as LiveFrame;
+    expect(LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES).toBe(1611);
+    expect(encodeLiveFrame(largest, LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES)).toHaveLength(LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES);
+    expect(() => encodeLiveFrame(largest, LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES - 1)).toThrow();
+    for (const agentDeclaration of [undefined, null, { agentId: "", onBehalfOf: null, depth: 0 }, { agentId: "a", onBehalfOf: null, depth: 65 },
+      { agentId: "a", onBehalfOf: null, depth: 0, principalId: "owner" }, { agentId: "a\u0085", onBehalfOf: null, depth: 0 }]) {
+      expect(() => encodeLiveFrame({ ...begin("submit-update"), agentDeclaration } as LiveFrame, 586)).toThrow(LiveFrameError);
+    }
+    expect(() => encodeLiveFrame({ ...begin("client-vector"), agentDeclaration: { agentId: "a", onBehalfOf: null, depth: 0 } } as LiveFrame, 586)).toThrow();
+    const head = "0000000000000001" + "03" + "0000000000000002" + "00".repeat(32) + "0000000164";
+    for (const [length, payload] of [["3d", "0000000161" + "02" + "00"], ["3d", "0000000161" + "00" + "41"], ["3e", "0000000161" + "00" + "00" + "00"],
+      ["3c", "0000000161" + "00"], ["3c", "00000000" + "00" + "00"]]) {
+      expect(() => decodeLiveFrame(bytes("444c495601030000000000" + length + head + payload), 586)).toThrow(LiveFrameError);
+    }
+  });
+  it("carries a declared submission through the live route", () => {
+    const { client, server } = makeLive();
+    const frame = { ...begin("submit-update", 2), agentDeclaration: { agentId: "trip-agent", onBehalfOf: null, depth: 1 } } as LiveFrame;
+    const received = deliver(client, server, frame);
+    try { expect(received.value.frame).toEqual(frame); } finally { received.value.transfer?.release(); received.release(); }
   });
   it("rejects corrupt headers, unsafe integers and unchecked announcements", () => {
     const literal = bytes(vectors.frames.find(v => v.name === "chunk")!.hex);

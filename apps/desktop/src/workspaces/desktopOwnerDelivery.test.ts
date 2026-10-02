@@ -3,7 +3,7 @@ import {parseDesktopOwnerDeliveryConfig, startDesktopOwnerDelivery} from "./desk
 import type {OwnerYDocDrainResult} from "./ownerYDocOutbox";
 const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
   currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1};
-const frames = {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+const frames = {receive: {maxFrameBytes: 2048, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096};
 const config = {version: 1, nativeConfigPath: "C:/test/native-owner.json", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2}, relayUrl: "https://relay.example.test", frames, attemptTimeoutMs: 10_000, retryDelayMs: 2500,
   documents: [{binding, relayDatabaseNamespace: "namespace", shareId: "share"}]};

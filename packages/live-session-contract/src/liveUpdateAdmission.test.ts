@@ -328,6 +328,36 @@ describe("agent declarations", () => {
     }
   });
 
+  it("keeps a present declaration after receivedAtMs and adds none when it is absent", () => {
+    const agentDeclaration = { agentId: "trip-agent-ü", onBehalfOf: "人", depth: 2 };
+    const owner = { principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null };
+    const parsed = parseRelayAcceptedLiveUpdate({ ...accepted, authority: owner, agentDeclaration });
+    expect(Object.keys(parsed)).toEqual(["receipt", "binding", "authority", "receivedAtMs", "agentDeclaration"]);
+    expect(parsed.agentDeclaration).toEqual(agentDeclaration);
+    // The declared person stays provenance; the authenticated owner stays the authority.
+    expect(parsed.authority).toEqual(owner);
+    expect(parseAdmittedLiveUpdateMetadata({ ...admittedMetadata, accepted: { ...accepted, authority: owner, agentDeclaration } })
+      .accepted.agentDeclaration).toEqual(agentDeclaration);
+    for (const shared of [authority, { ...authority, principalKind: "link" }]) {
+      expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, authority: shared, agentDeclaration })).toThrow(TypeError);
+    }
+    expect(parseRelayAcceptedLiveUpdate(accepted)).not.toHaveProperty("agentDeclaration");
+    const submission = { deliveryId: "delivery-1", updateDigest: digestA, binding };
+    expect(parseLiveUpdateSubmissionMetadata({ ...submission, agentDeclaration }).agentDeclaration).toEqual(agentDeclaration);
+    expect(parseLiveUpdateSubmissionMetadata(submission)).not.toHaveProperty("agentDeclaration");
+  });
+
+  it("refuses an undefined, null, or malformed declaration member and any other member", () => {
+    const submission = { deliveryId: "delivery-1", updateDigest: digestA, binding };
+    for (const agentDeclaration of [undefined, null, {}, { agentId: "agent", onBehalfOf: null, depth: 65 }]) {
+      expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, agentDeclaration })).toThrow(TypeError);
+      expect(() => parseLiveUpdateSubmissionMetadata({ ...submission, agentDeclaration })).toThrow(TypeError);
+    }
+    const agentDeclaration = { agentId: "agent", onBehalfOf: null, depth: 0 };
+    expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, agentDeclaration, agent: "agent" })).toThrow(TypeError);
+    expect(() => parseLiveUpdateReceipt({ ...receipt, agentDeclaration })).toThrow(TypeError);
+  });
+
   it("refuses the engine's out-of-bounds values and any other field", () => {
     for (const declaration of [
       { agentId: "", onBehalfOf: null, depth: 0 },
