@@ -14,7 +14,10 @@ export interface JournalAdapter {
   commit(storage: StorageContext, input: LiveUpdateJournalCommitInput): RelayLiveUpdateJournalResult;
   read(storage: StorageContext, input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult;
 }
-interface Settings { updates: number; warmupUpdates: number; pairs: number; resultPath: string; sources: Record<string, string>; }
+interface Settings { updates: number; warmupUpdates: number; pairs: number; profile?: boolean; resultPath: string; sources: Record<string, string>; }
+interface ProfileScope { name: string; start: number; children: number; }
+interface AdmissionProfile { begin(name: string): ProfileScope | undefined; end(scope?: ProfileScope): void; }
+declare global { var __liveAdmissionProfile: AdmissionProfile | undefined; }
 const sha = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 const quantile = (samples: number[], fraction: number) => [...samples].sort((a, b) => a - b)[Math.max(0, Math.ceil(samples.length * fraction) - 1)] ?? 0;
 const summary = (samples: number[]) => ({ count: samples.length, medianMs: quantile(samples, 0.5), p95Ms: quantile(samples, 0.95), totalMs: samples.reduce((a, b) => a + b, 0) });
@@ -31,9 +34,46 @@ export async function runAdmissionBenchmark(settings: Settings, adapters: Record
     const context = f.storage as StorageContext;
     const adapter = adapters[label];
     const admissionMs: number[] = [], transactionMs: number[] = [], checkpointAdmissionMs: number[] = [];
+    const cutReadMs: number[] = [], admissionAndCutReadMs: number[] = [];
     const fixtureHash = createHash('sha256').update(baselineBytes);
     let checkpoint: { digest: string; ranges: readonly LiveUpdateStructRange[] } | undefined;
     let transactionDuration = 0, transactionCalls = 0, checkpointCount = 0;
+    let profiling = false;
+    const profileStack: ProfileScope[] = [], profileTotals: Record<string, number> = {}, profileSamples: Record<string, number[]> = {}, cutReadProfileSamples: Record<string, number[]> = {};
+    const profiler: AdmissionProfile = {
+      begin(name) {
+        if (!profiling) return;
+        const scope = { name, start: performance.now(), children: 0 }; profileStack.push(scope); return scope;
+      },
+      end(scope) {
+        if (!scope) return;
+        if (profileStack.pop() !== scope) throw Error('Unbalanced admission profile');
+        const elapsed = performance.now() - scope.start;
+        profileTotals[scope.name] = (profileTotals[scope.name] ?? 0) + elapsed - scope.children;
+        const parent = profileStack.at(-1); if (parent) parent.children += elapsed;
+      },
+    };
+    const originalPrepare = context.db.prepare.bind(context.db), originalExec = context.db.exec.bind(context.db);
+    if (settings.profile) {
+      globalThis.__liveAdmissionProfile = profiler;
+      context.db.prepare = ((sql: string) => {
+        const scope = profiler.begin('SQLite prepare');
+        let statement: ReturnType<typeof context.db.prepare>;
+        try { statement = originalPrepare(sql); } finally { profiler.end(scope); }
+        return new Proxy(statement, { get(target, key) {
+          const value = Reflect.get(target, key);
+          if (typeof value !== 'function') return value;
+          return (...args: unknown[]) => {
+            const scope = profiler.begin(key === 'run' ? 'SQLite writes' : 'SQLite reads');
+            try { return Reflect.apply(value, target, args); } finally { profiler.end(scope); }
+          };
+        } });
+      }) as typeof context.db.prepare;
+      context.db.exec = ((sql: string) => {
+        const scope = profiler.begin(sql === 'COMMIT' ? 'SQLite commit and fsync' : 'SQLite transaction control');
+        try { return originalExec(sql); } finally { profiler.end(scope); }
+      }) as typeof context.db.exec;
+    }
     const originalTx = context.tx.bind(context);
     try {
       f.write(db => {
@@ -56,7 +96,16 @@ export async function runAdmissionBenchmark(settings: Settings, adapters: Record
         const actor = { kind: 'named' as const, grantId: 'bench-grant-' + account, userId: accountId };
         const current = f.storage.resolveCurrentLiveDocumentBinding({ document: f.input.evidence.document, actor });
         if (current.kind !== 'current') throw Error('Current binding refused: ' + JSON.stringify(current));
+        for (const key of Object.keys(profileTotals)) profileTotals[key] = 0;
+        profiling = settings.profile === true;
+        const readStart = performance.now();
         const cut = adapter.read(context, { document: f.input.evidence.document });
+        const readElapsed = performance.now() - readStart;
+        profiling = false;
+        if (settings.profile) {
+          profileTotals.other = readElapsed - Object.values(profileTotals).reduce((a, b) => a + b, 0);
+          for (const [key, value] of Object.entries(profileTotals)) (cutReadProfileSamples[key] ??= []).push(value);
+        }
         if (cut.kind !== 'cut') throw Error('Cut refused: ' + JSON.stringify(cut));
         if (checkpoint?.digest !== cut.cut.checkpoint.digest) {
           const registeredCheckpoint = validateCheckpoint({ document: cut.cut.document, currentPath: cut.cut.currentPath, checkpoint: cut.cut.checkpoint.bytes });
@@ -87,14 +136,22 @@ export async function runAdmissionBenchmark(settings: Settings, adapters: Record
           : { ...common, metadata: { deliveryId: 'bench-' + index, updateDigest: sha(updateBytes), binding: current.binding }, validation: { kind: 'accepted' as const, evidence: { ...ownedEvidence, candidate: { updateDigest: candidate.updateDigest, ranges: candidate.ranges } } } };
         fixtureHash.update(JSON.stringify({ index, actor, authorContext })).update(updateBytes);
         transactionDuration = 0; transactionCalls = 0;
+        for (const key of Object.keys(profileTotals)) profileTotals[key] = 0;
+        profiling = settings.profile === true;
         const start = performance.now();
         const result = adapter.commit(context, input as LiveUpdateJournalCommitInput);
         const elapsed = performance.now() - start;
+        profiling = false;
+        if (settings.profile) {
+          profileTotals.other = elapsed - Object.values(profileTotals).reduce((a, b) => a + b, 0);
+          for (const [key, value] of Object.entries(profileTotals)) (profileSamples[key] ??= []).push(value);
+        }
         if (result.result.kind !== 'accepted' || result.result.replayed || transactionCalls !== 1) throw Error('Admission refused: ' + JSON.stringify(result.result));
         if (label === 'after' && JSON.stringify(result.admitted?.metadata.authorSnapshot) !== JSON.stringify([
           { kind: 'human', humanId: accountId, humanName: 'Account ' + account }, { kind: 'agent', ...authorContext.agent },
         ])) throw Error('Authored fixture did not record its matching human and agent snapshot');
         admissionMs.push(elapsed); transactionMs.push(transactionDuration);
+        cutReadMs.push(readElapsed); admissionAndCutReadMs.push(readElapsed + elapsed);
         if (result.admitted?.metadata.checkpointCoverage !== undefined || liveJournalCheckpointDue(cut.cut.suffixCount + 1, cut.cut.suffixBytes + updateBytes.byteLength)) { checkpointCount++; checkpointAdmissionMs.push(elapsed); }
         if ((index + 1) % 1000 === 0) console.log(label + ' pair ' + pair + ': ' + (index + 1) + '/' + count);
       }
@@ -104,8 +161,11 @@ export async function runAdmissionBenchmark(settings: Settings, adapters: Record
         fixtureDigest = digest;
       }
       return { label, pair, warmup, updates: count, fixtureDigest: digest, sqlite, schemaDigest, checkpointCount,
-        admission: summary(admissionMs), transaction: summary(transactionMs), checkpointAdmission: summary(checkpointAdmissionMs), admissionMs, transactionMs };
-    } finally { context.tx = originalTx; f.close(); cleanupLiveDeliveryFixtures(); }
+        admission: summary(admissionMs), transaction: summary(transactionMs), cutRead: summary(cutReadMs), admissionAndCutRead: summary(admissionAndCutReadMs),
+        checkpointAdmission: summary(checkpointAdmissionMs), admissionMs, transactionMs,
+        ...(settings.profile ? { profile: Object.fromEntries(Object.entries(profileSamples).map(([name, values]) => [name, summary(values)])),
+          cutReadProfile: Object.fromEntries(Object.entries(cutReadProfileSamples).map(([name, values]) => [name, summary(values)])) } : {}) };
+    } finally { context.tx = originalTx; context.db.prepare = originalPrepare; context.db.exec = originalExec; globalThis.__liveAdmissionProfile = undefined; f.close(); cleanupLiveDeliveryFixtures(); }
   }
   if (settings.warmupUpdates > 0) for (const label of ['before', 'after'] as const) await run(label, settings.warmupUpdates, true, 0);
   for (let pair = 0; pair < settings.pairs; pair++) {

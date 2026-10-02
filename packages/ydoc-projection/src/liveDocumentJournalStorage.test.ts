@@ -338,6 +338,35 @@ it.each(['client_id', 'start_clock', 'end_clock'] as const)('checks retained suf
   } finally { f.close() }
 })
 
+it('reuses an unchanged issued cut without rereading the suffix or full provenance', () => {
+  const f = registered()
+  try {
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update(), 'first')).result.kind).toBe('accepted')
+    const input = f.capture(f.update('next', 'value'), 'next')
+    const db = (f.storage as StorageContext).db, prepare = db.prepare.bind(db), queries: string[] = []
+    const spy = vi.spyOn(db, 'prepare').mockImplementation(sql => { queries.push(sql); return prepare(sql) })
+    try {
+      expect(f.storage.commitLiveUpdateJournal(input).result.kind).toBe('accepted')
+      expect(queries.some(sql => sql.includes('LIMIT 4095') || sql.includes('LEFT JOIN sync_relay_live_update_journal'))).toBe(false)
+    } finally { spy.mockRestore() }
+  } finally { f.close() }
+})
+
+it('invalidates an issued cut after a same-connection write, including rollback', () => {
+  const f = registered()
+  try {
+    expect(f.storage.commitLiveUpdateJournal(f.capture(f.update(), 'first')).result.kind).toBe('accepted')
+    const input = f.capture(f.update('next', 'value'), 'next'), db = (f.storage as StorageContext).db
+    db.exec('BEGIN; UPDATE sync_relay_live_update_journal SET received_at_ms=received_at_ms+1; ROLLBACK')
+    const prepare = db.prepare.bind(db), queries: string[] = []
+    const spy = vi.spyOn(db, 'prepare').mockImplementation(sql => { queries.push(sql); return prepare(sql) })
+    try {
+      expect(f.storage.commitLiveUpdateJournal(input).result.kind).toBe('accepted')
+      expect(queries.some(sql => sql.includes('LIMIT 4095'))).toBe(true)
+    } finally { spy.mockRestore() }
+  } finally { f.close() }
+})
+
 it.each(['getter', 'proxy', 'symbol', 'non-enumerable', 'prototype-key', 'negative-zero'] as const)('rejects hostile suffix token %s without caller code or writes', kind => {
   const f = registered()
   try {

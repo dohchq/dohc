@@ -6,6 +6,7 @@ import {canonicalVersionedAcceptedMetadata as canonicalAcceptedMetadata, initial
 import { deriveLiveAuthorSnapshot } from "./liveAuthorSnapshot";
 import { assessLiveAuthorWindow, liveAuthorCoverageCheckpointDue } from "./liveAuthorWindow";
 import { LIVE_AUTHOR_CLIENTS } from "./liveAuthorshipSchema";
+import { captureSqliteReadRevisionMatches } from "./readRevision";
 import { parseLiveAuthorSnapshot, type LiveAuthorSnapshot } from "@dohc/live-session-contract";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual, types as nodeTypes } from "node:util";
@@ -59,9 +60,16 @@ function journalArray<T>(value: unknown, maximum: number, capture: (value: unkno
   });
 }
 function journalRecord(value: unknown, required: readonly string[], optional: readonly string[]): Record<string, unknown> {
-  baselineRecord(value, required, true);
+  const result = baselineRecord(value, required, true);
   const descriptors = Object.getOwnPropertyDescriptors(value);
-  return baselineRecord(value, [...required, ...optional.filter(key => Object.hasOwn(descriptors,key))]);
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (typeof key !== "string" || (!required.includes(key) && !optional.includes(key))) throw new TypeError("Invalid journal fields.");
+    if (required.includes(key)) continue;
+    const descriptor = descriptors[key]!;
+    if (!descriptor.enumerable || !Object.hasOwn(descriptor, "value")) throw new TypeError("Invalid journal field.");
+    result[key] = descriptor.value;
+  }
+  return result;
 }
 function journalRanges(value: unknown): LiveUpdateStructRange[] {
   const ranges = journalArray(value, Number.MAX_SAFE_INTEGER, row => parseLiveUpdateStructRange(baselineRecord(row, ["clientId", "startClock", "endClock"])));
@@ -266,6 +274,45 @@ function snapshotJournalCut(value: unknown): LiveUpdateJournalCut {
   return { ...copyJournalData({ ...outer, suffix: [] }) as LiveUpdateJournalCut, suffix };
 }
 
+interface IssuedJournalCut {
+  storage: StorageContext;
+  cut: LiveUpdateJournalCut;
+  coverage: LiveUpdateStructRange[];
+  current: () => boolean;
+}
+const issuedJournalCuts = new WeakMap<object, IssuedJournalCut>();
+
+// Compare data descriptors, never caller getters or proxy traps. The issued cut
+// stays private, including its byte arrays; public tokens remain mutable.
+function journalDataMatches(value: unknown, expected: unknown): boolean {
+  if (expected === null || typeof expected !== "object") return Object.is(value, expected);
+  if (typeof value !== "object" || value === null || nodeTypes.isProxy(value)) return false;
+  if (nodeTypes.isUint8Array(expected)) {
+    if (!nodeTypes.isUint8Array(value)) return false;
+    return Buffer.compare(journalBytes(value), expected) === 0;
+  }
+  const array = Array.isArray(expected);
+  if (Array.isArray(value) !== array) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (array ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) return false;
+  const keys = Reflect.ownKeys(expected);
+  if (Reflect.ownKeys(value).length !== keys.length) return false;
+  for (const key of keys) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !Object.hasOwn(descriptor, "value") || descriptor.enumerable !== !(array && key === "length") ||
+      !journalDataMatches(descriptor.value, Reflect.get(expected, key))) return false;
+  }
+  return true;
+}
+
+function captureJournalCut(storage: StorageContext, value: unknown): { token: LiveUpdateJournalCut; issued?: IssuedJournalCut } {
+  const issued = typeof value === "object" && value !== null ? issuedJournalCuts.get(value) : undefined;
+  if (issued?.storage === storage && journalDataMatches(value, issued.cut)) return { token: issued.cut, issued };
+  const token = snapshotJournalCut(value);
+  verifyJournalCut(token);
+  return { token };
+}
+
 function compareJournalSuffixRow(raw: Record<string, unknown>, expected: LiveUpdateJournalCut["suffix"][number],
   provenance: readonly Record<string, unknown>[]): void {
   const { receipt, binding, authority, receivedAtMs } = expected.metadata.accepted;
@@ -378,10 +425,17 @@ export function subtractJournalRanges(candidate: readonly LiveUpdateStructRange[
 
 export function readLiveUpdateJournalCut(storage: StorageContext, input: { document: LiveDocumentKey }): LiveUpdateJournalCutResult {
     const outer = baselineRecord(input, ["document"]), document = journalDocument(outer.document);
-    const result = storage.readTx(() => liveJournalCut(storage, document));
+    let current: (() => boolean) | undefined;
+    const result = storage.readTx(() => {
+      const read = liveJournalCut(storage, document);
+      if (read.kind === "cut") current = captureSqliteReadRevisionMatches(storage.db);
+      return read;
+    });
     if (result.kind === "cut") {
       verifyJournalCut(result.cut);
-      return { kind: "cut", cut: result.cut };
+      const cut = structuredClone(result.cut);
+      issuedJournalCuts.set(cut, { storage, cut: result.cut, coverage: result.coverage, current: current! });
+      return { kind: "cut", cut };
     }
     return result;
   }
@@ -492,8 +546,7 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
     const actorKind = baselineRecord(outer.actor, ["kind"], true).kind;
     if (actorKind !== "owner" && actorKind !== "named" && actorKind !== "link") return { result: { kind: "refused", reason: "authority-refused" }, admitted: null };
     const request = snapshotCurrentBindingRequest({ document, actor: outer.actor as CurrentLiveBindingRequest["actor"] });
-    const token = snapshotJournalCut(outer.cutToken);
-    verifyJournalCut(token);
+    const { token, issued } = captureJournalCut(storage, outer.cutToken);
     const updateBytes = journalBytes(outer.updateBytes), receivedAtMs = authorityInteger(outer.receivedAtMs);
     if (createHash("sha256").update(updateBytes).digest("hex") !== metadata.updateDigest) return { result: { kind: "refused", reason: "invalid-update" }, admitted: null };
     const anticipatedCheckpoint = liveJournalCheckpointDue(token.suffixCount + 1, token.suffixBytes + updateBytes.byteLength);
@@ -539,7 +592,9 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
           liveJournalCoverage(storage, document, stored.ranges);
           return { reply: { result: { kind: "accepted" as const, receipt: { ...previous.receipt }, replayed: true }, admitted: row.admitted }, row, history };
         }
-        const read = readJournalCut(storage, document, token);
+        // BEGIN IMMEDIATE excludes competing writers after this revision check.
+        const read = issued?.current() && isDeepStrictEqual(token.document, document) ? { kind: "cut" as const, cut: token, coverage: issued.coverage }
+          : readJournalCut(storage, document, token);
         if (read.kind !== "cut") return refused({ kind: "refused", reason: read.reason });
         if (read.cut.highWater !== token.highWater) {
           journalIntegrity(read.cut.highWater !== null && (token.highWater === null || read.cut.highWater > token.highWater));
