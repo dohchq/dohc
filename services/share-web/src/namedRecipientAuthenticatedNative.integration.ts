@@ -301,7 +301,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     for (const recipient of [first, peer]) await browserExpect(recipient.editor).toHaveAttribute("contenteditable", "false");
     expect(frameChanges.listenerCount()).toBe(0); results.grantRetired = true;
     await first.page.getByRole("button", {name: "Refresh files", exact: true}).click();
-    await browserExpect(first.page.getByRole("alert")).toContainText("could not open this invitation");
+    await browserExpect(first.page.getByRole("alert")).toContainText("The owner removed your access.");
     await browserExpect(first.page.getByRole("button", {name: "docs/a.md", exact: true})).toHaveCount(0);
     await first.page.screenshot({path: join(root, "revoked.png"), fullPage: true});
     expect(browserErrors).toEqual([]);
