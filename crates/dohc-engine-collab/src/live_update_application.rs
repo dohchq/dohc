@@ -1401,6 +1401,53 @@ mod tests {
                 "unexercised {parser}"
             );
         }
+        // Agent declarations. The loop above already parsed each row; these
+        // prove the shared rows still exercise every declaration rule. A
+        // named or link record that declares an agent is refused for its
+        // lane alone: without the declaration it parses, and the committed
+        // record gate refuses it as the parser does.
+        let accepted_of = |row: &Value| match row["parser"].as_str() {
+            Some("parseRelayAcceptedLiveUpdate") => Some(row["input"].clone()),
+            Some("parseAdmittedLiveUpdateMetadata") => Some(row["input"]["accepted"].clone()),
+            _ => None,
+        };
+        let declared_accepted = vectors["accepted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(accepted_of)
+            .filter(|accepted| accepted.get("agentDeclaration").is_some())
+            .count();
+        let (mut lane_refused, mut malformed_refused) = (0, 0);
+        for row in vectors["refused"].as_array().unwrap() {
+            let Some(accepted) = accepted_of(row) else {
+                continue;
+            };
+            if accepted.get("agentDeclaration").is_none() {
+                continue;
+            }
+            if accepted["authority"]["principalKind"] == "owner" {
+                malformed_refused += 1;
+                continue;
+            }
+            lane_refused += 1;
+            let parser = row["parser"].as_str().unwrap();
+            let mut without = row["input"].clone();
+            let record = if parser == "parseRelayAcceptedLiveUpdate" {
+                &mut without
+            } else {
+                &mut without["accepted"]
+            };
+            record.as_object_mut().unwrap().remove("agentDeclaration");
+            assert!(shared_parser(parser, without).is_ok(), "{}", row["case"]);
+            let mut committed: RelayAcceptedLiveUpdate = serde_json::from_value(accepted).unwrap();
+            assert!(committed.validate().is_err(), "{}", row["case"]);
+            committed.agent_declaration = None;
+            assert!(committed.validate().is_ok(), "{}", row["case"]);
+        }
+        assert!(declared_accepted >= 2, "declared owner records");
+        assert!(lane_refused >= 2, "named and link declarations");
+        assert!(malformed_refused >= 6, "malformed owner declarations");
         for row in vectors["jsonNumbers"].as_array().unwrap() {
             let input = serde_json::from_str(row["json"].as_str().unwrap()).unwrap();
             assert_eq!(

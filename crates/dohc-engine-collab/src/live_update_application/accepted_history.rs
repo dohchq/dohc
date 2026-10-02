@@ -836,6 +836,65 @@ fn verify_restore_state(
 mod tests {
     use super::*;
 
+    /// The relay computes these digests from the same shared rows. Native
+    /// history must reproduce each document's initial digest, the event's
+    /// canonical metadata bytes, and its accepted-event digest, with and
+    /// without a Unicode agent declaration.
+    #[test]
+    fn shared_accepted_history_digests_match_the_relay() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../../packages/live-session-contract/vectors/live-update-admission-vectors.json"
+        ))
+        .unwrap();
+        let rows = vectors["acceptedHistoryDigests"].as_array().unwrap();
+        let mut declared = 0;
+        for row in rows {
+            let case = &row["case"];
+            let metadata = parse_admitted_metadata(row["metadata"].clone()).unwrap();
+            let binding = metadata.accepted.binding.clone();
+            let document = &row["document"];
+            assert_eq!(document["workspaceId"], binding.workspace_id, "{case}");
+            assert_eq!(document["mainVersionId"], binding.main_version_id, "{case}");
+            assert_eq!(document["objectId"], binding.object_id, "{case}");
+            assert_eq!(
+                document["lineageClaimId"], binding.lineage_claim_id,
+                "{case}"
+            );
+            let held = Registration {
+                workspace_id: binding.workspace_id.clone(),
+                namespace: row["namespace"].as_str().unwrap().into(),
+                coordinate: ApplicationHostCoordinate {
+                    host_id: "host".into(),
+                    host_epoch: 1,
+                    instance_id: "instance".into(),
+                    connection_id: "connection".into(),
+                },
+                binding,
+                live: true,
+            };
+            let initial = initial_digest(&held).unwrap();
+            assert_eq!(initial, row["initialDigest"].as_str().unwrap(), "{case}");
+            assert_eq!(
+                serde_json::to_string(&metadata).unwrap(),
+                row["canonicalJson"].as_str().unwrap(),
+                "{case}"
+            );
+            let count = row["eventCount"].as_i64().unwrap();
+            assert_eq!(
+                next_digest(&initial, count, &metadata).unwrap(),
+                row["eventDigest"].as_str().unwrap(),
+                "{case}"
+            );
+            if metadata.accepted.agent_declaration.is_some() {
+                declared += 1;
+            }
+        }
+        assert!(
+            declared > 0 && declared < rows.len(),
+            "absent and declared rows"
+        );
+    }
+
     const ACCEPTED: &str = r#"{"receipt":{"deliveryId":"delivery-1","updateDigest":"1111111111111111111111111111111111111111111111111111111111111111","journalCursor":7,"acceptingHostEpoch":1},"binding":{"workspaceId":"workspace-1","mainVersionId":"main","objectId":"object-1","lineageClaimId":"2222222222222222222222222222222222222222222222222222222222222222","currentPath":"notes/a.md","selectorPaths":["notes/a.md"],"restoreFenceGeneration":0},"authority":{"grantGeneration":null,"grantId":null,"principalId":"owner-1","principalKind":"owner"},"receivedAtMs":10"#;
 
     /// The relay hashes the same bytes. An undeclared event has no

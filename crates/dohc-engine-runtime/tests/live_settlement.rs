@@ -964,6 +964,81 @@ async fn live_settlement_names_declared_agents_of_its_exact_interval() {
     f.assert_projection();
 }
 
+/// A delivery whose bytes an earlier delivery in the same interval already
+/// carried deduplicates natively, yet the settlement moment of that
+/// content-bearing interval still names its declared agent beside the first.
+#[tokio::test]
+async fn settlement_moment_names_a_byte_deduplicated_declared_delivery() {
+    let f = Fixture::new().await;
+    f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    let before = f.counts();
+    let added = f.doc.richdoc_append_paragraph("Agent paragraph");
+    let (_, first) = f
+        .apply_declared(
+            3,
+            added.clone(),
+            owner_authority(),
+            2,
+            agent("trip-agent", "owner"),
+        )
+        .await;
+    assert!(matches!(first, ApplicationResult::Applied(..)));
+    let (terminal, repeated) = f
+        .apply_declared(
+            4,
+            added,
+            owner_authority(),
+            3,
+            agent("review-agent", "owner"),
+        )
+        .await;
+    let ApplicationResult::Applied(ack, _) = repeated else {
+        panic!("the repeated delivery applies");
+    };
+    assert!(!ack.application_replayed);
+    let sequences: Vec<i64> = f.read(|db| {
+        db.prepare(
+            "SELECT local_ydoc_sequence FROM live_device_update_applications \
+             WHERE journal_cursor IN (3,4) ORDER BY journal_cursor",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+    });
+    assert_eq!(
+        sequences[0], sequences[1],
+        "the second delivery's bytes deduplicate"
+    );
+    let settled = f
+        .settle(Some(terminal), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(settled.application_count, 2);
+    assert_eq!(
+        f.counts(),
+        (before.0 + 1, before.1 + 1),
+        "the interval creates a moment"
+    );
+    let authors: String = f.read(|db| {
+        db.query_row(
+            "SELECT author_json FROM moments WHERE moment_id=?1",
+            [&settled.moment_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    });
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&authors).unwrap(),
+        serde_json::json!([
+            {"kind":"agent","agentId":"review-agent","onBehalfOf":"owner","depth":1},
+            {"kind":"agent","agentId":"trip-agent","onBehalfOf":"owner","depth":1},
+        ])
+    );
+    f.assert_projection();
+}
+
 /// A delivery whose agent the next settlement could not name within the
 /// moment's author bounds waits for that settlement instead of being
 /// truncated. After it, the same delivery applies.
