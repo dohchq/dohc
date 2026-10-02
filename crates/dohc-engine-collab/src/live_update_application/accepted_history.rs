@@ -1068,9 +1068,7 @@ mod tests {
     }
 
     const ACCEPTED: &str = r#"{"receipt":{"deliveryId":"delivery-1","updateDigest":"1111111111111111111111111111111111111111111111111111111111111111","journalCursor":7,"acceptingHostEpoch":1},"binding":{"workspaceId":"workspace-1","mainVersionId":"main","objectId":"object-1","lineageClaimId":"2222222222222222222222222222222222222222222222222222222222222222","currentPath":"notes/a.md","selectorPaths":["notes/a.md"],"restoreFenceGeneration":0},"authority":{"grantGeneration":null,"grantId":null,"principalId":"owner-1","principalKind":"owner"},"receivedAtMs":10"#;
-    pub(super) const ACCEPTED_COMPLETE: &str = concat!(
-        r#"{"receipt":{"deliveryId":"delivery-1","updateDigest":"1111111111111111111111111111111111111111111111111111111111111111","journalCursor":7,"acceptingHostEpoch":1},"binding":{"workspaceId":"workspace-1","mainVersionId":"main","objectId":"object-1","lineageClaimId":"2222222222222222222222222222222222222222222222222222222222222222","currentPath":"notes/a.md","selectorPaths":["notes/a.md"],"restoreFenceGeneration":0},"authority":{"grantGeneration":null,"grantId":null,"principalId":"owner-1","principalKind":"owner"},"receivedAtMs":10}"#
-    );
+    pub(super) const ACCEPTED_COMPLETE: &str = r#"{"receipt":{"deliveryId":"delivery-1","updateDigest":"1111111111111111111111111111111111111111111111111111111111111111","journalCursor":7,"acceptingHostEpoch":1},"binding":{"workspaceId":"workspace-1","mainVersionId":"main","objectId":"object-1","lineageClaimId":"2222222222222222222222222222222222222222222222222222222222222222","currentPath":"notes/a.md","selectorPaths":["notes/a.md"],"restoreFenceGeneration":0},"authority":{"grantGeneration":null,"grantId":null,"principalId":"owner-1","principalKind":"owner"},"receivedAtMs":10}"#;
 
     /// The relay hashes the same bytes. An undeclared event has no
     /// agentDeclaration member, so its evidence digest is unchanged; a
