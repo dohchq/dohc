@@ -392,7 +392,9 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await typeAfter(page, H2, ` ${R2}`);
       await expect(saveState(page)).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
       await expect(editor(owner!.page)).toContainText(R2, { timeout: 60_000 });
+      await expect.poll(() => cliRead(ownerTemp), { timeout: 60_000 }).toContain(R2);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, H2, A2, R2], [R1]), { timeout: 60_000 }).toBe(true);
+      await expect(owner!.page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 60_000 });
     });
 
     await test.step("the stopped recipient's access stays ended", async () => {
