@@ -24,6 +24,9 @@ export class OwnerCommittedDelivery {
   readonly #active = new Set<string>();
   readonly #registrations: LiveHostRegistrations;
   readonly #adopted = new Map<string,{registrationId: number; adoptionId: string; sequence: number; binding: LiveObjectBinding;settled?: CommittedSettlement}>();
+  // The adoption, per document, whose divergent seed a pass of this connection
+  // proved the host applied. Empty on a new connection; cleared with the adoption.
+  readonly #seedApplied = new Map<string,string>();
   constructor(private readonly storage: SyncRelayStorage,history: LiveJournalHistoryAuthority,private readonly connection: {
     client: EngineClient; workspace: string; host: LiveHostConnectionCoordinate; deadlineMs: number; nextRequestId(): number;
     bounds: { maxBytes: number; maxEvents: number };
@@ -41,6 +44,12 @@ export class OwnerCommittedDelivery {
     if (!saved) throw new Error("Owner registration is unavailable.");
     return this.#registrations.capture(saved.binding);
   }
+  /** Whether the host applied the held adoption's divergent seed, or the adoption had none. A new stream waits for it. */
+  adoptionSeedApplied(document: LiveDocumentKey): boolean {
+    const key = JSON.stringify(parseLiveDocumentKey(document)), saved = this.#adopted.get(key);
+    return saved !== undefined && this.#seedApplied.get(key) === saved.adoptionId;
+  }
+  #forget(key: string) { this.#adopted.delete(key); this.#seedApplied.delete(key); }
   get workspace() { return this.connection.workspace; }
   async #run(value: LiveDocumentKey,settle: false,signal?: AbortSignal): Promise<OwnerDeliveryOutcome>;
   async #run(value: LiveDocumentKey,settle: true,signal?: AbortSignal): Promise<CommittedSettlement>;
@@ -59,6 +68,7 @@ export class OwnerCommittedDelivery {
       const existing = this.#store.existingOwnerDelivery({host: c.host, document, actor});
       if (existing && (!saved || !isDeepStrictEqual(saved.binding, existing.binding))) {
         this.#registrations.invalidate(document.objectId);
+        this.#seedApplied.delete(key);
         const progress = this.#store.ownerDeliveryProgress(existing);
         const registered = await c.client.sendRequest({...request(), method: "liveApplication.register", params: {
           binding: {...existing.binding, selectorPaths: [...existing.binding.selectorPaths]}, resumeAdoptionId: progress.adoptionId,
@@ -101,6 +111,10 @@ export class OwnerCommittedDelivery {
       if (!isDeepStrictEqual(adopted.binding,current.binding)) throw new Error("Owner binding requires reconciliation.");
       let latest = current;
       let progress = this.#store.ownerDeliveryProgress(latest);
+      // The adoption as the relay recorded it from the host's ACK, never the
+      // greatest sequence delivery has reached since.
+      if (progress.adoptionId !== adopted.adoptionId) throw new Error("Owner adoption changed.");
+      const recorded = {adoptionId: progress.adoptionId, sequence: progress.adoptionSequence};
       let appliedCount = 0;
       // Set inside applyPending, so declared wide for the reads after it.
       let pendingReason = null as string | null;
@@ -152,6 +166,7 @@ export class OwnerCommittedDelivery {
       };
       const outbox = await drainOwnerOutbox({storage: this.storage,admission: c.ownerAdmission,client: c.client,workspace: c.workspace,host: c.host,
         registrationId,binding: saved.binding,nextRequestId: c.nextRequestId,deadlineMs: c.deadlineMs,signal,assertCurrent: current.assertCurrent,
+        adoption: {...recorded, applied: () => {if (this.#adopted.get(key) === adopted) this.#seedApplied.set(key, recorded.adoptionId);}},
         applyThrough: async receipt => {
           await applyPending(receipt);
           check(); latest.assertCurrent();
@@ -187,7 +202,7 @@ export class OwnerCommittedDelivery {
     if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
     this.#active.add(key);
     this.#registrations.invalidate(document.objectId);
-    this.#adopted.delete(key);
+    this.#forget(key);
     try {return await deliverStopRestore({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal});}
     finally {this.#active.delete(key);}
   }
@@ -200,7 +215,7 @@ export class OwnerCommittedDelivery {
     if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
     this.#active.add(key);
     this.#registrations.invalidate(document.objectId);
-    this.#adopted.delete(key);
+    this.#forget(key);
     try {return await restore.prepare({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal});}
     finally {this.#active.delete(key);}
   }
@@ -234,7 +249,7 @@ export class OwnerCommittedDelivery {
     if (this.#active.has(key)) throw new Error("An owner delivery already holds this document.");
     this.#active.add(key);
     this.#registrations.invalidate(document.objectId);
-    this.#adopted.delete(key);
+    this.#forget(key);
     try {
       return await restore.complete({store: this.#store, lookup, connection: this.connection, deliveryKind: "owner", signal}, proposalDigest);
     } finally {this.#active.delete(key);}

@@ -24,7 +24,8 @@ function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0} = {}) {
   const store = {
     existingOwnerDelivery: vi.fn(capture),
     openOwnerDelivery: vi.fn(capture),
-    ownerDeliveryProgress: vi.fn(() => ({terminal,sequence: terminal?.journalCursor ?? 0,adoptionId: "adoption"})),
+    // The tip sequence moves with delivery; the adoption's own sequence never does.
+    ownerDeliveryProgress: vi.fn(() => ({terminal,sequence: terminal?.journalCursor ?? 0,adoptionId: "adoption",adoptionSequence: 7})),
     nextOwnerApplication: vi.fn((value: ReturnType<typeof capture>) => {
       const next = journal.find(row => row.journalCursor > (terminal?.journalCursor ?? 0) && row.journalCursor <= value.high);
       return next ? {metadata: {accepted: {receipt: next}}} : undefined;
@@ -51,14 +52,18 @@ function fixture({prefix = 0, owners = 1, maxEvents = 10, suffix = 0} = {}) {
       const ack = durable.get(identity.deliveryId); return ack ? {...ack,applicationReplayed: true} : null;
     }),
   };
+  // The first retained entry stands for the adoption's seed: the pass reports
+  // it applied once the host's ACK for it checks, or when nothing is queued.
   vi.mocked(drainOwnerOutbox).mockImplementation(async options => {
     let admittedEntries = 0;
+    if (!retained.length) options.adoption.applied();
     for (const entry of [...retained]) {
       if (!journal.some(row => row.deliveryId === entry.deliveryId)) journal.push(entry);
       const ack = await options.applyThrough(entry);
       if (!ack) return {admittedEntries,hasMore: true};
       expect(ack).toMatchObject(entry);
       expect(durable.get(entry.deliveryId)).toMatchObject(entry);
+      options.adoption.applied();
       retained.shift(); outboxAcks.push(entry); admittedEntries++;
     }
     for (let index = 0; index < suffix; index++) {
@@ -267,6 +272,41 @@ it("checks owner standing before returning an earlier application error", async 
   await expect(f.consumer.drain(document)).rejects.toThrow("Owner standing changed");
   expect(f.outboxAcks).toEqual([]);
   expect(f.retained).toEqual(f.ownerEntries);
+});
+
+it("holds seed readiness until a pass proves it for the recorded adoption, then keeps it while later work is pending", async () => {
+  const f = fixture({owners: 2});
+  expect(f.consumer.adoptionSeedApplied(document)).toBe(false);
+  // The seed's application is still pending on the host.
+  f.client.sendLiveApplication.mockResolvedValueOnce({id: 2,result: {status: "pending",reason: "retry"}});
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "pending"});
+  expect(f.consumer.adoptionSeedApplied(document)).toBe(false);
+  // The pass names the adoption the relay recorded, not the delivery tip.
+  expect(vi.mocked(drainOwnerOutbox).mock.calls[0]![0].adoption).toMatchObject({adoptionId: "adoption", sequence: 7});
+  // The seed applies; the private entry behind it is still pending.
+  let calls = 0;
+  const apply = f.client.sendLiveApplication.getMockImplementation()!;
+  f.client.sendLiveApplication.mockImplementation(async (input,event) => ++calls === 2
+    ? {id: input.id,result: {status: "pending",reason: "retry"}} : apply(input,event));
+  expect(await f.consumer.drain(document)).toMatchObject({kind: "pending"});
+  expect(f.consumer.adoptionSeedApplied(document)).toBe(true);
+  expect(f.outboxAcks).toEqual([f.ownerEntries[0]]);
+});
+
+it("rederives seed readiness on a new consumer and refuses a pass whose recorded adoption changed", async () => {
+  const first = fixture();
+  expect(await first.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(first.consumer.adoptionSeedApplied(document)).toBe(true);
+  // A reconnect builds a new consumer, which knows nothing until its own pass.
+  const second = fixture();
+  expect(second.consumer.adoptionSeedApplied(document)).toBe(false);
+  const progress = second.store.ownerDeliveryProgress.getMockImplementation()!;
+  second.store.ownerDeliveryProgress.mockImplementationOnce(progress)
+    .mockImplementationOnce(() => ({...progress(), adoptionId: "replaced"}));
+  await expect(second.consumer.drain(document)).rejects.toThrow("Owner adoption changed.");
+  expect(second.consumer.adoptionSeedApplied(document)).toBe(false);
+  expect(await second.consumer.drain(document)).toMatchObject({kind: "done"});
+  expect(second.consumer.adoptionSeedApplied(document)).toBe(true);
 });
 
 it("schedules another owner pass after worker capacity returns even without prior progress", async () => {

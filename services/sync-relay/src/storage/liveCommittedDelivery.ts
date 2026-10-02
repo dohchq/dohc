@@ -327,12 +327,18 @@ export class LiveCommittedDeliveryStore {
     capture.assertCurrent();
     return saved;
   }
-  ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number;adoptionId:string} {
+  /**
+   * `sequence` is the greatest native sequence delivery proved. `adoptionSequence`
+   * is the native head the host adopted at, as its adoption ACK confirmed.
+   */
+  ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number;adoptionId:string;adoptionSequence: number} {
     const {host,document} = this.#ownerDelivery(capture), row = this.#ownerRow(host,document); integrity(row);
     const terminal = JSON.parse(String(row.tip_receipt_json)), parsed = terminal === null ? null : parseLiveUpdateReceipt(terminal);
     integrity((parsed?.journalCursor ?? 0) === row.tip_cursor);
     integrity(authorityInteger(row.tip_application_sequence) <= authorityInteger(row.tip_sequence));
-    return {terminal: parsed,sequence: authorityInteger(row.tip_sequence),adoptionId:parseLiveUpdateIdentifier(JSON.parse(String(row.origin_json)).adoptionId)};
+    const origin = JSON.parse(String(row.origin_json));
+    return {terminal: parsed,sequence: authorityInteger(row.tip_sequence),adoptionId:parseLiveUpdateIdentifier(origin.adoptionId),
+      adoptionSequence: authorityInteger(origin.expectedLocalSequence)};
   }
   nextOwnerApplication(capture: OwnerDeliveryCapture): AdmittedLiveUpdate | undefined {
     const {document,highWater} = this.#ownerDelivery(capture), progress = this.ownerDeliveryProgress(capture);
