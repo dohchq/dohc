@@ -1953,7 +1953,7 @@ mod tests {
             let supervisor: &'static WorkspaceSupervisor =
                 Box::leak(Box::new(WorkspaceSupervisor::new()));
             let config=serde_json::from_value(json!({
-                "ingress":{"aggregateBytes":400_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":2,"uploadDeadlineMs":30_000},
+                "ingress":{"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":2,"uploadDeadlineMs":30_000},
                 "maxRegistrations":4,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,"maxApplicationsPerSettlement":100,
                 "ownerOutbox":{"maxPendingBytes":1_000_000,"maxPendingAgeMs":60_000}
             })).unwrap();

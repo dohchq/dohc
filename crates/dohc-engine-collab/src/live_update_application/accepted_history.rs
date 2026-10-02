@@ -675,7 +675,7 @@ fn append_inner(
             .transpose()?;
         let doc = restored
             .map(|(_, doc)| doc)
-            .or_else(|| history.as_ref())
+            .or(history.as_ref())
             .ok_or(ApplicationError::Corrupt)?;
         let state = doc
             .encode_full_state_bounded(if reconstruction.is_some() {

@@ -819,6 +819,9 @@ pub(crate) mod tests {
             + config.application_working_reserve_bytes;
         assert_eq!(minimum, persistence);
         assert!(minimum < 512 * 1024 * 1024);
+        let ingress =
+            LiveApplicationIngress::new(Arc::new(EngineService::new()), config.clone()).unwrap();
+        assert!(ingress.settlement_admission(128).is_ok());
         assert!(
             config.reservation_bytes(2, 0).unwrap()
                 >= config.reconstruction().reservation_bytes().unwrap()

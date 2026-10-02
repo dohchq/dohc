@@ -148,10 +148,10 @@ impl Read for SqlJson<'_> {
             self.consumed = 0;
         }
         let count = output.len().min(self.chunk.len() - self.consumed);
-        for index in 0..count {
+        for (index, target) in output.iter_mut().enumerate().take(count) {
             let byte = self.chunk[self.consumed + index];
             self.check(byte)?;
-            output[index] = byte;
+            *target = byte;
         }
         self.consumed += count;
         Ok(count)
