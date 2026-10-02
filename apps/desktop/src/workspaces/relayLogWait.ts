@@ -27,11 +27,14 @@ export function createRelayLogWait(input: {
   // The relay's current coordinate. A held read names it the way a pull does;
   // the relay refuses a stale one, and the next read asks for it again.
   let identity: RelayWorkspaceIdentity | null | undefined;
-  return async (since, signal) => {
+  return async (since, abort) => {
+    // One deadline bounds the coordinate read and the held read together.
+    const signal = AbortSignal.any([abort, AbortSignal.timeout(holdMs + 15_000)]);
     if (identity === undefined) {
       identity = (await probeRelayWorkspace({
         workspaceId: input.workspaceId,
         relay: input.relay,
+        signal,
       })).identity;
       signal.throwIfAborted();
     }
@@ -44,7 +47,7 @@ export function createRelayLogWait(input: {
     const response = await relayRequest({
       relay: input.relay,
       path: `/sync/${encodeURIComponent(input.workspaceId)}/log?${query.toString()}`,
-      init: { signal: AbortSignal.any([signal, AbortSignal.timeout(holdMs + 15_000)]) },
+      init: { signal },
       errors: {
         409: () => {
           identity = undefined;
