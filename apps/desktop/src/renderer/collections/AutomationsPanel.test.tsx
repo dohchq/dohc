@@ -2519,6 +2519,7 @@ describe("an automation's runs", () => {
     });
     render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
     await screen.findByTestId("automation-run-atc_new");
+    await screen.findByText("Stamp the finish date");
     const calls = () => bridge.listCollectionAutomationRuns.mock.calls.length;
     const shown = calls();
     await userEvent.click(screen.getByRole("button", { name: "Older runs" }));
