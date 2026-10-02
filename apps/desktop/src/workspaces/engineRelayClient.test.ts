@@ -86,7 +86,7 @@ class MockDaemon implements EngineDaemonClient {
           return { closed: true };
         case "sync.push":
           return {
-            status: "complete",
+            status: "complete", refused: 0,
             pushed: 3, ownerAdmissionPending: [],
             fetched: 0,
             applied: 0,
@@ -100,7 +100,7 @@ class MockDaemon implements EngineDaemonClient {
           };
         case "sync.pull":
           return {
-            status: "complete",
+            status: "complete", refused: 0,
             pushed: 0, ownerAdmissionPending: [],
             fetched: 4,
             applied: 2,
@@ -251,9 +251,9 @@ function expectStatefulRequestsScoped(requests: Request[]): void {
 
 describe("EngineRelayClient", () => {
   it("commits engine-owned refusals before notifying Notices", async () => {
-    const refusal = { originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input", reason: "Review this conflict." };
+    const refusal = { workspaceId: "workspace-a", originId: "peer", originSeq: 1, opKind: "conflict.resolve", code: "invalid-input", reason: "Review this conflict." };
     const daemon = new MockDaemon(request => request.method === "sync.pull" ? {
-      status: "complete", fetched: 1, applied: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
+      status: "complete", refused: 1, fetched: 1, applied: 0, skipped: 0, conflictsOpened: 0, hasMore: false,
       nextCursor: 9, pendingCursor: {kind: "relay", token: "cursor-9"}, changedPaths: [], sharingDeclined: [], refusals: [refusal],
     } : undefined);
     const changed = vi.fn(() => expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(true));
@@ -436,7 +436,7 @@ describe("EngineRelayClient", () => {
       if (request.method !== "sync.pull") return undefined;
       pulls += 1;
       return {
-        status: "complete",
+        status: "complete", refused: 0,
         pushed: 0, ownerAdmissionPending: [],
         fetched: 1,
         applied: 1,
@@ -488,7 +488,7 @@ describe("EngineRelayClient", () => {
       if (request.method === "sync.pull") {
         const page = committedPages + 1;
         return {
-          status: "complete",
+          status: "complete", refused: 0,
           pushed: 0, ownerAdmissionPending: [],
           fetched: 1,
           applied: 1,
@@ -563,7 +563,7 @@ describe("EngineRelayClient", () => {
     const daemon = new MockDaemon((request) => {
       if (request.method !== "sync.pull") return undefined;
       return {
-        status: "complete",
+        status: "complete", refused: 0,
         pushed: 0, ownerAdmissionPending: [],
         fetched: 1,
         applied: 1,
@@ -584,9 +584,12 @@ describe("EngineRelayClient", () => {
     });
     const { sessions, client } = await harness(daemon);
 
-    await expect(client.pull(async () => undefined)).rejects.toThrow(
-      "Rust engine sync.pull.changedPaths[0].versionId must be a string.",
+    const materialize = vi.fn(async () => undefined);
+    await expect(client.pull(materialize)).rejects.toThrow(
+      /sync\.pull result:[\s\S]*changedPaths[\s\S]*versionId/,
     );
+    expect(materialize).not.toHaveBeenCalled();
+    expect(daemon.requests.some(request => request.method === "sync.commitCursor")).toBe(false);
     await sessions.closeAll();
   });
 
@@ -594,8 +597,8 @@ describe("EngineRelayClient", () => {
     const daemon = new MockDaemon((request) => {
       if (request.method !== "sync.push") return undefined;
       return {
-        status: "complete",
-        pushed: 0, ownerAdmissionPending: [],
+        status: "complete", refused: 0,
+        pushed: 0, ownerAdmissionPending: [], hasMore: false,
         sharingDeclined: [
           {
             path: "notes/oversized.md",
@@ -627,8 +630,8 @@ describe("EngineRelayClient", () => {
     const daemon = new MockDaemon((request) => {
       if (request.method !== "sync.push") return undefined;
       return {
-        status: "complete",
-        pushed: 0, ownerAdmissionPending: [],
+        status: "complete", refused: 0,
+        pushed: 0, ownerAdmissionPending: [], hasMore: false,
         sharingDeclined: [
           {
             constraint: "MAX_YDOC_UPDATE_BYTES",
@@ -641,7 +644,7 @@ describe("EngineRelayClient", () => {
     const { sessions, client } = await harness(daemon);
 
     await expect(client.push()).rejects.toThrow(
-      "Rust engine sync.push.sharingDeclined[0].path must be a string.",
+      /sync\.push result:[\s\S]*sharingDeclined[\s\S]*path/,
     );
     await sessions.closeAll();
   });
@@ -650,7 +653,7 @@ describe("EngineRelayClient", () => {
     const daemon = new MockDaemon((request) => {
       if (request.method === "sync.pull") {
         return {
-          status: "complete",
+          status: "complete", refused: 0,
           pushed: 0, ownerAdmissionPending: [],
           fetched: 0,
           applied: 0,
@@ -2099,7 +2102,7 @@ describe("EngineRelayClient", () => {
         workspacePulls += 1;
         const first = workspacePulls === 1;
         return {
-          status: "complete",
+          status: "complete", refused: 0,
           pushed: 0, ownerAdmissionPending: [],
           fetched: first ? 2 : 3,
           hasMore: first,

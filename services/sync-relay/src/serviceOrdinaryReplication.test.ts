@@ -93,7 +93,7 @@ it("leaves failed native materialization uncommitted and retries the page", asyn
 it.each([false, undefined, "success"])("does not accept native materialization result %s as success", async materialized => {
   const f = fixture(), original = f.sendRequest.getMockImplementation()!;
   f.sendRequest.mockImplementation(async request => request.method === "sync.materializePendingCursor" ? {result: {materialized}} as never : original(request));
-  await expect(f.driver.pull()).rejects.toThrow("materialization");
+  await expect(f.driver.pull()).rejects.toThrow("sync.materializePendingCursor result");
   expect(f.methods()).not.toContain("sync.commitCursor");
 });
 
@@ -198,4 +198,21 @@ it("pushes only on explicit request and preserves the native continuation result
   expect(f.methods()).not.toContain("sync.push");
   expect(await f.driver.push()).toEqual({pushed: 1, hasMore: false, sharingDeclined: []});
   expect(f.methods().filter(method => method === "sync.adoptJoinIdentity")).toHaveLength(1);
+});
+
+
+it.each([
+  {changedPaths: [{path: "work.md", operation: "write", contentKind: "text"}]},
+  {refusals: [{originId: "peer", originSeq: 1, opKind: "text.write", code: "invalid", reason: "refused"}]},
+  {pendingCursor: {kind: "shareView", token: "issued-1"}},
+  {status: "crashedAfterApply"},
+])("rejects malformed native pages before materializing or committing: %j", async patch => {
+  const f = fixture(), original = f.sendRequest.getMockImplementation()!;
+  const onPage = vi.fn();
+  f.sendRequest.mockImplementation(async request => request.method === "sync.pull" ?
+    {result: {...page(), ...patch}} as never : original(request));
+  await expect(f.driver.pull(undefined, onPage)).rejects.toThrow("sync.pull result");
+  expect(f.methods()).not.toContain("sync.materializePendingCursor");
+  expect(f.methods()).not.toContain("sync.commitCursor");
+  expect(onPage).not.toHaveBeenCalled();
 });
