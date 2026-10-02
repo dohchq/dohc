@@ -59,6 +59,8 @@ pub(crate) struct OpenWorkspace {
     pub(super) mode: WorkspaceOpenMode,
     handle_kind: WorkspaceHandleKind,
     pub(super) relay: Option<RelayConfiguration>,
+    /// The binding's capture policy, retained when its driver stops and inherited by read-only attachments.
+    pub(super) capture_enabled: bool,
     /// The autonomous capture driver (files actor + watcher + reconcile
     /// loop), spawned only after the root binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
@@ -116,6 +118,7 @@ impl OpenWorkspace {
             mode: WorkspaceOpenMode::ReadOnly,
             handle_kind: WorkspaceHandleKind::ReadOnlyAttach { owner },
             relay: self.relay.clone(),
+            capture_enabled: self.capture_enabled,
             capture: Arc::clone(&self.capture),
             reconciles_collections: self.reconciles_collections,
             automation_recovery: Arc::clone(&self.automation_recovery),
@@ -606,7 +609,7 @@ impl EngineService {
                         "workspace root is already open in a different mode",
                     ));
                 }
-                if lock(&open.capture).is_some() != capture_enabled
+                if open.capture_enabled != capture_enabled
                     || open.reconciles_collections != params.reconcile_collections
                 {
                     return Err(WireError::new(
@@ -997,6 +1000,7 @@ impl EngineService {
                 relay: params
                     .relay
                     .map(|configuration| configuration.configuration()),
+                capture_enabled: requested_mode == WorkspaceOpenMode::Full && capture_enabled,
                 capture: Arc::new(Mutex::new(capture)),
                 reconciles_collections: params.reconcile_collections,
                 automation_recovery: Arc::new(Mutex::new(automation_recovery)),
@@ -1590,13 +1594,14 @@ mod tests {
                 params["captureMode"] = json!("none");
             }
             let opened = service
-                .workspace_open(&RequestContext::unbounded(), params)
+                .workspace_open(&RequestContext::unbounded(), params.clone())
                 .await
                 .expect("open workspace");
             let handle: WorkspaceHandle =
                 serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
             let open = service.open(Some(&handle)).expect("open state");
             assert_eq!(lock(&open.capture).is_some(), capture_enabled);
+            assert_eq!(open.capture_enabled, capture_enabled);
             assert_eq!(
                 lock(&open.automation_recovery).is_some(),
                 seed_claim && !read_only
@@ -1618,6 +1623,61 @@ mod tests {
             let open = service.open(Some(&handle)).expect("binding still open");
             assert!(lock(&open.capture).is_none());
             assert!(lock(&open.automation_recovery).is_none());
+            if capture_enabled {
+                let attached = service
+                    .workspace_open(
+                        &RequestContext::unbounded(),
+                        json!({
+                            "rootDir": scratch.path().to_string_lossy(),
+                            "workspaceId": "automation-recovery-lifetime",
+                            "skipStartupMaintenance": true,
+                            "captureMode": "none",
+                        }),
+                    )
+                    .await
+                    .expect("read-only attachment inherits the owner policy");
+                let attached_handle: WorkspaceHandle =
+                    serde_json::from_value(attached["workspace"].clone()).unwrap();
+                assert!(
+                    service
+                        .open(Some(&attached_handle))
+                        .unwrap()
+                        .capture_enabled
+                );
+                for history_handle in [&handle, &attached_handle] {
+                    let error = service
+                        .history_page(
+                            &RequestContext::unbounded(),
+                            Some(history_handle.clone()),
+                            json!({
+                                "workspaceId":"automation-recovery-lifetime",
+                            }),
+                        )
+                        .await
+                        .expect_err("a lost capture driver must not expose unflushed history");
+                    assert_eq!(error.code, ErrorCode::Overloaded);
+                    assert_eq!(error.message, "History is still updating. Try again.");
+                }
+                assert_eq!(
+                    service
+                        .workspace_open(&RequestContext::unbounded(), params.clone())
+                        .await
+                        .unwrap(),
+                    opened
+                );
+                let mut capture_off = params.clone();
+                capture_off["captureMode"] = json!("none");
+                let error = service
+                    .workspace_open(&RequestContext::unbounded(), capture_off)
+                    .await
+                    .expect_err("a lost driver does not change the owner's capture configuration");
+                assert_eq!(error.code, ErrorCode::InvalidParams);
+                assert_eq!(error.message, "workspace capture configuration mismatch");
+                service
+                    .workspace_close(Some(attached_handle))
+                    .await
+                    .expect("close read-only attachment");
+            }
             service
                 .workspace_close(Some(handle))
                 .await
