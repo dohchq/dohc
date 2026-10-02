@@ -373,6 +373,33 @@ pub struct AdmittedLiveUpdateMetadata {
     pub accepted: RelayAcceptedLiveUpdate,
     pub first_seen: Vec<LiveUpdateStructRange>,
 }
+/// Native state replay uses bounded records, not a cumulative proof-read budget.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeHistoryReconstruction {
+    pub working_reserve_bytes: usize,
+}
+impl NativeHistoryReconstruction {
+    pub const MAX_RANGES: usize = (crate::limits::MAX_YDOC_UPDATE_BYTES - 2) / 5;
+    pub const HEADER_BYTES: usize = 643_576;
+    pub const CHUNK_BYTES: usize = 256 * 1024;
+
+    /// Conservative Rust buffer spans plus the existing engine working allowance.
+    /// This is admission accounting, not an allocator or SQLite heap measurement.
+    pub fn reservation_bytes(self) -> Option<usize> {
+        crate::limits::MAX_YDOC_UPDATE_BYTES
+            .checked_mul(4)?
+            .checked_add(Self::HEADER_BYTES.checked_mul(6)?)?
+            .checked_add(Self::CHUNK_BYTES.checked_mul(2)?)?
+            .checked_add(self.working_reserve_bytes)
+    }
+}
+
+#[derive(Clone)]
+pub struct AdmittedNativeHistoryReconstruction {
+    pub policy: NativeHistoryReconstruction,
+    pub reservation: std::sync::Arc<dyn Send + Sync>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedLiveUpdate {
     pub metadata: AdmittedLiveUpdateMetadata,

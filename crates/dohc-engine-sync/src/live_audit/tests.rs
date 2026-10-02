@@ -176,6 +176,7 @@ fn deferred_settlement_exports_its_companion_moment_after_evidence_once() {
         &f.handle,
         Some(receipt),
         8,
+        dohc_engine_collab::live_update_application::NativeHistoryReconstruction { working_reserve_bytes: 8 * 1024 * 1024 },
         |store, audit| {
             let b = audit.binding();
             let key = dohc_engine_collab::DocKey::new(

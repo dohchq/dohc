@@ -214,7 +214,13 @@ impl Fixture {
                 30,
                 Arc::new(NoFaults),
                 CancellationToken::new(),
-                Arc::new(()),
+                dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                    policy:
+                        dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                            working_reserve_bytes: 8 * 1024 * 1024,
+                        },
+                    reservation: Arc::new(()),
+                },
             )
             .await
             .unwrap()
@@ -388,6 +394,21 @@ async fn deliver_declared(
     (receipt, result)
 }
 
+struct PrefixRival {
+    path: PathBuf,
+    fired: std::sync::atomic::AtomicBool,
+}
+impl dohc_engine_storage::FaultInjector for PrefixRival {
+    fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+        if point == dohc_engine_storage::FaultPoint::MaterializeBeforePreimageRevalidate
+            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            std::fs::write(&self.path, "rival survives").unwrap();
+        }
+        dohc_engine_storage::FaultAction::Continue
+    }
+}
+
 /// The owner's own agent edit waits in its outbox while declared deliveries
 /// fill the interval's author bound. The accepted prefix settles without the
 /// private edit. After another private edit, a lost acknowledgement, and a
@@ -399,7 +420,12 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     const LOCAL: &str = "Private local paragraph";
     const SECOND: &str = "Second private paragraph";
     const REMOTE: &str = "Remote agent paragraph";
-    let f = Fixture::new();
+    let mut f = Fixture::new();
+    f.binding
+        .selector_paths
+        .extend((0..99).map(|i| format!("z{i:02}{}", "x".repeat(1020))));
+    f.binding.selector_paths.sort();
+    f.binding.validate_canonical().unwrap();
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 3).unwrap().actor;
     let owner = actor
@@ -447,11 +473,43 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     remote.apply(&f.bytes).unwrap();
     let remote_bytes = remote.richdoc_append_paragraph(REMOTE);
     f.doc.apply(&remote_bytes).unwrap();
+    // Keep each settlement interval inside the configured maximum while the
+    // accepted checkpoint segment accumulates discarded metadata above60MiB.
+    const PREFIX: i64 = 700;
+    for cursor in 1..=PREFIX {
+        let (receipt, result) =
+            deliver_declared(&handle, &f.binding, cursor, &remote_bytes, large_agent(999)).await;
+        assert!(matches!(result, ApplicationResult::Applied(..)));
+        if cursor % 100 == 0 {
+            let settled = f.settle(&handle, Some(receipt)).await;
+            assert!(!f.file().contains(LOCAL));
+            assert!(f.file().contains(REMOTE));
+            if cursor > 100 {
+                assert!(
+                    !settled.materialized,
+                    "unchanged accepted projection made another moment"
+                );
+            }
+        }
+    }
+    let metadata: i64 = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT sum(length(CAST(metadata_json AS BLOB))) FROM live_accepted_updates",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(metadata > 60 * 1024 * 1024);
+    let remote_bytes = remote.richdoc_append_paragraph("Capacity remote paragraph");
+    f.doc.apply(&remote_bytes).unwrap();
     let mut admitted = 0;
     let mut terminal = None;
     let refused = loop {
         assert!(admitted < 80, "the author bound never refused");
-        let cursor = admitted as i64 + 1;
+        let cursor = PREFIX + admitted as i64 + 1;
         let (receipt, result) = deliver_declared(
             &handle,
             &f.binding,
@@ -474,6 +532,45 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     // The private edit's native sequence has no application. Settling the
     // accepted prefix leaves it out of the file and the moment.
     let moments = f.store.table_row_count("moments").unwrap();
+    let preimage = f.file();
+    assert!(
+        handle
+            .settle(
+                terminal.clone(),
+                100,
+                f.root.path().to_owned(),
+                30,
+                Arc::new(PrefixRival {
+                    path: f.root.path().join(&f.binding.current_path),
+                    fired: std::sync::atomic::AtomicBool::new(false)
+                }),
+                CancellationToken::new(),
+                AdmittedNativeHistoryReconstruction {
+                    policy: NativeHistoryReconstruction {
+                        working_reserve_bytes: 8 * 1024 * 1024
+                    },
+                    reservation: Arc::new(())
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(f.file(), "rival survives");
+    let native = dohc_engine_collab::load_persisted(
+        &f.store,
+        &DocKey::new("workspace", "main", "object").unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+    .doc;
+    assert!(
+        native
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains(LOCAL)
+    );
+    std::fs::write(f.root.path().join(&f.binding.current_path), preimage).unwrap();
     let settled = f.settle(&handle, terminal.clone()).await;
     assert!(settled.materialized);
     assert!(f.file().contains(REMOTE));
@@ -516,6 +613,24 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     drop(handle);
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
+    dohc_engine_collab::maybe_compact(
+        &mut f.store,
+        &DocKey::new("workspace", "main", "object").unwrap(),
+        0,
+        &NoFaults,
+        41,
+    )
+    .unwrap();
+    let native = dohc_engine_collab::load_persisted(
+        &f.store,
+        &DocKey::new("workspace", "main", "object").unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+    .doc;
+    let native_text = native.project(ContentKind::Richdoc).unwrap().content;
+    assert!(native_text.contains(LOCAL));
+    assert!(native_text.contains(SECOND));
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&f.db, 4).unwrap().actor;
     let owner = actor
@@ -721,7 +836,12 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
-            Arc::new(()),
+            dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                policy: dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
         )
         .await
         .unwrap();
@@ -784,7 +904,12 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
-            Arc::new(()),
+            dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                policy: dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
         )
         .await
         .unwrap();
@@ -1032,7 +1157,12 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
-            Arc::new(()),
+            dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                policy: dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
         )
     };
     let settled = settle().await.unwrap();
@@ -1385,7 +1515,12 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
-            Arc::new(()),
+            dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                policy: dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
         )
     };
     let settled = settle().await.unwrap();

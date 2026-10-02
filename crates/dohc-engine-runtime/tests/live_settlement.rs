@@ -705,7 +705,13 @@ impl Fixture {
                 10,
                 faults,
                 tokio_util::sync::CancellationToken::new(),
-                Arc::new(()),
+                dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                    policy:
+                        dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                            working_reserve_bytes: 8 * 1024 * 1024,
+                        },
+                    reservation: Arc::new(()),
+                },
             )
             .await
     }

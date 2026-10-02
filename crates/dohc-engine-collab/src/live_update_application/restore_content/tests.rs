@@ -354,109 +354,118 @@ fn restore_preparation_uses_native_checkpoints_for_a_long_applied_history() {
 }
 
 #[test]
-fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_application() {
-    let mut f = Fixture::new("baseline");
-    f.edit("accepted", 3);
+fn ordinary_checkpoint_streams_cumulative_metadata_above_working_reserve() {
+    let mut f = Fixture::new("accepted checkpoint");
     let bytes = f.doc.encode_full_state();
-    append_history_copies(&mut f, 4093, bytes.clone());
-    let snapshot = |store: &EngineStore| {
-        store.read_with(|conn|conn.query_row(
-        "SELECT (SELECT count(*) FROM live_accepted_updates),(SELECT max(event_count) FROM live_accepted_updates),(SELECT count(*) FROM live_accepted_checkpoints),(SELECT count(*) FROM live_device_update_applications),(SELECT count(*) FROM binary_blobs),(SELECT head_update_seq FROM ydoc_docs),(SELECT count(*) FROM owner_ydoc_outbox_entries)",[],
-        |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?,r.get::<_,i64>(5)?,r.get::<_,i64>(6)?)))).unwrap()
-    };
-    let before = snapshot(&f.store);
-    let event = AdmittedLiveUpdate {
-        metadata: AdmittedLiveUpdateMetadata {
-            accepted: RelayAcceptedLiveUpdate {
-                receipt: LiveUpdateReceipt {
-                    delivery_id: "due".into(),
-                    update_digest: hex_sha256(&bytes),
-                    journal_cursor: 20_000,
-                    accepting_host_epoch: 1,
-                },
-                binding: f.binding.clone(),
-                authority: ServerDerivedLiveUpdateAuthority::Owner {
-                    principal_id: "owner".into(),
-                },
-                received_at_ms: 20_000,
-                agent_declaration: None,
-            },
-            first_seen: vec![],
-        },
-        update_bytes: bytes,
-    };
-    let (checkpoint_text, baseline_bytes, history_bytes, prior_metadata, stamp): (usize, usize, usize, usize, String) = f.store.read_with(|conn| conn.query_row(
-        "SELECT (SELECT length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB))+length(CAST(state_sha256 AS BLOB))+length(CAST(evidence_digest AS BLOB))+length(CAST(origin_stamp AS BLOB))+coalesce(length(CAST(restore_operation_id AS BLOB)),0)+coalesce(length(CAST(restore_stamp AS BLOB)),0) FROM live_accepted_checkpoints WHERE event_count=0),(SELECT byte_length FROM binary_blobs WHERE sha256=(SELECT state_sha256 FROM live_accepted_checkpoints WHERE event_count=0)),(SELECT sum(length(CAST(a.metadata_json AS BLOB))+b.byte_length) FROM live_accepted_updates a JOIN binary_blobs b ON b.sha256=a.update_sha256),(SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates ORDER BY event_count DESC LIMIT 1),(SELECT origin_stamp FROM live_accepted_checkpoints WHERE event_count=0)",[],|r|Ok((r.get::<_,i64>(0)? as usize,r.get::<_,i64>(1)? as usize,r.get::<_,i64>(2)? as usize,r.get::<_,i64>(3)? as usize,r.get(4)?)))).unwrap();
-    // Each checkpoint read also verifies its origin stamp by serializing the
-    // bootstrap record those stored stamp bytes hash.
-    let held = Registration {
-        workspace_id: "workspace".into(),
-        namespace: "namespace".into(),
-        coordinate: f.host.clone(),
-        binding: f.binding.clone(),
-        live: false,
-    };
-    let origin = serde_json::to_vec(
-        &f.store
-            .read_with(|conn| bootstrap::read_bootstrap(conn, &held))
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(hex_sha256(&origin), stamp);
-    // The stamp read costs its raw columns or their serialization, whichever is larger.
-    let checkpoint_metadata = checkpoint_text + origin.len().max(bootstrap_raw(&f));
-    let replay_bytes = checkpoint_metadata
-        + baseline_bytes
-        + history_bytes
-        + serde_json::to_vec(&event.metadata).unwrap().len()
-        + event.update_bytes.len()
-        + f.doc.encode_full_state().len();
-    let retained_metadata = checkpoint_metadata + prior_metadata;
-    let sufficient = replay_bytes + retained_metadata;
-    // Replay alone fits, but the checkpoint and prior binding remain live too.
-    for reserve in [4096, 1_000_000, replay_bytes, sufficient - 1] {
-        assert!(
-            matches!(
-                apply_committed(
-                    &mut f.store,
-                    &mut WriterDocCache::new(),
-                    &f.handle,
-                    event.clone(),
-                    &NoFaults,
-                    reserve,
-                    |_, _, _, _| Ok(())
-                ),
-                Err(ApplicationError::ConfiguredByteBudgetExceeded)
-            ),
-            "accepted under {reserve} bytes; requires {sufficient}"
-        );
-        assert_eq!(snapshot(&f.store), before);
-    }
-    let key = DocKey::new("workspace", "main", "object").unwrap();
-    assert!(f
+    // Three long legal selectors make 4095 retained records exceed the
+    // supported 8 MiB allowance without changing event or byte cadence.
+    let held = f.handle.registration.lock().unwrap();
+    let last = f
         .store
-        .read_with(|conn| crate::replay_parity::structurally_equal_v2(
-            &durable::load_doc_in(conn, &key)?,
-            &f.doc
-        ))
-        .unwrap());
+        .write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+            let mut last = None;
+            for ordinal in 1..=4096 {
+                let mut binding = f.binding.clone();
+                binding
+                    .selector_paths
+                    .extend((0..3).map(|i| format!("z{i}{}", "x".repeat(1000))));
+                binding.selector_paths.sort();
+                let event = AdmittedLiveUpdate {
+                    metadata: AdmittedLiveUpdateMetadata {
+                        accepted: RelayAcceptedLiveUpdate {
+                            receipt: LiveUpdateReceipt {
+                                delivery_id: format!("heavy-{ordinal}"),
+                                update_digest: hex_sha256(&bytes),
+                                journal_cursor: ordinal,
+                                accepting_host_epoch: 1,
+                            },
+                            binding,
+                            authority: ServerDerivedLiveUpdateAuthority::Owner {
+                                principal_id: "o".repeat(512),
+                            },
+                            received_at_ms: ordinal,
+                            agent_declaration: None,
+                        },
+                        first_seen: vec![],
+                    },
+                    update_bytes: bytes.clone(),
+                };
+                accepted_history::append(tx, &held, &event, 8 * 1024 * 1024)?;
+                last = Some(event.metadata.accepted.receipt);
+            }
+            Ok(last.unwrap())
+        })
+        .unwrap();
+    let TxnOutcome::Committed(last) = last else {
+        panic!("checkpoint did not commit")
+    };
+    f.store.read_with(|conn| -> Result<(),ApplicationError> {
+        let total:i64=conn.query_row("SELECT sum(length(CAST(metadata_json AS BLOB))) FROM live_accepted_updates WHERE event_count<=4095",[],|r|r.get(0)).map_err(read_sql)?;
+        assert!(total>8*1024*1024);
+        let checkpoint:i64=conn.query_row("SELECT max(event_count) FROM live_accepted_checkpoints",[],|r|r.get(0)).map_err(read_sql)?;
+        assert_eq!(checkpoint,4095);
+        let doc=accepted_history::read_state(conn,&held,last.journal_cursor,NativeHistoryReconstruction { working_reserve_bytes:8*1024*1024 })?;
+        assert!(crate::replay_parity::structurally_equal_v2(&doc,&f.doc)?);
+        // External restore retains its cumulative proof budget boundary.
+        assert!(matches!(accepted_history::read(conn,&held,last.journal_cursor,&mut Budget { remaining:4096 },4095),Err(ApplicationError::ConfiguredByteBudgetExceeded)));
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn native_state_reader_refuses_metadata_application_count_and_blob_corruption() {
+    for sql in [
+        "UPDATE live_accepted_updates SET evidence_digest=printf('%064d',0)",
+        "UPDATE live_accepted_updates SET metadata_json=json_set(metadata_json,'$.accepted.receipt.journalCursor',8)",
+        "UPDATE live_accepted_updates SET metadata_json=json_set(metadata_json,'$.accepted.binding.restoreFenceGeneration',1)",
+        "UPDATE live_device_update_applications SET first_seen_count=1",
+        "UPDATE binary_blobs SET bytes=zeroblob(length(bytes)) WHERE sha256=(SELECT update_sha256 FROM live_accepted_updates LIMIT 1)",
+        "UPDATE binary_blobs SET byte_length=byte_length+1 WHERE sha256=(SELECT update_sha256 FROM live_accepted_updates LIMIT 1)",
+        "UPDATE live_accepted_updates SET event_count=2",
+        "UPDATE live_accepted_updates SET suffix_count=2",
+        "UPDATE live_accepted_updates SET suffix_bytes=suffix_bytes+1",
+    ] {
+        let mut f=Fixture::new("baseline");
+        f.edit("accepted text",7);
+        damage(&f,sql);
+        let held=f.handle.registration.lock().unwrap();
+        assert!(f.store.read_with(|conn|accepted_history::read_state(conn,&held,7,NativeHistoryReconstruction {working_reserve_bytes:8*1024*1024})).is_err(),"{sql}");
+    }
+    let f = Fixture::new("baseline");
+    let held = f.handle.registration.lock().unwrap();
     assert!(matches!(
-        apply_committed(
-            &mut f.store,
-            &mut WriterDocCache::new(),
-            &f.handle,
-            event,
-            &NoFaults,
-            sufficient,
-            |_, _, _, _| Ok(())
-        )
-        .unwrap(),
-        ApplicationResult::Applied(..)
+        f.store.read_with(|conn| accepted_history::read_state(
+            conn,
+            &held,
+            0,
+            NativeHistoryReconstruction {
+                working_reserve_bytes: 0
+            }
+        )),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
     ));
-    let after = snapshot(&f.store);
-    assert_eq!(after.0, 4095);
-    assert_eq!(after.2, 2);
+}
+
+#[test]
+fn native_restore_checkpoint_compact_association_refuses_changed_generation_receipt_or_content() {
+    for sql in [
+        "UPDATE live_restore_fences SET application_delivery_id='wrong'",
+        "UPDATE live_restore_fences SET application_json=json_set(application_json,'$.admitted.accepted.receipt.acceptingHostEpoch',4)",
+        "UPDATE live_restore_fences SET application_json=json_set(application_json,'$.fence.operation.oldBinding.lineageClaimId',printf('%064d',0))",
+        "UPDATE live_restore_fences SET input_json=json_set(input_json,'$.newFence',2)",
+        "UPDATE live_restore_fences SET proposal_json=json_set(proposal_json,'$.finalContentDigest',printf('%064d',0))",
+        "UPDATE live_restore_fences SET application_json=json_set(application_json,'$.admitted.firstSeen',json('[]'))",
+        "UPDATE live_accepted_checkpoints SET state_sha256=printf('%064d',0) WHERE restore_operation_id IS NOT NULL",
+    ] {
+        let mut f=Fixture::new("baseline");
+        f.edit("accepted",7);
+        restore_and_resume(&mut f);
+        let cursor:i64=f.store.read_with(|conn|conn.query_row("SELECT max(journal_cursor) FROM live_accepted_updates",[],|r|r.get(0))).unwrap();
+        let held=f.handle.registration.lock().unwrap();
+        f.store.read_with(|conn|accepted_history::read_state(conn,&held,cursor,NativeHistoryReconstruction {working_reserve_bytes:8*1024*1024})).unwrap();
+        damage(&f,sql);
+        assert!(f.store.read_with(|conn|accepted_history::read_state(conn,&held,cursor,NativeHistoryReconstruction {working_reserve_bytes:8*1024*1024})).is_err(),"{sql}");
+    }
 }
 
 #[test]
@@ -520,6 +529,7 @@ pub(in crate::live_update_application) fn record_test_projection(
     let b = audit.binding();
     let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
     let doc = store.read_with(|conn| durable::load_doc_in(conn, &key))?;
+    let doc = audit.accepted_prefix().unwrap_or(&doc);
     let projected = doc.project(ContentKind::Richdoc)?.content;
     let content = doc
         .preserved_markdown_source(&projected)
@@ -531,6 +541,9 @@ pub(in crate::live_update_application) fn record_test_projection(
         }).map_err(|_|ApplicationError::Corrupt)?;
         tx.execute("UPDATE ydoc_docs SET last_settled_sha=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id,written.snapshot.blob_sha256]).map_err(write_sql)?;
         let id=audit.record_in_tx(tx,moment,&written.snapshot.blob_sha256,&vector,90)?;
+        if audit.accepted_prefix().is_some() {
+            crate::author_coverage::advance_accepted_prefix_in(tx,&key,false)?;
+        }
         Ok(audit.result(id,moment.into(),written.snapshot.blob_sha256,false))
     })?;
     let TxnOutcome::Committed(result) = result else {
@@ -1532,6 +1545,9 @@ fn ordinary_settlement_starts_at_verified_restore_anchor_under_future_open_bindi
         &f.handle,
         Some(input.admitted.accepted.receipt.clone()),
         100,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
         |store, audit| record_test_projection(store, audit, "restore-moment"),
     )
     .unwrap();
@@ -1581,6 +1597,9 @@ fn ordinary_settlement_starts_at_verified_restore_anchor_under_future_open_bindi
         &f.handle,
         Some(event.metadata.accepted.receipt),
         100,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
         |store, audit| record_test_projection(store, audit, "fresh-moment"),
     )
     .unwrap();
@@ -1607,6 +1626,9 @@ fn resumed_restore_settlement_moment_publishes_its_replaced_and_restored_images(
         &f.handle,
         f.terminal.clone(),
         100,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
         |store, audit| record_test_projection(store, audit, "replaced-moment"),
     )
     .unwrap();
@@ -2232,6 +2254,9 @@ fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
         &f.handle,
         f.terminal.clone(),
         100,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
         |store, audit| record_test_projection(store, audit, "first-moment"),
     )
     .unwrap();
@@ -2241,6 +2266,9 @@ fn fence_waits_for_this_documents_settlement_moments_to_reach_the_relay() {
         &f.handle,
         f.terminal.clone(),
         100,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
         |store, audit| record_test_projection(store, audit, "second-moment"),
     )
     .unwrap();
@@ -2361,6 +2389,9 @@ fn fence_waits_for_retained_settlement_history_to_be_exported() {
         &f.handle,
         f.terminal.clone(),
         100,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
         |store, audit| record_test_projection(store, audit, "retained-moment"),
     )
     .unwrap();
@@ -2401,6 +2432,9 @@ fn resumed_with_prior() -> Fixture {
         &f.handle,
         f.terminal.clone(),
         100,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
         |store, audit| record_test_projection(store, audit, "replaced-moment"),
     )
     .unwrap();

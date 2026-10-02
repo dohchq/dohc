@@ -294,6 +294,7 @@ pub fn with_settlement<E, T>(
     handle: &ApplicationHandle,
     terminal: Option<LiveUpdateReceipt>,
     max_applications: usize,
+    reconstruction: NativeHistoryReconstruction,
     settle: impl FnOnce(&mut EngineStore, &LiveSettlementAudit) -> Result<T, E>,
 ) -> Result<T, E>
 where
@@ -366,8 +367,7 @@ where
             // Accepting the pending seed must not roll back the owner's file
             // to an accepted state that lacks its pre-adoption head.
             if tail.seed { return Err(invalid("the owner's adoption seed must be accepted before a settlement")); }
-            let mut budget = restore_content::Budget { remaining: PREFIX_READ_BYTES };
-            Some(accepted_history::read_inner(conn,&held,terminal_cursor,&mut budget,accepted_history::CHECKPOINT_EVENTS as usize,false)?.doc)
+            Some(accepted_history::read_state(conn,&held,terminal_cursor,reconstruction)?)
         } else {
             None
         };
@@ -382,10 +382,6 @@ where
 
 type ReceiptIdentity = (String, String, i64, i64, i64, String);
 
-/// Reconstructing the accepted prefix reads its latest accepted checkpoint and
-/// the suffix after it: one bounded state and at most one checkpoint segment
-/// of updates, with their metadata.
-const PREFIX_READ_BYTES: usize = 3 * crate::limits::MAX_YDOC_UPDATE_BYTES;
 /// A native source names one binding and its origin. A larger one is corrupt.
 const MAX_NATIVE_SOURCE_BYTES: i64 = 262_144;
 

@@ -51,6 +51,9 @@ mod tests {
             Self::with_source(text, bytes)
         }
         fn with_source(text: String, bytes: Vec<u8>) -> Self {
+            Self::with_source_selectors(text, bytes, vec!["owner.md".into()])
+        }
+        fn with_source_selectors(text: String, bytes: Vec<u8>, selectors: Vec<String>) -> Self {
             let scratch = ScratchDir::new_named("existing-owner-adoption").unwrap();
             let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
             VersionedTextStore::new(&mut store)
@@ -102,7 +105,7 @@ mod tests {
                 object_id: "object".into(),
                 lineage_claim_id: hex_sha256(&bytes),
                 current_path: "owner.md".into(),
-                selector_paths: vec!["owner.md".into()],
+                selector_paths: selectors,
                 restore_fence_generation: 0,
             };
             let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
@@ -704,6 +707,9 @@ mod tests {
             &f.handle,
             Some(event.metadata.accepted.receipt.clone()),
             10,
+            NativeHistoryReconstruction {
+                working_reserve_bytes: 8 * 1024 * 1024,
+            },
             |_, audit| Ok(audit.result("test".into(), "test-moment".into(), "a".repeat(64), false)),
         );
         let result = result.unwrap();

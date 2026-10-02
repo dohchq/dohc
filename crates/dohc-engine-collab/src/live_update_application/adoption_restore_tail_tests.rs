@@ -1440,3 +1440,81 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
         .unwrap();
     assert_eq!(historic.binding.restore_fence_generation, 1);
 }
+
+#[test]
+fn restored_owner_capacity_rescue_streams_past_a_large_prior_proof_and_private_tail() {
+    let seed=Fixture::new();
+    let baseline=seed.cut.baseline_bytes.clone();
+    let source:String=seed.store.read_with(|conn|conn.query_row("SELECT text FROM blobs WHERE sha256=?1",[&seed.cut.source_digest],|r|r.get(0))).unwrap();
+    drop(seed);
+    let mut selectors=vec!["owner.md".into()];
+    selectors.extend((0..99).map(|i|format!("z{i:02}{}", "x".repeat(1020)))); selectors.sort();
+    let mut f=Fixture::with_source_selectors(source,baseline.clone(),selectors);
+    f.adopt().unwrap();
+    let mut terminal=None;
+    let mut sequence=0;
+    for cursor in 1..=700 {
+        let ack=native_tail_apply(&mut f,baseline.clone(),format!("proof-{cursor}"),cursor);
+        sequence=ack.local_ydoc_sequence;
+        terminal=Some(LiveUpdateReceipt {delivery_id:ack.delivery_id,update_digest:ack.update_digest,journal_cursor:cursor,accepting_host_epoch:1});
+    }
+    let preparation=native_tail_input(&mut f,terminal,sequence);
+    let coordinate=f.handle.registration.lock().unwrap().coordinate.clone();
+    const PROOF_BYTES:usize=512*1024*1024;
+    let proposal=f._owner.prepare_restore(&mut f.store,preparation.clone(),coordinate.clone(),PROOF_BYTES,1000,&NoFaults).unwrap();
+    let proof_length:i64=f.store.read_with(|conn|conn.query_row("SELECT length(CAST(proposal_json AS BLOB)) FROM live_restore_fences",[],|r|r.get(0))).unwrap();
+    assert!(proof_length>60*1024*1024);
+    let mut binding=f.binding.clone(); binding.restore_fence_generation=1;
+    let input=NativeRestoreApplication {
+        preparation,candidate_digest:proposal.receipt().candidate_digest.clone(),native_source_manifest_digest:proposal.receipt().native_source_manifest_digest.clone(),
+        admitted:AdmittedLiveUpdateMetadata {
+            accepted:RelayAcceptedLiveUpdate {
+                receipt:LiveUpdateReceipt {delivery_id:"proof-restore".into(),update_digest:proposal.receipt().candidate_digest.clone(),journal_cursor:701,accepting_host_epoch:1},
+                binding:binding.clone(),authority:ServerDerivedLiveUpdateAuthority::Owner {principal_id:"owner".into()},received_at_ms:701,agent_declaration:None,
+            },first_seen:proposal.receipt().replacement_ranges.clone(),
+        },
+    };
+    drop(proposal);
+    f._owner.apply_restore(&mut f.store,&mut WriterDocCache::new(),input.clone(),coordinate.clone(),PROOF_BYTES,1000,702,&NoFaults,|_,_,_,_|Ok(())).unwrap();
+    let settled=f._owner.with_restore_settlement(&mut f.store,input.clone(),coordinate.clone(),PROOF_BYTES,1000,|store,audit|restore_content::tests::record_test_projection(store,audit,"large-proof-restored")).unwrap();
+    f._owner.resume_restore(&mut f.store,NativeRestoreResume {application:input,settlement_id:settled.settlement_id},coordinate.clone(),PROOF_BYTES,1000,703,&NoFaults,|_,_,_,_|Ok(())).unwrap();
+    f.binding=binding;
+    f.doc=f.store.read_with(|conn|durable::load_doc_in(conn,&f.key)).unwrap();
+    f.handle=f._owner.register(&mut f.store,"namespace".into(),coordinate,f.binding.clone()).unwrap();
+    let peer=Ydoc::wire(); peer.apply(&f.doc.encode_full_state()).unwrap();
+    native_tail_edit(&mut f,"Private after restore",704);
+    let remote=peer.richdoc_append_paragraph("Accepted after restore");
+    let mut cursor=702;
+    let mut terminal=None;
+    let blocked=loop {
+        assert!(cursor<782);
+        let event=AdmittedLiveUpdate {
+            metadata:AdmittedLiveUpdateMetadata {
+                accepted:RelayAcceptedLiveUpdate {
+                    receipt:LiveUpdateReceipt {delivery_id:format!("post-restore-{cursor}"),update_digest:hex_sha256(&remote),journal_cursor:cursor,accepting_host_epoch:1},
+                    binding:f.binding.clone(),authority:ServerDerivedLiveUpdateAuthority::Owner {principal_id:"owner".into()},received_at_ms:cursor,
+                    agent_declaration:Some(AgentDeclaration {agent_id:format!("{cursor:03}{}", "\"".repeat(509)),on_behalf_of:Some("\"".repeat(512)),depth:1}),
+                },first_seen:vec![],
+            },update_bytes:remote.clone(),
+        };
+        let result=apply_committed(&mut f.store,&mut WriterDocCache::new(),&f.handle,event.clone(),&NoFaults,8*1024*1024,|_,_,_,_|Ok(())).unwrap();
+        match result {
+            ApplicationResult::Applied(..)=> {terminal=Some(event.metadata.accepted.receipt);cursor+=1;}
+            ApplicationResult::Pending(ApplicationPending::SettlementRequired)=>break event,
+            other=>panic!("unexpected {other:?}"),
+        }
+    };
+    let rescue=with_settlement(&mut f.store,&f.handle,terminal.clone(),128,NativeHistoryReconstruction {working_reserve_bytes:8*1024*1024},|store,audit| {
+        let doc=audit.accepted_prefix().expect("private tail needs accepted state");
+        let text=doc.project(ContentKind::Richdoc)?.content;
+        assert!(text.contains("Accepted after restore")); assert!(!text.contains("Private after restore"));
+        restore_content::tests::record_test_projection(store,audit,"rescued-after-restore")
+    }).unwrap();
+    let text:String=f.store.read_with(|conn|conn.query_row("SELECT text FROM blobs WHERE sha256=?1",[&rescue.markdown_digest],|r|r.get(0))).unwrap();
+    assert!(text.contains("Accepted after restore")); assert!(!text.contains("Private after restore"));
+    let held=f.handle.registration.lock().unwrap();
+    assert!(matches!(f.store.read_with(|conn|accepted_history::read(conn,&held,terminal.unwrap().journal_cursor,&mut restore_content::Budget {remaining:60*1024*1024},4095)),Err(ApplicationError::ConfiguredByteBudgetExceeded)));
+    drop(held);
+    let retry=apply_committed(&mut f.store,&mut WriterDocCache::new(),&f.handle,blocked,&NoFaults,8*1024*1024,|_,_,_,_|Ok(())).unwrap();
+    assert!(matches!(retry,ApplicationResult::Applied(..)));
+}
