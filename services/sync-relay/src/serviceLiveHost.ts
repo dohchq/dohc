@@ -168,7 +168,7 @@ export async function startServiceLiveHost(options: {
     changes?.notify();
     return closing;
   };
-  const abort = () => { void close().catch(error => console.error("Service host shutdown failed.", error)); };
+  const abort = () => { if (!closing) void close().catch(error => console.error("Service host shutdown failed.", error)); };
   const runDocument = async <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined, operation: (joined: AbortSignal) => Promise<T>): Promise<T> => {
     try {
       return await withLiveHostSignal(signal, callerSignal, joined => documents.run(JSON.stringify(parseLiveDocumentKey(document)), joined, async () => {
@@ -203,7 +203,7 @@ export async function startServiceLiveHost(options: {
       const stop = changes ? observeRelayWrites(storage, () => changes.notify()) : () => {};
       signal.addEventListener("abort",stop,{once: true});
       return stop;
-    }),stop => Effect.sync(() => {signal.removeEventListener("abort",stop); stop();}));
+    }),stop => Effect.sync(() => signal.removeEventListener("abort",stop)));
     const temporary = yield* Effect.acquireRelease(
       Effect.promise(() => mkdtemp(join(tmpdir(), "dohc-service-live-host-"))),
       directory => Effect.promise(() => rm(directory,{recursive: true,force: true})),

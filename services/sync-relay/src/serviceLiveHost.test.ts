@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost } from "./serviceLiveHost.js";
-import {observeRelayWrites} from "./relayWriteChanges.js";
+import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
 
 const spawn = vi.hoisted(() => vi.fn());
@@ -92,6 +92,38 @@ it("preserves the startup error and releases its reservation when directory clea
     removal.mockReset(); log.mockRestore();
     if (captured) await rm(dirname(captured.nativePath),{recursive: true,force: true});
   }
+});
+
+it("retains an observer registered while the native process is closing",async () => {
+  const f = await fixture(), exited = deferred<void>(); let captured!: ReturnType<typeof clientFrom>;
+  spawn.mockImplementation(async options => {
+    captured = clientFrom(options);
+    captured.client.waitForExit.mockImplementation(() => exited.promise);
+    return captured.client;
+  });
+  const host = await startServiceLiveHost({...f,frameChanges: {maxListeners: 16,notify() {},subscribe: () => () => {}}});
+  const closing = host.close();
+  expect(hasRelayWriteObservers(f.storage)).toBe(false);
+  const changed = vi.fn(), stop = observeRelayWrites(f.storage,changed);
+  try {
+    await vi.waitFor(() => expect(captured.client.waitForExit).toHaveBeenCalledTimes(1));
+    exited.resolve(); await closing;
+    changed.mockClear();
+    notifyRelayWrite(f.storage);
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+  } finally {exited.resolve(); await closing; stop();}
+});
+
+it("returns an explicit close failure without also logging it",async () => {
+  const f = await fixture(); let captured!: ReturnType<typeof clientFrom>;
+  spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
+  const host = await startServiceLiveHost(f), failure = new Error("directory locked");
+  const removal = vi.mocked(rm).mockRejectedValueOnce(failure);
+  const log = vi.spyOn(console,"error").mockImplementation(() => {});
+  try {
+    await expect(host.close()).rejects.toBe(failure);
+    expect(log).not.toHaveBeenCalled();
+  } finally {removal.mockReset(); log.mockRestore(); await rm(dirname(captured.nativePath),{recursive: true,force: true});}
 });
 
 it("registers only the discovered engine identity and releases its incarnation on close", async () => {
@@ -336,10 +368,14 @@ it("joins deadline-expired activation work before removing the native directory"
   const f = await fixture(), entered = deferred<AbortSignal>();
   const settled = deferred<Awaited<ReturnType<ServiceActivationDriver["activate"]>>>();
   await configureActivation(f,{passDeadlineMs: 10});
-  let captured!: ReturnType<typeof clientFrom>;
-  spawn.mockImplementation(async options => {captured = clientFrom(options); return captured.client;});
+  let captured!: ReturnType<typeof clientFrom>; const order: string[] = [];
+  spawn.mockImplementation(async options => {
+    captured = clientFrom(options);
+    captured.client.waitForExit.mockImplementation(async () => {order.push("exit");});
+    return captured.client;
+  });
   const activate = vi.spyOn(ServiceActivationDriver.prototype,"activate").mockImplementation((_target,signal) => {
-    entered.resolve(signal); return settled.promise;
+    entered.resolve(signal); return settled.promise.then(result => {order.push("settled"); return result;});
   });
   const host = await startServiceLiveHost(f), signal = await entered.promise;
   await new Promise<void>(resolve => {
@@ -347,7 +383,7 @@ it("joins deadline-expired activation work before removing the native directory"
   });
   const closed = vi.fn(), closes = [host.close().then(closed),host.close().then(closed)];
   try {
-    await Promise.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
     expect(signal.aborted).toBe(true);
     expect(closed).not.toHaveBeenCalled();
     expect(captured.client.close).toHaveBeenCalledTimes(1);
@@ -357,6 +393,7 @@ it("joins deadline-expired activation work before removing the native directory"
   } finally {settled.resolve({kind: "pending",reason: "finished"}); await Promise.all(closes); activate.mockRestore();}
   expect(closed).toHaveBeenCalledTimes(2);
   expect(captured.client.waitForExit).toHaveBeenCalledTimes(1);
+  expect(order).toEqual(["settled","exit"]);
   expect(existsSync(captured.nativePath)).toBe(false);
 });
 
