@@ -1696,6 +1696,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guarded_blob_interruption_during_terminal_flush_preserves_success() {
+        for interruption in [
+            ErrorCode::Cancelled,
+            ErrorCode::WorkspaceUnavailable,
+            ErrorCode::DeadlineExceeded,
+        ] {
+            let cancel = CancelSignal::new();
+            let retired = CancelSignal::new();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let deadline = (interruption == ErrorCode::DeadlineExceeded)
+                .then(|| std::time::Instant::now() + Duration::from_secs(1));
+            let guard = Arc::new(TestOutputGuard {
+                cancel: cancel.clone(),
+                retired: retired.clone(),
+                deadline,
+                dropped: dropped.clone(),
+            });
+            let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+            tx.send(guarded_blob(guard)).await.unwrap();
+            tx.send(OutputItem::Envelope(Envelope::Response(WireResponse {
+                id: 10,
+                result: serde_json::json!({ "ok": true }),
+            })))
+            .await
+            .unwrap();
+            drop(tx);
+            let active = Arc::new(Mutex::new(HashMap::from([(9, cancel.clone())])));
+            let limits = WireLimits {
+                max_blob_chunk_bytes: 512 * 1024,
+                ..WireLimits::default()
+            };
+            let mut transcript = Vec::new();
+            let output = InterruptAfterFrame {
+                output: &mut transcript,
+                completed: 0,
+                // BlobStart, one FIN chunk, then the terminal Response.
+                interrupt_after: 3,
+                interrupt: if interruption == ErrorCode::WorkspaceUnavailable {
+                    retired
+                } else {
+                    cancel
+                },
+                deadline,
+            };
+            write_output(output, &mut rx, &limits, active.clone())
+                .await
+                .expect("a successful terminal flush completes the request");
+            assert!(dropped.load(Ordering::SeqCst));
+            assert!(lock(&active).is_empty());
+            let mut decoder = FrameDecoder::new(limits.clone());
+            decoder.push(&transcript);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("BlobStart missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::BlobStart(start) if start.request_id == 9)
+            );
+            let Some(Frame::BlobChunk {
+                stream_id,
+                fin,
+                bytes,
+            }) = decoder.next_frame().unwrap()
+            else {
+                panic!("completed blob missing");
+            };
+            assert_eq!(stream_id, 9);
+            assert!(fin);
+            assert_eq!(bytes, vec![42; 512 * 1024]);
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("terminal response missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 9 && response.result["status"] == "prepared")
+            );
+            let Some(Frame::Control(payload)) = decoder.next_frame().unwrap() else {
+                panic!("following response missing");
+            };
+            assert!(
+                matches!(decode_control(&payload, &limits).unwrap(), Envelope::Response(response) if response.id == 10 && response.result["ok"] == true)
+            );
+            assert!(decoder.next_frame().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn guarded_blob_interruption_during_partial_frame_closes_output() {
         for retire in [false, true] {
             let cancel = CancelSignal::new();

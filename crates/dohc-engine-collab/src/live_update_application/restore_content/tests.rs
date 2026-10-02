@@ -561,6 +561,107 @@ fn native_restore_checkpoint_compact_association_refuses_changed_generation_rece
 }
 
 #[test]
+fn append_after_restore_avoids_historical_json_and_checkpoint_document_reads() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let mut f = Fixture::new("baseline");
+    f.edit("accepted", 7);
+    restore_and_resume(&mut f);
+    let held = f.handle.registration.lock().unwrap();
+    let cursor: i64 = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT max(journal_cursor) FROM live_accepted_updates",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let doc = f
+        .store
+        .read_with(|conn| {
+            accepted_history::read_state(
+                conn,
+                &held,
+                cursor,
+                NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+            )
+        })
+        .unwrap();
+    let bytes = doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "after restore")
+        .unwrap();
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "after-restore".into(),
+                    update_digest: hex_sha256(&bytes),
+                    journal_cursor: cursor + 1,
+                    accepting_host_epoch: 1,
+                },
+                binding: held.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 101,
+                agent_declaration: None,
+            },
+            first_seen: vec![],
+        },
+        update_bytes: bytes,
+    };
+    let result = f
+        .store
+        .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+            tx.authorizer(Some(|context: AuthContext<'_>| match context.action {
+                AuthAction::Read {
+                    table_name: "live_restore_fences",
+                    column_name: "proposal_json" | "application_json",
+                }
+                | AuthAction::Read {
+                    table_name: "binary_blobs",
+                    column_name: "bytes",
+                } => Authorization::Deny,
+                _ => Authorization::Allow,
+            }))
+            .map_err(read_sql)?;
+            let appended = accepted_history::append(tx, &held, &event, 8 * 1024 * 1024);
+            tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+                .map_err(read_sql)?;
+            appended
+        })
+        .unwrap();
+    assert!(matches!(result, TxnOutcome::Committed(())));
+    f.store
+        .read_with(|conn| {
+            accepted_history::read_state(
+                conn,
+                &held,
+                cursor + 1,
+                NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+            )
+        })
+        .unwrap();
+    damage(&f, "UPDATE live_restore_fences SET proposal_json=json_set(proposal_json,'$.finalContentDigest',printf('%064d',0))");
+    assert!(f
+        .store
+        .read_with(|conn| accepted_history::read_state(
+            conn,
+            &held,
+            cursor + 1,
+            NativeHistoryReconstruction {
+                working_reserve_bytes: 8 * 1024 * 1024
+            },
+        ))
+        .is_err());
+}
+
+#[test]
 fn accepted_history_checkpoints_follow_byte_cadence_without_a_local_pending_snapshot() {
     let mut f = Fixture::new(&"a".repeat(524_288));
     let baseline = f.doc.encode_full_state();

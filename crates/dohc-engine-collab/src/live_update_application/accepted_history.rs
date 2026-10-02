@@ -214,12 +214,17 @@ fn insert_checkpoint(
 enum CheckpointRead {
     Proof { verify_cadence: bool },
     NativeState { verify_cadence: bool },
+    NativeAppend,
 }
 impl CheckpointRead {
     fn verify_cadence(self) -> bool {
         match self {
             Self::Proof { verify_cadence } | Self::NativeState { verify_cadence } => verify_cadence,
+            Self::NativeAppend => false,
         }
+    }
+    fn native(self) -> bool {
+        matches!(self, Self::NativeState { .. } | Self::NativeAppend)
     }
 }
 
@@ -257,7 +262,7 @@ fn checkpoint_in(
         .optional()
         .map_err(read_sql)?
         .ok_or(ApplicationError::Conflict)?;
-    if matches!(mode, CheckpointRead::NativeState { .. })
+    if mode.native()
         && (length < 0 || length as u64 > NativeHistoryReconstruction::HEADER_BYTES as u64)
     {
         return Err(ApplicationError::Corrupt);
@@ -297,7 +302,7 @@ fn checkpoint_in(
             ))
         })
         .map_err(read_sql)?;
-    let actual_stamp = if matches!(mode, CheckpointRead::NativeState { .. }) {
+    let actual_stamp = if mode.native() {
         origin_stamp_in(
             conn,
             held,
@@ -350,7 +355,13 @@ fn checkpoint_in(
         {
             return Err(ApplicationError::Corrupt);
         };
-        let bound:bool=conn.query_row("SELECT application_delivery_id=?3 AND new_generation=?4 AND json_extract(application_json,'$.admitted.accepted.binding')=?5 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id,terminal.as_ref().ok_or(ApplicationError::Corrupt)?.delivery_id,binding.restore_fence_generation,serde_json::to_string(&binding).map_err(|_|ApplicationError::Corrupt)?],|r|r.get(0)).map_err(read_sql)?;
+        let bound = if matches!(mode, CheckpointRead::NativeAppend) {
+            // Historical restore JSON and content are checked by state replay.
+            // Append still binds this checkpoint to the committed fence row.
+            conn.query_row("SELECT application_delivery_id=?3 AND new_generation=?4 AND workspace_id=?5 AND main_version_id=?6 AND object_id=?7 AND lineage_claim_id=?8 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id,terminal.as_ref().ok_or(ApplicationError::Corrupt)?.delivery_id,binding.restore_fence_generation,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id],|r|r.get::<_,bool>(0)).map_err(read_sql)?
+        } else {
+            conn.query_row("SELECT application_delivery_id=?3 AND new_generation=?4 AND json_extract(application_json,'$.admitted.accepted.binding')=?5 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id,terminal.as_ref().ok_or(ApplicationError::Corrupt)?.delivery_id,binding.restore_fence_generation,serde_json::to_string(&binding).map_err(|_|ApplicationError::Corrupt)?],|r|r.get::<_,bool>(0)).map_err(read_sql)?
+        };
         if !bound {
             return Err(ApplicationError::Corrupt);
         };
@@ -376,7 +387,7 @@ fn checkpoint_in(
                 |r| r.get(0),
             )
             .map_err(read_sql)?;
-        let (metadata, expected) = if matches!(mode, CheckpointRead::NativeState { .. }) {
+        let (metadata, expected) = if mode.native() {
             let metadata = native_state::metadata(conn, held, count)?;
             let expected = conn.query_row(
                 &format!("SELECT evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6"),
@@ -561,15 +572,7 @@ fn append_inner(
         return Ok(());
     }
     let c = if reconstruction.is_some() {
-        checkpoint_in(
-            tx,
-            held,
-            SAFE,
-            budget,
-            CheckpointRead::NativeState {
-                verify_cadence: false,
-            },
-        )?
+        checkpoint_in(tx, held, SAFE, budget, CheckpointRead::NativeAppend)?
     } else {
         checkpoint(tx, held, SAFE, budget, false)?
     };

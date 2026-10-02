@@ -18,6 +18,14 @@ it("accepts only explicit owner document targets and unchanged frame budgets", (
     {...config, relayUrl: "https://user:password@relay.example.test"}]) expect(() => parseDesktopOwnerDeliveryConfig(changed)).toThrow();
 });
 
+it("requires frame and control budgets that carry the largest declared submission", () => {
+  for (const ownerFrames of [{...frames, receive: {...frames.receive, maxFrameBytes: 1610}}, {...frames, maxControlBytes: 1610}]) {
+    expect(() => parseDesktopOwnerDeliveryConfig({...config, frames: ownerFrames})).toThrow("largest declared submission");
+  }
+  const minimum = {...frames, receive: {...frames.receive, maxFrameBytes: 1611}, maxControlBytes: 1611};
+  expect(parseDesktopOwnerDeliveryConfig({...config, frames: minimum}).frames).toEqual(minimum);
+});
+
 it("holds one pass, rotates targets and waits the configured retry interval", async () => {
   vi.useFakeTimers();
   const pending = deferred<OwnerYDocDrainResult>(), run = vi.fn().mockImplementationOnce(() => pending.promise).mockResolvedValue("retry");

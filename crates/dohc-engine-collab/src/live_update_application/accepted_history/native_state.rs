@@ -46,11 +46,8 @@ const STRING_TOKEN_BYTES: usize = 6 * 1024;
 const NUMBER_TOKEN_BYTES: usize = 16;
 const CHUNK: usize = NativeHistoryReconstruction::CHUNK_BYTES;
 
-struct SqlJson<'a> {
-    conn: &'a Connection,
-    source: String,
-    expression: &'a str,
-    parameters: Vec<&'a dyn rusqlite::ToSql>,
+struct SqlJson<R> {
+    reader: R,
     length: usize,
     offset: usize,
     chunk: Vec<u8>,
@@ -60,19 +57,10 @@ struct SqlJson<'a> {
     token: usize,
     number: bool,
 }
-impl<'a> SqlJson<'a> {
-    fn new(
-        conn: &'a Connection,
-        expression: &'a str,
-        source: String,
-        parameters: Vec<&'a dyn rusqlite::ToSql>,
-        length: usize,
-    ) -> Self {
+impl<R: Read> SqlJson<R> {
+    fn new(reader: R, length: usize) -> Self {
         Self {
-            conn,
-            source,
-            expression,
-            parameters,
+            reader,
             length,
             offset: 0,
             chunk: Vec::new(),
@@ -119,7 +107,7 @@ impl<'a> SqlJson<'a> {
         Ok(())
     }
 }
-impl Read for SqlJson<'_> {
+impl<R: Read> Read for SqlJson<R> {
     fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
         if output.is_empty() {
             return Ok(0);
@@ -129,21 +117,8 @@ impl Read for SqlJson<'_> {
                 return Ok(0);
             }
             let expected = (self.length - self.offset).min(CHUNK);
-            // Bound SQLite's returned value before rusqlite copies it into Rust.
-            let sql = format!(
-                "SELECT substr(CAST({} AS BLOB),{},{} ) {}",
-                self.expression,
-                self.offset + 1,
-                expected,
-                self.source
-            );
-            self.chunk = self
-                .conn
-                .query_row(&sql, self.parameters.as_slice(), |r| r.get(0))
-                .map_err(std::io::Error::other)?;
-            if self.chunk.len() != expected {
-                return Err(std::io::Error::other("short retained JSON read"));
-            }
+            self.chunk.resize(expected, 0);
+            self.reader.read_exact(&mut self.chunk)?;
             self.offset += expected;
             self.consumed = 0;
         }
@@ -312,6 +287,7 @@ pub(super) struct NativeMetadata {
 }
 fn parse(
     conn: &Connection,
+    table: &str,
     expression: &str,
     source: String,
     parameters: Vec<&dyn rusqlite::ToSql>,
@@ -320,10 +296,10 @@ fn parse(
 ) -> Result<NativeMetadata, ApplicationError> {
     let application = expression == "application_json";
     let prefix = if application { "$.admitted" } else { "$" };
-    let facts=format!("SELECT length(CAST({expression} AS BLOB)),json_array_length({expression},'{prefix}.firstSeen'),length(CAST(json_extract({expression},'{prefix}.accepted') AS BLOB)) {source}");
-    let (length, count, header): (i64, i64, i64) = conn
+    let facts=format!("SELECT rowid,length(CAST({expression} AS BLOB)),json_array_length({expression},'{prefix}.firstSeen'),length(CAST(json_extract({expression},'{prefix}.accepted') AS BLOB)) {source}");
+    let (rowid, length, count, header): (i64, i64, i64, i64) = conn
         .query_row(&facts, parameters.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })
         .map_err(read_sql)?;
     let length = usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?;
@@ -348,21 +324,79 @@ fn parse(
     {
         return Err(ApplicationError::Corrupt);
     }
-    let selected = format!("json_extract({expression},'{prefix}.accepted')");
-    let header_reader = SqlJson::new(
-        conn,
-        &selected,
-        source.clone(),
-        parameters.clone(),
-        header as usize,
-    );
-    let accepted: RelayAcceptedLiveUpdate =
-        serde_json::from_reader(header_reader).map_err(|_| ApplicationError::Corrupt)?;
+    let accepted: RelayAcceptedLiveUpdate = conn
+        .query_row(
+            &format!("SELECT json_extract({expression},'{prefix}.accepted') {source}"),
+            parameters.as_slice(),
+            |r| {
+                let bytes = r.get_ref(0)?.as_str()?.as_bytes();
+                Ok(if bytes.len() != header as usize {
+                    Err(ApplicationError::Corrupt)
+                } else {
+                    serde_json::from_reader(SqlJson::new(bytes, bytes.len()))
+                        .map_err(|_| ApplicationError::Corrupt)
+                })
+            },
+        )
+        .map_err(read_sql)??;
     accepted.validate().map_err(|_| ApplicationError::Corrupt)?;
-    let reader = SqlJson::new(conn, expression, source, parameters, length);
+    let evidence_digest = if application {
+        // SQLite rejects incremental handles on tables with generated columns.
+        // Borrow its value for one parse; never re-query the whole JSON per chunk.
+        conn.query_row(
+            &format!("SELECT {expression} {source}"),
+            parameters.as_slice(),
+            |r| {
+                let bytes = r.get_ref(0)?.as_str()?.as_bytes();
+                Ok(if bytes.len() != length {
+                    Err(ApplicationError::Corrupt)
+                } else {
+                    parse_evidence(
+                        SqlJson::new(bytes, length),
+                        &accepted,
+                        count,
+                        previous,
+                        ordinal,
+                        true,
+                    )
+                })
+            },
+        )
+        .map_err(read_sql)??
+    } else {
+        // The incremental API accepts TEXT columns as raw bytes too.
+        let blob = conn
+            .blob_open("main", table, expression, rowid, true)
+            .map_err(read_sql)?;
+        if blob.len() != length {
+            return Err(ApplicationError::Corrupt);
+        }
+        parse_evidence(
+            SqlJson::new(blob, length),
+            &accepted,
+            count,
+            previous,
+            ordinal,
+            false,
+        )?
+    };
+    Ok(NativeMetadata {
+        accepted,
+        evidence_digest,
+    })
+}
+
+fn parse_evidence(
+    reader: impl Read,
+    accepted: &RelayAcceptedLiveUpdate,
+    count: usize,
+    previous: &str,
+    ordinal: i64,
+    application: bool,
+) -> Result<String, ApplicationError> {
     let mut de = serde_json::Deserializer::from_reader(reader);
     let metadata = Metadata {
-        accepted: &accepted,
+        accepted,
         count,
         previous,
         ordinal,
@@ -374,10 +408,7 @@ fn parse(
     }
     .map_err(|_| ApplicationError::Corrupt)?;
     de.end().map_err(|_| ApplicationError::Corrupt)?;
-    Ok(NativeMetadata {
-        accepted,
-        evidence_digest,
-    })
+    Ok(evidence_digest)
 }
 
 pub(super) fn metadata(
@@ -394,6 +425,7 @@ pub(super) fn metadata(
     digest(&previous)?;
     let result = parse(
         conn,
+        "live_accepted_updates",
         "metadata_json",
         format!("FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6"),
         vec![&p[0], &p[1], &p[2], &p[3], &p[4], &count],
@@ -482,7 +514,7 @@ pub(super) fn restore_metadata(
     } else {
         conn.query_row(&format!("SELECT evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND length(CAST(evidence_digest AS BLOB))=64"),params![p[0],p[1],p[2],p[3],p[4],count-1],|r|r.get(0)).map_err(read_sql)?
     };
-    let saved=parse(conn,"application_json","FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5".into(),vec![&p[0],&id,&p[1],&p[2],&p[3]],&previous,count)?;
+    let saved=parse(conn,"live_restore_fences","application_json","FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5".into(),vec![&p[0],&id,&p[1],&p[2],&p[3]],&previous,count)?;
     if saved.evidence_digest != evidence {
         return Err(ApplicationError::Corrupt);
     }
@@ -511,7 +543,7 @@ pub(super) fn transition(
         None,
     )?;
     let p = parameters(held);
-    let saved=parse(conn,"application_json","FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5".into(),vec![&p[0],&id,&p[1],&p[2],&p[3]],previous_digest,count)?;
+    let saved=parse(conn,"live_restore_fences","application_json","FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5".into(),vec![&p[0],&id,&p[1],&p[2],&p[3]],previous_digest,count)?;
     if saved.accepted != *next || saved.evidence_digest != evidence {
         return Err(ApplicationError::Corrupt);
     }
@@ -519,31 +551,30 @@ pub(super) fn transition(
 }
 
 pub(super) fn validate_blob_hash(conn: &Connection, digest: &str) -> Result<(), ApplicationError> {
-    let (declared, actual): (i64, i64) = conn
+    let (rowid, declared, actual): (i64, i64, i64) = conn
         .query_row(
-            "SELECT byte_length,length(bytes) FROM binary_blobs WHERE sha256=?1",
+            "SELECT rowid,byte_length,length(bytes) FROM binary_blobs WHERE sha256=?1",
             [digest],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(read_sql)?;
     if declared != actual || !(1..=crate::limits::MAX_YDOC_UPDATE_BYTES as i64).contains(&actual) {
         return Err(ApplicationError::Corrupt);
     };
     let mut hash = Sha256::new();
-    let mut offset = 0;
-    while offset < actual {
-        let count = (actual - offset).min(CHUNK as i64);
-        let chunk: Vec<u8> = conn
-            .query_row(
-                "SELECT substr(bytes,?2,?3) FROM binary_blobs WHERE sha256=?1",
-                params![digest, offset + 1, count],
-                |r| r.get(0),
-            )
-            .map_err(read_sql)?;
-        if chunk.len() != count as usize {
-            return Err(ApplicationError::Corrupt);
-        };
-        hash.update(&chunk);
+    let mut blob = conn
+        .blob_open("main", "binary_blobs", "bytes", rowid, true)
+        .map_err(read_sql)?;
+    if blob.len() != actual as usize {
+        return Err(ApplicationError::Corrupt);
+    }
+    let mut chunk = vec![0; CHUNK];
+    let mut offset = 0usize;
+    while offset < actual as usize {
+        let count = (actual as usize - offset).min(CHUNK);
+        blob.read_exact(&mut chunk[..count])
+            .map_err(|_| ApplicationError::Corrupt)?;
+        hash.update(&chunk[..count]);
         offset += count;
     }
     if dohc_engine_storage::hex(&hash.finalize()) != digest {
@@ -662,6 +693,24 @@ pub(super) fn read(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    fn count_reads(conn: &Connection) -> Arc<AtomicUsize> {
+        let count = Arc::new(AtomicUsize::new(0));
+        let observed = count.clone();
+        conn.authorizer(Some(move |context: AuthContext<'_>| {
+            if matches!(context.action, AuthAction::Select) {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }
+            Authorization::Allow
+        }))
+        .unwrap();
+        count
+    }
 
     fn read_json(json: &str, previous: &str) -> Result<NativeMetadata, ApplicationError> {
         let conn = Connection::open_in_memory().unwrap();
@@ -669,7 +718,21 @@ mod tests {
             .unwrap();
         conn.execute("INSERT INTO metadata VALUES (?1)", [json])
             .unwrap();
-        parse(&conn, "json", "FROM metadata".into(), vec![], previous, 1)
+        let count = count_reads(&conn);
+        let result = parse(
+            &conn,
+            "metadata",
+            "json",
+            "FROM metadata".into(),
+            vec![],
+            previous,
+            1,
+        );
+        assert!(
+            count.load(Ordering::Relaxed) <= 3,
+            "queries must not grow with chunks"
+        );
+        result
     }
 
     #[test]
@@ -751,13 +814,117 @@ mod tests {
             .unwrap();
         conn.execute("INSERT INTO metadata VALUES ('[]')", [])
             .unwrap();
-        let mut reader = SqlJson::new(&conn, "json", "FROM metadata".into(), vec![], 3);
+        let blob = conn.blob_open("main", "metadata", "json", 1, true).unwrap();
+        let mut reader = SqlJson::new(blob, 3);
         assert!(reader.read(&mut [0; 4]).is_err());
+        drop(reader);
         let json = format!("[{}\"🦀\\\"é\"]", " ".repeat(CHUNK - 3));
         conn.execute("UPDATE metadata SET json=?1", [&json])
             .unwrap();
-        let reader = SqlJson::new(&conn, "json", "FROM metadata".into(), vec![], json.len());
+        let blob = conn.blob_open("main", "metadata", "json", 1, true).unwrap();
+        let reader = SqlJson::new(blob, json.len());
         let parsed: Vec<String> = serde_json::from_reader(reader).unwrap();
         assert_eq!(parsed, vec!["🦀\"é"]);
+    }
+
+    #[test]
+    fn restore_json_with_generated_columns_uses_constant_queries_and_bounded_tokens() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE restores(application_json TEXT, generation INTEGER GENERATED ALWAYS AS (json_extract(application_json,'$.fence.generation')) VIRTUAL)").unwrap();
+        let accepted: RelayAcceptedLiveUpdate =
+            serde_json::from_str(super::super::tests::ACCEPTED_COMPLETE).unwrap();
+        let metadata = AdmittedLiveUpdateMetadata {
+            accepted,
+            first_seen: (0..60000)
+                .map(|client_id| LiveUpdateStructRange {
+                    client_id,
+                    start_clock: 0,
+                    end_clock: 1,
+                })
+                .collect(),
+        };
+        let application = serde_json::json!({
+            "fence": {"generation": 1}, "candidateDigest": "0".repeat(64),
+            "nativeSourceManifestDigest": "0".repeat(64), "admitted": metadata,
+            "localHeadSequence": 1, "hostCoordinate": {}, "recordedAtMs": 1,
+        });
+        let json = serde_json::to_string(&application).unwrap();
+        assert!(json.len() > 10 * CHUNK);
+        conn.execute(
+            "INSERT INTO restores(application_json) VALUES (?1)",
+            [&json],
+        )
+        .unwrap();
+        assert!(conn
+            .blob_open("main", "restores", "application_json", 1, true)
+            .is_err());
+        let queries = count_reads(&conn);
+        let previous = "0".repeat(64);
+        let parsed = parse(
+            &conn,
+            "restores",
+            "application_json",
+            "FROM restores".into(),
+            vec![],
+            &previous,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.evidence_digest,
+            next_digest(&previous, 1, &metadata).unwrap()
+        );
+        assert!(queries.load(Ordering::Relaxed) <= 3);
+        for token in [
+            serde_json::json!("x".repeat(STRING_TOKEN_BYTES + 1)),
+            serde_json::json!(10000000000000000_u64),
+        ] {
+            let mut damaged = application.clone();
+            // Ignored restore fields still pass through the token guard.
+            damaged["hostCoordinate"] = token;
+            conn.execute(
+                "UPDATE restores SET application_json=?1",
+                [damaged.to_string()],
+            )
+            .unwrap();
+            assert!(parse(
+                &conn,
+                "restores",
+                "application_json",
+                "FROM restores".into(),
+                vec![],
+                &previous,
+                1
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn incremental_blob_hash_checks_length_and_content_without_chunk_queries() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE binary_blobs(sha256 TEXT PRIMARY KEY, byte_length INTEGER, bytes BLOB)",
+        )
+        .unwrap();
+        let bytes = vec![42; 12 * CHUNK + 17];
+        let digest = hex_sha256(&bytes);
+        conn.execute(
+            "INSERT INTO binary_blobs VALUES (?1,?2,?3)",
+            params![digest, bytes.len() as i64, bytes],
+        )
+        .unwrap();
+        let queries = count_reads(&conn);
+        validate_blob_hash(&conn, &digest).unwrap();
+        assert!(queries.load(Ordering::Relaxed) <= 2);
+        conn.execute("UPDATE binary_blobs SET byte_length=byte_length+1", [])
+            .unwrap();
+        assert!(validate_blob_hash(&conn, &digest).is_err());
+        conn.execute(
+            "UPDATE binary_blobs SET byte_length=byte_length-1,bytes=zeroblob(length(bytes))",
+            [],
+        )
+        .unwrap();
+        assert!(validate_blob_hash(&conn, &digest).is_err());
     }
 }

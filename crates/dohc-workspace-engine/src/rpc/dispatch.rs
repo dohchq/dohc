@@ -987,6 +987,7 @@ impl EngineService {
                     | "chats.readState.listUnreadFileThreads"
                     | "history.page"
                     | "moments.get"
+                    | "versionedText.readBlob"
             )
         {
             return Err(WireError::new(

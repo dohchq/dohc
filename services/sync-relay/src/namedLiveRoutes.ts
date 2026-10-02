@@ -86,7 +86,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
   createLiveFrameSession("server", frames).close();
   if (frames.receive.maxFrameBytes > limits.maxPendingBytes) throw new TypeError("Named route send capacity is smaller than one frame.");
   // Only the owner route admits an agent declaration, so only it must receive the largest declared submission.
-  if (kind === "owner" && frames.receive.maxFrameBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES) {
+  if (kind === "owner" && (frames.receive.maxFrameBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES ||
+    frames.maxControlBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES)) {
     throw new TypeError("The owner route must receive the largest declared submission.");
   }
   const wsOptions = { noServer: true as const, clientTracking: false, perMessageDeflate: false as const, autoPong: false,

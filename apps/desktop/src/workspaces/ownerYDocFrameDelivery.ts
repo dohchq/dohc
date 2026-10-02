@@ -80,7 +80,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
     this.options = {...options, frames: {...options.frames, receive: {...options.frames.receive}}};
     createLiveFrameSession("client", this.options.frames).close();
     // A queued draft can declare an agent, so this route must carry the largest declared submission.
-    if (this.options.frames.receive.maxFrameBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES) throw new TypeError("Invalid owner frame policy.");
+    if (this.options.frames.receive.maxFrameBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES || this.options.frames.maxControlBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES) throw new TypeError("Invalid owner frame policy.");
     if (!Number.isSafeInteger(options.attemptTimeoutMs) || options.attemptTimeoutMs < 1 || options.attemptTimeoutMs > 2_147_483_647) throw new TypeError("Invalid owner attempt timeout.");
     this.routeUrl({workspaceId: "check", objectId: "check", lineageClaimId: "a".repeat(64)});
   }

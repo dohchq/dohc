@@ -83,7 +83,8 @@ it("requires an owner frame policy that carries the largest declared submission"
   const options = {relayUrl: "https://relay.example.test", shareId: "share", attemptTimeoutMs: 10_000, signal: new AbortController().signal,
     freshBearer: async () => "bearer", acceptedState: {} as OwnerAcceptedState};
   expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: 1610}}})).toThrow("owner frame policy");
-  new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: 1611}}}).dispose();
+  expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, maxControlBytes: 1610}})).toThrow("owner frame policy");
+  new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: 1611}, maxControlBytes: 1611}}).dispose();
 });
 
 it("refuses a malformed agent declaration before sending any submission", async () => {

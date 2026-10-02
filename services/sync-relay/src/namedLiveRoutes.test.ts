@@ -480,12 +480,25 @@ it("opens the owner bearer route without a recipient, browser cookie, ticket, or
   expect(f.raw.prepare("SELECT COUNT(*) AS count FROM sync_relay_live_session_tickets").get()).toEqual({count: 0});
 });
 
-it("refuses an owner route whose frames cannot carry the largest declared submission", () => {
+it.each([
+  { ...frames, receive: { ...frames.receive, maxFrameBytes: 1610 } },
+  { ...frames, maxControlBytes: 1610 },
+])("refuses an owner route whose frame or control budget cannot carry the largest declared submission", ownerFrames => {
   type OwnerRoute = Parameters<typeof createOwnerLiveRoutes>[0];
   expect(() => createOwnerLiveRoutes({ storage: {} as OwnerRoute["storage"], resolveActor: async () => { throw new UnauthorizedError(); },
     captureNative: async () => { throw new Error("No host opens in this test."); },
-    hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames: { ...frames, receive: { ...frames.receive, maxFrameBytes: 1610 } },
+    hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames: ownerFrames,
     bounds, limits, validate: createLiveMarkdownJournalValidator(policy) })).toThrow("The owner route must receive the largest declared submission.");
+});
+
+it("accepts an owner route at the largest declared submission's frame and control minimum", () => {
+  type OwnerRoute = Parameters<typeof createOwnerLiveRoutes>[0];
+  const route = createOwnerLiveRoutes({ storage: {} as OwnerRoute["storage"], resolveActor: async () => { throw new UnauthorizedError(); },
+    captureNative: async () => { throw new Error("No host opens in this test."); },
+    hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey,
+    frames: { ...frames, receive: { ...frames.receive, maxFrameBytes: 1611 }, maxControlBytes: 1611 },
+    bounds, limits, validate: createLiveMarkdownJournalValidator(policy) });
+  route.close();
 });
 
 it.each<Record<string, string>>([{authorization: ""}, {authorization: "Bearer reader-token"}, {origin: "https://foreign.example"}, {host: "foreign.example"}])(
