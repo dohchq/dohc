@@ -476,6 +476,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     // Keep each settlement interval inside the configured maximum while the
     // accepted checkpoint segment accumulates discarded metadata above60MiB.
     const PREFIX: i64 = 700;
+    let mut accepted_head = None;
     for cursor in 1..=PREFIX {
         let (receipt, result) =
             deliver_declared(&handle, &f.binding, cursor, &remote_bytes, large_agent(999)).await;
@@ -484,11 +485,18 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
             let settled = f.settle(&handle, Some(receipt)).await;
             assert!(!f.file().contains(LOCAL));
             assert!(f.file().contains(REMOTE));
-            if cursor > 100 {
-                assert!(
-                    !settled.materialized,
+            let moments = f.store.table_row_count("moments").unwrap();
+            if let Some((moment, count)) = &accepted_head {
+                assert_eq!(
+                    &settled.moment_id, moment,
                     "unchanged accepted projection made another moment"
                 );
+                assert_eq!(
+                    moments, *count,
+                    "unchanged accepted projection added a moment"
+                );
+            } else {
+                accepted_head = Some((settled.moment_id, moments));
             }
         }
     }
