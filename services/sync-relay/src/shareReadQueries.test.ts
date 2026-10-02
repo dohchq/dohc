@@ -10,10 +10,12 @@ const moment = (authors: unknown) => ({
 });
 
 function page(payload: Record<string, unknown>, audience: "authenticated" | "accountless" = "authenticated") {
-  const queries = createShareReadQueries({
+  const storage: Pick<Parameters<typeof createShareReadQueries>[0], "fetchLogPage"> = {
     fetchLogPage: () => ({ rows: [{ workspaceId: "workspace", originId: "owner-origin", originSeq: 0,
       relaySeq: 1, opKind: "moment.append", payloadJson: JSON.stringify(payload), recordedAtMs: 1 }], nextCursor: 1, hasMore: false }),
-  } as Parameters<typeof createShareReadQueries>[0], 500);
+  };
+  // Selected file moments use only fetchLogPage; the other query surfaces are outside this fixture.
+  const queries = createShareReadQueries(storage as unknown as Parameters<typeof createShareReadQueries>[0], 500);
   return queries.filteredLogPage("workspace", selector, 0, 10, audience);
 }
 
