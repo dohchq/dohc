@@ -229,8 +229,30 @@ const declaredAuthor = (declaration: Declaration) => expect.objectContaining({
 
 /** The moment that wrote `text` names the declared agent, in its list row and its detail alike. */
 async function expectDeclaredMoment(page: Page, workspaceId: string, text: string, declaration: Declaration): Promise<IntroducingMoment> {
-  await expect.poll(async () => (await momentIntroducing(page, workspaceId, text))?.authors ?? [], { timeout: 60_000, intervals: [1_000] })
-    .toContainEqual(declaredAuthor(declaration));
+  try {
+    await expect.poll(async () => (await momentIntroducing(page, workspaceId, text))?.authors ?? [], { timeout: 60_000, intervals: [1_000] })
+      .toContainEqual(declaredAuthor(declaration));
+  } catch (error) {
+    const evidence = await page.evaluate(async ({ workspaceId, path, text }) => {
+      const bridge = (window as unknown as { dohcDesktop: Api }).dohcDesktop;
+      const history = await bridge.listEngineMoments({ workspaceId, limit: 100 });
+      if (!("moments" in history)) return { workspaceId, path, historyReady: false };
+      const rows = history.moments.filter(moment => moment.path === path);
+      const details = [];
+      for (const row of rows.slice(0, 8)) {
+        const { moment } = await bridge.readEngineMoment({ workspaceId, momentId: row.id });
+        details.push({ id: row.id, momentOrder: row.momentOrder, detailExists: moment !== null,
+          afterContains: moment?.afterText?.includes(text) ?? false,
+          beforeContains: moment?.beforeText?.includes(text) ?? false,
+          listed: row.authors, authors: moment?.authors ?? null });
+      }
+      return { workspaceId, path, historyReady: true, pathRowCount: rows.length, details };
+    }, { workspaceId, path: PATH, text }).catch(cause => ({ error: cause instanceof Error ? cause.message : String(cause) }));
+    await test.info().attach(`declared agent history ${declaration.agentId}`, {
+      contentType: "application/json", body: JSON.stringify(evidence, null, 2),
+    }).catch(() => undefined);
+    throw error;
+  }
   const moment = (await momentIntroducing(page, workspaceId, text))!;
   expect(moment.listed).toEqual(moment.authors);
   return moment;

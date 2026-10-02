@@ -820,6 +820,37 @@ describe("share grants", () => {
     expect(await denialBytes(await h(request(STRANGER, `/sync/shares/share-0/blobs/${sharedSha}`)))).toBe(unknown);
   });
 
+  it("serves only selected declared-agent provenance to the current authenticated recipient", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    await putBlob(h, "shared declaration");
+    await putBlob(h, "hidden declaration");
+    await appendOps(h, [
+      momentOp("docs/plan.md", "shared declaration", { authors: [
+        { kind: "agent", agentId: "trip-agent-hosted", onBehalfOf: "opaque-owner", depth: 0,
+          agentRunId: "private-run", principalId: "fabricated-authority" },
+        { kind: "automation", automationId: "private-automation", depth: 1 },
+      ], metadata: { origin: "user", summary: "private-summary", correlationId: "private-correlation" } }),
+      momentOp("private/hidden.md", "hidden declaration", { authors: [{ kind: "agent", agentId: "hidden-agent" }] }),
+      momentOp("docs/version.md", "shared declaration", { versionId: "other-version", authors: [{ kind: "agent", agentId: "other-version-agent" }] }),
+    ]);
+    const shareId = await createShare(h);
+    const response = await h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0`));
+    expect(response.status).toBe(200);
+    const page = await json(response);
+    const ops = page.ops as Array<{ payload: Record<string, unknown> }>;
+    expect(ops).toHaveLength(1);
+    expect(ops[0]!.payload.authors).toEqual([{ kind: "agent", agentId: "trip-agent-hosted", onBehalfOf: "opaque-owner" }]);
+    for (const excluded of ["private-", "fabricated-authority", "hidden-agent", "other-version-agent", "agentRunId", "principalId"]) {
+      expect(JSON.stringify(page)).not.toContain(excluded);
+    }
+    expect((await h(request(STRANGER, `/sync/shares/${shareId}/log?since=0`))).status).toBe(404);
+    expect((await h(request(null, `/sync/shares/${shareId}/log?since=0`))).status).toBe(401);
+    storage.revokeShare(shareId, 6000);
+    expect((await h(request(RECIPIENT, `/sync/shares/${shareId}/log?since=0`))).status).toBe(404);
+  });
+
   it("serves an earlier write's blob to an authenticated recipient replaying share history", async () => {
     const storage = await testStorage();
     const h = handler(storage);
