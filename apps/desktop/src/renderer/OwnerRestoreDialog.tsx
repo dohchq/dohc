@@ -25,9 +25,9 @@ function ChangeList({label, events}: {label: string; events: OwnerRestoreReview[
         return <li key={receipt.deliveryId}>
           {authority.principalKind === "owner" ? "Owner" : authority.principalKind === "link" ? "Link participant" : `Account ${authority.principalId}`}
           {/* The agent the owner's computer named for this change. The owner is who the server authenticated. */}
-          {agentDeclaration ? <span className="inline-flex items-center gap-1"> · <AgentBadge testIdPrefix="owner-restore-change"
+          {agentDeclaration ? <span className="inline-flex max-w-full items-center gap-1"> · <AgentBadge testIdPrefix="owner-restore-change"
             author={{authorDisplayName: agentDeclaration.agentId, authorOwnerDisplayName: "Owner"}} />
-            <span className="text-agent">{agentDeclaration.agentId}</span></span> : null}
+            <span className="min-w-0 break-all text-agent">{agentDeclaration.agentId}</span></span> : null}
           <span> · {new Date(receivedAtMs).toLocaleString()}</span>
           <details><summary className="cursor-pointer">Change details</summary><pre className="overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(metadata, null, 2)}</pre></details>
         </li>;
