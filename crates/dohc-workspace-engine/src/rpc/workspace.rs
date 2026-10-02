@@ -1646,12 +1646,17 @@ mod tests {
                 );
                 for history_handle in [&handle, &attached_handle] {
                     let error = service
-                        .history_page(
-                            &RequestContext::unbounded(),
-                            Some(history_handle.clone()),
-                            json!({
-                                "workspaceId":"automation-recovery-lifetime",
-                            }),
+                        .dispatch(
+                            RequestContext::unbounded(),
+                            dohc_engine_protocol::wire::Request {
+                                id: 1,
+                                method: "history.page".into(),
+                                workspace: Some(history_handle.clone()),
+                                deadline_ms: None,
+                                idempotency_key: None,
+                                progress: false,
+                                params: json!({ "workspaceId": "automation-recovery-lifetime" }),
+                            },
                         )
                         .await
                         .expect_err("a lost capture driver must not expose unflushed history");

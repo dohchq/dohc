@@ -202,6 +202,51 @@ async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
         .expect("owner write")
         .result;
     assert!(written["moment"]["momentId"].is_string());
+
+    let history = common::call(
+        &transport,
+        &cli,
+        5,
+        "history.page",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert_eq!(history["activeVersion"]["id"], "main");
+    assert_eq!(
+        history["textMomentPage"]["moments"][0]["momentId"],
+        written["moment"]["momentId"]
+    );
+    let detail = common::call(
+        &transport,
+        &cli,
+        6,
+        "moments.get",
+        json!({ "momentId": written["moment"]["momentId"] }),
+    )
+    .await;
+    assert_eq!(detail["afterText"], "the owner still writes");
+
+    for (index, method) in [
+        "capture.flush",
+        "capture.reconcile",
+        "versionedText.rollback",
+        "versions.ensureMain",
+        "versions.setActive",
+        "sync.pull",
+        "secrets.write",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = common::call_error(&transport, &cli, 7 + index as u64, method, json!({})).await;
+        assert_eq!(error.code, ErrorCode::InvalidParams, "{method}");
+        assert_eq!(
+            error.message, "method is unavailable on a read-only workspace handle",
+            "{method}"
+        );
+    }
+    call(&transport, &cli, 14, "workspace.close").await;
+    call(&transport, &desktop, 15, "workspace.close").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

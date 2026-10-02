@@ -985,6 +985,8 @@ impl EngineService {
                 "workspace.close"
                     | "search.queryChatMessagesGranular"
                     | "chats.readState.listUnreadFileThreads"
+                    | "history.page"
+                    | "moments.get"
             )
         {
             return Err(WireError::new(
