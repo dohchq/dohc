@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
-import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
+import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { ownerSettlementState, ydocUpdateAuthors } from "./helpers/engineDb";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
 import {
@@ -18,7 +18,9 @@ import {
 // The owner types, an agent edits through the dohc CLI, and the owner
 // restarts. A second account opens the shared document on its own desktop and
 // types. The owner and the agent see that edit. The owner stops that access and
-// restores the document to before it, and the result survives a restart.
+// restores the document to before it, and the result survives a restart. The
+// owner and the agent then continue the restored document, and a third account
+// opens a new share, sees all of it, and edits. The stopped access stays ended.
 //
 // The recipient's Markdown file is a snapshot. The owner's live document is the
 // authority, so the recipient's disk is not asserted.
@@ -33,7 +35,15 @@ const SEED = "# Trip plan\n\nThe agent drafts this line.\n\nThe person writes he
 const H1 = "Human first edit.";
 const A1 = "Agent revised this line.";
 const R1 = "Recipient continued.";
+const H2 = "Human continued after restore.";
+const A2 = "Agent continued after restore.";
+const R2 = "New recipient continued.";
 const AGENT = "trip-agent";
+const NEXT_AGENT = "trip-agent-after-restore";
+// While the server hosts the document, an agent's edit can reach the live
+// document before the file is saved. The CLI then fails with this line, and
+// the agent reads the document instead of retrying.
+const EDIT_NOT_YET_SAVED = `dohc: The edit is in ${PATH}, but dohc has not saved it to the file yet (Saved locally. The shared file update is pending.). Read the document before you retry.\n`;
 
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 const saveState = (page: Page) => page.getByTestId("markdown-save-state");
@@ -105,22 +115,72 @@ async function openSharedRestore(page: Page) {
   return dialog;
 }
 
-async function expectNoActiveAccess(page: Page): Promise<void> {
+/** The owner's restore review lists exactly these recipients as holding edit access. */
+async function expectActiveAccess(page: Page, recipients: string[]): Promise<void> {
   const dialog = await openSharedRestore(page);
-  await expect(dialog.getByText("No active edit access is available for this file.")).toBeVisible({ timeout: 60_000 });
+  if (recipients.length) {
+    await expect(dialog.getByLabel("Access to stop").locator('option:not([value=""])')).toHaveText(recipients, { timeout: 60_000 });
+  } else {
+    await expect(dialog.getByText("No active edit access is available for this file.")).toBeVisible({ timeout: 60_000 });
+  }
   await dialog.getByRole("button", { name: "Close" }).click();
 }
 
-test("@shared-continuity a live document keeps its person's and agent's work through restart, a recipient continues it, and the owner restores it", async ({ browser }, testInfo) => {
-  test.setTimeout(600_000);
+async function shareForEdit(page: Page, workspaceId: string, recipientEmail: string) {
+  const created = await page.evaluate(({ workspaceId, recipientEmail, path }) =>
+    (window as unknown as { dohcDesktop: Api }).dohcDesktop.createRelayShare({ workspaceId, recipientEmail, paths: [path], access: "edit" }),
+  { workspaceId, recipientEmail, path: PATH });
+  await expect.poll(async () => {
+    const live = await page.evaluate(workspaceId =>
+      (window as unknown as { dohcDesktop: Api }).dohcDesktop.listOwnerLiveDocuments({ workspaceId }), workspaceId);
+    return live.documents.find(document => document.path === PATH)?.status;
+  }, { timeout: 120_000, intervals: [1_000] }).toBe("ready");
+  return created;
+}
+
+/** A recipient opens the share on their own desktop, connecting their account first, and opens the document. */
+async function openShare(recipient: LaunchedDesktopApp, temp: TempWorkspace, approvalPage: Page, origin: string,
+  account: { email: string; password: string }, shareCode: string): Promise<void> {
+  const page = recipient.page;
+  await page.getByTestId("first-run-open-share").click();
+  await page.getByTestId("open-share-code").fill(shareCode);
+  await page.getByTestId("open-share-choose-folder").click();
+  // Opening without an account asks the person to connect one first.
+  await page.getByTestId("open-share-start").click();
+  await openDesktopApproval(recipient, approvalPage, origin);
+  await approveDesktop(approvalPage, account);
+  // The sign-in panel leaves only once the desktop holds the session.
+  // Before that, the button reads Open share too, and pressing it only
+  // reopens the panel.
+  await expect(page.locator("#open-share-sign-in-description")).toHaveCount(0, { timeout: 60_000 });
+  const open = page.getByTestId("open-share-start");
+  await expect(open).toHaveText("Open share");
+  await expect(open).toBeEnabled();
+  await open.click();
+  await expect(page.getByTestId("shared-view-banner")).toBeVisible({ timeout: 60_000 });
+  const shared = await activeWorkspace(page, temp.rootPath);
+  await waitForWorkspaceFile(page, shared.workspaceId, PATH);
+  const listed = await page.evaluate(workspaceId =>
+    (window as unknown as { dohcDesktop: Api }).dohcDesktop.listWorkspaceFiles({ workspaceId }), shared.workspaceId);
+  expect(listed.files.map(file => file.path).filter(path => path.startsWith("private/"))).toEqual([]);
+  expect(existsSync(join(temp.rootPath, HIDDEN))).toBe(false);
+  await openDocument(page);
+  await expect(explorerRow(page, "private")).toHaveCount(0);
+}
+
+test("@shared-continuity a live document keeps its person's and agent's work through restart, a recipient continues it, the owner restores it, and the work continues with a new recipient", async ({ browser }, testInfo) => {
+  test.setTimeout(900_000);
   const ownerTemp = await createTempWorkspace();
   const recipientTemp = await createTempWorkspace();
+  const newRecipientTemp = await createTempWorkspace();
   let stack: Awaited<ReturnType<typeof startSelfHostOnboardingStack>> | undefined;
   let trust: ReturnType<typeof trustFixtureCa> | undefined;
   let owner: LaunchedDesktopApp | undefined;
   let recipient: LaunchedDesktopApp | undefined;
+  let newRecipient: LaunchedDesktopApp | undefined;
   let ownerBrowser: BrowserContext | undefined;
   let recipientBrowser: BrowserContext | undefined;
+  let newRecipientBrowser: BrowserContext | undefined;
   let bodyFailure: { error: unknown } | undefined;
   const launches: LaunchedDesktopApp[] = [];
   const launch = async (temp: TempWorkspace) => {
@@ -130,6 +190,9 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
   };
   const ownerAccount = { email: `owner-${randomUUID()}@example.test`, password: `Owner-proof-${randomUUID()}`, name: "Owner proof" };
   const recipientAccount = { email: `recipient-${randomUUID()}@example.test`, password: `Recipient-proof-${randomUUID()}`, name: "Recipient proof" };
+  const newRecipientAccount = { email: `new-recipient-${randomUUID()}@example.test`, password: `New-recipient-proof-${randomUUID()}`, name: "New recipient proof" };
+  const accountId = async (email: string) =>
+    (await stack!.account.pool.query<{ id: string }>('SELECT id FROM "user" WHERE email = $1', [email])).rows[0]!.id;
   try {
     stack = await startSelfHostOnboardingStack(ownerTemp.baseDir, { live: true });
     const origin = stack.relayUrl;
@@ -139,9 +202,13 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     await trust.route(ownerBrowser, origin);
     recipientBrowser = await browser.newContext();
     await trust.route(recipientBrowser, origin);
+    newRecipientBrowser = await browser.newContext();
+    await trust.route(newRecipientBrowser, origin);
     const recipientPage = await recipientBrowser.newPage();
+    const newRecipientPage = await newRecipientBrowser.newPage();
     // The owner can share only with an account the server knows.
     await createVerifiedAccount(recipientPage, stack.account, recipientAccount);
+    await createVerifiedAccount(newRecipientPage, stack.account, newRecipientAccount);
 
     const workspace = await test.step("the owner connects a workspace to the server", async () => {
       await writeWorkspaceFiles(ownerTemp, [{ path: PATH, contents: SEED }, { path: HIDDEN, contents: "Only the owner reads this.\n" }]);
@@ -194,45 +261,13 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       expect(status).toMatchObject({ connected: true, email: ownerAccount.email, relayUrl: origin, workspaceSynced: true });
     });
 
-    const share = await test.step("the owner shares the document with Edit and the server hosts it live", async () => {
-      const created = await owner!.page.evaluate(({ workspaceId, recipientEmail, path }) =>
-        (window as unknown as { dohcDesktop: Api }).dohcDesktop.createRelayShare({ workspaceId, recipientEmail, paths: [path], access: "edit" }),
-      { workspaceId: workspace.workspaceId, recipientEmail: recipientAccount.email, path: PATH });
-      await expect.poll(async () => {
-        const live = await owner!.page.evaluate(workspaceId =>
-          (window as unknown as { dohcDesktop: Api }).dohcDesktop.listOwnerLiveDocuments({ workspaceId }), workspace.workspaceId);
-        return live.documents.find(document => document.path === PATH)?.status;
-      }, { timeout: 120_000, intervals: [1_000] }).toBe("ready");
-      return created;
-    });
+    const share = await test.step("the owner shares the document with Edit and the server hosts it live", () =>
+      shareForEdit(owner!.page, workspace.workspaceId, recipientAccount.email));
 
     await test.step("the recipient opens the share on their own desktop and continues the document", async () => {
       recipient = await launch(recipientTemp);
+      await openShare(recipient, recipientTemp, recipientPage, origin, recipientAccount, share.shareCode);
       const page = recipient.page;
-      await page.getByTestId("first-run-open-share").click();
-      await page.getByTestId("open-share-code").fill(share.shareCode);
-      await page.getByTestId("open-share-choose-folder").click();
-      // Opening without an account asks the person to connect one first.
-      await page.getByTestId("open-share-start").click();
-      await openDesktopApproval(recipient, recipientPage, origin);
-      await approveDesktop(recipientPage, recipientAccount);
-      // The sign-in panel leaves only once the desktop holds the session.
-      // Before that, the button reads Open share too, and pressing it only
-      // reopens the panel.
-      await expect(page.locator("#open-share-sign-in-description")).toHaveCount(0, { timeout: 60_000 });
-      const open = page.getByTestId("open-share-start");
-      await expect(open).toHaveText("Open share");
-      await expect(open).toBeEnabled();
-      await open.click();
-      await expect(page.getByTestId("shared-view-banner")).toBeVisible({ timeout: 60_000 });
-      const shared = await activeWorkspace(page, recipientTemp.rootPath);
-      await waitForWorkspaceFile(page, shared.workspaceId, PATH);
-      const listed = await page.evaluate(workspaceId =>
-        (window as unknown as { dohcDesktop: Api }).dohcDesktop.listWorkspaceFiles({ workspaceId }), shared.workspaceId);
-      expect(listed.files.map(file => file.path).filter(path => path.startsWith("private/"))).toEqual([]);
-      expect(existsSync(join(recipientTemp.rootPath, HIDDEN))).toBe(false);
-      await openDocument(page);
-      await expect(explorerRow(page, "private")).toHaveCount(0);
       await expect(editor(page)).toContainText(H1);
       await expect(editor(page)).toContainText(A1);
       await typeAfter(page, H1, ` ${R1}`);
@@ -247,8 +282,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
 
     await test.step("the owner stops the recipient's access and restores the document to before their edit", async () => {
       const page = owner!.page;
-      const { rows } = await stack!.account.pool.query<{ id: string }>('SELECT id FROM "user" WHERE email = $1', [recipientAccount.email]);
-      const recipientUserId = rows[0]!.id;
+      const recipientUserId = await accountId(recipientAccount.email);
       const dialog = await openSharedRestore(page);
       // Restore lists an account recipient by account ID, not email.
       const recipientLabel = `Account ${recipientUserId}`;
@@ -308,7 +342,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await editor(page).getByText(H1).click();
       await page.keyboard.type(" Typed after access stopped.");
       await expect(editor(page)).not.toContainText("Typed after access stopped.");
-      await expectNoActiveAccess(owner!.page);
+      await expectActiveAccess(owner!.page, []);
     });
 
     await test.step("the restored document and the stopped access survive the owner's restart", async () => {
@@ -321,7 +355,56 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(editor(owner.page)).toContainText(A1);
       await expect(editor(owner.page)).not.toContainText(R1);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1], [R1]), { timeout: 30_000 }).toBe(true);
-      await expectNoActiveAccess(owner.page);
+      await expectActiveAccess(owner.page, []);
+    });
+
+    await test.step("the owner types and the agent edits through the CLI after the restore", async () => {
+      const page = owner!.page;
+      await openDocument(page);
+      await typeAfter(page, H1, ` ${H2}`);
+      // The server still hosts the document, so the owner's edit may finish as
+      // saved locally or saved to the host. The settled-file check covers the disk.
+      await expect(saveState(page)).toHaveAttribute("data-state", /^(saved|saved-to-host)$/, { timeout: 60_000 });
+      await expect.poll(() => cliRead(ownerTemp), { timeout: 30_000 }).toContain(H2);
+      const edited = await runDohcCli(ownerTemp, ["--json", "document", "edit", PATH, "--find", A1, "--text", `${A1} ${A2}`, "--agent", NEXT_AGENT])
+        .catch((error: unknown) => {
+          if (error instanceof DohcCliFailure && error.exitCode === 1 && error.stdout === "" && error.stderr === EDIT_NOT_YET_SAVED) return null;
+          throw error;
+        });
+      testInfo.annotations.push({ type: "post-restore agent edit", description: edited ? "saved" : "applied, not yet saved" });
+      if (edited) expect(JSON.parse(edited.stdout)).toMatchObject({ ok: true, path: PATH, changed: true });
+      await expect.poll(() => cliRead(ownerTemp), { timeout: 30_000 }).toContain(A2);
+      await expect(editor(page)).toContainText(A2);
+      await expect(saveState(page)).toHaveAttribute("data-state", /^(saved|saved-to-host)$/, { timeout: 60_000 });
+      await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, H2, A2], [R1]), { timeout: 60_000 }).toBe(true);
+      await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 60_000 });
+    });
+
+    const newShare = await test.step("the owner shares the continued document with a new recipient", () =>
+      shareForEdit(owner!.page, workspace.workspaceId, newRecipientAccount.email));
+
+    await test.step("the new recipient sees the restored and continued document and edits it", async () => {
+      newRecipient = await launch(newRecipientTemp);
+      await openShare(newRecipient, newRecipientTemp, newRecipientPage, origin, newRecipientAccount, newShare.shareCode);
+      const page = newRecipient.page;
+      for (const text of [H1, A1, H2, A2]) await expect(editor(page)).toContainText(text);
+      await expect(editor(page)).not.toContainText(R1);
+      await typeAfter(page, H2, ` ${R2}`);
+      await expect(saveState(page)).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
+      await expect(editor(owner!.page)).toContainText(R2, { timeout: 60_000 });
+      await expect.poll(() => cliRead(ownerTemp), { timeout: 60_000 }).toContain(R2);
+      await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, H2, A2, R2], [R1]), { timeout: 60_000 }).toBe(true);
+      await expect(owner!.page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 60_000 });
+    });
+
+    await test.step("the stopped recipient's access stays ended", async () => {
+      const page = recipient!.page;
+      expect(await page.evaluate(shareId =>
+        (window as unknown as { dohcDesktop: Api }).dohcDesktop.getRelayReceivedShare({ shareId }), share.shareId)).toMatchObject({ found: false });
+      await expect(saveState(page)).toHaveAttribute("data-state", "read-only");
+      await expect(editor(page)).toHaveAttribute("contenteditable", "false");
+      await expect(editor(page)).not.toContainText(R2);
+      await expectActiveAccess(owner!.page, [`Account ${await accountId(newRecipientAccount.email)}`]);
     });
 
     for (const app of launches) {
@@ -350,11 +433,12 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     throw error;
   } finally {
     const cleanup = await Promise.allSettled([
-      recipientBrowser?.close(), ownerBrowser?.close(), recipient?.close(), owner?.close(),
+      newRecipientBrowser?.close(), recipientBrowser?.close(), ownerBrowser?.close(),
+      newRecipient?.close(), recipient?.close(), owner?.close(),
     ]);
     trust?.restore();
     cleanup.push(...await Promise.allSettled([stack?.close()]));
-    cleanup.push(...await Promise.allSettled([recipientTemp.cleanup(), ownerTemp.cleanup()]));
+    cleanup.push(...await Promise.allSettled([newRecipientTemp.cleanup(), recipientTemp.cleanup(), ownerTemp.cleanup()]));
     const failures = cleanup.filter((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failures.length) {
       const errors = [...new Set([...(bodyFailure ? [bodyFailure.error] : []), ...failures.map(result => result.reason)])];
