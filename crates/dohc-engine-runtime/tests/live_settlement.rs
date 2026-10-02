@@ -2787,6 +2787,7 @@ fn history_validate(
     loaded
 }
 
+#[derive(Clone)]
 struct HistoryCorpus {
     bootstrap: Vec<u8>,
     updates: Vec<Vec<u8>>,
@@ -2804,24 +2805,6 @@ struct HistoryCorpus {
 /// A scenario with none of its files is generated and frozen. Existing files
 /// are never rewritten: a partial or invalid scenario stops the run.
 fn history_corpus(name: &str) -> HistoryCorpus {
-    if name == "long-empty-updates" {
-        let base = history_corpus("short-small");
-        let updates: Vec<Vec<u8>> = std::iter::repeat_n(vec![0, 0], HISTORY_LONG_PREFIX)
-            .chain(base.updates)
-            .collect();
-        return HistoryCorpus {
-            identity: serde_json::json!({
-                "scenario": name,
-                "sha256": hex_sha256(&encode_frames(&updates)),
-                "updates": updates.len(),
-                "usedBytes": updates.iter().map(Vec::len).sum::<usize>(),
-                "emptyUpdates": HISTORY_LONG_PREFIX,
-                "base": base.identity,
-            }),
-            updates,
-            ..base
-        };
-    }
     let (own_bootstrap, generated) = history_generate(name);
     let dir = std::env::var_os("DOHC_LIVE_HISTORY_CORPUS_DIR").map(PathBuf::from);
     let path = |extension: &str| {
@@ -2892,6 +2875,26 @@ fn history_corpus(name: &str) -> HistoryCorpus {
         delete_set_bytes: doc.encode_delete_set().len(),
         bootstrap,
         updates,
+    }
+}
+
+/// The `long-empty-updates` control: empty updates before short-small's
+/// exact bootstrap and update bytes, so it shares their native state.
+fn history_empty_updates(short_small: &HistoryCorpus) -> HistoryCorpus {
+    let updates: Vec<Vec<u8>> = std::iter::repeat_n(vec![0, 0], HISTORY_LONG_PREFIX)
+        .chain(short_small.updates.iter().cloned())
+        .collect();
+    HistoryCorpus {
+        identity: serde_json::json!({
+            "scenario": "long-empty-updates",
+            "sha256": hex_sha256(&encode_frames(&updates)),
+            "updates": updates.len(),
+            "usedBytes": updates.iter().map(Vec::len).sum::<usize>(),
+            "emptyUpdates": HISTORY_LONG_PREFIX,
+            "base": short_small.identity,
+        }),
+        updates,
+        ..short_small.clone()
     }
 }
 
@@ -3054,10 +3057,37 @@ async fn live_history_publication_and_settlement_benchmark() {
         "samples exceed 1000, fresh samples are outside 5..=50, or restarts exceed 100"
     );
     // Every corpus is generated or validated before any fixture work.
+    // Short-small loads once, so the empty-update control reuses its bytes.
+    let short_small = scenarios
+        .iter()
+        .any(|(name, ..)| matches!(*name, "short-small" | "long-empty-updates"))
+        .then(|| history_corpus("short-small"));
     let corpora: Vec<HistoryCorpus> = scenarios
         .iter()
-        .map(|(name, ..)| history_corpus(name))
+        .map(|(name, ..)| match *name {
+            "short-small" => short_small.clone().unwrap(),
+            "long-empty-updates" => history_empty_updates(short_small.as_ref().unwrap()),
+            name => history_corpus(name),
+        })
         .collect();
+    let find = |wanted: &str| {
+        scenarios
+            .iter()
+            .zip(&corpora)
+            .find(|((name, ..), _)| *name == wanted)
+            .map(|(_, corpus)| corpus)
+    };
+    if let (Some(small), Some(empty)) = (find("short-small"), find("long-empty-updates")) {
+        assert_eq!(
+            small.bootstrap, empty.bootstrap,
+            "long-empty-updates: bootstrap bytes"
+        );
+        assert_eq!(
+            small.updates[..],
+            empty.updates[HISTORY_LONG_PREFIX..],
+            "long-empty-updates: measured update bytes"
+        );
+    }
     for ((name, document, _), corpus) in scenarios.iter().zip(&corpora) {
         let (_, first) = scenarios
             .iter()
