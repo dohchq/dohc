@@ -1453,12 +1453,15 @@ fn restored_owner_capacity_rescue_streams_past_a_large_prior_proof_and_private_t
     f.adopt().unwrap();
     let mut terminal=None;
     let mut sequence=0;
-    for cursor in 1..=700 {
+    for cursor in 1..=350 {
         let ack=native_tail_apply(&mut f,baseline.clone(),format!("proof-{cursor}"),cursor);
         sequence=ack.local_ydoc_sequence;
         terminal=Some(LiveUpdateReceipt {delivery_id:ack.delivery_id,update_digest:ack.update_digest,journal_cursor:cursor,accepting_host_epoch:1});
     }
-    let preparation=native_tail_input(&mut f,terminal,sequence);
+    let mut preparation=native_tail_input(&mut f,terminal,sequence);
+    // The selected current point retains a second authentic copy of the
+    // accepted suffix: >60MiB of proof with half as many ingress operations.
+    preparation.point.journal_cursor=350;
     let coordinate=f.handle.registration.lock().unwrap().coordinate.clone();
     const PROOF_BYTES:usize=512*1024*1024;
     let proposal=f._owner.prepare_restore(&mut f.store,preparation.clone(),coordinate.clone(),PROOF_BYTES,1000,&NoFaults).unwrap();
@@ -1469,25 +1472,31 @@ fn restored_owner_capacity_rescue_streams_past_a_large_prior_proof_and_private_t
         preparation,candidate_digest:proposal.receipt().candidate_digest.clone(),native_source_manifest_digest:proposal.receipt().native_source_manifest_digest.clone(),
         admitted:AdmittedLiveUpdateMetadata {
             accepted:RelayAcceptedLiveUpdate {
-                receipt:LiveUpdateReceipt {delivery_id:"proof-restore".into(),update_digest:proposal.receipt().candidate_digest.clone(),journal_cursor:701,accepting_host_epoch:1},
-                binding:binding.clone(),authority:ServerDerivedLiveUpdateAuthority::Owner {principal_id:"owner".into()},received_at_ms:701,agent_declaration:None,
+                receipt:LiveUpdateReceipt {delivery_id:"proof-restore".into(),update_digest:proposal.receipt().candidate_digest.clone(),journal_cursor:351,accepting_host_epoch:1},
+                binding:binding.clone(),authority:ServerDerivedLiveUpdateAuthority::Owner {principal_id:"owner".into()},received_at_ms:351,agent_declaration:None,
             },first_seen:proposal.receipt().replacement_ranges.clone(),
         },
     };
     drop(proposal);
-    f._owner.apply_restore(&mut f.store,&mut WriterDocCache::new(),input.clone(),coordinate.clone(),PROOF_BYTES,1000,702,&NoFaults,|_,_,_,_|Ok(())).unwrap();
+    f._owner.apply_restore(&mut f.store,&mut WriterDocCache::new(),input.clone(),coordinate.clone(),PROOF_BYTES,1000,352,&NoFaults,|_,_,_,_|Ok(())).unwrap();
     let settled=f._owner.with_restore_settlement(&mut f.store,input.clone(),coordinate.clone(),PROOF_BYTES,1000,|store,audit|restore_content::tests::record_test_projection(store,audit,"large-proof-restored")).unwrap();
-    f._owner.resume_restore(&mut f.store,NativeRestoreResume {application:input,settlement_id:settled.settlement_id},coordinate.clone(),PROOF_BYTES,1000,703,&NoFaults,|_,_,_,_|Ok(())).unwrap();
+    f._owner.resume_restore(&mut f.store,NativeRestoreResume {application:input,settlement_id:settled.settlement_id},coordinate.clone(),PROOF_BYTES,1000,353,&NoFaults,|_,_,_,_|Ok(())).unwrap();
     f.binding=binding;
     f.doc=f.store.read_with(|conn|durable::load_doc_in(conn,&f.key)).unwrap();
     f.handle=f._owner.register(&mut f.store,"namespace".into(),coordinate,f.binding.clone()).unwrap();
+    {
+        let held=f.handle.registration.lock().unwrap();
+        let resumed=f.store.read_with(|conn|restore_resume::generation(conn,&held)).unwrap().unwrap();
+        assert_eq!(resumed.application_receipt.journal_cursor,351);
+        assert_eq!(resumed.binding,f.binding);
+    }
     let peer=Ydoc::wire(); peer.apply(&f.doc.encode_full_state()).unwrap();
-    native_tail_edit(&mut f,"Private after restore",704);
+    native_tail_edit(&mut f,"Private after restore",354);
     let remote=peer.richdoc_append_paragraph("Accepted after restore");
-    let mut cursor=702;
+    let mut cursor=352;
     let mut terminal=None;
     let blocked=loop {
-        assert!(cursor<782);
+        assert!(cursor<432);
         let event=AdmittedLiveUpdate {
             metadata:AdmittedLiveUpdateMetadata {
                 accepted:RelayAcceptedLiveUpdate {

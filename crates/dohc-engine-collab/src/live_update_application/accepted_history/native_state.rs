@@ -518,6 +518,40 @@ pub(super) fn transition(
     Ok(())
 }
 
+pub(super) fn validate_blob_hash(conn: &Connection, digest: &str) -> Result<(), ApplicationError> {
+    let (declared, actual): (i64, i64) = conn
+        .query_row(
+            "SELECT byte_length,length(bytes) FROM binary_blobs WHERE sha256=?1",
+            [digest],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(read_sql)?;
+    if declared != actual || !(1..=crate::limits::MAX_YDOC_UPDATE_BYTES as i64).contains(&actual) {
+        return Err(ApplicationError::Corrupt);
+    };
+    let mut hash = Sha256::new();
+    let mut offset = 0;
+    while offset < actual {
+        let count = (actual - offset).min(CHUNK as i64);
+        let chunk: Vec<u8> = conn
+            .query_row(
+                "SELECT substr(bytes,?2,?3) FROM binary_blobs WHERE sha256=?1",
+                params![digest, offset + 1, count],
+                |r| r.get(0),
+            )
+            .map_err(read_sql)?;
+        if chunk.len() != count as usize {
+            return Err(ApplicationError::Corrupt);
+        };
+        hash.update(&chunk);
+        offset += count;
+    }
+    if dohc_engine_storage::hex(&hash.finalize()) != digest {
+        return Err(ApplicationError::Corrupt);
+    };
+    Ok(())
+}
+
 pub(super) fn read(
     conn: &Connection,
     held: &Registration,

@@ -736,6 +736,48 @@ fn require_transition(
     Ok(())
 }
 
+/// Resume routing needs the committed checkpoint association, not a second Ydoc.
+/// The admitted state reader separately validates its origin and public content.
+pub(super) fn validate_resume_checkpoint(
+    conn: &Connection,
+    held: &Registration,
+    operation: &str,
+    receipt: &LiveUpdateReceipt,
+) -> Result<(), ApplicationError> {
+    let p = parameters(held);
+    let length: i64 = conn.query_row(
+        &format!("SELECT length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB))+length(CAST(state_sha256 AS BLOB))+length(CAST(evidence_digest AS BLOB)) FROM live_accepted_checkpoints WHERE {DOCUMENT} AND journal_cursor=?6 AND restore_operation_id=?7"),
+        params![p[0],p[1],p[2],p[3],p[4],receipt.journal_cursor,operation], |r|r.get(0),
+    ).map_err(read_sql)?;
+    if !(1..=NativeHistoryReconstruction::HEADER_BYTES as i64).contains(&length) {
+        return Err(ApplicationError::Corrupt);
+    }
+    let (count,terminal,binding,state,evidence):(i64,String,String,String,String)=conn.query_row(
+        &format!("SELECT event_count,terminal_json,binding_json,state_sha256,evidence_digest FROM live_accepted_checkpoints WHERE {DOCUMENT} AND journal_cursor=?6 AND restore_operation_id=?7"),
+        params![p[0],p[1],p[2],p[3],p[4],receipt.journal_cursor,operation], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+    ).map_err(read_sql)?;
+    integer(count, 1, SAFE).map_err(|_| ApplicationError::Corrupt)?;
+    digest(&state)?;
+    digest(&evidence)?;
+    let terminal: LiveUpdateReceipt =
+        serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?;
+    let binding: LiveObjectBinding =
+        serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
+    if terminal != *receipt || binding != held.binding {
+        return Err(ApplicationError::Corrupt);
+    };
+    let metadata = native_state::metadata(conn, held, count)?;
+    if metadata.accepted.receipt != terminal
+        || metadata.accepted.binding != binding
+        || metadata.evidence_digest != evidence
+    {
+        return Err(ApplicationError::Corrupt);
+    }
+    native_state::restore_association(conn, held, operation, &metadata.accepted, None, None)?;
+    native_state::restore_metadata(conn, held, operation, count, &evidence)?;
+    native_state::validate_blob_hash(conn, &state)
+}
+
 pub(super) fn read_state(
     conn: &Connection,
     held: &Registration,

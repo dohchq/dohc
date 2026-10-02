@@ -447,6 +447,98 @@ fn native_state_reader_refuses_metadata_application_count_and_blob_corruption() 
 }
 
 #[test]
+fn native_resume_generation_does_not_reopen_historical_proposal_under_fixed_stage_budget() {
+    let mut f = Fixture::new("baseline");
+    f.edit("accepted", 7);
+    restore_and_resume(&mut f);
+    // JSON whitespace changes no committed association. Full historical proof
+    // validation still charges this row and checks its original evidence stamp.
+    damage(
+        &f,
+        "UPDATE live_restore_fences SET proposal_json=proposal_json||printf('%*s',20971521,'')",
+    );
+    let held = f.handle.registration.lock().unwrap();
+    let resumed = f
+        .store
+        .read_with(|conn| restore_resume::generation(conn, &held))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        f.store.read_with(|conn| restore_resume::saved(
+            conn,
+            &held,
+            &resumed.operation_id,
+            crate::limits::MAX_YDOC_UPDATE_BYTES
+        )),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
+}
+
+#[test]
+fn native_resume_generation_preserves_historical_selector_scope() {
+    let mut f = Fixture::new("baseline");
+    f.edit("accepted", 7);
+    restore_and_resume(&mut f);
+    let held = f.handle.registration.lock().unwrap();
+    let expected = f
+        .store
+        .read_with(|conn| restore_resume::generation(conn, &held))
+        .unwrap()
+        .unwrap();
+    let mut current = Registration {
+        workspace_id: held.workspace_id.clone(),
+        namespace: held.namespace.clone(),
+        coordinate: held.coordinate.clone(),
+        binding: held.binding.clone(),
+        live: held.live,
+    };
+    current.binding.selector_paths.push("z.md".into());
+    current.binding.selector_paths.sort();
+    assert_eq!(
+        f.store
+            .read_with(|conn| restore_resume::generation(conn, &current))
+            .unwrap(),
+        Some(expected)
+    );
+}
+
+#[test]
+fn native_resume_generation_preflights_operation_identifier_length() {
+    let mut f = Fixture::new("baseline");
+    f.edit("accepted", 7);
+    restore_and_resume(&mut f);
+    damage(
+        &f,
+        "UPDATE live_restore_fences SET operation_id=printf('%*s',513,'x')",
+    );
+    let held = f.handle.registration.lock().unwrap();
+    assert!(matches!(
+        f.store
+            .read_with(|conn| restore_resume::generation(conn, &held)),
+        Err(ApplicationError::Corrupt)
+    ));
+}
+
+#[test]
+fn native_resume_generation_checks_compact_receipt_checkpoint_and_settlement_association() {
+    for sql in [
+        "UPDATE live_restore_fences SET resume_receipt_json=json_set(resume_receipt_json,'$.localHeadSequence',99)",
+        "UPDATE live_restore_fences SET resume_receipt_json=json_set(resume_receipt_json,'$.applicationReceipt.acceptingHostEpoch',99)",
+        "UPDATE live_restore_fences SET resume_receipt_json=json_set(resume_receipt_json,'$.binding.restoreFenceGeneration',99)",
+        "UPDATE live_restore_fences SET resume_receipt_json=json_set(resume_receipt_json,'$.momentId','wrong')",
+        "UPDATE live_restore_fences SET resume_receipt_json=json_set(resume_receipt_json,'$.markdownDigest',printf('%064d',0))",
+        "UPDATE live_device_settlements SET source_state_vector_digest=printf('%064d',0) WHERE settlement_kind='restore'",
+        "UPDATE live_accepted_checkpoints SET state_sha256=printf('%064d',0) WHERE restore_operation_id IS NOT NULL",
+    ] {
+        let mut f=Fixture::new("baseline"); f.edit("accepted",7); restore_and_resume(&mut f);
+        let held=f.handle.registration.lock().unwrap();
+        f.store.read_with(|conn|restore_resume::generation(conn,&held)).unwrap().unwrap();
+        damage(&f,sql);
+        assert!(f.store.read_with(|conn|restore_resume::generation(conn,&held)).is_err(),"{sql}");
+    }
+}
+
+#[test]
 fn native_restore_checkpoint_compact_association_refuses_changed_generation_receipt_or_content() {
     for sql in [
         "UPDATE live_restore_fences SET application_delivery_id='wrong'",
