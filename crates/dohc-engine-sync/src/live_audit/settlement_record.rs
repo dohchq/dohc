@@ -334,9 +334,56 @@ pub(super) fn journal_ready_in_tx(
         params![workspace, record.moment_id], |row| row.get(0),
     ).map_err(SyncError::corrupt)?;
     if !published {
-        crate::journal_moment_append_in_tx(tx, workspace, &record.moment_id)?;
+        match adopted_source_before_in_tx(tx, &record)? {
+            Some(before) => crate::outbound::journal_moment_append_from_in_tx(
+                tx,
+                workspace,
+                &record.moment_id,
+                &before,
+            )?,
+            None => crate::journal_moment_append_in_tx(tx, workspace, &record.moment_id)?,
+        }
     }
     Ok(Some(sequence))
+}
+
+/// The first ordinary settlement after an owner adoption publishes the adopted
+/// source as its before-image. Its local moment keeps the actual prior file,
+/// which may be a head settled before adoption that the relay never accepted.
+fn adopted_source_before_in_tx(
+    tx: &Transaction<'_>,
+    record: &SettlementRecord,
+) -> Result<Option<crate::outbound::PortableBefore>, SyncError> {
+    if record.restore_operation_id.is_some() {
+        return Ok(None);
+    }
+    let b = &record.binding;
+    tx.query_row(
+        "SELECT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+         FROM live_owner_adoptions a
+         JOIN moments m ON m.workspace_id=a.workspace_id AND m.version_id=a.main_version_id AND m.object_id=a.object_id AND m.moment_id=a.source_moment_id
+           AND m.path=?7 AND m.after_content_kind='text' AND m.after_blob_sha256=a.source_digest
+         JOIN blobs t ON t.sha256=a.source_digest AND t.byte_length=a.source_byte_length
+         WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5
+           AND a.binding_json=?6 AND a.terminal_cursor=?8
+           AND NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9)",
+        params![record.relay_database_namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,
+            serde_json::to_string(b).map_err(SyncError::corrupt)?,b.current_path,record.previous_cursor,record.terminal_cursor],
+        |row| Ok(crate::outbound::PortableBefore {
+            moment_id: row.get(0)?,
+            version_id: row.get(1)?,
+            object_id: row.get(2)?,
+            path: row.get(3)?,
+            blob_sha256: row.get(4)?,
+            byte_length: row.get(5)?,
+            recorded_at_ms: row.get(6)?,
+            metadata_origin: row.get(7)?,
+            metadata_summary: row.get(8)?,
+            metadata_correlation_id: row.get(9)?,
+        }),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
 }
 
 pub(super) fn apply_settlement_envelope(
