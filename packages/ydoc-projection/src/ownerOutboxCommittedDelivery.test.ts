@@ -23,7 +23,7 @@ it("replays a real journal admission and retains the owner entry until native ap
     let pending = true, requestId = 0, nativeAck: LiveUpdateHostApplicationAck | null = null;
     const removed: LiveUpdateReceipt[] = [], order: string[] = [];
     const journalValidator = createLiveMarkdownJournalValidator(policy);
-    const validate = vi.fn((input: Parameters<OwnerOutboxAdmission["validate"]>[0]) => journalValidator(input));
+    const validate = vi.fn(({retainStateUpdate: _retainStateUpdate, ...input}: Parameters<OwnerOutboxAdmission["validate"]>[0]) => journalValidator(input));
     const commits = vi.spyOn(f.storage,"commitLiveUpdateJournal");
     const cursor = (part: string, sequence = 0) => ({snapshot: hash(Buffer.from(String(pending))),part,sequence,offset: 0});
     // Only the native protocol is simulated. Both delivery layers, Yjs validation,

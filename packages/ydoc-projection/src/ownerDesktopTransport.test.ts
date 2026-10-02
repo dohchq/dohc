@@ -137,7 +137,8 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const relayPort = (relay.address() as {port: number}).port, exchangeKey = "owner-desktop-exchange-key-32-bytes";
     const frameChanges = createNamedFrameChanges(16);
     const control = createDeviceControl({storage: deployment.storage,hosts: new Set([`127.0.0.1:${relayPort}`]),relayExchangeKey: exchangeKey,limits,
-      delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,frameChanges,ownerAdmission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000_000,validate: createLiveMarkdownJournalValidator(policy)}}});
+      delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,frameChanges,ownerAdmission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000_000,
+        validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)}}});
     relay.on("upgrade",control.handleUpgrade);
     const {certificate, key} = await ensureLocalhostTls();
     const share = createTlsServer({cert: readFileSync(certificate),key: readFileSync(key)}); share.listen(0,"127.0.0.1"); await once(share,"listening");
@@ -263,7 +264,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const remoteActor = liveBrowserActor(scope);
     const namedPeer = captureNamedLiveFrameHost({ticket,actor: remoteActor,storage: deployment.storage,native: nativePeer,
       bounds: {maxClientVectorBytes: 100_000,maxSyncOutputBytes: 2_000_000,maxAppliedUpdateBytes: 2_000_000,maxSubmissionBytes: 2_000_000,maxAdmissionBytes: 8_000_000},
-      validate: createLiveMarkdownJournalValidator(policy)});
+      validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)});
     const membership = createLiveMembershipRegistry({maxSessions: 8,maxMembers: 8,maxSnapshotBytes: 153},deployment.storage.readLiveAuthority.bind(deployment.storage))
       .join({ticket,invalidated: namedPeer.invalidated,assertCurrent: namedPeer.assertCurrent});
     expect(membership.snapshot(1024).members).toHaveLength(1);
