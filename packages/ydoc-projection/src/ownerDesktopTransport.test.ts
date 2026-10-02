@@ -9,7 +9,6 @@ import {readRelayDeviceDeliveryConfig} from "../../../services/sync-relay/src/de
 import {createHash} from "node:crypto";
 import {spawn,spawnSync,type ChildProcess} from "node:child_process";
 import {once} from "node:events";
-import {createServer} from "node:http";
 import {createServer as createTlsServer} from "node:https";
 import {mkdirSync,mkdtempSync,readFileSync,writeFileSync} from "node:fs";
 import {join,resolve} from "node:path";
@@ -21,8 +20,13 @@ import {beginStopRestore,advanceStopRestoreFence,readStopRestore} from "../../..
 import type {StorageContext} from "../../../services/sync-relay/src/storage/context.js";
 import * as Y from "yjs";
 import {EngineDaemonLifecycle,EngineWorkspaceSessions,type EngineClient} from "../../workspace-engine-client/src/daemon/index.js";
+import {decodeOrdinarySyncResult} from "../../workspace-engine-client/src/relay/ordinarySyncWireContract.js";
+import {serveFetchHandler} from "../../service-http/src/index.js";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createWorkspaceEngineCapture} from "../../../apps/desktop/src/workspaces/workspaceEngineCapture.js";
+import {RelayConfiguredDaemonClientSource,RelayTransportRouteGuard} from "../../../apps/desktop/src/workspaces/engineRelayClient.js";
+import {createSyncRelayHandler,MAX_BLOB_BYTES} from "../../../services/sync-relay/src/server.js";
+import {resolveTestActor} from "../../../services/sync-relay/src/testing/index.js";
 import {createEngineYDocSessionIpc} from "../../../apps/desktop/src/workspaces/engineYDocSessionIpc.js";
 import {bindEngineYDoc} from "../../../apps/desktop/src/renderer/collab/engineYDocProvider.js";
 import {CHANNELS} from "../../../apps/desktop/src/ipc/channels.js";
@@ -69,9 +73,10 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
   const lifecycle = new EngineDaemonLifecycle({command: binary,maxRestarts: 0,privateOwnerHost: {configPath: nativeConfig,client: {aggregateBytes: 200_000_000,maxUploads: 2}}});
   await lifecycle.start();
   const singleton = lifecycle.currentClient() as EngineClient;
-  const sessions = new EngineWorkspaceSessions(lifecycle,{workspaceOpenDeadlineMs: 30_000});
+  const routes = new RelayTransportRouteGuard();
+  const sessions = new EngineWorkspaceSessions(new RelayConfiguredDaemonClientSource(lifecycle,routes),{workspaceOpenDeadlineMs: 30_000});
   const workspace = {workspaceId: "workspace",rootPath: workspaceRoot,attachmentId: Symbol("actual-owner")};
-  let capture = createWorkspaceEngineCapture({...workspace,rustEngineSessions: sessions});
+  const capture = createWorkspaceEngineCapture({...workspace,rustEngineSessions: sessions});
   let closeNetwork: (() => Promise<void>) | undefined;
   let ipc: ReturnType<typeof createEngineYDocSessionIpc> | undefined;
   let renderer: Awaited<ReturnType<typeof bindEngineYDoc>> | undefined;
@@ -83,12 +88,33 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
   let namedPeerInvalidated: AbortSignal | undefined;
   let releaseTailAdmission: (() => void) | undefined;
   try {
+    const configPath = join(root,"deployment.json");
+    initializeRelayDeployment({configPath,relayPath: join(root,"relay","relay.sqlite"),continuityDirectory: join(root,"continuity")}); deployment = openRelayDeployment(configPath,{liveTickets: {retainedTicketsPerPrincipalGrant: 8,expiredTicketCleanupBatchSize: 4,now: Date.now}});
+    // The real ordinary relay routes behind the test bearer seam, with the production blob headroom.
+    const relay = serveFetchHandler({handler: createSyncRelayHandler({storage: deployment.storage,resolveActor: resolveTestActor}),
+      maxBodyBytes: () => MAX_BLOB_BYTES + 1024 * 1024,oversized: () => new Response(null,{status: 413}),failure: () => new Response(null,{status: 500})});
+    relay.listen(0,"127.0.0.1"); await once(relay,"listening");
+    closeNetwork = () => new Promise<void>(resolve => relay.close(() => resolve()));
+    const relayPort = (relay.address() as {port: number}).port, exchangeKey = "owner-desktop-exchange-key-32-bytes";
+    routes.bind({workspaceId: "workspace",rootPath: workspaceRoot,relay: {baseUrl: `http://127.0.0.1:${relayPort}`,token: "user:owner"},allowInsecureLoopbackForTests: true});
+    let syncRequestId = 0;
+    const syncRequest = (method: string) => sessions.run(workspace,async ({client,workspace: handle}) =>
+      (await client.sendRequest({id: ++syncRequestId,workspace: handle,method,params: {workspaceId: "workspace"},deadlineMs: 30_000})).result);
+    // The desktop's ordinary publisher, as bounded sync.push passes.
+    const publish = async () => {
+      let pushed = 0;
+      for (let pass = 0; pass < 16; pass++) {
+        const page = decodeOrdinarySyncResult("sync.push",await syncRequest("sync.push"));
+        expect(page.ownerAdmissionPending).toEqual([]); expect(page.sharingDeclined).toEqual([]);
+        pushed += page.pushed;
+        if (!page.hasMore) return pushed;
+      }
+      throw new Error("Ordinary publication exceeded its 16-pass proof budget.");
+    };
     capture.captureBatch([{path: "docs/a.md",operation: "update"}]); await capture.flush();
-    await capture.stop(); await sessions.closeWorkspace(workspace);
-    const dbPath = join(workspaceRoot,".dohc/engine/engine.db"), setup = new DatabaseSync(dbPath);
-    setup.exec("INSERT INTO sync_identity(workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) VALUES('workspace','owner','epoch','stream',1); INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) VALUES('workspace','owner',0)");
-    setup.close();
-    capture = createWorkspaceEngineCapture({...workspace,rustEngineSessions: sessions});
+    expect(await syncRequest("sync.claim")).toMatchObject({claimed: true});
+    expect(await publish()).toBeGreaterThan(0);
+    const dbPath = join(workspaceRoot,".dohc/engine/engine.db");
     const listeners = new Map<string,(payload: any) => void>();
     const sender = {id: 7,isDestroyed: () => false,send: (channel: string,payload: unknown) => listeners.get(channel)?.(payload),once() {return this;}};
     ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: "workspace",generation: 1,isCurrent: () => true}),
@@ -116,15 +142,13 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const rendererDoc = renderer.doc!;
     const engineBinding = await sessions.run(workspace,async binding => binding);
     const native = new DatabaseSync(dbPath,{readOnly: true});
-    const origin = native.prepare("SELECT s.object_id,s.latest_moment_id,b.bytes,d.lineage_claim_id FROM snapshots s JOIN ydoc_docs d USING(workspace_id,version_id,object_id) JOIN ydoc_snapshots y USING(workspace_id,version_id,object_id) JOIN binary_blobs b ON b.sha256=y.snapshot_blob_sha256 WHERE y.up_to_seq=0").get()!;
+    const origin = native.prepare("SELECT s.object_id,b.bytes,d.lineage_claim_id FROM snapshots s JOIN ydoc_docs d USING(workspace_id,version_id,object_id) JOIN ydoc_snapshots y USING(workspace_id,version_id,object_id) JOIN binary_blobs b ON b.sha256=y.snapshot_blob_sha256 WHERE y.up_to_seq=0").get()!;
     const document = {workspaceId: "workspace",mainVersionId: "main",objectId: String(origin.object_id),lineageClaimId: String(origin.lineage_claim_id)};
     const initialSession = native.prepare("SELECT COUNT(*) AS count FROM moments").get()!.count;
     rendererDoc.getMap("frontmatter").set("beforeConnection","Owner edit before first connection");
     await renderer.flushPendingLocalUpdates();
     await expect.poll(() => native.prepare("SELECT head_update_seq FROM ydoc_docs WHERE object_id=?").get(document.objectId)!.head_update_seq).toBeGreaterThan(0);
     expect(native.prepare("SELECT COUNT(*) AS count FROM owner_ydoc_outbox_entries").get()!.count).toBe(0);
-    const configPath = join(root,"deployment.json");
-    initializeRelayDeployment({configPath,relayPath: join(root,"relay","relay.sqlite"),continuityDirectory: join(root,"continuity")}); deployment = openRelayDeployment(configPath,{liveTickets: {retainedTicketsPerPrincipalGrant: 8,expiredTicketCleanupBatchSize: 4,now: Date.now}});
     const credential = createDeviceHostCredential("host",parseHostEpoch(1));
     expect(deployment.storage.provisionDeviceHostCredential({credential,updatedAtMs: 1}).ok).toBe(true);
     const limits = {maxConnections: 4,maxHeaderBytes: 8192,maxCredentialBytes: 4096,maxPayloadBytes: 4096,maxPendingBytes: 4_000_000,maxFragments: 8,maxBufferedChunks: 16,
@@ -133,8 +157,6 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     writeFileSync(relayConfig,JSON.stringify({version: 1,workspaceIds: ["workspace"],maxQueuedBytes: 4_000_000,maxActiveDrains: 2,
       restore: {maxBytes: restoreMaxBytes, maxEvents: 100, aggregateBytes: restoreMaxBytes * 16 + 1_000_000, workingReserveBytes: 1_000_000, maxOperations: 1, validation: policy},
       client: {aggregateBytes: 200_000_000,maxUploads: 2,connectTimeoutMs: 30_000,requestDeadlineMs: 30_000,maxFrameBytes: 1_048_576}}));
-    const relay = createServer(); relay.listen(0,"127.0.0.1"); await once(relay,"listening");
-    const relayPort = (relay.address() as {port: number}).port, exchangeKey = "owner-desktop-exchange-key-32-bytes";
     const frameChanges = createNamedFrameChanges(16);
     const control = createDeviceControl({storage: deployment.storage,hosts: new Set([`127.0.0.1:${relayPort}`]),relayExchangeKey: exchangeKey,limits,
       delivery: {config: readRelayDeviceDeliveryConfig(relayConfig,limits),history: deployment.history,frameChanges,ownerAdmission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000_000,validate: createLiveMarkdownJournalValidator(policy)}}});
@@ -161,10 +183,6 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     Y.applyUpdate(baselineDoc, baseline);
     const baselineProjection = yDocToMarkdown(baselineDoc);
     baselineDoc.destroy();
-    deployment.storage.claimWorkspace({workspaceId: "workspace",ownerUserId: "owner",createdAtMs: 2});
-    deployment.storage.putBlob({workspaceId: "workspace",sha256: hash(seed.markdown),content: Buffer.from(seed.markdown),createdAtMs: 2});
-    deployment.storage.appendLogBatch({workspaceId: "workspace",originId: "owner",ops: [{originSeq: 0,opKind: "moment.append",recordedAtMs: 2,payloadJson: JSON.stringify({objectId: document.objectId,
-      momentId: origin.latest_moment_id,versionId: "main",recordedAtMs: 2,operation: "write",path: "docs/a.md",payloadAfterPath: "docs/a.md",payloadAfterBlobSha256: hash(seed.markdown),payloadAfterContentKind: "text",payloadAfterByteLength: Buffer.byteLength(seed.markdown)})}]});
     expect(deployment.storage.registerLiveDocumentBaseline({host,evidence: registration.evidence,baselineBytes: baseline,registeredAtMs: 3}).kind).toBe("registered");
     deployment.storage.createShare({share: {shareId: "share",workspaceId: "workspace",granterUserId: "owner",selectorJson: JSON.stringify({paths: ["docs"],versionId: null}),createdAtMs: 3},
       grant: {grantId: "grant",shareId: "share",principalKind: "user",principalUserId: "reader",principalEmail: null,access: "edit",generation: 1,status: "active",createdAtMs: 3,revokedAtMs: null,parentGrantId: null}});
@@ -274,7 +292,8 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const peerSync = await namedPeer.openSync(Uint8Array.of(0),peerSignal.signal), browser = new Y.Doc();
     Y.applyUpdate(browser,peerSync.missingStateUpdate);
     closeNamedPeer = () => {peerSignal.abort(); peerSync.close(); membership.close(); namedPeer.close(); browser.destroy();};
-    expect(peerSync.binding.selectorPaths).toEqual(["docs/a.md"]);
+    // A link's wire selector is relative to its share.
+    expect(peerSync.binding.selectorPaths).toEqual([link ? "a.md" : "docs/a.md"]);
     expect(nativePeer.binding.selectorPaths).toEqual(["docs"]);
     expect(yDocToMarkdown(browser)).toBe(yDocToMarkdown(rendererDoc));
     const firstApplied = peerSync.nextApplied(peerSignal.signal);
@@ -340,6 +359,10 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       expect(deployment.storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,metadata: {deliveryId: `later-${index}`,updateDigest: hash(bytes),binding: current.binding},
         cutToken: cut.cut,validation: createLiveMarkdownJournalValidator(policy)({document,currentPath: "docs/a.md",checkpoint: cut.cut.checkpoint.bytes,suffix: cut.cut.suffix.map(row => row.bytes),candidate: bytes}),updateBytes: bytes,receivedAtMs: Date.now()}).result.kind).toBe("accepted");
     }
+    // A pass applies at most maxAdoptionEvents (2) of the four later updates.
+    for (let pass = 0, outcome = await drain(); (outcome as {kind: string}).kind !== "done"; pass++, outcome = await drain()) {
+      expect(pass).toBeLessThan(3); expect(outcome).toHaveProperty("continueDrain",true);
+    }
     await control.settle(document); await control.settle(document);
     const beforeGrowth = Y.encodeStateVector(remote);
     remote.getMap("frontmatter").set("growth","x".repeat(1_000_100));
@@ -397,6 +420,11 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     await expect.poll(() => {const current=deployment!.storage.getLiveHostControl();return current?.admissionState==="open" && current.registeredConnectionId!==oldConnection;},{timeout: 30_000}).toBe(true);
     const handoffsBeforeStop = handoffCount;
     const stoppedRequests = vi.spyOn(singleton,"sendRequest");
+    // The desktop publishes its own journal. Until the old settlements reach the relay, the fence commits nothing.
+    expect(await stop()).toEqual({kind: "pending",reason: "publication-pending"});
+    expect(native.prepare("SELECT COUNT(*) AS n FROM live_restore_fences").get()!.n).toBe(0);
+    expect(await publish()).toBeGreaterThan(0);
+    for (const row of pendingTail) expect(deployment.storage.getBlob("workspace",String(row.update_digest))).toBeNull();
     const lostFence = vi.spyOn(LiveCommittedDeliveryStore.prototype,"acknowledgeStopRestoreFence").mockImplementationOnce(() => {throw new Error("Lost owner fence receipt");});
     try {await expect(stop()).rejects.toThrow("Lost owner fence receipt");} finally {lostFence.mockRestore();}
     expect(readStopRestore(deployment.storage as StorageContext,lookup)?.phase).toBe("old-cut-applied");
@@ -446,6 +474,10 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       .toEqual({principal_kind: "link",principal_id: ticket.authority.principalId,grant_id: "private-link-grant"});
     expect(membership.invalidated.aborted).toBe(true);
     writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,link,binary,sha256: hash(readFileSync(binary)),document,markdown: yDocToMarkdown(remote)},null,2)); remote.destroy();
+  } catch (error) {
+    // A cleanup failure below replaces this error, so keep it with the case.
+    writeFileSync(join(root,"result.json"),JSON.stringify({passed: false,standalone,link,binary,error: error instanceof Error ? error.stack ?? error.message : String(error)},null,2));
+    throw error;
   } finally {
     releaseTailAdmission?.(); closeNamedPeer?.();
     captures.mockRestore();
