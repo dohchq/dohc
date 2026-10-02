@@ -179,6 +179,7 @@ export class ServiceActivationDriver {
       if(!held.activationPending && this.#invalidated(held,document!))return fenced;
       throw error;
     }
+    check();
     if(this.#invalidated(held,document!))return fenced;
     held.completed=true;this.#completedTargets.add(targetKey);
     return {kind:"done" as const,document:document!};

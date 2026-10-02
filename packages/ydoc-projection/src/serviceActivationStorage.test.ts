@@ -718,6 +718,19 @@ it('does not publish readiness when the binding is fenced while settlement runs'
   }finally{vi.restoreAllMocks();f.close()}
 })
 
+// Proves: cancellation during settlement wins over a fence and over an
+// unchanged binding, and first readiness is not published.
+it.each([['a fenced',true],['an unchanged',false]] as const)('keeps cancellation when settlement resolves after an abort with %s binding',async(_binding,fence)=>{
+  const f=fixture()
+  try{
+    const native=nativeOwner(f),{d,fence:generation}=serializedActivation(f,native.client)
+    const abort=new AbortController(),reason=new Error('Pass cancelled.')
+    await expect(d.driver.activate(d.target,abort.signal,async()=>{if(fence)fenceRestore(f,generation);abort.abort(reason)})).rejects.toBe(reason)
+    expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
+    expect(d.driver.workspaceReady('workspace')).toBe(false)
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
 // Proves: damaged owner evidence on an unchanged open binding during a native
 // await stays an integrity failure rather than an expected fence.
 it('keeps damaged owner evidence on an open binding as an integrity failure during native application',async()=>{
