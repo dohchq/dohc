@@ -8,6 +8,7 @@ import { parseRelayAcceptedLiveUpdate, parseLiveUpdateIdentifier, parseLiveUpdat
 import type { BlobStart, Envelope, Event, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { OwnerYDocOutboxAppendResult } from "../ydoc/ownerYDocOutbox";
+import { decodeOwnerYDocOutboxAppendResult } from "../ydoc/ydocWireContract";
 import { parseNativeOwnerActivation, type NativeOwnerActivation } from "./nativeOwnerActivation";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
@@ -765,10 +766,10 @@ export class EngineClient implements EngineTransport {
       digest=createHash("sha256").update(bytes).digest("hex");
       return {params:{binding:{...binding,selectorPaths:[...binding.selectorPaths]},expectedRevision,appendKey,streamId,byteLength:bytes.length,digest},streams:[{streamId,bytes,digest}]};
     },signal);
-    const row=response.result as unknown as OwnerYDocOutboxAppendResult;
-    if (!row || Object.keys(row).sort().join()!=="deliveryId,oldestEntryAtMs,outboxId,pendingBytes,sequence,state,updateDigest" || row.updateDigest!==digest || !["active","sealed"].includes(row.state)
-      || !Number.isSafeInteger(row.sequence) || row.sequence<1 || !Number.isSafeInteger(row.pendingBytes) || row.pendingBytes<1 || !Number.isSafeInteger(row.oldestEntryAtMs) || row.oldestEntryAtMs<0) throw new TypeError("Invalid draft append response.");
-    return {...row,outboxId:parseLiveUpdateIdentifier(row.outboxId,"outbox ID"),deliveryId:parseLiveUpdateIdentifier(row.deliveryId,"delivery ID")};
+    if (!response.result || Object.keys(response.result).sort().join()!=="deliveryId,oldestEntryAtMs,outboxId,pendingBytes,sequence,state,updateDigest") throw new TypeError("Invalid draft append response.");
+    const row=decodeOwnerYDocOutboxAppendResult(response.result);
+    if (row.updateDigest!==digest) throw new TypeError("Invalid draft append response.");
+    return row;
   }
 
   async ownerYDocPrepareEnrollment(request: OwnerYDocDeliveryRequest, target: OwnerYDocDeliveryTarget, signal?: AbortSignal): Promise<

@@ -7,6 +7,9 @@ import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter";
 import { WorkspaceDaemonRequester } from "../live/daemonLiveAdapter";
 import type { JsonValue, WorkspaceHandle } from "../protocol";
+import { decodeOwnerYDocOutboxAppendResult, type OwnerYDocOutboxAppendResult } from "./ydocWireContract";
+
+export type { OwnerYDocOutboxAppendResult } from "./ydocWireContract";
 
 export { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 export type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -29,16 +32,6 @@ export interface OwnerYDocOutboxAppendInput {
   readonly appendKey: string;
   readonly update: Uint8Array;
   readonly limits: OwnerYDocOutboxLimits;
-}
-
-export interface OwnerYDocOutboxAppendResult {
-  readonly outboxId: string;
-  readonly sequence: number;
-  readonly deliveryId: string;
-  readonly updateDigest: string;
-  readonly pendingBytes: number;
-  readonly oldestEntryAtMs: number;
-  readonly state: OwnerYDocOutboxState;
 }
 
 type OwnerYDocOutboxState = "active" | "sealed" | "quarantined";
@@ -217,7 +210,7 @@ export class OwnerYDocOutbox {
     if (typeof input.appendKey !== "string" || input.appendKey.length === 0) {
       throw new TypeError("appendKey must be a non-empty string.");
     }
-    const raw = record(
+    return decodeOwnerYDocOutboxAppendResult(
       await this.requester.request(
         OWNER_YDOC_OUTBOX_METHOD.append,
         {
@@ -229,17 +222,7 @@ export class OwnerYDocOutbox {
         } as unknown as JsonValue,
         { workspace: this.workspace },
       ),
-      "owner outbox append result",
     );
-    return {
-      outboxId: stringField(raw, "outboxId"),
-      sequence: wireInteger(raw, "sequence", 1),
-      deliveryId: stringField(raw, "deliveryId"),
-      updateDigest: stringField(raw, "updateDigest"),
-      pendingBytes: wireInteger(raw, "pendingBytes"),
-      oldestEntryAtMs: wireInteger(raw, "oldestEntryAtMs"),
-      state: state(raw.state),
-    };
   }
 
   async readPending(outboxId: string): Promise<OwnerYDocOutboxPending> {
