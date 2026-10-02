@@ -971,114 +971,27 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
 #[test]
 fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_then_materializes() {
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
-    use dohc_engine_collab::owner_outbox::{
-        OwnerOutboxLimits,
-        draft::{ObservedOwnerBinding, install_observed_binding_in_tx},
-        enrollment::{OwnerEnrollmentInput, OwnerEnrollmentPreparation, enroll_in_tx, prepare_in},
-    };
-    let (_scratch, mut store) = test_store();
-    crate::adopt_join_identity(&mut store, "ws", "local", "epoch", "stream", 1, &NoFaults).unwrap();
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
-    ))
-    .unwrap();
-    let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
-    let initial_text = fixture["markdown"].as_str().unwrap();
-    let initial_moment = format!("moment-ydoc-{}", "a".repeat(64));
-    seed_text_moment(
-        &mut store,
-        "object",
-        "owner.md",
+    let RestoreOwner {
+        _scratch,
+        mut store,
+        observed,
+        checkpoint,
         initial_text,
-        &initial_moment,
-        None,
-        true,
-    );
-    let key = DocKey::new("ws", "main", "object").unwrap();
-    dohc_engine_collab::claim_base(
-        &mut store,
-        &key,
-        YdocContentKind::Richdoc,
-        &original,
-        &NoFaults,
-        2,
-    )
-    .unwrap();
-    store
-        .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path='owner.md'", []))
-        .unwrap();
-    let doc = store
-        .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
-        .unwrap();
-    let checkpoint = doc.encode_full_state();
-    let observed = ObservedOwnerBinding {
-        binding: LiveObjectBinding {
-            workspace_id: "ws".into(),
-            main_version_id: "main".into(),
-            object_id: "object".into(),
-            lineage_claim_id: hex_sha256(&original),
-            current_path: "owner.md".into(),
-            selector_paths: vec!["owner.md".into()],
-            restore_fence_generation: 0,
-        },
-        relay_database_namespace: "relay".into(),
-        revision: 1,
-        accepted_cursor: 0,
-        native_head_sequence: store
-            .read_with(|conn| dohc_engine_collab::read_marker_in(conn, &key))
-            .unwrap()
-            .unwrap()
-            .head_update_seq,
-        checkpoint_digest: hex_sha256(&checkpoint),
-        limits: OwnerOutboxLimits {
-            max_pending_bytes: 1_000_000,
-            max_pending_age_ms: 60_000,
-        },
-    };
-    store
-        .write_with(&NoFaults, |tx| {
-            install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)
-        })
-        .unwrap();
-    // The host's state once the restore is accepted at cursor 1.
-    let restored = Ydoc::wire();
-    restored.apply(&checkpoint).unwrap();
-    let _ = restored.richdoc_append_paragraph("restored by the owner");
-    let restored_text = restored.project(YdocContentKind::Richdoc).unwrap().content;
+        initial_moment,
+    } = restore_owner();
+    let (restored, restored_text) = restored_host(&checkpoint, "restored by the owner");
     let next = LiveObjectBinding {
         restore_fence_generation: 1,
         ..observed.binding.clone()
     };
-    let retain_audit = |store: &EngineStore,
-                        binding: &LiveObjectBinding,
-                        namespace: &str,
-                        id: &str,
-                        text: &str| {
-        // The audit parser is covered separately. Seed its committed output.
-        let record = format!(
-            "{{\"momentId\":{},\"relayDatabaseNamespace\":{},\"binding\":{},\"terminalCursor\":1}}",
-            serde_json::to_string(id).unwrap(),
-            serde_json::to_string(namespace).unwrap(),
-            serde_json::to_string(binding).unwrap()
-        );
-        store.read_with(|conn| conn.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,'ws',?2,?3,?4)", params![id, hex_sha256(record.as_bytes()), record, text_sha(text)])).unwrap();
-    };
+    let retain_audit =
+        |store: &EngineStore,
+         binding: &LiveObjectBinding,
+         namespace: &str,
+         id: &str,
+         text: &str| { retain_restore_audit(store, binding, namespace, id, text, 1) };
     let settlement = |origin: &str, id: &str, text: &str| {
-        envelope(
-            origin,
-            0,
-            "ws",
-            present_text_payload(
-                id,
-                "object",
-                "write",
-                "owner.md",
-                "owner.md",
-                initial_text,
-                &initial_moment,
-                text,
-            ),
-        )
+        restore_settlement(origin, id, &initial_text, &initial_moment, text)
     };
     let before = snapshot(&store, "object");
 
@@ -1193,34 +1106,7 @@ fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_the
     assert_eq!(snapshot(&store, "object"), before);
 
     // The authenticated owner feed reaches the restore generation.
-    let captured = match store
-        .read_with(|conn| prepare_in(conn, &next, "relay"))
-        .unwrap()
-    {
-        OwnerEnrollmentPreparation::Capture { captured } => captured,
-        OwnerEnrollmentPreparation::Observed { .. } => panic!("a restore generation captures"),
-    };
-    let advanced = store
-        .write_with(&NoFaults, |tx| {
-            enroll_in_tx(
-                tx,
-                "ws",
-                &OwnerEnrollmentInput {
-                    binding: next.clone(),
-                    relay_database_namespace: "relay".into(),
-                    captured: captured.clone(),
-                    journal_cursor: 1,
-                    checkpoint: restored.encode_full_state(),
-                    host_vector: restored.encode_state_vector(),
-                },
-                &observed.limits,
-                3,
-            )
-        })
-        .unwrap();
-    let dohc_engine_storage::TxnOutcome::Committed(advanced) = advanced else {
-        panic!("enrollment must commit")
-    };
+    let advanced = enroll_restore(&mut store, &next, &restored, 1, &observed.limits);
     assert_eq!(
         (advanced.binding, advanced.accepted_cursor),
         (next.clone(), 1)
@@ -1237,19 +1123,331 @@ fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_the
         snapshot(&store, "object").map(|(_, _, digest, moment)| (digest, moment)),
         Some((text_sha(&restored_text), restore_id.clone()))
     );
-    let disposition = |origin: &str| {
-        store
-            .read_with(|conn| {
-                conn.query_row(
-                    "SELECT apply_disposition FROM replication_log WHERE origin_id=?1",
-                    [origin],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-            })
-            .unwrap()
+    assert_eq!(disposition(&store, "forged").as_deref(), Some("refused"));
+    assert_ne!(disposition(&store, "host").as_deref(), Some("refused"));
+}
+
+#[test]
+fn restore_settlement_skipped_by_a_later_generation_is_refused_and_released() {
+    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
+    let RestoreOwner {
+        _scratch,
+        mut store,
+        observed,
+        checkpoint,
+        initial_text,
+        initial_moment,
+    } = restore_owner();
+    let generation = |restore_fence_generation| LiveObjectBinding {
+        restore_fence_generation,
+        ..observed.binding.clone()
     };
-    assert_eq!(disposition("forged").as_deref(), Some("refused"));
-    assert_ne!(disposition("host").as_deref(), Some("refused"));
+    let (_, skipped_text) = restored_host(&checkpoint, "restored at generation 1");
+    let (latest, latest_text) = restored_host(&checkpoint, "restored at generation 2");
+    hydrate_texts(&mut store, &[&skipped_text, &latest_text]);
+    let skipped_id = format!("moment-ydoc-{}", "b".repeat(64));
+    let latest_id = format!("moment-ydoc-{}", "c".repeat(64));
+    retain_restore_audit(
+        &store,
+        &generation(1),
+        "relay",
+        &skipped_id,
+        &skipped_text,
+        1,
+    );
+    retain_restore_audit(&store, &generation(2), "relay", &latest_id, &latest_text, 2);
+    let skipped = restore_settlement(
+        "first-restore",
+        &skipped_id,
+        &initial_text,
+        &initial_moment,
+        &skipped_text,
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &skipped, &NoFaults).unwrap(),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        1
+    );
+    let before = snapshot(&store, "object");
+
+    // The authenticated owner feed skips generation 1, so its settlement can
+    // never become ready. The drain refuses it instead of writing it.
+    let advanced = enroll_restore(&mut store, &generation(2), &latest, 2, &observed.limits);
+    assert_eq!(
+        (advanced.binding, advanced.accepted_cursor),
+        (generation(2), 2)
+    );
+    let report =
+        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert!(report.changes.is_empty());
+    assert!(report.report_id.is_some());
+    assert_eq!(snapshot(&store, "object"), before);
+    assert_eq!(
+        disposition(&store, "first-restore").as_deref(),
+        Some("refused")
+    );
+    assert_eq!(
+        store
+            .read_with(|conn| conn.query_row(
+                "SELECT reason_message FROM replication_pending_refusals WHERE origin_id='first-restore'",
+                [],
+                |row| row.get::<_, String>(0)
+            ))
+            .unwrap(),
+        crate::moment_apply::pending::SUPERSEDED
+    );
+
+    // Committing the report releases the queue row; the refused envelope
+    // keeps its text for inspection.
+    let committed = crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &crate::RelayCursor {
+            bootstrap_complete: true,
+            cursor: 1,
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            settlement_report_id: report.report_id,
+        },
+        &NoFaults,
+        &NoLiveLeases,
+        4,
+    )
+    .unwrap();
+    assert!(matches!(
+        committed,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .table_row_count("owner_pending_settlement_blobs")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .read_with(|conn| conn.query_row(
+                "SELECT COUNT(*) FROM replication_refused_moment_blobs \
+                 WHERE origin_id='first-restore' AND role='payload-after' AND text_sha256=?1",
+                [text_sha(&skipped_text)],
+                |row| row.get::<_, i64>(0)
+            ))
+            .unwrap(),
+        1
+    );
+
+    // The current generation's own settlement still applies at its exact binding.
+    let latest_settlement = restore_settlement(
+        "second-restore",
+        &latest_id,
+        &initial_text,
+        &initial_moment,
+        &latest_text,
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &latest_settlement, &NoFaults).unwrap(),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    assert_eq!(
+        snapshot(&store, "object").map(|(_, _, digest, moment)| (digest, moment)),
+        Some((text_sha(&latest_text), latest_id))
+    );
+}
+
+/// An owner observed at restore generation 0 and accepted cursor 0.
+struct RestoreOwner {
+    _scratch: ScratchDir,
+    store: EngineStore,
+    observed: dohc_engine_collab::owner_outbox::draft::ObservedOwnerBinding,
+    checkpoint: Vec<u8>,
+    initial_text: String,
+    initial_moment: String,
+}
+
+fn restore_owner() -> RestoreOwner {
+    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
+    use dohc_engine_collab::owner_outbox::{
+        OwnerOutboxLimits,
+        draft::{ObservedOwnerBinding, install_observed_binding_in_tx},
+    };
+    let (scratch, mut store) = test_store();
+    crate::adopt_join_identity(&mut store, "ws", "local", "epoch", "stream", 1, &NoFaults).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    let initial_text = fixture["markdown"].as_str().unwrap().to_owned();
+    let initial_moment = format!("moment-ydoc-{}", "a".repeat(64));
+    seed_text_moment(
+        &mut store,
+        "object",
+        "owner.md",
+        &initial_text,
+        &initial_moment,
+        None,
+        true,
+    );
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    dohc_engine_collab::claim_base(
+        &mut store,
+        &key,
+        YdocContentKind::Richdoc,
+        &original,
+        &NoFaults,
+        2,
+    )
+    .unwrap();
+    store
+        .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path='owner.md'", []))
+        .unwrap();
+    let checkpoint = store
+        .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+        .unwrap()
+        .encode_full_state();
+    let observed = ObservedOwnerBinding {
+        binding: LiveObjectBinding {
+            workspace_id: "ws".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: hex_sha256(&original),
+            current_path: "owner.md".into(),
+            selector_paths: vec!["owner.md".into()],
+            restore_fence_generation: 0,
+        },
+        relay_database_namespace: "relay".into(),
+        revision: 1,
+        accepted_cursor: 0,
+        native_head_sequence: store
+            .read_with(|conn| dohc_engine_collab::read_marker_in(conn, &key))
+            .unwrap()
+            .unwrap()
+            .head_update_seq,
+        checkpoint_digest: hex_sha256(&checkpoint),
+        limits: OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 60_000,
+        },
+    };
+    store
+        .write_with(&NoFaults, |tx| {
+            install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)
+        })
+        .unwrap();
+    RestoreOwner {
+        _scratch: scratch,
+        store,
+        observed,
+        checkpoint,
+        initial_text,
+        initial_moment,
+    }
+}
+
+/// The host's state once a restore that appends `paragraph` is accepted.
+fn restored_host(checkpoint: &[u8], paragraph: &str) -> (Ydoc, String) {
+    let host = Ydoc::wire();
+    host.apply(checkpoint).unwrap();
+    let _ = host.richdoc_append_paragraph(paragraph);
+    let text = host.project(YdocContentKind::Richdoc).unwrap().content;
+    (host, text)
+}
+
+/// The audit parser is covered separately. Seed its committed output.
+fn retain_restore_audit(
+    store: &EngineStore,
+    binding: &dohc_engine_collab::live_object_binding::LiveObjectBinding,
+    namespace: &str,
+    id: &str,
+    text: &str,
+    terminal_cursor: i64,
+) {
+    let record = format!(
+        "{{\"momentId\":{},\"relayDatabaseNamespace\":{},\"binding\":{},\"terminalCursor\":{terminal_cursor}}}",
+        serde_json::to_string(id).unwrap(),
+        serde_json::to_string(namespace).unwrap(),
+        serde_json::to_string(binding).unwrap()
+    );
+    store.read_with(|conn| conn.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,'ws',?2,?3,?4)", params![id, hex_sha256(record.as_bytes()), record, text_sha(text)])).unwrap();
+}
+
+fn restore_settlement(
+    origin: &str,
+    id: &str,
+    initial_text: &str,
+    initial_moment: &str,
+    text: &str,
+) -> ReplicationEnvelope {
+    envelope(
+        origin,
+        0,
+        "ws",
+        present_text_payload(
+            id,
+            "object",
+            "write",
+            "owner.md",
+            "owner.md",
+            initial_text,
+            initial_moment,
+            text,
+        ),
+    )
+}
+
+/// The authenticated owner feed reaches `binding` at the host cut `cursor`.
+fn enroll_restore(
+    store: &mut EngineStore,
+    binding: &dohc_engine_collab::live_object_binding::LiveObjectBinding,
+    host: &Ydoc,
+    cursor: i64,
+    limits: &dohc_engine_collab::owner_outbox::OwnerOutboxLimits,
+) -> dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor {
+    use dohc_engine_collab::owner_outbox::enrollment::{
+        OwnerEnrollmentInput, OwnerEnrollmentPreparation, enroll_in_tx, prepare_in,
+    };
+    let captured = match store
+        .read_with(|conn| prepare_in(conn, binding, "relay"))
+        .unwrap()
+    {
+        OwnerEnrollmentPreparation::Capture { captured } => captured,
+        OwnerEnrollmentPreparation::Observed { .. } => panic!("a restore generation captures"),
+    };
+    let input = OwnerEnrollmentInput {
+        binding: binding.clone(),
+        relay_database_namespace: "relay".into(),
+        captured,
+        journal_cursor: cursor,
+        checkpoint: host.encode_full_state(),
+        host_vector: host.encode_state_vector(),
+    };
+    let advanced = store
+        .write_with(&NoFaults, |tx| enroll_in_tx(tx, "ws", &input, limits, 3))
+        .unwrap();
+    let dohc_engine_storage::TxnOutcome::Committed(advanced) = advanced else {
+        panic!("enrollment must commit")
+    };
+    advanced
+}
+
+fn disposition(store: &EngineStore, origin: &str) -> Option<String> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT apply_disposition FROM replication_log WHERE origin_id=?1",
+                [origin],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
 }
 
 #[test]
