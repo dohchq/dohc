@@ -186,11 +186,27 @@ export async function startServiceLiveHost(options: {
     const document=consumers.get(lookup.workspaceId)?.documentForRestore(lookup);
     return document?(ordinary.has(document.workspaceId)?activation?.restoreConsumer(document):consumerFor(document)):undefined;
   };
+  const configuredConsumer = (document: LiveDocumentKey) => {
+    const consumer = consumerFor(document);
+    if (!consumer) throw new Error("Workspace is not configured on this service host.");
+    return consumer;
+  };
+  // A restore can fence the binding while a call waits for the document or the
+  // engine. The call then fails as incomplete; cancellation, lost standing,
+  // and damage on the same binding stay visible.
+  const deliver = <T>(document: LiveDocumentKey, callerSignal: AbortSignal | undefined,
+    run: (consumer: ReturnType<typeof configuredConsumer>, joined: AbortSignal) => Promise<T>) => {
+    configuredConsumer(document);
+    return runDocument(document, callerSignal, async joined => {
+      const consumer = configuredConsumer(document);
+      try { return await run(consumer, joined); }
+      catch (error) { joined.throwIfAborted(); check(); configuredConsumer(document); throw error; }
+    });
+  };
   const drain = async (value: LiveDocumentKey, callerSignal?: AbortSignal): Promise<CommittedDeliveryOutcome> => {
     check();
-    const document = parseLiveDocumentKey(value), consumer = consumerFor(document);
-    if (!consumer) throw new Error("Workspace is not configured on this service host.");
-    return runDocument(document, callerSignal, joined => consumer.drain(document, joined));
+    const document = parseLiveDocumentKey(value);
+    return deliver(document, callerSignal, (consumer, joined) => consumer.drain(document, joined));
   };
   const startup = Effect.runPromise(Effect.provideService(Effect.gen(function* () {
     yield* Effect.acquireRelease(Effect.succeed(lifetime), value => Effect.sync(() => value.dispose()));
@@ -276,8 +292,8 @@ export async function startServiceLiveHost(options: {
         try{
           for(let visited=0;visited<Math.min(bounds.maxDocumentsPerPass,bounds.targets.length);visited++){
             const target=bounds.targets[index]!;index=(index+1)%bounds.targets.length;
-            // Settlement runs in the activation's own document work, after its
-            // fence check, so a restore cannot fence the binding in between.
+            // Settlement runs in the activation's own document work. A restore
+            // fence during it leaves the pass pending rather than ready.
             const result=await activation!.activate(target,passSignal,
               config.settlement?(consumer,document,joined)=>consumer.settle(document,joined):undefined);
             if(result.kind==="done"){
@@ -383,9 +399,8 @@ export async function startServiceLiveHost(options: {
       async settle(value: LiveDocumentKey, callerSignal?: AbortSignal) {
         check();
         if (!config.settlement) throw new Error("Settlement is not configured on this service host.");
-        const document = parseLiveDocumentKey(value), consumer = consumerFor(document);
-        if (!consumer) throw new Error("Workspace is not configured on this service host.");
-        return runDocument(document, callerSignal, joined => consumer.settle(document, joined));
+        const document = parseLiveDocumentKey(value);
+        return deliver(document, callerSignal, (consumer, joined) => consumer.settle(document, joined));
       },
       drain,
       close,

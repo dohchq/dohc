@@ -3,10 +3,17 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import * as Y from "yjs";
 import { initializeRelayDeployment, openRelayDeployment } from "./relayDeployment.js";
 import { startServiceLiveHost } from "./serviceLiveHost.js";
 import {hasRelayWriteObservers, notifyRelayWrite, observeRelayWrites} from "./relayWriteChanges.js";
 import {ServiceActivationDriver} from "./serviceActivationDriver.js";
+import { OwnerCommittedDelivery } from "./ownerCommittedDelivery.js";
+import type { NativeOwnerActivation } from "@dohc/workspace-engine-client/daemon";
+import { markdownToYDoc } from "../../../packages/ydoc-projection/src/import-export.js";
+import { createLiveMarkdownJournalValidator, createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 
 const spawn = vi.hoisted(() => vi.fn());
 vi.mock("node:fs/promises",async importOriginal => {
@@ -414,4 +421,166 @@ it("keeps activation polling when logging throws and resets repeated errors afte
     await vi.advanceTimersByTimeAsync(100);
     expect(activate).toHaveBeenCalledTimes(4); expect(log).toHaveBeenCalledTimes(2);
   } finally {await host.close(); vi.useRealTimers(); log.mockRestore(); activate.mockRestore();}
+});
+
+const {DatabaseSync} = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+// A service owner whose activation completed under an earlier connection, as
+// after a restart. The started host resumes it from real relay storage; only
+// the engine is mocked. `park` holds the next engine request for one method.
+async function completedServiceOwner() {
+  const f = await fixture(), raw = new DatabaseSync(join(f.root, "relay", "relay.sqlite"));
+  cleanup.push(async () => raw.close());
+  const policy = {maxStructVisits: 1_000_000, maxValueNodeVisits: 5_000_000, maxDecodedPayloadByteVisits: 100_000_000,
+    maxStructClientGroupVisits: 1_000_000, maxDeleteClientGroupVisits: 1_000_000, maxDeleteIntervalVisits: 1_000_000, maxIndexOperations: 10_000_000};
+  const validateBaseline = createLiveMarkdownRegistrationValidator(policy), validateJournal = createLiveMarkdownJournalValidator(policy);
+  const doc = markdownToYDoc("Original"), baselineBytes = Buffer.from(Y.encodeStateAsUpdate(doc));
+  doc.getMap("frontmatter").set("title", "Edited");
+  const fullState = Buffer.from(Y.encodeStateAsUpdate(doc)); doc.destroy();
+  const document = {workspaceId: "workspace", mainVersionId: "main" as const, objectId: "object", lineageClaimId: sha256(baselineBytes)};
+  const validated = validateJournal({document, currentPath: "docs/a.md", checkpoint: baselineBytes, suffix: [], candidate: fullState});
+  const base = validateBaseline({document, currentPath: "docs/a.md", checkpoint: baselineBytes});
+  if (validated.kind !== "accepted" || base.kind !== "accepted") throw new Error("Invalid owner fixture.");
+  const capture: NativeOwnerActivation = {activationId: `ordinary-activation-${"a".repeat(64)}`, sessionId: "native-session", baselineBytes, fullState,
+    source: {version: 1, relayDatabaseNamespace: f.history.namespace, ...document, currentPath: "docs/a.md", replicationEpoch: "epoch",
+      streamIdentity: "stream", committedCursor: 3, baseOriginId: "origin", baseOriginSeq: 1, baseRelaySeq: 2,
+      sourceMomentId: `moment-ydoc-apply-${sha256(Buffer.from(["workspace", "main", "object", "docs/a.md", "origin", "2"].join("\0")))}`,
+      sourceDigest: validated.evidence.projectedMarkdownSha256, sourceByteLength: validated.evidence.projectedMarkdownByteLength,
+      nativeHeadSequence: 2, fullStateDigest: sha256(fullState), fullStateByteLength: fullState.length}};
+  raw.exec("INSERT INTO sync_relay_workspaces(workspace_id,owner_user_id,created_at_ms,replication_epoch,stream_identity) VALUES ('workspace','owner',0,'epoch','stream')");
+  const log = raw.prepare("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','origin',?,?,?,?)");
+  log.run(0, "moment.append", JSON.stringify({versionId: "main", objectId: "object", momentId: "original-moment", path: "docs/a.md", operation: "write",
+    payloadAfterPath: "docs/a.md", payloadAfterContentKind: "text", payloadAfterBlobSha256: base.evidence.projectedMarkdownSha256,
+    payloadAfterByteLength: base.evidence.projectedMarkdownByteLength}), 0);
+  log.run(1, "ydoc.update", JSON.stringify({versionId: "main", objectId: "object", path: "docs/a.md", contentKind: "richdoc", isBaseState: true,
+    lineageClaimId: document.lineageClaimId, updateBlobSha256: document.lineageClaimId}), 1);
+  log.run(2, "ydoc.update", JSON.stringify({versionId: "main", objectId: "object", path: "docs/a.md", contentKind: "richdoc", isBaseState: false,
+    lineageClaimId: document.lineageClaimId, updateBlobSha256: sha256(fullState)}), 2);
+  const blob = raw.prepare("INSERT INTO sync_relay_blobs(workspace_id,sha256,byte_length,content) VALUES ('workspace',?,?,?)");
+  blob.run(document.lineageClaimId, baselineBytes.length, baselineBytes); blob.run(sha256(fullState), fullState.length, fullState);
+  raw.prepare("INSERT INTO sync_relay_object_moments(workspace_id,object_id,relay_seq,moment_id,version_id,path,blob_sha256,content_kind,byte_length,recorded_at_ms) VALUES ('workspace','object',1,'original-moment','main','docs/a.md',?,'text',?,0)")
+    .run(base.evidence.projectedMarkdownSha256, base.evidence.projectedMarkdownByteLength);
+  raw.prepare("INSERT INTO sync_relay_shares(share_id,workspace_id,granter_user_id,selector_json,created_at_ms) VALUES ('share','workspace','owner',?,0)")
+    .run(JSON.stringify({paths: ["docs"], versionId: null}));
+  raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)");
+
+  // Complete the activation under the earlier connection: adoption, seed, native application.
+  const earlier = {mode: "service" as const, hostId: "service", hostEpoch: f.storage.getLiveHostControl()!.hostEpoch, instanceId: "instance", connectionId: "earlier"};
+  const actor = {kind: "owner" as const, userId: "owner", shareId: "share"}, store = f.storage.createServiceActivationStore(f.history);
+  store.prepare({capture, host: earlier, shareId: "share", registeredAtMs: 3, guard() {}, validateBaseline, validateJournal,
+    bounds: {maxCaptureBytes: 1_000_000, maxEntriesPerDrain: 10, maxBytesPerDrain: 1_000_000}});
+  const access = store.pending(document, earlier), delivery = f.storage.createLiveCommittedDeliveryStore(f.history, access);
+  const adoption = delivery.captureOwnerCut({host: earlier, document, actor, adoptionId: capture.activationId,
+    expectedLocalSequence: 2, maxBytes: 1_000_000, maxEvents: 100, throughCursor: 0});
+  delivery.acknowledgeOwnerAdoption(adoption, {adoptionId: capture.activationId, localYDocSequence: 2, terminalCursor: 0, adoptionReplayed: false});
+  const current = f.storage.resolveCurrentLiveDocumentBinding({document, actor}, access), cut = f.storage.readLiveUpdateJournalCut({document});
+  if (current.kind !== "current" || cut.kind !== "cut") throw new Error("Missing activation authority.");
+  const seed = validateJournal({document, currentPath: current.binding.currentPath, checkpoint: cut.cut.checkpoint.bytes,
+    suffix: cut.cut.suffix.map(row => row.bytes), candidate: fullState});
+  f.storage.commitLiveUpdateJournal({host: earlier, actor, expectedAuthority: current.authority,
+    metadata: {deliveryId: "seed", updateDigest: sha256(fullState), binding: current.binding}, cutToken: cut.cut, validation: seed,
+    updateBytes: fullState, receivedAtMs: 4}, access);
+  const owner = delivery.openOwnerDelivery({host: earlier, document, actor}), event = delivery.nextOwnerApplication(owner)!;
+  delivery.acknowledgeOwnerDeliveryApplication(owner, {...event.metadata.accepted.receipt, localYDocSequence: 2, applicationReplayed: false});
+  store.complete({document, host: earlier, access, nativeState: {adoptionId: capture.activationId, pendingBytes: 0}, guard() {}});
+
+  Object.assign(f.config, {settlement: {maxApplicationsPerSettlement: 8}});
+  await configureActivation(f, {targets: [{workspaceId: "workspace", path: "docs/a.md", shareId: "share"}], passDeadlineMs: 10_000, validation: policy});
+
+  let parked: {method: string; entered: ReturnType<typeof deferred<void>>; release: ReturnType<typeof deferred<void>>} | undefined;
+  const pushed = deferred<void>();
+  let ownerRequests = 0, client!: ReturnType<typeof clientFrom>["client"] & {captureOwnerActivation: ReturnType<typeof vi.fn>};
+  spawn.mockImplementation(async options => {
+    const captured = clientFrom(options), discovery = captured.client.sendRequest.getMockImplementation()!;
+    client = Object.assign(captured.client, {captureOwnerActivation: vi.fn(async () => capture)});
+    client.sendRequest.mockImplementation(async (...args: unknown[]) => {
+      const request = args[0] as {id: number; method: string; params: Record<string, unknown>}, held = parked;
+      if (request.method.startsWith("liveApplication.")) ownerRequests++;
+      if (held?.method === request.method) { parked = undefined; held.entered.resolve(); await held.release.promise; }
+      const reply = (result: unknown) => ({id: request.id, result}) as never;
+      switch (request.method) {
+        case "liveApplication.hosts": return discovery();
+        case "liveApplication.register": return reply({registrationId: 7});
+        case "liveApplication.ownerState": return reply({adoptionId: capture.activationId, expectedLocalSequence: 2, throughCursor: 0,
+          outboxId: null, pendingBytes: 0, outboxState: "active"});
+        case "liveApplication.settle": {
+          const terminal = request.params.terminalReceipt as {journalCursor: number} | null;
+          return reply({status: "settled", settlement: {settlementId: "settlement", previousCursor: 0, terminalCursor: terminal?.journalCursor ?? 0,
+            applicationCount: 0, localYDocSequence: 2, momentId: "settled-moment", markdownDigest: "c".repeat(64), materialized: true,
+            collectionReconcileRequired: false}});
+        }
+        case "sync.adoptJoinIdentity": return reply({adopted: true});
+        case "sync.push": pushed.resolve();
+          return reply({status: "complete", hasMore: false, pushed: 0, sharingDeclined: [], ownerAdmissionPending: []});
+        case "sync.pull": return reply({status: "complete", nextCursor: 3, pendingCursor: {kind: "relay", token: "pending"}, hasMore: false,
+          fetched: 0, applied: 0, refused: 0, skipped: 0, conflictsOpened: 0, refusals: [], sharingDeclined: [], changedPaths: []});
+        case "sync.materializePendingCursor": return reply({materialized: true});
+        case "sync.commitCursor": return reply({committed: true, sharingDeclined: []});
+      }
+      throw new Error(`Unexpected engine request ${request.method}.`);
+    });
+    return client;
+  });
+  const host = await startServiceLiveHost(f);
+  cleanup.push(() => host.close());
+  // The activation pass publishes readiness before it pushes ordinary changes.
+  await pushed.promise;
+  return {f, raw, host, document, ownerRequests: () => ownerRequests,
+    park(method: string) { parked = {method, entered: deferred<void>(), release: deferred<void>()}; return parked; },
+    restore() {
+      const plan = f.storage.readStopRestorePlan({document, ownerUserId: "owner", operationId: "restore", shareId: "share", grantId: "grant",
+        restorePointCursor: 0, restorePointReceiptDigest: document.lineageClaimId, maxOutputBytes: 1_000_000});
+      f.storage.beginStopRestore(plan.intent, 40);
+      f.storage.advanceStopRestoreFence({operationId: "restore", workspaceId: "workspace", ownerUserId: "owner"}, 50);
+    }};
+}
+
+// Proves: a real restore fence while a public call is in the engine fails that
+// call and the public calls queued behind it as incomplete. The queued calls
+// resolve their owner inside the document work and make no engine request.
+it.each(["drain", "settle"] as const)("fails an in-flight public %s and queued public calls as incomplete after a restore fence", async method => {
+  const o = await completedServiceOwner();
+  expect(o.host.isDocumentReady(o.document)).toBe(true);
+  const parked = o.park("liveApplication.ownerState"), inflight = o.host[method](o.document);
+  await parked.entered.promise;
+  const drains = vi.spyOn(OwnerCommittedDelivery.prototype, "drain"), settles = vi.spyOn(OwnerCommittedDelivery.prototype, "settle");
+  try {
+    const queuedDrain = o.host.drain(o.document), queuedSettle = o.host.settle(o.document), requests = o.ownerRequests();
+    o.restore();
+    expect(o.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()).toEqual({admission_state: "closed"});
+    expect(o.host.isDocumentReady(o.document)).toBe(false);
+    parked.release.resolve();
+    await expect(inflight).rejects.toThrow("Service document activation is incomplete.");
+    await expect(queuedDrain).rejects.toThrow("Service document activation is incomplete.");
+    await expect(queuedSettle).rejects.toThrow("Service document activation is incomplete.");
+    expect(o.ownerRequests()).toBe(requests);
+    // The queued calls never reached owner delivery.
+    expect(drains).not.toHaveBeenCalled();
+    expect(settles).not.toHaveBeenCalled();
+  } finally { drains.mockRestore(); settles.mockRestore(); }
+});
+
+// Proves: damaged owner evidence on an unchanged open binding, and caller
+// cancellation during a fence, are not reported as an expected fence.
+it("keeps damaged evidence and caller cancellation visible for public delivery", async () => {
+  const o = await completedServiceOwner();
+  let parked = o.park("liveApplication.ownerState");
+  const inflight = o.host.drain(o.document);
+  await parked.entered.promise;
+  const queued = o.host.settle(o.document);
+  const origin = o.raw.prepare("SELECT origin_json FROM sync_relay_live_delivery_owners").get()!.origin_json;
+  o.raw.exec("UPDATE sync_relay_live_delivery_owners SET origin_json=json_set(origin_json,'$.sourceMomentId','unrelated-source')");
+  parked.release.resolve();
+  await expect(inflight).rejects.toThrow("Committed delivery evidence is damaged or conflicts.");
+  await expect(queued).rejects.toThrow("Committed delivery evidence is damaged or conflicts.");
+
+  o.raw.prepare("UPDATE sync_relay_live_delivery_owners SET origin_json=?").run(origin);
+  const abort = new AbortController(), reason = new Error("Caller cancelled.");
+  parked = o.park("liveApplication.ownerState");
+  const cancelled = o.host.drain(o.document, abort.signal);
+  await parked.entered.promise;
+  o.restore(); abort.abort(reason);
+  parked.release.resolve();
+  await expect(cancelled).rejects.toBe(reason);
 });
