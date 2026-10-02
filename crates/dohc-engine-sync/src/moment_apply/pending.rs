@@ -1,14 +1,17 @@
 use super::*;
-use dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor;
+use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_storage::TxnOutcome;
 
 const PAGE_SIZE: usize = 64;
 
+/// The row becomes ready only once the authenticated owner binding equals
+/// `binding` and its accepted cursor reaches `terminal_cursor`.
 pub(super) fn enqueue(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     payload: &MomentAppendPayload,
-    owner: &OwnerDraftDescriptor,
+    relay_namespace: &str,
+    binding: &LiveObjectBinding,
     terminal_cursor: i64,
 ) -> Result<(), SyncError> {
     tx.execute(
@@ -19,11 +22,11 @@ pub(super) fn enqueue(
             envelope.workspace_id,
             envelope.origin_id,
             envelope.origin_seq,
-            owner.binding.main_version_id,
-            owner.binding.object_id,
-            owner.binding.lineage_claim_id,
-            owner.relay_database_namespace,
-            serde_json::to_string(&owner.binding).map_err(SyncError::corrupt)?,
+            binding.main_version_id,
+            binding.object_id,
+            binding.lineage_claim_id,
+            relay_namespace,
+            serde_json::to_string(binding).map_err(SyncError::corrupt)?,
             terminal_cursor
         ],
     )
