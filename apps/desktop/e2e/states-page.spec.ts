@@ -9,8 +9,9 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 // beside dark. Each section of the page is one part, named by its
 // `data-part`, and has one baseline per theme in states-page.spec.ts-snapshots,
 // `<part>-<theme>-<platform>.png`. A change to a shared part shows up as a
-// pixel difference in that part's pair and no other. Update a pair with
-// `--update-snapshots` when the change is the point of the PR.
+// pixel difference in that part's pair, and in no other unless the part's
+// section changes height (see the known exceptions below). Update a pair
+// with `--update-snapshots` when the change is the point of the PR.
 //
 // Every pixel must equal its baseline, compared here from the decoded
 // images: Playwright's comparator skips pixels it takes for antialiasing
@@ -21,8 +22,14 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 // through the browser instead of pointer events, a paused clock so
 // acknowledged copies hold, fonts checked, and a whole-page capture
 // repeated until two in a row are equal. So the baselines do not cover a
-// backdrop blur, an animation's end state, or anything only the GPU draws.
-// They were taken on Windows; Playwright names them per platform.
+// backdrop blur, an animation's end state, anything only the GPU draws, or
+// how a part looks at a display scale other than 100%. Every section is
+// held to a whole-pixel height so a height change in one section moves the
+// sections below it by whole pixels, which leaves their captures alone with
+// known exceptions: two antialiased outlines still change, the focus-visible
+// primary button's bottom corners in buttons and the first step's circle in
+// steps, plus toasts from a 2px move and empty from 4px. The baselines were
+// taken on Windows; Playwright names them per platform.
 
 const STATES_PAGE_HASH = "#/dev/states";
 const WIDTH = 1440;
