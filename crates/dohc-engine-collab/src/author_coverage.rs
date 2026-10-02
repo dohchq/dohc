@@ -1,7 +1,7 @@
 //! Author coverage belongs to the admitted interval, independently of CRDT compaction.
 
 use crate::{CollabError, DocKey};
-use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+use dohc_engine_domain::{AgentDeclaration, ChangeActorKind, ChangeAttribution};
 use dohc_engine_storage::StorageError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -109,7 +109,8 @@ impl Authors {
     }
 }
 
-/// Read only authors above the settled boundary, including rows a fold already consumed.
+/// Read only authors above the settled boundary, including rows a fold already
+/// consumed and agents that accepted deliveries declared.
 pub fn interval_in(conn: &Connection, key: &DocKey, through: i64) -> Result<Authors, CollabError> {
     let (boundary, pending): (Option<i64>, String) = conn
         .query_row(
@@ -212,17 +213,19 @@ pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
     Ok(authors)
 }
 
-pub fn check_admission_in(
-    conn: &Connection,
-    key: &DocKey,
-    actor: Option<&str>,
-    attribution: Option<&ChangeAttribution>,
-) -> Result<bool, CollabError> {
-    let Some(json) = dohc_engine_domain::moment_author_json(actor, attribution) else {
-        return Ok(false);
-    };
+fn declared_json(declaration: &AgentDeclaration) -> Result<String, CollabError> {
+    dohc_engine_domain::moment_author_json(
+        Some(declaration.agent_id.as_str()),
+        Some(&declaration.attribution()),
+    )
+    .ok_or_else(|| corrupt("declaration has no author"))
+}
+
+/// Adds one author to `covered`, refusing a new identity past the bounds.
+/// Returns the admission bytes of the result.
+fn admit(covered: &mut Authors, json: &str) -> Result<usize, CollabError> {
     let mut incoming = Authors::default();
-    incoming.union_json(&json)?;
+    incoming.union_json(json)?;
     if incoming
         .0
         .values()
@@ -235,20 +238,73 @@ pub fn check_admission_in(
         .keys()
         .next()
         .ok_or_else(|| corrupt("attribution has no identity"))?;
-    let mut covered = reserved_in(conn, key)?;
     let known = covered.0.contains_key(identity);
-    covered.union_json(&json)?;
+    covered.union_json(json)?;
     let bytes = covered.admission_bytes();
     if !known && (covered.len() > MAX_INTERVAL_AUTHORS || bytes > MAX_INTERVAL_AUTHOR_BYTES) {
         return Err(CollabError::AuthorCapacity);
     }
+    Ok(bytes)
+}
+
+pub fn check_admission_in(
+    conn: &Connection,
+    key: &DocKey,
+    actor: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+) -> Result<bool, CollabError> {
+    let Some(json) = dohc_engine_domain::moment_author_json(actor, attribution) else {
+        return Ok(false);
+    };
+    let mut covered = reserved_in(conn, key)?;
+    let bytes = admit(&mut covered, &json)?;
     Ok(
         (bytes >= SETTLE_AUTHOR_BYTE_THRESHOLD || covered.len() >= SETTLE_AUTHOR_COUNT_THRESHOLD)
             && !unresolved_in(conn, key)?,
     )
 }
 
-fn unresolved_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabError> {
+/// Admits the agent an accepted delivery declared to the current interval,
+/// under the bounds a local author meets. The delivery retains no attributed
+/// update row, so the interval keeps its agent with the authors compaction
+/// folded until a settlement names them. Local and accepted admission then
+/// count the same authors. Refuses before writing when the agent is new and
+/// the interval is full.
+pub fn admit_declared_in(
+    conn: &Connection,
+    key: &DocKey,
+    declaration: &AgentDeclaration,
+) -> Result<(), CollabError> {
+    let json = declared_json(declaration)?;
+    admit(&mut reserved_in(conn, key)?, &json)?;
+    let pending: String = conn
+        .query_row(
+            "SELECT pending_authors_json FROM ydoc_docs \
+             WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(sql)?;
+    let mut authors = Authors::default();
+    authors.union_json(&pending)?;
+    authors.union_json(&json)?;
+    conn.execute(
+        "UPDATE ydoc_docs SET pending_authors_json=?4 \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            authors.json()
+        ],
+    )
+    .map_err(sql)?;
+    Ok(())
+}
+
+/// Whether an earlier settlement's moment still reserves its authors until
+/// its file write resolves. Settling again cannot release them before then.
+pub fn unresolved_in(conn: &Connection, key: &DocKey) -> Result<bool, CollabError> {
     conn.query_row(
         "SELECT settle_prior_update_seq IS NOT NULL FROM ydoc_docs \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",

@@ -8,10 +8,10 @@
 use crate::live_object_binding::LiveObjectBinding;
 use dohc_engine_domain::AgentDeclaration;
 use dohc_engine_storage::{
-    EngineStore, MAX_IDENTIFIER_BYTES, NoFaults, StorageError, TxnOutcome, get_binary_blob,
-    hex_sha256, put_binary_blob_with_sha,
+    get_binary_blob, hex_sha256, put_binary_blob_with_sha, EngineStore, NoFaults, StorageError,
+    TxnOutcome, MAX_IDENTIFIER_BYTES,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -21,7 +21,10 @@ pub mod enrollment;
 mod native_source;
 pub mod publication;
 pub(crate) use native_source::retain_native_source;
-pub use native_source::{OwnerOutboxNativeOrigin, OwnerOutboxNativeSource};
+pub use native_source::{
+    OwnerOutboxDraftOrigin, OwnerOutboxDraftSource, OwnerOutboxNativeOrigin,
+    OwnerOutboxNativeSource, OwnerOutboxSource,
+};
 
 pub fn has_adopted_owner_in(
     conn: &Connection,
@@ -309,15 +312,24 @@ pub fn append_in_tx(
     append_with_retained_base(tx, workspace_id, input, None, None)
 }
 
-/// An append key names one exact entry: its binding, base, bytes, and agent
-/// declaration. A retry that changes any of them, including adding or
-/// removing the declaration, refuses instead of returning the first entry.
+/// What only an enrolled owner's draft carries: the observed binding revision
+/// it was queued under, which proves the entry is a draft, and the agent its
+/// editor declared.
+pub(crate) struct DraftAppend<'a> {
+    pub binding_revision: i64,
+    pub agent_declaration: Option<&'a AgentDeclaration>,
+}
+
+/// An append key names one exact entry: its binding, base, bytes, whether it
+/// is a draft, and its agent declaration. A retry that changes any of them,
+/// including adding or removing the declaration, refuses instead of returning
+/// the first entry.
 fn append_with_retained_base(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
     input: OwnerOutboxAppendInput,
     retained_base: Option<(String, i64)>,
-    agent_declaration: Option<&AgentDeclaration>,
+    draft: Option<DraftAppend<'_>>,
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
     let binding = input
         .binding
@@ -377,7 +389,14 @@ fn append_with_retained_base(
         )
     });
     let update_digest = hex_sha256(&input.update);
-    let declaration_json = agent_declaration
+    let draft_revision = draft.as_ref().map(|draft| draft.binding_revision);
+    if draft_revision.is_some_and(|revision| revision < 1) {
+        return Err(OwnerOutboxError::InvalidInput(
+            "invalid draft binding revision",
+        ));
+    }
+    let declaration_json = draft
+        .and_then(|draft| draft.agent_declaration)
         .map(|declaration| {
             declaration
                 .validate()
@@ -409,10 +428,12 @@ fn append_with_retained_base(
         result_oldest_entry_at_ms,
         result_state,
         existing_declaration_json,
+        existing_draft_revision,
     )) = tx
         .query_row(
             "SELECT outbox_id,sequence,delivery_id,update_digest,result_pending_bytes,\
-                 result_oldest_entry_at_ms,result_state,agent_declaration_json \
+                 result_oldest_entry_at_ms,result_state,agent_declaration_json,\
+                 draft_binding_revision \
                  FROM owner_ydoc_outbox_entries WHERE append_key=?1",
             [&input.append_key],
             |row| {
@@ -425,6 +446,7 @@ fn append_with_retained_base(
                     row.get::<_, i64>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
                 ))
             },
         )
@@ -432,10 +454,13 @@ fn append_with_retained_base(
         .map_err(read_sql)?
     {
         let parent = read_parent(tx, &existing_outbox_id)?.ok_or(OwnerOutboxError::Corrupt)?;
+        // A draft's revision advances with each accepted frame, so a retry
+        // matches on being a draft, not on the revision it was queued under.
         if parent.binding != binding
             || parent.base_update_digest != base_update_digest
             || existing_update_digest != update_digest
             || existing_declaration_json != declaration_json
+            || existing_draft_revision.is_some() != draft_revision.is_some()
         {
             return Err(OwnerOutboxError::AppendKeyMismatch);
         }
@@ -516,8 +541,9 @@ fn append_with_retained_base(
         "INSERT INTO owner_ydoc_outbox_entries \
              (outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,\
               byte_length,created_at_ms,pending,result_pending_bytes,\
-              result_oldest_entry_at_ms,result_state,agent_declaration_json) \
-             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11)",
+              result_oldest_entry_at_ms,result_state,agent_declaration_json,\
+              draft_binding_revision) \
+             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11,?12)",
         params![
             parent.outbox_id,
             parent.next_sequence,
@@ -530,6 +556,7 @@ fn append_with_retained_base(
             oldest_entry_at_ms,
             next_state.as_str(),
             declaration_json,
+            draft_revision,
         ],
     )
     .map_err(write_sql)?;
@@ -646,7 +673,7 @@ pub fn append_adopted_local_update_in_tx(
             created_at_ms: now_ms,
         },
         Some((lineage, base_byte_length)),
-        // The native source keeps this update's authors.
+        // Not a draft. The native source keeps this update's authors.
         None,
     )
     .map_err(map)?;
@@ -879,7 +906,9 @@ pub fn read_pending_page(
     })
 }
 
-fn stored_declaration(json: Option<String>) -> Result<Option<AgentDeclaration>, OwnerOutboxError> {
+pub(crate) fn stored_declaration(
+    json: Option<String>,
+) -> Result<Option<AgentDeclaration>, OwnerOutboxError> {
     json.map(|json| {
         let declaration: AgentDeclaration =
             serde_json::from_str(&json).map_err(|_| OwnerOutboxError::Corrupt)?;
@@ -1991,12 +2020,10 @@ mod tests {
             assert_eq!(drained.base_update, pending.base_update);
             let replay = append(&mut store, "workspace-1", second.clone()).expect("append replay");
             assert_eq!(replay.delivery_id, sealed.delivery_id);
-            assert!(
-                read_pending(&store, "workspace-1", &id)
-                    .expect("after replay")
-                    .entries
-                    .is_empty()
-            );
+            assert!(read_pending(&store, "workspace-1", &id)
+                .expect("after replay")
+                .entries
+                .is_empty());
             let mut third = input("key-3", b"three", 21);
             third.limits = second.limits.clone();
             let next = append(&mut store, "workspace-1", third).expect("append after sealed drain");

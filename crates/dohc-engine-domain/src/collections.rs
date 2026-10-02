@@ -3080,11 +3080,22 @@ impl ChangeAttribution {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentDeclaration {
     pub agent_id: String,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub on_behalf_of: Option<String>,
     pub depth: u32,
 }
 
 impl AgentDeclaration {
+    /// Reads an optional member that is either absent or a valid declaration.
+    /// Use with `#[serde(default)]`: an explicit null is malformed, not absent.
+    pub fn deserialize_present<'de, D: serde::Deserializer<'de>>(
+        decoder: D,
+    ) -> Result<Option<Self>, D::Error> {
+        let declaration = Self::deserialize(decoder)?;
+        declaration.validate().map_err(serde::de::Error::custom)?;
+        Ok(Some(declaration))
+    }
+
     /// What a write by `actor_origin_id` with `attribution` declares, when an
     /// agent made it. A person's or an automation's write declares none.
     pub fn from_change(

@@ -1,5 +1,60 @@
 use super::*;
 
+/// Where a pending outbox entry came from. A native source names the local
+/// journal update it queued; an owner draft names only what the enrolled
+/// owner's editor queued, with no native sequence or adoption.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OwnerOutboxSource {
+    Native(OwnerOutboxNativeSource),
+    Draft(OwnerOutboxDraftSource),
+}
+
+impl OwnerOutboxSource {
+    pub fn native(&self) -> Option<&OwnerOutboxNativeSource> {
+        match self {
+            Self::Native(source) => Some(source),
+            Self::Draft(_) => None,
+        }
+    }
+    pub fn draft(&self) -> Option<&OwnerOutboxDraftSource> {
+        match self {
+            Self::Native(_) => None,
+            Self::Draft(source) => Some(source),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerOutboxDraftSource {
+    pub binding: LiveObjectBinding,
+    pub update_digest: String,
+    pub origin: OwnerOutboxDraftOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum OwnerOutboxDraftOrigin {
+    /// The agent the draft declared, absent when it declared none.
+    #[serde(rename_all = "camelCase")]
+    OwnerDraft {
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "AgentDeclaration::deserialize_present"
+        )]
+        agent_declaration: Option<AgentDeclaration>,
+    },
+}
+
+impl OwnerOutboxDraftSource {
+    pub fn agent_declaration(&self) -> Option<&AgentDeclaration> {
+        let OwnerOutboxDraftOrigin::OwnerDraft { agent_declaration } = &self.origin;
+        agent_declaration.as_ref()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OwnerOutboxNativeSource {
@@ -152,4 +207,70 @@ pub(crate) fn retain_native_source(
     }
     tx.execute("UPDATE owner_ydoc_outbox_entries SET native_source_json=?3 WHERE outbox_id=?1 AND sequence=?2",params![result.outbox_id,result.sequence,json]).map_err(write_sql)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding() -> LiveObjectBinding {
+        LiveObjectBinding {
+            workspace_id: "workspace".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: "b".repeat(64),
+            current_path: "note.md".into(),
+            selector_paths: vec!["note.md".into()],
+            restore_fence_generation: 0,
+        }
+    }
+
+    #[test]
+    fn source_union_keeps_native_bytes_and_one_strict_draft_shape() {
+        let inner = OwnerOutboxNativeSource {
+            binding: binding(),
+            adoption_id: "adoption".into(),
+            native_sequence: 3,
+            update_digest: "a".repeat(64),
+            origin: OwnerOutboxNativeOrigin::AdoptionSeed,
+        };
+        let native = OwnerOutboxSource::Native(inner.clone());
+        let json = serde_json::to_string(&native).unwrap();
+        assert_eq!(json, serde_json::to_string(&inner).unwrap());
+        assert_eq!(
+            serde_json::from_str::<OwnerOutboxSource>(&json).unwrap(),
+            native
+        );
+        let binding_json = serde_json::to_string(&binding()).unwrap();
+        let digest = "a".repeat(64);
+        let absent = format!(
+            r#"{{"binding":{binding_json},"updateDigest":"{digest}","origin":{{"kind":"ownerDraft"}}}}"#
+        );
+        let declared = format!(
+            r#"{{"binding":{binding_json},"updateDigest":"{digest}","origin":{{"kind":"ownerDraft","agentDeclaration":{{"agentId":"trip-agent","onBehalfOf":null,"depth":0}}}}}}"#
+        );
+        for json in [&absent, &declared] {
+            let source: OwnerOutboxSource = serde_json::from_str(json).unwrap();
+            assert!(source.native().is_none());
+            assert_eq!(&serde_json::to_string(&source).unwrap(), json);
+        }
+        for refused in [
+            absent.replace(
+                r#""kind":"ownerDraft""#,
+                r#""kind":"ownerDraft","agentDeclaration":null"#,
+            ),
+            absent.replace(r#""updateDigest""#, r#""nativeSequence":3,"updateDigest""#),
+            absent.replace(
+                r#""updateDigest""#,
+                r#""adoptionId":"adoption","updateDigest""#,
+            ),
+            absent.replace("ownerDraft", "nativeUpdate"),
+            absent.replace(r#""kind":"ownerDraft""#, r#""kind":"ownerDraft","note":1"#),
+        ] {
+            assert!(
+                serde_json::from_str::<OwnerOutboxSource>(&refused).is_err(),
+                "{refused}"
+            );
+        }
+    }
 }

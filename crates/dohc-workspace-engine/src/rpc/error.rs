@@ -254,6 +254,8 @@ pub(super) fn map_runtime(error: RuntimeError) -> WireError {
             ApplicationError::Conflict | ApplicationError::ConfiguredBudgetMismatch => {
                 ErrorCode::Conflict
             }
+            // The earlier settlement's file write lands on its own; retry later.
+            ApplicationError::MaterializationPending => ErrorCode::Overloaded,
             _ => ErrorCode::Internal,
         };
         return WireError::new(code, error.code());
@@ -624,6 +626,13 @@ mod tests {
                 ErrorCode::InvalidParams,
             );
         }
+        // A settlement cannot release the author interval until the earlier
+        // settlement's file write lands, so the host retries after backoff.
+        let error = map_runtime(RuntimeError::LiveApplication(
+            ApplicationError::MaterializationPending,
+        ));
+        assert_eq!(error.code, ErrorCode::Overloaded);
+        assert_eq!(error.message, "settlement-materialization-pending");
     }
 
     /// The artifact lock and a busy engine database are two

@@ -217,6 +217,7 @@ mod tests {
                             principal_id: "owner".into(),
                         },
                         received_at_ms: 4,
+                        agent_declaration: None,
                     },
                     first_seen: vec![],
                 },

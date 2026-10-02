@@ -123,6 +123,7 @@ fn append_history_copies(f: &mut Fixture, copies: i64, bytes: Vec<u8>) -> Vec<Li
                                 principal_id: "owner".into(),
                             },
                             received_at_ms: ordinal,
+                            agent_declaration: None,
                         },
                         first_seen: vec![],
                     },
@@ -378,6 +379,7 @@ fn due_accepted_checkpoint_refuses_small_working_reserve_and_rolls_back_the_appl
                     principal_id: "owner".into(),
                 },
                 received_at_ms: 20_000,
+                agent_declaration: None,
             },
             first_seen: vec![],
         },
@@ -658,6 +660,14 @@ impl Fixture {
         self.accept(bytes, cursor)
     }
     fn accept(&mut self, bytes: Vec<u8>, cursor: i64) -> NativeRestorePoint {
+        self.accept_declared(bytes, cursor, None)
+    }
+    fn accept_declared(
+        &mut self,
+        bytes: Vec<u8>,
+        cursor: i64,
+        agent_declaration: Option<AgentDeclaration>,
+    ) -> NativeRestorePoint {
         let receipt = LiveUpdateReceipt {
             delivery_id: format!("event-{cursor}"),
             update_digest: hex_sha256(&bytes),
@@ -673,6 +683,7 @@ impl Fixture {
                         principal_id: "owner".into(),
                     },
                     received_at_ms: cursor,
+                    agent_declaration,
                 },
                 first_seen: vec![],
             },
@@ -1084,6 +1095,7 @@ fn admitted_restore(
                     principal_id: "restoring-owner".into(),
                 },
                 received_at_ms: 80,
+                agent_declaration: None,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
         },
@@ -2155,6 +2167,56 @@ fn adoption_origin_stamp_keeps_sqlite_json_bytes_and_is_bounded_before_serializi
         stamp(&damaged, 4_000_000),
         Err(ApplicationError::Corrupt)
     ));
+}
+
+/// The current interval names the agent each accepted delivery declared. A
+/// delivery whose bytes deduplicate natively keeps its agent, and compaction
+/// and reopen change nothing.
+#[test]
+fn interval_keeps_declared_agents_through_dedupe_compaction_and_reopen() {
+    let agent = |agent_id: &str, depth| {
+        Some(AgentDeclaration {
+            agent_id: agent_id.into(),
+            on_behalf_of: Some("owner".into()),
+            depth,
+        })
+    };
+    let declared = |f: &Fixture| {
+        let key = DocKey::new("workspace", "main", "object").unwrap();
+        let authors = f
+            .store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key, i64::MAX))
+            .unwrap();
+        serde_json::from_str::<Value>(&authors.json()).unwrap()
+    };
+    let mut f = Fixture::new("Original");
+    let first = f.doc.richdoc_append_paragraph("Agent edit");
+    f.accept_declared(first.clone(), 3, agent("trip-agent", 0));
+    let person = f.doc.richdoc_append_paragraph("Person edit");
+    f.accept_declared(person, 5, None);
+    f.accept_declared(first, 7, agent("review-agent", 2));
+    assert_eq!(
+        f.store
+            .read_with(|conn| conn.query_row(
+                "SELECT count(DISTINCT local_ydoc_sequence) FROM live_device_update_applications",
+                [],
+                |r| r.get::<_, i64>(0)
+            ))
+            .unwrap(),
+        2,
+        "the third delivery's bytes deduplicate"
+    );
+    let expected = json!([
+        {"kind":"agent","agentId":"review-agent","onBehalfOf":"owner","depth":2},
+        {"kind":"agent","agentId":"trip-agent","onBehalfOf":"owner"},
+    ]);
+    assert_eq!(declared(&f), expected);
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    durable::maybe_compact(&mut f.store, &key, 0, &NoFaults, 30).unwrap();
+    assert_eq!(f.store.table_row_count("ydoc_updates").unwrap(), 0);
+    drop(f.store);
+    f.store = EngineStore::open(&f.dir.join("engine.db"), 40).unwrap();
+    assert_eq!(declared(&f), expected);
 }
 
 /// A new fence waits until the relay acknowledged this document's journaled

@@ -1104,6 +1104,7 @@ fn pending_result(
         ApplicationPending::BaselineUnavailable => "baseline-unavailable",
         ApplicationPending::ApplicabilityUnavailable => "applicability-unavailable",
         ApplicationPending::BindingMismatch => "binding-mismatch",
+        ApplicationPending::SettlementRequired => "settlement-required",
     }})
 }
 

@@ -831,3 +831,60 @@ fn verify_restore_state(
     };
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ACCEPTED: &str = r#"{"receipt":{"deliveryId":"delivery-1","updateDigest":"1111111111111111111111111111111111111111111111111111111111111111","journalCursor":7,"acceptingHostEpoch":1},"binding":{"workspaceId":"workspace-1","mainVersionId":"main","objectId":"object-1","lineageClaimId":"2222222222222222222222222222222222222222222222222222222222222222","currentPath":"notes/a.md","selectorPaths":["notes/a.md"],"restoreFenceGeneration":0},"authority":{"grantGeneration":null,"grantId":null,"principalId":"owner-1","principalKind":"owner"},"receivedAtMs":10"#;
+
+    /// The relay hashes the same bytes. An undeclared event has no
+    /// agentDeclaration member, so its evidence digest is unchanged; a
+    /// declaration follows receivedAtMs as agentId, onBehalfOf, then depth.
+    #[test]
+    fn accepted_event_evidence_omits_an_absent_declaration_and_orders_a_present_one() {
+        let previous = "0".repeat(64);
+        let absent = format!(r#"{{"accepted":{ACCEPTED}}},"firstSeen":[]}}"#);
+        let declared = format!(
+            r#"{{"accepted":{ACCEPTED},"agentDeclaration":{{"agentId":"旅行-agent ✈","onBehalfOf":"ówner-1","depth":2}}}},"firstSeen":[]}}"#
+        );
+        let mut digests = Vec::new();
+        for (json, declaration) in [
+            (&absent, None),
+            (
+                &declared,
+                Some(AgentDeclaration {
+                    agent_id: "旅行-agent ✈".into(),
+                    on_behalf_of: Some("ówner-1".into()),
+                    depth: 2,
+                }),
+            ),
+        ] {
+            let metadata: AdmittedLiveUpdateMetadata = serde_json::from_str(json).unwrap();
+            assert_eq!(metadata.accepted.agent_declaration, declaration);
+            assert_eq!(&serde_json::to_string(&metadata).unwrap(), json);
+            let digest = next_digest(&previous, 1, &metadata).unwrap();
+            assert_eq!(
+                digest,
+                hex_sha256(format!(r#"["accepted-event-v1","{previous}",1,{json}]"#).as_bytes())
+            );
+            digests.push(digest);
+        }
+        assert_ne!(digests[0], digests[1]);
+        for refused in [
+            format!(r#"{{"accepted":{ACCEPTED},"agentDeclaration":null}},"firstSeen":[]}}"#),
+            format!(
+                r#"{{"accepted":{ACCEPTED},"agentDeclaration":{{"agentId":"a","depth":0}}}},"firstSeen":[]}}"#
+            ),
+            format!(
+                r#"{{"accepted":{ACCEPTED},"agentDeclaration":{{"agentId":"a","onBehalfOf":null,"depth":0,"run":null}}}},"firstSeen":[]}}"#
+            ),
+            format!(r#"{{"accepted":{ACCEPTED},"agentNote":"a"}},"firstSeen":[]}}"#),
+        ] {
+            assert!(
+                serde_json::from_str::<AdmittedLiveUpdateMetadata>(&refused).is_err(),
+                "{refused}"
+            );
+        }
+    }
+}

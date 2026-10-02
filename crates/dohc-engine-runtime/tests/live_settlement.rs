@@ -1,6 +1,7 @@
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::*;
 use dohc_engine_collab::{ContentKind, Ydoc};
+use dohc_engine_domain::AgentDeclaration;
 use dohc_engine_runtime::actor::{ActorLiveApplicationHandle, ActorLiveApplicationOwner};
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
 use dohc_engine_storage::{
@@ -98,6 +99,7 @@ async fn applied_restore(
                     principal_id: "owner".into(),
                 },
                 received_at_ms: 21,
+                agent_declaration: None,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
         },
@@ -725,6 +727,20 @@ impl Fixture {
         authority: ServerDerivedLiveUpdateAuthority,
         received_at_ms: i64,
     ) -> LiveUpdateReceipt {
+        let (receipt, result) = self
+            .apply_declared(cursor, bytes, authority, received_at_ms, None)
+            .await;
+        assert!(matches!(result, ApplicationResult::Applied(..)));
+        receipt
+    }
+    async fn apply_declared(
+        &self,
+        cursor: i64,
+        bytes: Vec<u8>,
+        authority: ServerDerivedLiveUpdateAuthority,
+        received_at_ms: i64,
+        agent_declaration: Option<AgentDeclaration>,
+    ) -> (LiveUpdateReceipt, ApplicationResult) {
         self.doc.apply(&bytes).unwrap();
         let receipt = LiveUpdateReceipt {
             delivery_id: format!("delivery-{cursor}"),
@@ -739,19 +755,18 @@ impl Fixture {
                     binding: self.binding.clone(),
                     authority,
                     received_at_ms,
+                    agent_declaration,
                 },
                 first_seen: vec![],
             },
             update_bytes: bytes,
         };
-        assert!(matches!(
-            self.handle
-                .apply(event, Arc::new(NoFaults), 100_000_000)
-                .await
-                .unwrap(),
-            ApplicationResult::Applied(..)
-        ));
-        receipt
+        let result = self
+            .handle
+            .apply(event, Arc::new(NoFaults), 100_000_000)
+            .await
+            .unwrap();
+        (receipt, result)
     }
 
     async fn apply_folder_scope(&mut self) -> LiveUpdateReceipt {
@@ -786,6 +801,7 @@ impl Fixture {
                         principal_id: "owner".into(),
                     },
                     received_at_ms: 2,
+                    agent_declaration: None,
                 },
                 first_seen: vec![],
             },
@@ -838,6 +854,172 @@ impl Fixture {
     }
 }
 
+fn owner_authority() -> ServerDerivedLiveUpdateAuthority {
+    ServerDerivedLiveUpdateAuthority::Owner {
+        principal_id: "owner".into(),
+    }
+}
+
+fn agent(agent_id: &str, on_behalf_of: &str) -> Option<AgentDeclaration> {
+    Some(AgentDeclaration {
+        agent_id: agent_id.into(),
+        on_behalf_of: Some(on_behalf_of.into()),
+        depth: 1,
+    })
+}
+
+/// The authors the latest settlement moment names.
+fn latest_authors(f: &Fixture) -> serde_json::Value {
+    f.read(|db| {
+        db.query_row(
+            "SELECT author_json FROM moments ORDER BY moment_order DESC LIMIT 1",
+            [],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+    })
+    .map_or(serde_json::Value::Null, |json| {
+        serde_json::from_str(&json).unwrap()
+    })
+}
+
+/// An update that only removes the body's last block: no new structs.
+fn delete_last_block(doc: &Ydoc) -> Vec<u8> {
+    use yrs::updates::decoder::Decode;
+    use yrs::{ReadTxn, Transact, XmlFragment};
+    let local = yrs::Doc::new();
+    local
+        .transact_mut()
+        .apply_update(yrs::Update::decode_v1(&doc.encode_full_state()).unwrap())
+        .unwrap();
+    let before = local.transact().state_vector();
+    let body = local.get_or_insert_xml_fragment("body");
+    {
+        let mut txn = local.transact_mut();
+        let len = body.len(&txn);
+        body.remove_range(&mut txn, len - 1, 1);
+    }
+    local.transact().encode_state_as_update_v1(&before)
+}
+
+/// A live settlement names the agents the owner declared for the deliveries
+/// it covers, beside undeclared and shared deliveries, including a delete-only
+/// edit with no new structs. The next interval names only its own.
+#[tokio::test]
+async fn live_settlement_names_declared_agents_of_its_exact_interval() {
+    let f = Fixture::new().await;
+    f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    let added = f.doc.richdoc_append_paragraph("Agent paragraph");
+    let (_, result) = f
+        .apply_declared(
+            3,
+            added,
+            owner_authority(),
+            2,
+            agent("trip-agent ✈", "owner"),
+        )
+        .await;
+    assert!(matches!(result, ApplicationResult::Applied(..)));
+    f.apply(4, f.doc.richdoc_append_paragraph("Owner paragraph"))
+        .await;
+    let terminal = f
+        .apply_as(
+            5,
+            f.doc.richdoc_append_paragraph("Friend paragraph"),
+            ServerDerivedLiveUpdateAuthority::Named {
+                principal_id: "friend".into(),
+                grant_id: "grant".into(),
+                grant_generation: 1,
+            },
+            2,
+        )
+        .await;
+    f.settle(Some(terminal), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(
+        latest_authors(&f),
+        serde_json::json!([{"kind":"agent","agentId":"trip-agent ✈","onBehalfOf":"owner","depth":1}])
+    );
+    let vector = f.doc.encode_state_vector();
+    let removed = delete_last_block(&f.doc);
+    let (terminal, result) = f
+        .apply_declared(
+            6,
+            removed,
+            owner_authority(),
+            3,
+            agent("cleanup-agent", "owner"),
+        )
+        .await;
+    assert!(matches!(result, ApplicationResult::Applied(..)));
+    assert_eq!(f.doc.encode_state_vector(), vector, "the edit only deletes");
+    f.settle(Some(terminal), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(
+        latest_authors(&f),
+        serde_json::json!([{"kind":"agent","agentId":"cleanup-agent","onBehalfOf":"owner","depth":1}])
+    );
+    f.assert_projection();
+}
+
+/// A delivery whose agent the next settlement could not name within the
+/// moment's author bounds waits for that settlement instead of being
+/// truncated. After it, the same delivery applies.
+#[tokio::test]
+async fn declared_agent_past_the_author_bound_waits_for_settlement() {
+    let f = Fixture::new().await;
+    f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    // Escaped quotes make each author entry as large as the contract allows.
+    let large = |index: usize| {
+        let mut declared = agent(&format!("{index:03}{}", "\"".repeat(509)), "owner").unwrap();
+        declared.on_behalf_of = Some("\"".repeat(512));
+        Some(declared)
+    };
+    let mut terminal = None;
+    let mut refused = None;
+    for index in 0..80 {
+        let bytes = f.doc.richdoc_append_paragraph(&format!("p{index}"));
+        let cursor = index as i64 + 3;
+        let (receipt, result) = f
+            .apply_declared(cursor, bytes.clone(), owner_authority(), 2, large(index))
+            .await;
+        match result {
+            ApplicationResult::Applied(..) => terminal = Some(receipt),
+            ApplicationResult::Pending(ApplicationPending::SettlementRequired) => {
+                refused = Some((index, cursor, bytes));
+                break;
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let (index, cursor, bytes) = refused.expect("the author bound refuses a delivery");
+    assert!(index > 1);
+    f.read(|db| {
+        let applied: i64 = db
+            .query_row(
+                "SELECT count(*) FROM live_device_update_applications WHERE journal_cursor=?1",
+                [cursor],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 0, "a refused delivery writes nothing");
+    });
+    f.settle(terminal, 100, Arc::new(NoFaults)).await.unwrap();
+    let named = latest_authors(&f);
+    assert_eq!(named.as_array().unwrap().len(), index);
+    assert!(named.to_string().len() <= dohc_engine_domain::MAX_AUTHOR_JSON_BYTES);
+    let (terminal, result) = f
+        .apply_declared(cursor, bytes, owner_authority(), 2, large(index))
+        .await;
+    assert!(matches!(result, ApplicationResult::Applied(..)));
+    f.settle(Some(terminal), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(latest_authors(&f).as_array().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn live_settlement_history_syncs_after_restore_without_granting_native_authority() {
     use dohc_engine_sync::{
@@ -883,6 +1065,7 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
                 grant_generation: 1,
             },
             received_at_ms: 2,
+            agent_declaration: None,
         },
         first_seen,
     };
@@ -1498,6 +1681,7 @@ async fn restore_fence_serializes_queued_writes_and_preserves_other_documents() 
                     principal_id: "owner".into(),
                 },
                 received_at_ms: 4,
+                agent_declaration: None,
             },
             first_seen: vec![],
         },
@@ -2475,6 +2659,7 @@ async fn restore_application_keeps_queued_memory_and_replays_after_cancelled_or_
                         principal_id: "restoring-owner".into(),
                     },
                     received_at_ms: 25,
+                    agent_declaration: None,
                 },
                 first_seen: proposal.receipt().replacement_ranges.clone(),
             },

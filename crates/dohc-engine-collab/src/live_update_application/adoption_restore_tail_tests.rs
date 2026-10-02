@@ -74,6 +74,7 @@ fn native_tail_apply(
                     principal_id: "owner".into(),
                 },
                 received_at_ms: cursor,
+                agent_declaration: None,
             },
             first_seen: vec![],
         },
@@ -192,6 +193,7 @@ fn native_restore_classifies_a_lost_ack_before_the_accepted_checkpoint() {
                                 principal_id: "owner".into(),
                             },
                             received_at_ms: ordinal,
+                            agent_declaration: None,
                         },
                         first_seen: vec![],
                     },
@@ -221,12 +223,10 @@ fn native_restore_classifies_a_lost_ack_before_the_accepted_checkpoint() {
         proposal.receipt().native_sources[0].accepted_receipt,
         Some(old_receipt)
     );
-    assert_eq!(
-        proposal.receipt().native_sources[0].source.native_sequence,
-        1
-    );
+    let native = proposal.receipt().native_sources[0].source.native().unwrap();
+    assert_eq!(native.native_sequence, 1);
     assert!(
-        matches!(&proposal.receipt().native_sources[0].source.origin,
+        matches!(&native.origin,
         owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {actor_origin_id:Some(id), ..} if id=="native-agent")
     );
     assert_eq!(native_tail_inventory(&f.store), before);
@@ -280,7 +280,7 @@ fn native_restore_tail_retains_interleaved_pending_context_with_descending_termi
                 .receipt()
                 .native_sources
                 .iter()
-                .map(|s| s.source.native_sequence)
+                .map(|s| s.source.native().unwrap().native_sequence)
                 .collect::<Vec<_>>(),
             vec![1, 2, 4]
         );
@@ -414,7 +414,11 @@ fn native_restore_tail_retains_adoption_seed_without_admitting_it() {
     let proposal = native_tail_prepare(&mut f, input).unwrap();
     assert_eq!(proposal.receipt().native_sources.len(), 1);
     assert!(matches!(
-        proposal.receipt().native_sources[0].source.origin,
+        proposal.receipt().native_sources[0]
+            .source
+            .native()
+            .unwrap()
+            .origin,
         owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
     ));
     assert!(proposal.receipt().native_sources[0]
@@ -638,6 +642,171 @@ fn native_restore_tail_does_not_infer_generic_pending_provenance_from_matching_b
     assert_eq!(inventory, native_tail_inventory(&f.store));
 }
 
+/// An enrolled owner's pending draft names no native journal update. Restore
+/// keeps it as an owner draft source with its delivery identity and declared
+/// agent; an accepted draft also carries its own receipt, whose declaration
+/// must be the draft's.
+#[test]
+fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
+    let declaration = dohc_engine_domain::AgentDeclaration {
+        agent_id: "trip-agent 旅行".into(),
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+    };
+    for accepted in [false, true] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let update = f
+            .doc
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Agent draft")
+            .unwrap();
+        let entry = owner_outbox::append(
+            &mut f.store,
+            "workspace",
+            owner_outbox::OwnerOutboxAppendInput {
+                binding: f.binding.clone(),
+                base_update: f.cut.baseline_bytes.clone(),
+                append_key: "agent-draft".into(),
+                update: update.clone(),
+                limits: f.cut.outbox_limits.clone(),
+                created_at_ms: 11,
+            },
+        )
+        .unwrap();
+        let (terminal, applied_sequence) = if accepted {
+            let receipt = LiveUpdateReceipt {
+                delivery_id: entry.delivery_id.clone(),
+                update_digest: entry.update_digest.clone(),
+                journal_cursor: 7,
+                accepting_host_epoch: 1,
+            };
+            let event = AdmittedLiveUpdate {
+                metadata: AdmittedLiveUpdateMetadata {
+                    accepted: RelayAcceptedLiveUpdate {
+                        receipt: receipt.clone(),
+                        binding: f.binding.clone(),
+                        authority: ServerDerivedLiveUpdateAuthority::Owner {
+                            principal_id: "owner".into(),
+                        },
+                        received_at_ms: 7,
+                        agent_declaration: Some(declaration.clone()),
+                    },
+                    first_seen: vec![],
+                },
+                update_bytes: update.clone(),
+            };
+            let ApplicationResult::Applied(ack, _) = apply_committed(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &f.handle,
+                event,
+                &NoFaults,
+                100_000_000,
+                |_, _, _, _| Ok(()),
+            )
+            .unwrap() else {
+                panic!("application refused")
+            };
+            (Some(receipt), ack.local_ydoc_sequence)
+        } else {
+            let key = f.key.clone();
+            f.store
+                .write_with(&NoFaults, |tx| {
+                    durable::record_authorized_update_in_tx(tx, &key, &update, None, None, 11)
+                })
+                .unwrap();
+            (None, 0)
+        };
+        // An enrollment observes this binding, and the entry keeps the agent
+        // its editor declared. Its draft proof is set below.
+        let namespace = f.handle.registration.lock().unwrap().namespace.clone();
+        let binding_json = serde_json::to_string(&f.binding).unwrap();
+        let declaration_json = serde_json::to_string(&declaration).unwrap();
+        let b = f.binding.clone();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE owner_ydoc_outbox_entries SET agent_declaration_json=?1 WHERE delivery_id=?2",
+                    params![declaration_json, entry.delivery_id],
+                )
+                .map_err(write_sql)?;
+                tx.execute(
+                    "INSERT INTO ydoc_owner_bindings (workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms) VALUES (?1,?2,?3,?4,?5,?6,1,0,0,?4,1000000,60000)",
+                    params![b.workspace_id, b.main_version_id, b.object_id, b.lineage_claim_id, binding_json, namespace],
+                )
+                .map_err(write_sql)?;
+                Ok::<_, ApplicationError>(())
+            })
+            .unwrap();
+        let input = native_tail_input(&mut f, terminal.clone(), applied_sequence);
+        let inventory = native_tail_inventory(&f.store);
+        // A generic entry queued before enrollment carries no draft proof.
+        // Neither does a revision the enrollment never reached, another
+        // relay's enrollment, or an enrollment observing another binding.
+        let path = f.binding.current_path.clone();
+        for mutation in [
+            String::new(),
+            "UPDATE owner_ydoc_outbox_entries SET draft_binding_revision=2".into(),
+            "UPDATE owner_ydoc_outbox_entries SET draft_binding_revision=1; \
+             UPDATE ydoc_owner_bindings SET relay_database_namespace='other-relay'"
+                .into(),
+            format!(
+                "UPDATE ydoc_owner_bindings SET relay_database_namespace='{namespace}', \
+                 binding_json=json_set(binding_json,'$.currentPath','elsewhere.md')"
+            ),
+        ] {
+            f.store
+                .write_with(&NoFaults, |tx| tx.execute_batch(&mutation).map_err(write_sql))
+                .unwrap();
+            assert!(
+                native_tail_prepare(&mut f, input.clone()).is_err(),
+                "accepted {mutation:?}"
+            );
+            assert_eq!(inventory, native_tail_inventory(&f.store));
+        }
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_owner_bindings SET binding_json=json_set(binding_json,'$.currentPath',?1)",
+                    [&path],
+                )
+                .map_err(write_sql)
+            })
+            .unwrap();
+        let proposal = native_tail_prepare(&mut f, input.clone()).unwrap();
+        let sources = &proposal.receipt().native_sources;
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].delivery_id, entry.delivery_id);
+        assert_eq!(sources[0].append_key, "agent-draft");
+        assert_eq!(sources[0].accepted_receipt, terminal);
+        assert!(sources[0].source.native().is_none());
+        assert_eq!(
+            serde_json::to_value(&sources[0].source).unwrap(),
+            serde_json::json!({
+                "binding": f.binding,
+                "updateDigest": entry.update_digest,
+                "origin": {
+                    "kind": "ownerDraft",
+                    "agentDeclaration": {"agentId": "trip-agent 旅行", "onBehalfOf": "owner", "depth": 1},
+                },
+            })
+        );
+        assert_eq!(inventory, native_tail_inventory(&f.store));
+        // The draft's declaration is part of its identity: a changed one
+        // no longer matches its accepted receipt or the saved proposal.
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE owner_ydoc_outbox_entries SET agent_declaration_json=json_set(agent_declaration_json,'$.agentId','other-agent')",
+                    [],
+                )
+                .map_err(write_sql)
+            })
+            .unwrap();
+        assert!(native_tail_prepare(&mut f, input).is_err());
+    }
+}
+
 #[test]
 fn native_restore_tail_keeps_adoption_seed_overlap_separate_from_admission() {
     let mut f = Fixture::new();
@@ -672,7 +841,11 @@ fn native_restore_tail_keeps_adoption_seed_overlap_separate_from_admission() {
         Some(receipt)
     );
     assert!(matches!(
-        proposal.receipt().native_sources[0].source.origin,
+        proposal.receipt().native_sources[0]
+            .source
+            .native()
+            .unwrap()
+            .origin,
         owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
     ));
     assert_eq!(inventory, native_tail_inventory(&f.store));
@@ -715,12 +888,16 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
             .receipt()
             .native_sources
             .iter()
-            .map(|source| source.source.native_sequence)
+            .map(|source| source.source.native().unwrap().native_sequence)
             .collect::<Vec<_>>(),
         vec![1, 1]
     );
     assert!(matches!(
-        proposal.receipt().native_sources[1].source.origin,
+        proposal.receipt().native_sources[1]
+            .source
+            .native()
+            .unwrap()
+            .origin,
         owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate { .. }
     ));
     assert!(proposal
@@ -759,6 +936,7 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
                     principal_id: "restoring-owner".into(),
                 },
                 received_at_ms: 80,
+                agent_declaration: None,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
         },
@@ -929,6 +1107,7 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
                     principal_id: "restoring-owner".into(),
                 },
                 received_at_ms: 80,
+                agent_declaration: None,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
         },
