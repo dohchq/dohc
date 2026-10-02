@@ -264,6 +264,8 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
   let hosted: AcceptedDeclaration | undefined;
   let next: AcceptedDeclaration | undefined;
   const provenance: Record<string, IntroducingMoment> = {};
+  // The owner document's compaction marker before and after its tab closed.
+  let foldEvidence: unknown;
   const ownerAudit = (deliveryId: string) => ownerAuditRecord(ownerTemp.rootPath, deliveryId);
   /** The one accepted change that declared `agentId`, as the relay journaled it, the service host accepted and audited it, and the owner imported that audit. */
   const acceptedDeclaration = async (workspaceId: string, agentId: string): Promise<AcceptedDeclaration> => {
@@ -378,19 +380,22 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     await test.step("closing the owner's document keeps the hosted agent as the author of its change", async () => {
       const page = owner!.page;
       const before = liveDocumentFold(ownerTemp.rootPath, PATH);
-      expect(before?.head).toBeGreaterThan(0);
+      foldEvidence = { before };
+      // A replicated document with updates its snapshot does not cover yet, so
+      // the close has something to fold.
+      expect(before).toMatchObject({ regime: "replicated" });
+      expect(before!.head).toBeGreaterThan(before!.snapshot);
       const tab = page.getByTestId(`tab-${PATH}`);
       await tab.hover();
       await tab.getByRole("button", { name: /^Close / }).click();
       await expect(tab).toHaveCount(0);
-      // Closing a replicated document folds it, so the snapshot should cover
-      // the head it had. Report what happened rather than forcing a fold.
-      const folded = await expect.poll(() => (liveDocumentFold(ownerTemp.rootPath, PATH)?.snapshot ?? 0) >= before!.head, { timeout: 15_000 })
-        .toBe(true).then(() => true, () => false);
-      testInfo.annotations.push({
-        type: "owner close fold",
-        description: JSON.stringify({ folded, before, after: liveDocumentFold(ownerTemp.rootPath, PATH) }),
-      });
+      // Closing the last session of a replicated document compacts it: a
+      // snapshot row covers the head it had, and the updates it folded are gone.
+      await expect.poll(() => {
+        const after = liveDocumentFold(ownerTemp.rootPath, PATH);
+        foldEvidence = { before, after };
+        return after !== null && after.snapshot >= before!.head && after.snapshotRow === after.snapshot && after.updatesAtOrBelowSnapshot === 0;
+      }, { message: "The owner's tab close compacted the document.", timeout: 30_000, intervals: [500] }).toBe(true);
       await openDocument(page);
       await expect(editor(page)).toContainText(HA);
       provenance.hostedClosed = await expectDeclaredMoment(page, workspace.workspaceId, HA, hosted!.change.agentDeclaration);
@@ -585,7 +590,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       expectAuditKept(hosted!);
       expectAuditKept(next!);
     });
-    await testInfo.attach("hosted agent provenance", { contentType: "application/json", body: JSON.stringify({ hosted, next, provenance }, null, 2) });
+    await testInfo.attach("hosted agent provenance", { contentType: "application/json", body: JSON.stringify({ hosted, next, provenance, foldEvidence }, null, 2) });
 
     for (const app of launches) {
       expect(app.logs.filter(entry => entry.level === "pageerror")).toEqual([]);
@@ -614,7 +619,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         try { return { agentId, evidence: relay.hostedAgentEvidence(ownerWorkspaceId!, PATH, agentId) }; }
         catch (cause) { return { agentId, error: cause instanceof Error ? cause.message : String(cause) }; }
       });
-      await testInfo.attach("hosted agent provenance", { contentType: "application/json", body: JSON.stringify({ declared, hosted, next, provenance }, null, 2) })
+      await testInfo.attach("hosted agent provenance", { contentType: "application/json", body: JSON.stringify({ declared, hosted, next, provenance, foldEvidence }, null, 2) })
         .catch(() => undefined);
     }
     throw error;

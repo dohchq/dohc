@@ -64,9 +64,10 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
   ],
   ["blobs", ["sha256", "text"]],
   ["snapshots", ["path"]],
-  ["ydoc_updates", ["actor_origin_id", "actor_kind"]],
+  ["ydoc_updates", ["workspace_id", "version_id", "object_id", "seq", "actor_origin_id", "actor_kind"]],
   ["replication_log", ["op_kind", "payload_json"]],
-  ["ydoc_docs", ["path", "head_update_seq", "head_snapshot_seq"]],
+  ["ydoc_docs", ["workspace_id", "version_id", "object_id", "path", "regime", "head_update_seq", "head_snapshot_seq"]],
+  ["ydoc_snapshots", ["workspace_id", "version_id", "object_id", "up_to_seq"]],
   ["live_audit_events", ["relay_database_namespace", "event_count", "evidence_digest", "journal_cursor", "delivery_id",
     "accepting_host_epoch", "record_digest"]],
   ["live_audit_record_manifests", ["record_digest", "manifest_json"]],
@@ -296,14 +297,35 @@ export function replicationOpKindsMentioning(rootPath: string, needle: string): 
   );
 }
 
-// Where one path's live document stands against its last fold: the newest
-// journaled update and the update the stored snapshot covers. A fold happened
-// when the snapshot reaches a head it had not covered before.
-export function liveDocumentFold(rootPath: string, path: string): { head: number; snapshot: number } | null {
+/** Where one path's live document stands against its last compaction. Read-only. */
+export interface LiveDocumentFold {
+  regime: string;
+  head: number;
+  snapshot: number;
+  // The newest stored snapshot row, and the journaled updates it should have pruned.
+  snapshotRow: number | null;
+  updatesAtOrBelowSnapshot: number;
+}
+
+// A compaction writes a snapshot row up to the head, moves head_snapshot_seq to
+// it and prunes every update it folded (durable.rs `maybe_compact`).
+export function liveDocumentFold(rootPath: string, path: string): LiveDocumentFold | null {
   return withEngineDb(rootPath, (db) => {
-    const rows = db.prepare("SELECT head_update_seq AS head, head_snapshot_seq AS snapshot FROM ydoc_docs WHERE path = ?").all(path);
+    const rows = db.prepare(`SELECT workspace_id, version_id, object_id, regime, head_update_seq AS head, head_snapshot_seq AS snapshot
+      FROM ydoc_docs WHERE path = ?`).all(path);
     if (rows.length > 1) throw new Error(`engine.db holds ${rows.length} live documents at ${path}.`);
-    return rows[0] ? { head: Number(rows[0].head), snapshot: Number(rows[0].snapshot) } : null;
+    const row = rows[0];
+    if (!row) return null;
+    const key = [row.workspace_id, row.version_id, row.object_id];
+    const snapshotRow = db.prepare(`SELECT MAX(up_to_seq) AS seq FROM ydoc_snapshots
+      WHERE workspace_id = ? AND version_id = ? AND object_id = ?`).get(...key)?.seq;
+    const folded = db.prepare(`SELECT COUNT(*) AS n FROM ydoc_updates
+      WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND seq <= ?`).get(...key, row.snapshot)?.n;
+    return {
+      regime: String(row.regime), head: Number(row.head), snapshot: Number(row.snapshot),
+      snapshotRow: snapshotRow === null || snapshotRow === undefined ? null : Number(snapshotRow),
+      updatesAtOrBelowSnapshot: Number(folded ?? 0),
+    };
   });
 }
 

@@ -5,7 +5,8 @@ import type { LiveJournalHistoryAuthority } from "./storage/liveJournalHistory.j
 import { configRecord } from "./deviceLiveHostConfig.js";
 import { authorityInteger } from "./storage/liveDocumentAuthority.js";
 import {drainOwnerOutbox,type OwnerOutboxAdmission} from "./ownerOutboxDelivery.js";
-import {settlementResult,type CommittedSettlement,type CommittedDeliveryOutcome} from "./liveCommittedDelivery.js";
+import type {CommittedDeliveryOutcome} from "./liveCommittedDelivery.js";
+import {settlementResult,type CommittedSettlement} from "./liveSettlement.js";
 import {isDeepStrictEqual} from "node:util";
 import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelivery";

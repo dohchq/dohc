@@ -1,8 +1,6 @@
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import {
   parseLiveDocumentKey,
-  parseLiveUpdateDigest,
-  parseLiveUpdateIdentifier,
   type LiveDocumentKey,
   type LiveUpdateReceipt,
 } from "@dohc/live-session-contract/live-update-admission";
@@ -18,36 +16,12 @@ import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelive
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import {LiveHostRegistrations, sameLiveHostDocument} from "./liveHostRegistration";
+import {settlementResult, type CommittedSettlement} from "./liveSettlement";
 export { createLiveJournalHistoryAuthority, type LiveJournalHistoryAuthority };
 
 export type CommittedDeliveryOutcome =
   | { kind: "done"; terminalReceipt: LiveUpdateReceipt | null }
   | { kind: "pending"; reason: string };
-
-export interface CommittedSettlement {
-  settlementId: string;
-  previousCursor: number;
-  terminalCursor: number;
-  applicationCount: number;
-  localYDocSequence: number;
-  momentId: string;
-  markdownDigest: string;
-  materialized: boolean;
-  collectionReconcileRequired: boolean;
-}
-
-export function settlementResult(value: unknown, terminal: LiveUpdateReceipt | null): CommittedSettlement {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid native settlement response.");
-  const response = value as Record<string, unknown>;
-  if (Object.keys(response).sort().join() !== "settlement,status" || response.status !== "settled" || !response.settlement || typeof response.settlement !== "object" || Array.isArray(response.settlement)) throw new Error("Invalid native settlement response.");
-  const row = response.settlement as Record<string, unknown>;
-  if (Object.keys(row).sort().join() !== "applicationCount,collectionReconcileRequired,localYDocSequence,markdownDigest,materialized,momentId,previousCursor,settlementId,terminalCursor") throw new Error("Invalid native settlement fields.");
-  for (const key of ["previousCursor", "terminalCursor", "applicationCount", "localYDocSequence"]) {
-    if (typeof row[key] !== "number" || !Number.isSafeInteger(row[key]) || row[key] < 0) throw new Error("Invalid native settlement integer.");
-  }
-  if (row.terminalCursor !== (terminal?.journalCursor ?? 0) || Number(row.previousCursor) > Number(row.terminalCursor) || Number(row.applicationCount) > Number(row.terminalCursor) - Number(row.previousCursor) || typeof row.materialized !== "boolean" || typeof row.collectionReconcileRequired !== "boolean") throw new Error("Native settlement coverage mismatch.");
-  return { settlementId: parseLiveUpdateIdentifier(row.settlementId,"settlement ID"), previousCursor: Number(row.previousCursor), terminalCursor: Number(row.terminalCursor), applicationCount: Number(row.applicationCount), localYDocSequence: Number(row.localYDocSequence), momentId: parseLiveUpdateIdentifier(row.momentId,"moment ID"), markdownDigest: parseLiveUpdateDigest(row.markdownDigest), materialized: row.materialized, collectionReconcileRequired: row.collectionReconcileRequired };
-}
 
 /** Private configured-host consumer; the caller supplies an authenticated, provisioned connection. */
 export class LiveCommittedDelivery {
