@@ -330,6 +330,30 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     expect(run.requests).toHaveLength(responses.length);
   });
 
+  it("reads the agent an entry declared and adds none to an entry that declared none", async () => {
+    const result = pendingResult();
+    result.entries.push({ ...result.entries[0]!, sequence: 3, deliveryId: "delivery-3", appendKey: "append-3" });
+    result.pendingBytes = 6;
+    const agentDeclaration = { agentId: "trip-agent", onBehalfOf: "local-person", depth: 2 };
+    Object.assign(result.entries[0]!, { agentDeclaration });
+    const pending = await read(result);
+    expect(pending.entries[0]?.agentDeclaration).toEqual(agentDeclaration);
+    expect(pending.entries[1]).not.toHaveProperty("agentDeclaration");
+  });
+
+  it.each([
+    null,
+    { agentId: "", onBehalfOf: null, depth: 0 },
+    { agentId: "agent\u0085", onBehalfOf: null, depth: 0 },
+    { agentId: "agent", onBehalfOf: null, depth: 65 },
+    { agentId: "agent", depth: 0 },
+    { agentId: "agent", onBehalfOf: null, depth: 0, principalId: "owner" },
+  ])("refuses a malformed agent declaration %j", async (agentDeclaration) => {
+    const result = pendingResult();
+    Object.assign(result.entries[0]!, { agentDeclaration });
+    await expect(read(result)).rejects.toThrow(TypeError);
+  });
+
   it("discards a changed snapshot and does not automatically retry", async () => {
     const responses = pages(pendingResult());
     const last = responses.length - 1;

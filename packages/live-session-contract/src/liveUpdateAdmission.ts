@@ -49,6 +49,19 @@ export type ServerDerivedLiveUpdateAuthority =
       readonly grantGeneration: number;
     };
 
+/**
+ * The agent a writer declared for one change: its name, the person it said it
+ * works for, and its chain depth. Provenance only, never authority: it names
+ * no authenticated principal. Every field is always present.
+ */
+export interface AgentDeclaration {
+  readonly agentId: string;
+  readonly onBehalfOf: string | null;
+  readonly depth: number;
+}
+
+export const AGENT_DECLARATION_MAX_DEPTH = 64;
+
 export interface LiveUpdateSubmissionMetadata {
   readonly deliveryId: string;
   readonly updateDigest: string;
@@ -137,6 +150,7 @@ const ACCEPTED_FIELDS = [
   "receivedAtMs",
 ] as const;
 const STRUCT_RANGE_FIELDS = ["clientId", "startClock", "endClock"] as const;
+const AGENT_DECLARATION_FIELDS = ["agentId", "onBehalfOf", "depth"] as const;
 const ADMITTED_METADATA_FIELDS = ["accepted", "firstSeen"] as const;
 const APPLICATION_ACK_FIELDS = [
   ...RECEIPT_FIELDS,
@@ -283,6 +297,25 @@ export function parseServerDerivedLiveUpdateAuthority(
     principalId,
     grantId: parseLiveUpdateIdentifier(record.grantId, "grantId"),
     grantGeneration: positiveSafeInteger(record.grantGeneration, "grantGeneration"),
+  };
+}
+
+/** The engine's bounds: an identifier with no Unicode control character. */
+function declaredIdentifier(value: unknown, name: string): string {
+  const identifier = parseLiveUpdateIdentifier(value, name);
+  if (/\p{Cc}/u.test(identifier)) {
+    throw new TypeError(`${name} must not contain control characters.`);
+  }
+  return identifier;
+}
+
+export function parseAgentDeclaration(value: unknown): AgentDeclaration {
+  const record = exactRecord(value, "AgentDeclaration", AGENT_DECLARATION_FIELDS);
+  return {
+    agentId: declaredIdentifier(record.agentId, "agentId"),
+    onBehalfOf:
+      record.onBehalfOf === null ? null : declaredIdentifier(record.onBehalfOf, "onBehalfOf"),
+    depth: boundedInteger(record.depth, "depth", 0, AGENT_DECLARATION_MAX_DEPTH),
   };
 }
 

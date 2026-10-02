@@ -3070,6 +3070,56 @@ impl ChangeAttribution {
     }
 }
 
+/// The agent a writer declared for one change: its name, the person it said
+/// it works for, and its chain depth, as [`ChangeAttribution`] carries them
+/// for an agent. A queued or delivered change keeps it beside the identity
+/// that authenticated the change. Provenance only, never authority: it names
+/// no authenticated principal, and no permission or automation decision
+/// reads it. Every field is always present, so its JSON has one form.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentDeclaration {
+    pub agent_id: String,
+    pub on_behalf_of: Option<String>,
+    pub depth: u32,
+}
+
+impl AgentDeclaration {
+    /// What a write by `actor_origin_id` with `attribution` declares, when an
+    /// agent made it. A person's or an automation's write declares none.
+    pub fn from_change(
+        actor_origin_id: Option<&str>,
+        attribution: Option<&ChangeAttribution>,
+    ) -> Option<Self> {
+        let attribution = attribution.filter(|a| a.actor_kind == ChangeActorKind::Agent)?;
+        Some(Self {
+            agent_id: actor_origin_id?.to_owned(),
+            on_behalf_of: attribution.on_behalf_of.clone(),
+            depth: attribution.depth,
+        })
+    }
+
+    /// The attribution the declared agent's write carries.
+    pub fn attribution(&self) -> ChangeAttribution {
+        ChangeAttribution {
+            actor_kind: ChangeActorKind::Agent,
+            on_behalf_of: self.on_behalf_of.clone(),
+            depth: self.depth,
+            run: None,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.agent_id.is_empty()
+            || self.agent_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+            || self.agent_id.chars().any(char::is_control)
+        {
+            return Err("agent declaration agentId must be non-empty and bounded");
+        }
+        self.attribution().validate()
+    }
+}
+
 /// One applied field difference, exactly as its history row was recorded.
 /// Values stay as the stored JSON text; the event layer decides parsing and
 /// size bounds. Serialized device-locally onto a parked update's deferred

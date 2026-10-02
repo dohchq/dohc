@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import vectors from "../vectors/live-update-admission-vectors.json";
 import {
+  AGENT_DECLARATION_MAX_DEPTH,
   LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
   LIVE_UPDATE_REFUSAL_VALUES,
   LIVE_UPDATE_RETRY_VALUES,
@@ -12,6 +13,7 @@ import {
   LIVE_UPDATE_YJS_START_CLOCK_MAX,
   parseAdmittedLiveUpdate,
   parseAdmittedLiveUpdateMetadata,
+  parseAgentDeclaration,
   parseLiveDocumentKey,
   parseLiveUpdateAcceptResult,
   parseLiveUpdateDigest,
@@ -313,6 +315,33 @@ describe("live-update text and digest fields", () => {
         },
       }),
     ).toThrow();
+  });
+});
+
+describe("agent declarations", () => {
+  it("keeps every field, with a null onBehalfOf and the depth bounds", () => {
+    for (const declaration of [
+      { agentId: "trip-agent", onBehalfOf: "local-person", depth: 0 },
+      { agentId: "trip-agent", onBehalfOf: null, depth: AGENT_DECLARATION_MAX_DEPTH },
+    ]) {
+      expect(parseAgentDeclaration(declaration)).toEqual(declaration);
+    }
+  });
+
+  it("refuses the engine's out-of-bounds values and any other field", () => {
+    for (const declaration of [
+      { agentId: "", onBehalfOf: null, depth: 0 },
+      { agentId: "agent\u0085", onBehalfOf: null, depth: 0 },
+      { agentId: "agent", onBehalfOf: "", depth: 0 },
+      { agentId: "a".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 1), onBehalfOf: null, depth: 0 },
+      { agentId: "agent", onBehalfOf: null, depth: AGENT_DECLARATION_MAX_DEPTH + 1 },
+      { agentId: "agent", onBehalfOf: null, depth: -1 },
+      { agentId: "agent", onBehalfOf: null, depth: 1.5 },
+      { agentId: "agent", depth: 0 },
+      { agentId: "agent", onBehalfOf: null, depth: 0, principalId: "owner-1" },
+    ]) {
+      expect(() => parseAgentDeclaration(declaration)).toThrow(TypeError);
+    }
   });
 });
 

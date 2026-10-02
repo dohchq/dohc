@@ -1125,6 +1125,10 @@ impl EngineService {
                 append_key,
                 update,
                 now_ms: now_ms()?,
+                agent_declaration: dohc_engine_domain::AgentDeclaration::from_change(
+                    params.actor_origin_id.as_deref(),
+                    params.attribution.as_ref(),
+                ),
             };
             let actor = open.actor.clone();
             let workspace = open.workspace_id.clone();

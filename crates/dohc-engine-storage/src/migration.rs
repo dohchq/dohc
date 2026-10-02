@@ -2855,6 +2855,14 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_YDOC_LIVE_EDIT_AUTHORS_DDL,
         sets_user_version: None,
     },
+    // The agent an owner's queued draft declared, kept with its delivery
+    // after the relay's receipt. Null for every entry that declared none.
+    Migration {
+        ordinal: 27,
+        id: "v2-owner-draft-agent-declarations",
+        sql: "ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN agent_declaration_json TEXT CHECK (agent_declaration_json IS NULL OR json_valid(agent_declaration_json));",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -3215,6 +3223,10 @@ mod tests {
             (
                 "v2-ydoc-live-edit-authors",
                 "33ec61e3e1f37d0908e6e5eac829e9e5a749e2834e4ce42729716fc32fe5d938",
+            ),
+            (
+                "v2-owner-draft-agent-declarations",
+                "7bb36813afe82921b70fa48a9fe0fa99bf0506f041bf1781e57892fc03d9d867",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
