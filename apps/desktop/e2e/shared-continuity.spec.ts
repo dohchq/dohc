@@ -6,7 +6,7 @@ import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import type { DohcDesktopBridge, EngineMomentRecord } from "../src/ipc/bridgeContract";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
-import { liveDocumentFold, ownerAuditRecord, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
+import { liveDocumentFold, ownerAuditRecord, ownerOutboxDeclarations, ownerSettlementState, ydocUpdateAuthors, type LiveAuditRecord } from "./helpers/engineDb";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
 import {
   activeWorkspace, createTempWorkspace, explorerRow, openHistoryView, openWorkspaceFromFirstRun,
@@ -33,6 +33,8 @@ type Api = DohcDesktopBridge;
 
 const PATH = "notes/plan.md";
 const HIDDEN = "private/hidden.md";
+const HIDDEN_TEXT = "Only the owner reads this.";
+const HIDDEN_EDIT = "The owner changed this privately.";
 const SEED = "# Trip plan\n\nThe agent drafts this line.\n\nThe person writes here.\n";
 const H1 = "Human first edit.";
 const A1 = "Agent revised this line.";
@@ -266,14 +268,20 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
   const provenance: Record<string, IntroducingMoment> = {};
   // The owner document's compaction marker before and after its tab closed.
   let foldEvidence: unknown;
+  // Counts from the last check of a declared change's acceptance.
+  let lastAcceptance: unknown;
   const ownerAudit = (deliveryId: string) => ownerAuditRecord(ownerTemp.rootPath, deliveryId);
   /** The one accepted change that declared `agentId`, as the relay journaled it, the service host accepted and audited it, and the owner imported that audit. */
   const acceptedDeclaration = async (workspaceId: string, agentId: string): Promise<AcceptedDeclaration> => {
     const read = () => stack!.hostedAgentEvidence(workspaceId, PATH, agentId);
     await expect.poll(() => {
-      const { relay, host } = read();
-      return relay.length === 1 && host.some(copy => copy.audit) && ownerAudit(relay[0]!.deliveryId) !== null;
-    }, { timeout: 60_000, intervals: [1_000] }).toBe(true);
+      const { relay, host, journal } = read();
+      const imported = relay.length === 1 && ownerAudit(relay[0]!.deliveryId) !== null;
+      // Where the change stopped: the owner's queue, the relay journal, the host audit or the owner's import.
+      lastAcceptance = { agentId, checkedAt: new Date().toISOString(), ownerOutbox: ownerOutboxDeclarations(ownerTemp.rootPath),
+        journal, declaredChanges: relay.length, hostAudits: host.filter(copy => copy.audit).length, ownerImported: imported };
+      return imported && host.some(copy => copy.audit);
+    }, { message: `The server accepted, audited and returned one change that declared ${agentId}.`, timeout: 60_000, intervals: [1_000] }).toBe(true);
     const { relay: [change], host } = read();
     const ownerId = await accountId(ownerAccount.email);
     // The authority is the authenticated owner; the agent is only declared.
@@ -313,7 +321,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     await createVerifiedAccount(newRecipientPage, stack.account, newRecipientAccount);
 
     const workspace = await test.step("the owner connects a workspace to the server", async () => {
-      await writeWorkspaceFiles(ownerTemp, [{ path: PATH, contents: SEED }, { path: HIDDEN, contents: "Only the owner reads this.\n" }]);
+      await writeWorkspaceFiles(ownerTemp, [{ path: PATH, contents: SEED }, { path: HIDDEN, contents: `${HIDDEN_TEXT}\n` }]);
       owner = await launch(ownerTemp);
       const opened = await openWorkspaceFromFirstRun(owner.page, ownerTemp);
       await owner.page.getByTestId("activity-cloud").click();
@@ -346,6 +354,14 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       const authors = ydocUpdateAuthors(ownerTemp.rootPath);
       expect(authors).toContainEqual({ actorOriginId: AGENT, actorKind: "agent" });
       expect(authors.some(author => author.actorKind === "human")).toBe(true);
+    });
+
+    // The share will leave this file out. Its history must hold a moment, so a
+    // recipient has a real moment ID to guess.
+    await test.step("the owner changes the private file and history records it", async () => {
+      const edited = await runDohcCli(ownerTemp, ["--json", "document", "edit", HIDDEN, "--find", HIDDEN_TEXT, "--text", `${HIDDEN_TEXT} ${HIDDEN_EDIT}`]);
+      expect(JSON.parse(edited.stdout)).toMatchObject({ ok: true, path: HIDDEN, changed: true });
+      await expect.poll(() => momentIds(owner!.page, workspace.workspaceId, HIDDEN), { timeout: 30_000 }).not.toEqual([]);
     });
 
     await test.step("both edits survive the owner's restart", async () => {
@@ -428,7 +444,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // The share holds one file: no history of the hidden one, even by the owner's moment IDs.
       expect(await momentIds(page, recipientWorkspaceId, HIDDEN)).toEqual([]);
       const guessed = await momentIds(owner!.page, workspace.workspaceId, HIDDEN);
-      testInfo.annotations.push({ type: "guessed hidden moment IDs", description: String(guessed.length) });
+      expect(guessed.length).toBeGreaterThan(0);
       for (const momentId of guessed) {
         expect(await page.evaluate(payload =>
           (window as unknown as { dohcDesktop: Api }).dohcDesktop.readEngineMoment(payload), { workspaceId: recipientWorkspaceId, momentId })).toEqual({ moment: null });
@@ -619,7 +635,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         try { return { agentId, evidence: relay.hostedAgentEvidence(ownerWorkspaceId!, PATH, agentId) }; }
         catch (cause) { return { agentId, error: cause instanceof Error ? cause.message : String(cause) }; }
       });
-      await testInfo.attach("hosted agent provenance", { contentType: "application/json", body: JSON.stringify({ declared, hosted, next, provenance, foldEvidence }, null, 2) })
+      await testInfo.attach("hosted agent provenance", { contentType: "application/json", body: JSON.stringify({ lastAcceptance, declared, hosted, next, provenance, foldEvidence }, null, 2) })
         .catch(() => undefined);
     }
     throw error;

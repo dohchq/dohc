@@ -77,6 +77,20 @@ it("autonomously drains durable owner notices and wakes an already-open frame su
   expect(state.dispose).toHaveBeenCalledTimes(1);
 });
 
+it("starts no frame stream until the owner pass delivered everything queued, then starts one", async () => {
+  const f = await fixture();
+  try {
+    // The adoption's seed is still queued: validation asked to retry.
+    state.drain.mockResolvedValueOnce({kind: "pending", reason: "Owner delivery pass reached its work budget.", continueDrain: false});
+    await expect(f.delivery.captureNative(binding)).rejects.toThrow("Device delivery has not finished delivering this document.");
+    expect(state.drain).toHaveBeenCalledTimes(1);
+    const captured = await f.delivery.captureNative(binding);
+    expect(captured).toMatchObject({registrationId: 9, binding, workspace: "handle"});
+    expect(state.drain).toHaveBeenCalledTimes(2);
+    expect(f.stop).not.toHaveBeenCalled();
+  } finally {f.delivery.close();}
+});
+
 it("waits for the owner pass before a named drain or settlement acquires the same document", async () => {
   const f = await fixture(), entered = deferred<void>(), release = deferred<unknown>();
   try {

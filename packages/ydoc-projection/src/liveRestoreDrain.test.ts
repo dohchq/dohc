@@ -11,7 +11,7 @@ import type { StorageContext } from "../../../services/sync-relay/src/storage/co
 import type { StopRestoreCutCapture, OwnerCutCapture } from "../../../services/sync-relay/src/storage/liveCommittedDelivery.js";
 import type {NativeRestoreFenceReceipt} from "../../../services/sync-relay/src/liveRestoreFence.js";
 import { openSyncRelayStorage } from "../../../services/sync-relay/src/storage.js";
-import {parseNativeRestoreProposalReceipt, encodeNativeRestoreProposal, decodeNativeRestoreProposal} from "../../../services/sync-relay/src/liveRestoreProposal.js";
+import {parseNativeRestoreProposalReceipt, encodeNativeRestoreProposal, decodeNativeRestoreProposal, nativeSourceAgentDeclaration} from "../../../services/sync-relay/src/liveRestoreProposal.js";
 import {initializeLiveRestoreOperationSchema} from "../../../services/sync-relay/src/storage/liveRestoreOperationSchema.js";
 import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
 import * as restoreProof from "./liveRestoreProof.js";
@@ -102,6 +102,8 @@ it("bounds restore proposal metadata and refuses corrupt native source manifests
   } finally {f.close();}
 });
 
+// The agent the fixture's native update attribution names.
+const nativeAgent = {agentId: "owner-device", onBehalfOf: "owner", depth: 64};
 function pendingSource(binding: NativeRestoreFenceReceipt["operation"]["oldBinding"], bytes: Uint8Array, sequence: number) {
   const updateDigest = hash(bytes), outboxId = `owner-outbox-${hash(Buffer.from(`${binding.workspaceId}\0${JSON.stringify(binding)}\0${binding.lineageClaimId}`))}`;
   const source = {binding, adoptionId: "adoption", nativeSequence: sequence + 9, updateDigest,
@@ -363,7 +365,9 @@ it("accepts native human, agent, automation and absent attribution at their dept
       const receipt = structuredClone(f.receipt), native = receipt.nativeSources[0]!;
       Object.assign(native.source.origin, patch);native.appendKey = `adopted-local:${jsonHash(native.source)}`;
       receipt.nativeSourceManifestDigest = jsonHash([receipt.fence, receipt.nativeSources]);
-      expect(parseNativeRestoreProposalReceipt(JSON.stringify(receipt), f.input).nativeSources[0]!.source.origin).toMatchObject(patch);
+      const parsed = parseNativeRestoreProposalReceipt(JSON.stringify(receipt), f.input).nativeSources[0]!;
+      expect(parsed.source.origin).toMatchObject(patch);
+      expect(nativeSourceAgentDeclaration(parsed)).toEqual(patch.actorKind === "agent" ? nativeAgent : undefined);
     }
   } finally {f.close();}
 });
@@ -578,6 +582,56 @@ it("authenticates bounded native pending identities and refuses a different adop
     }
   } finally {f.close();}
 });
+
+it("derives an adopted native update's declaration from its retained attribution and keeps the source wire unchanged", () => {
+  const f = proposalSourcesFixture("owner", "device");
+  try {
+    const binding = f.proposal.fence.operation.oldBinding, updateDigest = "e".repeat(64);
+    const outboxId = `owner-outbox-${hash(Buffer.from(`${binding.workspaceId}\0${JSON.stringify(binding)}\0${binding.lineageClaimId}`))}`;
+    const origin = (patch: Record<string, unknown> = {}) => ({kind: "nativeUpdate", actorOriginId: "trip-agent-hosted", actorKind: "agent",
+      onBehalfOf: "owner", chainDepth: 2, recordedAtMs: 100, ...patch});
+    const native = (source: Record<string, unknown>, appendKey = `adopted-local:${jsonHash(source)}`) => ({outboxId, outboxSequence: 1, binding, appendKey,
+      deliveryId: `owner-delivery-${hash(Buffer.from(`${outboxId}\0${1}\0${updateDigest}`))}`, updateDigest,
+      byteLength: 2, createdAtMs: 100, source, acceptedReceipt: null});
+    const parse = (source: Record<string, unknown>, appendKey?: string) => {
+      const sources = [native(source, appendKey)];
+      return parseNativeRestoreProposalReceipt(JSON.stringify({...f.proposal, nativeSources: sources,
+        nativeSourceManifestDigest: jsonHash([f.proposal.fence, sources])}), f.input).nativeSources[0]!;
+    };
+    const source = (patch?: Record<string, unknown>) => ({binding, adoptionId: "adoption", nativeSequence: 9, updateDigest, origin: origin(patch)});
+    // The agent's update keeps its exact source and key, and names the agent its attribution names.
+    const agent = source(), parsed = parse(agent);
+    expect(JSON.stringify(parsed.source)).toBe(JSON.stringify(agent));
+    expect(parsed.appendKey).toBe(`adopted-local:${jsonHash(agent)}`);
+    expect(nativeSourceAgentDeclaration(parsed)).toEqual({agentId: "trip-agent-hosted", onBehalfOf: "owner", depth: 2});
+    expect(nativeSourceAgentDeclaration(parse(source({onBehalfOf: null, chainDepth: 0}))))
+      .toEqual({agentId: "trip-agent-hosted", onBehalfOf: null, depth: 0});
+    // A person, an automation, an agent with no actor and absent attribution name none.
+    for (const patch of [{actorKind: "human", chainDepth: 0, onBehalfOf: null}, {actorKind: "automation", chainDepth: 1, onBehalfOf: null},
+      {actorOriginId: null}, {actorOriginId: null, actorKind: null, chainDepth: null, onBehalfOf: null}]) {
+      expect(nativeSourceAgentDeclaration(parse(source(patch)))).toBeUndefined();
+    }
+    const seed = {binding, adoptionId: "adoption", nativeSequence: 0, updateDigest, origin: {kind: "adoptionSeed"}};
+    expect(nativeSourceAgentDeclaration(parse(seed, `owner-adoption:${jsonHash(["adoption", 0, updateDigest])}`))).toBeUndefined();
+    // The source names its agent only through the native origin; any other member is refused.
+    expect(() => parse({...agent, agentDeclaration: {agentId: "trip-agent-hosted", onBehalfOf: "owner", depth: 2}})).toThrow();
+  } finally {f.close();}
+});
+
+it.each([{actorOriginId: "other-agent"}, {chainDepth: 63}, {onBehalfOf: null}, {actorKind: "human", chainDepth: 0, onBehalfOf: null}])(
+  "refuses an adopted native source whose accepted delivery declared other provenance: %j", patch => {
+    const f = contentProposalFixture("owner", "device", false, true);
+    try {
+      const changed = structuredClone(f.receipt), native = changed.nativeSources[0]!;
+      Object.assign(native.source.origin, patch);
+      native.appendKey = `adopted-local:${jsonHash(native.source)}`;
+      changed.nativeSourceManifestDigest = jsonHash([changed.fence, changed.nativeSources]);
+      // The source parses on its own; its accepted copy declared the fixture's agent.
+      parseNativeRestoreProposalReceipt(JSON.stringify(changed), f.input);
+      expect(() => f.store.captureStopRestoreProposal(f.input, JSON.stringify(changed))).toThrow();
+      expect(() => f.store.captureStopRestoreProposal(f.input, JSON.stringify(f.receipt))).not.toThrow();
+    } finally {f.close();}
+  });
 
 it("authenticates an enrolled owner draft's identity and declaration without a native sequence", () => {
   const f = proposalSourcesFixture("bootstrap", "service");
@@ -912,7 +966,9 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
     const current = f.storage.resolveCurrentLiveDocumentBinding({document: f.document, actor: f.actor});
     if (current.kind !== "current") throw Error(current.kind);
     const bytes = f.update("first", "first"), source = pendingSource(current.binding, bytes, 1);
-    const committed = f.storage.commitLiveUpdateJournal(f.journalCapture(bytes, source.deliveryId)).result;
+    // The owner's delivery of that update declares the agent its attribution names.
+    const capture = f.journalCapture(bytes, source.deliveryId);
+    const committed = f.storage.commitLiveUpdateJournal({...capture, metadata: {...capture.metadata, agentDeclaration: nativeAgent}}).result;
     if (committed.kind !== "accepted") throw Error(committed.kind);
     receipts.push(committed.receipt); acceptedNative = {bytes, source: {...source, acceptedReceipt: committed.receipt}};
   } else if (events) receipts.push(f.add("first"));

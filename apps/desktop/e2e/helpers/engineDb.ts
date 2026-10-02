@@ -388,6 +388,21 @@ export function readLiveAuditRecord(db: Pick<EngineDb, "prepare">, deliveryId: s
   };
 }
 
+// Failure evidence only: how many changes this owner queued for the server,
+// how many still wait, and how many declared an agent. Its columns are newer
+// than the read gate above, so a store without them reports the error instead.
+export function ownerOutboxDeclarations(rootPath: string): { entries: number; pending: number; declared: number } | { error: string } | null {
+  try {
+    return withEngineDb(rootPath, (db) => {
+      const row = db.prepare(`SELECT COUNT(*) AS entries, COALESCE(SUM(pending), 0) AS pending,
+        COUNT(agent_declaration_json) AS declared FROM owner_ydoc_outbox_entries`).get();
+      return { entries: Number(row?.entries ?? 0), pending: Number(row?.pending ?? 0), declared: Number(row?.declared ?? 0) };
+    });
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 // The owner's imported copy of one accepted change's audit record.
 export function ownerAuditRecord(rootPath: string, deliveryId: string): LiveAuditRecord | null {
   return withEngineDb(rootPath, (db) => readLiveAuditRecord(db, deliveryId));

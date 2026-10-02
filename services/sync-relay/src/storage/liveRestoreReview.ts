@@ -78,7 +78,7 @@ export function readRestoreReviewHistory(storage: StorageContext, input: {
       eventCount: receipt.acceptedHistory.eventCount, deliveryId: source.deliveryId,
     }, budget);
     if (accepted) {
-      // The relay accepted the draft's own declaration, or none for a native update.
+      // The relay accepted the source's own declaration, absent when it named none.
       require(accepted.accepted.receipt.updateDigest === source.updateDigest && accepted.accepted.authority.principalKind === "owner" &&
         isDeepStrictEqual(accepted.accepted.binding, source.binding) &&
         isDeepStrictEqual(nativeSourceAgentDeclaration(source), accepted.accepted.agentDeclaration));

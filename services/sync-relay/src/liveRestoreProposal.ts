@@ -151,9 +151,17 @@ export function parseNativeRestoreProposalReceipt(json: string, budget: RestoreP
 export type NativeRestoreProposalReceipt = ReturnType<typeof parseNativeRestoreProposalReceipt>;
 type NativeRestoreSourceIdentity = Pick<NativeRestoreProposalReceipt["nativeSources"][number], "source">;
 
-/** What an accepted copy of this source must declare: the draft's own agent, and nothing for a native update. */
+/**
+ * What an accepted copy of this source must declare: the draft's own agent, or
+ * the agent a native update's retained attribution names, as
+ * `AgentDeclaration::from_change` derives it. Absent for anything else.
+ */
 export function nativeSourceAgentDeclaration(source: NativeRestoreSourceIdentity) {
-  return "adoptionId" in source.source ? undefined : source.source.origin.agentDeclaration;
+  if (!("adoptionId" in source.source)) return source.source.origin.agentDeclaration;
+  const {origin} = source.source;
+  return origin.kind === "nativeUpdate" && origin.actorKind === "agent" && origin.actorOriginId !== null
+    ? parseAgentDeclaration({agentId: origin.actorOriginId, onBehalfOf: origin.onBehalfOf, depth: origin.chainDepth})
+    : undefined;
 }
 
 export function decodeNativeRestoreProposal(bytes: Uint8Array, budget: RestoreProofBudget) {

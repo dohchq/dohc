@@ -2,6 +2,7 @@ import {expect, it, vi} from "vitest";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {DaemonRefusalError} from "@dohc/workspace-engine-client";
 import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
+import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {LiveCommittedDelivery} from "./liveCommittedDelivery";
 
 const document = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: "a".repeat(64)};
@@ -46,7 +47,7 @@ function fixture(events: number, refusals: (call: number) => boolean,
   };
   const consumer = new LiveCommittedDelivery({createLiveCommittedDeliveryStore: () => store} as never,{} as never,{
     client: client as unknown as EngineClient,workspace: "handle",deadlineMs: 1_000,nextRequestId: () => ++requestId,
-    host: {mode: "device",hostId: "host",hostEpoch: 1,instanceId: "instance",connectionId: "connection"},
+    host: {mode: "device",hostId: "host",hostEpoch: parseHostEpoch(1),instanceId: "instance",connectionId: "connection"},
   });
   const offered = () => client.sendLiveApplication.mock.calls.map(([,event]) => event);
   return {consumer,client,store,settled,offered};

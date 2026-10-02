@@ -181,6 +181,12 @@ function hostedAgentEvidence(directory: string, workspaceId: string, path: strin
     eventCount: Number(row.eventCount), evidenceDigest: String(row.evidenceDigest),
     agentDeclaration: { agentId: String(row.agentId), onBehalfOf: row.onBehalfOf === null ? null : String(row.onBehalfOf), depth: Number(row.depth) },
   })));
+  // Every accepted change of the document by authenticated kind, and how many declared any agent. Counts only.
+  const journal = read(join(directory, "relay-data", "relay.sqlite"), (db) => db.prepare(
+    `SELECT j.principal_kind AS kind, COUNT(*) AS accepted, COUNT(d.journal_cursor) AS declared
+     FROM sync_relay_live_update_journal j LEFT JOIN sync_relay_live_update_agent_declarations d ON d.journal_cursor=j.journal_cursor
+     WHERE j.workspace_id=? AND j.current_path=? GROUP BY j.principal_kind ORDER BY j.principal_kind`,
+  ).all(workspaceId, path).map((row) => ({ kind: String(row.kind), accepted: Number(row.accepted), declared: Number(row.declared) })));
   const hostRoot = join(directory, "relay-deployment", "live-host");
   const host = readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
     .flatMap((entry) => read(join(hostRoot, entry.name, ".dohc", "engine", "engine.db"), (db) => relay.map((change) => ({
@@ -192,7 +198,7 @@ function hostedAgentEvidence(directory: string, workspaceId: string, path: strin
           evidenceDigest: String(row.evidenceDigest), accepted: JSON.parse(String(row.accepted)) as LiveAuditRecord["accepted"] })),
       audit: readLiveAuditRecord(db, change.deliveryId),
     }))));
-  return { relay, host };
+  return { relay, host, journal };
 }
 
 function settlementEvidence(directory: string) {
