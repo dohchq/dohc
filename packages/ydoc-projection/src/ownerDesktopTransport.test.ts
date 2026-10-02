@@ -26,7 +26,7 @@ import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createWorkspaceEngineCapture} from "../../../apps/desktop/src/workspaces/workspaceEngineCapture.js";
 import {RelayConfiguredDaemonClientSource,RelayTransportRouteGuard} from "../../../apps/desktop/src/workspaces/engineRelayClient.js";
 import {createSyncRelayHandler,MAX_BLOB_BYTES} from "../../../services/sync-relay/src/server.js";
-import {resolveTestActor} from "../../../services/sync-relay/src/testing/index.js";
+import {UnauthorizedError} from "../../workspace-auth/src/session.js";
 import {createEngineYDocSessionIpc} from "../../../apps/desktop/src/workspaces/engineYDocSessionIpc.js";
 import {bindEngineYDoc} from "../../../apps/desktop/src/renderer/collab/engineYDocProvider.js";
 import {CHANNELS} from "../../../apps/desktop/src/ipc/channels.js";
@@ -87,16 +87,22 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
   let closeNamedPeer: (() => void) | undefined;
   let namedPeerInvalidated: AbortSignal | undefined;
   let releaseTailAdmission: (() => void) | undefined;
+  let failed = false, failure: unknown;
   try {
     const configPath = join(root,"deployment.json");
     initializeRelayDeployment({configPath,relayPath: join(root,"relay","relay.sqlite"),continuityDirectory: join(root,"continuity")}); deployment = openRelayDeployment(configPath,{liveTickets: {retainedTicketsPerPrincipalGrant: 8,expiredTicketCleanupBatchSize: 4,now: Date.now}});
-    // The real ordinary relay routes behind the test bearer seam, with the production blob headroom.
-    const relay = serveFetchHandler({handler: createSyncRelayHandler({storage: deployment.storage,resolveActor: resolveTestActor}),
+    // The bearer seam main.ts enables with SYNC_RELAY_TEST_AUTH, so the standalone relay admits the same owner.
+    const resolveActor = (request: Request,workspaceId: string) => {
+      if (request.headers.get("authorization") !== "Bearer test:owner") throw new UnauthorizedError();
+      return {userId: "owner",workspaceId};
+    };
+    // The real ordinary relay routes, with the production blob headroom.
+    const relay = serveFetchHandler({handler: createSyncRelayHandler({storage: deployment.storage,resolveActor}),
       maxBodyBytes: () => MAX_BLOB_BYTES + 1024 * 1024,oversized: () => new Response(null,{status: 413}),failure: () => new Response(null,{status: 500})});
     relay.listen(0,"127.0.0.1"); await once(relay,"listening");
     closeNetwork = () => new Promise<void>(resolve => relay.close(() => resolve()));
     const relayPort = (relay.address() as {port: number}).port, exchangeKey = "owner-desktop-exchange-key-32-bytes";
-    routes.bind({workspaceId: "workspace",rootPath: workspaceRoot,relay: {baseUrl: `http://127.0.0.1:${relayPort}`,token: "user:owner"},allowInsecureLoopbackForTests: true});
+    routes.bind({workspaceId: "workspace",rootPath: workspaceRoot,relay: {baseUrl: `http://127.0.0.1:${relayPort}`,token: "test:owner"},allowInsecureLoopbackForTests: true});
     let syncRequestId = 0;
     const syncRequest = (method: string) => sessions.run(workspace,async ({client,workspace: handle}) =>
       (await client.sendRequest({id: ++syncRequestId,workspace: handle,method,params: {workspaceId: "workspace"},deadlineMs: 30_000})).result);
@@ -176,6 +182,16 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     closeNetwork = async () => {connection.stop(); control.close(); bridge.close(); await connection.closed;
       await Promise.all([new Promise<void>(resolve => share.close(() => resolve())),new Promise<void>(resolve => relay.close(() => resolve()))]); native.close();};
     await expect.poll(() => deployment!.storage.getLiveHostControl()?.admissionState,{timeout: 30_000}).toBe("open");
+    // The old connection's disconnect clears its id and closes admission. Only a new, admitted
+    // registration has device delivery; registration and delivery are installed together.
+    const reconnect = async (whileDisconnected?: () => void) => {
+      const previous = deployment!.storage.getLiveHostControl()!.registeredConnectionId;
+      connection.stop(); await connection.closed;
+      whileDisconnected?.();
+      connection = connect();
+      await expect.poll(() => {const current = deployment!.storage.getLiveHostControl();
+        return current?.admissionState === "open" && current.registeredConnectionId != null && current.registeredConnectionId !== previous;},{timeout: 30_000}).toBe(true);
+    };
     const hostRow = deployment.storage.getLiveHostControl()!, host = {mode: "device" as const,hostId: credential.hostId,hostEpoch: credential.hostEpoch,instanceId: credential.instanceId,connectionId: hostRow.registeredConnectionId!};
     const baseline = new Uint8Array(origin.bytes as Uint8Array), registration = createLiveMarkdownRegistrationValidator(policy)({document,currentPath: "docs/a.md",checkpoint: baseline});
     if (registration.kind !== "accepted") throw new Error(JSON.stringify(registration));
@@ -238,6 +254,41 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       await expect.poll(() => readFileSync(join(workspaceRoot,"docs/a.md"),"utf8"),{timeout: 30_000}).toContain("Reconnect owner edit");
       expect(lifecycle.currentClient()).toBe(singleton);
       expect(native.prepare("SELECT COUNT(*) AS count FROM live_device_bootstraps").get()!.count).toBe(0);
+      // Every settlement reaches ordinary sync through the standalone relay, including the first,
+      // whose before-image is the head the owner settled locally before adoption.
+      const latestSettlement = () => native.prepare("SELECT markdown_digest FROM live_device_settlements WHERE workspace_id='workspace' AND object_id=? ORDER BY terminal_cursor DESC LIMIT 1").get(document.objectId);
+      await expect.poll(() => latestSettlement()?.markdown_digest,{timeout: 30_000}).toBe(hash(readFileSync(join(workspaceRoot,"docs/a.md"))));
+      expect(await publish()).toBeGreaterThan(0);
+      const settlements = native.prepare("SELECT settlement_id,moment_id,terminal_cursor,markdown_digest FROM live_device_settlements WHERE workspace_id='workspace' AND object_id=? ORDER BY terminal_cursor").all(document.objectId);
+      expect(settlements.length).toBeGreaterThanOrEqual(2);
+      const relayLog = new DatabaseSync(join(root,"relay","relay.sqlite"),{readOnly: true});
+      try {
+        expect(relayLog.prepare("SELECT MAX(journal_cursor) AS cursor FROM sync_relay_live_update_journal").get()!.cursor).toBe(settlements.at(-1)!.terminal_cursor);
+        // The relay holds the exact native operation at its native origin coordinate.
+        const relayed = (kind: string,op: Record<string,unknown>) => {
+          const local = native.prepare("SELECT payload_json FROM replication_log WHERE workspace_id='workspace' AND origin_id=? AND origin_seq=? AND op_kind=?").get(String(op.origin_id),Number(op.origin_seq),kind);
+          const published = relayLog.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id='workspace' AND origin_id=? AND origin_seq=? AND op_kind=?").get(String(op.origin_id),Number(op.origin_seq),kind);
+          expect(published,`${kind} reached the relay`).toBeDefined();
+          const payload = JSON.parse(String(published!.payload_json));
+          expect(payload).toEqual(JSON.parse(String(local!.payload_json)));
+          return payload;
+        };
+        const adoption = native.prepare("SELECT source_moment_id,source_digest FROM live_owner_adoptions").get()!;
+        let previous: Record<string,unknown> | undefined;
+        for (const settlement of settlements) {
+          const audit = native.prepare("SELECT origin_id,origin_seq FROM live_audit_settlement_publications WHERE settlement_id=?").get(settlement.settlement_id);
+          const moment = native.prepare("SELECT origin_id,origin_seq FROM replication_log WHERE workspace_id='workspace' AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?").get(settlement.moment_id);
+          if (!audit || !moment) throw new Error(`Settlement ${String(settlement.settlement_id)} was not journaled for ordinary sync.`);
+          expect(relayed("live.audit.settlement",audit).record).toMatchObject({settlementId: settlement.settlement_id,momentId: settlement.moment_id,
+            previousCursor: previous?.terminal_cursor ?? 0,terminalCursor: settlement.terminal_cursor,markdownDigest: settlement.markdown_digest});
+          const published = relayed("moment.append",moment);
+          expect(published).toMatchObject({momentId: settlement.moment_id,objectId: document.objectId,payloadAfterBlobSha256: settlement.markdown_digest});
+          // The first settlement names the adopted source, never a draft the owner settled before adoption.
+          if (!previous) expect(published).toMatchObject({payloadBeforeBlobSha256: adoption.source_digest,beforeBlobSha256: adoption.source_digest,beforeLatestMomentId: adoption.source_moment_id});
+          else expect(published.payloadBeforeBlobSha256).toBe(previous.markdown_digest);
+          previous = settlement;
+        }
+      } finally {relayLog.close();}
       assertIndependentRelayReader(root,baseline,rendererDoc);
       writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,standalone: true,binary,document,markdown: yDocToMarkdown(rendererDoc)},null,2)); remote.destroy();
       return;
@@ -410,14 +461,12 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     const stop = async () => {let result: Awaited<ReturnType<typeof control.stopRestore>> | undefined, failure: unknown; await expect.poll(async () => {
       try {result = await control.stopRestore(lookup); return true;} catch(error) {if ((error as Error).message.includes("not ready")) return false; failure=error; return true;}
     },{timeout: 30_000}).toBe(true); if(failure) throw failure; return result!;};
-    const oldConnection = deployment.storage.getLiveHostControl()!.registeredConnectionId;
     expect(namedPeerInvalidated!.aborted).toBe(false);
-    connection.stop(); await connection.closed;
-    expect(namedPeerInvalidated!.aborted).toBe(true);
-    closeNamedPeer!(); closeNamedPeer = undefined;
-    expect(frameChanges.listenerCount()).toBe(0);
-    connection = connect();
-    await expect.poll(() => {const current=deployment!.storage.getLiveHostControl();return current?.admissionState==="open" && current.registeredConnectionId!==oldConnection;},{timeout: 30_000}).toBe(true);
+    await reconnect(() => {
+      expect(namedPeerInvalidated!.aborted).toBe(true);
+      closeNamedPeer!(); closeNamedPeer = undefined;
+      expect(frameChanges.listenerCount()).toBe(0);
+    });
     const handoffsBeforeStop = handoffCount;
     const stoppedRequests = vi.spyOn(singleton,"sendRequest");
     // The desktop publishes its own journal. Until the old settlements reach the relay, the fence commits nothing.
@@ -464,9 +513,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     expect(native.prepare("SELECT sequence,update_digest,pending FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence").all()).toEqual(pendingTail);
     expect((await control.settle(document)).materialized).toBe(true);
     expect(readFileSync(join(workspaceRoot, "docs/a.md"), "utf8")).toBe(yDocToMarkdown(renderer.doc!));
-    const restoredConnection = deployment.storage.getLiveHostControl()!.registeredConnectionId;
-    connection.stop(); await connection.closed; connection = connect();
-    await expect.poll(() => deployment!.storage.getLiveHostControl()?.registeredConnectionId !== restoredConnection, {timeout: 30_000}).toBe(true);
+    await reconnect();
     expect(await drain()).toHaveProperty("kind", "done");
     expect(handoffCount).toBe(handoffsAfterRestore);
     expect(await control.completeRestore(lookup, prepared.proposalDigest)).toEqual(resumed);
@@ -475,15 +522,30 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
     expect(membership.invalidated.aborted).toBe(true);
     writeFileSync(join(root,"result.json"),JSON.stringify({passed: true,link,binary,sha256: hash(readFileSync(binary)),document,markdown: yDocToMarkdown(remote)},null,2)); remote.destroy();
   } catch (error) {
-    // A cleanup failure below replaces this error, so keep it with the case.
-    writeFileSync(join(root,"result.json"),JSON.stringify({passed: false,standalone,link,binary,error: error instanceof Error ? error.stack ?? error.message : String(error)},null,2));
+    failed = true; failure = error;
     throw error;
   } finally {
-    releaseTailAdmission?.(); closeNamedPeer?.();
-    captures.mockRestore();
-    if (child && child.exitCode === null) {child.kill(); await once(child,"exit");}
-    await closeNetwork?.();
-    try { await renderer?.destroy(); await ipc?.shutdown(); await capture.stop(); await sessions.closeAll(); }
-    finally { await lifecycle.stop(); deployment?.storage.close(); }
+    // Every owned resource gets its close, in order, even after an earlier close fails.
+    const cleanupErrors: unknown[] = [];
+    const attempt = async (close: () => unknown) => {try {await close();} catch (error) {cleanupErrors.push(error);}};
+    await attempt(() => releaseTailAdmission?.());
+    await attempt(() => closeNamedPeer?.());
+    await attempt(() => captures.mockRestore());
+    await attempt(async () => {if (child && child.exitCode === null) {child.kill(); await once(child,"exit");}});
+    await attempt(() => closeNetwork?.());
+    await attempt(() => renderer?.destroy());
+    await attempt(() => ipc?.shutdown());
+    await attempt(() => capture.stop());
+    await attempt(() => sessions.closeAll());
+    await attempt(() => lifecycle.stop());
+    await attempt(() => deployment?.storage.close());
+    const describe = (error: unknown) => error instanceof Error ? error.stack ?? error.message : String(error);
+    if (failed || cleanupErrors.length) {
+      writeFileSync(join(root,"result.json"),JSON.stringify({passed: false,standalone,link,binary,
+        error: failed ? describe(failure) : null,cleanupErrors: cleanupErrors.map(describe)},null,2));
+    }
+    // Throwing here would replace the test's own failure, which stays primary.
+    if (failed && cleanupErrors.length) console.error("Owner proof cleanup also failed.",cleanupErrors);
+    if (!failed && cleanupErrors.length) throw new AggregateError(cleanupErrors,"Owner proof resource cleanup failed.");
   }
 },120_000);
