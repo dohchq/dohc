@@ -95,6 +95,14 @@ impl Fixture {
         &self,
         owner: &dohc_engine_runtime::actor::ActorLiveApplicationOwner,
     ) -> dohc_engine_runtime::actor::ActorLiveApplicationHandle {
+        self.adopt_at(owner, 0).await
+    }
+
+    async fn adopt_at(
+        &self,
+        owner: &dohc_engine_runtime::actor::ActorLiveApplicationOwner,
+        expected_local_sequence: i64,
+    ) -> dohc_engine_runtime::actor::ActorLiveApplicationHandle {
         let handle = owner
             .register(
                 "relay".into(),
@@ -119,7 +127,7 @@ impl Fixture {
                     baseline_moment_relay_sequence: 1,
                     baseline_registered_at_ms: 3,
                     baseline_bytes: self.bytes.clone(),
-                    expected_local_sequence: 0,
+                    expected_local_sequence,
                     events: vec![],
                     terminal_receipt: None,
                     outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
@@ -135,6 +143,90 @@ impl Fixture {
             .await
             .unwrap();
         handle
+    }
+
+    async fn record(&self, actor: &ActorHandle, update: Vec<u8>, request: &str, now_ms: i64) {
+        actor
+            .ydoc_record_update(
+                DocKey::new("workspace", "main", "object").unwrap(),
+                self.binding.current_path.clone(),
+                ContentKind::Richdoc,
+                Regime::Replicated,
+                update,
+                Some("owner-origin".into()),
+                None,
+                Some(self.binding.lineage_claim_id.clone()),
+                false,
+                None,
+                Some(request.into()),
+                now_ms,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    /// The relay accepts the oldest pending owner entry at `cursor`, then the owner ACKs it.
+    async fn accept_pending(
+        &self,
+        actor: &ActorHandle,
+        handle: &dohc_engine_runtime::actor::ActorLiveApplicationHandle,
+        cursor: i64,
+    ) -> LiveUpdateReceipt {
+        let (outbox, delivery, digest): (String, String, String) = self
+            .store
+            .read_with(|conn| conn.query_row(
+                "SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            ))
+            .unwrap();
+        let receipt = LiveUpdateReceipt {
+            delivery_id: delivery.clone(),
+            update_digest: digest.clone(),
+            journal_cursor: cursor,
+            accepting_host_epoch: 1,
+        };
+        let applied = handle
+            .apply(
+                AdmittedLiveUpdate {
+                    metadata: AdmittedLiveUpdateMetadata {
+                        accepted: RelayAcceptedLiveUpdate {
+                            receipt: receipt.clone(),
+                            binding: self.binding.clone(),
+                            authority: ServerDerivedLiveUpdateAuthority::Owner {
+                                principal_id: "owner".into(),
+                            },
+                            received_at_ms: 20 + cursor,
+                        },
+                        first_seen: vec![],
+                    },
+                    update_bytes: self.store.get_binary_blob(&digest).unwrap().unwrap(),
+                },
+                Arc::new(NoFaults),
+                100_000_000,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(applied, ApplicationResult::Applied(..)));
+        actor
+            .owner_ydoc_outbox_acknowledge(
+                "workspace".into(),
+                outbox,
+                vec![dohc_engine_collab::OwnerDeliveryReceipt {
+                    delivery_id: delivery,
+                    update_digest: digest,
+                    journal_cursor: cursor,
+                    accepting_host_epoch: 1,
+                }],
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        receipt
     }
 
     fn counts(&self) -> Vec<i64> {
@@ -877,4 +969,303 @@ async fn enrolled_owner_keeps_its_lineage_when_an_old_conflict_is_resolved_after
         f.text
     );
     supervisor.close_all().unwrap();
+}
+
+/// The owner settles a private draft H1 locally before the device host adopts
+/// the document, optionally replaces it with unsettled H2, and the relay
+/// accepts the adoption seed and a later edit H3. The first live settlement's
+/// local moment keeps H1 -> H3 for rollback. Its published companion names the
+/// adopted source H0 instead, so H1 never reaches the relay's history.
+async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_before_adoption: bool) {
+    use dohc_engine_sync::{ReplicationEnvelope, owner_publication_prefix};
+    const SENTINEL: &str = "Private draft sentinel 7f3c9a, never shared.";
+    let mut f = Fixture::new();
+    let key = DocKey::new("workspace", "main", "object").unwrap();
+    let path = f.binding.current_path.clone();
+    let source = hex_sha256(f.text.as_bytes());
+    let projection = |doc: &Ydoc| doc.project(ContentKind::Richdoc).unwrap().content;
+    let allowed = |store: &EngineStore, op: &ReplicationEnvelope| {
+        owner_publication_prefix(store, "workspace", std::slice::from_ref(op), 1_000_000)
+            .unwrap()
+            .allowed_ops
+    };
+    let journaled = |store: &EngineStore, kind: &str, id: &str| -> (String, i64, String) {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT origin_id,origin_seq,payload_json FROM replication_log WHERE imported=0 AND op_kind=?1 AND (json_extract(payload_json,'$.momentId')=?2 OR json_extract(payload_json,'$.record.settlementId')=?2)",
+                    [kind, id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap()
+    };
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+
+    // H1: a private draft settles locally.
+    f.record(
+        &actor,
+        f.doc.richdoc_append_paragraph(SENTINEL),
+        "draft",
+        10,
+    )
+    .await;
+    f.ordinary_settle(&actor).await.unwrap();
+    let draft_text = projection(&f.doc);
+    let draft = hex_sha256(draft_text.as_bytes());
+    assert!(draft_text.contains(SENTINEL));
+    assert_eq!(
+        std::fs::read_to_string(f.root.path().join(&path)).unwrap(),
+        draft_text
+    );
+    let draft_moment: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT moment_id FROM moments WHERE after_blob_sha256=?1",
+                [&draft],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    if replace_draft_before_adoption {
+        // H2 deletes the sentinel and is never settled before adoption.
+        let replaced = format!("{}\nOwner work that replaced the private draft.\n", f.text);
+        f.record(
+            &actor,
+            f.doc
+                .rewrite_content_to_markdown(ContentKind::Richdoc, &replaced)
+                .unwrap(),
+            "replace-draft",
+            20,
+        )
+        .await;
+        assert!(!projection(&f.doc).contains(SENTINEL));
+    }
+
+    // Adoption seeds the full local state; the relay accepts it, then H3.
+    let head: i64 = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT head_update_seq FROM ydoc_docs", [], |r| r.get(0)))
+        .unwrap();
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt_at(&owner, head).await;
+    f.accept_pending(&actor, &handle, 1).await;
+    f.record(
+        &actor,
+        f.doc.richdoc_append_paragraph("Accepted owner edit."),
+        "accepted-edit",
+        30,
+    )
+    .await;
+    let receipt = f.accept_pending(&actor, &handle, 2).await;
+    let settle = || {
+        handle.settle(
+            Some(receipt.clone()),
+            100,
+            f.root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+    };
+    let settled = settle().await.unwrap();
+    assert!(settled.materialized);
+
+    // The local moment keeps the actual rollback preimage H1.
+    let local = |store: &EngineStore| -> (String, String) {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT before_blob_sha256,before_latest_moment_id FROM moments WHERE moment_id=?1",
+                    [&settled.moment_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(local(&f.store), (draft.clone(), draft_moment.clone()));
+
+    // The published companion names the adopted source H0 for every before field.
+    let (source_recorded_at, source_origin): (i64, String) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT recorded_at_ms,metadata_origin FROM moments WHERE moment_id='original'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(source_origin, "api");
+    let (moment_origin, moment_seq, moment_json) =
+        journaled(&f.store, "moment.append", &settled.moment_id);
+    let payload: serde_json::Value = serde_json::from_str(&moment_json).unwrap();
+    let length = f.text.len() as i64;
+    for (field, expected) in [
+        ("payloadBeforePath", serde_json::json!(path)),
+        ("payloadBeforeContentKind", serde_json::json!("text")),
+        ("payloadBeforeBlobSha256", serde_json::json!(source)),
+        ("payloadBeforeByteLength", serde_json::json!(length)),
+        ("beforePresent", serde_json::json!("present")),
+        ("beforeObjectId", serde_json::json!("object")),
+        ("beforeVersionId", serde_json::json!("main")),
+        ("beforePath", serde_json::json!(path)),
+        ("beforeBlobSha256", serde_json::json!(source)),
+        ("beforeContentKind", serde_json::json!("text")),
+        ("beforeByteLength", serde_json::json!(length)),
+        ("beforeUpdatedAtMs", serde_json::json!(source_recorded_at)),
+        ("beforeLatestMomentId", serde_json::json!("original")),
+        (
+            "beforeMetadata",
+            serde_json::json!({"origin": "api", "summary": null, "correlationId": null}),
+        ),
+        ("momentId", serde_json::json!(settled.moment_id)),
+        (
+            "payloadAfterBlobSha256",
+            serde_json::json!(settled.markdown_digest),
+        ),
+    ] {
+        assert_eq!(payload[field], expected, "{field}");
+    }
+    assert!(!moment_json.contains(&draft));
+    assert!(!moment_json.contains(&draft_moment));
+    assert!(!moment_json.contains(SENTINEL));
+
+    // The audit and its moment sit at consecutive native origin coordinates.
+    let (audit_origin, audit_seq, audit_json) =
+        journaled(&f.store, "live.audit.settlement", &settled.settlement_id);
+    let audit: serde_json::Value = serde_json::from_str(&audit_json).unwrap();
+    assert_eq!(
+        audit["record"]["momentId"],
+        serde_json::json!(settled.moment_id)
+    );
+    assert_eq!(
+        audit["record"]["markdownDigest"],
+        serde_json::json!(settled.markdown_digest)
+    );
+    assert_eq!(audit["record"]["previousCursor"], serde_json::json!(0));
+    assert_eq!(audit["record"]["terminalCursor"], serde_json::json!(2));
+    let publication: (String, i64) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT origin_id,origin_seq FROM live_audit_settlement_publications WHERE settlement_id=?1",
+                [&settled.settlement_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(publication, (audit_origin.clone(), audit_seq));
+    assert_eq!(
+        (moment_origin.clone(), moment_seq),
+        (audit_origin, audit_seq + 1)
+    );
+
+    let published = ReplicationEnvelope {
+        workspace_id: "workspace".into(),
+        origin_id: moment_origin,
+        origin_seq: moment_seq,
+        op_kind: "moment.append".into(),
+        recorded_at_ms: payload["recordedAtMs"].as_i64().unwrap(),
+        relay_seq: None,
+        payload: payload.clone(),
+    };
+    assert_eq!(allowed(&f.store, &published), 1);
+    // The H1 envelope the old projection would have published stays refused.
+    let mut leaked = published.clone();
+    leaked.payload["payloadBeforeBlobSha256"] = serde_json::json!(draft);
+    leaked.payload["beforeBlobSha256"] = serde_json::json!(draft);
+    assert_eq!(allowed(&f.store, &leaked), 0);
+
+    // Replaying the settlement journals nothing new.
+    let rows = f.store.table_row_count("replication_log").unwrap();
+    let again = settle().await.unwrap();
+    assert_eq!(
+        (again.settlement_id, again.moment_id),
+        (settled.settlement_id.clone(), settled.moment_id.clone())
+    );
+    assert_eq!(f.store.table_row_count("replication_log").unwrap(), rows);
+
+    // A later private tail stays refused.
+    f.record(
+        &actor,
+        f.doc.richdoc_append_paragraph("Private tail."),
+        "private-tail",
+        50,
+    )
+    .await;
+    let mut tail = published.clone();
+    let tail_digest = hex_sha256(projection(&f.doc).as_bytes());
+    tail.payload["payloadBeforeBlobSha256"] = serde_json::json!(tail_digest);
+    tail.payload["beforeBlobSha256"] = serde_json::json!(tail_digest);
+    assert_eq!(allowed(&f.store, &tail), 0);
+    assert_eq!(allowed(&f.store, &published), 1);
+
+    // Closing the owner fences publication; compaction and a restart keep the
+    // journaled envelope and the local preimage.
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+    let compacted =
+        dohc_engine_collab::maybe_compact(&mut f.store, &key, 0, &NoFaults, 60).unwrap();
+    assert!(matches!(
+        compacted,
+        dohc_engine_storage::TxnOutcome::Committed(
+            dohc_engine_collab::CompactOutcome::Compacted { .. }
+        )
+    ));
+    let reopened = EngineStore::open(&f.db, 0).unwrap();
+    assert_eq!(allowed(&reopened, &published), 0);
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let _registered = owner
+        .register(
+            "relay".into(),
+            ApplicationHostCoordinate {
+                host_id: "host".into(),
+                host_epoch: 1,
+                instance_id: "restarted".into(),
+                connection_id: "reconnected".into(),
+            },
+            f.binding.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed(&reopened, &published), 1);
+    assert_eq!(allowed(&reopened, &leaked), 0);
+    assert_eq!(allowed(&reopened, &tail), 0);
+    assert_eq!(
+        journaled(&reopened, "moment.append", &settled.moment_id).2,
+        moment_json
+    );
+    assert_eq!(local(&reopened), (draft.clone(), draft_moment));
+    let preimage: String = reopened
+        .read_with(|conn| {
+            conn.query_row("SELECT text FROM blobs WHERE sha256=?1", [&draft], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(preimage, draft_text);
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn first_owner_settlement_publishes_the_adopted_source_over_a_settled_seed_head() {
+    first_owner_settlement_publishes_the_adopted_source(false).await;
+}
+
+#[tokio::test]
+async fn first_owner_settlement_publishes_the_adopted_source_over_a_replaced_draft() {
+    first_owner_settlement_publishes_the_adopted_source(true).await;
 }

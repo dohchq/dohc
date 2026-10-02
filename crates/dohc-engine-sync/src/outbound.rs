@@ -115,6 +115,21 @@ struct MomentPayloadRow {
     before_metadata_correlation_id: Option<String>,
 }
 
+/// Accepted text a published moment names as its before-image in place of
+/// the moment's local preimage. The local rollback tuple is unchanged.
+pub(crate) struct PortableBefore {
+    pub moment_id: String,
+    pub version_id: String,
+    pub object_id: String,
+    pub path: String,
+    pub blob_sha256: String,
+    pub byte_length: i64,
+    pub recorded_at_ms: i64,
+    pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
+}
+
 /// Project one committed domain moment into the relay-visible log.
 ///
 /// The caller must check [`crate::workspace_replicates_with_relay_in_tx`]
@@ -124,7 +139,19 @@ pub fn journal_moment_append_in_tx(
     workspace_id: &str,
     moment_id: &str,
 ) -> Result<(), SyncError> {
-    let (payload, recorded_at_ms) = moment_append_payload_in_tx(tx, workspace_id, moment_id)?;
+    let (payload, recorded_at_ms) = moment_payload_in_tx(tx, workspace_id, moment_id, None)?;
+    journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
+}
+
+/// [`journal_moment_append_in_tx`] with `before` as the whole public before group.
+pub(crate) fn journal_moment_append_from_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    before: &PortableBefore,
+) -> Result<(), SyncError> {
+    let (payload, recorded_at_ms) =
+        moment_payload_in_tx(tx, workspace_id, moment_id, Some(before))?;
     journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
 }
 
@@ -132,6 +159,15 @@ pub(crate) fn moment_append_payload_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
     moment_id: &str,
+) -> Result<(serde_json::Value, i64), SyncError> {
+    moment_payload_in_tx(tx, workspace_id, moment_id, None)
+}
+
+fn moment_payload_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    portable_before: Option<&PortableBefore>,
 ) -> Result<(serde_json::Value, i64), SyncError> {
     let row = tx
         .query_row(
@@ -245,6 +281,34 @@ pub(crate) fn moment_append_payload_in_tx(
         "beforeLatestMomentId": row.before_latest_moment_id,
         "beforeMetadata": before_metadata,
     });
+    if let Some(before) = portable_before {
+        let fields = serde_json::json!({
+            "payloadBeforePath": before.path,
+            "payloadBeforeContentKind": "text",
+            "payloadBeforeBlobSha256": before.blob_sha256,
+            "payloadBeforeByteLength": before.byte_length,
+            "beforePresent": "present",
+            "beforeObjectId": before.object_id,
+            "beforeVersionId": before.version_id,
+            "beforePath": before.path,
+            "beforeBlobSha256": before.blob_sha256,
+            "beforeContentKind": "text",
+            "beforeByteLength": before.byte_length,
+            "beforeUpdatedAtMs": before.recorded_at_ms,
+            "beforeLatestMomentId": before.moment_id,
+            "beforeMetadata": {
+                "origin": replicated_moment_origin(&before.metadata_origin),
+                "summary": before.metadata_summary,
+                "correlationId": before.metadata_correlation_id,
+            },
+        });
+        let object = payload
+            .as_object_mut()
+            .expect("moment payload is an object");
+        for (field, value) in fields.as_object().expect("before group is an object") {
+            object.insert(field.clone(), value.clone());
+        }
+    }
     omit_local_person_authors(&mut payload);
     if let Some(authors) = payload
         .get_mut("authors")
