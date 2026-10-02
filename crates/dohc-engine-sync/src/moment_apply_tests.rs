@@ -1009,7 +1009,7 @@ fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_the
     // Each payload names the restored text; only the audit differs.
     let other_text = "a restore with other content";
     let restored_audit = restored_text.as_str();
-    let cases: Vec<(&str, Option<(LiveObjectBinding, &str, &str)>)> = vec![
+    let cases = vec![
         ("unaudited", None),
         (
             "same-generation",
