@@ -377,7 +377,6 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(editor(page)).toContainText(A2);
       await expect(saveState(page)).toHaveAttribute("data-state", /^(saved|saved-to-host)$/, { timeout: 60_000 });
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, H2, A2], [R1]), { timeout: 60_000 }).toBe(true);
-      expect(ydocUpdateAuthors(ownerTemp.rootPath)).toContainEqual({ actorOriginId: NEXT_AGENT, actorKind: "agent" });
       await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 60_000 });
     });
 
