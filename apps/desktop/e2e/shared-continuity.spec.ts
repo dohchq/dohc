@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
-import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
+import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { ownerSettlementState, ydocUpdateAuthors } from "./helpers/engineDb";
 import { approveDesktop, createVerifiedAccount, openDesktopApproval, startSelfHostOnboardingStack, trustFixtureCa } from "./helpers/selfHostOnboarding";
 import {
@@ -40,6 +40,10 @@ const A2 = "Agent continued after restore.";
 const R2 = "New recipient continued.";
 const AGENT = "trip-agent";
 const NEXT_AGENT = "trip-agent-after-restore";
+// While the server hosts the document, an agent's edit can reach the live
+// document before the file is saved. The CLI then fails with this line, and
+// the agent reads the document instead of retrying.
+const EDIT_NOT_YET_SAVED = `dohc: The edit is in ${PATH}, but dohc has not saved it to the file yet (Saved locally. The shared file update is pending.). Read the document before you retry.\n`;
 
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 const saveState = (page: Page) => page.getByTestId("markdown-save-state");
@@ -362,11 +366,17 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // saved locally or saved to the host. The settled-file check covers the disk.
       await expect(saveState(page)).toHaveAttribute("data-state", /^(saved|saved-to-host)$/, { timeout: 60_000 });
       await expect.poll(() => cliRead(ownerTemp), { timeout: 30_000 }).toContain(H2);
-      const edited = await runDohcCli(ownerTemp, ["--json", "document", "edit", PATH, "--find", A1, "--text", `${A1} ${A2}`, "--agent", NEXT_AGENT]);
-      expect(JSON.parse(edited.stdout)).toMatchObject({ ok: true, path: PATH, changed: true });
+      const edited = await runDohcCli(ownerTemp, ["--json", "document", "edit", PATH, "--find", A1, "--text", `${A1} ${A2}`, "--agent", NEXT_AGENT])
+        .catch((error: unknown) => {
+          if (error instanceof DohcCliFailure && error.exitCode === 1 && error.stdout === "" && error.stderr === EDIT_NOT_YET_SAVED) return null;
+          throw error;
+        });
+      testInfo.annotations.push({ type: "post-restore agent edit", description: edited ? "saved" : "applied, not yet saved" });
+      if (edited) expect(JSON.parse(edited.stdout)).toMatchObject({ ok: true, path: PATH, changed: true });
+      await expect.poll(() => cliRead(ownerTemp), { timeout: 30_000 }).toContain(A2);
       await expect(editor(page)).toContainText(A2);
       await expect(saveState(page)).toHaveAttribute("data-state", /^(saved|saved-to-host)$/, { timeout: 60_000 });
-      await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, H2, A2], [R1]), { timeout: 30_000 }).toBe(true);
+      await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, H2, A2], [R1]), { timeout: 60_000 }).toBe(true);
       expect(ydocUpdateAuthors(ownerTemp.rootPath)).toContainEqual({ actorOriginId: NEXT_AGENT, actorKind: "agent" });
       await expect(page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 60_000 });
     });
