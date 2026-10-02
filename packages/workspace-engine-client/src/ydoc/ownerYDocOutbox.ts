@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { parseLiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
-import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
+import { parseAgentDeclaration, parseLiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
+import type { AgentDeclaration, LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter";
 import { WorkspaceDaemonRequester } from "../live/daemonLiveAdapter";
 import type { JsonValue, WorkspaceHandle } from "../protocol";
@@ -44,6 +44,8 @@ export interface OwnerYDocOutboxEntry {
   readonly update: Uint8Array;
   readonly byteLength: number;
   readonly createdAtMs: number;
+  /** The agent the queued edit declared; absent when it declared none. Never authority. */
+  readonly agentDeclaration?: AgentDeclaration;
 }
 
 export interface OwnerYDocOutboxPending {
@@ -358,6 +360,9 @@ export class OwnerYDocOutbox {
         deliveryId: stringField(entry, "deliveryId"),
         updateDigest, update, byteLength,
         createdAtMs: wireInteger(entry, "createdAtMs"),
+        ...(Object.hasOwn(entry, "agentDeclaration")
+          ? { agentDeclaration: parseAgentDeclaration(entry.agentDeclaration) }
+          : {}),
       });
       remaining -= byteLength;
       lastSequence = sequence;

@@ -234,6 +234,87 @@ fn saved_in(
     Ok(Some((receipt, application, anchor)))
 }
 
+/// Native continuation validates the committed resume/checkpoint association.
+/// External publication proofs retain saved_in's full evidence and read budget.
+fn native_saved(
+    conn: &Connection,
+    held: &Registration,
+    operation: &str,
+) -> Result<Option<NativeRestoreResumeReceipt>, ApplicationError> {
+    identifier(operation, 512)?;
+    let b = &held.binding;
+    let length:Option<i64>=conn.query_row(
+        "SELECT length(CAST(resume_receipt_json AS BLOB)) FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5 AND lineage_claim_id=?6",
+        params![held.namespace,operation,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|r|r.get(0)).optional().map_err(read_sql)?.flatten();
+    let Some(length) = length else {
+        return Ok(None);
+    };
+    if !(1..=NativeHistoryReconstruction::HEADER_BYTES as i64).contains(&length) {
+        return Err(ApplicationError::Corrupt);
+    };
+    let (json,settlement,stamp):(String,String,String)=conn.query_row(
+        "SELECT resume_receipt_json,resume_settlement_id,resume_evidence_digest FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2 AND length(CAST(resume_settlement_id AS BLOB))<=512 AND length(CAST(resume_evidence_digest AS BLOB))=64",
+        params![held.namespace,operation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(read_sql)?;
+    let receipt: NativeRestoreResumeReceipt =
+        serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+    digest(&stamp)?;
+    identifier(&settlement, 512)?;
+    receipt
+        .binding
+        .validate_canonical()
+        .map_err(|_| ApplicationError::Corrupt)?;
+    receipt
+        .application_receipt
+        .validate()
+        .map_err(|_| ApplicationError::Corrupt)?;
+    identifier(&receipt.moment_id, 512)?;
+    digest(&receipt.markdown_digest)?;
+    integer(receipt.recorded_at_ms, 0, SAFE).map_err(|_| ApplicationError::Corrupt)?;
+    integer(receipt.local_head_sequence, 1, SAFE).map_err(|_| ApplicationError::Corrupt)?;
+    if receipt.operation_id != operation
+        || receipt.relay_database_namespace != held.namespace
+        || receipt.settlement_id != settlement
+    {
+        return Err(ApplicationError::Corrupt);
+    };
+    settlement::validate_historical_binding(&receipt.binding, b)?;
+    let bound:bool=conn.query_row(
+        "SELECT new_generation=?3 AND application_delivery_id=?4 AND json_extract(application_json,'$.admitted.accepted.receipt.deliveryId')=?4 AND json_extract(application_json,'$.admitted.accepted.receipt.updateDigest')=?5 AND json_extract(application_json,'$.admitted.accepted.receipt.journalCursor')=?6 AND json_extract(application_json,'$.admitted.accepted.receipt.acceptingHostEpoch')=?7 AND json_extract(application_json,'$.localHeadSequence')=?8 AND json_extract(proposal_json,'$.point.markdownDigest')=?9 AND EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.settlement_id=?10 AND s.workspace_id=?11 AND s.main_version_id=?12 AND s.object_id=?13 AND s.lineage_claim_id=?14 AND s.settlement_kind='restore' AND s.restore_operation_id=?2 AND s.terminal_cursor=?6 AND s.binding_json=?15) FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",
+        params![held.namespace,operation,b.restore_fence_generation,receipt.application_receipt.delivery_id,receipt.application_receipt.update_digest,receipt.application_receipt.journal_cursor,receipt.application_receipt.accepting_host_epoch,receipt.local_head_sequence,receipt.markdown_digest,receipt.settlement_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,serde_json::to_string(&receipt.binding).map_err(|_|ApplicationError::Corrupt)?],|r|r.get(0)).map_err(read_sql)?;
+    if !bound {
+        return Err(ApplicationError::Corrupt);
+    };
+    let anchor = settlement::restore::read_anchor(
+        conn,
+        held,
+        receipt.application_receipt.journal_cursor,
+        NativeHistoryReconstruction::HEADER_BYTES,
+    )?
+    .ok_or(ApplicationError::Corrupt)?;
+    if anchor.id != receipt.settlement_id
+        || anchor.moment != receipt.moment_id
+        || anchor.markdown != receipt.markdown_digest
+        || anchor.sequence != receipt.local_head_sequence
+        || anchor.cursor != receipt.application_receipt.journal_cursor
+    {
+        return Err(ApplicationError::Corrupt);
+    };
+    let at_resume = Registration {
+        workspace_id: held.workspace_id.clone(),
+        namespace: held.namespace.clone(),
+        coordinate: held.coordinate.clone(),
+        binding: receipt.binding.clone(),
+        live: false,
+    };
+    accepted_history::validate_resume_checkpoint(
+        conn,
+        &at_resume,
+        operation,
+        &receipt.application_receipt,
+    )?;
+    Ok(Some(receipt))
+}
+
 pub(super) fn generation(
     conn: &Connection,
     held: &Registration,
@@ -241,8 +322,8 @@ pub(super) fn generation(
     generation_with(conn, held, None)
 }
 
-/// Without a budget, the resume keeps its separate stage budgets. With one,
-/// every read, including the fence replay, is charged to it.
+/// Native generation reads bounded committed associations. An explicit budget
+/// retains the full proof and charges every read, including the fence replay.
 fn generation_with(
     conn: &Connection,
     held: &Registration,
@@ -258,15 +339,17 @@ fn generation_with(
         b.lineage_claim_id,
         b.restore_fence_generation
     ];
+    let length: i64 = conn
+        .query_row(
+            &format!("SELECT coalesce(sum(length(CAST(operation_id AS BLOB))),0) {generation}"),
+            p,
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
     if let Some(budget) = budget.as_deref_mut() {
-        let length: i64 = conn
-            .query_row(
-                &format!("SELECT coalesce(sum(length(CAST(operation_id AS BLOB))),0) {generation}"),
-                p,
-                |r| r.get(0),
-            )
-            .map_err(read_sql)?;
         budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+    } else if !(0..=512).contains(&length) {
+        return Err(ApplicationError::Corrupt);
     }
     let id: Option<String> = conn
         .query_row(&format!("SELECT operation_id {generation}"), p, |r| {
@@ -279,7 +362,7 @@ fn generation_with(
     };
     let receipt = match budget {
         Some(budget) => saved_in(conn, held, &id, budget, None)?.map(|(receipt, ..)| receipt),
-        None => saved(conn, held, &id, crate::limits::MAX_YDOC_UPDATE_BYTES)?,
+        None => native_saved(conn, held, &id)?,
     };
     receipt.ok_or(ApplicationError::Conflict).map(Some)
 }

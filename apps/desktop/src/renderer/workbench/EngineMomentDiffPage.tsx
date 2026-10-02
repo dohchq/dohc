@@ -49,6 +49,7 @@ export type ActiveUndoHandler = {
 export function EngineMomentDiffPage({
   workspaceId,
   tabPath,
+  readOnly = false,
   onBeforeRestore,
   onOpenFile,
   onPathResolved,
@@ -58,6 +59,8 @@ export function EngineMomentDiffPage({
 }: {
   workspaceId: string;
   tabPath: string;
+  // A shared view shows the change its share imported and offers no restore.
+  readOnly?: boolean;
   // Settles drafts and queued collection writes, and pauses new cell edits
   // until the returned release runs — held across the restore IPC so no cell
   // edit lands between the drain and the lineage change.
@@ -354,6 +357,7 @@ export function EngineMomentDiffPage({
             ) : null}
           </div>
         </div>
+        {readOnly ? null : <>
         <button
           type="button"
           data-testid="engine-diff-restore-file"
@@ -393,6 +397,7 @@ export function EngineMomentDiffPage({
             {restoreState.status === "undoing" ? "Undoing..." : "Undo restore"}
           </button>
         ) : null}
+        </>}
         {canOpenFile ? (
           <button
             type="button"

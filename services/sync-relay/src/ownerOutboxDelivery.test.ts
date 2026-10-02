@@ -5,10 +5,18 @@ import type {LiveUpdateHostApplicationAck, LiveUpdateReceipt} from "@dohc/live-s
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
-function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000) {
+// The key native gives a divergent adoption's seed (adoption.rs).
+const seedKey = (adoptionId: string, sequence: number) => (updateDigest: string) =>
+  `owner-adoption:${sha(Buffer.from(JSON.stringify([adoptionId, sequence, updateDigest])))}`;
+
+function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclaration?: object, firstKey?: (updateDigest: string) => string) {
   const base = Buffer.alloc(1_048_576, 17);
   const binding = {workspaceId: "workspace",mainVersionId: "main",objectId: "object",lineageClaimId: sha(base),currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
-  const entries = [1,3,7].map(sequence => ({sequence,appendKey: `append-${sequence}`,deliveryId: `delivery-${sequence}`,updateDigest: sha(Buffer.from([sequence])),byteLength: 1,createdAtMs: sequence}));
+  const entries = [1,3,7].map(sequence => ({sequence,
+    appendKey: sequence === 1 && firstKey ? firstKey(sha(Buffer.from([sequence]))) : `append-${sequence}`,
+    deliveryId: `delivery-${sequence}`,updateDigest: sha(Buffer.from([sequence])),byteLength: 1,createdAtMs: sequence,
+    ...(sequence === 1 && agentDeclaration ? {agentDeclaration} : {})}));
+  const applied = vi.fn();
   const host = {hostId: "host",hostEpoch: 1,instanceId: "instance",connectionId: "connection"};
   const requests: Array<{part: string; bytes: number}> = [], receipts: unknown[] = [];
   const state = {value: "active"};
@@ -48,8 +56,45 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000) {
     commitLiveUpdateJournal: vi.fn((input: {metadata: {deliveryId: string; updateDigest: string}}) => ({result: {kind: "accepted",receipt: {deliveryId: input.metadata.deliveryId,updateDigest: input.metadata.updateDigest,journalCursor: receipts.length + 1,acceptingHostEpoch: 1}}})),
   };
   const validate = vi.fn<OwnerOutboxAdmission["validate"]>(() => ({} as never));
-  return {requests,receipts,storage,state,applyThrough,validate,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,validate},workspace: "handle",host: host as never,registrationId: 1,binding,nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough})};
+  return {requests,receipts,storage,state,applyThrough,validate,applied,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,validate},workspace: "handle",host: host as never,registrationId: 1,binding,
+    adoption: {adoptionId: "adoption",sequence: 7,applied},nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough})};
 }
+
+it("proves the adoption's seed applied only from the host's verified ACK, before the queue drops it", async () => {
+  const f = fixture(1, 10_000, undefined, seedKey("adoption", 7));
+  f.validate.mockReturnValueOnce({kind: "retry", reason: "admission-unavailable", waitForCapacity: async () => {}});
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true, retryReady: true});
+  f.applyThrough.mockResolvedValueOnce(null);
+  expect(await f.run()).toEqual({admittedEntries: 0, hasMore: true});
+  f.applyThrough.mockImplementationOnce(async receipt => ({...receipt,localYDocSequence: 1,applicationReplayed: true,deliveryId: "other"}) as LiveUpdateHostApplicationAck);
+  await expect(f.run()).rejects.toThrow("ACK identity changed");
+  expect(f.applied).not.toHaveBeenCalled();
+  f.applied.mockImplementationOnce(() => expect(f.receipts).toEqual([]));
+  expect(await f.run()).toEqual({admittedEntries: 1, hasMore: true});
+  expect(f.applied).toHaveBeenCalledTimes(1);
+  expect(f.receipts).toMatchObject([{deliveryId: "delivery-1"}]);
+});
+
+it("proves no seed waits when the head is later work, even while it is pending, or the queue is empty", async () => {
+  const later = fixture(1);
+  later.validate.mockReturnValueOnce({kind: "retry", reason: "admission-unavailable", waitForCapacity: async () => {}});
+  expect(await later.run()).toEqual({admittedEntries: 0, hasMore: true, retryReady: true});
+  expect(later.applied).toHaveBeenCalledTimes(1);
+  const drained = fixture(3, 10_000, undefined, seedKey("adoption", 7));
+  expect(await drained.run()).toEqual({admittedEntries: 3, hasMore: false});
+  drained.applied.mockClear();
+  expect(await drained.run()).toEqual({admittedEntries: 0, hasMore: false});
+  expect(drained.applied).toHaveBeenCalledTimes(1);
+});
+
+it.each([["another adoption", seedKey("other", 7)], ["another adopted head", seedKey("adoption", 6)]])(
+  "refuses a seed key from %s without delivering it", async (_name, key) => {
+    const f = fixture(1, 10_000, undefined, key);
+    await expect(f.run()).rejects.toThrow("Owner outbox holds another adoption's seed.");
+    expect(f.applied).not.toHaveBeenCalled();
+    expect(f.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
+    expect(f.applyThrough).not.toHaveBeenCalled();
+  });
 
 it("drains small edits when their immutable base exceeds the aggregate drain budget", async () => {
   const run = fixture();
@@ -58,6 +103,17 @@ it("drains small edits when their immutable base exceeds the aggregate drain bud
   expect(run.requests.filter(row => row.part === "base")).toHaveLength(0);
   expect(run.requests).toHaveLength(9);
   expect(run.requests.reduce((bytes, row) => bytes + row.bytes, 0)).toBeLessThan(10_000);
+});
+
+it("submits the agent each entry declared and none for an entry that declared none", async () => {
+  const agentDeclaration = {agentId: "trip-agent-ü",onBehalfOf: "local-person",depth: 2};
+  const run = fixture(2, 10_000, agentDeclaration);
+  expect(await run.run()).toEqual({admittedEntries: 2, hasMore: true});
+  const [first, second] = run.storage.commitLiveUpdateJournal.mock.calls.map(([input]) => (input as {metadata: Record<string, unknown>}).metadata);
+  expect(first).toMatchObject({deliveryId: "delivery-1",agentDeclaration});
+  expect(second).toMatchObject({deliveryId: "delivery-3"});
+  expect(second).not.toHaveProperty("agentDeclaration");
+  await expect(fixture(1, 10_000, {agentId: "",onBehalfOf: null,depth: 0}).run()).rejects.toThrow();
 });
 
 it("retains configured entry and byte limits without acknowledging unread updates", async () => {

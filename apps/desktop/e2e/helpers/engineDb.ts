@@ -1,5 +1,8 @@
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { join } from "node:path";
+import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 
 // WS-G2-C-2 — the one source of truth for the e2e SQLite helpers that read the
 // workspace engine.db. These are load-bearing for the "no double-journal"
@@ -63,8 +66,17 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
   ],
   ["blobs", ["sha256", "text"]],
   ["snapshots", ["path"]],
-  ["ydoc_updates", ["actor_origin_id", "actor_kind"]],
+  ["ydoc_updates", ["workspace_id", "version_id", "object_id", "seq", "actor_origin_id", "actor_kind"]],
   ["replication_log", ["op_kind", "payload_json"]],
+  ["ydoc_docs", ["workspace_id", "version_id", "object_id", "path", "regime", "head_update_seq", "head_snapshot_seq"]],
+  ["ydoc_snapshots", ["workspace_id", "version_id", "object_id", "up_to_seq"]],
+  ["ydoc_owner_bindings", ["workspace_id", "main_version_id", "object_id", "lineage_claim_id",
+    "binding_json", "relay_database_namespace", "binding_revision", "accepted_cursor"]],
+  ["live_audit_events", ["relay_database_namespace", "event_count", "evidence_digest", "journal_cursor", "delivery_id",
+    "accepting_host_epoch", "record_digest"]],
+  ["live_audit_record_manifests", ["record_digest", "manifest_json"]],
+  ["live_audit_record_chunks", ["record_digest", "ordinal", "chunk_sha256"]],
+  ["binary_blobs", ["sha256", "bytes"]],
 ];
 
 // Presence is the read gate. The engine ships one transactional migration
@@ -146,6 +158,37 @@ export function ydocUpdateCount(rootPath: string): number {
       return Number(row?.n ?? 0);
     }) ?? 0
   );
+}
+
+export interface OwnerEnrollment {
+  binding: LiveObjectBinding;
+  relayDatabaseNamespace: string;
+  revision: number;
+  acceptedCursor: number;
+}
+
+/** The owner's persisted row for this exact object and lineage, including an older restore fence while enrollment catches up. */
+export function ownerEnrollment(rootPath: string, expected: LiveObjectBinding): OwnerEnrollment | null {
+  return withEngineDb(rootPath, (db) => {
+    const row = db.prepare(
+      `SELECT binding_json, relay_database_namespace, binding_revision, accepted_cursor
+       FROM ydoc_owner_bindings
+       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`,
+    ).get(expected.workspaceId, expected.mainVersionId, expected.objectId, expected.lineageClaimId);
+    if (!row) return null;
+    if (typeof row.binding_json !== "string") throw new Error("Owner enrollment binding is not JSON text.");
+    const binding = parseLiveObjectBinding(JSON.parse(row.binding_json));
+    const relayDatabaseNamespace = parseLiveUpdateIdentifier(row.relay_database_namespace, "relayDatabaseNamespace");
+    const revision = row.binding_revision;
+    const acceptedCursor = row.accepted_cursor;
+    if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error("Owner enrollment revision must be a positive safe integer.");
+    }
+    if (typeof acceptedCursor !== "number" || !Number.isSafeInteger(acceptedCursor) || acceptedCursor < 0) {
+      throw new Error("Owner enrollment cursor must be a nonnegative safe integer.");
+    }
+    return { binding, relayDatabaseNamespace, revision, acceptedCursor };
+  });
 }
 
 // Who each journaled Y.Doc update is recorded under.
@@ -287,6 +330,117 @@ export function replicationOpKindsMentioning(rootPath: string, needle: string): 
         .map((row) => row.opKind);
     }) ?? []
   );
+}
+
+/** Where one path's live document stands against its last compaction. Read-only. */
+export interface LiveDocumentFold {
+  regime: string;
+  head: number;
+  snapshot: number;
+  // The newest stored snapshot row, and the journaled updates it should have pruned.
+  snapshotRow: number | null;
+  updatesAtOrBelowSnapshot: number;
+}
+
+// A compaction writes a snapshot row up to the head, moves head_snapshot_seq to
+// it and prunes every update it folded (durable.rs `maybe_compact`).
+export function liveDocumentFold(rootPath: string, path: string): LiveDocumentFold | null {
+  return withEngineDb(rootPath, (db) => {
+    const rows = db.prepare(`SELECT workspace_id, version_id, object_id, regime, head_update_seq AS head, head_snapshot_seq AS snapshot
+      FROM ydoc_docs WHERE path = ?`).all(path);
+    if (rows.length > 1) throw new Error(`engine.db holds ${rows.length} live documents at ${path}.`);
+    const row = rows[0];
+    if (!row) return null;
+    const key = [row.workspace_id, row.version_id, row.object_id];
+    const snapshotRow = db.prepare(`SELECT MAX(up_to_seq) AS seq FROM ydoc_snapshots
+      WHERE workspace_id = ? AND version_id = ? AND object_id = ?`).get(...key)?.seq;
+    const folded = db.prepare(`SELECT COUNT(*) AS n FROM ydoc_updates
+      WHERE workspace_id = ? AND version_id = ? AND object_id = ? AND seq <= ?`).get(...key, row.snapshot)?.n;
+    return {
+      regime: String(row.regime), head: Number(row.head), snapshot: Number(row.snapshot),
+      snapshotRow: snapshotRow === null || snapshotRow === undefined ? null : Number(snapshotRow),
+      updatesAtOrBelowSnapshot: Number(folded ?? 0),
+    };
+  });
+}
+
+// The fixture document is small. A record past this bound is not one this test wrote.
+const MAX_AUDIT_RECORD_BYTES = 1024 * 1024;
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+/** One accepted change's durable audit record, with every stored length and hash verified before it is parsed. */
+export interface LiveAuditRecord {
+  namespace: string;
+  eventCount: number;
+  evidenceDigest: string;
+  journalCursor: number;
+  deliveryId: string;
+  acceptingHostEpoch: number;
+  recordDigest: string;
+  accepted: {
+    receipt: { deliveryId: string; updateDigest: string; journalCursor: number; acceptingHostEpoch: number };
+    binding: { restoreFenceGeneration: number; currentPath: string };
+    authority: { principalKind: string; principalId: string };
+    agentDeclaration?: { agentId: string; onBehalfOf: string | null; depth: number };
+  };
+}
+
+/** Reads from an owner's imported audit or the service host's own. Read-only; it never repairs a record. */
+export function readLiveAuditRecord(db: Pick<EngineDb, "prepare">, deliveryId: string): LiveAuditRecord | null {
+  const events = db.prepare(`SELECT relay_database_namespace AS namespace, event_count, evidence_digest, journal_cursor,
+      delivery_id, accepting_host_epoch, record_digest FROM live_audit_events WHERE delivery_id = ?`).all(deliveryId);
+  if (events.length > 1) throw new Error(`Audit holds ${events.length} events for delivery ${deliveryId}.`);
+  const event = events[0];
+  if (!event) return null;
+  const recordDigest = String(event.record_digest);
+  const manifestRow = db.prepare("SELECT manifest_json FROM live_audit_record_manifests WHERE record_digest = ?").get(recordDigest);
+  if (!manifestRow) throw new Error(`Audit event ${deliveryId} has no record manifest.`);
+  const manifest = JSON.parse(String(manifestRow.manifest_json)) as {
+    formatVersion: number; recordDigest: string; byteLength: number; chunks: { sha256: string; byteLength: number }[];
+  };
+  if (manifest.formatVersion !== 1 || manifest.recordDigest !== recordDigest || manifest.byteLength > MAX_AUDIT_RECORD_BYTES) {
+    throw new Error(`Audit record ${recordDigest} is not a bounded version 1 record.`);
+  }
+  const stored = db.prepare("SELECT ordinal, chunk_sha256 FROM live_audit_record_chunks WHERE record_digest = ? ORDER BY ordinal").all(recordDigest);
+  if (stored.length !== manifest.chunks.length) throw new Error(`Audit record ${recordDigest} has ${stored.length} of ${manifest.chunks.length} chunks.`);
+  const parts = manifest.chunks.map((chunk, ordinal) => {
+    const row = stored[ordinal]!;
+    if (Number(row.ordinal) !== ordinal || row.chunk_sha256 !== chunk.sha256) throw new Error(`Audit chunk ${ordinal} of ${recordDigest} differs from its manifest.`);
+    const blob = db.prepare("SELECT bytes FROM binary_blobs WHERE sha256 = ?").get(chunk.sha256)?.bytes;
+    if (!(blob instanceof Uint8Array) || blob.byteLength !== chunk.byteLength || sha256(blob) !== chunk.sha256) {
+      throw new Error(`Audit chunk ${ordinal} of ${recordDigest} is missing or damaged.`);
+    }
+    return blob;
+  });
+  const bytes = Buffer.concat(parts);
+  if (bytes.byteLength !== manifest.byteLength || sha256(bytes) !== recordDigest) throw new Error(`Audit record ${recordDigest} does not match its digest.`);
+  const record = JSON.parse(bytes.toString("utf8")) as { metadata?: { accepted?: LiveAuditRecord["accepted"] } };
+  const accepted = record.metadata?.accepted;
+  if (!accepted || accepted.receipt.deliveryId !== deliveryId) throw new Error(`Audit record ${recordDigest} names another delivery.`);
+  return {
+    namespace: String(event.namespace), eventCount: Number(event.event_count), evidenceDigest: String(event.evidence_digest),
+    journalCursor: Number(event.journal_cursor), deliveryId, acceptingHostEpoch: Number(event.accepting_host_epoch), recordDigest, accepted,
+  };
+}
+
+// Failure evidence only: how many changes this owner queued for the server,
+// how many still wait, and how many declared an agent. Its columns are newer
+// than the read gate above, so a store without them reports the error instead.
+export function ownerOutboxDeclarations(rootPath: string): { entries: number; pending: number; declared: number } | { error: string } | null {
+  try {
+    return withEngineDb(rootPath, (db) => {
+      const row = db.prepare(`SELECT COUNT(*) AS entries, COALESCE(SUM(pending), 0) AS pending,
+        COUNT(agent_declaration_json) AS declared FROM owner_ydoc_outbox_entries`).get();
+      return { entries: Number(row?.entries ?? 0), pending: Number(row?.pending ?? 0), declared: Number(row?.declared ?? 0) };
+    });
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+// The owner's imported copy of one accepted change's audit record.
+export function ownerAuditRecord(rootPath: string, deliveryId: string): LiveAuditRecord | null {
+  return withEngineDb(rootPath, (db) => readLiveAuditRecord(db, deliveryId));
 }
 
 export function replicationOpKindCount(rootPath: string, opKind: string): number {

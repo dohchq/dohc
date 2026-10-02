@@ -135,6 +135,9 @@ impl RuntimeError {
                     }
                     ApplicationError::Interrupted => "operation-crashed",
                     ApplicationError::PublicationPending => "live-application-publication-pending",
+                    ApplicationError::MaterializationPending => {
+                        "settlement-materialization-pending"
+                    }
                 }
             }
             RuntimeError::Sync(err) => err.code(),

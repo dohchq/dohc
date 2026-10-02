@@ -560,8 +560,9 @@ pub fn journal_live_event_in_tx(
             |r| r.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    // The canonical accepted header is at most214,820 bytes under the existing
-    // binding and authority bounds. Do not ask SQLite to parse the range array.
+    // The canonical accepted header is at most 216,929 bytes under the existing
+    // binding, authority, and declaration bounds. Do not ask SQLite to parse
+    // the range array.
     let head:Vec<u8>=tx.query_row(&format!("SELECT substr(CAST(metadata_json AS BLOB),1,262144) FROM live_accepted_updates WHERE {SCOPE} AND event_count=?6"),params![p[0],p[1],p[2],p[3],p[4],count],|r|r.get(0)).map_err(SyncError::corrupt)?;
     let accepted = accepted_header(&head)?;
     accepted.validate().map_err(SyncError::corrupt)?;
@@ -708,6 +709,56 @@ mod tests {
     }
 
     #[test]
+    fn accepted_header_keeps_a_declared_agent_and_refuses_a_null_one() {
+        let mut accepted = accepted();
+        accepted.agent_declaration = Some(dohc_engine_domain::AgentDeclaration {
+            agent_id: "trip-agent 旅行".into(),
+            on_behalf_of: None,
+            depth: 0,
+        });
+        let json = serde_json::to_string(&accepted).unwrap();
+        let declared =
+            r#""agentDeclaration":{"agentId":"trip-agent 旅行","onBehalfOf":null,"depth":0}"#;
+        assert!(json.ends_with(&format!(r#","receivedAtMs":1,{declared}}}"#)));
+        let record = format!("{{\"accepted\":{json},\"firstSeen\":[{{\"clientId\":1");
+        assert_eq!(accepted_header(record.as_bytes()).unwrap(), accepted);
+        let null = json.replace(declared, r#""agentDeclaration":null"#);
+        assert!(accepted_header(format!("{{\"accepted\":{null}}}").as_bytes()).is_err());
+        let mut friend = accepted;
+        friend.authority = ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "friend".into(),
+            grant_id: "grant".into(),
+            grant_generation: 1,
+        };
+        assert!(friend.validate().is_err());
+    }
+
+    fn accepted() -> RelayAcceptedLiveUpdate {
+        RelayAcceptedLiveUpdate {
+            receipt: LiveUpdateReceipt {
+                delivery_id: "delivery".into(),
+                update_digest: "a".repeat(64),
+                journal_cursor: 1,
+                accepting_host_epoch: 1,
+            },
+            binding: LiveObjectBinding {
+                workspace_id: "workspace".into(),
+                main_version_id: "main".into(),
+                object_id: "object".into(),
+                lineage_claim_id: "b".repeat(64),
+                current_path: "note.md".into(),
+                selector_paths: vec!["note.md".into()],
+                restore_fence_generation: 0,
+            },
+            authority: ServerDerivedLiveUpdateAuthority::Owner {
+                principal_id: "owner".into(),
+            },
+            received_at_ms: 1,
+            agent_declaration: None,
+        }
+    }
+
+    #[test]
     fn accepted_header_does_not_require_the_metadata_map_to_end() {
         let accepted = RelayAcceptedLiveUpdate {
             receipt: LiveUpdateReceipt {
@@ -729,6 +780,7 @@ mod tests {
                 principal_id: "owner".into(),
             },
             received_at_ms: 1,
+            agent_declaration: None,
         };
         let json = serde_json::to_string(&accepted).unwrap();
         for tail in [

@@ -415,7 +415,13 @@ impl EngineService {
     pub(super) fn configured_settlement_admission(
         &self,
         ctx: &RequestContext,
-    ) -> Result<(usize, Arc<dyn Send + Sync>), WireError> {
+    ) -> Result<
+        (
+            usize,
+            dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction,
+        ),
+        WireError,
+    > {
         if let Some(host) = self.ordinary_live_host.get() {
             if !host.connection.is_current()
                 || !ctx
@@ -428,7 +434,10 @@ impl EngineService {
                     "ordinary live host connection is not current",
                 ));
             }
-            return Ok((host.settlement.0, host.settlement.1.reserve()?));
+            return Ok((
+                host.settlement.0,
+                host.settlement.1.reserve_reconstruction()?,
+            ));
         }
         let discovery = self
             .configured_live_host
@@ -449,7 +458,7 @@ impl EngineService {
         let (max, admission) = discovery.settlement.as_ref().ok_or_else(|| {
             WireError::new(ErrorCode::Forbidden, "live settlement is not configured")
         })?;
-        Ok((*max, admission.reserve()?))
+        Ok((*max, admission.reserve_reconstruction()?))
     }
 
     pub(super) fn relay_sync_admission(
@@ -547,7 +556,7 @@ mod tests {
         serde_json::from_value(json!({
             "version":1,"relayNamespace":"relay", "host":{"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
             "workspaces": roots.iter().map(|(root,id)| json!({"root":root,"workspaceId":id,"maxRegistrations":4})).collect::<Vec<_>>(),
-            "ingress":{"aggregateBytes":400_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":2,"uploadDeadlineMs":30_000}
+            "ingress":{"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":2,"uploadDeadlineMs":30_000}
         })).unwrap()
     }
 

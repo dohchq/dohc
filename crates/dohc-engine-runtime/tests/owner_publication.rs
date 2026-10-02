@@ -1,5 +1,6 @@
 use dohc_engine_collab::live_update_application::*;
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
+use dohc_engine_domain::{AgentDeclaration, ChangeActorKind, ChangeAttribution};
 use dohc_engine_runtime::{ActorHandle, CancellationToken, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -168,6 +169,81 @@ impl Fixture {
             .unwrap();
     }
 
+    /// A native edit by `origin` with `attribution`, as an agent's session records it.
+    async fn record_by(
+        &self,
+        actor: &ActorHandle,
+        update: Vec<u8>,
+        request: &str,
+        now_ms: i64,
+        origin: &str,
+        attribution: ChangeAttribution,
+    ) {
+        actor
+            .ydoc_record_update(
+                DocKey::new("workspace", "main", "object").unwrap(),
+                self.binding.current_path.clone(),
+                ContentKind::Richdoc,
+                Regime::Replicated,
+                update,
+                Some(origin.into()),
+                Some(attribution),
+                Some(self.binding.lineage_claim_id.clone()),
+                false,
+                None,
+                Some(request.into()),
+                now_ms,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn settle(
+        &self,
+        handle: &dohc_engine_runtime::actor::ActorLiveApplicationHandle,
+        terminal: Option<LiveUpdateReceipt>,
+    ) -> LiveSettlementResult {
+        handle
+            .settle(
+                terminal,
+                100,
+                self.root.path().to_owned(),
+                30,
+                Arc::new(NoFaults),
+                CancellationToken::new(),
+                dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                    policy:
+                        dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                            working_reserve_bytes: 8 * 1024 * 1024,
+                        },
+                    reservation: Arc::new(()),
+                },
+            )
+            .await
+            .unwrap()
+    }
+
+    fn file(&self) -> String {
+        std::fs::read_to_string(self.root.path().join(&self.binding.current_path)).unwrap()
+    }
+
+    fn moment_authors(&self, moment: &str) -> Vec<serde_json::Value> {
+        let json: Option<String> = self
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT author_json FROM moments WHERE moment_id=?1",
+                    [moment],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        json.map_or_else(Vec::new, |json| serde_json::from_str(&json).unwrap())
+    }
+
     /// The relay accepts the oldest pending owner entry at `cursor`, then the owner ACKs it.
     async fn accept_pending(
         &self,
@@ -175,14 +251,17 @@ impl Fixture {
         handle: &dohc_engine_runtime::actor::ActorLiveApplicationHandle,
         cursor: i64,
     ) -> LiveUpdateReceipt {
-        let (outbox, delivery, digest): (String, String, String) = self
+        let (outbox, delivery, digest, declaration): (String, String, String, Option<String>) = self
             .store
             .read_with(|conn| conn.query_row(
-                "SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence LIMIT 1",
+                "SELECT outbox_id,delivery_id,update_digest,agent_declaration_json FROM owner_ydoc_outbox_entries WHERE pending=1 ORDER BY sequence LIMIT 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             ))
             .unwrap();
+        // The relay accepts exactly what the entry declared.
+        let agent_declaration =
+            declaration.map(|json| serde_json::from_str::<AgentDeclaration>(&json).unwrap());
         let receipt = LiveUpdateReceipt {
             delivery_id: delivery.clone(),
             update_digest: digest.clone(),
@@ -200,6 +279,7 @@ impl Fixture {
                                 principal_id: "owner".into(),
                             },
                             received_at_ms: 20 + cursor,
+                            agent_declaration,
                         },
                         first_seen: vec![],
                     },
@@ -263,6 +343,357 @@ impl Fixture {
             )
             .await
     }
+}
+
+/// An agent as large as the declaration contract allows: escaped quotes fill
+/// its author entry.
+fn large_agent(index: usize) -> AgentDeclaration {
+    AgentDeclaration {
+        agent_id: format!("{index:03}{}", "\"".repeat(509)),
+        on_behalf_of: Some("\"".repeat(512)),
+        depth: 1,
+    }
+}
+
+/// A collaborator agent's accepted delivery of `bytes` at `cursor`.
+async fn deliver_declared(
+    handle: &dohc_engine_runtime::actor::ActorLiveApplicationHandle,
+    binding: &dohc_engine_collab::LiveObjectBinding,
+    cursor: i64,
+    bytes: &[u8],
+    declaration: AgentDeclaration,
+) -> (LiveUpdateReceipt, ApplicationResult) {
+    let receipt = LiveUpdateReceipt {
+        delivery_id: format!("remote-{cursor}"),
+        update_digest: hex_sha256(bytes),
+        journal_cursor: cursor,
+        accepting_host_epoch: 1,
+    };
+    let result = handle
+        .apply(
+            AdmittedLiveUpdate {
+                metadata: AdmittedLiveUpdateMetadata {
+                    accepted: RelayAcceptedLiveUpdate {
+                        receipt: receipt.clone(),
+                        binding: binding.clone(),
+                        authority: ServerDerivedLiveUpdateAuthority::Owner {
+                            principal_id: "owner".into(),
+                        },
+                        received_at_ms: 20 + cursor,
+                        agent_declaration: Some(declaration),
+                    },
+                    first_seen: vec![],
+                },
+                update_bytes: bytes.to_vec(),
+            },
+            Arc::new(NoFaults),
+            100_000_000,
+        )
+        .await
+        .unwrap();
+    (receipt, result)
+}
+
+struct PrefixRival {
+    path: PathBuf,
+    fired: std::sync::atomic::AtomicBool,
+}
+impl dohc_engine_storage::FaultInjector for PrefixRival {
+    fn poll(&self, point: dohc_engine_storage::FaultPoint) -> dohc_engine_storage::FaultAction {
+        if point == dohc_engine_storage::FaultPoint::MaterializeBeforePreimageRevalidate
+            && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            std::fs::write(&self.path, "rival survives").unwrap();
+        }
+        dohc_engine_storage::FaultAction::Continue
+    }
+}
+
+/// The owner's own agent edit waits in its outbox while declared deliveries
+/// fill the interval's author bound. The accepted prefix settles without the
+/// private edit. After another private edit, a lost acknowledgement, and a
+/// restart, the same terminal replays that settlement instead of minting a
+/// new one. The refused delivery then applies, and the private edit's own
+/// acceptance names its trusted agent in the next moment.
+#[tokio::test]
+async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
+    const LOCAL: &str = "Private local paragraph";
+    const SECOND: &str = "Second private paragraph";
+    const REMOTE: &str = "Remote agent paragraph";
+    let mut f = Fixture::new();
+    f.binding
+        .selector_paths
+        .extend((0..99).map(|i| format!("z{i:02}{}", "x".repeat(1020))));
+    f.binding.selector_paths.sort();
+    f.binding.validate_canonical().unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt(&owner).await;
+    let local_agent = ChangeAttribution {
+        actor_kind: ChangeActorKind::Agent,
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+        run: None,
+    };
+    f.record_by(
+        &actor,
+        f.doc.richdoc_append_paragraph(LOCAL),
+        "local",
+        20,
+        "local-agent",
+        local_agent.clone(),
+    )
+    .await;
+    // The outbox entry declares the agent its native row recorded. It is no
+    // enrolled draft.
+    let local_entry: (Option<String>, Option<i64>) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT agent_declaration_json,draft_binding_revision FROM owner_ydoc_outbox_entries WHERE pending=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        local_entry,
+        (
+            Some(r#"{"agentId":"local-agent","onBehalfOf":"owner","depth":1}"#.into()),
+            None
+        )
+    );
+    // A collaborator's paragraph, concurrent with the private edit. Every
+    // delivery after the first carries its bytes again.
+    let remote = Ydoc::wire();
+    remote.apply(&f.bytes).unwrap();
+    let remote_bytes = remote.richdoc_append_paragraph(REMOTE);
+    f.doc.apply(&remote_bytes).unwrap();
+    // Keep each settlement interval inside the configured maximum while the
+    // accepted checkpoint segment accumulates discarded metadata above60MiB.
+    const PREFIX: i64 = 700;
+    let mut accepted_head = None;
+    for cursor in 1..=PREFIX {
+        let (receipt, result) =
+            deliver_declared(&handle, &f.binding, cursor, &remote_bytes, large_agent(999)).await;
+        assert!(matches!(result, ApplicationResult::Applied(..)));
+        if cursor % 100 == 0 {
+            let settled = f.settle(&handle, Some(receipt)).await;
+            assert!(!f.file().contains(LOCAL));
+            assert!(f.file().contains(REMOTE));
+            let moments = f.store.table_row_count("moments").unwrap();
+            if let Some((moment, count)) = &accepted_head {
+                assert_eq!(
+                    &settled.moment_id, moment,
+                    "unchanged accepted projection made another moment"
+                );
+                assert_eq!(
+                    moments, *count,
+                    "unchanged accepted projection added a moment"
+                );
+            } else {
+                accepted_head = Some((settled.moment_id, moments));
+            }
+        }
+    }
+    let metadata: i64 = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT sum(length(CAST(metadata_json AS BLOB))) FROM live_accepted_updates",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(metadata > 60 * 1024 * 1024);
+    let remote_bytes = remote.richdoc_append_paragraph("Capacity remote paragraph");
+    f.doc.apply(&remote_bytes).unwrap();
+    let mut admitted = 0;
+    let mut terminal = None;
+    let refused = loop {
+        assert!(admitted < 80, "the author bound never refused");
+        let cursor = PREFIX + admitted as i64 + 1;
+        let (receipt, result) = deliver_declared(
+            &handle,
+            &f.binding,
+            cursor,
+            &remote_bytes,
+            large_agent(admitted),
+        )
+        .await;
+        match result {
+            ApplicationResult::Applied(..) => {
+                terminal = Some(receipt);
+                admitted += 1;
+            }
+            ApplicationResult::Pending(ApplicationPending::SettlementRequired) => break cursor,
+            other => panic!("unexpected {other:?}"),
+        }
+    };
+    assert!(admitted > 1);
+
+    // The private edit's native sequence has no application. Settling the
+    // accepted prefix leaves it out of the file and the moment.
+    let moments = f.store.table_row_count("moments").unwrap();
+    let preimage = f.file();
+    assert!(
+        handle
+            .settle(
+                terminal.clone(),
+                100,
+                f.root.path().to_owned(),
+                30,
+                Arc::new(PrefixRival {
+                    path: f.root.path().join(&f.binding.current_path),
+                    fired: std::sync::atomic::AtomicBool::new(false)
+                }),
+                CancellationToken::new(),
+                AdmittedNativeHistoryReconstruction {
+                    policy: NativeHistoryReconstruction {
+                        working_reserve_bytes: 8 * 1024 * 1024
+                    },
+                    reservation: Arc::new(())
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(f.file(), "rival survives");
+    let native = dohc_engine_collab::load_persisted(
+        &f.store,
+        &DocKey::new("workspace", "main", "object").unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+    .doc;
+    assert!(
+        native
+            .project(ContentKind::Richdoc)
+            .unwrap()
+            .content
+            .contains(LOCAL)
+    );
+    std::fs::write(f.root.path().join(&f.binding.current_path), preimage).unwrap();
+    let settled = f.settle(&handle, terminal.clone()).await;
+    assert!(settled.materialized);
+    assert!(f.file().contains(REMOTE));
+    assert!(!f.file().contains(LOCAL));
+    assert_eq!(f.store.table_row_count("moments").unwrap(), moments + 1);
+    let authors = f.moment_authors(&settled.moment_id);
+    assert_eq!(authors.len(), admitted);
+    assert!(
+        authors
+            .iter()
+            .all(|author| author["agentId"] != "local-agent")
+    );
+    let (head, boundary): (i64, Option<i64>) = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT head_update_seq,settled_update_seq FROM ydoc_docs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(settled.local_ydoc_sequence, head);
+    assert!(
+        boundary.is_none_or(|boundary| boundary < head),
+        "the file lacks the private edit"
+    );
+
+    // Another private edit, then a restart before the acknowledgement reached
+    // the relay. The same terminal replays the same settlement.
+    f.record_by(
+        &actor,
+        f.doc.richdoc_append_paragraph(SECOND),
+        "second",
+        40,
+        "local-agent",
+        local_agent,
+    )
+    .await;
+    drop(handle);
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+    dohc_engine_collab::maybe_compact(
+        &mut f.store,
+        &DocKey::new("workspace", "main", "object").unwrap(),
+        0,
+        &NoFaults,
+        41,
+    )
+    .unwrap();
+    let native = dohc_engine_collab::load_persisted(
+        &f.store,
+        &DocKey::new("workspace", "main", "object").unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+    .doc;
+    let native_text = native.project(ContentKind::Richdoc).unwrap().content;
+    assert!(native_text.contains(LOCAL));
+    assert!(native_text.contains(SECOND));
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 4).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = owner
+        .register(
+            "relay".into(),
+            ApplicationHostCoordinate {
+                host_id: "host".into(),
+                host_epoch: 1,
+                instance_id: "instance".into(),
+                connection_id: "connection".into(),
+            },
+            f.binding.clone(),
+        )
+        .await
+        .unwrap();
+    let replayed = f.settle(&handle, terminal).await;
+    assert_eq!(replayed.settlement_id, settled.settlement_id);
+    assert_eq!(replayed.local_ydoc_sequence, settled.local_ydoc_sequence);
+    assert_eq!(replayed.moment_id, settled.moment_id);
+    assert_eq!(f.store.table_row_count("moments").unwrap(), moments + 1);
+    assert!(!f.file().contains(LOCAL));
+
+    // The refused delivery applies once the interval is free.
+    let (_, retried) = deliver_declared(
+        &handle,
+        &f.binding,
+        refused,
+        &remote_bytes,
+        large_agent(admitted),
+    )
+    .await;
+    assert!(matches!(retried, ApplicationResult::Applied(..)));
+    // The private edit's own acceptance names its trusted agent. The second
+    // private edit still waits, so the next moment holds accepted content.
+    let accepted = f.accept_pending(&actor, &handle, refused + 1).await;
+    let next = f.settle(&handle, Some(accepted)).await;
+    assert!(next.materialized);
+    assert_eq!(next.application_count, 2);
+    assert!(f.file().contains(LOCAL));
+    assert!(!f.file().contains(SECOND));
+    let mut named: Vec<String> = f
+        .moment_authors(&next.moment_id)
+        .iter()
+        .map(|author| author["agentId"].as_str().unwrap().to_owned())
+        .collect();
+    named.sort();
+    let mut expected = vec![large_agent(admitted).agent_id, "local-agent".to_owned()];
+    expected.sort();
+    assert_eq!(named, expected);
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
 }
 
 #[tokio::test]
@@ -403,19 +834,30 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
         std::fs::read_to_string(f.root.path().join(&f.binding.current_path)).unwrap(),
         f.text
     );
+    // A live settlement covers only the accepted prefix: the pending edit
+    // stays out of the file.
+    let prefix = handle
+        .settle(
+            None,
+            100,
+            f.root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                policy: dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(prefix.application_count, 0);
     assert!(
-        handle
-            .settle(
-                None,
-                100,
-                f.root.path().to_owned(),
-                30,
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-                Arc::new(())
-            )
-            .await
-            .is_err()
+        !std::fs::read_to_string(f.root.path().join(&f.binding.current_path))
+            .unwrap()
+            .contains("pending-only")
     );
     let (outbox,delivery,digest):(String,String,String)=f.store.read_with(|conn|conn.query_row("SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))).unwrap();
     let receipt = LiveUpdateReceipt {
@@ -435,6 +877,7 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
                             principal_id: "owner".into(),
                         },
                         received_at_ms: 21,
+                        agent_declaration: None,
                     },
                     first_seen: vec![],
                 },
@@ -469,7 +912,12 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
-            Arc::new(()),
+            dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                policy: dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
         )
         .await
         .unwrap();
@@ -682,6 +1130,7 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
                             principal_id: "owner".into(),
                         },
                         received_at_ms: 21,
+                        agent_declaration: None,
                     },
                     first_seen: vec![],
                 },
@@ -716,7 +1165,12 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
-            Arc::new(()),
+            dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                policy: dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
         )
     };
     let settled = settle().await.unwrap();
@@ -1069,7 +1523,12 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
-            Arc::new(()),
+            dohc_engine_collab::live_update_application::AdmittedNativeHistoryReconstruction {
+                policy: dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
         )
     };
     let settled = settle().await.unwrap();

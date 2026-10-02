@@ -20,6 +20,8 @@ import type { ServerRuns } from "../automations/serverRuns";
 import type { WorkspaceEngineCapture, probeEngineStoreRefusal } from "../workspaces/workspaceEngineCapture";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { createEngineYDocSessionIpc, EngineYDocIpcSender } from "../workspaces/engineYDocSessionIpc";
+import { sharedViewHistory } from "../workspaces/sharedViewHistory";
+import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 
 type EngineStoreAuthorityState = {
   operationLanes: Map<string, Promise<void>>;
@@ -39,7 +41,7 @@ export function createWorkspaceEngineIpc<
     sender: Sender, workspaceId: string, retiredMessage: string,
     work: (operation: Operation) => Promise<Result>,
   ): Promise<Result>;
-  receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceForRegistered">;
+  receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceForRegistered" | "storeFor">;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
     work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus" | "getCollectionRecord">) => Promise<Result>,
@@ -216,37 +218,53 @@ export function createWorkspaceEngineIpc<
       };
     }
 
+    // A shared view reads its own imported history through the renderer's
+    // registered attachment. It keeps no capture, so restore stays refused.
+    // The read never reaches the relay: a share whose access ended keeps the
+    // history it already imported, as it keeps its files, and gains nothing new.
+    async function readHistory<Result>(
+      event: Event, workspaceId: string,
+      read: (history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment">) => Promise<Result>,
+    ): Promise<Result> {
+      if (!shareViewIsPresent(requireWorkspace(workspaceId).shareView)) {
+        return read((await requireEngineCapture(workspaceId, "Engine history")).capture);
+      }
+      return withRendererWorkspaceOperation(event.sender, workspaceId,
+        "History stopped loading because this window changed workspaces.", async (operation) => {
+          const { workspace } = operation;
+          if (!shareViewIsPresent(workspace.shareView)) throw new Error("This workspace is no longer a shared view.");
+          const store = receivedShareEngine.storeFor({
+            engineWorkspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: workspace.attachmentId,
+          });
+          return read(sharedViewHistory(store, workspace.workspaceId));
+        });
+    }
+
     registerHandler(CHANNELS.listEngineMoments, async (event, payload) => {
       assertTrustedSender(event);
       const input = ListEngineMomentsPayload.parse(payload);
-      const { capture } = await requireEngineCapture(
-        input.workspaceId,
-        "Engine history",
-      );
-      return listEngineMomentsForIpc(
+      return readHistory(event, input.workspaceId, (history) => listEngineMomentsForIpc(
         () =>
-          capture.listMoments({
+          history.listMoments({
             ...(input.limit !== undefined ? { limit: input.limit } : {}),
             ...(input.beforeMomentOrder !== undefined
               ? { beforeMomentOrder: input.beforeMomentOrder }
               : {}),
           }),
         authorNames(input.workspaceId),
-      );
+      ));
     });
 
     registerHandler(CHANNELS.readEngineMoment, async (event, payload) => {
       assertTrustedSender(event);
       const input = ReadEngineMomentPayload.parse(payload);
-      const { capture } = await requireEngineCapture(
-        input.workspaceId,
-        "Engine history",
-      );
-      const moment = await capture.readMoment(input.momentId);
-      return ReadEngineMomentResult.parse({
-        moment: moment
-          ? engineMomentDetailForIpc(moment, authorNames(input.workspaceId))
-          : null,
+      return readHistory(event, input.workspaceId, async (history) => {
+        const moment = await history.readMoment(input.momentId);
+        return ReadEngineMomentResult.parse({
+          moment: moment
+            ? engineMomentDetailForIpc(moment, authorNames(input.workspaceId))
+            : null,
+        });
       });
     });
 
