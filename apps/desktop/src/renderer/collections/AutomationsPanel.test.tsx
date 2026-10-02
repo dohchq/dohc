@@ -2517,7 +2517,9 @@ describe("an automation's runs", () => {
       await new Promise<void>((resolve) => { older = resolve; });
       return { status: "listed", runs: [run({ claimId: "atc_older", createdAtMs: 1 })], next: null };
     });
-    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    // Opening reads the file, and its first answer reads the newest page again. Count from after both.
+    await act(async () => { render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />); });
+    expect(screen.getByText("Stamp the finish date")).toBeTruthy();
     await screen.findByTestId("automation-run-atc_new");
     await screen.findByText("Stamp the finish date");
     const calls = () => bridge.listCollectionAutomationRuns.mock.calls.length;
@@ -2536,6 +2538,45 @@ describe("an automation's runs", () => {
     await userEvent.click(within(screen.getByTestId("automation-run-atc_new")).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(calls()).toBe(shown + 2));
     expect(bridge.listCollectionAutomationRuns).toHaveBeenLastCalledWith({ workspaceId: "ws-1", automationId: "collection:Tasks#stamp" });
+    expect(screen.getByTestId("automation-run-atc_older")).toBeDefined();
+  });
+
+  it("reads the newest page again when the file's first answer comes while older runs load, and keeps them", async () => {
+    const { bridge } = makeBridge(read([summary(stamp)]));
+    let answerHolds: () => void = () => undefined;
+    bridge.listAutomationHolds.mockImplementationOnce(() => new Promise((resolve) => {
+      answerHolds = () => resolve({ holds: [], unreadable: false });
+    }));
+    let older: () => void = () => undefined;
+    const newest = run({ claimId: "atc_new", createdAtMs: 2, writes: [{ kind: "field", recordId: "rec_1", path: "Tasks/Plan.md", field: "Done", before: null, after: true }] });
+    bridge.listCollectionAutomationRuns.mockImplementation(async (payload) => {
+      if (payload?.before === undefined) return { status: "listed", runs: [newest], next: "2:atc_new" };
+      await new Promise<void>((resolve) => { older = resolve; });
+      return { status: "listed", runs: [run({ claimId: "atc_older", createdAtMs: 1 })], next: null };
+    });
+    const head = { workspaceId: "ws-1", automationId: "collection:Tasks#stamp" };
+    const olderPage = { ...head, before: "2:atc_new" };
+    render(<Panel focus={{ automationId: "collection:Tasks#stamp", run: null, seq: 1 }} />);
+    await screen.findByTestId("automation-run-atc_new");
+    await userEvent.click(screen.getByRole("button", { name: "Older runs" }));
+    expect(bridge.listCollectionAutomationRuns.mock.calls).toEqual([[head], [olderPage]]);
+    // The file's first answer comes while the older page loads, and reads the newest page again.
+    await act(async () => answerHolds());
+    expect(screen.getByText("Stamp the finish date")).toBeTruthy();
+    expect(bridge.listCollectionAutomationRuns.mock.calls).toEqual([[head], [olderPage], [head]]);
+    const button = screen.getByRole("button", { name: "Older runs" });
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => older());
+    await screen.findByTestId("automation-run-atc_older");
+    expect(bridge.listCollectionAutomationRuns).toHaveBeenCalledTimes(3);
+    expect(bridge.listCollectionAutomations).toHaveBeenCalledTimes(1);
+    expect(bridge.listAutomationHolds).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Older runs" })).toBeNull();
+    // The refresh after an Undo reads the newest page only, and the older page stays.
+    await userEvent.click(within(screen.getByTestId("automation-run-atc_new")).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(bridge.listCollectionAutomationRuns).toHaveBeenCalledTimes(4));
+    expect(bridge.listCollectionAutomationRuns).toHaveBeenLastCalledWith(head);
     expect(screen.getByTestId("automation-run-atc_older")).toBeDefined();
   });
 
