@@ -42,6 +42,9 @@ export function deriveLiveAuthorSnapshot(storage: StorageContext, authority: Ser
     authors.push({kind: "human",humanId: trustedAccount.accountId,humanName: trustedAccount.name});
   } else if (context.kind === "link") {
     if (authority.principalKind !== "link") return [];
+    const mapping = storage.db.prepare("SELECT public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?")
+      .get(authority.grantId,authority.principalId);
+    if (!mapping || context.publicPrincipalId !== mapping.public_principal_id) return [];
     const publicId = ensureLiveLinkPublicPrincipal(storage,authority);
     if (context.publicPrincipalId !== publicId) return [];
     const principal = storage.getLinkPrincipal(authority.principalId);

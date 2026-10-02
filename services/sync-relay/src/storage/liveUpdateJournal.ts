@@ -4,10 +4,10 @@ import { liveJournalCheckpointDue } from "./liveJournalCheckpoint";
 import { allowsServiceActivationCandidate, type ServiceActivationAccess } from "./serviceActivationAccess";
 import {canonicalVersionedAcceptedMetadata as canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextVersionedAcceptedHistoryDigest as nextAcceptedHistoryDigest} from "../liveAcceptedHistory";
 import { deriveLiveAuthorSnapshot } from "./liveAuthorSnapshot";
-import { assessLiveAuthorWindow, liveAuthorCoverageCheckpointDue } from "./liveAuthorWindow";
+import { assessLiveAuthorWindow, liveAuthorCoverageCheckpointDue, limitLiveDeclaredAgents } from "./liveAuthorWindow";
 import { LIVE_AUTHOR_CLIENTS } from "./liveAuthorshipSchema";
 import { captureSqliteReadRevisionMatches } from "./readRevision";
-import { parseLiveAuthorSnapshot, type LiveAuthorSnapshot } from "@dohc/live-session-contract";
+import { liveAuthorIdentity, parseLiveAuthorSnapshot, type LiveAuthorSnapshot } from "@dohc/live-session-contract";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual, types as nodeTypes } from "node:util";
 import { LIVE_OBJECT_BINDING_SELECTOR_PATH_MAX_COUNT, parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -605,7 +605,10 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         requireRestoreSourceCoverage(storage, document, namespace, validation.evidence.candidate.ranges, validation.evidence.checkpointRanges, read.coverage);
         const allFirstSeen = validation.evidence.candidate.firstSeen;
         journalIntegrity(subtractJournalRanges(allFirstSeen, validation.evidence.candidate.ranges).length === 0);
-        const authorSnapshot = deriveLiveAuthorSnapshot(storage, current.authority, metadata.authorContext, trustedAccount);
+        if (!isDeepStrictEqual(subtractJournalRanges(allFirstSeen, read.coverage), allFirstSeen)) {
+          return refused({kind:"refused",reason:"provenance-refused"});
+        }
+        let authorSnapshot = deriveLiveAuthorSnapshot(storage, current.authority, metadata.authorContext, trustedAccount);
         journalIntegrity(isDeepStrictEqual(seedSource,liveJournalSeedSource(storage,document)));
         const seedFirstSeen = allFirstSeen.filter(range => range.clientId === seedId);
         const firstSeen = allFirstSeen.filter(range => range.clientId !== seedId);
@@ -614,14 +617,20 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
         const bindings: {clientId:number; snapshot:string}[] = [];
         if (authorSnapshot.length && clients.length) {
           const encoded = JSON.stringify(authorSnapshot);
+          const identities = authorSnapshot.map(liveAuthorIdentity);
           let unbound = 0;
           for (const clientId of clients) {
             const prior = storage.db.prepare(`SELECT author_snapshot_json FROM ${LIVE_AUTHOR_CLIENTS} WHERE ${JOURNAL_DOCUMENT_WHERE} AND client_id=?`).get(...documentParams(document), clientId);
-            if (prior && prior.author_snapshot_json !== encoded) return refused({kind:"refused",reason:"provenance-refused"});
+            if (prior) {
+              const storedSnapshot = parseLiveAuthorSnapshot(JSON.parse(String(prior.author_snapshot_json)));
+              if (!isDeepStrictEqual(storedSnapshot.map(liveAuthorIdentity), identities)) return refused({kind:"refused",reason:"provenance-refused"});
+              authorSnapshot = storedSnapshot;
+            }
             if (!prior) {unbound++; bindings.push({clientId,snapshot:encoded});}
           }
           if (unbound > 1) return refused({kind:"refused",reason:"provenance-refused"});
         }
+        authorSnapshot = limitLiveDeclaredAgents(read.cut.suffix.map(row => row.metadata), current.authority, authorSnapshot);
         const window = assessLiveAuthorWindow(read.cut.suffix.map(row => row.metadata), {authorSnapshot,firstSeen,firstSeenDeletes});
         if (window.refused) return refused({kind:"refused",reason:"capacity-refused"});
         const due = anticipatedCheckpoint || window.checkpointDue;

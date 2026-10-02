@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { OwnerYDocOutbox } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
@@ -86,7 +87,8 @@ export async function drainOwnerOutbox(options: {
       const cut = storage.readLiveUpdateJournalCut({document});
       if (cut.kind !== "cut") throw new Error("Owner journal is unavailable.");
       const validation = await admission.validate({document,currentPath: binding.currentPath,checkpoint: cut.cut.checkpoint.bytes,
-        suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update}, signal);
+        suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update,
+        retainStateUpdate: liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata))}, signal);
       check();
       if (validation.kind === "retry") {
         await validation.waitForCapacity(signal); check();

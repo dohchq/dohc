@@ -79,7 +79,11 @@ it("reuses a durable public mapping and publishes only its ID and stored label",
 it("leaves a different public link context unnamed, including its agent declaration", () => {
   const storage = fixture();
   expect(storage.tx(() => deriveLiveAuthorSnapshot(storage, link, { kind: "link", publicPrincipalId: "public_other", agent }))).toEqual([]);
-  expect(storage.db.prepare("SELECT COUNT(*) AS count FROM sync_relay_app_public_principals").get()!.count).toBe(1);
+  expect(storage.db.prepare("SELECT COUNT(*) AS count FROM sync_relay_app_public_principals").get()!.count).toBe(0);
+  const before = workspaceUsageBytes(storage, "workspace");
+  storage.options.workspaceQuotaBytes = before;
+  expect(storage.tx(() => deriveLiveAuthorSnapshot(storage, link, { kind: "link", publicPrincipalId: "public_other", agent }))).toEqual([]);
+  expect(workspaceUsageBytes(storage, "workspace")).toBe(before);
 });
 
 it("does not allocate a link mapping for absent or signed-out context", () => {

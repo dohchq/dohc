@@ -9,7 +9,6 @@ import { deriveLiveAuthorSnapshot, ensureLiveLinkPublicPrincipal } from '../../.
 import { liveBrowserActor } from '../../../services/sync-relay/src/liveBrowserContext.js'
 import { hashLinkBearer, hashLinkProfileSecret } from '../../../services/sync-relay/src/linkSecurity.js'
 import { registered, cleanupLiveDeliveryFixtures, policy, hash } from './liveCommittedDeliveryTestSupport.js'
-import { createLiveMarkdownJournalValidator } from './liveDocumentValidation.js'
 
 const close: Array<() => void> = []
 afterEach(() => { for (const fn of close.splice(0).reverse()) fn(); cleanupLiveDeliveryFixtures() })
@@ -116,13 +115,65 @@ it('refuses a reconstructed delta containing two unbound authored clients withou
   expect(f.raw.prepare('SELECT COUNT(*) AS n FROM sync_relay_live_author_clients').get()!.n).toBe(0)
 })
 
-it('refuses new structs from a client already bound to another snapshot', () => {
+it('refuses new structs from a client already bound to another identity', () => {
   const f = setup(), first = f.update('alice', 'Alice')
   expect(f.storage.commitLiveUpdateJournal(authored(f.capture(first, 'alice'))).result.kind).toBe('accepted')
   const next = f.update('alice-again', 'Alice'), bobDoc = replica(f, 202, [first])
   const mixed = Y.mergeUpdates([next, edit(bobDoc, 'bob', 'Bob')]), before = f.journalRows()
   expect(f.storage.commitLiveUpdateJournal(authored(f.capture(mixed, 'other-snapshot', bobActor), { kind: 'account', accountId: 'reader' }, 'Bob')).result)
     .toEqual({ kind: 'refused', reason: 'provenance-refused' })
+  expect(f.journalRows()).toEqual(before)
+})
+
+it('admits originals after account and agent renames or depth changes, preserving stored credit', () => {
+  const f = setup(), agent = {agentId: 'writer', agentName: 'First name', onBehalfOf: 'owner', depth: 1}
+  const context = {kind: 'account' as const, accountId: 'owner', agent}
+  const first = f.storage.commitLiveUpdateJournal(authored(f.capture(f.update('first'), 'first'), context))
+  const second = f.storage.commitLiveUpdateJournal(authored(f.capture(f.update('second'), 'renamed'),
+    {...context, agent: {...agent, agentName: 'New name', depth: 3}}, 'Renamed account'))
+  expect(second.result.kind).toBe('accepted')
+  expect(second.admitted?.metadata.authorSnapshot).toEqual(first.admitted?.metadata.authorSnapshot)
+  const before = f.journalRows()
+  expect(f.storage.commitLiveUpdateJournal(authored(f.capture(f.update('third'), 'changed-identity'),
+    {...context, agent: {...agent, onBehalfOf: 'other'}})).result).toEqual({kind: 'refused', reason: 'provenance-refused'})
+  expect(f.journalRows()).toEqual(before)
+})
+
+it('admits fresh agent declarations beyond 16 unnamed without forcing an author checkpoint', () => {
+  const f = setup()
+  for (let index = 0; index < 80; index++) {
+    f.doc.clientID = 30_000 + index
+    const agentId = `agent-${index}-` + '"'.repeat(490)
+    const input = authored(f.capture(f.update(`agent-edit-${index}`), `agent-edit-${index}`),
+      {kind: 'account', accountId: 'owner', agent: {agentId, agentName: '"'.repeat(500)}})
+    const result = f.storage.commitLiveUpdateJournal(input)
+    expect(result.result.kind).toBe('accepted')
+    expect(result.admitted?.metadata.authorSnapshot?.length).toBe(index < 16 ? 2 : 1)
+    expect(result.admitted?.metadata.checkpointCoverage).toBeUndefined()
+    if (index === 79) {
+      const again = authored(f.capture(f.update('overflow-again'), 'overflow-again'), input.metadata.authorContext)
+      expect(f.storage.commitLiveUpdateJournal(again).admitted?.metadata.authorSnapshot).toEqual(alice)
+    }
+  }
+  f.doc.clientID = 40_000
+  const other = authored(f.capture(f.update('other-agent'), 'other-agent', bobActor),
+    {kind: 'account', accountId: 'reader', agent: {agentId: 'other-agent'}}, 'Bob')
+  expect(f.storage.commitLiveUpdateJournal(other).admitted?.metadata.authorSnapshot).toEqual([...bob, {kind: 'agent', agentId: 'other-agent'}])
+  f.doc.clientID = 30_000
+  const known = authored(f.capture(f.update('known-agent'), 'known-agent'),
+    {kind: 'account', accountId: 'owner', agent: {agentId: 'agent-0-' + '"'.repeat(490), agentName: 'Changed'}})
+  expect(f.storage.commitLiveUpdateJournal(known).admitted?.metadata.authorSnapshot?.length).toBe(2)
+  expect(f.journalRows().journal.every(row => row.validation_checkpoint_bytes === null)).toBe(true)
+})
+
+it('refuses validator firstSeen evidence overlapping retained coverage without writing', () => {
+  const f = setup(), bytes = f.update()
+  expect(f.storage.commitLiveUpdateJournal(authored(f.capture(bytes, 'original'))).result.kind).toBe('accepted')
+  const input = authored(f.capture(bytes, 'overlap')), before = f.journalRows()
+  if (input.validation.kind !== 'accepted') throw new Error('Validation refused')
+  const validation = {kind: 'accepted' as const, evidence: {...input.validation.evidence,
+    candidate: {...input.validation.evidence.candidate, firstSeen: input.validation.evidence.candidate.ranges}}}
+  expect(f.storage.commitLiveUpdateJournal({...input, validation}).result).toEqual({kind: 'refused', reason: 'provenance-refused'})
   expect(f.journalRows()).toEqual(before)
 })
 
@@ -156,51 +207,6 @@ it('exempts the deterministic source-moment seed client from authored struct bin
   expect(f.storage.commitLiveUpdateJournal(authored(f.capture(seed, 'seed-only', bobActor), { kind: 'account', accountId: 'reader' }, 'Bob')).admitted?.metadata.firstSeen).toEqual([])
 })
 
-it('cuts a complete checkpoint at 960 identities and starts the next author window', () => {
-  const journalPolicy = { ...policy, maxIndexOperations: 100_000_000 }
-  const f = setup({ journalPolicy }), validate = createLiveMarkdownJournalValidator(journalPolicy)
-  for (let index = 0; index < 959; index++) {
-    f.doc.clientID = 10_000 + index
-    if (index === 958) f.doc.getMap('frontmatter').delete('author-0')
-    let input = authored(f.capture(f.update(`author-${index}`, String(index)), `window-${index}`),
-      { kind: 'account', accountId: 'owner', agent: { agentId: `agent-${index}` } })
-    expect(input.validation.kind, `Author ${index}: ${JSON.stringify(input.validation.kind === 'refused' ? input.validation : { kind: input.validation.kind })}`).toBe('accepted')
-    if (index === 958) {
-      const cut = input.cutToken
-      const validation = validate({ document: cut.document, currentPath: cut.currentPath,
-        checkpoint: cut.checkpoint.bytes, suffix: cut.suffix.map(row => row.bytes), candidate: input.updateBytes })
-      expect(validation.kind, `Checkpoint author ${index}: ${JSON.stringify(validation.kind === 'refused' ? validation : { kind: validation.kind })}`).toBe('accepted')
-      if (validation.kind !== 'accepted') throw new Error('Checkpoint validation refused')
-      input = { ...input, validation: { kind: 'accepted', evidence: { ...validation.evidence, stateUpdate: validation.evidence.stateUpdate } } }
-    }
-    const result = f.storage.commitLiveUpdateJournal(input)
-    expect(result.result.kind, `Author ${index}: ${JSON.stringify(result.result)}`).toBe('accepted')
-    if (index < 958) expect(result.admitted?.metadata.checkpointCoverage).toBeUndefined()
-    else {
-      expect(result.admitted?.metadata.checkpointCoverage).toHaveLength(960)
-      const owner = result.admitted!.metadata.checkpointCoverage!.find(entry => entry.author.kind === 'human')!
-      expect(owner.author).toEqual(alice[0])
-      expect(owner.structRanges).toHaveLength(959)
-      expect(owner.deletionRanges).toEqual([{ clientId: 10_000, startClock: 0, endClock: 1 }])
-      for (const entry of result.admitted!.metadata.checkpointCoverage!) expect(entry.structRanges.length).toBeGreaterThan(0)
-    }
-  }
-  const cut = f.storage.readLiveUpdateJournalCut({ document: f.input.evidence.document })
-  expect(cut.kind).toBe('cut')
-  if (cut.kind !== 'cut') throw new Error('Checkpoint cut missing')
-  expect(cut.cut).toMatchObject({ highWater: 959, suffixCount: 0, checkpoint: { cursor: 959 } })
-  expect(cut.cut.checkpoint.metadata?.checkpointCoverage).toHaveLength(960)
-  expect(hash(cut.cut.checkpoint.bytes)).toBe(cut.cut.checkpoint.digest)
-  f.doc.clientID = 20_000
-  const next = f.storage.commitLiveUpdateJournal(authored(f.capture(f.update('next-window', 'Fresh'), 'next-window'),
-    { kind: 'account', accountId: 'owner', agent: { agentId: 'next-agent' } }))
-  expect(next.result.kind).toBe('accepted')
-  expect(next.admitted?.metadata.checkpointCoverage).toBeUndefined()
-  const advanced = f.storage.readLiveUpdateJournalCut({ document: f.input.evidence.document })
-  expect(advanced).toMatchObject({ kind: 'cut', cut: { highWater: 960, suffixCount: 1, checkpoint: { cursor: 959 },
-    suffix: [{ metadata: { authorSnapshot: [...alice, { kind: 'agent', agentId: 'next-agent' }] } }] } })
-}, 600_000)
-
 it('uses a stable public link ID and exports no private principal or grant in its author snapshot', () => {
   const f = setup(), key = 'k'.repeat(32), time = Date.now()
   f.raw.exec("UPDATE sync_relay_share_grants SET principal_kind='link', principal_user_id=NULL WHERE grant_id='grant'")
@@ -222,6 +228,11 @@ it('uses a stable public link ID and exports no private principal or grant in it
   const result = f.storage.commitLiveUpdateJournal({ ...input, metadata: { ...input.metadata, authorContext: { kind: 'link', publicPrincipalId: publicId } } })
   expect(result.result.kind).toBe('accepted')
   expect(result.admitted?.metadata.authorSnapshot).toEqual(snapshot)
+  f.raw.prepare("UPDATE sync_relay_link_principals SET display_name='Relabeled' WHERE principal_id='private-link-principal'").run()
+  const relabeled = f.capture(f.update('relabeled'), 'relabeled', liveBrowserActor(scope))
+  const renamed = f.storage.commitLiveUpdateJournal({...relabeled, metadata: {...relabeled.metadata, authorContext: {kind: 'link', publicPrincipalId: publicId}}})
+  expect(renamed.result.kind).toBe('accepted')
+  expect(renamed.admitted?.metadata.authorSnapshot).toEqual(snapshot)
   const exported = JSON.stringify(result.admitted?.metadata.authorSnapshot)
   for (const privateValue of [authority.principalId, authority.grantId, scope.sessionId, scope.capabilityHash, scope.profileTokenHash]) expect(exported).not.toContain(privateValue)
   expect(storage.tx(() => deriveLiveAuthorSnapshot(storage, authority, { kind: 'link', publicPrincipalId: 'forged-public-id' }))).toEqual([])

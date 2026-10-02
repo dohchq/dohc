@@ -56,6 +56,7 @@ function nativeSource(value: unknown) {
 }
 
 function historyProof(value: unknown, namespace: string, maximum: number) {
+  // This is untrusted proof syntax. Storage derives the checkpoint version from its retained row and compares the complete proof.
   const row = configRecord(value, ["checkpoint", "suffix", "eventCount", "terminal", "evidenceDigest"]);
   const c = configRecord(row.checkpoint, ["eventCount", "terminal", "binding", "stateDigest", "evidenceDigest"], ["restoreOperationId", "canonicalVersion"]);
   if (c.canonicalVersion !== undefined) require(c.canonicalVersion === 2);

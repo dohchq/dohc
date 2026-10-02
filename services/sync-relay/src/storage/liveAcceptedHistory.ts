@@ -135,6 +135,7 @@ function captureAcceptedHistory(storage: StorageContext, input: {
     checkpoint = {cursor: floor, bytes: row.checkpoint.bytes, digest: row.checkpoint.digest};
     c = {eventCount: row.history.eventCount, terminal: row.admitted.metadata.accepted.receipt, binding: row.admitted.metadata.accepted.binding,
       stateDigest: checkpoint.digest, evidenceDigest: row.history.evidenceDigest,
+      // The stored row determines the checkpoint version, never the host's proof.
       ...(row.admitted.metadata.canonicalVersion === 2 ? {canonicalVersion: 2 as const} : {}),
       ...(row.restoreOperationId===null?{}:{restoreOperationId:row.restoreOperationId})};
   }

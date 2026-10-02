@@ -115,6 +115,9 @@ it.each(["small", "long"])("authenticates the native %s history through retained
       expect(selected.events).toHaveLength(2);expect(accepted.events).toHaveLength(3);
       const earlyRestore = structuredClone(receipt.acceptedHistory);earlyRestore.checkpoint.restoreOperationId = "unverified-restore";
       expect(() => requireAcceptedHistoryProof(accepted.proof, earlyRestore)).toThrow(/damaged/);
+      const claimedVersion = structuredClone(receipt.acceptedHistory);claimedVersion.checkpoint.canonicalVersion = 2;
+      expect(accepted.proof.checkpoint.canonicalVersion).toBeUndefined();
+      expect(() => requireAcceptedHistoryProof(accepted.proof, claimedVersion)).toThrow(/damaged/);
       const cursor = selected.proof.checkpoint.terminal!.journalCursor;
       f.raw.prepare("UPDATE sync_relay_live_update_journal SET restore_fence_generation=restore_fence_generation+1 WHERE journal_cursor=?").run(cursor);
       expect(() => readAcceptedHistory(f.storage as StorageContext, {document: binding,namespace,through: receipt.point.journalCursor,

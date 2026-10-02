@@ -7,7 +7,7 @@ import {
   type LiveAuthorSnapshot,
   type LiveUpdateStructRange,
 } from "@dohc/live-session-contract";
-import {assessLiveAuthorWindow, liveAuthorCoverageCheckpointDue} from "./liveAuthorWindow";
+import {assessLiveAuthorWindow, liveAuthorCoverageCheckpointDue, liveAuthorCheckpointAnticipated, limitLiveDeclaredAgents} from "./liveAuthorWindow";
 
 const range = (clientId: number, startClock = 0, endClock = 1): LiveUpdateStructRange => ({clientId, startClock, endClock});
 const human = (id: string, name = id): LiveAuthorEntry => ({kind: "human", humanId: id, humanName: name});
@@ -67,6 +67,8 @@ it("deduplicates scoped identities, preserves names and reserves agent depth gro
 });
 
 it("checkpoints at 960 identities and refuses only a new identity beyond 1024", () => {
+  expect(liveAuthorCheckpointAnticipated(authors(957))).toBe(false);
+  expect(liveAuthorCheckpointAnticipated(authors(958))).toBe(true);
   expect(assessLiveAuthorWindow(authors(958), candidate([human("new")])).checkpointDue).toBe(false);
   const due = assessLiveAuthorWindow(authors(959), candidate([human("new")]));
   expect(due.identityCount).toBe(960);
@@ -100,6 +102,23 @@ it("uses escaped UTF-8 author bytes at the 96 KiB checkpoint threshold", () => {
   expect(liveAuthorCoverageCheckpointDue(at.coverage)).toBe(true);
   const smaller = author.kind === "human" ? {...author, humanName: author.humanName.slice(0, -1)} : author;
   expect(assessLiveAuthorWindow(suffix, candidate([smaller])).checkpointDue).toBe(false);
+  expect(liveAuthorCheckpointAnticipated([...suffix, admitted([smaller])])).toBe(true);
+  expect(liveAuthorCheckpointAnticipated([])).toBe(false);
+});
+
+it("counts agent identities per authenticated principal and resets the cap with the consumed window", () => {
+  const authority = {principalKind: "owner" as const, principalId: "alice", grantId: null, grantGeneration: null};
+  const agent: LiveAuthorEntry = {kind: "agent", agentId: "writer", onBehalfOf: "alice"};
+  const snapshot: LiveAuthorSnapshot = [human("alice"), agent];
+  const suffix = Array.from({length: 16}, (_, index) => ({...admitted([human("alice"), {...agent, agentId: `writer-${index}`}]),
+    accepted: {...admitted([]).accepted, authority}}));
+  expect(limitLiveDeclaredAgents(suffix, authority, snapshot)).toEqual([human("alice")]);
+  expect(limitLiveDeclaredAgents(suffix, {...authority, principalKind: "named", grantId: "grant", grantGeneration: 1}, snapshot)).toEqual([human("alice")]);
+  expect(limitLiveDeclaredAgents(suffix, {...authority, principalId: "bob"}, snapshot)).toEqual(snapshot);
+  expect(limitLiveDeclaredAgents(suffix, authority, [human("alice"), {...agent, agentId: "writer-0", agentName: "Renamed", depth: 64}])).toHaveLength(2);
+  expect(limitLiveDeclaredAgents([], authority, snapshot)).toEqual(snapshot);
+  const changedScope = [human("alice"), {...agent, agentId: "writer-0", onBehalfOf: "bob"}];
+  expect(limitLiveDeclaredAgents(suffix, authority, changedScope)).toEqual([human("alice")]);
 });
 
 it("derives a stored coverage checkpoint trigger with the agent growth reserve", () => {

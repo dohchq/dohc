@@ -9,11 +9,11 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
-const help = 'Usage: node tools/perf-profiling/live-authorship-sync.mjs --baseline-source <v1-journal.ts> [--output <directory>] [--updates 10000] [--warmup-updates 200] [--pairs 1] [--profile true]\nMeasures relay admission and its SQLite transaction. Ordered validation runs outside timing.';
+const help = 'Usage: node tools/perf-profiling/live-authorship-sync.mjs --baseline-source <v1-journal.ts> [--output <directory>] [--updates 10000] [--warmup-updates 200] [--pairs 1]\nMeasures relay admission and its SQLite transaction. Ordered validation runs outside timing.';
 if (args.includes('--help')) { console.log(help); process.exit(0); }
 const values = {};
 for (let index = 0; index < args.length; index += 2) {
-  if (!['--baseline-source', '--output', '--updates', '--warmup-updates', '--pairs', '--profile'].includes(args[index]) || !args[index + 1]) throw Error(help);
+  if (!['--baseline-source', '--output', '--updates', '--warmup-updates', '--pairs'].includes(args[index]) || !args[index + 1]) throw Error(help);
   if (Object.hasOwn(values, args[index])) throw Error('Duplicate argument ' + args[index]);
   values[args[index]] = args[index + 1];
 }
@@ -40,9 +40,7 @@ const sha = source => createHash('sha256').update(source).digest('hex');
 const sources = { baselineSha256: sha(baseline), baselineRuntimeSha256: sha(rewritten), currentSha256: sha(await readFile(journalPath)),
   harnessSha256: sha(await readFile(resolve(root, 'tools/perf-profiling/live-authorship-sync.bench.ts'))), baselineSource: slash(relative(root, baselineSource)),
   readRevisionSha256: sha(await readFile(resolve(root, 'services/sync-relay/src/storage/readRevision.ts'))) };
-const profile = values['--profile'] === 'true';
-if (values['--profile'] !== undefined && !profile) throw Error('--profile accepts true');
-const settings = { updates, warmupUpdates, pairs, profile, resultPath: resolve(output, 'result.json'), sources };
+const settings = { updates, warmupUpdates, pairs, resultPath: resolve(output, 'result.json'), sources };
 const runDeadlineMs = Math.max(7200000, pairs * 7200000);
 const runtimePath = resolve(output, 'baseline.runtime.ts'), testPath = resolve(output, 'admission.test.ts'), configPath = resolve(output, 'vitest.config.mjs');
 await writeFile(runtimePath, rewritten);
@@ -58,7 +56,7 @@ it('measures paired relay admission', async () => {
 }, ${runDeadlineMs});
 `);
 const yjsModule = require.resolve('yjs').replace(/yjs\.cjs$/, 'yjs.mjs');
-await writeFile(configPath, `${profile ? `import { admissionProfilePlugin } from ${JSON.stringify(localImport(resolve(root, 'tools/perf-profiling/live-authorship-profile.mjs')))};\n` : ''}export default { ${profile ? 'plugins: [admissionProfilePlugin()],' : ''}root: ${JSON.stringify(root)}, resolve: { alias: { yjs: ${JSON.stringify(yjsModule)} } }, test: { include: [${JSON.stringify(slash(relative(root, testPath)))}], fileParallelism: false, maxWorkers: 1 } };\n`);
+await writeFile(configPath, `export default { root: ${JSON.stringify(root)}, resolve: { alias: { yjs: ${JSON.stringify(yjsModule)} } }, test: { include: [${JSON.stringify(slash(relative(root, testPath)))}], fileParallelism: false, maxWorkers: 1 } };\n`);
 const vitest = resolve(dirname(require.resolve('vitest/package.json')), 'vitest.mjs');
 const startedAt = new Date().toISOString();
 let lane;

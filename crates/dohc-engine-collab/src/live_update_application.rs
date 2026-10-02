@@ -1415,6 +1415,8 @@ fn insert_application(
     event: &AdmittedLiveUpdate,
     sequence: i64,
 ) -> Result<(), ApplicationError> {
+    // admitted_metadata_json contains the private link principal and grant. Never export it.
+    // Author readers (A2b/B) must read only the author snapshot.
     let a = &event.metadata.accepted;
     let b = &a.binding;
     let c = &r.coordinate;

@@ -3,6 +3,7 @@ import {
   LIVE_AUTHOR_CHECKPOINT_IDENTITIES,
   MAX_LIVE_AUTHOR_BYTES,
   MAX_LIVE_AUTHOR_IDENTITIES,
+  MAX_LIVE_AUTHOR_ENTRY_BYTES,
   liveAuthorIdentity,
   type AdmittedLiveUpdateMetadata,
   type LiveAuthorEntry,
@@ -10,6 +11,7 @@ import {
   type LiveCheckpointAuthorCoverage,
   type LiveUpdateStructRange,
 } from "@dohc/live-session-contract";
+import type { ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
 
 interface AuthorCoverage {
   author: LiveAuthorEntry;
@@ -41,6 +43,40 @@ function admissionBytes(authors: readonly LiveAuthorEntry[]): number {
 export function liveAuthorCoverageCheckpointDue(coverage: readonly LiveCheckpointAuthorCoverage[]): boolean {
   return coverage.length >= LIVE_AUTHOR_CHECKPOINT_IDENTITIES ||
     admissionBytes(coverage.map(entry => entry.author)) >= LIVE_AUTHOR_CHECKPOINT_BYTES;
+}
+
+/** Reserve enough validation state for a candidate with a principal and an agent. */
+export function liveAuthorCheckpointAnticipated(suffix: readonly AdmittedLiveUpdateMetadata[]): boolean {
+  const authors = new Map<string, LiveAuthorEntry>();
+  for (const metadata of suffix) {
+    if (metadata.firstSeen.length === 0 && (metadata.firstSeenDeletes?.length ?? 0) === 0) continue;
+    for (const author of metadata.authorSnapshot ?? []) {
+      const identity = liveAuthorIdentity(author), prior = authors.get(identity);
+      if (!prior || (prior.kind === "agent" && author.kind === "agent" && (author.depth ?? 0) > (prior.depth ?? 0))) {
+        authors.set(identity, prior?.kind === "agent" && author.kind === "agent" ? {...prior, depth: author.depth} : author);
+      }
+    }
+  }
+  return authors.size >= LIVE_AUTHOR_CHECKPOINT_IDENTITIES - 2 ||
+    admissionBytes([...authors.values()]) >= LIVE_AUTHOR_CHECKPOINT_BYTES - 2 * (MAX_LIVE_AUTHOR_ENTRY_BYTES + 12);
+}
+
+/** Each authenticated principal may introduce 16 declared-agent identities per window.
+ * Further declarations keep the principal's credit but omit agent identity; content is still admitted.
+ */
+export function limitLiveDeclaredAgents(suffix: readonly AdmittedLiveUpdateMetadata[],
+  authority: ServerDerivedLiveUpdateAuthority, snapshot: LiveAuthorSnapshot): LiveAuthorSnapshot {
+  const agent = snapshot.find(author => author.kind === "agent");
+  if (!agent) return snapshot;
+  const identities = new Set<string>();
+  for (const metadata of suffix) {
+    const prior = metadata.accepted.authority;
+    if (prior.principalId !== authority.principalId || (prior.principalKind === "link") !== (authority.principalKind === "link") ||
+      (authority.principalKind === "link" && prior.grantId !== authority.grantId) ||
+      (metadata.firstSeen.length === 0 && (metadata.firstSeenDeletes?.length ?? 0) === 0)) continue;
+    for (const author of metadata.authorSnapshot ?? []) if (author.kind === "agent") identities.add(liveAuthorIdentity(author));
+  }
+  return identities.has(liveAuthorIdentity(agent)) || identities.size < 16 ? snapshot : snapshot.filter(author => author.kind !== "agent");
 }
 
 /** Assess only the suffix after the consumed checkpoint boundary. */
