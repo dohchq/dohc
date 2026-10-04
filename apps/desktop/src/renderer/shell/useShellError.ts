@@ -59,7 +59,10 @@ export interface ShellError {
   kind?: ShellErrorKind;
   // A kept copy's row: it stays while the engine lists that copy.
   keptCopyId?: number;
-  creationIdentity?: string;
+  // What the row is about, such as one record a creation left part way or
+  // one person's Stop and restore. A row replaces only a row of the same
+  // identity, whatever its message.
+  identity?: string;
   atMs: number;
   // The toast was closed; the row in Notices stays until dismissed there.
   seen: boolean;
@@ -90,8 +93,8 @@ export function useShellError(workspaceId: string) {
           : error.message;
       setShellErrors((current) => {
         const matches = (existing: ShellError) =>
-          error.creationIdentity !== undefined || existing.creationIdentity !== undefined
-            ? error.creationIdentity === existing.creationIdentity
+          error.identity !== undefined || existing.identity !== undefined
+            ? error.identity === existing.identity
             : existing.message === message || (error.kind !== undefined && existing.kind === error.kind);
         const replaced = current.find(matches);
         const next: ShellError = {
@@ -109,6 +112,11 @@ export function useShellError(workspaceId: string) {
     },
     [],
   );
+  const clearIdentity = useCallback((identity: string) => {
+    setShellErrors((current) =>
+      current.some((error) => error.identity === identity) ? current.filter((error) => error.identity !== identity) : current,
+    );
+  }, []);
   const clearKind = useCallback((...kinds: ShellErrorKind[]) => {
     setShellErrors((current) =>
       current.some((error) => error.kind !== undefined && kinds.includes(error.kind))
@@ -156,6 +164,7 @@ export function useShellError(workspaceId: string) {
       error: unknown,
       retry: (() => void) | null = null,
       kind?: ShellErrorKind,
+      identity?: string,
     ) => {
       const { cause } = readError(error);
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
@@ -168,9 +177,9 @@ export function useShellError(workspaceId: string) {
       ] : cause ? [["Cause", cause]] : [];
       push({
         message: partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
-        ...(partial ? { creationIdentity: partial.retry.recordId
+        ...(partial ? { identity: partial.retry.recordId
           ? `record:${partial.retry.recordId}`
-          : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : {}),
+          : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),
         ...(details.length ? { details } : {}),
         retry,
         ...(kind ? { kind } : {}),
@@ -458,6 +467,7 @@ export function useShellError(workspaceId: string) {
   return {
     shellErrors,
     clearKind,
+    clearIdentity,
     reportShellError,
     reportShellFailure,
     reportLaneFailure,

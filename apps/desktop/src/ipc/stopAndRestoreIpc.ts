@@ -128,6 +128,15 @@ export function registerStopAndRestoreIpc<
     credentialGeneration: dependencies.currentCredentialGeneration,
   });
 
+  // Per workspace and person or link, the fields each computer's runs kept at
+  // its last pass that finished. A try that stops before a computer's pass
+  // finishes keeps that computer's earlier fields instead of counting none.
+  const keptByTarget = new Map<string, { server: string[]; here: string[] }>();
+  const knownKept = (target: string): number => {
+    const kept = keptByTarget.get(target);
+    return kept ? new Set([...kept.server, ...kept.here]).size : 0;
+  };
+
   /**
    * Undoes the runs of these definitions on the owner's server and here. A
    * run on one of them may have written a field after a run on the other,
@@ -138,12 +147,14 @@ export function registerStopAndRestoreIpc<
    */
   async function undoRunsHereAndOnServer(
     workspaceId: string,
+    target: string,
     definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
     undoHere: (again: boolean) => ReturnType<CollectionAutomations["undoRunsOf"]>,
   ): Promise<UndoneRuns> {
     const counts = { undone: 0, left: 0, missing: 0, otherKept: 0, errorMessage: null };
     // The fields each computer's runs still keep, by hash: one kept on both counts once.
-    const kept = { server: [] as string[], here: [] as string[] };
+    const kept = keptByTarget.get(target) ?? { server: [], here: [] };
+    keptByTarget.set(target, kept);
     const total = (): UndoneRuns => ({ ...counts, kept: new Set([...kept.server, ...kept.here]).size });
     const add = (host: "server" | "here", pass: { undone: number; left: number; missing: number; keptFields: string[]; otherKept: number; errorMessage: string | null }, again: boolean) => {
       if (!again) {
@@ -151,9 +162,9 @@ export function registerStopAndRestoreIpc<
         counts.left += pass.left;
       }
       counts.missing += pass.missing;
-      kept[host] = pass.keptFields;
       counts.otherKept += pass.otherKept;
       if (pass.errorMessage !== null) throw new UndoRunsStopped(pass.errorMessage, total());
+      kept[host] = pass.keptFields;
     };
     try {
       for (let pass = 0; pass < UNDO_PASSES; pass += 1) {
@@ -251,56 +262,77 @@ export function registerStopAndRestoreIpc<
         grantIds = [grantId];
       }
 
-      const writes: Array<{ committedAtMs: number; files: DirectWriteFile[] }> = [];
-      for (const grantId of grantIds) {
-        let after: number | null = -1;
-        for (let page = 0; after !== null; page += 1) {
-          if (page === MAX_LEDGER_PAGES) throw new Error("dohc cannot restore this many direct changes at once.");
-          const answer = LedgerPage.parse(await relay<unknown>(
-            `/sync/${encodeURIComponent(workspaceId)}/collection-writes/${encodeURIComponent(grantId)}?afterOriginSeq=${after}`,
-          ));
-          writes.push(...answer.writes);
-          after = answer.nextAfterOriginSeq;
-        }
+      // Access is stopped. Anything that fails from here is said as what is
+      // still to finish, so the owner knows access stays stopped. A try that
+      // stops before undoing runs reports the fields earlier tries found kept.
+      const target = JSON.stringify([workspaceId, input.target]);
+      try {
+        const outcome = await restoreGrantWrites(grantIds);
+        if (outcome.status !== "restored" || outcome.unfinished?.step !== "files") return outcome;
+        const kept = knownKept(target);
+        return { ...outcome, fieldsKept: kept, runChangesKept: outcome.runChangesKept + kept };
+      } catch (error) {
+        const kept = knownKept(target);
+        return StopAndRestoreResult.parse({
+          status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, runChangesKept: kept,
+          wroteAutomations: false, sendsMessages: false, fieldsKept: kept, fieldsMissing: 0,
+          unfinished: {
+            step: "files",
+            message: error instanceof z.ZodError ? "dohc could not read the relay's list of their changes."
+              : error instanceof Error ? error.message : String(error),
+          },
+        });
       }
-      writes.sort((left, right) => left.committedAtMs - right.committedAtMs);
 
-      const { capture } = await dependencies.requireEngineCapture(workspaceId);
-      const root = operation.workspace.rootPath;
-      const outcome = await restoreDirectWrites({
-        moment: async (momentId) => {
-          const detail = await capture.readMoment(momentId);
-          if (detail?.protected) {
-            throw new Error(`dohc cannot restore ${detail.moment.path} here because its contents are protected. Restore it from its History.`);
+      async function restoreGrantWrites(grantIds: readonly string[]): Promise<StopAndRestoreResult> {
+        const writes: Array<{ committedAtMs: number; files: DirectWriteFile[] }> = [];
+        for (const grantId of grantIds) {
+          let after: number | null = -1;
+          for (let page = 0; after !== null; page += 1) {
+            if (page === MAX_LEDGER_PAGES) throw new Error("dohc cannot restore this many direct changes at once.");
+            const answer = LedgerPage.parse(await relay<unknown>(
+              `/sync/${encodeURIComponent(workspaceId)}/collection-writes/${encodeURIComponent(grantId)}?afterOriginSeq=${after}`,
+            ));
+            writes.push(...answer.writes);
+            after = answer.nextAfterOriginSeq;
           }
-          return detail?.moment ?? null;
-        },
-        momentsAfter: (objectId, momentId) => capture.listObjectMomentsAfter(objectId, momentId),
-        assertCurrent: () => operation.assertCurrent(),
-        restore: async (momentId, expectedHeadMomentId, aloneInFolder) => {
-          try {
-            const { path, restoredMomentId } = await capture.restoreFileToBeforeMoment(momentId, person, {
-              expectedHeadMomentId,
-              ...(aloneInFolder ? { aloneInFolder: true } : {}),
-            });
-            return { kind: "restored", receipt: { path, restoredMomentId } };
-          } catch (error) {
-            if (error instanceof RestoreHeadChangedError) return { kind: "changed" };
-            if (error instanceof RestoreFolderInUseError) return { kind: "folder-in-use" };
-            if (error instanceof LiveDocumentMutationError) return { kind: "refused", detail: error.message };
-            throw error;
-          }
-        },
-        folderEntries: (path) => folderEntriesOrNone(join(root, path)),
-        removeEmptyFolder: async (path) => await rmdir(join(root, path)).catch(() => undefined),
-        undoRuns: (definitions) => undoRunsHereAndOnServer(workspaceId, definitions, (again) =>
-          operation.state.collectionAutomations.undoRunsOf(definitions, async (relativePath) => {
-            await dependencies.deletePath(event, { workspaceId, relativePath });
-          }, again)),
-      }, writes.flatMap((write) => write.files));
-      if (outcome.status === "waiting") dependencies.queuePull(workspaceId);
-      else dependencies.notifyRenderer({ workspaceId });
-      return StopAndRestoreResult.parse(outcome);
+        }
+        writes.sort((left, right) => left.committedAtMs - right.committedAtMs);
+
+        const { capture } = await dependencies.requireEngineCapture(workspaceId);
+        const root = operation.workspace.rootPath;
+        const outcome = await restoreDirectWrites({
+          moment: async (momentId) => {
+            const detail = await capture.readMoment(momentId);
+            return detail?.protected ? "protected" : detail?.moment ?? null;
+          },
+          momentsAfter: (objectId, momentId) => capture.listObjectMomentsAfter(objectId, momentId),
+          assertCurrent: () => operation.assertCurrent(),
+          restore: async (momentId, expectedHeadMomentId, aloneInFolder) => {
+            try {
+              const { path, restoredMomentId } = await capture.restoreFileToBeforeMoment(momentId, person, {
+                expectedHeadMomentId,
+                ...(aloneInFolder ? { aloneInFolder: true } : {}),
+              });
+              return { kind: "restored", receipt: { path, restoredMomentId } };
+            } catch (error) {
+              if (error instanceof RestoreHeadChangedError) return { kind: "changed" };
+              if (error instanceof RestoreFolderInUseError) return { kind: "folder-in-use" };
+              if (error instanceof LiveDocumentMutationError) return { kind: "refused", detail: error.message };
+              throw error;
+            }
+          },
+          folderEntries: (path) => folderEntriesOrNone(join(root, path)),
+          removeEmptyFolder: async (path) => await rmdir(join(root, path)).catch(() => undefined),
+          undoRuns: (definitions) => undoRunsHereAndOnServer(workspaceId, target, definitions, (again) =>
+            operation.state.collectionAutomations.undoRunsOf(definitions, async (relativePath) => {
+              await dependencies.deletePath(event, { workspaceId, relativePath });
+            }, again)),
+        }, writes.flatMap((write) => write.files));
+        if (outcome.status === "waiting") dependencies.queuePull(workspaceId);
+        else dependencies.notifyRenderer({ workspaceId });
+        return StopAndRestoreResult.parse(outcome);
+      }
     }, dependencies.assertOriginalWorkspace);
   });
 

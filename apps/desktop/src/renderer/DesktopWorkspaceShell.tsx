@@ -798,6 +798,7 @@ export function DesktopWorkspaceShell(props: {
     dismissShellError,
     retryShellError,
     runShellErrorAction,
+    clearIdentity,
   } = useShellError(workspaceId);
   useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   // Share removals from Chats, Settings and the share dialog: one notice
@@ -5721,7 +5722,8 @@ export function DesktopWorkspaceShell(props: {
             stopAndRestore.close();
             openFile(path);
           }}
-          onError={reportShellError}
+          onError={(fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)}
+          onSettled={clearIdentity}
         />
       ) : null}
       {recordHistory.session ? (

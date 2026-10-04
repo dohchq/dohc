@@ -225,7 +225,7 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
     expect(outcome).toMatchObject({
       restored: [{ path: SCHEMA_PATH }],
       review: [{ path: AUTOMATIONS_PATH, reason: "changed-since" }],
-      errorMessage: null,
+      unfinished: null,
     });
     expect(await readFile(join(ownerTemp.rootPath, SCHEMA_PATH), "utf8")).toBe(SCHEMA);
     expect(await readFile(join(ownerTemp.rootPath, AUTOMATIONS_PATH), "utf8")).toBe(AUTOMATIONS_OWNER);

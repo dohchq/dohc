@@ -984,10 +984,14 @@ type LedgerClaim = {
   history: HistoryClaim;
 };
 
+/** Which of two claims is newer: by when each was made, then by id. */
+function newerFirst(left: Pick<HistoryClaim, "createdAtMs" | "claimId">, right: Pick<HistoryClaim, "createdAtMs" | "claimId">): number {
+  return right.createdAtMs - left.createdAtMs || (left.claimId < right.claimId ? 1 : left.claimId > right.claimId ? -1 : 0);
+}
+
 /** Claims from both ledgers, merged newest first, in the order both page them. */
 function newestFirst(claims: HistoryClaim[]): HistoryClaim[] {
-  return claims.sort((left, right) =>
-    right.createdAtMs - left.createdAtMs || (left.claimId < right.claimId ? 1 : left.claimId > right.claimId ? -1 : 0));
+  return claims.sort(newerFirst);
 }
 
 function engineHistoryClaim(claim: AutomationClaimSummary): HistoryClaim {
@@ -3351,42 +3355,49 @@ export class CollectionAutomations {
     again: boolean,
     keptFields: Set<string>,
   ): Promise<void> {
+    // Every claim of these automations, newest first across them all, so a
+    // field two automations wrote in turn goes back in the reverse order.
+    const claims: Array<{ automationId: string; wanted: ReadonlySet<string>; claim: HistoryClaim }> = [];
     for (const [automationId, wanted] of hashes) {
       // A dataset's runs are in its host's ledger, which may not be open yet.
       await this.indexAutomation(automationId);
       const listed = await this.everyClaim(automationId);
       if (listed === null) throw new Error("The workspace engine is not running.");
-      try {
-        for (const claim of listed) {
-          const runs = (await this.options.store.runsOf(automationId, claim.claimId)).runs
-            .filter((run) => wanted.has(run.definitionHash));
-          const pending = runs.some((run) => run.undo !== "done");
-          const kept = documentUndoKept(runs).length > 0;
-          if (again ? pending || !kept : !pending && !kept) continue;
-          const target = { automationId, claimId: claim.claimId };
-          let undone = await this.undoClaim({ ...target, deletes: null }, trash, wanted);
-          // Stop and restore leaves deletions for the person's confirmation in run history.
-          if (undone.status === "confirm" && undone.preview.deletes + undone.preview.unchecked === 0) {
-            undone = await this.undoClaim({ ...target, deletes: { token: undone.preview.token, chosen: [] } }, trash, wanted);
-          }
-          if (undone.status === "undone") {
-            if (pending) result.undone += 1;
-            result.reverted += undone.reverted;
-            result.missing += undone.missing;
-            if (pending) {
-              result.otherKept += undone.kept + undone.keptChanged + undone.irreversible + undone.actions;
-            }
-          } else if (!again) {
-            result.left += 1;
-          }
+      for (const claim of listed) claims.push({ automationId, wanted, claim });
+    }
+    claims.sort((left, right) => newerFirst(left.claim, right.claim));
+    // The pass stops at the first claim whose Undo fails, so no older claim
+    // is undone over one that stopped part way.
+    try {
+      for (const { automationId, wanted, claim } of claims) {
+        const runs = (await this.options.store.runsOf(automationId, claim.claimId)).runs
+          .filter((run) => wanted.has(run.definitionHash));
+        const pending = runs.some((run) => run.undo !== "done");
+        const kept = documentUndoKept(runs).length > 0;
+        if (again ? pending || !kept : !pending && !kept) continue;
+        const target = { automationId, claimId: claim.claimId };
+        let undone = await this.undoClaim({ ...target, deletes: null }, trash, wanted);
+        // Stop and restore leaves deletions for the person's confirmation in run history.
+        if (undone.status === "confirm" && undone.preview.deletes + undone.preview.unchecked === 0) {
+          undone = await this.undoClaim({ ...target, deletes: { token: undone.preview.token, chosen: [] } }, trash, wanted);
         }
-      } finally {
-        for (const claim of listed) {
-          for (const run of (await this.options.store.runsOf(automationId, claim.claimId)).runs) {
-            if (!wanted.has(run.definitionHash)) continue;
-            for (const { recordId, field } of run.undoKept) {
-              keptFields.add(createHash("sha256").update(JSON.stringify([recordId, field])).digest("hex").slice(0, 32));
-            }
+        if (undone.status === "undone") {
+          if (pending) result.undone += 1;
+          result.reverted += undone.reverted;
+          result.missing += undone.missing;
+          if (pending) {
+            result.otherKept += undone.kept + undone.keptChanged + undone.irreversible + undone.actions;
+          }
+        } else if (!again) {
+          result.left += 1;
+        }
+      }
+    } finally {
+      for (const { automationId, wanted, claim } of claims) {
+        for (const run of (await this.options.store.runsOf(automationId, claim.claimId)).runs) {
+          if (!wanted.has(run.definitionHash)) continue;
+          for (const { recordId, field } of run.undoKept) {
+            keptFields.add(createHash("sha256").update(JSON.stringify([recordId, field])).digest("hex").slice(0, 32));
           }
         }
       }

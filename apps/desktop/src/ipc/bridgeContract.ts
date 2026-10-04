@@ -4862,8 +4862,9 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
     // no longer in their Collection.
     fieldsKept: z.number().int().nonnegative(),
     fieldsMissing: z.number().int().nonnegative(),
-    // What stopped the restore part way; the files above were restored.
-    errorMessage: z.string().nullable(),
+    // The step a failure stopped, with why; what the fields above count happened.
+    // At files, this try undid no run.
+    unfinished: z.object({ step: z.enum(["files", "runs"]), message: z.string() }).strict().nullable(),
   }).strict(),
   // Access stopped, but this computer has not received every change the
   // person wrote yet. Nothing was restored; trying again continues.
