@@ -98,7 +98,7 @@ export function Titlebar(props: {
   return (
     <header
       data-testid="titlebar"
-      className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel-2"
+      className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel"
       style={{ height: TITLEBAR_HEIGHT_PX, paddingLeft: leftInset }}
     >
       {/* Reserve space for centered quick-open. */}

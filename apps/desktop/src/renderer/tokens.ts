@@ -37,49 +37,52 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     panel2: "#ebe8e0",
     line: "#e4e1d8",
     ink: "#1c1b18",
-    hover: "color-mix(in srgb, var(--dohc-ink) 5%, transparent)",
-    selected: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
-    scrim: "rgba(0, 0, 0, 0.20)",
+    // State fills are ink alpha so one value serves both themes: 7% hover,
+    // 11% selected, far enough apart to tell a hovered row from the
+    // selection (see the contrast test).
+    hover: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
+    selected: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
+    scrim: "rgba(0, 0, 0, 0.40)",
     muted: "#55524a",
     // Decorative text must clear 3.0:1 on every surface it sits on —
-    // panel-2 (sidebar/status bar), not just bg — in both modes (see the
-    // contrast test).
+    // panel-2 (insets), not just bg — in both modes (see the contrast
+    // test).
     subtle: "#7f7b6e",
     // Green-graphite (the brand accent): focus rings, primary buttons.
     accent: "#2d342e",
-    agent: "#5c6250",
+    // Olive, the default agent color: AA as text on bg, panel and panel-2.
+    agent: "#666d2e",
     // Find-match highlight (search panel <mark>, pressed search toggles):
     // the editor's selection-blue family, tuned so the OPAQUE mark clears
-    // 3:1 against panel/panel-2 and the selected-row fill, with bold
-    // ink text on it at AA (4.21:1) — see the contrast test below. The
-    // graphite accent stays the only structural accent; this token means
-    // exactly one thing: "your match".
-    match: "#397be4",
+    // 3:1 against every surface and the 11% selected-row fill, with paper
+    // (bg) text on it at AA — see the contrast test below. The graphite
+    // accent stays the only structural accent; this token means exactly
+    // one thing: "your match".
+    match: "#326fce",
     success: "#38684e",
     warning: "#8a6420",
     danger: "#a6402c",
     selection: "rgba(58, 126, 233, 0.22)",
   },
   dark: {
-    // Warm charcoal with a green-black card surface (panel) per the brand
-    // bible — never pure black.
+    // Warm charcoal, never pure black. The ladder climbs away from the
+    // paper the same way light descends from it: bg is the darkest, chrome
+    // (panel) one step up, insets (panel-2) two steps up.
     bg: "#131211",
-    panel: "#1b1d1a",
-    panel2: "#181715",
+    panel: "#181715",
+    panel2: "#201f1c",
     line: "#2a2925",
     ink: "#f6f4ee",
-    hover: "color-mix(in srgb, var(--dohc-ink) 5%, transparent)",
-    selected: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
-    scrim: "rgba(0, 0, 0, 0.20)",
+    hover: "color-mix(in srgb, var(--dohc-ink) 7%, transparent)",
+    selected: "color-mix(in srgb, var(--dohc-ink) 11%, transparent)",
+    scrim: "rgba(0, 0, 0, 0.40)",
     muted: "#a9a599",
     subtle: "#7d7a6e",
     accent: "#d7d0c0",
-    agent: "#b7b8a4",
-    // Dark variant: 3:1+ vs panel/panel-2 and row fills. Ink-on-match is 4.30:1 —
-    // near the physical ceiling while holding 3:1 against the selected-row
-    // bg (any brighter mark erodes the ink text further); the mark text is
-    // bold, which carries the remaining gap.
-    match: "#2f6ce9",
+    agent: "#c0c585",
+    // Dark variant: 3:1+ vs every surface and the 11% selected-row fill,
+    // with paper (bg) text on it at AA.
+    match: "#377afa",
     success: "#82c29b",
     warning: "#d9a94e",
     danger: "#e08065",

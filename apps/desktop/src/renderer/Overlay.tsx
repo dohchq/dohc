@@ -28,7 +28,7 @@ export function OverlayFrame(props: {
       data-dohc-modal="true"
       className={props.appearance === "warning"
         ? "fixed inset-0 z-50 grid place-items-center bg-scrim"
-        : "fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-scrim p-4 pt-24 backdrop-blur-[1.5px]"}
+        : "fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-scrim p-4 pt-24"}
       onClick={props.onBackdropClick}
     >
       <div
