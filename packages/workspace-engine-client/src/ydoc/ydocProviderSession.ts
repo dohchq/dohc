@@ -152,6 +152,7 @@ export interface EngineYdocProviderSession {
     options?: ApplyLocalUpdateOptions & { armSettle?: boolean },
   ): Promise<void>;
   reestablishAcknowledgedState?(update: Uint8Array): Promise<void>;
+  adoptCollectionRecord?(): Promise<"settled" | "ownerPending" | "declined">;
   settleNow(options?: { summary?: string }): Promise<YdocSettleResult>;
   // `settle: false` alone does not promise the file will be left alone: a
   // release the daemon refuses as unsettled escalates to a settling close, so
@@ -441,6 +442,13 @@ export async function openEngineYdocProviderSession(
     async reestablishAcknowledgedState(update) {
       await journalChain;
       await session.reestablishAcknowledgedState(update);
+    },
+
+    async adoptCollectionRecord() {
+      await journalChain;
+      const status = await session.adoptCollectionRecord();
+      if (status === "settled") await runSettle();
+      return status;
     },
 
     async settleNow(settleOptions) {

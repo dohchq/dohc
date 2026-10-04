@@ -3177,6 +3177,12 @@ export function createWorkspaceEngineCapture(
       applyDecidedLocalUpdate(decide, onArmed, applyOptions) {
         return journalLocalUpdate(decide, onArmed, applyOptions);
       },
+      adoptCollectionRecord() {
+        return append(() => executeWithReconnect(async session => {
+          if (!session.adoptCollectionRecord) return "declined";
+          return session.adoptCollectionRecord();
+        }));
+      },
       settleNow(settleOptions) {
         return append(async () => {
           // The delete seam's own vacate settles on this capture chain before
@@ -3721,6 +3727,8 @@ export function createWorkspaceEngineCapture(
     const workspace = { workspaceId, rootPath, attachmentId };
     let cursor: CollectionPendingAdoptionCursor | null = null;
     let found = false;
+    let deferred = false;
+    let reconcileReady = false;
     const pendingAdoptionKeys = new Set<string>();
     do {
       const pending: CollectionPendingAdoptionsPage | undefined =
@@ -3736,6 +3744,29 @@ export function createWorkspaceEngineCapture(
         pendingAdoptionKeys.add(adoptionKey);
         let retained = pendingCollectionAdoptionProviders.get(adoptionKey);
         try {
+          const live = liveYDocSessions.get(adoption.filePath);
+          if (live !== undefined && !live.orphaned) {
+            if (
+              live.versionId !== adoption.versionId ||
+              live.publicSession?.objectId !== adoption.objectId ||
+              live.publicSession.contentKind !== "richdoc"
+            ) {
+              deferred = true;
+              continue;
+            }
+            if (live.closing || live.status === "failing-close" || live.publicSession === null) {
+              deferred = true;
+              continue;
+            }
+            const borrowed = borrowRecordSession(live);
+            try {
+              const status = await live.session.adoptCollectionRecord?.();
+              if (status !== "settled") deferred = true;
+            } finally {
+              await borrowed.close();
+            }
+            continue;
+          }
           await options.rustEngineSessions.run(
             workspace,
             async (binding) => {
@@ -3779,7 +3810,12 @@ export function createWorkspaceEngineCapture(
             { retryTransportErrors: true },
           );
           pendingCollectionAdoptionProviders.delete(adoptionKey);
+          reconcileReady = true;
         } catch (error) {
+          if (error instanceof YdocOwnerDraftPendingError) {
+            deferred = true;
+            continue;
+          }
           // Every unconfirmed eviction — busy, cancelled while queued, or any
           // other failure — leaves the daemon session live and its lease
           // held. Deleting the only handle here would leak that lease:
@@ -3801,8 +3837,14 @@ export function createWorkspaceEngineCapture(
       cursor = pending.nextCursor;
     } while (cursor !== null);
     await releaseRetainedCollectionAdoptionProviders(pendingAdoptionKeys);
-    if (!found || pendingCollectionAdoptionProviders.size > 0) return;
-    await engine.reconcileCapture?.();
+    if (!found || !reconcileReady) return;
+    try {
+      await engine.reconcileCapture?.();
+    } catch (error) {
+      if ((deferred || pendingCollectionAdoptionProviders.size > 0) &&
+          error instanceof DaemonRefusalError && error.wireCode === "COLLECTION_RECONCILIATION_LEASE_HELD") return;
+      throw error;
+    }
   }
 
   async function releaseRetainedCollectionAdoptionProviders(
@@ -7167,11 +7209,13 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    async flush() {
-      await chain;
-      const engine = await engineStore();
-      await engine.flushCapture?.();
-      await drainPendingCollectionAdoptions(engine);
+    flush() {
+      return enqueueResult("flush capture", async () => {
+        const engine = await engineStore();
+        await drainPendingCollectionAdoptions(engine);
+        await engine.flushCapture?.();
+        await drainPendingCollectionAdoptions(engine);
+      });
     },
 
     async stop() {
@@ -7187,8 +7231,8 @@ export function createWorkspaceEngineCapture(
       try {
         if (store) {
           try {
-            await store.flushCapture?.();
             await drainPendingCollectionAdoptions(store);
+            await store.flushCapture?.();
           } catch (error) {
             // A refused store was never opened, so nothing is pending in
             // it. Failing the stop here would block the move-aside rebuild,

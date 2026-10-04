@@ -12,6 +12,7 @@ export const YDOC_METHOD = {
   open: "ydoc.open",
   recordUpdate: "ydoc.recordUpdate",
   settle: "ydoc.settle",
+  adoptCollectionRecord: "ydoc.adoptCollectionRecord",
   close: "ydoc.close",
   // Ends a session without settling and without pruning: the daemon drops the
   // session and its lease and leaves the durable lineage alone. The only exit
@@ -237,6 +238,7 @@ const YdocResultSchemas = {
   [YDOC_METHOD.recordUpdate]: RecordUpdateResultSchema,
   [YDOC_METHOD.resync]: ResyncResultSchema,
   [YDOC_METHOD.settle]: SettleResultSchema,
+  [YDOC_METHOD.adoptCollectionRecord]: mutableStruct({ status: Schema.Literals(["settled", "ownerPending", "declined"]) }),
   [YDOC_METHOD.close]: CloseResultSchema,
   [YDOC_METHOD.evict]: EvictResultSchema,
 } as const;

@@ -57,17 +57,19 @@ test("desktop production and shared inputs override the site's compatibility-onl
   assert.equal(full.proofs.desktop, true);
 });
 
-test("browser proof inputs retain preparation without unrelated desktop unit or script tests", () => {
+test("onboarding inputs select the two-daemon test and browser proofs without unrelated desktop tests", () => {
   const site = "apps/site/src/ProductDemo.tsx";
   for (const input of ["services/workspace-api/src/main.ts", "packages/workspace-postgres/src/db/migrations/0001_better_auth.sql",
     "services/share-web/src/server.ts"]) {
     const plan = select([input]);
-    assert.equal(plan.packages.includes("@dohc/desktop"), false, input);
+    assert.equal(plan.packages.includes("@dohc/desktop"), true, input);
+    assert.deepEqual(plan.testFiles["@dohc/desktop"], ["src/workspaces/twoDaemonSync.e2e.test.ts"], input);
     assert.equal(plan.desktopScripts, false, input);
     assert.equal(plan.proofs.desktop, true, input);
     assert.deepEqual(plan.needs, {postgres: true, engine: true, desktop: true}, input);
     const mixed = select([site, input]);
-    assert.deepEqual(mixed.testFiles["@dohc/desktop"], select([site]).testFiles["@dohc/desktop"], input);
+    assert.deepEqual(mixed.testFiles["@dohc/desktop"], [...select([site]).testFiles["@dohc/desktop"],
+      "src/workspaces/twoDaemonSync.e2e.test.ts"].sort(), input);
     assert.equal(mixed.desktopScripts, false, input);
     assert.equal(mixed.proofs.desktop, true, input);
     const full = select([input], {full: true});
@@ -175,7 +177,7 @@ test("Y.Doc transport tests declare the relay HTTP and auth sources they import"
 test("database migrations include consumers that read SQL outside their manifests", () => {
   const plan = select(["packages/workspace-postgres/src/db/migrations/0001_better_auth.sql"]);
   assert.deepEqual(plan.affected, ["@dohc/workspace-postgres"]);
-  assert.deepEqual(plan.packages, ["@dohc/share-web", "@dohc/workspace-api", "@dohc/workspace-auth", "@dohc/workspace-postgres"]);
+  assert.deepEqual(plan.packages, ["@dohc/desktop", "@dohc/share-web", "@dohc/workspace-api", "@dohc/workspace-auth", "@dohc/workspace-postgres"]);
   assert.deepEqual(plan.proofs, { accounts: true, selfHostNative: true, desktop: true, statesPage: false });
   assert.deepEqual(plan.needs, { postgres: true, engine: true, desktop: true });
 });
@@ -183,14 +185,14 @@ test("database migrations include consumers that read SQL outside their manifest
 test("account API changes retain browser and desktop onboarding proofs", () => {
   const plan = select(["services/workspace-api/src/main.ts"]);
   assert.deepEqual(plan.affected, ["@dohc/workspace-api"]);
-  assert.deepEqual(plan.packages, ["@dohc/workspace-api"]);
+  assert.deepEqual(plan.packages, ["@dohc/desktop", "@dohc/workspace-api"]);
   assert.deepEqual(plan.proofs, { accounts: true, selfHostNative: false, desktop: true, statesPage: false });
 });
 
 test("share changes include relay and Y.Doc tests that import its source", () => {
   const plan = select(["services/share-web/src/liveGateway.ts"]);
   assert.deepEqual(plan.affected, ["@dohc/share-web"]);
-  assert.deepEqual(plan.packages, ["@dohc/share-web", "@dohc/sync-relay", "@dohc/ydoc-projection"]);
+  assert.deepEqual(plan.packages, ["@dohc/desktop", "@dohc/share-web", "@dohc/sync-relay", "@dohc/ydoc-projection"]);
 });
 
 test("workspace dependency closure includes every manifest dependency field", () => {
