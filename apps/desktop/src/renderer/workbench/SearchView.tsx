@@ -45,15 +45,16 @@ function isBlankSearchQuery(value: string): boolean {
 // Offset-based match highlighting: slice the preview at matchStart/matchEnd.
 // The row END-truncates, so deep-column matches are lead-trimmed first
 // (windowPreviewForRow) — the match must always be visible in its own row.
-// The mark is the OPAQUE --dohc-match blue (3:1+ vs panel and the selected
-// row in both themes; one hue means "your match" here and in the editor).
+// The mark is the OPAQUE --dohc-match blue with paper text (3:1+ vs every
+// surface and the selected row in both themes, AA for the text; one hue
+// means "your match" here and in the editor).
 function HighlightedPreview({ entry }: { entry: SearchResultsEventEntry }) {
   const windowed = windowPreviewForRow(entry);
   return (
     <span className="block truncate font-mono text-[12px] leading-5 text-muted">
       {windowed.leadTrimmed ? <span aria-hidden>…</span> : null}
       {windowed.text.slice(0, windowed.matchStart)}
-      <mark className="rounded-[2px] bg-match px-px font-semibold text-ink">
+      <mark className="rounded-[2px] bg-match px-px font-semibold text-bg">
         {windowed.text.slice(windowed.matchStart, windowed.matchEnd)}
       </mark>
       {windowed.text.slice(windowed.matchEnd)}
@@ -139,7 +140,7 @@ const FileGroup = memo(function FileGroup(props: {
                 // matching the h-7 workbench row pitch.
                 className={`block w-full rounded-md py-[4px] pl-6 pr-2 text-left transition-colors duration-75 ${
                   index === props.selectedEntryIndex
-                    ? "bg-selected/80 text-ink"
+                    ? "bg-selected text-ink"
                     : "hover:bg-hover"
                 }`}
               >

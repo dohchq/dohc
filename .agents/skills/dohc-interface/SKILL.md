@@ -203,8 +203,8 @@ Defined in `apps/desktop/src/renderer/styles.css` (mirrored in `tokens.ts`, sync
 | Utility | Meaning |
 | --- | --- |
 | `bg-bg` | Document paper. The lightest surface; editors, inputs, popover tiles |
-| `bg-panel` | Sidebars, cards, menus. One step down from paper |
-| `bg-panel-2` | Insets, status/title bars, two steps down |
+| `bg-panel` | The chrome: title bar, rails, sidebars, tab strip, plus cards and menus. One step from paper in both themes |
+| `bg-panel-2` | Insets inside the chrome: pills, counts, segmented tracks, inline code, section bands. Two steps from paper |
 | `hover:bg-hover` | Hover fill, using ink alpha in both themes |
 | `bg-selected` | Selected-row fill, using ink alpha in both themes |
 | `bg-scrim` | Modal overlay dim |
@@ -266,7 +266,7 @@ Ghost icon button (toolbars, row affordances): `grid size-6 place-items-center r
 
 Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink placeholder:text-subtle focus:border-ink` (mono content → add `font-mono`). No `outline-none`: the global `:focus-visible` accent ring must stay for keyboard users. `focus:border-ink` alone is too subtle. Only opt out where a ring would clip (rounded overflow-hidden popovers) AND the frame provides an equivalent (e.g. the command palette's `focus-within:border-ink` row).
 
-List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75` + state: active `bg-selected text-ink` · selected-not-active `bg-selected/85 text-ink` · rest `text-muted hover:bg-hover hover:text-ink` (inset rows in panels: parent gets `px-1`, row keeps `rounded-md`)
+List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75` + state: active and selected-not-active share `bg-selected text-ink`; the active row adds `font-medium`; the focused row adds the ring it uses (`ring-1 ring-inset ring-ink/30`) · rest `text-muted hover:bg-hover hover:text-ink`. Never attenuate a state fill (`bg-selected/85`): it lands between hover and selected, and tokens.test.ts rejects it (inset rows in panels: parent gets `px-1`, row keeps `rounded-md`)
 
 Card / grouped section: `rounded-lg border border-line bg-panel p-3` (modal cards: `rounded-xl p-5` + `dohc-elevated`)
 

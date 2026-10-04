@@ -369,12 +369,15 @@ export const TreeRow = memo(function TreeRow(props: {
         onDrop={(event) => props.onRowDrop(row.fullPath, event)}
         onDragLeave={props.onRowDragLeave}
         onDragEnd={props.onRowDragEnd}
-        // Three distinguishable read-outs (VS Code list semantics): the
-        // ACTIVE-tab row keeps the strongest fill, selected-not-active rows a
-        // lighter fill (Delete/drag act on the selection — the visuals must
-        // not collapse the two meanings), and the keyboard-FOCUSED row an
-        // inset ring. The drag drop-target is a filled tint (list.drop-
-        // Background style) — box-shadow/background only, never `outline`:
+        // One selected fill, a weight and a ring (VS Code list semantics):
+        // the ACTIVE-tab row and selected-not-active rows share the selected
+        // fill (Delete/drag act on the whole selection), the active row
+        // alone is medium weight so it still reads inside a multi-selection
+        // once the tree loses focus, and the keyboard-FOCUSED row adds an
+        // inset ring. An attenuated fill for the selected-not-active rows
+        // sat between hover and selected, too close to either to read. The
+        // drag drop-target is a filled tint (list.drop-Background style) —
+        // box-shadow/background only, never `outline`:
         // the base outline-none nulls --tw-outline-style later in the same
         // cascade layer, which made an outline-based highlight unrenderable.
         style={{ height: TREE_ROW_HEIGHT }}
@@ -382,9 +385,9 @@ export const TreeRow = memo(function TreeRow(props: {
           props.dropPreview
             ? dropClass
             : props.active
-              ? "bg-selected text-ink"
+              ? "bg-selected font-medium text-ink"
               : props.selected
-                ? "bg-selected/85 text-ink"
+                ? "bg-selected text-ink"
                 : "text-muted hover:bg-hover hover:text-ink"
         } ${props.focused ? "ring-1 ring-inset ring-ink/30" : ""}`}
       >
