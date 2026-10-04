@@ -121,8 +121,8 @@ function settlementRequired(f: ReturnType<typeof fixture>, refusals: (call: numb
   f.store.nextOwnerApplication.mockImplementation(value => {
     const event = next(value);
     if (!event) return undefined;
-    const accepted = {...event.metadata.accepted,agentDeclaration: declaration};
-    return {metadata: {accepted}};
+    const accepted = {...event.metadata.accepted};
+    return {metadata: {accepted, authorSnapshot: [{kind: "agent", agentId: declaration.agentId, depth: declaration.depth}]}};
   });
   f.client.sendRequest.mockImplementation(async input => {
     if (input.method === "liveApplication.register") return {id: input.id,result: {registrationId: 1}};
@@ -141,7 +141,7 @@ function settlementRequired(f: ReturnType<typeof fixture>, refusals: (call: numb
   return settled;
 }
 const offered = (f: ReturnType<typeof fixture>) => f.client.sendLiveApplication.mock.calls.map(([,event]) => event);
-const declared = (cursor: number) => ({metadata: {accepted: {receipt: receipt(cursor),agentDeclaration: declaration}}});
+const declared = (cursor: number) => ({metadata: {accepted: {receipt: receipt(cursor)},authorSnapshot: [{kind: "agent", agentId: declaration.agentId, depth: declaration.depth}]}});
 
 it("settles the applied interval when the host requires it and offers the identical owner event again", async () => {
   const f = fixture({prefix: 1}), settled = settlementRequired(f, call => call === 2);

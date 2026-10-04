@@ -2589,7 +2589,7 @@ describe('validateOrderedLiveUpdateCut', () => {
     const cut = accepted(validateOrderedLiveUpdateCut({
       mode: 'journal-candidate', checkpoint, suffix: [suffix], candidate: deletion,
     }, highPolicy()))
-    const exactIndexOperations = 490
+    const exactIndexOperations = 492
     expect(cut.usage.indexOperations).toBe(exactIndexOperations)
     expect(validateOrderedLiveUpdateCut({
       mode: 'journal-candidate', checkpoint, suffix: [suffix], candidate: deletion,

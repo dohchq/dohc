@@ -3,7 +3,7 @@ import { sha256Hex } from "@dohc/workspace-core/hash";
 import type { DiscussionActivityHub } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
 import { arrayBufferForBytes, readBytes } from "./relayBytes";
-import { assertChatAuthorship, assertClientLogProvenance, namedShareOrigin, parseLogOp } from "./relayLogInputs";
+import { assertChatAuthorship, assertClientLogProvenance, namedShareOrigin, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { assertSha256, parseCursor, parseLimit, parseString, readJsonObject } from "./requestInputs";
 import type { AuthorizedShareAction } from "./shareAuthorization";
 import {
@@ -49,6 +49,7 @@ export function createNamedShareTransportRoutes(
   filteredLogPage: ReturnType<typeof createShareReadQueries>["filteredLogPage"],
   historicalSharedBlob: ReturnType<typeof createShareReadQueries>["historicalSharedBlob"],
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog">,
+  lookupUserDisplayName?: LogAuthorNameLookup,
 ) {
   return async function respondToNamedShareTransport(
     request: Request,
@@ -176,7 +177,7 @@ export function createNamedShareTransportRoutes(
           storage.objectCurrentPath(share.workspaceId, objectId),
         objectIdAtPath: (path) => storage.objectIdAtPath(share.workspaceId, path),
       };
-      const ops = input.ops.map(parseLogOp);
+      const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
       for (const op of ops) {
         // The write filter, never the read one: what a recipient may see is
         // not what it may push into the granter's log (#646 PR3-0).

@@ -452,6 +452,7 @@ export function createSyncRelayHandler({
     storage,
     nowMs,
     discussionActivity,
+    lookupUserDisplayName,
   );
 
   const respondToWorkspaceBlobs = createWorkspaceBlobRoutes(
@@ -489,6 +490,7 @@ export function createSyncRelayHandler({
     filteredLogPage,
     historicalSharedBlob,
     discussionActivity,
+    lookupUserDisplayName,
   );
 
   const { respondToShareProposals, respondToWorkspaceProposals } = createProposalRoutes(

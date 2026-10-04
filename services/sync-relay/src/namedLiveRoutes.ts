@@ -20,6 +20,8 @@ import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
 import {authorizeLinkShareAction} from "./shareAuthorization";
 import {createAccountlessPathProjection} from "./accountlessPathProjection";
 import {linkRefusal} from "./linkRefusal";
+import { accountDisplayName } from "./discussionRoutes";
+import type { TrustedLiveAccount } from "./storage/liveAuthorSnapshot";
 
 export interface NamedLiveRouteLimits {
   readonly maxConnections: number;
@@ -56,6 +58,7 @@ interface LiveRouteOptions {
   bounds: NamedFrameHostBounds;
   captureNative(binding: LiveObjectBinding, signal: AbortSignal): Promise<NamedFrameNativeHost>;
   validate: OwnerOutboxAdmission["validate"];
+  lookupUserDisplayName?: (userId: string) => Promise<string | null> | string | null;
   admission?: ReturnType<typeof createLiveConnectionAdmission>;
 }
 type BrowserRouteOptions = LiveRouteOptions & {
@@ -98,6 +101,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
   const shutdown = new AbortController();
   const storage = options.storage;
   const captureNative = options.captureNative.bind(options), validate = options.validate;
+  const accountSnapshot = async (accountId: string): Promise<TrustedLiveAccount> => ({accountId,
+    name: await accountDisplayName(options.lookupUserDisplayName,accountId) ?? "Unnamed"});
 
   let closed = false, pendingRequests = 0;
   const refusal = () => Response.json({ ok: false, error: "not found" }, { status: 404, headers: { "cache-control": "private, no-store" } });
@@ -242,7 +247,8 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
         if (!isDeepStrictEqual({...native.binding, selectorPaths: current.binding.selectorPaths}, current.binding)) throw new Error("Native owner target changed.");
         const refreshed = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: actor.userId, shareId}});
         if (!isDeepStrictEqual(refreshed, current)) throw new Error("Owner binding changed during capture.");
-        host = captureOwnerLiveFrameHost({authenticatedUserId: actor.userId, shareId, storage, native, bounds, validate});
+        const trustedAccount = await accountSnapshot(actor.userId); signal.throwIfAborted(); check();
+        host = captureOwnerLiveFrameHost({authenticatedUserId: actor.userId, trustedAccount, shareId, storage, native, bounds, validate});
       } else {
         const context = await options.sessions.resolve(authenticated, discriminator); signal.throwIfAborted(); check();
         if (!context || context.kind !== kind) { stop(); return; }
@@ -259,7 +265,9 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
           (context.kind === "named" && ticket.authority.principalId !== context.userId) ||
           ticket.authority.grantId !== context.grantId || ticket.binding.workspaceId !== context.workspaceId) { stop(); return; }
         const native = await captureNative(ticket.binding, signal); signal.throwIfAborted(); check();
-        host = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(context), storage, native, bounds, validate });
+        const trustedAccount = context.kind === "named" ? await accountSnapshot(context.userId) : undefined;
+        signal.throwIfAborted(); check();
+        host = captureNamedLiveFrameHost({ ticket, actor: liveBrowserActor(context), ...(trustedAccount ? {trustedAccount} : {}), storage, native, bounds, validate });
         host.assertCurrent();
         membership = options.membership?.join({ ticket, invalidated: host.invalidated, assertCurrent: host.assertCurrent.bind(host) });
       }

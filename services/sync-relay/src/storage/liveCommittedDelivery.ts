@@ -1,3 +1,4 @@
+import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors";
 import {parseNativeRestoreApplicationReceipt,parseNativeRestoreSettlementReceipt,parseNativeRestoreResumeReceipt,type RestoreLifecycle,type NativeRestoreApplicationReceipt,type NativeRestoreSettlementReceipt,type NativeRestoreResumeReceipt} from "../liveRestoreLifecycle";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
@@ -8,7 +9,8 @@ import {revalidateAcceptedHistoryDelivery,readAcceptedHistory, readAcceptedHisto
 import {captureSqliteReadRevision} from "./readRevision";
 import {requireRestoreLifecycleBudget} from "./liveRestoreLifecycleBudget";
 import {HOST_CONTROL_IDENTIFIER_MAX_BYTES} from "@dohc/live-session-contract/host-control";
-import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHistoryDigest} from "../liveAcceptedHistory";
+import {canonicalVersionedAcceptedMetadata, initialAcceptedHistoryDigest, nextVersionedAcceptedHistoryDigest} from "../liveAcceptedHistory";
+import {assessLiveAuthorWindow} from "./liveAuthorWindow";
 import type {NativeRestoreHistoryProof} from "../liveRestoreProposal";
 export type {RestoreLifecycle} from "../liveRestoreLifecycle";
 import type { LiveOwnerAdoptionCut, NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
@@ -66,7 +68,7 @@ import {
 import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
 import { nativeRestoreFence, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
-import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, nativeSourceAgentDeclaration, type RestoreProofBudget} from "../liveRestoreProposal";
+import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
 import {validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
 import {readRestoreReviewHistory} from "./liveRestoreReview";
 import {assertWorkspaceQuota} from "./workspaces";
@@ -473,12 +475,12 @@ export class LiveCommittedDeliveryStore {
     const { baselineBytes: _baseline,events: _events,...header } = cut;
     const cutEvidenceDigest = createHash("sha256").update(JSON.stringify([capture.binding, cut.relayDatabaseNamespace, cut.sourceMomentId,
       cut.sourceDigest, cut.sourceByteLength, cut.baselineMomentRelaySequence, cut.baselineRegisteredAtMs, cut.expectedLocalSequence,
-      cut.events.map(event => canonicalAcceptedMetadata(event.metadata))])).digest("hex");
+      cut.events.map(event => canonicalVersionedAcceptedMetadata(event.metadata))])).digest("hex");
     // Native adoption of an ordinary service activation also binds its retained source, as native evidence does.
     const originEvidenceDigest = activation === null ? cutEvidenceDigest
       : createHash("sha256").update(JSON.stringify(["ordinary-replication", cutEvidenceDigest, activation])).digest("hex");
     const originEventCount = cut.events.length;
-    const originHistoryEvidenceDigest = cut.events.reduce((previous, event, index) => nextAcceptedHistoryDigest(previous, index + 1, event.metadata),
+    const originHistoryEvidenceDigest = cut.events.reduce((previous, event, index) => nextVersionedAcceptedHistoryDigest(previous, index + 1, event.metadata),
       initialAcceptedHistoryDigest(this.#history.namespace, document));
     const origin = JSON.stringify({ ...header,bindingDigest: createHash("sha256").update(JSON.stringify(capture.binding)).digest("hex"),
       originEvidenceDigest, originEventCount, originHistoryEvidenceDigest,originalBinding:structuredClone(capture.binding) });
@@ -809,7 +811,7 @@ export class LiveCommittedDeliveryStore {
       const bytes = (prior.hasCheckpoint ? 0 : prior.bytes) + rowBytes;
       integrity(
         count <= 4095 &&
-          hasCheckpoint === (restored!==null || liveJournalCheckpointDue(count, bytes)),
+          hasCheckpoint === (restored!==null || row.admitted.metadata.checkpointCoverage !== undefined || liveJournalCheckpointDue(count, bytes)),
       );
       position = { count, bytes };
     } else {
@@ -1174,7 +1176,7 @@ export class LiveCommittedDeliveryStore {
         if (!metadata) {integrity(source.acceptedReceipt === null); continue;}
         integrity(isDeepStrictEqual(source.acceptedReceipt, metadata.accepted.receipt) && metadata.accepted.authority.principalKind === "owner" &&
           metadata.accepted.receipt.updateDigest === source.updateDigest &&
-          isDeepStrictEqual(nativeSourceAgentDeclaration(source), metadata.accepted.agentDeclaration));
+          nativeSourceAuthorMatches(this.#storage, source, metadata, sourceBudget));
       }
       integrity(sameReceipt(accepted.proof.terminal, operation.terminal));
       let origin: unknown;
@@ -1329,6 +1331,9 @@ export class LiveCommittedDeliveryStore {
       const raw=this.#storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_TABLE} WHERE ${WHERE_DOCUMENT} ORDER BY journal_cursor DESC LIMIT 1`).get(...documentParams(document));
       return raw?decodeJournalRow(this.#storage.db,raw).admitted.metadata:null;
     });
+    const authorWindow = assessLiveAuthorWindow(capture.accepted.events.map(event => event.metadata), {
+      authorSnapshot: [], firstSeen: validated.content.replacementRanges, firstSeenDeletes: validated.content.firstSeenDeletes});
+    integrity(!authorWindow.refused);
     this.#storage.tx(()=>{
       assertReviewCurrent?.();
       assertProposalCurrent();
@@ -1337,7 +1342,8 @@ export class LiveCommittedDeliveryStore {
       integrity(operation.phase==="native-fenced");
       const admitted=appendValidatedLiveJournal(this.#storage,{document,namespace:this.#history.namespace,host,
         current:{binding,authority:{principalKind:"owner",principalId:input.ownerUserId,grantId:null,grantGeneration:null}},metadata,
-        updateBytes,receivedAtMs:at,firstSeen:validated.content.replacementRanges,checkpointBytes,checkpointDigest,priorMetadata,restoreOperationId:input.operationId});
+        updateBytes,receivedAtMs:at,firstSeen:validated.content.replacementRanges,firstSeenDeletes:validated.content.firstSeenDeletes,
+        authorSnapshot:[],checkpointCoverage:authorWindow.coverage,checkpointBytes,checkpointDigest,priorMetadata,restoreOperationId:input.operationId});
       const admission:RestoreAdmission={proposalDigest:expectedProposalDigest,candidateDigest:proposal.candidateDigest,preparation:{fence,point},
         nativeSourceManifestDigest,admitted:admitted.metadata,checkpointDigest,sourceRanges,recordedAtMs:at};
       const admissionJson=JSON.stringify(admission);

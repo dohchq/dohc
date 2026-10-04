@@ -41,6 +41,15 @@ it("validates proposal bytes, selected content and native vectors under one proo
   result.candidateBytes.fill(0);expect(hash(result.candidateBytes)).toBe(f.capture.receipt.candidateDigest);
   f.bytes.candidateBytes.fill(0);expect(hash(result.candidateBytes)).toBe(f.capture.receipt.candidateDigest);
 });
+it("retains the replacement's new deletion coverage for relay admission", () => {
+  const f = contentProposalFixture(), result = validateLiveRestoreProposal(f.capture, f.bytes, policy, budget);
+  const expected = [...Y.decodeUpdate(f.bytes.candidateBytes).ds.clients].flatMap(([clientId, ranges]) =>
+    ranges.map(range => ({clientId, startClock: range.clock, endClock: range.clock + range.len})))
+    .sort((a,b) => a.clientId-b.clientId || a.startClock-b.startClock);
+  expect(expected.length).toBeGreaterThan(0);
+  expect(result.content.firstSeenDeletes).toEqual(expected);
+  expect(Object.isFrozen(result.content.firstSeenDeletes)).toBe(true);
+});
 it("refuses proposal byte changes, substituted full point and changed before or after vectors", () => {
   for (const name of ["candidateBytes", "frozenStateBytes", "pointStateBytes"] as const) {
     const f = contentProposalFixture();f.bytes[name] = Uint8Array.of(0, 0);

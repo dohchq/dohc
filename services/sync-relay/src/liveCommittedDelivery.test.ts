@@ -9,7 +9,7 @@ const document = {workspaceId: "workspace",mainVersionId: "main",objectId: "obje
 const binding = {...document,currentPath: "a.md",selectorPaths: ["a.md"],restoreFenceGeneration: 1};
 const declaration = {agentId: "trip-agent-hosted",onBehalfOf: null,depth: 0};
 const receipt = (cursor: number) => ({deliveryId: `delivery-${cursor}`,updateDigest: "b".repeat(64),journalCursor: cursor,acceptingHostEpoch: 1}) as LiveUpdateReceipt;
-const declared = (cursor: number) => ({metadata: {accepted: {receipt: receipt(cursor),binding,agentDeclaration: declaration}}});
+const declared = (cursor: number) => ({metadata: {accepted: {receipt: receipt(cursor),binding},authorSnapshot: [{kind: "agent", agentId: declaration.agentId, depth: declaration.depth}]}});
 
 // A service host's committed delivery of `events` declared changes. The host
 // refuses the chosen application calls as settlement-required.

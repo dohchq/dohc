@@ -1,3 +1,4 @@
+import { initializeLiveAuthorshipSchema, originalLiveJournalSql, liveAuthorSchemaMarked, assertLiveAuthorColumns } from "./liveAuthorshipSchema";
 import { initializeAppPublicationSchema } from "./publicationSchema";
 import { initializeAppCollectionSchema } from "./appCollectionSchema";
 import { initializeLiveCommittedDeliverySchema } from "./liveCommittedDeliverySchema";
@@ -893,53 +894,16 @@ function assertLiveJournalSchema(db: SqliteDb): void {
     same(rows.length, 1);
     same(row?.type, name.startsWith("idx_") ? "index" : "table");
     same(row?.tbl_name, name.includes("struct_provenance") ? LIVE_JOURNAL_PROVENANCE : LIVE_JOURNAL_TABLE);
-    same(typeof row?.sql === "string" ? normalizedSchemaSql(row.sql) : null, normalizedSchemaSql(sql));
+    same(typeof row?.sql === "string" ? (name === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db) ? originalLiveJournalSql(row.sql) : normalizedSchemaSql(row.sql)) : null, normalizedSchemaSql(sql));
   }
   for (const [table, expected] of Object.entries(LIVE_JOURNAL_SHAPE)) {
-    same(db.prepare(`PRAGMA table_info(${table})`).all().map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk]), expected.columns);
+    if (table === LIVE_JOURNAL_TABLE && liveAuthorSchemaMarked(db)) assertLiveAuthorColumns(db);
+    same(db.prepare(`PRAGMA table_info(${table})`).all().filter(r => table !== LIVE_JOURNAL_TABLE || !liveAuthorSchemaMarked(db) || Number(r.cid) < 24).map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk]), expected.columns);
     same(db.prepare(`PRAGMA foreign_key_list(${table})`).all().map(r => [r.id,r.seq,r.table,r.from,r.to,r.on_update,r.on_delete,r.match]), expected.foreignKeys);
     same(db.prepare(`PRAGMA index_list(${table})`).all().map(r => [r.name,r.unique,r.origin,r.partial]).sort((a,b) => String(a[0]).localeCompare(String(b[0]))), expected.indexes);
     for (const [name, columns] of Object.entries(expected.indexColumns)) same(db.prepare(`PRAGMA index_info(${name})`).all().map(r => [r.seqno,r.cid,r.name]), columns);
   }
 }
-// The agent an owner's accepted edit declared, one row per declaring journal
-// event. Provenance only: the event's principal columns stay its authority.
-const LIVE_JOURNAL_AGENT_DECLARATIONS_MARKER = "live-update-agent-declarations-v1";
-export const LIVE_JOURNAL_AGENT_DECLARATIONS = "sync_relay_live_update_agent_declarations";
-const LIVE_JOURNAL_AGENT_DECLARATIONS_SQL = `
-CREATE TABLE sync_relay_live_update_agent_declarations (
-  journal_cursor INTEGER PRIMARY KEY
-    REFERENCES sync_relay_live_update_journal(journal_cursor) ON DELETE CASCADE,
-  agent_id TEXT NOT NULL
-    CHECK (length(CAST(agent_id AS BLOB)) BETWEEN 1 AND 512),
-  on_behalf_of TEXT
-    CHECK (on_behalf_of IS NULL OR length(CAST(on_behalf_of AS BLOB)) BETWEEN 1 AND 512),
-  depth INTEGER NOT NULL
-    CHECK (depth BETWEEN 0 AND 64)
-) STRICT;
-`;
-function assertLiveJournalAgentDeclarationSchema(db: SqliteDb): void {
-  const same = (actual: unknown, expected: unknown) => { if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("live update agent declaration schema is missing or damaged"); };
-  const rows = db.prepare("SELECT type,name,sql FROM sqlite_schema WHERE tbl_name=?").all(LIVE_JOURNAL_AGENT_DECLARATIONS);
-  same(rows.map(row => [row.type, row.name, typeof row.sql === "string" ? normalizedSchemaSql(row.sql) : null]),
-    [["table", LIVE_JOURNAL_AGENT_DECLARATIONS, normalizedSchemaSql(LIVE_JOURNAL_AGENT_DECLARATIONS_SQL)]]);
-  same(db.prepare(`PRAGMA table_info(${LIVE_JOURNAL_AGENT_DECLARATIONS})`).all().map(r => [r.cid,r.name,r.type,r.notnull,r.dflt_value,r.pk]),
-    [[0,"journal_cursor","INTEGER",0,null,1],[1,"agent_id","TEXT",1,null,0],[2,"on_behalf_of","TEXT",0,null,0],[3,"depth","INTEGER",1,null,0]]);
-  same(db.prepare(`PRAGMA foreign_key_list(${LIVE_JOURNAL_AGENT_DECLARATIONS})`).all().map(r => [r.id,r.seq,r.table,r.from,r.to,r.on_update,r.on_delete,r.match]),
-    [[0,0,LIVE_JOURNAL_TABLE,"journal_cursor","journal_cursor","NO ACTION","CASCADE","NONE"]]);
-  same(db.prepare(`PRAGMA index_list(${LIVE_JOURNAL_AGENT_DECLARATIONS})`).all(), []);
-}
-function initializeLiveJournalAgentDeclarationSchema(db: SqliteDb): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_JOURNAL_AGENT_DECLARATIONS_MARKER);
-  if (marked) { assertLiveJournalAgentDeclarationSchema(db); return; }
-  if (db.prepare("SELECT 1 FROM sqlite_schema WHERE name=?").get(LIVE_JOURNAL_AGENT_DECLARATIONS)) {
-    throw new Error("unmarked live update agent declaration schema already exists");
-  }
-  db.exec(LIVE_JOURNAL_AGENT_DECLARATIONS_SQL);
-  assertLiveJournalAgentDeclarationSchema(db);
-  db.prepare("INSERT INTO sync_relay_migrations(migration_id,completed_at_ms) VALUES (?,?)").run(LIVE_JOURNAL_AGENT_DECLARATIONS_MARKER,Date.now());
-}
-
 function initializeLiveJournalSchema(db: SqliteDb): void {
   const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id=?").get(LIVE_JOURNAL_MARKER);
   if (marked) { assertLiveJournalSchema(db); return; }
@@ -951,6 +915,14 @@ function initializeLiveJournalSchema(db: SqliteDb): void {
 }
 
 export function initializeSyncRelaySchema(db: SqliteDb): void {
+    const legacy = "sync_relay_live_update_agent_declarations";
+    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?").get(legacy)) {
+      if (db.prepare(`SELECT 1 FROM ${legacy} LIMIT 1`).get()) {
+        throw new Error("Cannot open a relay store with declared v1 accepted evidence. Its data is unchanged. Reset the development relay store to use v2 authors.");
+      }
+      db.exec(`DROP TABLE ${legacy}`);
+      db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id=?").run("live-update-agent-declarations-v1");
+    }
     db.exec(`
       CREATE TABLE IF NOT EXISTS sync_relay_workspaces (
         workspace_id TEXT PRIMARY KEY,
@@ -1254,11 +1226,11 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     initializeServiceHostEnrollmentSchema(db);
     initializeLiveRestoreOperationSchema(db);
     initializeLiveJournalSchema(db);
-    initializeLiveJournalAgentDeclarationSchema(db);
     initializeLiveCommittedDeliverySchema(db);
     initializeLiveTicketSchema(db);
     initializeAppPublicationSchema(db);
     initializeAppCollectionSchema(db);
+    initializeLiveAuthorshipSchema(db);
     initializeNoticeSchema(db);
     initializeShareNoticeDeliverySchema(db);
     initializeAutomationHostSchema(db);

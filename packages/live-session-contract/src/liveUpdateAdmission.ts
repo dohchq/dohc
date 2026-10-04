@@ -1,3 +1,4 @@
+import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext, type LiveAuthorSnapshot, type LiveAuthorEntry } from "./liveAuthorship.js";
 import { parseHostEpoch, type HostEpoch } from "./hostControl.js";
 import {
   parseLiveObjectBinding,
@@ -50,9 +51,9 @@ export type ServerDerivedLiveUpdateAuthority =
     };
 
 /**
- * The agent a writer declared for one change: its name, the person it said it
- * works for, and its chain depth. Provenance only, never authority: it names
- * no authenticated principal. Every field is always present.
+ * Native owner draft input: the agent, its declared scope, and chain depth.
+ * Delivery converts this into recording context before admission; accepted
+ * history credits only the admitted author snapshot.
  */
 export interface AgentDeclaration {
   readonly agentId: string;
@@ -66,8 +67,7 @@ export interface LiveUpdateSubmissionMetadata {
   readonly deliveryId: string;
   readonly updateDigest: string;
   readonly binding: LiveObjectBinding;
-  /** Only the owner lane submits one. Absent when the edit declared no agent. */
-  readonly agentDeclaration?: AgentDeclaration;
+  readonly authorContext?: LiveAuthorContext;
 }
 
 export interface LiveUpdateSubmission {
@@ -87,11 +87,6 @@ export interface RelayAcceptedLiveUpdate {
   readonly binding: LiveObjectBinding;
   readonly authority: ServerDerivedLiveUpdateAuthority;
   readonly receivedAtMs: number;
-  /**
-   * What the authenticated owner declared about the agent that made this
-   * change. `authority` stays the authenticated submitter. Absent when none.
-   */
-  readonly agentDeclaration?: AgentDeclaration;
 }
 
 export interface LiveUpdateStructRange {
@@ -100,9 +95,35 @@ export interface LiveUpdateStructRange {
   readonly endClock: number;
 }
 
+export interface LiveCheckpointAuthorCoverage {
+  readonly author: LiveAuthorEntry;
+  readonly structRanges: readonly LiveUpdateStructRange[];
+  readonly deletionRanges: readonly LiveUpdateStructRange[];
+}
+export function parseLiveCheckpointCoverage(value: unknown): readonly LiveCheckpointAuthorCoverage[] {
+  return checkpointCoverage(value, parseLiveUpdateStructRanges);
+}
+function checkpointCoverage(value: unknown, parseRanges: typeof parseLiveUpdateStructRanges): readonly LiveCheckpointAuthorCoverage[] {
+  if (!Array.isArray(value) || value.length > 1024) throw new TypeError("Invalid checkpoint coverage.");
+  const identities = new Set<string>();
+  const coverage = Array.from(value, item => {
+    const entry = exactRecord(item, "Checkpoint author coverage", ["author", "structRanges", "deletionRanges"]);
+    const author = parseLiveAuthorSnapshot([entry.author])[0]!;
+    const identity = JSON.stringify([author.kind, author.kind === "agent" ? author.onBehalfOf ?? null : null, author.kind === "human" ? author.humanId : author.kind === "link" ? author.publicPrincipalId : author.agentId]);
+    if (identities.has(identity)) throw new TypeError("Duplicate checkpoint author.");
+    identities.add(identity);
+    return { author, structRanges: parseRanges(entry.structRanges), deletionRanges: parseRanges(entry.deletionRanges) };
+  });
+  if (new TextEncoder().encode(JSON.stringify(coverage.map(entry => entry.author))).byteLength > 128 * 1024) throw new TypeError("Checkpoint authors exceed byte bound.");
+  return coverage;
+}
 export interface AdmittedLiveUpdateMetadata {
   readonly accepted: RelayAcceptedLiveUpdate;
   readonly firstSeen: readonly LiveUpdateStructRange[];
+  readonly canonicalVersion?: 2;
+  readonly authorSnapshot?: LiveAuthorSnapshot;
+  readonly firstSeenDeletes?: readonly LiveUpdateStructRange[];
+  readonly checkpointCoverage?: readonly LiveCheckpointAuthorCoverage[];
 }
 
 export interface AdmittedLiveUpdate {
@@ -169,30 +190,19 @@ function exactRecord(
   value: unknown,
   name: string,
   fields: readonly string[],
-  optional?: string,
 ): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError(`${name} must be an object.`);
   }
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
-  const expected = optional !== undefined && Object.hasOwn(record, optional) ? [...fields, optional] : fields;
   if (
-    keys.length !== expected.length ||
-    keys.some((key) => !expected.includes(key))
+    keys.length !== fields.length ||
+    keys.some((key) => !fields.includes(key))
   ) {
     throw new TypeError(`${name} must contain exactly its defined fields.`);
   }
   return record;
-}
-
-/** A present member must be a declaration; `undefined` is not absence. */
-function optionalAgentDeclaration(
-  record: Record<string, unknown>,
-): { agentDeclaration?: AgentDeclaration } {
-  return Object.hasOwn(record, "agentDeclaration")
-    ? { agentDeclaration: parseAgentDeclaration(record.agentDeclaration) }
-    : {};
 }
 
 function isWellFormedUtf16(value: string): boolean {
@@ -343,14 +353,13 @@ export function parseLiveUpdateSubmissionMetadata(
   const record = exactRecord(
     value,
     "LiveUpdateSubmissionMetadata",
-    SUBMISSION_METADATA_FIELDS,
-    "agentDeclaration",
+    [...SUBMISSION_METADATA_FIELDS, ...(typeof value === "object" && value !== null && Object.hasOwn(value, "authorContext") ? ["authorContext"] : [])],
   );
   return {
     deliveryId: parseLiveUpdateIdentifier(record.deliveryId, "deliveryId"),
     updateDigest: parseLiveUpdateDigest(record.updateDigest),
     binding: parseLiveObjectBinding(record.binding),
-    ...optionalAgentDeclaration(record),
+    ...(Object.hasOwn(record, "authorContext") ? {authorContext: parseLiveAuthorContext(record.authorContext)} : {}),
   };
 }
 
@@ -386,19 +395,13 @@ export function parseLiveUpdateReceipt(value: unknown): LiveUpdateReceipt {
 export function parseRelayAcceptedLiveUpdate(
   value: unknown,
 ): RelayAcceptedLiveUpdate {
-  const record = exactRecord(value, "RelayAcceptedLiveUpdate", ACCEPTED_FIELDS, "agentDeclaration");
+  const record = exactRecord(value, "RelayAcceptedLiveUpdate", ACCEPTED_FIELDS);
   const authority = parseServerDerivedLiveUpdateAuthority(record.authority);
-  const declared = optionalAgentDeclaration(record);
-  // Only the owner lane carries the agent its edit declared.
-  if (declared.agentDeclaration && authority.principalKind !== "owner") {
-    throw new TypeError("Only an owner's accepted change declares an agent.");
-  }
   return {
     receipt: parseLiveUpdateReceipt(record.receipt),
     binding: parseLiveObjectBinding(record.binding),
     authority,
     receivedAtMs: nonNegativeSafeInteger(record.receivedAtMs, "receivedAtMs"),
-    ...declared,
   };
 }
 
@@ -466,14 +469,41 @@ export function parseLiveUpdateStructRanges(
 export function parseAdmittedLiveUpdateMetadata(
   value: unknown,
 ): AdmittedLiveUpdateMetadata {
+  return admittedMetadata(value, parseLiveUpdateStructRanges);
+}
+
+/** Admitted wire and retained evidence must already have sorted, disjoint, non-adjacent ranges. */
+export function parseCanonicalAdmittedLiveUpdateMetadata(value: unknown): AdmittedLiveUpdateMetadata {
+  return admittedMetadata(value, canonicalRanges);
+}
+
+function canonicalRanges(value: unknown): readonly LiveUpdateStructRange[] {
+  try {
+    if (!Array.isArray(value)) throw new TypeError();
+    const ranges: LiveUpdateStructRange[] = [];
+    for (let index = 0; index < value.length; index++) {
+      if (!Object.hasOwn(value, index)) throw new TypeError();
+      const range = parseLiveUpdateStructRange(value[index]);
+      const prior = ranges.at(-1);
+      if (prior && (range.clientId < prior.clientId ||
+        (range.clientId === prior.clientId && range.startClock <= prior.endClock))) throw new TypeError();
+      ranges.push(range);
+    }
+    return ranges;
+  } catch { throw new TypeError("Invalid live application range."); }
+}
+
+function admittedMetadata(value: unknown, parseRanges: typeof parseLiveUpdateStructRanges): AdmittedLiveUpdateMetadata {
   const record = exactRecord(
     value,
     "AdmittedLiveUpdateMetadata",
-    ADMITTED_METADATA_FIELDS,
+    [...ADMITTED_METADATA_FIELDS, ...(typeof value === "object" && value !== null && Object.hasOwn(value, "canonicalVersion") ? ["canonicalVersion", "authorSnapshot", "firstSeenDeletes", ...(Object.hasOwn(value, "checkpointCoverage") ? ["checkpointCoverage"] : [])] : [])],
   );
+  if (Object.hasOwn(record, "canonicalVersion") && record.canonicalVersion !== 2) throw new TypeError("Unknown canonical version.");
   return {
     accepted: parseRelayAcceptedLiveUpdate(record.accepted),
-    firstSeen: parseLiveUpdateStructRanges(record.firstSeen),
+    firstSeen: parseRanges(record.firstSeen),
+    ...(record.canonicalVersion === 2 ? {canonicalVersion: 2 as const, authorSnapshot: parseLiveAuthorSnapshot(record.authorSnapshot), firstSeenDeletes: parseRanges(record.firstSeenDeletes), ...(Object.hasOwn(record, "checkpointCoverage") ? {checkpointCoverage: checkpointCoverage(record.checkpointCoverage, parseRanges)} : {})} : {}),
   };
 }
 

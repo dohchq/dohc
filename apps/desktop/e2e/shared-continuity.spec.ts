@@ -1,3 +1,4 @@
+import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -218,11 +219,17 @@ async function momentIntroducing(page: Page, workspaceId: string, text: string):
 type HostedEvidence = ReturnType<Awaited<ReturnType<typeof startSelfHostOnboardingStack>>["hostedAgentEvidence"]>;
 interface AcceptedDeclaration { change: HostedEvidence["relay"][number]; audit: LiveAuditRecord }
 
-type Declaration = { agentId: string; onBehalfOf: string | null; depth: number };
+type Declaration = { agentId: string; agentName?: string; onBehalfOf: string | null; depth: number };
+const admittedAgent = (snapshot: LiveAuthorSnapshot): Declaration => {
+  const agent = snapshot.find(author => author.kind === "agent");
+  if (!agent || agent.kind !== "agent") throw new Error("Accepted snapshot has no agent.");
+  return {...agent, onBehalfOf: agent.onBehalfOf ?? null, depth: agent.depth ?? 0};
+};
 // How history names the agent a change declared. Depth 0 and no principal are
 // the defaults history leaves out.
 const declaredAuthor = (declaration: Declaration) => expect.objectContaining({
   kind: "agent", agentId: declaration.agentId,
+  ...(declaration.agentName === undefined ? {} : {agentName: declaration.agentName}),
   ...(declaration.onBehalfOf === null ? {} : { onBehalfOf: declaration.onBehalfOf }),
   ...(declaration.depth > 0 ? { depth: declaration.depth } : {}),
 });
@@ -335,19 +342,20 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     const { relay: [change], host } = read();
     const ownerId = await accountId(ownerAccount.email);
     // The authority is the authenticated owner; the agent is only declared.
-    expect(change).toMatchObject({ principalKind: "owner", principalId: ownerId, agentDeclaration: { agentId } });
+    expect(change).toMatchObject({ principalKind: "owner", principalId: ownerId });
+    expect(change!.authorSnapshot).toContainEqual({kind: "human", humanId: ownerId, humanName: ownerAccount.name});
+    expect(change!.authorSnapshot).toContainEqual(expect.objectContaining({kind: "agent", agentId}));
     const accepted = {
       receipt: { deliveryId: change!.deliveryId, updateDigest: change!.updateDigest, journalCursor: change!.journalCursor },
       binding: { currentPath: PATH, restoreFenceGeneration: change!.restoreFenceGeneration },
       authority: { principalKind: "owner", principalId: ownerId },
-      agentDeclaration: change!.agentDeclaration,
     };
     const copies = host.filter(copy => copy.audit);
     expect(copies).toHaveLength(1);
     const { journalCursor, eventCount, evidenceDigest } = change!;
-    expect(copies[0]!.accepted).toMatchObject([{ journalCursor, eventCount, evidenceDigest, accepted }]);
+    expect(copies[0]!.accepted).toMatchObject([{ journalCursor, eventCount, evidenceDigest, accepted, authorSnapshot: change!.authorSnapshot }]);
     const audit = copies[0]!.audit!;
-    expect(audit).toMatchObject({ deliveryId: change!.deliveryId, journalCursor, eventCount, evidenceDigest, accepted });
+    expect(audit).toMatchObject({ deliveryId: change!.deliveryId, journalCursor, eventCount, evidenceDigest, accepted, authorSnapshot: change!.authorSnapshot });
     expect(ownerAudit(change!.deliveryId)).toEqual(audit);
     return { change: change!, audit };
   };
@@ -441,7 +449,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(editor(page)).toContainText(HA);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA]), { timeout: 60_000 }).toBe(true);
       hosted = await acceptedDeclaration(workspace.workspaceId, HOSTED_AGENT);
-      provenance.hostedOwner = await expectDeclaredMoment(page, workspace.workspaceId, HA, hosted.change.agentDeclaration);
+      provenance.hostedOwner = await expectDeclaredMoment(page, workspace.workspaceId, HA, admittedAgent(hosted.change.authorSnapshot));
     });
 
     await test.step("closing the owner's document keeps the hosted agent as the author of its change", async () => {
@@ -465,7 +473,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       }, { message: "The owner's tab close compacted the document.", timeout: 30_000, intervals: [500] }).toBe(true);
       await openDocument(page);
       await expect(editor(page)).toContainText(HA);
-      provenance.hostedClosed = await expectDeclaredMoment(page, workspace.workspaceId, HA, hosted!.change.agentDeclaration);
+      provenance.hostedClosed = await expectDeclaredMoment(page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot));
       expect(provenance.hostedClosed).toEqual(provenance.hostedOwner);
       expectAuditKept(hosted!);
     });
@@ -479,7 +487,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await openDocument(owner.page);
       await expect(editor(owner.page)).toContainText(HA);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA]), { timeout: 30_000 }).toBe(true);
-      provenance.hostedRestarted = await expectDeclaredMoment(owner.page, workspace.workspaceId, HA, hosted!.change.agentDeclaration);
+      provenance.hostedRestarted = await expectDeclaredMoment(owner.page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot));
       expect(provenance.hostedRestarted).toEqual(provenance.hostedOwner);
       expectAuditKept(hosted!);
     });
@@ -491,7 +499,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(editor(page)).toContainText(H1);
       await expect(editor(page)).toContainText(A1);
       await expect(editor(page)).toContainText(HA);
-      provenance.hostedRecipient = await expectDeclaredMoment(page, recipientWorkspaceId, HA, hosted!.change.agentDeclaration);
+      provenance.hostedRecipient = await expectDeclaredMoment(page, recipientWorkspaceId, HA, admittedAgent(hosted!.change.authorSnapshot));
       // The share holds one file: no history of the hidden one, even by the owner's moment IDs.
       expect(await momentIds(page, recipientWorkspaceId, HIDDEN)).toEqual([]);
       const guessed = await momentIds(owner!.page, workspace.workspaceId, HIDDEN);
@@ -588,7 +596,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(editor(owner.page)).not.toContainText(R1);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA], [R1]), { timeout: 30_000 }).toBe(true);
       await expectActiveAccess(owner.page, []);
-      expect(await expectDeclaredMoment(owner.page, workspace.workspaceId, HA, hosted!.change.agentDeclaration)).toEqual(provenance.hostedOwner);
+      expect(await expectDeclaredMoment(owner.page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot))).toEqual(provenance.hostedOwner);
       expectAuditKept(hosted!);
     });
 
@@ -611,8 +619,8 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // accepted change carries the higher restore fence.
       next = await acceptedDeclaration(workspace.workspaceId, NEXT_AGENT);
       expect(next.change.restoreFenceGeneration).toBeGreaterThan(hosted!.change.restoreFenceGeneration);
-      provenance.nextOwner = await expectDeclaredMoment(page, workspace.workspaceId, A2, next.change.agentDeclaration);
-      expect(await expectDeclaredMoment(page, workspace.workspaceId, HA, hosted!.change.agentDeclaration)).toEqual(provenance.hostedOwner);
+      provenance.nextOwner = await expectDeclaredMoment(page, workspace.workspaceId, A2, admittedAgent(next.change.authorSnapshot));
+      expect(await expectDeclaredMoment(page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot))).toEqual(provenance.hostedOwner);
       expectAuditKept(hosted!);
     });
 
@@ -626,8 +634,8 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       for (const text of [H1, A1, HA, H2, A2]) await expect(editor(page)).toContainText(text);
       await expect(editor(page)).not.toContainText(R1);
       // Both agents' changes reach the new recipient's history, before and after the restore.
-      provenance.hostedNewRecipient = await expectDeclaredMoment(page, newRecipientWorkspaceId, HA, hosted!.change.agentDeclaration);
-      provenance.nextNewRecipient = await expectDeclaredMoment(page, newRecipientWorkspaceId, A2, next!.change.agentDeclaration);
+      provenance.hostedNewRecipient = await expectDeclaredMoment(page, newRecipientWorkspaceId, HA, admittedAgent(hosted!.change.authorSnapshot));
+      provenance.nextNewRecipient = await expectDeclaredMoment(page, newRecipientWorkspaceId, A2, admittedAgent(next!.change.authorSnapshot));
       await typeAfter(page, H2, ` ${R2}`);
       await expect(saveState(page)).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
       await expect(editor(owner!.page)).toContainText(R2, { timeout: 60_000 });
@@ -653,8 +661,8 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await openWorkspaceFromFirstRun(owner.page, ownerTemp);
       await waitForCliEndpoint(ownerTemp.homeDir);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, H2, A2, R2], [R1]), { timeout: 30_000 }).toBe(true);
-      expect(await expectDeclaredMoment(owner.page, workspace.workspaceId, HA, hosted!.change.agentDeclaration)).toEqual(provenance.hostedOwner);
-      expect(await expectDeclaredMoment(owner.page, workspace.workspaceId, A2, next!.change.agentDeclaration)).toEqual(provenance.nextOwner);
+      expect(await expectDeclaredMoment(owner.page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot))).toEqual(provenance.hostedOwner);
+      expect(await expectDeclaredMoment(owner.page, workspace.workspaceId, A2, admittedAgent(next!.change.authorSnapshot))).toEqual(provenance.nextOwner);
       expectAuditKept(hosted!);
       expectAuditKept(next!);
     });

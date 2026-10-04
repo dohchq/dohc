@@ -10,7 +10,7 @@ import { Client, Pool } from "pg";
 import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
+import { createLiveValidationExecutor } from "../../sync-relay/src/liveValidation.js";
 import { createEngineClient } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
 import { serveFetchHandler } from "@dohc/service-http";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
@@ -180,7 +180,9 @@ it("resumes a real configured service activation after a lost native adoption re
     deployment = openRelayDeployment(configPath, {liveTickets: {retainedTicketsPerPrincipalGrant: 4, expiredTicketCleanupBatchSize: 2, now: Date.now}});
     const relayRead = new DatabaseSync(join(root, "relay/relay.sqlite"), {readOnly: true});
     closes.push(async () => relayRead.close());
-    const {storage, history} = deployment, frameChanges = createNamedFrameChanges(16), validate = createLiveMarkdownJournalValidator(validationPolicy);
+    const validationExecutor = createLiveValidationExecutor();
+    closes.push(() => validationExecutor.close());
+    const {storage, history} = deployment, frameChanges = createNamedFrameChanges(16), validate = validationExecutor.validator(validationPolicy);
     let routes: ReturnType<typeof createNamedLiveRoutes> | undefined;
     const relayApp = createSyncRelayHandler({storage, shareWebOrigin: audience, relayExchangeKey: exchangeKey, resolveActor: createSessionActorResolver(relayAuth),
       namedBrowserSessionLimits: {...browserLimits, maxSessions: 4, retentionMs: 120000}, ownerRestoreHost: () => active});

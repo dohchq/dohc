@@ -25,6 +25,9 @@
 /// since they were written; the domain's write path was the outlier.
 pub const MAX_IDENTIFIER_BYTES: usize = 512;
 
+/// Maximum accepted live metadata header, shared by native replay and migration preflight.
+pub const MAX_LIVE_ACCEPTED_HEADER_BYTES: usize = 643_576;
+
 /// The schema fingerprint this build owns. Persisted in `PRAGMA user_version`
 /// and re-validated on every open: a store stamped with any other value is
 /// rejected by the v1-vs-v2 fence (`plan §Day-one Rust schema`), never

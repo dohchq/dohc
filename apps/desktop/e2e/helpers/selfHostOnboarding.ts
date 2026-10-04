@@ -226,19 +226,22 @@ function hostedAgentEvidence(directory: string, workspaceId: string, path: strin
   const relay = read(join(directory, "relay-data", "relay.sqlite"), (db) => db.prepare(
     `SELECT j.journal_cursor AS cursor, j.delivery_id AS deliveryId, j.update_digest AS updateDigest,
        j.principal_kind AS principalKind, j.principal_id AS principalId, j.restore_fence_generation AS fence,
-       j.accepted_event_count AS eventCount, j.accepted_evidence_digest AS evidenceDigest, d.agent_id AS agentId, d.on_behalf_of AS onBehalfOf, d.depth AS depth
-     FROM sync_relay_live_update_journal j JOIN sync_relay_live_update_agent_declarations d ON d.journal_cursor=j.journal_cursor
-     WHERE j.workspace_id=? AND j.current_path=? AND d.agent_id=? ORDER BY j.journal_cursor LIMIT 16`,
+       j.accepted_event_count AS eventCount, j.accepted_evidence_digest AS evidenceDigest, j.author_snapshot_json AS authorSnapshot
+     FROM sync_relay_live_update_journal j
+     WHERE j.workspace_id=? AND j.current_path=? AND EXISTS (
+       SELECT 1 FROM json_each(j.author_snapshot_json) a
+       WHERE json_extract(a.value,'$.kind')='agent' AND json_extract(a.value,'$.agentId')=?) ORDER BY j.journal_cursor LIMIT 16`,
   ).all(workspaceId, path, agentId).map((row) => ({
     journalCursor: Number(row.cursor), deliveryId: String(row.deliveryId), updateDigest: String(row.updateDigest),
     principalKind: String(row.principalKind), principalId: String(row.principalId), restoreFenceGeneration: Number(row.fence),
     eventCount: Number(row.eventCount), evidenceDigest: String(row.evidenceDigest),
-    agentDeclaration: { agentId: String(row.agentId), onBehalfOf: row.onBehalfOf === null ? null : String(row.onBehalfOf), depth: Number(row.depth) },
+    authorSnapshot: JSON.parse(String(row.authorSnapshot)) as LiveAuditRecord["authorSnapshot"],
   })));
   // Every accepted change of the document by authenticated kind, and how many declared any agent. Counts only.
   const journal = read(join(directory, "relay-data", "relay.sqlite"), (db) => db.prepare(
-    `SELECT j.principal_kind AS kind, COUNT(*) AS accepted, COUNT(d.journal_cursor) AS declared
-     FROM sync_relay_live_update_journal j LEFT JOIN sync_relay_live_update_agent_declarations d ON d.journal_cursor=j.journal_cursor
+    `SELECT j.principal_kind AS kind, COUNT(*) AS accepted, SUM(EXISTS (
+       SELECT 1 FROM json_each(j.author_snapshot_json) a WHERE json_extract(a.value,'$.kind')='agent')) AS declared
+     FROM sync_relay_live_update_journal j
      WHERE j.workspace_id=? AND j.current_path=? GROUP BY j.principal_kind ORDER BY j.principal_kind`,
   ).all(workspaceId, path).map((row) => ({ kind: String(row.kind), accepted: Number(row.accepted), declared: Number(row.declared) })));
   const hostRoot = join(directory, "relay-deployment", "live-host");
@@ -246,10 +249,11 @@ function hostedAgentEvidence(directory: string, workspaceId: string, path: strin
     .flatMap((entry) => read(join(hostRoot, entry.name, ".dohc", "engine", "engine.db"), (db) => relay.map((change) => ({
       deliveryId: change.deliveryId,
       accepted: db.prepare(`SELECT journal_cursor AS cursor, event_count AS eventCount, evidence_digest AS evidenceDigest,
-          json_extract(metadata_json,'$.accepted') AS accepted FROM live_accepted_updates
+          json_extract(metadata_json,'$.accepted') AS accepted, json_extract(metadata_json,'$.authorSnapshot') AS authorSnapshot FROM live_accepted_updates
           WHERE delivery_id=? AND json_extract(metadata_json,'$.accepted.binding.workspaceId')=?`)
         .all(change.deliveryId, workspaceId).map((row) => ({ journalCursor: Number(row.cursor), eventCount: Number(row.eventCount),
-          evidenceDigest: String(row.evidenceDigest), accepted: JSON.parse(String(row.accepted)) as LiveAuditRecord["accepted"] })),
+          evidenceDigest: String(row.evidenceDigest), accepted: JSON.parse(String(row.accepted)) as LiveAuditRecord["accepted"],
+          authorSnapshot: JSON.parse(String(row.authorSnapshot)) as LiveAuditRecord["authorSnapshot"] })),
       audit: readLiveAuditRecord(db, change.deliveryId),
     }))));
   return { relay, host, journal };

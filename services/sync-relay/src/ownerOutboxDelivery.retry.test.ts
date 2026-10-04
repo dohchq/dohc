@@ -12,7 +12,8 @@ import type {StorageContext} from "./storage/context";
 
 const cleanup: Array<() => void> = [];
 afterEach(() => {for (const close of cleanup.splice(0).reverse()) close(); cleanupLiveDeliveryFixtures(); vi.restoreAllMocks();});
-const validateJournal = createLiveMarkdownJournalValidator(policy);
+const validateProjection = createLiveMarkdownJournalValidator(policy);
+const validateJournal: OwnerOutboxAdmission["validate"] = ({retainStateUpdate: _retainStateUpdate, ...input}) => validateProjection(input);
 function deferred() {
   let resolve!: () => void;
   return {promise: new Promise<void>(done => {resolve = done;}), resolve: () => resolve()};

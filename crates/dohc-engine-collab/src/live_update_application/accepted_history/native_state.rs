@@ -134,7 +134,7 @@ impl<R: Read> Read for SqlJson<R> {
 }
 
 struct Ranges<'a> {
-    count: usize,
+    count: Option<usize>,
     writer: &'a mut HashWriter,
 }
 impl<'de> DeserializeSeed<'de> for Ranges<'_> {
@@ -150,10 +150,11 @@ impl<'de> Visitor<'de> for Ranges<'_> {
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
         let mut previous = None;
-        for ordinal in 0..self.count {
-            let range: LiveUpdateStructRange = seq
-                .next_element()?
-                .ok_or_else(|| A::Error::custom("short firstSeen"))?;
+        let mut ordinal = 0;
+        while let Some(range) = seq.next_element::<LiveUpdateStructRange>()? {
+            if self.count.is_some_and(|count| ordinal >= count) {
+                return Err(A::Error::custom("long range array"));
+            }
             range
                 .validate_after(previous.as_ref())
                 .map_err(A::Error::custom)?;
@@ -162,19 +163,138 @@ impl<'de> Visitor<'de> for Ranges<'_> {
             }
             serde_json::to_writer(&mut *self.writer, &range).map_err(A::Error::custom)?;
             previous = Some(range);
+            ordinal += 1;
         }
-        // Reject the first excess element before any array allocation.
-        if seq.next_element::<LiveUpdateStructRange>()?.is_some() {
-            return Err(A::Error::custom("long firstSeen"));
+        if self.count.is_some_and(|count| ordinal != count) {
+            return Err(A::Error::custom("short range array"));
         }
         Ok(())
     }
 }
+struct Coverage<'a>(&'a mut HashWriter);
+impl<'de> DeserializeSeed<'de> for Coverage<'_> {
+    type Value = ();
+    fn deserialize<D: serde::Deserializer<'de>>(self, de: D) -> Result<(), D::Error> {
+        de.deserialize_seq(self)
+    }
+}
+impl<'de> Visitor<'de> for Coverage<'_> {
+    type Value = ();
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("checkpoint author coverage")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        let mut count = 0;
+        let mut bytes = 2;
+        let mut identities = std::collections::BTreeSet::new();
+        while let Some(author) = seq.next_element_seed(CoverageEntry {
+            writer: &mut *self.0,
+            comma: count > 0,
+        })? {
+            if count == 1024
+                || !identities.insert((
+                    author.identity().0.to_owned(),
+                    author.identity().1.map(str::to_owned),
+                    author.identity().2.to_owned(),
+                ))
+            {
+                return Err(A::Error::custom("checkpoint author bound or duplicate"));
+            }
+            bytes += serde_json::to_vec(&author).map_err(A::Error::custom)?.len()
+                + usize::from(count > 0);
+            count += 1;
+            if bytes > 128 * 1024 {
+                return Err(A::Error::custom("checkpoint author byte bound"));
+            }
+        }
+        Ok(())
+    }
+}
+struct CoverageEntry<'a> {
+    writer: &'a mut HashWriter,
+    comma: bool,
+}
+impl<'de> DeserializeSeed<'de> for CoverageEntry<'_> {
+    type Value = LiveAuthorEntry;
+    fn deserialize<D: serde::Deserializer<'de>>(self, de: D) -> Result<Self::Value, D::Error> {
+        de.deserialize_map(self)
+    }
+}
+impl<'de> Visitor<'de> for CoverageEntry<'_> {
+    type Value = LiveAuthorEntry;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("checkpoint author ranges")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        if self.comma {
+            self.writer.write_all(b",").map_err(A::Error::custom)?;
+        }
+        if map.next_key::<String>()?.as_deref() != Some("author") {
+            return Err(A::Error::custom("checkpoint author order"));
+        }
+        let author: LiveAuthorEntry = map.next_value()?;
+        author.validate().map_err(A::Error::custom)?;
+        self.writer
+            .write_all(b"{\"author\":")
+            .map_err(A::Error::custom)?;
+        serde_json::to_writer(&mut *self.writer, &author).map_err(A::Error::custom)?;
+        for field in ["structRanges", "deletionRanges"] {
+            if map.next_key::<String>()?.as_deref() != Some(field) {
+                return Err(A::Error::custom("checkpoint range order"));
+            }
+            self.writer
+                .write_all(format!(",\"{field}\":[").as_bytes())
+                .map_err(A::Error::custom)?;
+            map.next_value_seed(Ranges {
+                count: None,
+                writer: &mut *self.writer,
+            })?;
+            self.writer.write_all(b"]").map_err(A::Error::custom)?;
+        }
+        if map.next_key::<String>()?.is_some() {
+            return Err(A::Error::custom("unknown checkpoint field"));
+        }
+        self.writer.write_all(b"}").map_err(A::Error::custom)?;
+        Ok(author)
+    }
+}
+struct Snapshot;
+impl<'de> DeserializeSeed<'de> for Snapshot {
+    type Value = Vec<LiveAuthorEntry>;
+    fn deserialize<D: serde::Deserializer<'de>>(self, de: D) -> Result<Self::Value, D::Error> {
+        de.deserialize_seq(self)
+    }
+}
+impl<'de> Visitor<'de> for Snapshot {
+    type Value = Vec<LiveAuthorEntry>;
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("bounded author snapshot")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut authors = Vec::new();
+        while let Some(author) = seq.next_element::<LiveAuthorEntry>()? {
+            if authors.len() == 2 {
+                return Err(A::Error::custom("snapshot author bound"));
+            }
+            author.validate().map_err(A::Error::custom)?;
+            authors.push(author);
+        }
+        if authors.len() == 2
+            && (matches!(authors[0], LiveAuthorEntry::Agent { .. })
+                || !matches!(authors[1], LiveAuthorEntry::Agent { .. }))
+        {
+            return Err(A::Error::custom("snapshot author order"));
+        }
+        Ok(authors)
+    }
+}
+
 struct Metadata<'a> {
     accepted: &'a RelayAcceptedLiveUpdate,
     count: usize,
     previous: &'a str,
     ordinal: i64,
+    canonical_version: Option<u8>,
 }
 impl<'de> DeserializeSeed<'de> for Metadata<'_> {
     type Value = String;
@@ -190,7 +310,11 @@ impl<'de> Visitor<'de> for Metadata<'_> {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<String, A::Error> {
         let mut writer = HashWriter::default();
         writer
-            .write_all(b"[\"accepted-event-v1\",")
+            .write_all(if self.canonical_version == Some(2) {
+                b"[\"accepted-event-v2\","
+            } else {
+                b"[\"accepted-event-v1\","
+            })
             .map_err(A::Error::custom)?;
         serde_json::to_writer(&mut writer, self.previous).map_err(A::Error::custom)?;
         writer.write_all(b",").map_err(A::Error::custom)?;
@@ -204,6 +328,7 @@ impl<'de> Visitor<'de> for Metadata<'_> {
             .map_err(A::Error::custom)?;
         let mut accepted = false;
         let mut ranges = false;
+        let mut extension = 0;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "accepted" if !accepted => {
@@ -215,10 +340,48 @@ impl<'de> Visitor<'de> for Metadata<'_> {
                 }
                 "firstSeen" if !ranges => {
                     map.next_value_seed(Ranges {
-                        count: self.count,
+                        count: Some(self.count),
                         writer: &mut writer,
                     })?;
                     ranges = true;
+                }
+                "canonicalVersion"
+                    if ranges && self.canonical_version == Some(2) && extension == 0 =>
+                {
+                    if map.next_value::<u8>()? != 2 {
+                        return Err(A::Error::custom("metadata version"));
+                    }
+                    writer
+                        .write_all(b"],\"canonicalVersion\":2")
+                        .map_err(A::Error::custom)?;
+                    extension = 1;
+                }
+                "authorSnapshot" if extension == 1 => {
+                    let authors = map.next_value_seed(Snapshot)?;
+                    writer
+                        .write_all(b",\"authorSnapshot\":")
+                        .map_err(A::Error::custom)?;
+                    serde_json::to_writer(&mut writer, &authors).map_err(A::Error::custom)?;
+                    extension = 2;
+                }
+                "firstSeenDeletes" if extension == 2 => {
+                    writer
+                        .write_all(b",\"firstSeenDeletes\":[")
+                        .map_err(A::Error::custom)?;
+                    map.next_value_seed(Ranges {
+                        count: None,
+                        writer: &mut writer,
+                    })?;
+                    writer.write_all(b"]").map_err(A::Error::custom)?;
+                    extension = 3;
+                }
+                "checkpointCoverage" if extension == 3 => {
+                    writer
+                        .write_all(b",\"checkpointCoverage\":[")
+                        .map_err(A::Error::custom)?;
+                    map.next_value_seed(Coverage(&mut writer))?;
+                    writer.write_all(b"]").map_err(A::Error::custom)?;
+                    extension = 4;
                 }
                 _ => return Err(A::Error::custom("unknown or duplicate metadata field")),
             }
@@ -226,7 +389,14 @@ impl<'de> Visitor<'de> for Metadata<'_> {
         if !accepted || !ranges {
             return Err(A::Error::custom("missing metadata field"));
         }
-        writer.write_all(b"]}]").map_err(A::Error::custom)?;
+        if self.canonical_version == Some(2) {
+            if extension < 3 {
+                return Err(A::Error::custom("missing v2 metadata field"));
+            }
+            writer.write_all(b"}]").map_err(A::Error::custom)?;
+        } else {
+            writer.write_all(b"]}]").map_err(A::Error::custom)?;
+        }
         Ok(writer.finish())
     }
 }
@@ -284,6 +454,8 @@ impl<'de> Visitor<'de> for RestoreApplication<'_> {
 pub(super) struct NativeMetadata {
     pub accepted: RelayAcceptedLiveUpdate,
     pub evidence_digest: String,
+    pub canonical_version: Option<u8>,
+    pub checkpoint_coverage: bool,
 }
 fn parse(
     conn: &Connection,
@@ -296,10 +468,28 @@ fn parse(
 ) -> Result<NativeMetadata, ApplicationError> {
     let application = expression == "application_json";
     let prefix = if application { "$.admitted" } else { "$" };
-    let facts=format!("SELECT rowid,length(CAST({expression} AS BLOB)),json_array_length({expression},'{prefix}.firstSeen'),length(CAST(json_extract({expression},'{prefix}.accepted') AS BLOB)) {source}");
-    let (rowid, length, count, header): (i64, i64, i64, i64) = conn
+    let facts = format!(
+        "SELECT rowid,length(CAST({expression} AS BLOB)),json_array_length({expression},'{prefix}.firstSeen'),length(CAST(json_extract({expression},'{prefix}.accepted') AS BLOB)),json_extract({expression},'{prefix}.canonicalVersion'),json_type({expression},'{prefix}.checkpointCoverage'),coalesce(json_array_length({expression},'{prefix}.firstSeenDeletes'),0)+coalesce((SELECT sum(coalesce(json_array_length(value,'$.structRanges'),0)+coalesce(json_array_length(value,'$.deletionRanges'),0)) FROM json_each({expression},'{prefix}.checkpointCoverage')),0) {source}"
+    );
+    let (rowid, length, count, header, canonical_version, coverage, extra_ranges): (
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<u8>,
+        Option<String>,
+        i64,
+    ) = conn
         .query_row(&facts, parameters.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
         })
         .map_err(read_sql)?;
     let length = usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?;
@@ -309,14 +499,19 @@ fn parse(
     // The stored byte length bounds count and the canonical 76-byte range bound
     // bounds raw metadata; no range-count-sized allocation is made.
     let limit = count
-        .checked_mul(76)
+        .checked_add(usize::try_from(extra_ranges).map_err(|_| ApplicationError::Corrupt)?)
+        .and_then(|n| n.checked_mul(76))
         .and_then(|n| {
             n.checked_add(
-                NativeHistoryReconstruction::HEADER_BYTES * (if application { 2 } else { 1 }) + 32,
+                NativeHistoryReconstruction::HEADER_BYTES * (if application { 2 } else { 1 })
+                    + 128 * 1024
+                    + 32,
             )
         })
         .ok_or(ApplicationError::Corrupt)?;
-    if length == 0
+    if (canonical_version.is_some() && canonical_version != Some(2))
+        || coverage.as_ref().is_some_and(|kind| kind != "array")
+        || length == 0
         || length > limit
         || count > length / 2
         || header < 0
@@ -358,6 +553,7 @@ fn parse(
                         previous,
                         ordinal,
                         true,
+                        canonical_version,
                     )
                 })
             },
@@ -378,11 +574,14 @@ fn parse(
             previous,
             ordinal,
             false,
+            canonical_version,
         )?
     };
     Ok(NativeMetadata {
         accepted,
         evidence_digest,
+        canonical_version,
+        checkpoint_coverage: coverage.is_some(),
     })
 }
 
@@ -393,6 +592,7 @@ fn parse_evidence(
     previous: &str,
     ordinal: i64,
     application: bool,
+    canonical_version: Option<u8>,
 ) -> Result<String, ApplicationError> {
     let mut de = serde_json::Deserializer::from_reader(reader);
     let metadata = Metadata {
@@ -400,6 +600,7 @@ fn parse_evidence(
         count,
         previous,
         ordinal,
+        canonical_version,
     };
     let evidence_digest = if application {
         RestoreApplication(metadata).deserialize(&mut de)
@@ -630,6 +831,7 @@ pub(super) fn read(
     let mut evidence = c.evidence_digest;
     let mut binding = c.binding;
     let mut bytes = 0;
+    let mut canonical_version = c.canonical_version;
     while let Some(row) = rows.next().map_err(read_sql)? {
         if count - c.event_count >= CHECKPOINT_EVENTS || bytes >= CHECKPOINT_BYTES {
             return Err(ApplicationError::Corrupt);
@@ -641,6 +843,10 @@ pub(super) fn read(
             return Err(ApplicationError::Corrupt);
         }
         let metadata = metadata(conn, held, ordinal)?;
+        if canonical_version == Some(2) && metadata.canonical_version != Some(2) {
+            return Err(ApplicationError::Corrupt);
+        }
+        canonical_version = metadata.canonical_version;
         // metadata() also hashes against the preceding retained row. Bind it to
         // this replay's validated checkpoint/suffix chain explicitly.
         let previous: String = if ordinal == 1 {
@@ -748,23 +954,20 @@ mod tests {
                 read_json(&canonical, previous).unwrap().evidence_digest,
                 digest
             );
-            let reordered = format!(
-                "{{\"firstSeen\":{},\"accepted\":{}}}",
-                serde_json::to_string(&expected.first_seen).unwrap(),
-                serde_json::to_string(&expected.accepted).unwrap()
-            );
-            assert_eq!(
-                read_json(&reordered, previous).unwrap().evidence_digest,
-                digest
-            );
+            if expected.canonical_version.is_none() {
+                let reordered = format!(
+                    "{{\"firstSeen\":{},\"accepted\":{}}}",
+                    serde_json::to_string(&expected.first_seen).unwrap(),
+                    serde_json::to_string(&expected.accepted).unwrap()
+                );
+                assert_eq!(
+                    read_json(&reordered, previous).unwrap().evidence_digest,
+                    digest
+                );
+            }
         }
         let mut accepted: RelayAcceptedLiveUpdate =
             serde_json::from_str(super::super::tests::ACCEPTED_COMPLETE).unwrap();
-        accepted.agent_declaration = Some(AgentDeclaration {
-            agent_id: "旅行\"agent🦀".into(),
-            on_behalf_of: Some("ówner".into()),
-            depth: 1,
-        });
         accepted
             .binding
             .selector_paths
@@ -780,6 +983,30 @@ mod tests {
         let metadata = AdmittedLiveUpdateMetadata {
             accepted,
             first_seen,
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![LiveAuthorEntry::Agent {
+                agent_id: "旅行-agent".into(),
+                agent_name: Some("Trip helper".into()),
+                on_behalf_of: Some("owner".into()),
+                depth: Some(1),
+            }]),
+            first_seen_deletes: Some(vec![LiveUpdateStructRange {
+                client_id: 9,
+                start_clock: 0,
+                end_clock: 1,
+            }]),
+            checkpoint_coverage: Some(vec![LiveCheckpointAuthorCoverage {
+                author: LiveAuthorEntry::Human {
+                    human_id: "owner".into(),
+                    human_name: "Owner".into(),
+                },
+                struct_ranges: vec![LiveUpdateStructRange {
+                    client_id: 1,
+                    start_clock: 0,
+                    end_clock: 1,
+                }],
+                deletion_ranges: vec![],
+            }]),
         };
         let json = serde_json::to_string(&metadata).unwrap();
         assert!(json.len() > 10 * CHUNK);
@@ -797,13 +1024,23 @@ mod tests {
             format!("{{\"accepted\":{accepted},\"accepted\":{accepted},\"firstSeen\":[]}}"),
             format!("{{\"accepted\":{accepted},\"firstSeen\":[],\"other\":0}}"),
             format!("{{\"accepted\":{accepted},\"firstSeen\":[],\"firstSeen\":[]}}"),
-            format!("{{\"accepted\":{accepted},\"firstSeen\":[{{\"clientId\":1,\"startClock\":1,\"endClock\":1}}]}}"),
-            format!("{{\"accepted\":{accepted},\"firstSeen\":[{{\"clientId\":2,\"startClock\":0,\"endClock\":1}},{{\"clientId\":1,\"startClock\":0,\"endClock\":1}}]}}"),
+            format!(
+                "{{\"accepted\":{accepted},\"firstSeen\":[{{\"clientId\":1,\"startClock\":1,\"endClock\":1}}]}}"
+            ),
+            format!(
+                "{{\"accepted\":{accepted},\"firstSeen\":[{{\"clientId\":2,\"startClock\":0,\"endClock\":1}},{{\"clientId\":1,\"startClock\":0,\"endClock\":1}}]}}"
+            ),
             format!("{{\"accepted\":{accepted},\"firstSeen\":[]}} garbage"),
-            format!("{{\"accepted\":{},\"firstSeen\":[]}}",accepted.replace("delivery-1",&"x".repeat(STRING_TOKEN_BYTES+1))),
-            format!("{{\"accepted\":{},\"firstSeen\":[]}}",accepted.replace("receivedAtMs\":10","receivedAtMs\":10000000000000000")),
+            format!(
+                "{{\"accepted\":{},\"firstSeen\":[]}}",
+                accepted.replace("delivery-1", &"x".repeat(STRING_TOKEN_BYTES + 1))
+            ),
+            format!(
+                "{{\"accepted\":{},\"firstSeen\":[]}}",
+                accepted.replace("receivedAtMs\":10", "receivedAtMs\":10000000000000000")
+            ),
         ] {
-            assert!(read_json(&json,&previous).is_err(),"{json}");
+            assert!(read_json(&json, &previous).is_err(), "{json}");
         }
     }
 
@@ -842,6 +1079,14 @@ mod tests {
                     end_clock: 1,
                 })
                 .collect(),
+
+            canonical_version: None,
+
+            author_snapshot: None,
+
+            first_seen_deletes: None,
+
+            checkpoint_coverage: None,
         };
         let application = serde_json::json!({
             "fence": {"generation": 1}, "candidateDigest": "0".repeat(64),
@@ -874,7 +1119,10 @@ mod tests {
             parsed.evidence_digest,
             next_digest(&previous, 1, &metadata).unwrap()
         );
-        assert!(queries.load(Ordering::Relaxed) <= 3);
+        assert!(
+            queries.load(Ordering::Relaxed) <= 4,
+            "three statements plus the coverage subquery, independent of chunks"
+        );
         for token in [
             serde_json::json!("x".repeat(STRING_TOKEN_BYTES + 1)),
             serde_json::json!(10000000000000000_u64),

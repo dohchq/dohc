@@ -298,7 +298,7 @@ pub(super) fn classify(
                 // The receipt is this entry's own delivery: the same bytes,
                 // binding, owner authority, and declaration.
                 if metadata.accepted.receipt.update_digest != update_digest
-                    || metadata.accepted.agent_declaration != declaration
+                    || !metadata.matches_draft_declaration(declaration.as_ref())
                     || metadata.accepted.binding != *b
                     || metadata.accepted.receipt.journal_cursor
                         > operation.terminal.as_ref().map_or(0, |r| r.journal_cursor)

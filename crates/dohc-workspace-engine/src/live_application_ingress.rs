@@ -24,7 +24,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const RANGE_BYTES: usize = 16;
 // Worst-case canonical request with 100 selectors and six-byte JSON escapes.
-const MAX_HEADER_BYTES: usize = 643_576;
+const MAX_HEADER_BYTES: usize = dohc_engine_storage::limits::MAX_LIVE_ACCEPTED_HEADER_BYTES;
 const MAX_CHUNK_BYTES: usize = 256 * 1024;
 mod adoption;
 mod restore;
@@ -91,6 +91,11 @@ impl LiveApplicationIngressConfig {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ApplyParams {
     accepted: RelayAcceptedLiveUpdate,
+    #[serde(
+        default,
+        deserialize_with = "dohc_engine_collab::live_update_application::nonnull_optional"
+    )]
+    metadata_byte_length: Option<usize>,
     registration_id: u64,
     range_count: usize,
     range_stream_id: u64,
@@ -221,6 +226,8 @@ struct Upload {
     bytes: Vec<u8>,
     first_seen: Vec<LiveUpdateStructRange>,
     range_tail: Vec<u8>,
+    range_count: usize,
+    metadata_bytes: Vec<u8>,
     deadline: Instant,
     permit: Arc<Reservation>,
 }
@@ -496,10 +503,14 @@ impl LiveApplicationIngress {
         } else {
             let params: ApplyParams = serde_json::from_value(std::mem::take(&mut request.params))
                 .map_err(|_| invalid("invalid-live-application-header"))?;
-            let canonical = parse_admitted_metadata(serde_json::json!({
-                "accepted": params.accepted, "firstSeen": [],
-            }))
+            let canonical = dohc_engine_collab::live_update_application::parse_admitted_metadata(
+                serde_json::json!({"accepted":params.accepted,"firstSeen":[]}),
+            )
             .map_err(|_| invalid("invalid-live-application-header"))?;
+            let metadata_bytes = params.metadata_byte_length.unwrap_or(0);
+            if metadata_bytes > MAX_YDOC_UPDATE_BYTES * 128 {
+                return Err(invalid("invalid-live-metadata-bound"));
+            }
             if canonical.accepted != params.accepted {
                 return Err(invalid("noncanonical-live-application-header"));
             }
@@ -516,7 +527,7 @@ impl LiveApplicationIngress {
             )?;
             let ranges = Stream::new(
                 params.range_stream_id,
-                params.range_count * RANGE_BYTES,
+                params.range_count * RANGE_BYTES + metadata_bytes,
                 params.range_digest,
             )?;
             (
@@ -549,7 +560,15 @@ impl LiveApplicationIngress {
             // First adoption can seed a native head larger than the relay baseline.
             self.adoption_reservation(*max_bytes)
         } else {
-            self.config.reservation_bytes(update.expected, range_count)
+            self.config
+                .reservation_bytes(update.expected, range_count)
+                .and_then(|bytes| {
+                    ranges.as_ref().map_or(Some(bytes), |ranges| {
+                        bytes.checked_add(
+                            (ranges.expected - range_count * RANGE_BYTES).checked_mul(4)?,
+                        )
+                    })
+                })
         }
         .and_then(|bytes| u32::try_from(bytes).ok())
         .ok_or_else(overloaded)?;
@@ -593,6 +612,8 @@ impl LiveApplicationIngress {
                 bytes,
                 first_seen,
                 range_tail: Vec::with_capacity(RANGE_BYTES),
+                range_count,
+                metadata_bytes: Vec::new(),
                 deadline,
                 permit,
             },
@@ -662,6 +683,10 @@ impl LiveApplicationIngress {
                 .ok_or_else(|| invalid("unknown-live-stream"))?
                 .chunk(bytes, fin)?;
             for byte in bytes {
+                if upload.first_seen.len() == upload.range_count {
+                    upload.metadata_bytes.push(*byte);
+                    continue;
+                }
                 upload.range_tail.push(*byte);
                 if upload.range_tail.len() == RANGE_BYTES {
                     let raw = &upload.range_tail;
@@ -715,13 +740,39 @@ impl LiveApplicationIngress {
         let operation = match upload.metadata {
             Metadata::Owner(_) => unreachable!("owner dispatched above"),
             Metadata::Sync(policy) => LiveApplicationOperation::SyncOpen(upload.bytes, policy),
-            Metadata::Apply(accepted) => LiveApplicationOperation::Apply(AdmittedLiveUpdate {
-                metadata: AdmittedLiveUpdateMetadata {
-                    accepted,
-                    first_seen: upload.first_seen,
-                },
-                update_bytes: upload.bytes,
-            }),
+            Metadata::Apply(accepted) => {
+                let mut value = if upload.metadata_bytes.is_empty() {
+                    serde_json::json!({})
+                } else {
+                    serde_json::from_slice::<serde_json::Value>(&upload.metadata_bytes)
+                        .map_err(|_| invalid("invalid-live-metadata-attachment"))?
+                };
+                let extensions = value
+                    .as_object_mut()
+                    .ok_or_else(|| invalid("invalid-live-metadata-attachment"))?;
+                if extensions.contains_key("accepted") || extensions.contains_key("firstSeen") {
+                    return Err(invalid("invalid-live-metadata-fields"));
+                }
+                extensions.insert(
+                    "accepted".into(),
+                    serde_json::to_value(accepted)
+                        .map_err(|_| invalid("invalid-live-metadata-attachment"))?,
+                );
+                extensions.insert(
+                    "firstSeen".into(),
+                    serde_json::to_value(upload.first_seen)
+                        .map_err(|_| invalid("invalid-live-metadata-attachment"))?,
+                );
+                let metadata: AdmittedLiveUpdateMetadata = serde_json::from_value(value)
+                    .map_err(|_| invalid("invalid-live-metadata-attachment"))?;
+                metadata
+                    .validate_extensions()
+                    .map_err(|_| invalid("invalid-live-metadata-attachment"))?;
+                LiveApplicationOperation::Apply(AdmittedLiveUpdate {
+                    metadata,
+                    update_bytes: upload.bytes,
+                })
+            }
             Metadata::Bootstrap(metadata) => {
                 LiveApplicationOperation::Bootstrap(metadata, upload.bytes)
             }
@@ -1114,6 +1165,72 @@ pub(crate) mod tests {
             } else {
                 assert!(decoded.is_err());
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn v2_metadata_tail_survives_chunk_boundaries_after_packed_ranges() {
+        let (_scratch, service, owner, workspace, registration, binding) = fixture().await;
+        let bytes = Ydoc::wire().plaintext_insert(0, "abcdefghij");
+        let spans = [(7_u64, 0_u32, 3_u32), (7, 5, 10)];
+        let mut ranges: Vec<u8> = spans
+            .iter()
+            .flat_map(|(client, start, end)| {
+                let mut packed = client.to_le_bytes().to_vec();
+                packed.extend(start.to_le_bytes());
+                packed.extend(end.to_le_bytes());
+                packed
+            })
+            .collect();
+        let author = json!({"kind":"human","humanId":"owner","humanName":"Sam 🐈"});
+        let agent = json!({"kind":"agent","agentId":"writer","agentName":"Writer","onBehalfOf":"owner","depth":1});
+        let first_seen = json!([
+            {"clientId":7,"startClock":0,"endClock":3},
+            {"clientId":7,"startClock":5,"endClock":10}
+        ]);
+        let deletions = json!([{"clientId":7,"startClock":1,"endClock":2}]);
+        let extensions = json!({
+            "canonicalVersion":2,"authorSnapshot":[author.clone(),agent],"firstSeenDeletes":deletions.clone(),
+            "checkpointCoverage":[{"author":author,"structRanges":first_seen.clone(),"deletionRanges":deletions}]
+        });
+        let tail = serde_json::to_vec(&extensions).unwrap();
+        ranges.extend(&tail);
+        let mut request = request(&workspace, registration, &binding, &bytes, &ranges);
+        request.params["rangeCount"] = json!(spans.len());
+        request.params["metadataByteLength"] = json!(tail.len());
+        let mut expected = extensions;
+        expected["accepted"] = request.params["accepted"].clone();
+        expected["firstSeen"] = first_seen;
+
+        for chunk_size in [1, 15, 16, 31, 32, 33, 64] {
+            let mut ingress = LiveApplicationIngress::new(service.clone(), config()).unwrap();
+            ingress.begin(request.clone(), &owner.handle()).unwrap();
+            for (stream_id, payload) in [(1, &bytes), (2, &ranges)] {
+                ingress
+                    .start(BlobStart {
+                        request_id: 3,
+                        stream_id,
+                        total_bytes: Some(payload.len() as u64),
+                        sha256: Some(hex_sha256(payload)),
+                    })
+                    .unwrap();
+            }
+            assert!(ingress.chunk(1, true, &bytes).unwrap().is_none());
+            let mut decoded = None;
+            for (index, chunk) in ranges.chunks(chunk_size).enumerate() {
+                let fin = (index + 1) * chunk_size >= ranges.len();
+                decoded = ingress.chunk(2, fin, chunk).unwrap();
+                assert_eq!(decoded.is_some(), fin);
+            }
+            let (_, input) = decoded.unwrap();
+            let LiveApplicationInput::Admitted(input) = input else {
+                panic!("expected admitted input")
+            };
+            let LiveApplicationOperation::Apply(event) = input.operation else {
+                panic!("expected application")
+            };
+            assert_eq!(event.update_bytes, bytes);
+            assert_eq!(serde_json::to_value(event.metadata).unwrap(), expected);
         }
     }
 

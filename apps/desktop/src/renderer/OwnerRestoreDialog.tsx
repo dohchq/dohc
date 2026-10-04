@@ -21,13 +21,13 @@ function ChangeList({label, events}: {label: string; events: OwnerRestoreReview[
     <summary className="cursor-pointer text-[13px] text-ink">{label} <span className="font-mono">({events.length})</span></summary>
     <ol className="space-y-2 pl-5 text-[12px] text-muted" start={start + 1}>
       {events.slice(start, start + 50).map(({metadata}) => {
-        const {authority, receipt, receivedAtMs, agentDeclaration} = metadata.accepted;
+        const {authority, receipt, receivedAtMs} = metadata.accepted;
+        const agent = metadata.authorSnapshot?.find(author => author.kind === "agent");
         return <li key={receipt.deliveryId}>
           {authority.principalKind === "owner" ? "Owner" : authority.principalKind === "link" ? "Link participant" : `Account ${authority.principalId}`}
-          {/* The agent the owner's computer named for this change. The owner is who the server authenticated. */}
-          {agentDeclaration ? <span className="inline-flex max-w-full items-center gap-1"> · <AgentBadge testIdPrefix="owner-restore-change"
-            author={{authorDisplayName: agentDeclaration.agentId, authorOwnerDisplayName: "Owner"}} />
-            <span className="min-w-0 break-all text-agent">{agentDeclaration.agentId}</span></span> : null}
+          {agent ? <span className="inline-flex max-w-full items-center gap-1"> · <AgentBadge testIdPrefix="owner-restore-change"
+            author={{authorDisplayName: agent.agentName ?? agent.agentId, authorOwnerDisplayName: "Owner"}} />
+            <span className="min-w-0 break-all text-agent">{agent.agentName ?? agent.agentId}</span></span> : null}
           <span> · {new Date(receivedAtMs).toLocaleString()}</span>
           <details><summary className="cursor-pointer">Change details</summary><pre className="overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(metadata, null, 2)}</pre></details>
         </li>;

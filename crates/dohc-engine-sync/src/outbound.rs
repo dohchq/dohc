@@ -15,8 +15,17 @@ pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool
         return false;
     };
     let original_len = authors.len();
-    authors
-        .retain(|author| author.get("kind").and_then(serde_json::Value::as_str) != Some("human"));
+    authors.retain(|author| {
+        author.get("kind").and_then(serde_json::Value::as_str) != Some("human")
+            || (author
+                .get("humanName")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                && author
+                    .get("humanId")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| relay_person_id(id).is_some()))
+    });
     if authors.len() == original_len {
         return false;
     }

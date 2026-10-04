@@ -7,7 +7,7 @@ import { WebSocket } from "ws";
 import { afterEach, expect, it, vi } from "vitest";
 import { serveFetchHandler } from "@dohc/service-http";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
-import { createLiveFrameSession, decodeLiveFrame, type LiveFrame } from "@dohc/live-session-contract/live-frame";
+import { LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, createLiveFrameSession, decodeLiveFrame, type LiveFrame } from "@dohc/live-session-contract/live-frame";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
 import { createSyncRelayHandler } from "./server.js";
 import { createOwnerLiveRoutes, createNamedLiveRoutes, type NamedLiveRouteLimits } from "./namedLiveRoutes.js";
@@ -25,8 +25,7 @@ import { parseNamedLiveConfig } from "./namedLiveConfig.js";
 import type { StorageContext } from "./storage/context.js";
 
 const exchangeKey = "test-exchange-key-".repeat(3), relayHost = "relay.example.test";
-// The owner route must receive the largest declared submission, 1611 bytes.
-const frames = { receive: { maxFrameBytes: 2048, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096 },
+const frames = { receive: { maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096 },
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096 };
 const bounds = { maxClientVectorBytes: 1024, maxSyncOutputBytes: 4096, maxAppliedUpdateBytes: 4096, maxSubmissionBytes: 4096, maxAdmissionBytes: 16384 };
 const policy = { maxStructVisits: 10000, maxValueNodeVisits: 10000, maxDecodedPayloadByteVisits: 1000000, maxStructClientGroupVisits: 10000,
@@ -149,8 +148,8 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     editorLimits: {provider: {frames, maxPendingUpdateBytes: 8192, maxPendingUpdates: 4, maxDeliveryAttempts: 3},
       maxHttpResponseBytes: 4096, maxSocketBufferedBytes: 4096, connectTimeoutMs: 1000, sendTimeoutMs: 1000, drainPollMs: 10} }) : undefined;
   const routes = owner ? createOwnerLiveRoutes({storage: state.storage, resolveActor: actor, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey,
-    frames, bounds, limits: routeLimits, validate: createLiveMarkdownJournalValidator(policy), captureNative, admission}) : createNamedLiveRoutes({ kind: link ? "link" : "named", desktopBearer: desktop, membership: memberships, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
-    validate: createLiveMarkdownJournalValidator(policy), sessions: desktopAdmission ?? (link ? createLinkLiveBrowserResolver({storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }), tickets, captureNative, admission });
+    frames, bounds, limits: routeLimits, validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input), captureNative, admission}) : createNamedLiveRoutes({ kind: link ? "link" : "named", desktopBearer: desktop, membership: memberships, storage: state.storage, hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey, frames, bounds, limits: routeLimits,
+    validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input), sessions: desktopAdmission ?? (link ? createLinkLiveBrowserResolver({storage: state.storage, linkKey: key}) : { resolve: application.resolveNamedBrowserSession }), tickets, captureNative, admission });
   const http = serveFetchHandler({ handler: request => new URL(request.url).pathname === "/sync/live/desktop-open" && desktopAdmission ? desktopAdmission.handle(request) : new URL(request.url).pathname === `/sync/live/${routeKind}-tickets` ? routes.handle(request) : application(request),
     maxBodyBytes: () => 16384, oversized: () => Response.json({}, { status: 404 }), failure: () => Response.json({}, { status: 500 }) });
   const upgrades: Promise<void>[] = [], sockets: WebSocket[] = [];
@@ -419,7 +418,7 @@ async function namedMember(f: Awaited<ReturnType<typeof fixture>>) {
   const minted = await f.tickets.mint({objectId: binding.objectId}, context), ticket = await f.tickets.redeem(minted!.token, context);
   if (!ticket) throw new Error("Named member ticket missing");
   const host = captureNamedLiveFrameHost({ticket, actor: liveBrowserActor(context), storage: f.storage, native: f.native, bounds,
-    validate: createLiveMarkdownJournalValidator(policy)});
+    validate: ({retainStateUpdate: _retainStateUpdate, ...input}) => createLiveMarkdownJournalValidator(policy)(input)});
   const member = f.memberships.join({ticket, invalidated: host.invalidated, assertCurrent: host.assertCurrent});
   cleanups.push(async () => {member.close(); host.close();});
   return member;
@@ -481,8 +480,8 @@ it("opens the owner bearer route without a recipient, browser cookie, ticket, or
 });
 
 it.each([
-  { ...frames, receive: { ...frames.receive, maxFrameBytes: 1610 } },
-  { ...frames, maxControlBytes: 1610 },
+  { ...frames, receive: { ...frames.receive, maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES - 1 } },
+  { ...frames, maxControlBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES - 1 },
 ])("refuses an owner route whose frame or control budget cannot carry the largest declared submission", ownerFrames => {
   type OwnerRoute = Parameters<typeof createOwnerLiveRoutes>[0];
   expect(() => createOwnerLiveRoutes({ storage: {} as OwnerRoute["storage"], resolveActor: async () => { throw new UnauthorizedError(); },
@@ -496,7 +495,7 @@ it("accepts an owner route at the largest declared submission's frame and contro
   const route = createOwnerLiveRoutes({ storage: {} as OwnerRoute["storage"], resolveActor: async () => { throw new UnauthorizedError(); },
     captureNative: async () => { throw new Error("No host opens in this test."); },
     hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey,
-    frames: { ...frames, receive: { ...frames.receive, maxFrameBytes: 1611 }, maxControlBytes: 1611 },
+    frames: { ...frames, receive: { ...frames.receive, maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES }, maxControlBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES },
     bounds, limits, validate: createLiveMarkdownJournalValidator(policy) });
   route.close();
 });

@@ -1,5 +1,8 @@
+import type { StorageContext } from "./storage/context.js";
+import { deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { limitLiveDeclaredAgents, liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { OwnerYDocOutbox } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
@@ -17,10 +20,12 @@ export type LiveAdmissionValidation = LiveJournalValidation | {
 
 export interface OwnerOutboxAdmission {
   readonly activation?: ServiceActivationAccess;
+  trustedAccount?(accountId: string): TrustedLiveAccount | undefined | Promise<TrustedLiveAccount | undefined>;
   readonly shares: ReadonlyMap<string,string>;
   readonly maxEntriesPerDrain: number;
   readonly maxBytesPerDrain: number;
-  validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
+  validate(input: {document: LiveDocumentKey; currentPath: string; checkpoint: Uint8Array; suffix: readonly Uint8Array[]; candidate: Uint8Array;
+    retainStateUpdate?: boolean}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
 
 /**
@@ -105,16 +110,27 @@ export async function drainOwnerOutbox(options: {
       if (current.kind !== "current" || !isDeepStrictEqual(current.host,host) || !isDeepStrictEqual(current.binding,binding)) throw new Error("Owner standing changed.");
       const cut = storage.readLiveUpdateJournalCut({document});
       if (cut.kind !== "cut") throw new Error("Owner journal is unavailable.");
+      const declared = entry.agentDeclaration;
+      const trustedAccount = declared ? await admission.trustedAccount?.(current.authority.principalId) ??
+        {accountId: current.authority.principalId, name: current.authority.principalId} : undefined;
+      check();
+      if (trustedAccount && trustedAccount.accountId !== current.authority.principalId) throw new Error("Owner account changed.");
+      const authorContext = declared && trustedAccount ? {kind: "account" as const, accountId: trustedAccount.accountId,
+        agent: {agentId: declared.agentId, ...(declared.onBehalfOf !== null ? {onBehalfOf: declared.onBehalfOf} : {}), depth: declared.depth}} : undefined;
       const validation = await admission.validate({document,currentPath: binding.currentPath,checkpoint: cut.cut.checkpoint.bytes,
-        suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update}, signal);
+        suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update,
+        retainStateUpdate: liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata),
+          limitLiveDeclaredAgents(cut.cut.suffix.map(row => row.metadata), current.authority,
+            deriveLiveAuthorSnapshot(storage as StorageContext, current.authority, authorContext, trustedAccount)))}, signal);
       check();
       if (validation.kind === "retry") {
         await validation.waitForCapacity(signal); check();
         return {admittedEntries, hasMore: true, retryReady: true};
       }
       const committed = storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,
+        ...(trustedAccount ? {trustedAccount} : {}),
         metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding,
-          ...(entry.agentDeclaration ? {agentDeclaration: entry.agentDeclaration} : {})},
+          ...(authorContext ? {authorContext} : {})},
         cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);
       if (committed.result.kind === "retry") return {admittedEntries, hasMore: true, retryReady: true};
       if (committed.result.kind !== "accepted") throw new Error("Owner update admission refused.");

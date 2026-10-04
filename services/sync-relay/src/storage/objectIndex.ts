@@ -74,7 +74,7 @@ export function listObjectMomentLogRowsByBlob(storage: StorageContext, input: {
         `WITH ${selectorPathsCte}
          ${candidateCtes}
          SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
-                l.payload_json, l.recorded_at_ms, l.relay_seq
+                l.payload_json, l.recorded_at_ms, l.relay_seq, l.admitted_author_snapshot_json
          FROM candidates c
          JOIN sync_relay_log l ON l.relay_seq = c.relay_seq
          ORDER BY c.relay_seq DESC`,
@@ -101,7 +101,7 @@ export function listVersionCreateLogRowsByBlob(storage: StorageContext, input: {
     return storage.db
       .prepare(
         `SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
-                l.payload_json, l.recorded_at_ms, l.relay_seq
+                l.payload_json, l.recorded_at_ms, l.relay_seq, l.admitted_author_snapshot_json
          FROM sync_relay_version_snapshot_blobs candidate
          JOIN sync_relay_log l ON l.relay_seq = candidate.relay_seq
          WHERE candidate.workspace_id = ? AND candidate.version_id = ?

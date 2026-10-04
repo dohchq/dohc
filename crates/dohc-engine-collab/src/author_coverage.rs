@@ -1,7 +1,7 @@
 //! Author coverage belongs to the admitted interval, independently of CRDT compaction.
 
 use crate::{CollabError, DocKey};
-use dohc_engine_domain::{AgentDeclaration, ChangeActorKind, ChangeAttribution};
+use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
 use dohc_engine_storage::StorageError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -46,6 +46,7 @@ impl Authors {
             "agent" => "agentId",
             "automation" => "automationId",
             "human" => "humanId",
+            "link" => "publicPrincipalId",
             _ => return Err(corrupt("unsupported live author kind")),
         };
         let id = author
@@ -232,15 +233,6 @@ pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
     Ok(authors)
 }
 
-/// The author a declared agent's accepted delivery names.
-pub fn declared_json(declaration: &AgentDeclaration) -> Result<String, CollabError> {
-    dohc_engine_domain::moment_author_json(
-        Some(declaration.agent_id.as_str()),
-        Some(&declaration.attribution()),
-    )
-    .ok_or_else(|| corrupt("declaration has no author"))
-}
-
 /// One author entry within the size a moment can hold.
 fn entry(json: &str) -> Result<Authors, CollabError> {
     let mut incoming = Authors::default();
@@ -298,8 +290,8 @@ pub fn check_admission_in(
 }
 
 /// Admits the authors of one accepted delivery to the current interval, under
-/// the bounds a local author meets: the agent it declared, and the trusted
-/// author of this owner's own native update. The delivery retains no
+/// the bounds a local author meets. Only the admitted snapshot credits a
+/// live delivery. The delivery retains no
 /// attributed update row, so the interval keeps them with the authors
 /// compaction folded until a settlement names them. Refuses before writing
 /// when a new author would not fit.

@@ -1,3 +1,4 @@
+import {LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES} from "@dohc/live-session-contract/live-frame";
 import {createHash} from "node:crypto";
 import {afterEach, expect, it, vi} from "vitest";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
@@ -7,7 +8,7 @@ import type {OwnerYDocDeliveryEnvelope} from "./ownerYDocOutbox";
 
 const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
   currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1};
-const frames = {receive: {maxFrameBytes: 2048, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+const frames = {receive: {maxFrameBytes: 4096, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096};
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const envelope: OwnerYDocDeliveryEnvelope = {outboxId: "outbox", binding, baseUpdate: new Uint8Array([0,0]), baseUpdateDigest: hash(new Uint8Array([0,0])),
@@ -17,7 +18,7 @@ const disposals: (() => void)[] = [];
 afterEach(() => {for (const close of disposals.splice(0)) close();});
 
 function fixture(overrides: {binding?: typeof binding; initialCursor?: number; initialResult?: "applied" | "retry"; retained?: boolean;
-  result?: NamedFrameSubmissionResult; state?: Partial<OwnerAcceptedState>; connect?: OwnerYDocFrameDeliveryOptions["connect"]} = {}) {
+  accountId?: string | null; result?: NamedFrameSubmissionResult; state?: Partial<OwnerAcceptedState>; connect?: OwnerYDocFrameDeliveryOptions["connect"]} = {}) {
   const controller = new AbortController(), submitted = deferred<void>(), receiptChecked = deferred<void>(), feedApplied = deferred<void>();
   const queue: NamedFrameAppliedUpdate[] = [], waiters: (() => void)[] = [], retained = new Map<number,string>();
   const receipt = {deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest, journalCursor: 9, acceptingHostEpoch: parseHostEpoch(2)};
@@ -46,7 +47,7 @@ function fixture(overrides: {binding?: typeof binding; initialCursor?: number; i
     return {send: async bytes => server!.receive(bytes), close: () => server!.close()};
   }));
   const delivery = new OwnerYDocFrameDelivery({relayUrl: "https://relay.example.test", shareId: "share", frames, attemptTimeoutMs: 10_000,
-    signal: controller.signal, freshBearer: async () => "actual-owner-bearer", acceptedState, connect});
+    signal: controller.signal, freshBearer: async () => "actual-owner-bearer", authenticatedAccountId: async () => overrides.accountId === null ? undefined : overrides.accountId ?? "owner", acceptedState, connect});
   disposals.push(() => {delivery.dispose(); controller.abort(); server?.close();});
   return {delivery, acceptedState, connect, submit, submitted, receiptChecked, feedApplied, receipt, controller,
     feed: (update: NamedFrameAppliedUpdate = {journalCursor: 9, updateBytes: envelope.update}) => {queue.push(update); waiters.shift()?.();}};
@@ -76,15 +77,23 @@ it("submits the agent a queued edit declared, owned before transport, beside its
   (agentDeclaration as {agentId: string}).agentId = "changed";
   expect(await work).toEqual({kind: "receipt", receipt: f.receipt});
   expect(f.submit).toHaveBeenCalledWith({deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest, updateBytes: envelope.update,
-    agentDeclaration: {agentId: "trip-agent-ü", onBehalfOf: "local-person", depth: 2}}, expect.any(AbortSignal));
+    authorContext: {kind: "account", accountId: "owner", agent: {agentId: "trip-agent-ü", onBehalfOf: "local-person", depth: 2}}}, expect.any(AbortSignal));
+});
+
+it("leaves a declared draft unnamed when no recording account is available", async () => {
+  const f = fixture({retained: true, accountId: null}), fresh = await f.delivery.freshOwnerAuthority(binding);
+  if (fresh.kind !== "authority") throw new Error("Missing authority");
+  const work = f.delivery.deliver(fresh.authority, {...envelope, agentDeclaration: {agentId: "trip-agent", onBehalfOf: null, depth: 0}});
+  expect(await work).toEqual({kind: "receipt", receipt: f.receipt});
+  expect(f.submit).toHaveBeenCalledWith({deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest, updateBytes: envelope.update}, expect.any(AbortSignal));
 });
 
 it("requires an owner frame policy that carries the largest declared submission", () => {
   const options = {relayUrl: "https://relay.example.test", shareId: "share", attemptTimeoutMs: 10_000, signal: new AbortController().signal,
     freshBearer: async () => "bearer", acceptedState: {} as OwnerAcceptedState};
-  expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: 1610}}})).toThrow("owner frame policy");
-  expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, maxControlBytes: 1610}})).toThrow("owner frame policy");
-  new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: 1611}, maxControlBytes: 1611}}).dispose();
+  expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES - 1}}})).toThrow("owner frame policy");
+  expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, maxControlBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES - 1}})).toThrow("owner frame policy");
+  new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES}, maxControlBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES}}).dispose();
 });
 
 it("refuses a malformed agent declaration before sending any submission", async () => {
