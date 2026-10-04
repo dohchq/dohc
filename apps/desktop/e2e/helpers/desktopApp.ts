@@ -98,6 +98,8 @@ function launchEnv(input: {
 export async function launchDesktopApp(input: {
   workspace: Pick<TempWorkspace, "baseDir" | "homeDir" | "rootPath">;
   env?: NodeJS.ProcessEnv;
+  /** Extra Chromium switches for this launch. */
+  switches?: string[];
 }): Promise<LaunchedDesktopApp> {
   const build = requireBuiltDesktopApp();
   const userDataDir = await createUserDataDir(input.workspace);
@@ -127,7 +129,7 @@ export async function launchDesktopApp(input: {
   try {
     app = await electron.launch({
       executablePath: electronExecutable,
-      args: electronLaunchArgs({ mainEntry, userDataDir }),
+      args: electronLaunchArgs({ mainEntry, userDataDir, switches: input.switches }),
       cwd: desktopRoot,
       env: launchEnv(input),
       artifactsDir: artifacts,

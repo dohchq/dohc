@@ -272,7 +272,7 @@ Card / grouped section: `rounded-lg border border-line bg-panel p-3` (modal card
 
 kbd chip: `rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle`
 
-Count/status pill: `rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-muted` (semantic: swap text color, never the fill)
+Count/status pill: `rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-muted` (semantic: swap text color through `Pill`'s `tone`, never the fill)
 
 Segmented control: container `flex rounded-lg border border-line bg-panel-2 p-0.5`, segment `rounded-md px-2.5 py-1 text-xs transition-colors`, active `bg-bg text-ink shadow-sm`, rest `text-muted hover:text-ink`
 

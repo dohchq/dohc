@@ -5,6 +5,7 @@ import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DesktopRoot } from "./DesktopRoot";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import type { ReactionStore } from "./workbench/reactionStore";
 import { deferred, type Deferred } from "../testing/deferred";
 
@@ -107,6 +108,8 @@ function workspace(workspaceId: string): Workspace {
 }
 
 beforeEach(() => {
+  // jsdom has no ResizeObserver; the states page measures its sections.
+  vi.stubGlobal("ResizeObserver", ObserverStub);
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     callback(0);
     return 1;
