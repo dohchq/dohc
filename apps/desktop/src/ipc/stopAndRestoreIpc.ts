@@ -11,6 +11,7 @@ import {
   type WorkspaceEngineCapture,
 } from "../workspaces/workspaceEngineCapture";
 import { restoreDirectWrites, UndoRunsStopped, type DirectWriteFile, type UndoneRuns } from "../workspaces/stopAndRestore";
+import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { folderEntriesOrNone } from "../workspaces/folderEntries";
 import {
   StopAndRestorePayload,
@@ -106,6 +107,8 @@ export function registerStopAndRestoreIpc<
   requireEngineCapture(workspaceId: string): Promise<{
     capture: Pick<WorkspaceEngineCapture, "readMoment" | "listObjectMomentsAfter" | "restoreFileToBeforeMoment">;
   }>;
+  /** The person a request is made by, read from main's own account when it arrives. */
+  localPerson(): Promise<LocalPersonAuthor>;
   /** Asks the workspace's sync to pull now. */
   queuePull(workspaceId: string): void;
   /** Runs one sync pass of the workspace now, pushing and pulling, and throws when it did not sync. */
@@ -174,6 +177,7 @@ export function registerStopAndRestoreIpc<
   registerHandler(CHANNELS.stopAndRestore, async (event, payload) => {
     assertTrustedSender(event);
     const input = StopAndRestorePayload.parse(payload);
+    const person = await dependencies.localPerson();
     return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
       const workspaceId = operation.workspace.workspaceId;
       const relay = <Result>(path: string, init?: RequestInit) => session.run(() => relayJson<Result>(credentials, path, init));
@@ -275,7 +279,7 @@ export function registerStopAndRestoreIpc<
         assertCurrent: () => operation.assertCurrent(),
         restore: async (momentId, expectedHeadMomentId, aloneInFolder) => {
           try {
-            const { path, restoredMomentId } = await capture.restoreFileToBeforeMoment(momentId, {
+            const { path, restoredMomentId } = await capture.restoreFileToBeforeMoment(momentId, person, {
               expectedHeadMomentId,
               ...(aloneInFolder ? { aloneInFolder: true } : {}),
             });
@@ -305,6 +309,7 @@ export function registerStopAndRestoreIpc<
   registerHandler(CHANNELS.undoStopAndRestore, async (event, payload) => {
     assertTrustedSender(event);
     const input = UndoStopAndRestorePayload.parse(payload);
+    const person = await dependencies.localPerson();
     await dependencies.withRendererWorkspaceOperation(
       event.sender, input.workspaceId, "Undo stopped because this window changed workspaces.",
       async (operation) => {
@@ -312,7 +317,7 @@ export function registerStopAndRestoreIpc<
         try {
           for (const momentId of [...input.restoredMomentIds].reverse()) {
             operation.assertCurrent();
-            await capture.restoreFileToBeforeMoment(momentId);
+            await capture.restoreFileToBeforeMoment(momentId, person);
           }
         } finally {
           dependencies.notifyRenderer({ workspaceId: operation.workspace.workspaceId });

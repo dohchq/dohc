@@ -26,6 +26,10 @@ import {
 } from "./workspaceEngineCapture";
 
 import { createTestScratch } from "./testTemp";
+
+// The person a restore names, as desktop main reads them.
+const RESTORER = { kind: "human", humanId: "local-person" } as const;
+
 // Secret-backed files through the desktop daemon pipeline: protected moments
 // stay metadata-only while switch, merge, and restore materialize disk state.
 
@@ -307,7 +311,7 @@ describe("secret version operations through the desktop daemon path", () => {
       (moment) => moment.protected && moment.operation === "write",
     );
     expect(editMoment).toBeDefined();
-    const result = await engine.restoreFileToBeforeMoment(editMoment?.id ?? "");
+    const result = await engine.restoreFileToBeforeMoment(editMoment?.id ?? "", RESTORER);
     expect(result.restored).toBe("text");
     expect(result.path).toBe(".env");
     expect(await readText(root, ".env")).toBe(ENV_A);

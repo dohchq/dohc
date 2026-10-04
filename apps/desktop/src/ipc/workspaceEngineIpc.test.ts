@@ -5,7 +5,8 @@ import type { CollectionGetRecordResult } from "@dohc/workspace-contracts";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
-import type { RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
+import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
+import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
@@ -172,6 +173,9 @@ async function harness(sharedStore?: SharedHistoryStore) {
   });
   const registrations = createWorkspaceEngineIpc({
     localPersonId: () => "person-local",
+    localPersonName: () => "Ice",
+    // Read from main's own account, as the sign-in stands when the request arrives.
+    localPerson: async () => ({ kind: "human", humanId: session.account ?? "install-local" }),
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
     withRendererWorkspaceOperation, receivedShareEngine,
@@ -183,7 +187,7 @@ async function harness(sharedStore?: SharedHistoryStore) {
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
-    namedAuthorLabel: () => "Someone you shared with",
+    namedAuthorLabels: () => () => "Someone you shared with",
     retryOwnerLiveDelivery, retryCloudSync,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
@@ -673,6 +677,25 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "detail" })).resolves.toMatchObject({
       moment: { agentAuthorName: "ice@example.com", beforeText: null, afterText: "body" },
     });
+  });
+
+  it("restores as the person signed in here, never one the renderer names, and History names them", async () => {
+    const h = await harness();
+    await h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "moment",
+      author: { kind: "human", humanId: "mallory" } });
+    expect(h.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("moment", { kind: "human", humanId: "person-local" });
+
+    const restore = (id: string, humanId: string) => ({
+      id, versionId: "main", path: "notes/a.md", recordedAtMs: 1, operation: "write" as const,
+      metadata: { origin: "restore" as const }, protected: false as const, momentOrder: 0, authors: [{ kind: "human" as const, humanId }],
+    });
+    h.capture.listMoments.mockResolvedValue({
+      moments: [restore("mine", "person-local"), restore("earlier-account", "person-before")],
+      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+    });
+    const listed = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] };
+    expect(listed.moments.map((moment) => moment.personAuthorName)).toEqual(["Ice", undefined]);
+    expect(listed.moments.map(engineMomentSourceLabel)).toEqual(["Ice", "Restore"]);
   });
 
   it("notifies after a restore and before parsing its result", async () => {

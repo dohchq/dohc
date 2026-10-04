@@ -1507,6 +1507,9 @@ export const EngineMomentRecord = z.object({
   // Present only when a dohc-tracked agent run authored the moment; main
   // resolves the configured agent name for local runs.
   agentAuthorName: z.string().min(1).max(500).optional(),
+  // Present when this computer's person authored the moment: main names them
+  // as the account settled here now, or this installation when signed out.
+  personAuthorName: z.string().min(1).max(500).optional(),
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
   // Present when a Collection automation authored the moment: its name as
   // this computer's automations.yaml has it, and the Collection it belongs to.

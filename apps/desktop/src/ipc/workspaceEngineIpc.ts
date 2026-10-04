@@ -20,6 +20,7 @@ import type { ServerRuns } from "../automations/serverRuns";
 import type { WorkspaceEngineCapture, probeEngineStoreRefusal } from "../workspaces/workspaceEngineCapture";
 import type { createReceivedShareEngineAccess } from "../workspaces/receivedShareEngineAccess";
 import type { createEngineYDocSessionIpc, EngineYDocIpcSender } from "../workspaces/engineYDocSessionIpc";
+import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { sharedViewHistory } from "../workspaces/sharedViewHistory";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { collectionListSources, collectionReadSource, mountedCollectionSchema, receivedCollectionQuery } from "../workspaces/receivedShareCollections";
@@ -52,10 +53,15 @@ export function createWorkspaceEngineIpc<
   }>;
   localAgentDisplayName(): string;
   localPersonId(): string;
+  /** This computer's person as History names them. */
+  localPersonName(): string;
+  /** The person a request is made by, read from main's own account when it arrives. */
+  localPerson(): Promise<LocalPersonAuthor>;
   /** An automation author as History shows it, in one workspace. */
   automationAuthor(workspaceId: string, automationId: string): ReturnType<EngineMomentAuthorNames["automation"]>;
   /** A person the owner shared with, as History names their direct write. */
-  namedAuthorLabel(workspaceId: string, author: Parameters<EngineMomentAuthorNames["named"]>[0]): string;
+  /** How one History read names the people the owner shared with, reading the roster once. */
+  namedAuthorLabels(workspaceId: string): EngineMomentAuthorNames["named"];
   /** Whether this computer keeps an automation's run, so a record's history can open it. */
   automationRunOnThisComputer(workspaceId: string, automationId: string, claimId: string): Promise<boolean>;
   /** The owner's server's runs; the relay answers only the workspace's owner. */
@@ -86,7 +92,8 @@ export function createWorkspaceEngineIpc<
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
-    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, automationAuthor, namedAuthorLabel,
+    receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, localPersonName, localPerson,
+    automationAuthor, namedAuthorLabels,
     automationRunOnThisComputer, serverRuns, signedInAccount,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
@@ -232,8 +239,9 @@ export function createWorkspaceEngineIpc<
     function authorNames(workspaceId: string): EngineMomentAuthorNames {
       return {
         agent: (author) => author.agentRunId ? (author.onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent") : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
+        person: (author) => author.humanId === localPersonId() ? localPersonName() : undefined,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
-        named: (author) => namedAuthorLabel(workspaceId, author),
+        named: namedAuthorLabels(workspaceId),
       };
     }
 
@@ -290,11 +298,12 @@ export function createWorkspaceEngineIpc<
     registerHandler(CHANNELS.restoreEngineMomentFile, async (event, payload) => {
       assertTrustedSender(event);
       const input = RestoreEngineMomentFilePayload.parse(payload);
+      const person = await localPerson();
       const { capture } = await requireEngineCapture(
         input.workspaceId,
         "Engine history",
       );
-      const result = await capture.restoreFileToBeforeMoment(input.momentId);
+      const result = await capture.restoreFileToBeforeMoment(input.momentId, person);
       notifyRenderer({ workspaceId: input.workspaceId });
       return RestoreEngineMomentFileResult.parse(result);
     });

@@ -22,6 +22,7 @@ import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 
 const names: EngineMomentAuthorNames = {
   agent: (author) => author.onBehalfOf === "local" ? "You" : author.onBehalfOf,
+  person: (author) => author.humanId === "local" ? "Ice" : undefined,
   automation: (automationId) =>
     automationId.startsWith("collection:") ? { name: `Named ${automationId}`, collection: "Tasks" } : null,
   named: (author) => `${author.userId}@example.com (Edit)`,

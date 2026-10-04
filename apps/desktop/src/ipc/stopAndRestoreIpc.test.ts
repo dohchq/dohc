@@ -10,11 +10,13 @@ import {
   RestoreHeadChangedError,
   type WorkspaceEngineMomentDetail,
 } from "../workspaces/workspaceEngineCapture";
+import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 type Pass = { undone: number; left: number; reverted: number; missing: number; keptFields: string[]; otherKept: number; errorMessage: string | null };
 const NOTHING: Pass = { undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null };
 const SCHEMA = "trip/packing/collection.yaml";
+const OWNER: LocalPersonAuthor = { kind: "human", humanId: "user_owner" };
 
 function grant(overrides: Record<string, unknown>) {
   return {
@@ -47,6 +49,8 @@ function fixture(options: {
 } = {}) {
   const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
   const calls: Array<{ path: string; method: string }> = [];
+  // The account main has settled on; a test signs in as someone else mid-request.
+  const account = { person: OWNER };
   const granted = options.granted ?? [
     grant({}),
     grant({ grantId: "grant-view", shareId: "share-2", access: "view" }),
@@ -95,7 +99,7 @@ function fixture(options: {
       return options.moment === null ? null : { protected: false, moment: options.moment ?? schemaMoment };
     }),
     listObjectMomentsAfter: vi.fn(async () => []),
-    restoreFileToBeforeMoment: vi.fn(async (momentId: string, _options?: { expectedHeadMomentId?: string }) => {
+    restoreFileToBeforeMoment: vi.fn(async (momentId: string, _person: LocalPersonAuthor, _options?: { expectedHeadMomentId?: string }) => {
       if (options.changed) throw new RestoreHeadChangedError(SCHEMA);
       if (options.restoreError) throw options.restoreError;
       return { restored: "text" as const, restoredMomentId: `back-${momentId}`, path: SCHEMA };
@@ -121,6 +125,7 @@ function fixture(options: {
     endLink,
     sharesChanged,
     requireEngineCapture: async () => ({ capture }),
+    localPerson: async () => account.person,
     queuePull,
     deletePath: async () => undefined,
     notifyRenderer: () => undefined,
@@ -130,7 +135,7 @@ function fixture(options: {
   });
   const call = (channel: string, payload: Record<string, unknown>) =>
     handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
-  return { call, calls, bodies, capture, queuePull, sharesChanged };
+  return { call, calls, bodies, capture, queuePull, sharesChanged, account };
 }
 
 describe("stop and restore in main", () => {
@@ -148,7 +153,7 @@ describe("stop and restore in main", () => {
       fieldsKept: 0, fieldsMissing: 0,
       errorMessage: null,
     });
-    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", { expectedHeadMomentId: "m-schema" });
+    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema" });
     expect(f.calls.filter((call) => call.method === "POST").map((call) => call.path))
       .toEqual(["/sync/shares/share-1/grants/grant-edit/revoke"]);
     expect(f.sharesChanged).toHaveBeenCalledWith(WORKSPACE_ID);
@@ -398,6 +403,24 @@ describe("stop and restore in main", () => {
   it("undoes the restores newest first", async () => {
     const f = fixture();
     await f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: ["back-1", "back-2"] });
-    expect(f.capture.restoreFileToBeforeMoment.mock.calls.map(([id]) => id)).toEqual(["back-2", "back-1"]);
+    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["back-2", OWNER], ["back-1", OWNER]]);
+  });
+
+  it("names the person signed in here when the request arrived, never one the renderer sends", async () => {
+    const f = fixture();
+    const mallory = { kind: "human", humanId: "user_mallory" };
+    for (const [channel, payload] of [
+      [CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" }, person: mallory }],
+      [CHANNELS.undoStopAndRestore, { restoredMomentIds: ["back-1"], author: mallory }],
+    ] as const) {
+      await expect(f.call(channel, payload)).rejects.toThrow();
+    }
+    expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+
+    // Another account settles while the restore waits on the relay: the restore stays the first person's.
+    const restored = f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } });
+    f.account.person = { kind: "human", humanId: "user_other" };
+    await restored;
+    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema" });
   });
 });

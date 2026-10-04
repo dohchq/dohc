@@ -650,9 +650,12 @@ export interface WorkspaceEngineCapture {
   // after its disk state is captured, is still that one; otherwise it throws
   // RestoreHeadChangedError and changes nothing. `aloneInFolder` removes a
   // file the moment created only while nothing else is in its folder;
-  // otherwise it throws RestoreFolderInUseError.
+  // otherwise it throws RestoreFolderInUseError. `person` is who restores, as
+  // desktop main read them when the request arrived; the restore moment names
+  // them. A protected file's restore names nobody, as its other moments do.
   restoreFileToBeforeMoment(
     momentId: string,
+    person: Extract<MomentWriteAuthor, { kind: "human" }>,
     options?: { expectedHeadMomentId?: string; aloneInFolder?: true },
   ): Promise<WorkspaceEngineRestoreResult>;
   // `author` names an agent's removal during a run an automation started, so
@@ -6252,7 +6255,9 @@ export function createWorkspaceEngineCapture(
       }
     },
 
-    restoreFileToBeforeMoment(momentId, options = {}) {
+    restoreFileToBeforeMoment(momentId, person, options = {}) {
+      // The person as submitted, before the restore waits for its turn.
+      const author = structuredClone(person);
       return enqueueResult("restore file", async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
@@ -6443,6 +6448,7 @@ export function createWorkspaceEngineCapture(
                       path,
                       bytes,
                       metadata,
+                      author,
                     });
                   })()
                 : await engine.writeTextFile({
@@ -6453,6 +6459,7 @@ export function createWorkspaceEngineCapture(
                     publish: true,
                     restoreBeforeMomentId: momentId,
                     metadata,
+                    author,
                   });
             requirePublishedWrite(path, result);
             return {
@@ -6476,6 +6483,7 @@ export function createWorkspaceEngineCapture(
             versionId: activeVersionId,
             path,
             metadata,
+            author,
           });
           await materialize([{ kind: "delete", path }], policy);
           return {

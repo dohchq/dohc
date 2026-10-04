@@ -36,6 +36,9 @@ import { encodeFixtureBigInts } from "@dohc/workspace-engine-client/testing";
 import { decodeCollectionValue } from "../../../../packages/workspace-engine-client/src/workspace/workspaceWireContract";
 import type { JsonValue } from "@dohc/workspace-engine-client";
 
+// The person a restore names, as desktop main reads them.
+const RESTORER = { kind: "human", humanId: "local-person" } as const;
+
 function createWorkspaceEngineCapture(
   options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
 ) {
@@ -445,10 +448,13 @@ it.skipIf(engine.missing)(
       const binaryEdit = binaryMoments[0];
       expect(binaryEdit).toBeTruthy();
 
-      await capture.restoreFileToBeforeMoment(binaryEdit!.id);
+      const { restoredMomentId } = await capture.restoreFileToBeforeMoment(binaryEdit!.id, RESTORER);
       expect(await readFile(join(root, "asset.bin"))).toEqual(
         Buffer.from(firstBinary),
       );
+      const restored = (await capture.listMoments({ limit: 100 })).moments
+        .find((moment) => moment.id === restoredMomentId);
+      expect(restored?.authors).toEqual([RESTORER]);
     } finally {
       await capture.stop();
       await sessions.closeAll();

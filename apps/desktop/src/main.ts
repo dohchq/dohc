@@ -219,7 +219,7 @@ import {
   readReceivedShareListing,
 } from "./workspaces/recipientShareReconciliation";
 import { createShareRosters, rosterAuthorLabel } from "./automations/shareRoster";
-import { listRosterGrants } from "@dohc/automation-executor/roster-listing";
+import { listRosterGrants, readStoredRoster } from "@dohc/automation-executor/roster-listing";
 import {
   CollectionAutomations,
   type CollectionAutomationsOptions,
@@ -5377,7 +5377,11 @@ function registerIpcHandlers(): void {
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
-    namedAuthorLabel: (workspaceId, author) => rosterAuthorLabel(findWorkspace(workspaceId)?.shareRoster, author),
+    localPersonName: localUserDisplayName, localPerson,
+    namedAuthorLabels: (workspaceId) => {
+      const roster = readStoredRoster(findWorkspace(workspaceId)?.shareRoster);
+      return (author) => rosterAuthorLabel(roster, author);
+    },
     automationAuthor, notifyRenderer,
     // A shared view keeps no runs: its automations run on the owner's computer.
     signedInAccount: () => cachedCredentials?.userId ?? null,
@@ -5902,6 +5906,7 @@ function registerIpcHandlers(): void {
         : "dependents-changed",
     sharesChanged: shareRosters.sharesChanged,
     requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
+    localPerson,
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),
     syncNow: (workspaceId) => activity.syncNow(workspaceId),
     deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),

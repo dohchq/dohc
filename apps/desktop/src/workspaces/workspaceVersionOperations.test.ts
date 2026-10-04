@@ -36,6 +36,10 @@ import {
 } from "./workspaceEngineCapture";
 
 import { createTestScratch } from "./testTemp";
+
+// The person a restore names, as desktop main reads them.
+const RESTORER = { kind: "human", humanId: "local-person" } as const;
+
 // Named-version desktop orchestration: active-version capture routing,
 // merge/conflict handling, restore, and scale. The stateful
 // loopback uses the daemon RPC adapters and real sha256 values, but capture and
@@ -1502,7 +1506,7 @@ describe("restoreFileToBeforeMoment", () => {
       (moment) => moment.path === "logo.png" && moment.contentKind === "binary",
     );
     expect(update).toBeTruthy();
-    const restored = await engine.restoreFileToBeforeMoment(update!.id);
+    const restored = await engine.restoreFileToBeforeMoment(update!.id, RESTORER);
 
     expect(restored.restored).toBe("text");
     expect(Buffer.from(await readFile(join(root, "logo.png")))).toEqual(before);
