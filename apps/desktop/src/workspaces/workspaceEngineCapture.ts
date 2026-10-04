@@ -2124,7 +2124,7 @@ export function createWorkspaceEngineCapture(
       },
       token: number,
       generation: number,
-    ) => void | Promise<void>;
+    ) => boolean | void | Promise<boolean | void>;
     onSettleStart: (token: number, generation: number) => void;
     onSettleError: (error: unknown, token: number, generation: number) => void;
     // The first generation's answers to "does the entered version have a
@@ -4104,7 +4104,7 @@ export function createWorkspaceEngineCapture(
               ),
             );
             reportSaveState("error", takeSaveToken(token, generation), "outcome");
-            return;
+            return false;
           }
           // The engine just wrote this path's settled content to disk — the
           // proof a stand-down marker denies. This fires for every
@@ -4193,7 +4193,7 @@ export function createWorkspaceEngineCapture(
               ),
             );
             reportSaveState("error", takeSaveToken(token, generation), "outcome");
-            return;
+            return false;
           }
           if (digest.kind === "changed" || digest.sha256 !== result.sha256) {
             // Gone, too big to be this document, or simply different: in none of
@@ -4202,9 +4202,10 @@ export function createWorkspaceEngineCapture(
             // same overwrite in reverse. The text stays in the CRDT and in
             // History either way.
             reportSaveState("changed-on-disk", takeSaveToken(token, generation), "outcome");
-            return;
+            return false;
           }
           reportSaveState("saved", takeSaveToken(token, generation), "outcome");
+          return true;
         };
         // Claim exactly what this settle can carry. The daemon serves one
         // session's commands in order, so an update already sent is in the

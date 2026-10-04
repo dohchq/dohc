@@ -40,6 +40,205 @@ const WORKSPACE = "workspace-handle-1";
 const VERSION = "version-1";
 const PATH = "notes/live.txt";
 
+describe("closing a settled revision", () => {
+  async function fixture(onSettled?: (result: YdocSettleResult) => boolean | void | Promise<boolean | void>) {
+    const engine = seedPlaintextEngine("seed");
+    const provider = await openEngineYdocProviderSession({
+      transport: engine, workspace: WORKSPACE, versionId: VERSION, path: PATH,
+      contentKind: "plaintext", onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined, onSettled,
+    });
+    await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0, "edited ")));
+    return { engine, provider };
+  }
+
+  it("settles and verifies once before releasing an unchanged record", async () => {
+    const onSettled = vi.fn();
+    const { engine, provider } = await fixture(onSettled);
+    await provider.settleNow();
+    await provider.close();
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.settle)).toHaveLength(1);
+    expect(onSettled).toHaveBeenCalledOnce();
+    expect(engine.activeSessionIds()).toHaveLength(0);
+  });
+
+  it("still settles and verifies every explicit save", async () => {
+    const onSettled = vi.fn();
+    const { engine, provider } = await fixture(onSettled);
+    await provider.settleNow();
+    await provider.settleNow();
+    await provider.close();
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.settle)).toHaveLength(2);
+    expect(onSettled).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([1, 2])("keeps settling-close refusal handling after %i refusals", async refusals => {
+    const engine = seedPlaintextEngine("seed");
+    const closeFlags: boolean[] = [];
+    const refusal = new DaemonRefusalError({
+      code: "OVERLOADED", message: "engine-store-busy", retry: "afterBackoff",
+    }, new Error("close refused"));
+    const onSettled = vi.fn();
+    const provider = await openEngineYdocProviderSession({
+      transport: {
+        ...forwardYdocBlobEgress(engine),
+        onEvent: handler => engine.onEvent(handler),
+        async sendRequest(request) {
+          if (request.method === YDOC_METHOD.close) {
+            closeFlags.push((request.params as { settle: boolean }).settle);
+            if (closeFlags.length <= refusals) throw refusal;
+          }
+          const response = await engine.sendRequest(request);
+          if (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync) {
+            return { ...response, result: { ...(response.result as Record<string, JsonValue>),
+              lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
+          }
+          if (request.method === YDOC_METHOD.recordUpdate) {
+            return { ...response, result: { ...(response.result as Record<string, JsonValue>),
+              lineageClaimId: "owner-claim" } };
+          }
+          return response;
+        },
+      }, workspace: WORKSPACE, versionId: VERSION, path: PATH,
+      contentKind: "plaintext", onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined, onSettled,
+    });
+    await provider.settleNow();
+    expect(provider.lineageClaimId).toBe("owner-claim");
+    engine.markSessionReplicated(provider.nativeOwner!.sessionId);
+    if (refusals === 2) {
+      await expect(provider.close()).rejects.toBe(refusal);
+      expect(engine.activeSessionIds()).toHaveLength(1);
+    }
+    await expect(provider.close()).resolves.toBeUndefined();
+    expect(closeFlags).toEqual(refusals === 1 ? [false, true] : [false, true, false]);
+    expect(onSettled).toHaveBeenCalledOnce();
+    expect(engine.activeSessionIds()).toHaveLength(0);
+  });
+
+  it.each(["conflict-stale-target", "persist-failed", "blocked target"])("releases and reports a claimed lineage's %s at close", async failure => {
+    const engine = seedPlaintextEngine("seed");
+    let failSettle = false;
+    const refusal = new DaemonRefusalError({
+      code: failure === "persist-failed" ? "INTERNAL" : "INVALID_PARAMS",
+      message: failure, retry: "no",
+    }, new Error("settle refused"));
+    const onSettled = vi.fn();
+    const onSettleStart = vi.fn();
+    const onSettleError = vi.fn();
+    const closes: boolean[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport: {
+        ...forwardYdocBlobEgress(engine),
+        onEvent: handler => engine.onEvent(handler),
+        async sendRequest(request) {
+          if (request.method === YDOC_METHOD.close) {
+            const settle = (request.params as { settle: boolean }).settle;
+            closes.push(settle);
+            if (settle && failSettle && failure !== "blocked target") throw refusal;
+          }
+          if (request.method === YDOC_METHOD.settle && failSettle && failure !== "blocked target") throw refusal;
+          const response = await engine.sendRequest(request);
+          if (request.method === YDOC_METHOD.settle && failSettle) {
+            return { ...response, result: { ...(response.result as Record<string, JsonValue>), materialized: false } };
+          }
+          if (request.method === YDOC_METHOD.open || request.method === YDOC_METHOD.resync) {
+            return { ...response, result: { ...(response.result as Record<string, JsonValue>),
+              lineageClaimId: "owner-claim", lineageOriginatedHere: true } };
+          }
+          if (request.method === YDOC_METHOD.recordUpdate) {
+            return { ...response, result: { ...(response.result as Record<string, JsonValue>), lineageClaimId: "owner-claim" } };
+          }
+          return response;
+        },
+      }, workspace: WORKSPACE, versionId: VERSION, path: PATH,
+      contentKind: "plaintext", onRemoteUpdate: () => undefined,
+      scheduleSettle: () => () => undefined, onSettled, onSettleStart, onSettleError,
+    });
+    await provider.settleNow();
+    expect(provider.lineageClaimId).toBe("owner-claim");
+    engine.markSessionReplicated(provider.nativeOwner!.sessionId);
+    failSettle = true;
+    const error = await provider.close().catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(YdocReleasedWithSettleFailureError);
+    expect(engine.activeSessionIds()).toHaveLength(0);
+    expect(closes).toEqual([false]);
+    expect(onSettled).toHaveBeenCalledOnce();
+    expect(onSettleError).toHaveBeenCalledOnce();
+    const [cause, token] = onSettleError.mock.calls[0]!;
+    expect(error).toMatchObject({ cause });
+    expect(token).toBeGreaterThan(1);
+    expect(onSettleStart.mock.calls.at(-1)).toEqual([token]);
+    if (failure !== "blocked target") expect(cause).toBe(refusal);
+    else expect(String(cause)).toContain("blocked target");
+  });
+
+  it.each(["local", "remote", "deletion"])("settles again after a %s edit", async kind => {
+    const { engine, provider } = await fixture();
+    await provider.settleNow();
+    const update = plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), text => {
+      if (kind === "deletion") text.delete(0, 1);
+      else text.insert(0, "later ");
+    });
+    if (kind === "remote") engine.applyRemoteUpdate(engine.activeSessionIds()[0]!, update);
+    else await provider.applyLocalUpdate(update);
+    await provider.close();
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.settle)).toHaveLength(2);
+  });
+
+  it("does not certify edits arriving while the settle callback waits", async () => {
+    let provider: Awaited<ReturnType<typeof openEngineYdocProviderSession>>;
+    const onSettled = vi.fn(async () => {
+      if (onSettled.mock.calls.length === 1) {
+        await provider.applyLocalUpdate(plaintextUpdate(Y.encodeStateAsUpdate(provider.doc), text => text.insert(0, "late ")));
+      }
+    });
+    const opened = await fixture(onSettled);
+    provider = opened.provider;
+    await provider.settleNow();
+    await provider.close();
+    expect(onSettled).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries verification that refused the settled artifact", async () => {
+    const onSettled = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    const { engine, provider } = await fixture(onSettled);
+    await provider.settleNow();
+    await provider.close();
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.settle)).toHaveLength(2);
+    expect(onSettled).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a settle whose target was not materialized", async () => {
+    const onSettled = vi.fn((result: YdocSettleResult) => {
+      if (onSettled.mock.calls.length === 1) result.materialized = false;
+    });
+    const { engine, provider } = await fixture(onSettled);
+    await provider.settleNow();
+    await provider.close();
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.settle)).toHaveLength(2);
+  });
+
+  it("withdraws proof when a resync is required without new Y.Doc bytes", async () => {
+    const { engine, provider } = await fixture();
+    await provider.settleNow();
+    engine.emitEvent({ name: YDOC_EVENT.remoteUpdate, seq: 1000, sessionGeneration: 1,
+      payload: { sessionId: provider.nativeOwner!.sessionId, resyncRequired: true },
+    });
+    await provider.close();
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.settle)).toHaveLength(2);
+    expect(engine.requests.filter(request => request.method === YDOC_METHOD.resync)).toHaveLength(1);
+  });
+
+  it("retries a failed callback before close", async () => {
+    const onSettled = vi.fn().mockRejectedValueOnce(new Error("cannot verify")).mockResolvedValue(undefined);
+    const { provider } = await fixture(onSettled);
+    await expect(provider.settleNow()).rejects.toThrow("cannot verify");
+    await provider.close();
+    expect(onSettled).toHaveBeenCalledTimes(2);
+  });
+});
+
 it("keeps owner draft durability distinct from native settlement and preserves it on close", async () => {
   const engine = new YdocLoopbackEngine();
   const path = "notes/owner.md";
