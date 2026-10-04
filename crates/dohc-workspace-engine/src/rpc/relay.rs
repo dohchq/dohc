@@ -981,6 +981,7 @@ impl EngineService {
         }
         let (issued, reconcile_collections) =
             self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
+        let share_view = matches!(&issued, IssuedCursor::ShareView(_));
         let operation = match issued {
             IssuedCursor::Relay(cursor) => RelayOperation::CommitCursor {
                 workspace_id: open.workspace_id.clone(),
@@ -995,11 +996,14 @@ impl EngineService {
         let mut outcome = self
             .relay_execute(ctx, &open, configuration, operation, "sync.commitCursor")
             .await?;
+        if share_view && reconcile_collections {
+            open.request_collection_reconcile();
+        }
         // A cursor commit can be what makes enrollment ready, as a push can.
         let (_, declined) = self.originate_live_sessions(ctx, &open).await?;
         if let RelayOperationOutcome::CursorCommitted { sharing_declined } = &mut outcome {
             sharing_declined.extend(declined);
-            if reconcile_collections {
+            if reconcile_collections && !share_view {
                 self.collections_changed(ctx, &open).await?;
             }
         }
@@ -1316,15 +1320,23 @@ impl EngineService {
             )
             .await?;
         let pending = match &outcome {
-            RelayOperationOutcome::ShareViewPulled(outcome) => {
-                Some(IssuedCursor::ShareView(outcome.pending_cursor.clone()))
-            }
+            RelayOperationOutcome::ShareViewPulled(outcome) => Some((
+                IssuedCursor::ShareView(outcome.pending_cursor.clone()),
+                // A replay after a crash can dedupe every write but still
+                // complete the first cursor and make projection safe.
+                outcome.applied > 0 || !outcome.changed_paths.is_empty(),
+            )),
             _ => None,
         };
         let mut result = relay_outcome_json(outcome)?;
-        if let Some(cursor) = pending {
-            result["pendingCursor"] =
-                self.issue_pending_cursor(bound_handle, &open.workspace_id, cursor)?;
+        if let Some((cursor, applied)) = pending {
+            let issued = self.issue_pending_cursor(bound_handle, &open.workspace_id, cursor)?;
+            if let Some(token) = issued["token"].as_str()
+                && let Some(entry) = lock(&self.pending_cursors).get_mut(token)
+            {
+                entry.reconcile_collections = applied;
+            }
+            result["pendingCursor"] = issued;
         }
         Ok(result)
     }

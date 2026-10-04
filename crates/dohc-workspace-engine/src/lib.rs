@@ -5,6 +5,7 @@
 mod automation_recovery;
 pub(crate) mod capture_driver;
 pub mod capture_sink;
+mod collection_projection;
 mod events;
 #[doc(hidden)]
 pub mod live_application_ingress;
@@ -18,6 +19,7 @@ pub use events::AUTOMATION_CLAIMED_EVENT;
 pub use events::CAPTURE_INITIAL_SETTLED_EVENT;
 pub use events::CAPTURE_MOMENT_RECORDED_EVENT;
 pub use events::CAPTURE_NO_ATOMIC_PLACEMENT_EVENT;
+pub use events::COLLECTIONS_PROJECTED_EVENT;
 pub use events::EngineEventNotice;
 pub use events::EngineEvents;
 pub use events::RECORD_CREATED_EVENT;

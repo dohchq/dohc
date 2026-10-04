@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Event } from "@dohc/workspace-engine-client";
 import {
   CAPTURE_MOMENT_RECORDED_EVENT,
+  COLLECTIONS_PROJECTED_EVENT,
   CAPTURE_NO_ATOMIC_PLACEMENT_EVENT,
   bridgeCaptureEventsToRenderer,
   bridgeNoAtomicPlacement,
@@ -50,6 +51,18 @@ describe("bridgeCaptureEventsToRenderer", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("refreshes projected Collections without announcing capture settlement", () => {
+    const { daemon, emit } = fakeDaemon();
+    const notify = vi.fn();
+    const settled = vi.fn();
+    bridgeCaptureEventsToRenderer(daemon, notify, 100);
+    onWorkspaceCaptureSettled(daemon, "share", settled);
+    emit(captureEvent(COLLECTIONS_PROJECTED_EVENT, { workspaceId: "share", paths: ["tasks/a.md"], projectedCount: 1 }));
+    vi.advanceTimersByTime(100);
+    expect(notify).toHaveBeenCalledWith({ workspaceId: "share", paths: ["tasks/a.md"] });
+    expect(settled).not.toHaveBeenCalled();
   });
 
   it("forwards the daemon payload's workspaceId and paths", () => {

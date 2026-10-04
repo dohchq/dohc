@@ -311,11 +311,39 @@ describe("workspace engine IPC registrations", () => {
     }
   });
 
+  it("keeps the host and healthy mount Collections when another mount cannot open", async () => {
+    const h = await harness();
+    h.workspace.shareMounts = ["broken", "healthy", "other"].map(label => ({
+      shareId: label, label, granterEmail: null, relayUrl: "http://127.0.0.1:1234",
+      grantedSelector: { paths: ["tasks"], versionId: null, access: "view" as const },
+    }));
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let calls = 0;
+    h.adapter.listCollections.mockImplementation(async () => {
+      const call = calls++;
+      if (call === 1) throw new Error("mount store refused");
+      if (call === 2) await release.promise;
+      if (call === 3) entered.resolve();
+      return { collections: [{ path: "tasks", objectId: "schema", status: "valid", reasons: [] }] };
+    });
+    const listed = h.invoke(CHANNELS.listCollections);
+    await entered.promise;
+    release.resolve();
+    await expect(listed).resolves.toEqual({ collections: [
+      { path: "tasks", objectId: "schema", status: "valid", reasons: [] },
+      { path: "shared-with-me/healthy/tasks", objectId: "schema", status: "valid", reasons: [] },
+      { path: "shared-with-me/other/tasks", objectId: "schema", status: "valid", reasons: [] },
+    ] });
+    h.adapter.listCollections.mockRejectedValue(new Error("host store refused"));
+    await expect(h.invoke(CHANNELS.listCollections)).rejects.toThrow("host store refused");
+  });
+
   it("routes shared views through the received-share owner and strips only workspaceId from queries", async () => {
     const h = await harness();
     h.workspace.shareView = {
       shareId: "share", granterEmail: null, genericChatWritable: false,
-      grantedSelector: { paths: [], versionId: null, access: "view" },
+      grantedSelector: { paths: ["data"], versionId: null, access: "view" },
     };
     const params = {
       collectionPath: "data", filter: { field: "name", operator: "equals", value: "Ada" },

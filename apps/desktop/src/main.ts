@@ -325,6 +325,7 @@ import {
   mountStoreWorkspaceIdFor,
   shareViewFilesMountProjection,
   shareMountRecordsForId,
+  usableShareMountRecord,
 } from "./workspaces/shareMounts";
 import { createShareMountCommands } from "./workspaces/shareMountCommands";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
@@ -771,6 +772,18 @@ function cloudLogin(): CloudLogin {
 const workspaceFileListings = new WorkspaceFileListingCache();
 
 function notifyRenderer(scope?: WorkspaceActivityScope): void {
+  if (scope) {
+    for (const workspace of listWorkspaces()) {
+      const mounts = storedShareMounts(workspace);
+      const mount = mounts.find(mount => usableShareMountRecord(mounts, mount)
+        && mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId) === scope?.workspaceId);
+      if (mount) {
+        scope = { workspaceId: workspace.workspaceId,
+          ...(scope.paths ? { paths: scope.paths.map(path => `shared-with-me/${mount.label}/${path}`) } : {}) };
+        break;
+      }
+    }
+  }
   const activityEvent = workspaceActivityPayload(scope);
   workspaceFileListings.invalidate(activityEvent);
   invalidateDatasetAddresses(activityEvent);

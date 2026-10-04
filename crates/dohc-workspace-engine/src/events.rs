@@ -16,6 +16,9 @@ use std::sync::Mutex;
 /// announces these writes.
 pub const CAPTURE_MOMENT_RECORDED_EVENT: &str = "capture.momentRecorded";
 
+/// Received Collection snapshot projection committed; no moment was recorded.
+pub const COLLECTIONS_PROJECTED_EVENT: &str = "collections.projected";
+
 /// Advisory wake-up after initial capture leaves Starting or Importing.
 /// The payload identifies the workspace; callers must retry their fenced read.
 /// Delivery can be dropped, so subscribers retain their retry timer.

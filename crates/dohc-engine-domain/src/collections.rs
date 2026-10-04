@@ -19,6 +19,9 @@ use serde_json::Value;
 
 use crate::chats::{base32_lowercase_no_padding, is_js_trim_ws};
 
+mod projection;
+pub use projection::{CollectionProjection, project_collections_in_tx};
+
 pub const COLLECTION_SCHEMA_FILENAME: &str = "collection.yaml";
 pub const DEFAULT_COLLECTION_QUERY_LIMIT: usize = 100;
 pub const MAX_COLLECTION_QUERY_LIMIT: usize = 500;
@@ -2698,7 +2701,8 @@ fn bound_record(
     conn.query_row(
         "SELECT record_id,collection_path,index_initialized FROM collection_records \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
-           AND record_id IS NOT NULL",
+           AND record_id IS NOT NULL \
+           AND NOT EXISTS(SELECT 1 FROM share_view_cursors WHERE workspace_id=?1)",
         params![workspace_id, version_id, object_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )

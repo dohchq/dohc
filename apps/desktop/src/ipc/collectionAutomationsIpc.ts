@@ -338,9 +338,9 @@ export function registerCollectionAutomationsIpc<
   registerHandler(CHANNELS.listCollectionFieldMarks, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListCollectionFieldMarksPayload.parse(payload);
-    if ("collectionPath" in input) assertCollectionPath(input.collectionPath);
+    if ("collectionPath" in input) assertCollectionPath(input.collectionPath, true);
     return withRendererWorkspaceOperation(event.sender, input.workspaceId, stale, async (operation): Promise<ListCollectionFieldMarksResult> => {
-      if (dependencies.sharedViewOf(input.workspaceId)) return { marks: [] };
+      if (dependencies.sharedViewOf(input.workspaceId) || ("collectionPath" in input && isSharedWithMePath(input.collectionPath))) return { marks: [] };
       const automations = operation.state.collectionAutomations;
       return {
         marks: "datasetId" in input

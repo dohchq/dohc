@@ -1210,6 +1210,7 @@ export class EngineWorkspaceSessions {
         // fresh desktop boot and a sidecar-only rebind.
         recoverRunningDispatches: false,
         ...(captureDisabled ? { captureMode: "none" as const } : {}),
+        ...(shareMount ? { projectCollections: true } : {}),
         ...(!captureDisabled && hasCaptureAuthor
           ? {
               captureAuthor:

@@ -11,7 +11,7 @@ export function useCollectionFolders(
   workspaceId: string,
   workspaceIsReady: boolean,
   isShareView: boolean,
-  // An Edit share view reads its Collections; others read none.
+  // Healthy received shares read Collections within their pinned grant.
   shareViewReadsCollections = false,
 ) {
   // Collection folders: the engine's collections.list result,

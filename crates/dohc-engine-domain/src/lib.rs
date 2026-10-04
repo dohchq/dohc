@@ -96,8 +96,8 @@ pub use collections::{
     CollectionFieldHistoryEntry, CollectionFieldType, CollectionFieldValue, CollectionFilter,
     CollectionFilterOperator, CollectionHistoryValue, CollectionIndexedValue,
     CollectionIndexedValueValidation, CollectionListPage, CollectionPendingAdoption,
-    CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,
-    CollectionQueryCursor, CollectionQueryCursorValue, CollectionQueryResult,
+    CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionProjection,
+    CollectionQuery, CollectionQueryCursor, CollectionQueryCursorValue, CollectionQueryResult,
     CollectionReconcileResult, CollectionRecord, CollectionRecordApplyFacts,
     CollectionRecordDetails, CollectionRecordGroup, CollectionRecordLifecycle,
     CollectionRecordLifecycleKind, CollectionRelationCleanupCandidate, CollectionResolvedRelation,
@@ -116,9 +116,9 @@ pub use collections::{
     is_collection_record_bound_in_tx, is_record_id, list_collections,
     list_pending_collection_adoptions, mint_record_id, moment_author_attribution,
     moment_author_depth, moment_author_entries, moment_author_json, moment_author_list_json,
-    parse_collection_schema, query_collection_records, reconcile_collections_in_tx,
-    set_collection_adoption_state_in_tx, synchronize_collection_frontmatter_index_in_tx,
-    validate_field_value,
+    parse_collection_schema, project_collections_in_tx, query_collection_records,
+    reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
+    synchronize_collection_frontmatter_index_in_tx, validate_field_value,
 };
 pub use conflicts::{
     BINARY_COMBINED_TEXT_REFUSAL, BinaryResolveWrite, CONFLICT_METADATA_BUDGET_BYTES,
