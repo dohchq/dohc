@@ -35,7 +35,7 @@ const desktopProofConsumers = {
 // the consumer or an input without a file map still selects its complete suite.
 const externalTestFiles = {
   "@dohc/desktop": {
-    "@dohc/site": ["src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"],
+    "@dohc/site": ["src/renderer/tokens.test.ts", "src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"],
   },
   "@dohc/ydoc-projection": {
     "@dohc/desktop": ["src/liveRestoreDrain.test.ts", "src/ownerDesktopTransport.test.ts"],
