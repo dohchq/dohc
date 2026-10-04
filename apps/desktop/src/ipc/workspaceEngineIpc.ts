@@ -22,6 +22,7 @@ import type { createReceivedShareEngineAccess } from "../workspaces/receivedShar
 import type { createEngineYDocSessionIpc, EngineYDocIpcSender } from "../workspaces/engineYDocSessionIpc";
 import { sharedViewHistory } from "../workspaces/sharedViewHistory";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
+import { collectionListSources, collectionReadSource, mountedCollectionSchema, receivedCollectionQuery } from "../workspaces/receivedShareCollections";
 
 type EngineStoreAuthorityState = {
   operationLanes: Map<string, Promise<void>>;
@@ -41,7 +42,7 @@ export function createWorkspaceEngineIpc<
     sender: Sender, workspaceId: string, retiredMessage: string,
     work: (operation: Operation) => Promise<Result>,
   ): Promise<Result>;
-  receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceForRegistered" | "storeFor">;
+  receivedShareEngine: Pick<ReturnType<typeof createReceivedShareEngineAccess>, "workspaceFor" | "workspaceForRegistered" | "storeFor">;
   withEngineAdapter<Result>(
     workspace: EngineWorkspace,
     work: (adapter: Pick<VersionedLiveAdapter, "listCollections" | "getCollection" | "queryCollectionRecords" | "reconcileCapture" | "watcherStatus" | "getCollectionRecord">) => Promise<Result>,
@@ -111,11 +112,19 @@ export function createWorkspaceEngineIpc<
         input.workspaceId,
         "Collection listing stopped because this window changed workspaces.",
         async (operation) => {
-          const result = await withEngineAdapter(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
-            async (adapter) => await adapter.listCollections(),
-          );
-          return ListCollectionsResult.parse(result ?? { collections: [] });
+          const [required, ...mounts] = collectionListSources(operation.workspace, receivedShareEngine);
+          const read = async (source: NonNullable<typeof required>) => {
+            const result = await withEngineAdapter(source.workspace, adapter => adapter.listCollections());
+            return (result?.collections ?? [])
+              .filter(collection => source.selected(`${collection.path}/collection.yaml`))
+              .map(collection => ({ ...collection, path: source.prefix + collection.path }));
+          };
+          const collections = required ? await read(required) : [];
+          const mounted = await Promise.allSettled(mounts.map(read));
+          for (const result of mounted) {
+            if (result.status === "fulfilled") collections.push(...result.value);
+          }
+          return ListCollectionsResult.parse({ collections });
         },
       );
     });
@@ -128,13 +137,14 @@ export function createWorkspaceEngineIpc<
         input.workspaceId,
         "Collection read stopped because this window changed workspaces.",
         async (operation) => {
+          const { source, path } = await collectionReadSource(operation.workspace, input.collectionPath, receivedShareEngine);
           const result = await withEngineAdapter(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
+            source.workspace,
             async (adapter) =>
-              await adapter.getCollection({ collectionPath: input.collectionPath }),
+              await adapter.getCollection({ collectionPath: path }),
           );
           if (!result) throw new Error("The workspace engine is not running.");
-          return GetCollectionResult.parse(result);
+          return GetCollectionResult.parse({ ...result, path: source.prefix + result.path, schema: mountedCollectionSchema(result.schema, source.prefix) });
         },
       );
     });
@@ -148,12 +158,18 @@ export function createWorkspaceEngineIpc<
         input.workspaceId,
         "Collection query stopped because this window changed workspaces.",
         async (operation) => {
+          const { source, path } = await collectionReadSource(operation.workspace, input.collectionPath, receivedShareEngine);
+          const cursor = params.cursor;
+          if (cursor && (!cursor.recordPath.startsWith(source.prefix) || !source.selected(cursor.recordPath.slice(source.prefix.length)))) {
+            throw new Error("This record is outside the files shared with you.");
+          }
           const result = await withEngineAdapter(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
-            async (adapter) => await adapter.queryCollectionRecords(params),
+            source.workspace,
+            async (adapter) => await adapter.queryCollectionRecords({ ...params, collectionPath: path,
+              ...(cursor ? { cursor: { ...cursor, recordPath: cursor.recordPath.slice(source.prefix.length) } } : {}) }),
           );
           if (!result) throw new Error("The workspace engine is not running.");
-          return QueryCollectionRecordsResult.parse(result);
+          return QueryCollectionRecordsResult.parse(receivedCollectionQuery(result, source));
         },
       );
     });
@@ -168,16 +184,19 @@ export function createWorkspaceEngineIpc<
         input.workspaceId,
         "Record history stopped loading because this window changed workspaces.",
         async (operation) => {
+          const { source, path } = await collectionReadSource(operation.workspace, input.collectionPath, receivedShareEngine);
           const result = await withEngineAdapter(
-            receivedShareEngine.workspaceForRegistered(operation.workspace),
+            source.workspace,
             async (adapter) => await adapter.getCollectionRecord({
-              collectionPath: input.collectionPath,
+              collectionPath: path,
               recordId: input.recordId,
               historyLimit: RECORD_HISTORY_PAGE,
               ...(input.beforeHistoryId === undefined ? {} : { beforeHistoryId: input.beforeHistoryId }),
             }),
           );
           if (!result) throw new Error("The workspace engine is not running.");
+          if (!source.selected(result.record.path)) throw new Error("This record is outside the files shared with you.");
+          result.record.path = source.prefix + result.record.path;
           const { workspaceId } = operation.workspace;
           const authors: RecordHistoryAuthors = {
             agent: (onBehalfOf) => onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent",

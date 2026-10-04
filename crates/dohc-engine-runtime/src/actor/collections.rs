@@ -24,6 +24,34 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 impl ActorHandle {
+    pub async fn project_collections(
+        &self,
+        workspace_id: String,
+        previous: dohc_engine_domain::CollectionProjection,
+    ) -> Result<(dohc_engine_domain::CollectionProjection, Vec<String>), RuntimeError> {
+        self.run(move |store, _| {
+            let version_id = match VersionedTextStore::new(store).get_active_version(&workspace_id)
+            {
+                Ok(version) => version.version_id,
+                // A fresh share binding opens before its first pull bootstraps main.
+                Err(DomainError::WorkspaceNotFound) => return Ok((Default::default(), Vec::new())),
+                Err(error) => return Err(error.into()),
+            };
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                dohc_engine_domain::project_collections_in_tx(
+                    tx,
+                    &workspace_id,
+                    &version_id,
+                    previous,
+                )
+            })? {
+                TxnOutcome::Committed(result) => Ok(result),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
     /// Check changed collection records against their durable id bindings,
     /// blocking the calling capture worker thread.
     pub fn collection_record_id_mismatch_blocking(

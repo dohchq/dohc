@@ -1262,7 +1262,7 @@ describe("EngineWorkspaceSessions", () => {
     );
     expect(firstTwoOpens).toHaveLength(2);
     expect(firstTwoOpens.map((request) => request.params)).toEqual([
-      expect.objectContaining({ captureMode: "none" }),
+      expect.objectContaining({ captureMode: "none", projectCollections: true }),
       expect.objectContaining({ captureMode: "none" }),
     ]);
 

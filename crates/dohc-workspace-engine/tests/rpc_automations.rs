@@ -31,6 +31,44 @@ use std::sync::Arc;
 const WORKSPACE_ID: &str = "ws-rpc-automations";
 const AUTOMATION: &str = "collection:tasks#triage";
 
+#[tokio::test]
+async fn received_share_handles_refuse_local_automation_claims_and_execution() {
+    let scratch = ScratchDir::new().unwrap();
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID,
+            "captureMode": "none", "projectCollections": true }),
+            ),
+        )
+        .await
+        .unwrap();
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+    let mut id = 1;
+    for method in [
+        "automations.subscribe",
+        "automations.claimNext",
+        "automations.press",
+        "automations.claimSchedule",
+        "automations.runNow",
+        "automations.settle",
+    ] {
+        assert_eq!(
+            call_error(&transport, &handle, &mut id, method, json!({}))
+                .await
+                .code,
+            ErrorCode::Forbidden
+        );
+    }
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
 async fn call(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,

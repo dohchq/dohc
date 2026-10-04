@@ -468,6 +468,9 @@ impl EngineService {
         {
             self.collections_changed(ctx, &open).await?;
         }
+        if open.projects_collections() && can_move_collections(&result.snapshot.path, true) {
+            open.request_collection_reconcile();
+        }
         Ok(json!({
             "object": file_object_json(&result.object),
             "snapshot": crate::rpc::reads::settled_snapshot_json(&result.snapshot),

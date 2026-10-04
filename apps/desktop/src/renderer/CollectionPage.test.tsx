@@ -289,6 +289,7 @@ function pageWithHost(
   onNewRecord: (collectionPath: string) => void = () => undefined,
   onOpenRecord: (recordPath: string) => void = () => undefined,
   view?: {
+    readOnly?: boolean;
     activeViewName?: string | null;
     onActiveViewChange?: (viewName: string | null) => void;
     onError?: CollectionPageProps["onError"];
@@ -300,6 +301,7 @@ function pageWithHost(
       <CollectionPage
         workspaceId="ws-1"
         collectionPath="tasks"
+        readOnly={view?.readOnly}
         activeViewName={view?.activeViewName ?? null}
         onActiveViewChange={view?.onActiveViewChange ?? (() => undefined)}
         onNewRecord={onNewRecord}
@@ -318,6 +320,7 @@ function renderPage(
   onNewRecord: (collectionPath: string) => void = () => undefined,
   onOpenRecord: (recordPath: string) => void = () => undefined,
   view?: {
+    readOnly?: boolean;
     activeViewName?: string | null;
     onActiveViewChange?: (viewName: string | null) => void;
     onError?: CollectionPageProps["onError"];
@@ -328,6 +331,16 @@ function renderPage(
 }
 
 describe("CollectionPage", () => {
+  it("keeps View tables readable without record or definition writes", async () => {
+    const bridge = makeBridge([record("rec-1", "Shared task")]);
+    renderPage(bridge, undefined, undefined, { readOnly: true });
+    await screen.findByText("Shared task");
+    expect(screen.queryByTestId("collection-new-record")).toBeNull();
+    expect(screen.queryByTestId("collection-fields-button")).toBeNull();
+    expect(screen.queryByTestId("collection-views-button")).toBeNull();
+    expect(bridge.listAutomationButtons).not.toHaveBeenCalled();
+    expect(bridge.writeWorkspaceText).not.toHaveBeenCalled();
+  });
   it("reloads initially empty Buttons when the automation index changes in this workspace", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")], {
       ...SCHEMA, fields: [...SCHEMA.fields, { name: "Finish", type: "button" }],

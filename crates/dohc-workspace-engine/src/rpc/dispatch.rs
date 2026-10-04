@@ -976,6 +976,16 @@ impl EngineService {
         let Some(handle) = handle else {
             return Ok(());
         };
+        if method.starts_with("automations.")
+            && lock(&self.handles)
+                .get(handle)
+                .is_some_and(|open| open.projects_collections())
+        {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "received shares do not execute automations",
+            ));
+        }
         let read_only = lock(&self.handles)
             .get(handle)
             .is_some_and(|open| open.mode == WorkspaceOpenMode::ReadOnly);

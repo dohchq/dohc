@@ -36,6 +36,228 @@ use std::{fmt::Write as _, sync::Arc};
 const WORKSPACE_ID: &str = "ws-rpc-collections";
 const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+#[tokio::test]
+async fn fresh_received_projection_has_no_index_until_its_first_pull() {
+    let scratch = ScratchDir::new().unwrap();
+    let supervisor = dohc_engine_runtime::WorkspaceSupervisor::new();
+    let db = scratch.path().join("projection.sqlite");
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let (_, paths) = actor
+        .project_collections(WORKSPACE_ID.to_owned(), Default::default())
+        .await
+        .unwrap();
+    assert!(paths.is_empty());
+    supervisor.close(&db).unwrap();
+}
+
+#[tokio::test]
+async fn received_collection_projection_follows_local_definition_writes_and_announces_commit() {
+    let scratch = ScratchDir::new().unwrap();
+    let service = Arc::new(EngineService::new());
+    let mut notices = service.events().subscribe();
+    let transport = InProcessTransport::new(service);
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({ "rootDir": scratch.path().to_string_lossy(), "workspaceId": WORKSPACE_ID,
+            "captureMode": "none", "projectCollections": true }),
+            ),
+        )
+        .await
+        .unwrap();
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": WORKSPACE_ID }),
+    )
+    .await;
+    let db = engine_db_path(&scratch).unwrap();
+    let mut connection = rusqlite::Connection::open(&db).unwrap();
+    connection
+        .execute(
+            "INSERT INTO share_view_cursors (workspace_id,share_id,cursor) VALUES (?1,'share','0')",
+            [WORKSPACE_ID],
+        )
+        .unwrap();
+    let tx = connection.transaction().unwrap();
+    subscribe_automation_in_tx(
+        &tx,
+        WORKSPACE_ID,
+        &AutomationSubscription {
+            automation_id: "collection:tasks#stamp".to_owned(),
+            prefix: "tasks".to_owned(),
+            kinds: vec![AutomationChangeKind::Added, AutomationChangeKind::Changed],
+            fields: None,
+        },
+        1,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    drop(connection);
+    for (id, path, text) in [
+        (
+            3,
+            "tasks/collection.yaml",
+            "name: Tasks\nfields:\n  Title:\n    type: text\n".to_owned(),
+        ),
+        (
+            4,
+            "tasks/a.md",
+            format!("---\nid: {RECORD_ID}\nTitle: First\n---\n"),
+        ),
+        (
+            5,
+            "tasks/collection.yaml",
+            "name: Tasks\nfields:\n  Title:\n    type: text\n  Note:\n    type: text\n".to_owned(),
+        ),
+        (
+            6,
+            "tasks/a.md",
+            format!("---\nid: {RECORD_ID}\nTitle: Second\n---\n"),
+        ),
+    ] {
+        call(
+            &transport,
+            &handle,
+            id,
+            "versionedText.write",
+            json!({ "workspaceId": WORKSPACE_ID,
+            "versionId": "main", "path": path, "text": text, "origin": "local-file" }),
+        )
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            loop {
+                let notice = notices.recv().await.unwrap();
+                assert_ne!(notice.name, AUTOMATION_CLAIMED_EVENT);
+                if notice.name == dohc_workspace_engine::COLLECTIONS_PROJECTED_EVENT
+                    && notice.payload["paths"]
+                        .as_array()
+                        .is_some_and(|paths| paths.contains(&json!(path)))
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("projection commit event");
+    }
+    let listed = call(&transport, &handle, 7, "collections.list", json!({})).await;
+    assert_eq!(listed["collections"][0]["path"], json!("tasks"));
+    let details = call(
+        &transport,
+        &handle,
+        8,
+        "collections.get",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    assert_eq!(details["schema"]["fields"].as_array().unwrap().len(), 2);
+    let queried = call(
+        &transport,
+        &handle,
+        9,
+        "collections.query",
+        json!({ "collectionPath": "tasks" }),
+    )
+    .await;
+    assert_eq!(queried["records"].as_array().unwrap().len(), 1);
+    // local-file writes report bytes already on disk. Give settlement the
+    // same real artifact, so its stale-target fence can check that head.
+    let record_path = scratch.path().join("tasks/a.md");
+    std::fs::create_dir_all(record_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &record_path,
+        format!("---\nid: {RECORD_ID}\nTitle: Second\n---\n"),
+    )
+    .unwrap();
+    let opened = call(
+        &transport,
+        &handle,
+        10,
+        "ydoc.open",
+        json!({
+            "versionId": "main", "path": "tasks/a.md", "contentKind": "richdoc",
+        }),
+    )
+    .await;
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown(
+        ContentKind::Richdoc,
+        &format!("---\nid: {RECORD_ID}\nTitle: Second\n---\n"),
+    )
+    .unwrap();
+    call(&transport, &handle, 11, "ydoc.recordUpdate", json!({
+        "sessionId": opened["sessionId"], "seed": true,
+        "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.encode_full_state()),
+    })).await;
+    call(&transport, &handle, 12, "ydoc.recordUpdate", json!({
+        "sessionId": opened["sessionId"],
+        "updateBase64": base64::engine::general_purpose::STANDARD.encode(doc.frontmatter_set("Title", "Third").unwrap()),
+    })).await;
+    call(
+        &transport,
+        &handle,
+        13,
+        "ydoc.evict",
+        json!({"sessionId": opened["sessionId"]}),
+    )
+    .await;
+    // A later file write still maintains the closed lineage in a received
+    // store. The old broad early return left this Y.Doc at Third.
+    std::fs::write(
+        &record_path,
+        format!("---\nid: {RECORD_ID}\nTitle: Fourth\n---\n"),
+    )
+    .unwrap();
+    call(
+        &transport,
+        &handle,
+        14,
+        "versionedText.write",
+        json!({
+            "workspaceId": WORKSPACE_ID, "versionId": "main", "path": "tasks/a.md",
+            "text": format!("---\nid: {RECORD_ID}\nTitle: Fourth\n---\n"), "origin": "local-file",
+        }),
+    )
+    .await;
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    for table in ["automation_claims", "collection_field_history"] {
+        assert_eq!(
+            connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "recipient Y.Doc append created {table}"
+        );
+    }
+    let object_id: String = connection.query_row(
+        "SELECT object_id FROM snapshots WHERE workspace_id=?1 AND version_id='main' AND path='tasks/a.md'",
+        [WORKSPACE_ID], |row| row.get(0)).unwrap();
+    let key = DocKey::new(WORKSPACE_ID, "main", object_id).unwrap();
+    let lineage = dohc_engine_collab::load_doc_in(&connection, &key).unwrap();
+    assert_eq!(lineage.frontmatter_json()["Title"], json!("Fourth"));
+    drop(connection);
+    call(&transport, &handle, 15, "workspace.close", json!({})).await;
+    let connection = rusqlite::Connection::open(&db).unwrap();
+    for table in ["automation_claims", "collection_field_history"] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "recipient writes created {table}");
+    }
+}
+
 fn seed_text(store: &mut EngineStore, path: &str, text: &str, sequence: i64) {
     VersionedTextStore::new(store)
         .capture_ingest(

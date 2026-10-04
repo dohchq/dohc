@@ -137,7 +137,10 @@ describe("field marks", () => {
     const shared = fixture({ sharedView: true });
     await expect(shared.marks("Tasks")).resolves.toEqual({ marks: [] });
     expect(shared.fieldMarks).not.toHaveBeenCalled();
-    await expect(fixture().marks("shared-with-me/Trip")).rejects.toThrow(/not a Collection/);
+    const mounted = fixture();
+    await expect(mounted.marks("shared-with-me/Ana/Trip")).resolves.toEqual({ marks: [] });
+    expect(mounted.fieldMarks).not.toHaveBeenCalled();
+    await expect(mounted.marks("shared-with-me/../Trip")).rejects.toThrow(/not a Collection/);
   });
 
   it("answers one dataset table's marks by the dataset's id and the table's name, and none in a shared view", async () => {

@@ -4,6 +4,7 @@ import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 
 /** Emitted by the daemon once per settled capture batch / reconcile pass. */
 export const CAPTURE_MOMENT_RECORDED_EVENT = "capture.momentRecorded";
+export const COLLECTIONS_PROJECTED_EVENT = "collections.projected";
 export const CAPTURE_NO_ATOMIC_PLACEMENT_EVENT = "capture.noAtomicPlacement";
 
 /**
@@ -50,9 +51,10 @@ function scopeOf(payload: unknown): { workspaceId: string; paths: string[] | nul
   const rawPaths = Array.isArray(record.paths)
     ? record.paths.filter((path): path is string => typeof path === "string")
     : null;
-  const appliedCount =
+  const appliedCount = typeof record.projectedCount === "number" ? record.projectedCount :
     typeof record.appliedCount === "number" ? record.appliedCount : Number.NaN;
   const notOwnedCount =
+    typeof record.projectedCount === "number" ? 0 :
     typeof record.notOwnedCount === "number" ? record.notOwnedCount : Number.NaN;
   const truncated =
     rawPaths === null ||
@@ -100,7 +102,7 @@ export function bridgeCaptureEventsToRenderer(
   }
 
   const unsubscribe = daemon.onEvent((event) => {
-    if (event.name !== CAPTURE_MOMENT_RECORDED_EVENT) return;
+    if (event.name !== CAPTURE_MOMENT_RECORDED_EVENT && event.name !== COLLECTIONS_PROJECTED_EVENT) return;
     const scope = scopeOf(event.payload);
     if (!scope) {
       pendingGlobal = true;

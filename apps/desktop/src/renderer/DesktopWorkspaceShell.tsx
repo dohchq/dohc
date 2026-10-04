@@ -1422,7 +1422,9 @@ export function DesktopWorkspaceShell(props: {
   // imported, list and detail only, from its own store.
   const historyReadable = (status: SyncStatusResult | null) =>
     isShareView ? !status?.engineStoreRefused : !statusSaysNoRecorder(status);
-  // An Edit share view reads and makes document Collections (ADR 0013).
+  const shareViewReadsCollections = isShareView &&
+    !props.workspace.shareView?.damaged && !props.workspace.shareView?.ended;
+  // An Edit share view also changes Collection definitions (ADR 0013).
   const shareViewEditsCollections =
     props.workspace.shareView?.access === "edit" &&
     !props.workspace.shareView.damaged &&
@@ -1433,7 +1435,7 @@ export function DesktopWorkspaceShell(props: {
     workspaceId,
     workspaceIsReady,
     isShareView,
-    shareViewEditsCollections,
+    shareViewReadsCollections,
   );
   useEffect(() => {
     if (!workspaceIsReady) return;
@@ -3339,7 +3341,7 @@ export function DesktopWorkspaceShell(props: {
       void refreshHistory().catch((error) =>
         reportShellError("Could not refresh history.", error),
       );
-      if (!isShareView || shareViewEditsCollections) void refreshCollections();
+      if (!isShareView || shareViewReadsCollections) void refreshCollections();
       if (!isShareView) {
         void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error));
         void refreshKeptCopies();
@@ -3371,6 +3373,7 @@ export function DesktopWorkspaceShell(props: {
     refreshHistory,
     reportShellError,
     isShareView,
+    shareViewReadsCollections,
     refreshCollections,
     refreshDatasets,
     refreshKeptCopies,
@@ -5093,6 +5096,7 @@ export function DesktopWorkspaceShell(props: {
                     key={`${tabPath}:${collectionLineage}`}
                     workspaceId={workspaceId}
                     collectionPath={groupCollectionPath}
+                    readOnly={(isShareView && !shareViewEditsCollections) || isMountedSharePath(groupCollectionPath)}
                     activeViewName={wb.collectionViews[groupCollectionPath] ?? null}
                     onActiveViewChange={(viewName) =>
                       mutateWb((state) =>

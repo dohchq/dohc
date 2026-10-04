@@ -68,6 +68,9 @@ pub(crate) struct OpenWorkspace {
     /// The workspace opened without capture and asked to keep its Collections
     /// current itself, as a server's automation replica does.
     reconciles_collections: bool,
+    projects_collections: bool,
+    collection_projection:
+        Arc<Mutex<Option<crate::collection_projection::CollectionProjectionWorker>>>,
     automation_recovery: Arc<Mutex<Option<automation_recovery::AutomationRecovery>>>,
     /// Held by every capture reconcile+apply and by versions.setActive across
     /// its forced full scan plus switch transaction. This drains an in-flight
@@ -105,6 +108,9 @@ impl WorkspaceHandleKind {
 }
 
 impl OpenWorkspace {
+    pub(super) fn projects_collections(&self) -> bool {
+        self.projects_collections
+    }
     pub(super) fn is_local_owner(&self) -> bool {
         self.handle_kind.owns_binding() && self.mode == WorkspaceOpenMode::Full
     }
@@ -121,6 +127,8 @@ impl OpenWorkspace {
             capture_enabled: self.capture_enabled,
             capture: Arc::clone(&self.capture),
             reconciles_collections: self.reconciles_collections,
+            projects_collections: self.projects_collections,
+            collection_projection: Arc::clone(&self.collection_projection),
             automation_recovery: Arc::clone(&self.automation_recovery),
             capture_apply_gate: Arc::clone(&self.capture_apply_gate),
             capture_holds: Arc::clone(&self.capture_holds),
@@ -129,6 +137,9 @@ impl OpenWorkspace {
     }
 
     pub(super) fn request_collection_reconcile(&self) {
+        if let Some(projection) = lock(&self.collection_projection).as_ref() {
+            projection.request();
+        }
         if let Some(driver) = lock(&self.capture).as_ref() {
             driver.status().request_collection_reconcile();
         }
@@ -138,6 +149,9 @@ impl OpenWorkspace {
     /// fence that already owns the apply gate can still finish against the
     /// driver; teardown takes the handle only after acquiring that gate.
     fn request_capture_shutdown(&self) {
+        if let Some(projection) = lock(&self.collection_projection).as_ref() {
+            projection.request_shutdown();
+        }
         if let Some(recovery) = lock(&self.automation_recovery).as_ref() {
             recovery.request_shutdown();
         }
@@ -149,14 +163,17 @@ impl OpenWorkspace {
     /// Take and cancel the background tasks without an await point, so an
     /// aborted RPC future cannot leave them running. Return
     /// the join handles for callers that must await the full drain.
-    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 2] {
+    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 3] {
+        let projection = lock(&self.collection_projection)
+            .take()
+            .and_then(crate::collection_projection::CollectionProjectionWorker::begin_shutdown);
         let capture = lock(&self.capture)
             .take()
             .and_then(capture_driver::CaptureDriver::begin_shutdown);
         let recovery = lock(&self.automation_recovery)
             .take()
             .and_then(automation_recovery::AutomationRecovery::begin_shutdown);
-        [capture, recovery]
+        [capture, recovery, projection]
     }
 
     /// Cancel and await capture and automation recovery (idempotent).
@@ -311,6 +328,8 @@ struct WorkspaceOpenParams {
     /// the changes a capture pass would reconcile after.
     #[serde(default)]
     reconcile_collections: bool,
+    #[serde(default)]
+    project_collections: bool,
     #[serde(default)]
     relay: Option<RelayOpenParams>,
 }
@@ -536,10 +555,16 @@ impl EngineService {
                 "captureAuthor is unavailable when captureMode is none",
             ));
         }
-        if capture_enabled && params.reconcile_collections {
+        if (capture_enabled && (params.reconcile_collections || params.project_collections))
+            || (params.project_collections && params.reconcile_collections)
+        {
             return Err(WireError::new(
                 ErrorCode::InvalidParams,
-                "reconcileCollections needs captureMode none",
+                if params.project_collections {
+                    "projectCollections needs captureMode none and reconcileCollections false"
+                } else {
+                    "reconcileCollections needs captureMode none"
+                },
             ));
         }
         let cancellation = OperationCancellation::new(ctx);
@@ -611,6 +636,7 @@ impl EngineService {
                 }
                 if open.capture_enabled != capture_enabled
                     || open.reconciles_collections != params.reconcile_collections
+                    || open.projects_collections() != params.project_collections
                 {
                     return Err(WireError::new(
                         ErrorCode::InvalidParams,
@@ -949,7 +975,7 @@ impl EngineService {
             // next open. The idle bound protects a handler a still-alive
             // desktop is running, whose run settles inside the shorter
             // per-run deadline.
-            {
+            if !params.project_collections {
                 Self::read_under_ctx(
                     &cancellation,
                     "workspace.open (automation reclaim)",
@@ -970,21 +996,33 @@ impl EngineService {
             }
             capture
         };
-        let automation_recovery = if requested_mode == WorkspaceOpenMode::Full {
-            let attempts = Self::read_under_ctx(
-                &cancellation,
-                "workspace.open (automation recovery snapshot)",
-                actor.automation_running_attempts(params.workspace_id.clone()),
-            )
-            .await?;
-            (!attempts.is_empty()).then(|| {
-                automation_recovery::AutomationRecovery::spawn(
+        let automation_recovery =
+            if requested_mode == WorkspaceOpenMode::Full && !params.project_collections {
+                let attempts = Self::read_under_ctx(
+                    &cancellation,
+                    "workspace.open (automation recovery snapshot)",
+                    actor.automation_running_attempts(params.workspace_id.clone()),
+                )
+                .await?;
+                (!attempts.is_empty()).then(|| {
+                    automation_recovery::AutomationRecovery::spawn(
+                        actor.clone(),
+                        params.workspace_id.clone(),
+                        attempts,
+                        self.events.clone(),
+                    )
+                })
+            } else {
+                None
+            };
+        let collection_projection = if params.project_collections {
+            Some(
+                crate::collection_projection::CollectionProjectionWorker::spawn(
                     actor.clone(),
                     params.workspace_id.clone(),
-                    attempts,
                     self.events.clone(),
-                )
-            })
+                ),
+            )
         } else {
             None
         };
@@ -1003,6 +1041,8 @@ impl EngineService {
                 capture_enabled: requested_mode == WorkspaceOpenMode::Full && capture_enabled,
                 capture: Arc::new(Mutex::new(capture)),
                 reconciles_collections: params.reconcile_collections,
+                projects_collections: params.project_collections,
+                collection_projection: Arc::new(Mutex::new(collection_projection)),
                 automation_recovery: Arc::new(Mutex::new(automation_recovery)),
                 capture_apply_gate,
                 capture_holds: CaptureHolds::default(),
@@ -1817,6 +1857,54 @@ mod tests {
             .workspace_close(Some(full_handle))
             .await
             .expect("close full handle");
+    }
+
+    #[tokio::test]
+    async fn received_projection_identity_survives_worker_shutdown() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        let params = json!({ "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "projection-close", "captureMode": "none", "projectCollections": true });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .unwrap();
+        let handle: WorkspaceHandle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let open = service.open(Some(&handle)).unwrap();
+        let attached = open.read_only_attach(handle.clone());
+        open.shutdown_capture().await;
+        assert!(lock(&open.collection_projection).is_none());
+        assert!(open.projects_collections());
+        assert!(attached.projects_collections());
+        let repeated = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .unwrap();
+        assert_eq!(opened, repeated);
+        service.workspace_close(Some(handle)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn projection_parameter_errors_name_project_collections() {
+        let scratch = ScratchDir::new().unwrap();
+        let service = EngineService::new();
+        for extra in [
+            json!({}),
+            json!({"captureMode":"none", "reconcileCollections":true}),
+        ] {
+            let mut params = json!({ "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "projection-invalid", "projectCollections": true });
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let error = service
+                .workspace_open(&RequestContext::unbounded(), params)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidParams);
+            assert!(error.message.contains("projectCollections"));
+        }
     }
 
     #[tokio::test]
