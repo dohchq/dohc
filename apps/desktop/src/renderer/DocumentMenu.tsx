@@ -1,16 +1,14 @@
-import { useFocusReturn } from "./ui/focusReturn";
 import { useRequestSequence } from "./useRequestSequence";
 import { useContext, useEffect, useRef, useState } from "react";
-import { MoreHorizontal } from "lucide-react";
-import { IconButton } from "./ui/controls";
+import { Menu } from "./ui/Menu";
 import { bridge } from "./bridge";
 import { CustomizeContext } from "./settings/customize";
+import type { ReportButtonError } from "./collections/useAutomationButtons";
 
 // The document header's "…" menu (ViewHeader): copy the raw markdown, export
-// it as a .md file, or export a self-contained HTML/PDF render. Styled and
-// keyboard-driven like TurnIntoMenu (editor/blockControls.tsx) — same
-// trigger/list shape, own class names since this lives in the header chrome,
-// not the bubble menu.
+// it as a .md file, or export a self-contained HTML/PDF render. The Menu part
+// owns the trigger, the list, and dismissal; this file owns what each row
+// does and what the menu says about it afterwards.
 type DocumentMenuItemId =
   | "copy-markdown"
   | "export-markdown"
@@ -55,11 +53,13 @@ export function DocumentMenu(props: {
   // copy or an export that silently produces nothing is a file the user
   // believes is their document.
   getMarkdown: () => string | null;
+  // The shell's error hook. A copy that fails after the menu has closed has
+  // no row left to say so, and reaches the person through this instead.
+  reportError?: ReportButtonError;
 }) {
   const customize = useContext(CustomizeContext)?.customize;
   const items = customize ? [...ITEMS, CUSTOMIZE_ITEM] : ITEMS;
   const [open, setOpen] = useState(false);
-  const [selected, setSelected] = useState(0);
   // The transient half: an item's label swaps for 1.2s to say what happened.
   const [feedback, setFeedback] = useState<
     Partial<Record<DocumentMenuItemId, string>>
@@ -67,28 +67,28 @@ export function DocumentMenu(props: {
   // The lasting half. A refusal owes the user a next step
   // (the dohc-interface skill), and a label that swaps for 1.2s has no room for one
   // and no time to be read. It is stated in the menu's status line, which
-  // every user reaches — a tooltip is not one, because focus stays on the
-  // menu container and never presents it. It stands until the user
-  // closes the menu or another action supersedes it, never on a timer.
+  // every user reaches — a tooltip is not one, because a title never
+  // presents to keyboard focus. It stands until the user closes the menu
+  // or another action supersedes it, never on a timer.
   const [instruction, setInstruction] = useState("");
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-  useFocusReturn(open, menuRef, () => triggerRef.current);
   const feedbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Every attempt gets a number, and only the newest one may speak. A
   // clipboard write settles after the click that started it, so its outcome
   // can land on a menu that has moved on — over a refusal the user is still
   // reading, on a menu that closed, or on the next one they open.
   const attempts = useRequestSequence();
+  // Actions count separately from attempts: closing the menu retires an
+  // attempt but not the action behind it. A write that settles after the
+  // close can then tell the two apart. The person closed the menu, so a
+  // success needs no message, but a failure still owes them one, unless a
+  // later action took over or the document went away.
+  const actions = useRequestSequence();
 
   useEffect(() => {
     if (!open) return;
-    setSelected(0);
     // A freshly opened menu says nothing about the last one.
     setFeedback({});
     setInstruction("");
-    menuRef.current?.focus();
     // Closing ends every attempt this menu started. The token moves past
     // them, so a clipboard write settling afterwards cannot speak into a menu
     // that is gone or one the user has since reopened, and the timer it would
@@ -99,16 +99,6 @@ export function DocumentMenu(props: {
       attempts.next();
       if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     };
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    function onPointerDown(event: MouseEvent) {
-      if (containerRef.current?.contains(event.target as Node)) return;
-      setOpen(false);
-    }
-    window.addEventListener("mousedown", onPointerDown, true);
-    return () => window.removeEventListener("mousedown", onPointerDown, true);
   }, [open]);
 
   // One timer, so one label. Merging into the previous feedback stranded it:
@@ -155,7 +145,7 @@ export function DocumentMenu(props: {
     }
   }
 
-  async function copyAsMarkdown(attempt: number) {
+  async function copyAsMarkdown(attempt: number, action: number) {
     const serialized = serializeOrFail(
       "copy-markdown",
       "Couldn't copy",
@@ -173,16 +163,43 @@ export function DocumentMenu(props: {
     }
     const write = navigator.clipboard?.writeText(markdown);
     if (!write) return;
-    let label = "Copied";
+    let failure: unknown = null;
     try {
       await write;
-    } catch {
-      label = "Couldn't copy";
+    } catch (error) {
+      failure = error ?? new Error("clipboard write failed");
+    }
+    if (attempts.isCurrent(attempt)) {
+      showFeedback("copy-markdown", failure ? "Couldn't copy" : "Copied");
+      return;
     }
     // A later attempt already answered. Its answer is what the menu shows,
-    // and this one describes a click the user has moved past.
-    if (!attempts.isCurrent(attempt)) return;
-    showFeedback("copy-markdown", label);
+    // and this one describes a click the user has moved past. If instead the
+    // menu closed under this write, a failure still reaches the person.
+    if (failure && actions.isCurrent(action)) reportCopyFailure(failure);
+  }
+
+  function reportCopyFailure(failure: unknown): void {
+    props.reportError?.("dohc could not copy this document.", failure, copyAgain);
+  }
+
+  // Try again on the toast or the Notices row: the same copy, from the
+  // document as it is now, with no menu to answer on. Only a failure speaks,
+  // and not after a later action or the document's view has moved on.
+  function copyAgain(): void {
+    const action = actions.next();
+    void (async () => {
+      let failure: unknown;
+      try {
+        const markdown = props.getMarkdown();
+        if (markdown === null) throw new Error(REFUSAL_LABEL);
+        await navigator.clipboard?.writeText(markdown);
+        return;
+      } catch (error) {
+        failure = error ?? new Error("clipboard write failed");
+      }
+      if (actions.isCurrent(action)) reportCopyFailure(failure);
+    })();
   }
 
   async function exportDocument(kind: "markdown" | "html" | "pdf") {
@@ -241,6 +258,7 @@ export function DocumentMenu(props: {
 
   function runItem(id: DocumentMenuItemId) {
     const attempt = attempts.next();
+    const action = actions.next();
     // The token says who may speak next. This says the last one has stopped —
     // a new action retires its predecessor's answer when it starts, not when
     // it finishes. Its own result can be a while away (a clipboard write can
@@ -251,7 +269,7 @@ export function DocumentMenu(props: {
     setInstruction("");
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
     if (id === "copy-markdown") {
-      void copyAsMarkdown(attempt);
+      void copyAsMarkdown(attempt, action);
       return;
     }
     if (id === "customize") {
@@ -266,82 +284,37 @@ export function DocumentMenu(props: {
     );
   }
 
-  const move = (delta: number) =>
-    setSelected((current) => (current + delta + items.length) % items.length);
-
+  // Every row answers inside the menu, so the actions above decide when it
+  // closes: a confirmation on its timer, an export before the dialog, a
+  // refusal never.
   return (
-    <div className="dohc-document-menu" ref={containerRef}>
-      <IconButton
-        ref={triggerRef}
-        data-testid="document-menu-trigger"
-        aria-label="Document actions"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        title="Document actions"
-        onClick={() => setOpen((current) => !current)}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowDown" || event.key === "Enter") {
-            event.preventDefault();
-            setOpen(true);
-          }
-        }}
+    <Menu
+      label="Document actions"
+      testId="document-menu-trigger"
+      open={open}
+      onOpenChange={setOpen}
+      closeOnPick={false}
+      width={190}
+      items={items.map((item) => ({
+        id: item.id,
+        label: feedback[item.id] ?? item.label,
+        testId: `document-menu-item-${item.id}`,
+        onSelect: () => runItem(item.id),
+      }))}
+    >
+      {/* The refusal's next step, stated where every user reads it, for as
+          long as the menu is open. It mounts with the menu and stays empty
+          until there is something to say, so a screen reader is already
+          watching the region when the instruction arrives — a region that
+          appears with its text is announced unreliably. Empty, it takes no
+          room but stays in the accessibility tree; `hidden` would not. */}
+      <div
+        data-testid="document-menu-status"
+        role="status"
+        className="px-2 pb-0.5 pt-1 text-[12px] leading-snug text-muted empty:p-0"
       >
-        <MoreHorizontal size={14} aria-hidden />
-      </IconButton>
-      {open ? (
-        <div
-          ref={menuRef}
-          className="dohc-document-menu-list"
-          role="menu"
-          aria-label="Document actions"
-          tabIndex={-1}
-          onMouseDown={(event) => event.preventDefault()}
-          onKeyDown={(event) => {
-            if (event.key === "ArrowDown") {
-              event.preventDefault();
-              move(1);
-            } else if (event.key === "ArrowUp") {
-              event.preventDefault();
-              move(-1);
-            } else if (event.key === "Enter") {
-              event.preventDefault();
-              const item = items[selected];
-              if (item) runItem(item.id);
-            } else if (event.key === "Escape") {
-              event.preventDefault();
-              setOpen(false);
-            }
-          }}
-        >
-          {items.map((item, index) => (
-            <button
-              key={item.id}
-              type="button"
-              role="menuitem"
-              data-testid={`document-menu-item-${item.id}`}
-              aria-selected={index === selected}
-              className={`dohc-document-menu-item${index === selected ? " is-selected" : ""}`}
-              onMouseEnter={() => setSelected(index)}
-              onClick={() => runItem(item.id)}
-            >
-              {feedback[item.id] ?? item.label}
-            </button>
-          ))}
-          {/* The refusal's next step, stated where every user reads it, for as
-              long as the menu is open. It mounts with the menu and stays empty
-              until there is something to say, so a screen reader is already
-              watching the region when the instruction arrives — a region that
-              appears with its text is announced unreliably. Empty, it paints
-              nothing. */}
-          <div
-            data-testid="document-menu-status"
-            className="dohc-document-menu-status"
-            role="status"
-          >
-            {instruction}
-          </div>
-        </div>
-      ) : null}
-    </div>
+        {instruction}
+      </div>
+    </Menu>
   );
 }

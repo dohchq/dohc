@@ -63,6 +63,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const SWITCHES = ["--disable-gpu", "--force-device-scale-factor=1", "--disable-partial-raster"];
 
 type Pixels = Pick<PNG, "width" | "height" | "data">;
+type Box = NonNullable<Awaited<ReturnType<Locator["boundingBox"]>>>;
 
 function decode(png: Buffer): Pixels {
   return PNG.sync.read(png);
@@ -138,17 +139,16 @@ async function withDesktop(
   }
 }
 
-// Every element marked `data-force-state` gets that pseudo-class forced
-// through the browser, so the part's own :hover, :focus-visible or :focus
-// rules apply. `data-force-target` names a descendant to force instead.
-async function forceMarkedStates(page: Page): Promise<void> {
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("DOM.enable");
-  await cdp.send("CSS.enable");
+// Every element marked `data-force-state` under `scope` gets that
+// pseudo-class forced through the browser, so the part's own :hover,
+// :focus-visible or :focus rules apply. `data-force-target` names a
+// descendant to force instead.
+type Cdp = Awaited<ReturnType<ReturnType<Page["context"]>["newCDPSession"]>>;
+async function forceMarkedStates(cdp: Cdp, scope: string): Promise<void> {
   const { root } = await cdp.send("DOM.getDocument", { depth: 0 });
   const { nodeIds } = await cdp.send("DOM.querySelectorAll", {
     nodeId: root.nodeId,
-    selector: "[data-force-state]",
+    selector: `${scope} [data-force-state]`,
   });
   for (const nodeId of nodeIds) {
     const { attributes } = await cdp.send("DOM.getAttributes", { nodeId });
@@ -169,10 +169,23 @@ async function forceMarkedStates(page: Page): Promise<void> {
 
 // Opened from the keyboard, so no pointer is left over the trigger or lands
 // on a row, and no pointer press reaches the listeners that close a menu.
+// Focus then leaves the menu for the page: a menu closes when focus moves to
+// another element, not when it goes to the page, and the row the part marks
+// is drawn by a forced :focus rather than by the keyboard's focus ring.
 async function openMenu(page: Page, trigger: Locator, menu: Locator): Promise<void> {
   await trigger.focus();
   await page.keyboard.press("Enter");
   await expect(menu).toBeVisible();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+}
+
+// Closed from its trigger, which Escape reaches while focus is inside the
+// menu's frame. Focus then leaves the trigger, so no ring outlives the part.
+async function closeMenu(page: Page, trigger: Locator, menu: Locator): Promise<void> {
+  await trigger.focus();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 }
 
 // Pressed from the keyboard for the same reason. The part says what it says
@@ -256,21 +269,28 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       const detailsIcon = pane.getByTestId(`states-copy-details-icon-copied-${theme}`);
       await press(page, detailsIcon);
       await expect(detailsIcon).toHaveAttribute("title", "Copied");
-
-      await openMenu(page, pane.getByTestId(`states-menu-${theme}`), pane.getByRole("menu", { name: "More for Research" }));
-      await openMenu(
-        page,
-        pane.getByRole("button", { name: "Document actions" }),
-        pane.getByRole("menu", { name: "Document actions" }),
-      );
     }
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 
-    // After the menus exist, so their rows can be marked.
-    await forceMarkedStates(page);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("DOM.enable");
+    await cdp.send("CSS.enable");
+    // A menu's rows exist only while it is open, so a part with a menu is
+    // marked after it opens its menu.
+    await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:not(:has([aria-haspopup="menu"]))`);
     await waitForStillPage(page);
 
     const seen = new Set<string>();
     const failures: string[] = [];
+    const capture = async (name: string, theme: string, box: Box) => {
+      const pixels = await page.screenshot({
+        ...CSS_PIXELS,
+        clip: { x: box.x - BLEED, y: box.y - BLEED, width: box.width + 2 * BLEED, height: box.height + 2 * BLEED },
+      });
+      const failure = await compareWithBaseline(`${name}-${theme}`, pixels);
+      if (failure) failures.push(failure);
+    };
+    const menuParts: { name: string; theme: string; part: Locator; box: Box }[] = [];
     for (const theme of THEMES) {
       const pane = page.getByTestId(`states-${theme}`);
       for (const part of await pane.locator("[data-part]").all()) {
@@ -284,13 +304,23 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         }
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
-        const capture = await page.screenshot({
-          ...CSS_PIXELS,
-          clip: { x: box.x - BLEED, y: box.y - BLEED, width: box.width + 2 * BLEED, height: box.height + 2 * BLEED },
-        });
-        const failure = await compareWithBaseline(`${name}-${theme}`, capture);
-        if (failure) failures.push(failure);
+        const menus = await part.locator("[aria-haspopup='menu']").count();
+        if (menus > 1) throw new Error(`${name} (${theme}) has ${menus} menus; a part opens one`);
+        if (menus === 1) menuParts.push({ name, theme, part, box });
+        else await capture(name, theme, box);
       }
+    }
+    // Each marking pass starts from a fresh DOM.getDocument, which clears the
+    // states forced before it, so the menu parts are captured last. One menu is open at a time: opening
+    // another moves focus and closes the first.
+    for (const { name, theme, part, box } of menuParts) {
+      const trigger = part.locator("[aria-haspopup='menu']");
+      const menu = part.getByRole("menu");
+      await openMenu(page, trigger, menu);
+      await forceMarkedStates(cdp, `[data-testid="states-${theme}"] [data-part="${name}"]`);
+      await waitForStillPage(page);
+      await capture(name, theme, box);
+      await closeMenu(page, trigger, menu);
     }
     expect(failures, "every part must equal its baseline").toEqual([]);
     expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());
