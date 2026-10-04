@@ -303,12 +303,14 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         }
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
-        if ((await part.locator("[aria-haspopup='menu']").count()) === 1) menuParts.push({ name, theme, part, box });
+        const menus = await part.locator("[aria-haspopup='menu']").count();
+        if (menus > 1) throw new Error(`${name} (${theme}) has ${menus} menus; a part opens one`);
+        if (menus === 1) menuParts.push({ name, theme, part, box });
         else await capture(name, theme, box);
       }
     }
-    // Marking a menu's rows clears the states forced on every other part, so
-    // the menu parts are captured last. One menu is open at a time: opening
+    // Each marking pass starts from a fresh DOM.getDocument, which clears the
+    // states forced before it, so the menu parts are captured last. One menu is open at a time: opening
     // another moves focus and closes the first.
     for (const { name, theme, part, box } of menuParts) {
       const trigger = part.locator("[aria-haspopup='menu']");
