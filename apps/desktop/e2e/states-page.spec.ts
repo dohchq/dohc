@@ -62,6 +62,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const SWITCHES = ["--disable-gpu", "--force-device-scale-factor=1", "--disable-partial-raster"];
 
 type Pixels = Pick<PNG, "width" | "height" | "data">;
+type Box = NonNullable<Awaited<ReturnType<Locator["boundingBox"]>>>;
 
 function decode(png: Buffer): Pixels {
   return PNG.sync.read(png);
@@ -273,13 +274,22 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     const cdp = await page.context().newCDPSession(page);
     await cdp.send("DOM.enable");
     await cdp.send("CSS.enable");
-    // A menu's rows exist only while it is open, so its part marks them
-    // below, after opening it.
-    await forceMarkedStates(cdp, '[data-testid="states-page"]');
+    // A menu's rows exist only while it is open, so a part with a menu is
+    // marked after it opens its menu.
+    await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:not(:has([aria-haspopup="menu"]))`);
     await waitForStillPage(page);
 
     const seen = new Set<string>();
     const failures: string[] = [];
+    const capture = async (name: string, theme: string, box: Box) => {
+      const pixels = await page.screenshot({
+        ...CSS_PIXELS,
+        clip: { x: box.x - BLEED, y: box.y - BLEED, width: box.width + 2 * BLEED, height: box.height + 2 * BLEED },
+      });
+      const failure = await compareWithBaseline(`${name}-${theme}`, pixels);
+      if (failure) failures.push(failure);
+    };
+    const menuParts: { name: string; theme: string; part: Locator; box: Box }[] = [];
     for (const theme of THEMES) {
       const pane = page.getByTestId(`states-${theme}`);
       for (const part of await pane.locator("[data-part]").all()) {
@@ -293,27 +303,21 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         }
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
-        // One menu is open at a time: opening another moves focus and closes
-        // the first. A part with a menu opens it for its own capture.
-        const trigger = part.locator("[aria-haspopup='menu']");
-        const menu = part.getByRole("menu");
-        const hasMenu = (await trigger.count()) === 1;
-        if (hasMenu) {
-          await openMenu(page, trigger, menu);
-          await forceMarkedStates(cdp, `[data-testid="states-${theme}"] [data-part="${name}"]`);
-          await waitForStillPage(page);
-        }
-        const capture = await page.screenshot({
-          ...CSS_PIXELS,
-          clip: { x: box.x - BLEED, y: box.y - BLEED, width: box.width + 2 * BLEED, height: box.height + 2 * BLEED },
-        });
-        const failure = await compareWithBaseline(`${name}-${theme}`, capture);
-        if (failure) failures.push(failure);
-        if (hasMenu) {
-          await closeMenu(page, trigger, menu);
-          await waitForStillPage(page);
-        }
+        if ((await part.locator("[aria-haspopup='menu']").count()) === 1) menuParts.push({ name, theme, part, box });
+        else await capture(name, theme, box);
       }
+    }
+    // Marking a menu's rows clears the states forced on every other part, so
+    // the menu parts are captured last. One menu is open at a time: opening
+    // another moves focus and closes the first.
+    for (const { name, theme, part, box } of menuParts) {
+      const trigger = part.locator("[aria-haspopup='menu']");
+      const menu = part.getByRole("menu");
+      await openMenu(page, trigger, menu);
+      await forceMarkedStates(cdp, `[data-testid="states-${theme}"] [data-part="${name}"]`);
+      await waitForStillPage(page);
+      await capture(name, theme, box);
+      await closeMenu(page, trigger, menu);
     }
     expect(failures, "every part must equal its baseline").toEqual([]);
     expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());
