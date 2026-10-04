@@ -578,7 +578,7 @@ pub struct NativeHistoryReconstruction {
 }
 impl NativeHistoryReconstruction {
     pub const MAX_RANGES: usize = (crate::limits::MAX_YDOC_UPDATE_BYTES - 2) / 5;
-    pub const HEADER_BYTES: usize = 643_576;
+    pub const HEADER_BYTES: usize = dohc_engine_storage::limits::MAX_LIVE_ACCEPTED_HEADER_BYTES;
     pub const CHUNK_BYTES: usize = 256 * 1024;
 
     /// Conservative Rust buffer spans plus the existing engine working allowance.

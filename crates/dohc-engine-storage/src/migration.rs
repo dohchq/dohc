@@ -3091,10 +3091,12 @@ pub(crate) fn refuse_declared_v1_evidence(conn: &Connection) -> Result<(), Stora
     ).map_err(StorageError::migration)?;
     let mut declared_audit = false;
     if has_chunks {
-        let mut statement = conn.prepare("SELECT substr(b.bytes,1,270336) FROM live_audit_record_chunks c JOIN binary_blobs b ON b.sha256=c.chunk_sha256 WHERE c.ordinal=0")
+        // The portable application framing precedes the bounded accepted header.
+        let prefix_bytes = crate::limits::MAX_LIVE_ACCEPTED_HEADER_BYTES + 8192;
+        let mut statement = conn.prepare("SELECT substr(b.bytes,1,?1) FROM live_audit_record_chunks c JOIN binary_blobs b ON b.sha256=c.chunk_sha256 WHERE c.ordinal=0")
             .map_err(StorageError::migration)?;
         let prefixes = statement
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .query_map([prefix_bytes as i64], |row| row.get::<_, Vec<u8>>(0))
             .map_err(StorageError::migration)?;
         for prefix in prefixes {
             let prefix = prefix.map_err(StorageError::migration)?;
@@ -3567,7 +3569,8 @@ mod tests {
 
     #[test]
     fn migration_29_refuses_replicated_or_conflicting_declared_v1_evidence() {
-        for conflict in [false, true] {
+        for (conflict, large_header) in [(false, false), (true, false), (false, true), (true, true)]
+        {
             let dir = tempdir();
             let path = dir.join("engine.db");
             let mut conn = open_bare(&path);
@@ -3577,6 +3580,18 @@ mod tests {
             let (metadata, evidence) = migration_29_history_fixture(&conn);
             let declaration = ",\"agentDeclaration\":{\"agentId\":\"trip-agent\",\"onBehalfOf\":null,\"depth\":0}";
             let head = metadata.strip_suffix("},\"firstSeen\":[]}").unwrap();
+            // A syntactically valid accepted header can place its declaration
+            // beyond the old prefix without exceeding the native header bound.
+            let padding = if large_header {
+                " ".repeat(280_000)
+            } else {
+                String::new()
+            };
+            let head = head.replacen("\"binding\":", &format!("\"binding\":{padding}"), 1);
+            assert!(head.len() < crate::limits::MAX_LIVE_ACCEPTED_HEADER_BYTES);
+            if large_header {
+                assert!(head.len() > 270_336);
+            }
             let record = format!(
                 "{{\"kind\":\"application\",\"metadata\":{head}{declaration}}},\"firstSeen\":[]}}}}"
             );
