@@ -1161,9 +1161,11 @@ pub fn apply_committed(
                 // the relay's log. The claim keeps its history-row key, so it
                 // dedupes as before, and the cursor lets the relay place it.
                 facts.live_cursor = Some(event.metadata.accepted.receipt.journal_cursor);
-                let admitted_actor = if event.metadata.canonical_version == Some(2) {
+                let admitted_actor = if let Some(own) = own {
+                    own.author
+                } else if event.metadata.canonical_version == Some(2) {
                     event.metadata.admitted_declaration().map(|declaration| (Some(declaration.agent_id.clone()), Some(declaration.attribution())))
-                } else { own.and_then(|own| own.author) };
+                } else { None };
                 match admitted_actor {
                     Some((actor, attribution)) => {
                         facts.author_origin_id = actor;
@@ -3362,6 +3364,36 @@ mod tests {
     /// changes once, as the principal the relay accepted it from.
     #[test]
     fn the_session_host_claims_each_accepted_field_change_once() {
+        host_claims_each_accepted_field_change(None, false);
+    }
+
+    #[test]
+    fn v2_own_draft_keeps_its_automation_author_depth_and_person() {
+        host_claims_each_accepted_field_change(Some(2), false);
+    }
+
+    #[test]
+    fn v2_capped_agent_own_draft_keeps_its_automation_author_depth_and_person() {
+        host_claims_each_accepted_field_change(Some(2), true);
+    }
+
+    fn host_claims_each_accepted_field_change(canonical_version: Option<u8>, capped_agent: bool) {
+        let event = |delivery: &str, cursor: i64, bytes: Vec<u8>| {
+            let mut admitted = event(delivery, cursor, bytes);
+            admitted.metadata.canonical_version = canonical_version;
+            if canonical_version == Some(2) {
+                admitted.metadata.author_snapshot = Some(if capped_agent {
+                    vec![LiveAuthorEntry::Human {
+                        human_id: "owner-1".into(),
+                        human_name: "Owner".into(),
+                    }]
+                } else {
+                    Vec::new()
+                });
+                admitted.metadata.first_seen_deletes = Some(Vec::new());
+            }
+            admitted
+        };
         use dohc_engine_domain::{
             AutomationChangeKind, AutomationSubscription, VersionedTextStore, WriteText,
         };
@@ -3613,11 +3645,16 @@ mod tests {
             store
                 .write_with(&NoFaults, |tx| {
                     tx.execute(
-                        "UPDATE owner_ydoc_outbox_entries SET native_source_json = ?1 \
+                        "UPDATE owner_ydoc_outbox_entries SET native_source_json = ?1, agent_declaration_json = ?3 \
                          WHERE delivery_id = ?2",
                         params![
                             serde_json::to_string(&source).unwrap(),
-                            appended.delivery_id
+                            appended.delivery_id,
+                            capped_agent.then(|| serde_json::to_string(&AgentDeclaration {
+                                agent_id: "collection:notes#stamp".into(),
+                                on_behalf_of: Some("person-1".into()),
+                                depth: 2,
+                            }).unwrap())
                         ],
                     )
                     .unwrap();
