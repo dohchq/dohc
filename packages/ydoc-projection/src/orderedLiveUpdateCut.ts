@@ -1310,133 +1310,144 @@ interface DecoderEvidenceSink {
   fingerprintOnlyUsage: DecoderUsage
 }
 
-function strictDecoderClass(
+class StrictUpdateDecoderV1 extends Y.UpdateDecoderV1 {
+  private readonly structClients = new Set<number>()
+  private readonly deleteClients = new Set<number>()
+
+  constructor(
+    private readonly budget: ValidationBudget,
+    private readonly stage: OrderedLiveUpdateCutFailureStage,
+    private readonly captureFingerprints: boolean,
+    private readonly sink: DecoderEvidenceSink,
+    decoder: decoding.Decoder,
+  ) {
+    super(decoder)
+    sink.decoder = decoder
+  }
+
+  readInfo(): number {
+    this.budget.visitStruct(this.stage)
+    const info = super.readInfo()
+    if ((info & 0x1f) === 2) fail('invalid-schema', this.stage)
+    return info
+  }
+
+  readClient(): number {
+    this.budget.visitStructClientGroup(this.stage)
+    const client = super.readClient()
+    if (
+      !portableInteger(client, 0, LIVE_UPDATE_YJS_CLIENT_ID_MAX)
+      || this.structClients.has(client)
+    ) {
+      fail('invalid-update', this.stage)
+    }
+    this.structClients.add(client)
+    return client
+  }
+
+  resetDsCurVal(): void {
+    super.resetDsCurVal()
+    const clone = decoding.clone(this.restDecoder)
+    let client: number
+    try {
+      client = decoding.readVarUint(clone)
+    } catch {
+      return fail('invalid-update', this.stage)
+    }
+    this.budget.visitDeleteClientGroup(this.stage)
+    if (
+      !portableInteger(client, 0, LIVE_UPDATE_YJS_CLIENT_ID_MAX)
+      || this.deleteClients.has(client)
+    ) {
+      fail('invalid-update', this.stage)
+    }
+    this.deleteClients.add(client)
+  }
+
+  readDsClock(): number {
+    this.budget.visitDeleteInterval(this.stage)
+    const clock = super.readDsClock()
+    if (!portableInteger(clock, 0, LIVE_UPDATE_YJS_START_CLOCK_MAX)) {
+      fail('invalid-update', this.stage)
+    }
+    return clock
+  }
+
+  readDsLen(): number {
+    const length = super.readDsLen()
+    if (!portableInteger(length, 1, LIVE_UPDATE_YJS_END_CLOCK_MAX)) {
+      fail('invalid-update', this.stage)
+    }
+    return length
+  }
+
+  readString(): string {
+    return readBoundedString(this.restDecoder, this.budget, this.stage)
+  }
+
+  readKey(): string {
+    return readBoundedString(this.restDecoder, this.budget, this.stage)
+  }
+
+  readBuf(): Uint8Array {
+    const view = decoding.readVarUint8Array(this.restDecoder)
+    this.budget.visitDecodedPayloadBytes(view.byteLength, this.stage)
+    return Uint8Array.from(view)
+  }
+
+  readAny(): unknown {
+    if (this.captureFingerprints) {
+      const node = readHashedAnyNode(this.restDecoder, 0, this.budget, this.stage)
+      this.sink.anyFingerprints.push(bytesHex(node.digest))
+      return node.value
+    }
+    return readAnyValue(this.restDecoder, 0, this.budget, this.stage)
+  }
+
+  readJSON(): unknown {
+    const view = decoding.readVarUint8Array(this.restDecoder)
+    const scannerBudget: BoundedV1JsonBudget = {
+      visitValueNode: () => this.budget.visitValueNode(this.stage),
+      visitDecodedPayloadBytes: length => {
+        this.budget.visitDecodedPayloadBytes(length, this.stage)
+      },
+      refuseCapacity: () => fail('capacity-refused', this.stage),
+    }
+    let value: unknown
+    try {
+      value = parseBoundedV1Json(view, scannerBudget, nativeJsonParse)
+    } catch (error) {
+      if (error instanceof CutFailure) throw error
+      return fail('invalid-update', this.stage)
+    }
+    if (this.captureFingerprints) {
+      const beforeFingerprint = this.budget.decoderSnapshot()
+      this.sink.jsonFingerprints.push(bytesHex(jsonTreeDigest(value, this.budget, this.stage)))
+      const fingerprintDelta = decoderDelta(
+        this.budget.decoderSnapshot(),
+        beforeFingerprint,
+        this.stage,
+      )
+      this.sink.fingerprintOnlyUsage = addDecoderUsage(
+        this.sink.fingerprintOnlyUsage,
+        fingerprintDelta,
+        this.stage,
+      )
+    }
+    return value
+  }
+}
+
+function strictDecoderConstructor(
   budget: ValidationBudget,
   stage: OrderedLiveUpdateCutFailureStage,
   captureFingerprints: boolean,
   sink: DecoderEvidenceSink,
 ): typeof Y.UpdateDecoderV1 {
-  return class StrictUpdateDecoderV1 extends Y.UpdateDecoderV1 {
-    private readonly structClients = new Set<number>()
-    private readonly deleteClients = new Set<number>()
-
-    constructor(decoder: decoding.Decoder) {
-      super(decoder)
-      sink.decoder = decoder
-    }
-
-    readInfo(): number {
-      budget.visitStruct(stage)
-      const info = super.readInfo()
-      if ((info & 0x1f) === 2) fail('invalid-schema', stage)
-      return info
-    }
-
-    readClient(): number {
-      budget.visitStructClientGroup(stage)
-      const client = super.readClient()
-      if (
-        !portableInteger(client, 0, LIVE_UPDATE_YJS_CLIENT_ID_MAX)
-        || this.structClients.has(client)
-      ) {
-        fail('invalid-update', stage)
-      }
-      this.structClients.add(client)
-      return client
-    }
-
-    resetDsCurVal(): void {
-      super.resetDsCurVal()
-      const clone = decoding.clone(this.restDecoder)
-      let client: number
-      try {
-        client = decoding.readVarUint(clone)
-      } catch {
-        return fail('invalid-update', stage)
-      }
-      budget.visitDeleteClientGroup(stage)
-      if (
-        !portableInteger(client, 0, LIVE_UPDATE_YJS_CLIENT_ID_MAX)
-        || this.deleteClients.has(client)
-      ) {
-        fail('invalid-update', stage)
-      }
-      this.deleteClients.add(client)
-    }
-
-    readDsClock(): number {
-      budget.visitDeleteInterval(stage)
-      const clock = super.readDsClock()
-      if (!portableInteger(clock, 0, LIVE_UPDATE_YJS_START_CLOCK_MAX)) {
-        fail('invalid-update', stage)
-      }
-      return clock
-    }
-
-    readDsLen(): number {
-      const length = super.readDsLen()
-      if (!portableInteger(length, 1, LIVE_UPDATE_YJS_END_CLOCK_MAX)) {
-        fail('invalid-update', stage)
-      }
-      return length
-    }
-
-    readString(): string {
-      return readBoundedString(this.restDecoder, budget, stage)
-    }
-
-    readKey(): string {
-      return readBoundedString(this.restDecoder, budget, stage)
-    }
-
-    readBuf(): Uint8Array {
-      const view = decoding.readVarUint8Array(this.restDecoder)
-      budget.visitDecodedPayloadBytes(view.byteLength, stage)
-      return Uint8Array.from(view)
-    }
-
-    readAny(): unknown {
-      if (captureFingerprints) {
-        const node = readHashedAnyNode(this.restDecoder, 0, budget, stage)
-        sink.anyFingerprints.push(bytesHex(node.digest))
-        return node.value
-      }
-      return readAnyValue(this.restDecoder, 0, budget, stage)
-    }
-
-    readJSON(): unknown {
-      const view = decoding.readVarUint8Array(this.restDecoder)
-      const scannerBudget: BoundedV1JsonBudget = {
-        visitValueNode: () => budget.visitValueNode(stage),
-        visitDecodedPayloadBytes: length => {
-          budget.visitDecodedPayloadBytes(length, stage)
-        },
-        refuseCapacity: () => fail('capacity-refused', stage),
-      }
-      let value: unknown
-      try {
-        value = parseBoundedV1Json(view, scannerBudget, nativeJsonParse)
-      } catch (error) {
-        if (error instanceof CutFailure) throw error
-        return fail('invalid-update', stage)
-      }
-      if (captureFingerprints) {
-        const beforeFingerprint = budget.decoderSnapshot()
-        sink.jsonFingerprints.push(bytesHex(jsonTreeDigest(value, budget, stage)))
-        const fingerprintDelta = decoderDelta(
-          budget.decoderSnapshot(),
-          beforeFingerprint,
-          stage,
-        )
-        sink.fingerprintOnlyUsage = addDecoderUsage(
-          sink.fingerprintOnlyUsage,
-          fingerprintDelta,
-          stage,
-        )
-      }
-      return value
-    }
-  }
+  // Yjs constructs the bound class; its type also requires an unused prototype.
+  return StrictUpdateDecoderV1.bind(
+    null, budget, stage, captureFingerprints, sink,
+  ) as typeof Y.UpdateDecoderV1
 }
 
 function portableInteger(value: number, minimum: number, maximum: number): boolean {
@@ -1989,7 +2000,7 @@ function decodeOwnedInput(
     jsonFingerprints: [],
     fingerprintOnlyUsage: zeroDecoderUsage(),
   }
-  const Decoder = strictDecoderClass(budget, entry.stage, true, sink)
+  const Decoder = strictDecoderConstructor(budget, entry.stage, true, sink)
   let decoded: ReturnType<typeof Y.decodeUpdateV2>
   try {
     decoded = Y.decodeUpdateV2(entry.bytes, Decoder)
@@ -3315,7 +3326,7 @@ function decodeCompleteState(
     jsonFingerprints: [],
     fingerprintOnlyUsage: zeroDecoderUsage(),
   }
-  const Decoder = strictDecoderClass(budget, stage, true, sink)
+  const Decoder = strictDecoderConstructor(budget, stage, true, sink)
   let decoded: ReturnType<typeof Y.decodeUpdateV2>
   try {
     decoded = Y.decodeUpdateV2(bytes, Decoder)
@@ -3386,8 +3397,7 @@ function applyOwnedInput(
     jsonFingerprints: [],
     fingerprintOnlyUsage: zeroDecoderUsage(),
   }
-  const Decoder = strictDecoderClass(budget, entry.stage, false, sink)
-  const strictDecoder = new Decoder(rawDecoder)
+  const strictDecoder = new StrictUpdateDecoderV1(budget, entry.stage, false, sink, rawDecoder)
   try {
     Y.readUpdateV2(rawDecoder, document, null, strictDecoder)
     if (decoding.hasContent(rawDecoder)) fail('invalid-update', entry.stage)
