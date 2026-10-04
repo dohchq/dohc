@@ -35,6 +35,7 @@ pub mod floor;
 pub mod hash;
 pub mod materialize;
 pub mod media;
+pub mod observation;
 pub mod policy;
 pub mod reconcile;
 pub mod scan;

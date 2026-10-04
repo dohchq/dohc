@@ -74,9 +74,79 @@ pub(super) const ENGINE_EVENT_QUEUE_CAPACITY: usize = 256;
 #[derive(Clone, Default)]
 pub struct EngineEvents {
     pub(super) subscriber: Arc<Mutex<Option<tokio::sync::mpsc::Sender<EngineEventNotice>>>>,
+    files: Arc<FileWakes>,
+}
+
+#[derive(Default)]
+struct FileWakes {
+    pending: Mutex<
+        std::collections::BTreeMap<
+            (String, String),
+            dohc_engine_files::observation::ObservationCursor,
+        >,
+    >,
+    wake: tokio::sync::Notify,
+}
+
+pub struct EngineEventReceiver {
+    ordinary: tokio::sync::mpsc::Receiver<EngineEventNotice>,
+    files: Option<Arc<FileWakes>>,
+}
+
+impl From<tokio::sync::mpsc::Receiver<EngineEventNotice>> for EngineEventReceiver {
+    fn from(ordinary: tokio::sync::mpsc::Receiver<EngineEventNotice>) -> Self {
+        Self {
+            ordinary,
+            files: None,
+        }
+    }
+}
+
+impl EngineEventReceiver {
+    pub async fn recv(&mut self) -> Option<EngineEventNotice> {
+        let Some(files) = &self.files else {
+            return self.ordinary.recv().await;
+        };
+        loop {
+            if let Some(((workspace_id, _generation), cursor)) = lock(&files.pending).pop_first() {
+                return Some(EngineEventNotice {
+                    name: "workspace.filesChanged".to_owned(),
+                    payload: json!({ "workspaceId": workspace_id, "cursor": cursor }),
+                });
+            }
+            if let Ok(notice) = self.ordinary.try_recv() {
+                return Some(notice);
+            }
+            tokio::select! {
+                biased;
+                () = files.wake.notified() => {},
+                notice = self.ordinary.recv() => return notice,
+            }
+        }
+    }
 }
 
 impl EngineEvents {
+    pub fn subscribe_with_files(&self) -> EngineEventReceiver {
+        EngineEventReceiver {
+            ordinary: self.subscribe(),
+            files: Some(Arc::clone(&self.files)),
+        }
+    }
+
+    pub(crate) fn emit_files_changed(
+        &self,
+        workspace: &str,
+        cursor: dohc_engine_files::observation::ObservationCursor,
+    ) {
+        lock(&self.files.pending).insert((workspace.to_owned(), cursor.generation.clone()), cursor);
+        self.files.wake.notify_one();
+    }
+
+    pub(crate) fn remove_files_wake(&self, workspace: &str, generation: &str) {
+        lock(&self.files.pending).remove(&(workspace.to_owned(), generation.to_owned()));
+    }
+
     /// Route subsequent notices to the returned receiver, replacing any
     /// previous subscriber. The channel is BOUNDED: a transport that stops
     /// draining (blocked Electron main thread) sheds notices instead of
@@ -213,6 +283,51 @@ impl EngineService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn file_wake_coalesces_when_the_shared_notice_queue_is_full() {
+        let events = EngineEvents::default();
+        let mut receiver = events.subscribe_with_files();
+        for _ in 0..ENGINE_EVENT_QUEUE_CAPACITY + 10 {
+            events.emit("ordinary", json!({}));
+        }
+        for revision in 1..1000 {
+            events.emit_files_changed(
+                "workspace",
+                dohc_engine_files::observation::ObservationCursor {
+                    generation: "test".to_owned(),
+                    revision,
+                },
+            );
+        }
+        let wake = receiver.recv().await.unwrap();
+        assert_eq!(wake.name, "workspace.filesChanged");
+        assert_eq!(wake.payload["cursor"]["revision"], 999);
+        for _ in 0..ENGINE_EVENT_QUEUE_CAPACITY {
+            assert_eq!(receiver.recv().await.unwrap().name, "ordinary");
+        }
+        assert!(lock(&events.files.pending).is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_wakes_for_distinct_bindings_do_not_replace_or_remove_each_other() {
+        let events = EngineEvents::default();
+        let mut receiver = events.subscribe_with_files();
+        for generation in ["a", "b"] {
+            events.emit_files_changed(
+                "workspace",
+                dohc_engine_files::observation::ObservationCursor {
+                    generation: generation.to_owned(),
+                    revision: 1,
+                },
+            );
+        }
+        events.remove_files_wake("workspace", "a");
+        assert_eq!(
+            receiver.recv().await.unwrap().payload["cursor"]["generation"],
+            "b"
+        );
+    }
     use serde_json::Value;
     use serde_json::json;
 

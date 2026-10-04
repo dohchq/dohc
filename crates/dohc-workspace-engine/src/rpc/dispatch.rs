@@ -276,7 +276,15 @@ impl EngineService {
                     .await?
             }
             "engine.ping" => engine_ping(),
-            "workspace.open" => self.workspace_open(&ctx, request.params).await?,
+            "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
+            "files.changesSince" => {
+                Box::pin(self.files_changes_since(&ctx, request.workspace, request.params, false))
+                    .await?
+            }
+            "files.drain" => {
+                Box::pin(self.files_changes_since(&ctx, request.workspace, request.params, true))
+                    .await?
+            }
             "workspace.close" => self.workspace_close(request.workspace).await?,
             "sync.push" => {
                 Box::pin(self.sync_push(&ctx, request.workspace, request.params)).await?
@@ -997,6 +1005,8 @@ impl EngineService {
             && !matches!(
                 method,
                 "workspace.close"
+                    | "files.changesSince"
+                    | "files.drain"
                     | "search.queryChatMessagesGranular"
                     | "chats.readState.listUnreadFileThreads"
                     | "history.page"
