@@ -55,7 +55,7 @@ test("fixture reports an ordinary nonzero command exit as status", { timeout: 20
 });
 
 test("verification selects packages and proofs and prepares before parallel jobs", { concurrency: 2 }, async (t) => {
-  const siteFiles = ["src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"];
+  const siteFiles = ["src/renderer/tokens.test.ts", "src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"];
   const cases = [];
   for (const [mode, job, fault, changed = "pnpm-lock.yaml", full = false] of [
     ["pr", null, null], ["pr", "rust", null], ["pr", "js", null],
