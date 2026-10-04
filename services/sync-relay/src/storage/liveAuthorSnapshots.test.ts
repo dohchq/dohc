@@ -20,7 +20,7 @@ const declare = (input: Input, agentDeclaration: AgentDeclaration): Input =>
       agent: {agentId: agentDeclaration.agentId, ...(agentDeclaration.onBehalfOf === null ? {} : {onBehalfOf: agentDeclaration.onBehalfOf}), depth: agentDeclaration.depth}}}});
 const declarations = (f: Fixture) =>
   f.raw.prepare("SELECT author_snapshot_json FROM sync_relay_live_update_journal WHERE author_context_json IS NOT NULL ORDER BY journal_cursor").all();
-const admittedAgent = (metadata: import("@dohc/live-session-contract").AdmittedLiveUpdateMetadata | undefined) => metadata?.authorSnapshot?.find(author => author.kind === "agent");
+const admittedAgent = (metadata: import("@dohc/live-session-contract").AdmittedLiveUpdateMetadata | null | undefined) => metadata?.authorSnapshot?.find(author => author.kind === "agent");
 const expectedAgent = {kind: "agent", ...declared};
 
 it("charges native request context before loading it for restore association", () => {
@@ -36,7 +36,7 @@ it("charges native request context before loading it for restore association", (
     const budget = new RestoreHistoryBudget(contextBytes, 1);
     expect(nativeSourceAuthorMatches(f.storage as unknown as StorageContext, source, metadata, budget)).toBe(true);
     expect(budget.bytes).toBe(0);
-    f.raw.prepare("UPDATE sync_relay_live_update_journal SET author_context_json=? WHERE delivery_id='context-budget'").run(JSON.stringify({kind: "account", accountId: "x".repeat(1_000_000)}));
+    f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET author_context_json=? WHERE delivery_id='context-budget'").run(JSON.stringify({kind: "account", accountId: "x".repeat(1_000_000)})));
     expect(() => nativeSourceAuthorMatches(f.storage as unknown as StorageContext, source, metadata, new RestoreHistoryBudget(contextBytes, 1)))
       .toThrow("Restore history exceeds configured byte bounds.");
   } finally {f.close();}

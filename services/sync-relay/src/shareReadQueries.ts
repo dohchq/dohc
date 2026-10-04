@@ -462,7 +462,10 @@ function admittedMomentAuthors(payloadJson: string): Array<Record<string, unknow
       ...(author.agentName === undefined ? {} : {agentName: author.agentName}),
       ...(author.onBehalfOf === undefined || String(author.onBehalfOf).startsWith("local:") ? {} : {onBehalfOf: author.onBehalfOf}),
       ...(author.depth === undefined || author.depth === 0 ? {} : {depth: author.depth})} : author;
-    try {authors.push({...parseLiveAuthorSnapshot([publicAuthor])[0]!});}
+    try {
+      if (Object.values(publicAuthor).some(field => typeof field === "string" && /\p{Cc}/u.test(field))) continue;
+      authors.push({...parseLiveAuthorSnapshot([publicAuthor])[0]!});
+    }
     catch { /* Optional malformed provenance does not discard an authorized file change. */ }
   }
   return authors.length > 0 && Buffer.byteLength(JSON.stringify(authors), "utf8") <= MAX_SHARED_AUTHOR_JSON_BYTES

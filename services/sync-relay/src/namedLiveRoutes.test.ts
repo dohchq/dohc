@@ -26,7 +26,7 @@ import type { StorageContext } from "./storage/context.js";
 
 const exchangeKey = "test-exchange-key-".repeat(3), relayHost = "relay.example.test";
 // The owner route must receive the largest declared submission, 2647 bytes.
-const frames = { receive: { maxFrameBytes: 2048, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096 },
+const frames = { receive: { maxFrameBytes: 2647, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096 },
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096 };
 const bounds = { maxClientVectorBytes: 1024, maxSyncOutputBytes: 4096, maxAppliedUpdateBytes: 4096, maxSubmissionBytes: 4096, maxAdmissionBytes: 16384 };
 const policy = { maxStructVisits: 10000, maxValueNodeVisits: 10000, maxDecodedPayloadByteVisits: 1000000, maxStructClientGroupVisits: 10000,
