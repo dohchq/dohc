@@ -1,3 +1,4 @@
+import {LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES} from "@dohc/live-session-contract/live-frame";
 import {createHash} from "node:crypto";
 import {afterEach, expect, it, vi} from "vitest";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
@@ -90,9 +91,9 @@ it("leaves a declared draft unnamed when no recording account is available", asy
 it("requires an owner frame policy that carries the largest declared submission", () => {
   const options = {relayUrl: "https://relay.example.test", shareId: "share", attemptTimeoutMs: 10_000, signal: new AbortController().signal,
     freshBearer: async () => "bearer", acceptedState: {} as OwnerAcceptedState};
-  expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: 2646}}})).toThrow("owner frame policy");
-  expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, maxControlBytes: 2646}})).toThrow("owner frame policy");
-  new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: 2647}, maxControlBytes: 2647}}).dispose();
+  expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES - 1}}})).toThrow("owner frame policy");
+  expect(() => new OwnerYDocFrameDelivery({...options, frames: {...frames, maxControlBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES - 1}})).toThrow("owner frame policy");
+  new OwnerYDocFrameDelivery({...options, frames: {...frames, receive: {...frames.receive, maxFrameBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES}, maxControlBytes: LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES}}).dispose();
 });
 
 it("refuses a malformed agent declaration before sending any submission", async () => {
