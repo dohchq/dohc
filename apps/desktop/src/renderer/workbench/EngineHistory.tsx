@@ -63,11 +63,13 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 // chatAuthorLabel), and one a Collection automation authored as the
 // automation's name and its Collection. An Edit link's direct file write
 // names the link and a short form of the browser session that used it, so
-// it never reads like an app submission from a link holder. Everything else
-// keeps its actor-neutral origin label.
+// it never reads like an app submission from a link holder. A restore names
+// this computer's person who made it; their other edits read as a local file
+// edit or a live edit. Everything else keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">,
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">,
 ): string {
+  if (moment.origin === "restore" && moment.personAuthorName !== undefined) return moment.personAuthorName;
   if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
   if (moment.linkAuthor) return `Edit link · holder ${moment.linkAuthor.principalId.slice(0, 8)}`;
   if (moment.automationAuthor) {
@@ -83,7 +85,7 @@ export function engineMomentSourceLabel(
 // Where a moment came from, as one line of History. An automation's name
 // and Collection follow the ⚡ mark, in words, so nothing waits behind hover.
 export function EngineMomentSource(props: {
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">;
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "personAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">;
   testId: string;
   id?: string;
 }) {

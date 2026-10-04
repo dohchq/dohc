@@ -54,6 +54,10 @@ import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/li
 import { deferred } from "../testing/deferred";
 
 import { createTestScratch } from "./testTemp";
+
+// The person a restore names, as desktop main reads them.
+const RESTORER = { kind: "human", humanId: "local-person" } as const;
+
 afterEach(async () => {
   vi.restoreAllMocks();
 });
@@ -1108,7 +1112,7 @@ describe("workspaceEngineCapture batch capture", () => {
     });
 
     const outcome = await engine
-      .restoreFileToBeforeMoment("missing-moment")
+      .restoreFileToBeforeMoment("missing-moment", RESTORER)
       .catch((error: unknown) => error);
     expect(outcome).toBeInstanceOf(Error);
     const relevant = requests
@@ -1199,7 +1203,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root,created.snapshot.path,"response 104");
     expect(await engine.undoAcceptedAppResponse(selection)).toEqual(deleted);
     expect(existsSync(join(root,created.snapshot.path))).toBe(false);
-    await engine.restoreFileToBeforeMoment(deleted.momentId!);
+    await engine.restoreFileToBeforeMoment(deleted.momentId!, RESTORER);
     expect(requests.filter(request=>request.method==="versionedText.write").at(-1)?.params).toMatchObject({
       restoreBeforeMomentId: deleted.momentId,
       origin: "restore",
@@ -1272,7 +1276,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const created = await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md", text: "original", metadata: { origin: "api" } });
     if (artifact === "present") await write(root, "shared.md", "original");
     const engine = capture(root, { store, rustEngineSessions: sessions });
-    await expect(engine.restoreFileToBeforeMoment(created.moment.id)).rejects.toThrow("dohc could not restore shared.md. This action is unavailable for shared live files.");
+    await expect(engine.restoreFileToBeforeMoment(created.moment.id, RESTORER)).rejects.toThrow("dohc could not restore shared.md. This action is unavailable for shared live files.");
     expect(deletionAttempts).toBe(1);
     expect((await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md" }))?.text).toBe("original");
     if (artifact === "present") expect(await readFile(join(root, "shared.md"), "utf8")).toBe("original");
@@ -1305,7 +1309,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root, target.path, disk);
     refuseBinaryWrites = true;
     const engine = capture(root, { store, rustEngineSessions: sessions });
-    await expect(engine.restoreFileToBeforeMoment(changed.moment.id)).rejects.toMatchObject({
+    await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER)).rejects.toMatchObject({
       message: "dohc could not restore shared.md. This action is unavailable for shared live files. Continue editing at the current location.",
       cause: refusal,
     });
@@ -1337,7 +1341,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root, target.path, "current");
     conflict = true;
     const engine = capture(root, { store, rustEngineSessions: sessions });
-    await expect(engine.restoreFileToBeforeMoment(changed.moment.id)).rejects.toBeInstanceOf(AuthoredTextChangedError);
+    await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER)).rejects.toBeInstanceOf(AuthoredTextChangedError);
     expect(await readFile(join(root, target.path), "utf8")).toBe("outside edit");
     await engine.stop();
   });
@@ -1354,7 +1358,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root, target.path, current);
     const engine = capture(root, { store, rustEngineSessions: sessions });
 
-    await engine.restoreFileToBeforeMoment(changed.moment.id);
+    await engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER);
 
     const summaries = (await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments.map(
       (moment) => moment.metadata.summary,
@@ -1378,7 +1382,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const before = (await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments.length;
     const engine = capture(root, { store, rustEngineSessions: sessions });
 
-    await expect(engine.restoreFileToBeforeMoment(edited.moment.id)).resolves.toMatchObject({
+    await expect(engine.restoreFileToBeforeMoment(edited.moment.id, RESTORER)).resolves.toMatchObject({
       restoredMomentId: edited.moment.id,
     });
 

@@ -16,6 +16,10 @@ import {
 } from "./workspaceEngineCapture";
 
 import { createTestScratch } from "./testTemp";
+
+// The person a restore names, as desktop main reads them.
+const RESTORER = { kind: "human", humanId: "local-person" } as const;
+
 // Engine history reads (active-version timeline + one-moment
 // payloads), engine-routed restore (forward history, expected-event
 // registration, disk materialization, undo), the stable-object-id seam for
@@ -125,7 +129,7 @@ describe("engine restore", () => {
 
     const page = await engine.listMoments();
     const editMoment = page.moments[0];
-    const result = await engine.restoreFileToBeforeMoment(editMoment.id);
+    const result = await engine.restoreFileToBeforeMoment(editMoment.id, RESTORER);
     expect(result.restored).toBe("text");
     expect(result.path).toBe("doc.md");
     expect(await readText(root, "doc.md")).toBe("original\n");
@@ -136,6 +140,9 @@ describe("engine restore", () => {
     expect(after.moments[0].id).toBe(result.restoredMomentId);
     expect(after.moments[0].metadata.summary).toBe("Restored doc.md");
     expect(after.moments[0].metadata.origin).toBe("restore");
+    // The restore names who made it; the edit it undid stays outside capture's.
+    expect(after.moments[0].authors).toEqual([RESTORER]);
+    expect(after.moments[1].authors).toBeUndefined();
 
     // The watcher's observation of our own materialized write consumes the
     // registered expected event instead of re-capturing a duplicate moment.
@@ -159,7 +166,7 @@ describe("engine restore", () => {
 
     // A newer edit is still inside the settle window (never captured).
     await write(root, "doc.md", "uncaptured newest\n");
-    await engine.restoreFileToBeforeMoment(editMomentId);
+    await engine.restoreFileToBeforeMoment(editMomentId, RESTORER);
 
     expect(await readText(root, "doc.md")).toBe("original\n");
     const moments = (await engine.listMoments()).moments;
@@ -217,7 +224,7 @@ describe("engine restore", () => {
     const editMomentId = (await engine.listMoments()).moments[0].id;
 
     armed = true;
-    await engine.restoreFileToBeforeMoment(editMomentId);
+    await engine.restoreFileToBeforeMoment(editMomentId, RESTORER);
 
     expect(await readText(root, "doc.md")).toBe("original\n");
     const moments = (await engine.listMoments()).moments;
@@ -239,14 +246,18 @@ describe("engine restore", () => {
     await engine.flush();
     const createMomentId = (await engine.listMoments()).moments[0].id;
 
-    const restore = await engine.restoreFileToBeforeMoment(createMomentId);
+    const restore = await engine.restoreFileToBeforeMoment(createMomentId, RESTORER);
     expect(restore.restored).toBe("deleted");
     expect(existsSync(join(root, "new.md"))).toBe(false);
+    const authorsOf = async (momentId: string) =>
+      (await engine.listMoments()).moments.find((moment) => moment.id === momentId)?.authors;
+    expect(await authorsOf(restore.restoredMomentId)).toEqual([RESTORER]);
 
     // Undo = restore to before the restore moment (forward again).
-    const undo = await engine.restoreFileToBeforeMoment(restore.restoredMomentId);
+    const undo = await engine.restoreFileToBeforeMoment(restore.restoredMomentId, RESTORER);
     expect(undo.restored).toBe("text");
     expect(await readText(root, "new.md")).toBe("created\n");
+    expect(await authorsOf(undo.restoredMomentId)).toEqual([RESTORER]);
     await engine.stop();
   });
 
@@ -267,13 +278,13 @@ describe("engine restore", () => {
     // A change on disk the engine has not recorded yet is recorded first,
     // and then the file is no longer at the expected moment.
     await write(root, "doc.md", "someone else\n");
-    await expect(engine.restoreFileToBeforeMoment(edit.id, { expectedHeadMomentId: edit.id }))
+    await expect(engine.restoreFileToBeforeMoment(edit.id, RESTORER, { expectedHeadMomentId: edit.id }))
       .rejects.toBeInstanceOf(RestoreHeadChangedError);
     expect(await readText(root, "doc.md")).toBe("someone else\n");
     const after = await engine.listObjectMomentsAfter(objectId, edit.id);
     expect(after).toHaveLength(1);
 
-    const restore = await engine.restoreFileToBeforeMoment(edit.id, { expectedHeadMomentId: after[0]! });
+    const restore = await engine.restoreFileToBeforeMoment(edit.id, RESTORER, { expectedHeadMomentId: after[0]! });
     expect(await readText(root, "doc.md")).toBe("original\n");
     await expect(engine.listObjectMomentsAfter(objectId, edit.id)).resolves.toEqual([restore.restoredMomentId, after[0]]);
     await engine.stop();
@@ -292,12 +303,12 @@ describe("engine restore", () => {
     const created = (await engine.listMoments()).moments[0]!;
 
     await write(root, "ideas/other.md", "someone else\n");
-    await expect(engine.restoreFileToBeforeMoment(created.id, { expectedHeadMomentId: created.id, aloneInFolder: true }))
+    await expect(engine.restoreFileToBeforeMoment(created.id, RESTORER, { expectedHeadMomentId: created.id, aloneInFolder: true }))
       .rejects.toBeInstanceOf(RestoreFolderInUseError);
     expect(await readText(root, "ideas/collection.yaml")).toBe("name: Ideas\n");
 
     await rm(join(root, "ideas/other.md"));
-    await expect(engine.restoreFileToBeforeMoment(created.id, { expectedHeadMomentId: created.id, aloneInFolder: true }))
+    await expect(engine.restoreFileToBeforeMoment(created.id, RESTORER, { expectedHeadMomentId: created.id, aloneInFolder: true }))
       .resolves.toMatchObject({ restored: "deleted" });
     expect(existsSync(join(root, "ideas/collection.yaml"))).toBe(false);
     await engine.stop();
@@ -315,9 +326,9 @@ describe("engine restore", () => {
     await engine.flush();
     const editMomentId = (await engine.listMoments()).moments[0].id;
 
-    const restore = await engine.restoreFileToBeforeMoment(editMomentId);
+    const restore = await engine.restoreFileToBeforeMoment(editMomentId, RESTORER);
     expect(await readText(root, "doc.md")).toBe("original\n");
-    const undo = await engine.restoreFileToBeforeMoment(restore.restoredMomentId);
+    const undo = await engine.restoreFileToBeforeMoment(restore.restoredMomentId, RESTORER);
     expect(undo.restored).toBe("text");
     expect(await readText(root, "doc.md")).toBe("edited\n");
     await engine.stop();
@@ -333,7 +344,7 @@ describe("engine restore", () => {
     const mainMomentId = (await engine.listMoments()).moments[0].id;
     await engine.createVersion("Draft");
 
-    await expect(engine.restoreFileToBeforeMoment(mainMomentId)).rejects.toThrow(
+    await expect(engine.restoreFileToBeforeMoment(mainMomentId, RESTORER)).rejects.toThrow(
       /different version/i,
     );
     await engine.stop();
@@ -346,7 +357,7 @@ describe("engine restore", () => {
     engine.start();
     await engine.flush();
     await expect(
-      engine.restoreFileToBeforeMoment("moment_does_not_exist"),
+      engine.restoreFileToBeforeMoment("moment_does_not_exist", RESTORER),
     ).rejects.toThrow(/no longer available/i);
     await engine.stop();
   });

@@ -728,6 +728,59 @@ it.skipIf(engine.missing).each(["new", "legacy", "accepted"] as const)(
 );
 
 it.skipIf(engine.missing)(
+  "names the person on their restore in local History after a reopen, and never sends them to the relay",
+  async () => {
+    const workspaceId = "two-daemon-person-restore";
+    const root = await createTestScratch("dohc-person-restore-");
+    const relayRoot = await createTestScratch("dohc-person-restore-relay-");
+    const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relayConnection = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
+    const person = { kind: "human", humanId: "local-person" } as const;
+    let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+    let capture: WorkspaceEngineCapture | undefined;
+    const restoreMoment = async (momentId: string) =>
+      (await capture!.listMoments({ limit: 100 })).moments.find(moment => moment.id === momentId);
+    try {
+      owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: root }, { maxRestarts: 0 });
+      capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
+      const relay = owner.relay.bind({ ...owner.workspace, relay: relayConnection });
+      await relay.claim();
+      await owner.chats.ensureGeneralChannel({ workspaceId });
+      await capture.writeAuthoredFile(join(root, "plan.md"), "first\n", person, { createOnly: true });
+      await capture.writeAuthoredFile(join(root, "plan.md"), "second\n", person);
+      const [edit] = await waitForPathMoments(capture, "plan.md", 2);
+      const { restoredMomentId } = await capture.restoreFileToBeforeMoment(edit!.id, person);
+      expect(await readFile(join(root, "plan.md"), "utf8")).toBe("first\n");
+      expect(await restoreMoment(restoredMomentId)).toMatchObject({ metadata: { origin: "restore" }, authors: [person] });
+
+      expect((await relay.push()).pushed).toBeGreaterThan(0);
+      const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
+      try {
+        const sent = relayDb.prepare(
+          "SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append' AND json_extract(payload_json, '$.momentId')=?",
+        ).get(workspaceId, restoredMomentId) as { payload_json: string } | undefined;
+        expect(JSON.parse(sent!.payload_json)).toMatchObject({ metadata: { origin: "restore" } });
+        expect(JSON.parse(sent!.payload_json).authors).toBeUndefined();
+        expect(sent!.payload_json).not.toContain(person.humanId);
+      } finally {
+        relayDb.close();
+      }
+
+      await capture.stop();
+      await owner.close();
+      owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: root }, { maxRestarts: 0 });
+      capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
+      expect(await restoreMoment(restoredMomentId)).toMatchObject({ metadata: { origin: "restore" }, authors: [person] });
+    } finally {
+      await capture?.stop();
+      await owner?.close();
+      await relayServer.stop();
+    }
+  },
+  3 * REAL_DAEMON_DEADLINE_MS,
+);
+
+it.skipIf(engine.missing)(
   "syncs a captured file between two real daemons through one real relay",
   async () =>
     await expectTwoDaemonFileSync({

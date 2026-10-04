@@ -21,11 +21,13 @@ type MomentAuthor = NonNullable<VersionedTextMomentSummary["authors"]>[number];
 
 // Main supplies how an author reads. An agent working for this computer's
 // person reads as the configured agent name, and any other agent as
-// "Agent". A Collection automation
+// "Agent". This computer's person reads as their name; any other person is
+// left unnamed. A Collection automation
 // reads as its name and the Collection it belongs to; null leaves any other
 // automation on the moment's origin label.
 export interface EngineMomentAuthorNames {
   agent(author: Extract<MomentAuthor, {kind: "agent"}>): string | undefined;
+  person(author: Extract<MomentAuthor, {kind: "human"}>): string | undefined;
   automation(automationId: string): { name: string; collection?: string } | null;
   named(author: Extract<MomentAuthor, {kind: "named"}>): string;
 }
@@ -65,6 +67,7 @@ function engineMomentBaseForIpc(
   // Keep every author in IPC. Existing display fields name singleton authors.
   const author = moment.authors?.length === 1 ? moment.authors[0] : undefined;
   const agentAuthorName = author?.kind === "agent" ? names.agent(author) : undefined;
+  const personAuthorName = author?.kind === "human" ? names.person(author) : undefined;
   return {
     id: moment.id,
     versionId: moment.versionId,
@@ -76,6 +79,7 @@ function engineMomentBaseForIpc(
     ...(agentAuthorName !== undefined
       ? { agentAuthorName }
       : {}),
+    ...(personAuthorName !== undefined ? { personAuthorName } : {}),
     ...(author?.kind === "public" ? { publicAuthor: author } : {}),
     ...(author?.kind === "link" ? { linkAuthor: author } : {}),
     ...automationAuthorOf(author, names),

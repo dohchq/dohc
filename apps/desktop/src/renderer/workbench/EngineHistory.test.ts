@@ -109,6 +109,12 @@ describe("engineMomentSourceLabel", () => {
       engineMomentSourceLabel(moment({ id: "m2", origin: "restore" })),
     ).toBe("Restore");
   });
+
+  it("names this computer's person on their restore, and keeps their edits as local file edits", () => {
+    const authors = [{ kind: "human" as const, humanId: "user-ice" }];
+    expect(engineMomentSourceLabel(moment({ id: "restored", origin: "restore", authors, personAuthorName: "Ice" }))).toBe("Ice");
+    expect(engineMomentSourceLabel(moment({ id: "edited", origin: "local-file", authors, personAuthorName: "Ice" }))).toBe("Local file edit");
+  });
 });
 
 describe("groupAgentAuthorName", () => {
