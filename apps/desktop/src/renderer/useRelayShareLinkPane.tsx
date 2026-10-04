@@ -21,6 +21,7 @@ import { bridge } from "./bridge";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
 import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
+import { SegmentedControl } from "./ui/SegmentedControl";
 
 type LinkAccess = "view" | "comment" | "edit";
 
@@ -375,29 +376,13 @@ function LinkAccessChoice(props: {
   onChange: (access: LinkAccess) => void;
 }) {
   return (
-    <div
-      role="radiogroup"
-      aria-label={props.ariaLabel}
-      className="flex rounded-lg border border-line bg-panel-2 p-0.5"
-    >
-      {LINK_ACCESS_OPTIONS.filter(option => props.supported.includes(option.value)).map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          role="radio"
-          aria-checked={props.access === option.value}
-          disabled={props.disabled}
-          onClick={() => props.onChange(option.value)}
-          className={`flex-1 rounded-md px-2.5 py-1 text-xs transition-colors disabled:opacity-50 ${
-            props.access === option.value
-              ? "bg-bg text-ink shadow-sm"
-              : "text-muted hover:text-ink"
-          }`}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
+    <SegmentedControl
+      label={props.ariaLabel}
+      value={props.access}
+      options={LINK_ACCESS_OPTIONS.filter((option) => props.supported.includes(option.value))}
+      disabled={props.disabled}
+      onChange={props.onChange}
+    />
   );
 }
 

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { EmailShareForm } from "./EmailShareForm";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { IconButton } from "./ui/controls";
+import { SegmentedControl, type SegmentedOption } from "./ui/SegmentedControl";
 import { useRelayShareLinkPane } from "./useRelayShareLinkPane";
 
 export type RelayShareTarget =
@@ -10,6 +11,10 @@ export type RelayShareTarget =
   | { kind: "version"; versionId: string; versionName?: string };
 
 type ShareWith = "email" | "link";
+const SHARE_WITH_OPTIONS: ReadonlyArray<SegmentedOption<ShareWith>> = [
+  { value: "email", label: "Invite by email" },
+  { value: "link", label: "Anyone with the link" },
+];
 
 export function RelayShareDialog(props: {
   workspaceId: string;
@@ -55,38 +60,12 @@ export function RelayShareDialog(props: {
         )}
       </p>
 
-      <div
-        role="radiogroup"
-        aria-label="Share with"
-        className="flex rounded-lg border border-line bg-panel-2 p-0.5"
-      >
-        <button
-          type="button"
-          role="radio"
-          aria-checked={shareWith === "email"}
-          onClick={() => setShareWith("email")}
-          className={`flex-1 rounded-md px-2.5 py-1 text-xs transition-colors ${
-            shareWith === "email"
-              ? "bg-bg text-ink shadow-sm"
-              : "text-muted hover:text-ink"
-          }`}
-        >
-          Invite by email
-        </button>
-        <button
-          type="button"
-          role="radio"
-          aria-checked={shareWith === "link"}
-          onClick={() => setShareWith("link")}
-          className={`flex-1 rounded-md px-2.5 py-1 text-xs transition-colors ${
-            shareWith === "link"
-              ? "bg-bg text-ink shadow-sm"
-              : "text-muted hover:text-ink"
-          }`}
-        >
-          Anyone with the link
-        </button>
-      </div>
+      <SegmentedControl
+        label="Share with"
+        value={shareWith}
+        options={SHARE_WITH_OPTIONS}
+        onChange={setShareWith}
+      />
 
       <EmailShareForm
         key={linkPane.scope}
