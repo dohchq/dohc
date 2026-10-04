@@ -36,7 +36,7 @@ export function SidePanel(props: {
       tabIndex={-1}
       data-focus-surface="panel"
       data-testid="side-panel"
-      className="relative flex shrink-0 flex-col border-r border-line bg-panel-2"
+      className="relative flex shrink-0 flex-col border-r border-line bg-panel"
       style={{ width }}
     >
       {/* h-9: one header band height across panel, tab strip, and history

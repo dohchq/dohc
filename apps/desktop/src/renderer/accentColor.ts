@@ -1,7 +1,7 @@
 import { palette } from "./tokens";
 
 // WCAG 2.x relative luminance and contrast, for 6-digit hex colors.
-function luminance(hex: string): number {
+export function luminance(hex: string): number {
   const [r, g, b] = [1, 3, 5].map((index) => {
     const channel = parseInt(hex.slice(index, index + 2), 16) / 255;
     return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;

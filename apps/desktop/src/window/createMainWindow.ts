@@ -106,8 +106,8 @@ export function titleBarOverlayOptions(theme: "light" | "dark"): {
 } {
   return {
     height: TITLEBAR_HEIGHT_PX,
-    // Matches the Titlebar strip surface (panel-2), not the page bg.
-    color: palette[theme].panel2,
+    // Matches the Titlebar strip surface (panel, the chrome), not the page bg.
+    color: palette[theme].panel,
     symbolColor: palette[theme].ink,
   };
 }
