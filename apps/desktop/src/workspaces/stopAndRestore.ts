@@ -42,7 +42,8 @@ export interface RestoreReceipt {
 }
 
 export interface StopAndRestoreDependencies {
-  moment(momentId: string): Promise<VersionedTextMoment | null>;
+  /** A moment, `protected` when its contents are protected here, or null while it has not arrived. */
+  moment(momentId: string): Promise<VersionedTextMoment | "protected" | null>;
   /** Throws when the window that asked has left the workspace. */
   assertCurrent(): void;
   /** The ids of a file's moments after `momentId`, newest first. */
@@ -103,8 +104,11 @@ export type StopAndRestoreOutcome =
       fieldsKept: number;
       /** Fields the runs wrote on records no longer in their Collection. */
       fieldsMissing: number;
-      /** What stopped the restore part way; everything above it happened. */
-      errorMessage: string | null;
+      /**
+       * The step a failure stopped, with why; everything above it happened.
+       * At `files`, this try undid no run.
+       */
+      unfinished: { step: "files" | "runs"; message: string } | null;
     };
 
 interface Written {
@@ -175,21 +179,40 @@ export async function restoreDirectWrites(
     }
   }
 
-  // Everything must be here before anything changes.
+  // Everything must be here before anything changes. A file whose contents
+  // are protected here cannot be restored here, so it goes to review.
+  const review = new Map<string, ReviewFile>();
+  // A protected automations.yaml hides which automations they changed, so
+  // their runs are neither found nor undone; the file's review says so.
+  let protectedAutomations = false;
+  // `theirs`: their own changes are protected, not only a later one.
+  const refuseProtected = (path: string, theirs: boolean) => {
+    const automations = theirs && posix.basename(path) === AUTOMATIONS_FILE;
+    protectedAutomations ||= automations;
+    review.set(path, {
+      path, reason: "restore-refused",
+      detail: automations
+        ? "Its contents are protected here, so dohc could not read its automations or undo their runs. Restore it from its History, and undo their runs from its Collection's run history."
+        : "Its contents are protected. Restore it from its History.",
+    });
+  };
+  const written: Written[] = [];
   for (const entry of objects.values()) {
+    let readable = true;
     for (const file of entry.all) {
       const moment = await dependencies.moment(file.momentId);
       if (moment === null) return { status: "waiting" };
-      entry.moments.set(file.momentId, moment);
+      if (moment === "protected") readable = false;
+      else entry.moments.set(file.momentId, moment);
     }
+    if (readable) written.push(entry);
+    else refuseProtected(entry.last.path, true);
   }
-  const written = [...objects.values()];
 
   // A file goes back only when every moment after the person's first one is
   // theirs. One already as it was before them, such as after an earlier
   // try, is passed over; any other goes to review.
   const restorable: Array<{ entry: Written; head: string }> = [];
-  const review = new Map<string, ReviewFile>();
   for (const entry of written) {
     const theirs = new Set(entry.all.map((file) => file.momentId));
     const after = await dependencies.momentsAfter(entry.first.objectId, entry.first.momentId);
@@ -198,6 +221,10 @@ export async function restoreDirectWrites(
       continue;
     }
     const head = await dependencies.moment(after[0]!);
+    if (head === "protected") {
+      refuseProtected(entry.last.path, false);
+      continue;
+    }
     if (sameContent(contentBefore(entry.moments.get(entry.first.momentId)!), contentNow(head))) continue;
     const path = head !== null && head.operation !== "delete" ? head.path : entry.last.path;
     review.set(path, { path, reason: "changed-since" });
@@ -229,10 +256,12 @@ export async function restoreDirectWrites(
   const restored: RestoreReceipt[] = [];
   const outcome = () => ({ status: "restored" as const, restored, review: [...review.values()].sort((left, right) => left.path.localeCompare(right.path)) });
   let runs = { undone: 0, left: 0, kept: 0, missing: 0, otherKept: 0 };
-  const done = (errorMessage: string | null) => ({
+  let step: "files" | "runs" = "files";
+  const done = (message: string | null) => ({
     ...outcome(), runsUndone: runs.undone, runsLeft: runs.left, runChangesKept: runs.kept + runs.missing + runs.otherKept,
     fieldsKept: runs.kept, fieldsMissing: runs.missing,
-    wroteAutomations: definitions.length > 0, sendsMessages: messages, errorMessage,
+    wroteAutomations: definitions.length > 0 || protectedAutomations, sendsMessages: messages,
+    unfinished: message === null ? null : { step, message },
   });
   try {
     for (const { entry, head } of restorable) {
@@ -264,6 +293,7 @@ export async function restoreDirectWrites(
       if (isCreatedSchema(entry)) await dependencies.removeEmptyFolder(folder);
     }
     if (definitions.length > 0) {
+      step = "runs";
       const undone = await dependencies.undoRuns(definitions);
       runs = undone;
       if (undone.errorMessage !== null) return done(undone.errorMessage);

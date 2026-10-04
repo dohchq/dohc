@@ -8,9 +8,11 @@ import { useRequestSequence } from "./useRequestSequence";
 // Stop and restore (ADR 0013): the owner picks a person they shared this
 // workspace with, or an Edit share link, and confirms once. dohc stops that
 // access, puts back every file written directly through it, and lists each
-// file it left as it is, with why. Undo puts the files back as they were
-// left; access stays stopped. Failures go to the shell's toast and Notices
-// row, with Try again. A link is ended as a whole: stopping one of the
+// file it left as it is, with why, then undoes runs of the automations
+// changed through that access. Undo puts the files back as they were left;
+// access stays stopped. Failures go to the shell's toast and Notices row,
+// with Try again; a try that stopped part way also says in the dialog what
+// it has not finished. A link is ended as a whole: stopping one of the
 // browsers that hold it would leave the others writing.
 
 /** A person or an Edit share link, as the dialog shows it. */
@@ -42,7 +44,7 @@ export interface StopAndRestoreSession {
   key: number;
 }
 
-/** Runs of automations a person or link wrote that stop and restore undid, the fields on records gone from their Collection, and the other changes they left. */
+/** Runs of automations a person or link changed that stop and restore undid, the fields on records gone from their Collection, and the other changes they left. */
 interface RunTotals {
   runsUndone: number;
   fieldsMissing: number;
@@ -120,7 +122,7 @@ const otherKept = (result: Restored): number => result.runChangesKept - result.f
 const MAX_LINK_PAGES = 5;
 
 export function StopAndRestoreDialog({
-  workspaceId, target: first, start, receipts, onRetry, onClose, onBeforeRestore, onRestored, onOpenFile, onError,
+  workspaceId, target: first, start, receipts, onRetry, onClose, onBeforeRestore, onRestored, onOpenFile, onError, onSettled,
 }: {
   workspaceId: string;
   /** The person or link History showed, picked first, with History's label until the relay lists it. */
@@ -134,8 +136,13 @@ export function StopAndRestoreDialog({
   onBeforeRestore(): Promise<() => void>;
   onRestored(): void;
   onOpenFile(path: string): void;
-  /** The shell's toast and Notices row, with Try again. */
-  onError(fallback: string, error: unknown, retry: () => void): void;
+  /**
+   * The shell's toast and Notices row, with Try again. Each person or link
+   * has one row, `identity`, which a newer failure replaces.
+   */
+  onError(fallback: string, error: unknown, retry: () => void, identity: string): void;
+  /** Removes the row of `identity`: what it reported has finished, or its Try again no longer applies. */
+  onSettled(identity: string): void;
 }) {
   // Opened again by a Try again, the dialog starts on what it last showed.
   const [state, setState] = useState<State>(() => {
@@ -188,6 +195,7 @@ export function StopAndRestoreDialog({
   const targets = state.kind === "loading" ? [first] : state.targets;
   const chosen = targets.find((candidate) => keyOf(candidate.target) === key) ?? first;
   const words = wordsFor(chosen);
+  const identity = `stop-and-restore:${JSON.stringify([workspaceId, keyOf(chosen.target)])}`;
 
   // The listing may land while an action runs; what it found stays.
   const listedTargets = (current: State): StopTarget[] => current.kind === "loading" ? targets : current.targets;
@@ -209,14 +217,22 @@ export function StopAndRestoreDialog({
           ? { kind: "choose", targets: listedTargets(current) }
           : { ...before, targets: listedTargets(current) });
       }
-      onError(fallback, error, () => onRetry(workspaceId, chosen, action));
+      onError(fallback, error, () => onRetry(workspaceId, chosen, action), identity);
     } finally {
       release?.();
       running.current = false;
     }
   }
 
-  const stop = (): Promise<void> => perform(words.stopFailed, "stop", async (token) => {
+  // A try that fails after an earlier one stopped access says access stays
+  // stopped, and names what is still to finish.
+  const stopFallback = (): string => {
+    const last = receipts.shown(workspaceId, chosen.target);
+    if (last !== null) return words.unfinished[last.result.unfinished?.step ?? "files"];
+    return stateRef.current.kind === "waiting" ? words.unfinished.files : words.stopFailed;
+  };
+
+  const stop = (): Promise<void> => perform(stopFallback(), "stop", async (token) => {
     const result = await bridge().stopAndRestore({ workspaceId, target: chosen.target });
     if (result.status === "waiting") {
       if (request.isCurrent(token)) setState((current) => ({ kind: "waiting", targets: listedTargets(current) }));
@@ -228,17 +244,30 @@ export function StopAndRestoreDialog({
     const totals = receipts.addRuns(workspaceId, chosen.target, {
       runsUndone: result.runsUndone, fieldsMissing: result.fieldsMissing, otherKept: otherKept(result),
     });
+    // A try that stopped before undoing runs may not have read every file
+    // again, so the files to check stay as an earlier try found them, and so
+    // does what the automations do while that try had not finished either.
+    const earlier = result.unfinished?.step === "files" ? receipts.shown(workspaceId, chosen.target)?.result ?? null : null;
+    const carried = earlier?.unfinished ? earlier : null;
     const outcome = {
       result: {
         ...result, restored: receipts.get(workspaceId, chosen.target), runsUndone: totals.runsUndone, fieldsMissing: totals.fieldsMissing,
         runChangesKept: totals.otherKept + result.fieldsKept + totals.fieldsMissing,
+        ...(earlier === null ? {} : {
+          review: [...new Map([...earlier.review, ...result.review].map((file) => [file.path, file])).values()]
+            .sort((left, right) => left.path.localeCompare(right.path)),
+          wroteAutomations: (carried?.wroteAutomations ?? false) || result.wroteAutomations,
+          sendsMessages: (carried?.sendsMessages ?? false) || result.sendsMessages,
+        }),
       },
       undone: false,
     };
     receipts.show(workspaceId, chosen.target, outcome);
     onRestored();
-    if (result.errorMessage !== null) {
-      onError(words.stopFailed, new Error(result.errorMessage), () => onRetry(workspaceId, chosen, "stop"));
+    if (result.unfinished !== null) {
+      onError(words.unfinished[result.unfinished.step], new Error(result.unfinished.message), () => onRetry(workspaceId, chosen, "stop"), identity);
+    } else {
+      onSettled(identity);
     }
     if (request.isCurrent(token)) setState((current) => ({ kind: "done", targets: listedTargets(current), ...outcome }));
   });
@@ -250,6 +279,8 @@ export function StopAndRestoreDialog({
     }
     receipts.set(workspaceId, chosen.target, []);
     onRestored();
+    // The row's Try again would restore the files again without asking.
+    onSettled(identity);
     const last = receipts.shown(workspaceId, chosen.target);
     const runs = receipts.runs(workspaceId, chosen.target);
     const outcome = {
@@ -258,7 +289,7 @@ export function StopAndRestoreDialog({
         : {
             status: "restored" as const, restored, review: [], runsLeft: 0, runsUndone: runs.runsUndone, fieldsMissing: runs.fieldsMissing,
             runChangesKept: runs.otherKept + runs.fieldsMissing,
-            fieldsKept: 0, wroteAutomations: false, sendsMessages: false, errorMessage: null,
+            fieldsKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: null,
           },
       undone: true,
     };
@@ -307,6 +338,9 @@ export function StopAndRestoreDialog({
         {state.kind === "choose" ? (
           <DangerButton data-testid="stop-and-restore-confirm" onClick={() => void stop()}>Stop and restore</DangerButton>
         ) : null}
+        {state.kind === "done" && !state.undone && state.result.unfinished !== null ? (
+          <PrimaryButton onClick={() => void stop()}>Try again</PrimaryButton>
+        ) : null}
         {state.kind === "waiting" ? <PrimaryButton onClick={() => void stop()}>Try again</PrimaryButton> : null}
       </div>
     </Overlay>
@@ -319,23 +353,31 @@ function wordsFor({ target, label }: StopTarget) {
   if (target.kind === "person") {
     return {
       loses: `${label} loses Edit access to this workspace. Share again to give it back.`,
-      restores: "Each file they changed directly goes back to how it was before their first change. Collections they created are removed. You can undo the file changes.",
+      restores: "Each file they changed directly goes back to how it was before their first change. Collections they created are removed. Runs of automations they changed are undone on this computer and your server. You can undo the file changes, not the runs.",
       stopFailed: `dohc could not stop ${label} and restore their changes.`,
+      unfinished: {
+        files: `Stopped ${label}'s access. dohc has not finished restoring their changes.`,
+        runs: `Stopped ${label}'s access. dohc has not finished undoing runs of automations they changed.`,
+      },
       waiting: `Access stopped. dohc has not received all of ${label}'s changes yet. Try again in a moment.`,
       stopped: (files: string) => `Stopped ${label}'s access and restored ${files}.`,
       undone: (files: string) => `Put back ${files} as ${label} left them. Their access stays stopped.`,
-      wrote: `automations ${label} wrote`,
+      automations: `automations ${label} changed`,
       after: label,
     };
   }
   return {
     loses: `${label} stops working for everyone who has it, including people who opened it in dohc. Share again to give access back.`,
-    restores: "Each file changed through it goes back to how it was before its first change. Collections created through it are removed. You can undo the file changes.",
+    restores: "Each file changed through it goes back to how it was before its first change. Collections created through it are removed. Runs of automations changed through it are undone on this computer and your server. You can undo the file changes, not the runs.",
     stopFailed: `dohc could not end ${label} and restore its changes.`,
+    unfinished: {
+      files: `Ended ${label}. dohc has not finished restoring its changes.`,
+      runs: `Ended ${label}. dohc has not finished undoing runs of automations changed through it.`,
+    },
     waiting: "Link ended. dohc has not received every change made through it yet. Try again in a moment.",
     stopped: (files: string) => `Ended ${label} and restored ${files}.`,
     undone: (files: string) => `Put back ${files} as ${label} left them. The link stays ended.`,
-    wrote: `automations written through ${label}`,
+    automations: `automations changed through ${label}`,
     after: "the link",
   };
 }
@@ -371,12 +413,21 @@ function Outcome({ words, result, undone, onOpenFile }: {
   return (
     <div className="mt-3 space-y-3" data-testid="stop-and-restore-outcome">
       <p className="m-0 text-[13px] text-ink">{undone ? words.undone(files) : words.stopped(files)}</p>
+      {result.unfinished?.step === "files" && !undone ? (
+        <p className="m-0 text-[13px] text-ink">dohc has not finished restoring files.</p>
+      ) : null}
       {result.runsUndone > 0 ? (
-        <p className="m-0 text-[13px] text-muted">Undid {plural(result.runsUndone, "run", "runs")} of {words.wrote}.</p>
+        <p className="m-0 text-[13px] text-muted">Undid {plural(result.runsUndone, "run", "runs")} of {words.automations}.</p>
+      ) : null}
+      {result.unfinished !== null && result.wroteAutomations ? (
+        <p className="m-0 text-[13px] text-ink">
+          dohc has not finished undoing runs{result.runsUndone > 0 ? "" : ` of ${words.automations}`}.
+          {undone ? " Stop and restore again to finish. This restores the files again too." : ""}
+        </p>
       ) : null}
       {result.runsLeft > 0 ? (
         <p className="m-0 text-[13px] text-muted">
-          dohc could not undo {plural(result.runsLeft, "run", "runs")} of {words.wrote}. Undo each from its Collection's run history.
+          dohc could not undo {plural(result.runsLeft, "run", "runs")} of {words.automations}. Undo each from its Collection's run history.
         </p>
       ) : null}
       {result.fieldsKept > 0 ? (
@@ -395,7 +446,7 @@ function Outcome({ words, result, undone, onOpenFile }: {
         </p>
       ) : null}
       {result.sendsMessages ? (
-        <p className="m-0 text-[13px] text-muted">Messages and notices from {words.wrote} stay sent.</p>
+        <p className="m-0 text-[13px] text-muted">Messages and notices from {words.automations} stay sent.</p>
       ) : null}
       {result.wroteAutomations ? (
         <p className="m-0 text-[13px] text-muted">

@@ -16,6 +16,13 @@ import { rebaseRun, type CollectionAutomationReads, type CollectionRecordWrites 
 const RECORD_NOT_FOUND = "collection-record-not-found";
 const PERSON: ChangeAuthor = { kind: "user", userId: "local" };
 
+/** A record with a sync conflict, which the engine will not let Undo write until someone resolves it. */
+class RecordConflictError extends Error {
+  constructor(readonly path: string) {
+    super(`${path} has a sync conflict. Resolve the conflict, then try again.`);
+  }
+}
+
 /** What an Undo did, for the sentence its notice shows. */
 export interface CollectionAutomationUndone {
   /** Fields written back to their value before the run. */
@@ -121,23 +128,23 @@ function wayBack(writes: readonly FieldWrite[]): { to: JsonValue; from: JsonValu
   return { to: value, from: from.filter((candidate) => !isDeepStrictEqual(candidate, value)) };
 }
 
-/** Where the record with `recordId` is now, or null when it left the Collection. */
+/** Where the record with `recordId` is now and whether it has a sync conflict, or null when it left the Collection. */
 async function locate(
   dependencies: CollectionAutomationUndoDependencies,
   path: string,
   recordId: string,
-): Promise<string | null> {
+): Promise<{ path: string; conflicted: boolean } | null> {
   const found = await dependencies.withReads(async (reads) => {
     try {
       const { record } = await reads.getCollectionRecord({ collectionPath: posix.dirname(path), recordId, historyLimit: 1 });
-      return { path: record.path };
+      return { record: { path: record.path, conflicted: record.conflicted } };
     } catch (error) {
-      if (error instanceof Error && error.message === RECORD_NOT_FOUND) return { path: null };
+      if (error instanceof Error && error.message === RECORD_NOT_FOUND) return { record: null };
       throw error;
     }
   });
   if (found === null) throw new Error("The workspace engine is not running.");
-  return found.path;
+  return found.record;
 }
 
 /**
@@ -174,23 +181,35 @@ export async function undoCollectionAutomationRuns(
     if (added.has(record.recordId) && tried === null) continue;
     const fields = [...record.fields].map(([field, writes]) => ({ field, ...wayBack(writes) })).filter(({ field, from }) => from.length > 0 && (tried === null || tried.has(JSON.stringify([record.recordId, field]))));
     if (fields.length === 0) continue;
-    const path = await locate(dependencies, record.path, record.recordId);
-    if (path === null) {
+    const found = await locate(dependencies, record.path, record.recordId);
+    if (found === null) {
       undone.missing += fields.length;
       continue;
     }
+    // The engine refuses to open a record with a sync conflict.
+    if (found.conflicted) throw new RecordConflictError(found.path);
+    const path = found.path;
     // Each field goes back only from a value the runs left it at: first the
     // likeliest, then, for a write the runs did not record, the value before it.
     let pending = fields.map((entry) => ({ ...entry, attempt: 0 }));
     while (pending.length > 0) {
-      const result = await dependencies.withRecordWrites(signal, (edit) =>
-        edit.setFields({
-          recordPath: path,
-          fields: Object.fromEntries(pending.map(({ field, to }) => [field, to])),
-          expectedBefore: Object.fromEntries(pending.map(({ field, from, attempt }) => [field, from[attempt]])),
-          author: PERSON,
-        }),
-      );
+      let result: Awaited<ReturnType<CollectionRecordWrites["setFields"]>>;
+      try {
+        result = await dependencies.withRecordWrites(signal, (edit) =>
+          edit.setFields({
+            recordPath: path,
+            fields: Object.fromEntries(pending.map(({ field, to }) => [field, to])),
+            expectedBefore: Object.fromEntries(pending.map(({ field, from, attempt }) => [field, from[attempt]])),
+            author: PERSON,
+          }),
+        );
+      } catch (error) {
+        // A conflict that opened since the read above: the engine refuses
+        // without naming it, so read the record again to say what to do.
+        const now = await locate(dependencies, path, record.recordId).catch(() => null);
+        if (now?.conflicted) throw new RecordConflictError(now.path);
+        throw error;
+      }
       undone.reverted += Object.keys(result.replaced).length;
       const next: typeof pending = [];
       for (const entry of pending) {
@@ -210,7 +229,7 @@ export async function undoCollectionAutomationRuns(
     if (onlyRecordId !== undefined && recordId !== onlyRecordId) continue;
     const current = await locate(dependencies, path, recordId);
     if (current === null) continue;
-    await dependencies.trash(current);
+    await dependencies.trash(current.path);
     undone.removed += 1;
   }
   return { undone, keptFields };

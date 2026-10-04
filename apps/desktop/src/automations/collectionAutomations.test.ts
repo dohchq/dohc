@@ -67,7 +67,7 @@ const editor = (email: string, paths: string[]): RosterGrant => ({
   files: { paths, versionId: null, access: "edit" }, channel: null,
 });
 
-interface FakeRecord { id: string; path: string; collection: string; doc: Y.Doc }
+interface FakeRecord { id: string; path: string; collection: string; doc: Y.Doc; conflicted?: boolean }
 
 // Every field these tests name. A field a Collection lacks keeps its
 // automation off, so each test Collection defines them all.
@@ -163,7 +163,7 @@ async function world(options: {
 
   const fieldsOf = (record: FakeRecord) => record.doc.getMap("frontmatter").toJSON() as Record<string, unknown>;
   const collectionRecord = (record: FakeRecord): CollectionRecord => ({
-    id: record.id, path: record.path, conflicted: false,
+    id: record.id, path: record.path, conflicted: record.conflicted ?? false,
     values: Object.entries(fieldsOf(record)).map(([field, value]) => ({
       field, value: value as CollectionRecord["values"][number]["value"], validation: { status: "valid" }, resolvedRelations: [],
     })),
@@ -179,7 +179,7 @@ async function world(options: {
     const id = `rec_${createHash("sha256").update(`${collection}/${name}`).digest("hex").slice(0, 26).replace(/[01890]/g, "a")}`;
     const doc = new Y.Doc();
     for (const [field, value] of Object.entries(fields)) doc.getMap("frontmatter").set(field, value);
-    const record = { id, path: `${collection}/${name}.md`, collection, doc };
+    const record: FakeRecord = { id, path: `${collection}/${name}.md`, collection, doc };
     records.set(id, record);
     return record;
   };
@@ -2517,6 +2517,89 @@ describe("Collection automations", () => {
     // Runs already undone are passed over.
     await expect(w.executor.undoRunsOf([{ collectionPath: "Tasks", id: "stamp", definitionHash: hash }], async () => undefined))
       .resolves.toEqual({ undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
+  });
+
+  it.each([
+    ["no record has a sync conflict", false],
+    ["the newer run's other record has a sync conflict", true],
+  ] as const)("undoes runs of two automations newest first across both when %s", async (_case, conflict) => {
+    const later = STAMP.replace("id: stamp", "id: later").replace("name: Stamp", "name: Later");
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: `${STAMP}\n${later}\n` } });
+    let now = Date.UTC(2026, 8, 1);
+    const executor = w.makeExecutor({ nowMs: () => now });
+    const shared = w.addRecord("Tasks", "shared", { Status: "Done", Count: 2, Note: "two" });
+    const other = w.addRecord("Tasks", "other", { Status: "Done", Count: 2, Note: "y" });
+    const older = w.claim("collection:Tasks#stamp", shared);
+    await executor.open();
+    await w.settledClaim(older);
+    now += 1_000;
+    const newer = w.claim("collection:Tasks#later", shared);
+    executor.notifyClaimed();
+    await w.settledClaim(newer);
+    // Stamp's older run wrote Note "two" to "one"; Later's newer run wrote it
+    // back to "two", and wrote the other record too.
+    const rewrite = async (automationId: string, claimId: string, writes: Array<{ record: typeof shared; before: string; after: string }>) => {
+      const [run] = (await w.baseStore.runsOf(automationId, claimId)).runs;
+      await w.baseStore.save({
+        ...run!, created: [],
+        applied: run!.applied.map((entry, index) => ({
+          ...entry,
+          writes: index > 0 ? [] : writes.map(({ record, before, after }) => ({ kind: "field" as const, recordId: record.id, path: record.path, field: "Note", before, after })),
+        })),
+      });
+    };
+    await rewrite("collection:Tasks#stamp", older.claimId, [{ record: shared, before: "two", after: "one" }]);
+    await rewrite("collection:Tasks#later", newer.claimId, [{ record: other, before: "x", after: "y" }, { record: shared, before: "one", after: "two" }]);
+    shared.doc.getMap("frontmatter").set("Note", "two");
+    other.doc.getMap("frontmatter").set("Note", "y");
+    const file = await executor.automationsIn("Tasks");
+    if (file.status !== "read") throw new Error("expected the automations to read");
+    const hashOf = (id: string) => {
+      const found = file.automations.find((automation) => automation.valid && automation.automation.id === id);
+      if (!found?.valid) throw new Error(`expected ${id} to read`);
+      return found.definitionHash;
+    };
+    // The older automation's definition first: the order of the pass must not follow it.
+    const definitions = [
+      { collectionPath: "Tasks", id: "stamp", definitionHash: hashOf("stamp") },
+      { collectionPath: "Tasks", id: "later", definitionHash: hashOf("later") },
+    ];
+
+    if (conflict) {
+      other.conflicted = true;
+      // The pass stops at the newer run, after it put the shared record back, and leaves the older run as it is.
+      await expect(executor.undoRunsOf(definitions, async () => undefined)).resolves.toMatchObject({
+        undone: 0, errorMessage: "Tasks/other.md has a sync conflict. Resolve the conflict, then try again.",
+      });
+      expect(w.fieldsOf(shared).Note).toBe("one");
+      expect(w.fieldsOf(other).Note).toBe("y");
+      expect((await w.baseStore.runsOf("collection:Tasks#stamp", older.claimId)).runs.map((run) => run.undo)).toEqual([null]);
+      other.conflicted = false;
+    }
+    await expect(executor.undoRunsOf(definitions, async () => undefined)).resolves.toMatchObject({ undone: 2, errorMessage: null });
+    expect(w.fieldsOf(other).Note).toBe("x");
+    expect(w.fieldsOf(shared).Note).toBe("two");
+    await executor.dispose();
+  });
+
+  it("names a sync conflict that opened after Undo read the record, and keeps any other write failure as it is", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const file = await w.executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]!.valid) throw new Error("expected Stamp to read");
+    const definitions = [{ collectionPath: "Tasks", id: "stamp", definitionHash: file.automations[0]!.definitionHash }];
+
+    w.failures.openSession = 1;
+    await expect(w.executor.undoRunsOf(definitions, async () => undefined))
+      .resolves.toMatchObject({ undone: 0, errorMessage: "The record is open in a live session elsewhere." });
+    // The conflict opens as the write is refused, after Undo read the record.
+    w.failures.openSession = 1;
+    Object.defineProperty(task, "conflicted", { get: () => w.failures.openSession === 0, configurable: true });
+    await expect(w.executor.undoRunsOf(definitions, async () => undefined))
+      .resolves.toMatchObject({ undone: 0, errorMessage: "Tasks/one.md has a sync conflict. Resolve the conflict, then try again." });
   });
 
   it("will not run a failed run again after someone undid what it changed", async () => {
