@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { extensionOf } from "./path";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
+import { StateMark } from "./ui/StateMark";
 import {
   useAutosavedTextDraft,
   type DraftFlush,
@@ -141,6 +142,7 @@ export function CsvView({
   path,
   onOpenPath,
   truncated,
+  readOnly,
   reopenKey,
   switchReadPending,
   switchUnresyncedRef,
@@ -160,11 +162,16 @@ export function CsvView({
   workspaceId: string;
   path: string;
   onOpenPath?: (path: string) => void;
+  // Two reasons the table cannot take edits, kept apart so the chip can
+  // name the right one: the bounded read cut the file short, or the share
+  // is read-only.
   truncated?: boolean;
+  readOnly?: boolean;
   onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   localBuffer: SharedLocalDocument;
 }) {
+  const locked = Boolean(truncated || readOnly);
   const [raw, setRaw] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
@@ -177,7 +184,7 @@ export function CsvView({
     refreshAfterConflict,
     workspaceId,
     path,
-    disabled: truncated,
+    disabled: locked,
     reopenKey,
     switchReadPending,
     switchUnresyncedRef,
@@ -350,7 +357,7 @@ export function CsvView({
   }, [delimiter, raw]);
 
   async function importToSqlite() {
-    if (importing || truncated) return;
+    if (importing || locked) return;
     setImporting(true);
     setImportError(null);
     try {
@@ -375,25 +382,18 @@ export function CsvView({
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="view-csv">
       <div className="flex items-center justify-end gap-1 border-b border-line px-3 py-1">
-        <span
-          data-testid="csv-save-state"
-          data-state={draft.saveState}
-          className={`mr-auto font-mono text-[11px] ${draft.saveState === "error" ? "text-danger" : "text-subtle"}`}
-        >
-          {truncated
-            ? "Read-only"
-            : draft.saveState === "saved"
-              ? "Saved"
-              : draft.saveState === "saving"
-                ? "Saving..."
-                : "Couldn't save"}
-        </span>
+        <StateMark
+          testId="csv-save-state"
+          state={draft.saveState}
+          shown={readOnly ? "read-only" : truncated ? "too-large" : draft.saveState}
+          className="mr-auto"
+        />
         {importError ? (
           <span data-testid="csv-import-error" className="px-1 text-[11px] text-danger">
             {importError}
           </span>
         ) : null}
-        {!raw && !truncated ? (
+        {!raw && !locked ? (
           <>
             <button
               type="button"
@@ -419,7 +419,7 @@ export function CsvView({
           <button
             type="button"
             onClick={() => void importToSqlite()}
-            disabled={importing || truncated}
+            disabled={importing || locked}
             className="rounded px-2 py-0.5 text-[11px] text-subtle hover:text-ink disabled:opacity-50"
             data-testid="csv-import-sqlite"
           >
@@ -446,7 +446,7 @@ export function CsvView({
               void draft.saveNow();
             }
           }}
-          readOnly={truncated}
+          readOnly={locked}
           spellCheck={false}
           className="dohc-csv-raw-editor min-h-0 flex-1 resize-none bg-bg p-4 font-mono text-[13px] leading-relaxed text-ink outline-none read-only:text-muted"
         />
@@ -460,7 +460,7 @@ export function CsvView({
             <span className="text-sm text-ink">Empty table</span>
             <span className="text-xs text-subtle">No rows or columns</span>
           </div>
-          {!truncated ? (
+          {!locked ? (
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -491,7 +491,7 @@ export function CsvView({
             <CsvTableHeader
               header={header}
               columnCount={columnCount}
-              truncated={truncated}
+              truncated={locked}
               onUpdateCell={updateCell}
               onDeleteColumn={deleteColumn}
             />
@@ -502,7 +502,7 @@ export function CsvView({
                   row={row}
                   rowIndex={r + 1}
                   columnCount={columnCount}
-                  truncated={truncated}
+                  truncated={locked}
                   onUpdateCell={updateCell}
                   onDeleteRow={deleteRow}
                 />

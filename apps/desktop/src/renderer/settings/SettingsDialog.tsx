@@ -1,7 +1,7 @@
 import { useRequestSequence } from "../useRequestSequence";
+import { StateMark } from "../ui/StateMark";
 import {
   AlertTriangle,
-  CheckCircle2,
   Download,
   Minus,
   Plus,
@@ -68,7 +68,7 @@ import {
   type SettingsSectionId,
 } from "./settingsRegistry";
 
-type SaveState = "idle" | "saving" | "saved" | "error";
+export type SettingsSaveState = "idle" | "saving" | "saved" | "error";
 
 function sectionMatches(section: (typeof SETTINGS_SECTIONS)[number], query: string) {
   const q = query.trim().toLowerCase();
@@ -85,19 +85,23 @@ function isModified(value: unknown, defaultValue: unknown): boolean {
   return JSON.stringify(value) !== JSON.stringify(defaultValue);
 }
 
-function StatusPill(props: { state: SaveState }) {
+// The document chip's "your edits are still here" is false here: a failed
+// save rolls the control back. The title promises nothing about which value
+// it shows, because two overlapping saves that both fail leave the later
+// one's optimistic value on screen, not the value on disk.
+export const SETTINGS_SAVE_ERROR_TITLE =
+  "dohc could not save this setting. Try changing it again.";
+
+function StatusPill(props: { state: SettingsSaveState }) {
   if (props.state === "idle") return null;
   return (
-    <span
-      data-testid="settings-save-state"
-      data-state={props.state}
-      className={`ml-auto flex items-center gap-1 text-[11px] ${
-        props.state === "error" ? "text-danger" : "text-subtle"
-      }`}
-    >
-      {props.state === "saved" ? <CheckCircle2 size={12} aria-hidden /> : null}
-      {props.state === "saving" ? "Saving..." : props.state === "saved" ? "Saved" : "Save failed"}
-    </span>
+    <StateMark
+      testId="settings-save-state"
+      state={props.state}
+      shown={props.state}
+      title={props.state === "error" ? SETTINGS_SAVE_ERROR_TITLE : undefined}
+      className="ml-auto"
+    />
   );
 }
 
@@ -174,7 +178,7 @@ export function SettingsDialog(props: {
   const [userResult, setUserResult] = useState<DesktopUserSettingsResult | null>(null);
   const [workspaceResult, setWorkspaceResult] =
     useState<WorkspaceSettingsResult | null>(null);
-  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [saveState, setSaveState] = useState<SettingsSaveState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [updateBusy, setUpdateBusy] = useState<"check" | "install" | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);

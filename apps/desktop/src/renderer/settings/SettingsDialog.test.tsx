@@ -560,6 +560,11 @@ describe("SettingsDialog", () => {
         "error",
       ),
     );
+    // The chip must not borrow the document's "your edits are still here",
+    // and it owes a next step.
+    expect(screen.getByTestId("settings-save-state").getAttribute("title")).toBe(
+      "dohc could not save this setting. Try changing it again.",
+    );
     expect(document.documentElement.dataset.theme).toBe(initialTheme);
     expect(screen.getByRole("radio", { name: "System" }).getAttribute("aria-checked")).toBe(
       "true",

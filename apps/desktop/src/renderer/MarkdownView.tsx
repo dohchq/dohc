@@ -3,16 +3,17 @@ import { RecordButtonsRow } from "./collections/RecordButtonsRow";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import {
-  DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
-  REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
-  ENGINE_CHIP,
   EngineMayHoldDocumentNotice,
-  READ_ONLY_TRANSITION_CHIP,
   ViewHeader,
   type FileSaveState,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
 } from "./fileInspectorUi";
+import {
+  DELETED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE,
+  StateMark,
+} from "./ui/StateMark";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import type { PendingTextUndo } from "./fileEditorUndo";
 import {
@@ -678,9 +679,6 @@ export function MarkdownView(props: {
     engine.saveState === "saved" && orphanedDrafts.length > 0
       ? ("recovery" as const)
       : engine.saveState;
-  const engineChip = engine.readOnlyWhileEditing
-    ? READ_ONLY_TRANSITION_CHIP
-    : ENGINE_CHIP[engineChipState];
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -1912,9 +1910,10 @@ export function MarkdownView(props: {
           onShare={onShareCurrentPath}
           actions={
             <>
-              <span
-                data-testid="markdown-save-state"
-                data-state={engineChipState}
+              <StateMark
+                testId="markdown-save-state"
+                state={engineChipState}
+                shown={engine.readOnlyWhileEditing ? "read-only-transition" : engineChipState}
                 title={
                   (engineChipState === "deleted" ||
                     engineChipState === "object-changed") &&
@@ -1922,16 +1921,9 @@ export function MarkdownView(props: {
                     ? goneNotice(engine.goneCause, true)
                     : engineChipState === "error" && engine.saveError
                       ? engine.saveError
-                      : engineChip.title
+                      : undefined
                 }
-                className={`font-mono text-[11px] ${
-                  engineChipState === "saved" || engineChipState === "saving"
-                    ? "text-subtle"
-                    : "text-danger"
-                }`}
-              >
-                {engineChip.label}
-              </span>
+              />
               <button
                 type="button"
                 data-testid="markdown-source-toggle"
@@ -2096,28 +2088,7 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <span
-                data-testid="markdown-save-state"
-                data-state={chipState}
-                title={
-                  chipState === "recovery"
-                    ? "A set-aside edit is not saved. Copy or dismiss it in the notice below."
-                    : undefined
-                }
-                className={`font-mono text-[11px] ${
-                  chipState === "error" || chipState === "recovery"
-                    ? "text-danger"
-                    : "text-subtle"
-                }`}
-              >
-                {chipState === "saved"
-                  ? "Saved"
-                  : chipState === "saving"
-                    ? "Saving…"
-                    : chipState === "recovery"
-                      ? "Edit set aside"
-                      : "Couldn't save"}
-              </span>
+              <StateMark testId="markdown-save-state" state={chipState} shown={chipState} />
             ) : null}
             <button
               type="button"

@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import type { PendingTextUndo } from "./fileEditorUndo";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
+import { StateMark } from "./ui/StateMark";
 import {
   useAutosavedTextDraft,
   type DraftFlush,
@@ -21,6 +22,7 @@ export function TextEditorView({
   workspaceId,
   path,
   truncated,
+  readOnly,
   reopenKey,
   switchReadPending,
   switchUnresyncedRef,
@@ -44,6 +46,7 @@ export function TextEditorView({
   workspaceId: string;
   path: string;
   truncated?: boolean;
+  readOnly?: boolean;
   onSaveStateChange?: (state: SaveState) => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   pendingUndo?: PendingTextUndo;
@@ -62,7 +65,7 @@ export function TextEditorView({
     refreshAfterConflict,
     workspaceId,
     path,
-    disabled: truncated,
+    disabled: truncated || readOnly,
     reopenKey,
     switchReadPending,
     switchUnresyncedRef,
@@ -79,19 +82,12 @@ export function TextEditorView({
         <span className="font-mono text-[11px] uppercase tracking-wide text-subtle">
           {language}
         </span>
-        <span
-          data-testid={`${testId}-save-state`}
-          data-state={editor.saveState}
-          className={`ml-auto text-[11px] ${editor.saveState === "error" ? "text-danger" : "text-subtle"}`}
-        >
-          {truncated
-            ? "Read-only"
-            : editor.saveState === "saved"
-              ? "Saved"
-              : editor.saveState === "saving"
-                ? "Saving..."
-                : "Couldn't save"}
-        </span>
+        <StateMark
+          testId={`${testId}-save-state`}
+          state={editor.saveState}
+          shown={readOnly ? "read-only" : truncated ? "too-large" : editor.saveState}
+          className="ml-auto"
+        />
       </div>
       <Suspense
         fallback={
@@ -106,7 +102,7 @@ export function TextEditorView({
           valueRevision={editor.valueRevision}
           language={language}
           path={path}
-          readOnly={truncated}
+          readOnly={truncated || readOnly}
           scrollLine={scrollLine}
           pendingUndo={pendingUndo}
           onPendingUndoConsumed={onPendingUndoConsumed}

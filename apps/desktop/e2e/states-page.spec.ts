@@ -42,7 +42,7 @@ const THEMES = ["light", "dark"] as const;
 // Every part the page has, so a section dropped by mistake fails here
 // instead of leaving its baselines unread.
 const PARTS = [
-  "surfaces", "buttons", "copy", "segmented", "switch", "chips", "avatars", "badges", "text-inputs",
+  "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
   "steps", "folder-chip", "hue-control", "color-control", "list-rows", "menu", "document-menu",
   "empty", "loading", "toasts", "notices", "dialog",
 ];

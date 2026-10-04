@@ -10,6 +10,7 @@ import { CopyButton } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
 import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AutomationBadge } from "../workbench/AutomationBadge";
@@ -355,6 +356,20 @@ function Pane(props: { theme: "light" | "dark" }) {
             <SwitchControl label="Sync" checked onChange={noop} />
           </span>
           <SwitchControl label="Sync" checked disabled onChange={noop} />
+        </Specimen>
+      </Section>
+
+      {/* Every row of the save-state map, keyed by the stored state it
+          presents. Settings' idle state draws nothing, so its specimen is
+          the empty space where the chip would be. */}
+      <Section part="state-mark" title="State mark">
+        {(Object.keys(SAVE_STATE) as SaveStateKey[]).map((key) => (
+          <Specimen key={key} label={key}>
+            <StateMark testId={`states-mark-${key}-${theme}`} state={key} shown={key} />
+          </Specimen>
+        ))}
+        <Specimen label="settings idle">
+          <span className="block h-4" />
         </Specimen>
       </Section>
 

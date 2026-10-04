@@ -27,7 +27,7 @@ describe("states page", () => {
     expect(screen.getByTestId("states-dark").getAttribute("data-theme")).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("light");
     // The same sections in both themes, so a capture compares like with like.
-    for (const title of ["Buttons", "Copy", "Menu", "Text inputs", "List rows", "Toasts", "Notices", "Dialog"]) {
+    for (const title of ["Buttons", "Copy", "State mark", "Menu", "Text inputs", "List rows", "Toasts", "Notices", "Dialog"]) {
       expect(screen.getAllByRole("heading", { name: title })).toHaveLength(2);
     }
     // Every forced state names an element the capture can find. A menu's
