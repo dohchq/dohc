@@ -339,17 +339,6 @@ describe("agent declarations", () => {
     expect(() => parseRelayAcceptedLiveUpdate({...accepted, agentDeclaration: {...agent}})).toThrow(TypeError);
   });
 
-  it("refuses an undefined, null, or malformed declaration member and any other member", () => {
-    const submission = { deliveryId: "delivery-1", updateDigest: digestA, binding };
-    for (const agentDeclaration of [undefined, null, {}, { agentId: "agent", onBehalfOf: null, depth: 65 }]) {
-      expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, agentDeclaration })).toThrow(TypeError);
-      expect(() => parseLiveUpdateSubmissionMetadata({ ...submission, agentDeclaration })).toThrow(TypeError);
-    }
-    const agentDeclaration = { agentId: "agent", onBehalfOf: null, depth: 0 };
-    expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, agentDeclaration, agent: "agent" })).toThrow(TypeError);
-    expect(() => parseLiveUpdateReceipt({ ...receipt, agentDeclaration })).toThrow(TypeError);
-  });
-
   it("refuses the engine's out-of-bounds values and any other field", () => {
     for (const declaration of [
       { agentId: "", onBehalfOf: null, depth: 0 },

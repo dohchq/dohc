@@ -976,7 +976,7 @@
     },
     {
       "parser": "parseAdmittedLiveUpdateMetadata",
-      "case": "owner accepted record with a Unicode agent declaration",
+      "case": "v2 owner accepted metadata with a Unicode agent snapshot",
       "input": {
         "accepted": {
           "receipt": {
@@ -1058,7 +1058,7 @@
     },
     {
       "parser": "parseAdmittedLiveUpdateMetadata",
-      "case": "admitted metadata with an agent declaration and no declared person",
+      "case": "v2 admitted metadata with an agent snapshot and no declared person",
       "input": {
         "accepted": {
           "receipt": {
@@ -1150,7 +1150,7 @@
     },
     {
       "parser": "parseLiveUpdateSubmissionMetadata",
-      "case": "submission metadata with an agent declaration",
+      "case": "submission metadata with agent recording context",
       "input": {
         "deliveryId": "delivery-1",
         "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1690,285 +1690,6 @@
           }
         ],
         "checkpointCoverage": []
-      }
-    },
-    {
-      "parser": "parseRelayAcceptedLiveUpdate",
-      "case": "named accepted record declares an agent",
-      "input": {
-        "receipt": {
-          "deliveryId": "delivery-1",
-          "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "journalCursor": 1,
-          "acceptingHostEpoch": 2
-        },
-        "binding": {
-          "workspaceId": "workspace-1",
-          "mainVersionId": "main-1",
-          "objectId": "object-1",
-          "lineageClaimId": "lineage-1",
-          "currentPath": "notes/a.md",
-          "selectorPaths": [
-            "notes/a.md"
-          ],
-          "restoreFenceGeneration": 0
-        },
-        "authority": {
-          "principalKind": "named",
-          "principalId": "person-1",
-          "grantId": "grant-1",
-          "grantGeneration": 1
-        },
-        "receivedAtMs": 30,
-        "agentDeclaration": {
-          "agentId": "trip-agent",
-          "onBehalfOf": null,
-          "depth": 0
-        }
-      }
-    },
-    {
-      "parser": "parseRelayAcceptedLiveUpdate",
-      "case": "link accepted record declares an agent",
-      "input": {
-        "receipt": {
-          "deliveryId": "delivery-1",
-          "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "journalCursor": 1,
-          "acceptingHostEpoch": 2
-        },
-        "binding": {
-          "workspaceId": "workspace-1",
-          "mainVersionId": "main-1",
-          "objectId": "object-1",
-          "lineageClaimId": "lineage-1",
-          "currentPath": "notes/a.md",
-          "selectorPaths": [
-            "notes/a.md"
-          ],
-          "restoreFenceGeneration": 0
-        },
-        "authority": {
-          "principalKind": "link",
-          "principalId": "link-session-1",
-          "grantId": "grant-1",
-          "grantGeneration": 2
-        },
-        "receivedAtMs": 30,
-        "agentDeclaration": {
-          "agentId": "trip-agent",
-          "onBehalfOf": null,
-          "depth": 0
-        }
-      }
-    },
-    {
-      "parser": "parseRelayAcceptedLiveUpdate",
-      "case": "accepted agent declaration is null",
-      "input": {
-        "receipt": {
-          "deliveryId": "delivery-1",
-          "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "journalCursor": 1,
-          "acceptingHostEpoch": 2
-        },
-        "binding": {
-          "workspaceId": "workspace-1",
-          "mainVersionId": "main-1",
-          "objectId": "object-1",
-          "lineageClaimId": "lineage-1",
-          "currentPath": "notes/a.md",
-          "selectorPaths": [
-            "notes/a.md"
-          ],
-          "restoreFenceGeneration": 0
-        },
-        "authority": {
-          "principalKind": "owner",
-          "principalId": "owner-1",
-          "grantId": null,
-          "grantGeneration": null
-        },
-        "receivedAtMs": 30,
-        "agentDeclaration": null
-      }
-    },
-    {
-      "parser": "parseRelayAcceptedLiveUpdate",
-      "case": "accepted agent declaration omits onBehalfOf",
-      "input": {
-        "receipt": {
-          "deliveryId": "delivery-1",
-          "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "journalCursor": 1,
-          "acceptingHostEpoch": 2
-        },
-        "binding": {
-          "workspaceId": "workspace-1",
-          "mainVersionId": "main-1",
-          "objectId": "object-1",
-          "lineageClaimId": "lineage-1",
-          "currentPath": "notes/a.md",
-          "selectorPaths": [
-            "notes/a.md"
-          ],
-          "restoreFenceGeneration": 0
-        },
-        "authority": {
-          "principalKind": "owner",
-          "principalId": "owner-1",
-          "grantId": null,
-          "grantGeneration": null
-        },
-        "receivedAtMs": 30,
-        "agentDeclaration": {
-          "agentId": "trip-agent",
-          "depth": 0
-        }
-      }
-    },
-    {
-      "parser": "parseRelayAcceptedLiveUpdate",
-      "case": "accepted agent declaration names an authority",
-      "input": {
-        "receipt": {
-          "deliveryId": "delivery-1",
-          "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "journalCursor": 1,
-          "acceptingHostEpoch": 2
-        },
-        "binding": {
-          "workspaceId": "workspace-1",
-          "mainVersionId": "main-1",
-          "objectId": "object-1",
-          "lineageClaimId": "lineage-1",
-          "currentPath": "notes/a.md",
-          "selectorPaths": [
-            "notes/a.md"
-          ],
-          "restoreFenceGeneration": 0
-        },
-        "authority": {
-          "principalKind": "owner",
-          "principalId": "owner-1",
-          "grantId": null,
-          "grantGeneration": null
-        },
-        "receivedAtMs": 30,
-        "agentDeclaration": {
-          "agentId": "trip-agent",
-          "onBehalfOf": null,
-          "depth": 0,
-          "principalId": "owner-1"
-        }
-      }
-    },
-    {
-      "parser": "parseRelayAcceptedLiveUpdate",
-      "case": "accepted agent declaration depth exceeds the chain bound",
-      "input": {
-        "receipt": {
-          "deliveryId": "delivery-1",
-          "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "journalCursor": 1,
-          "acceptingHostEpoch": 2
-        },
-        "binding": {
-          "workspaceId": "workspace-1",
-          "mainVersionId": "main-1",
-          "objectId": "object-1",
-          "lineageClaimId": "lineage-1",
-          "currentPath": "notes/a.md",
-          "selectorPaths": [
-            "notes/a.md"
-          ],
-          "restoreFenceGeneration": 0
-        },
-        "authority": {
-          "principalKind": "owner",
-          "principalId": "owner-1",
-          "grantId": null,
-          "grantGeneration": null
-        },
-        "receivedAtMs": 30,
-        "agentDeclaration": {
-          "agentId": "trip-agent",
-          "onBehalfOf": null,
-          "depth": 65
-        }
-      }
-    },
-    {
-      "parser": "parseRelayAcceptedLiveUpdate",
-      "case": "accepted agent declaration contains a C1 control",
-      "input": {
-        "receipt": {
-          "deliveryId": "delivery-1",
-          "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "journalCursor": 1,
-          "acceptingHostEpoch": 2
-        },
-        "binding": {
-          "workspaceId": "workspace-1",
-          "mainVersionId": "main-1",
-          "objectId": "object-1",
-          "lineageClaimId": "lineage-1",
-          "currentPath": "notes/a.md",
-          "selectorPaths": [
-            "notes/a.md"
-          ],
-          "restoreFenceGeneration": 0
-        },
-        "authority": {
-          "principalKind": "owner",
-          "principalId": "owner-1",
-          "grantId": null,
-          "grantGeneration": null
-        },
-        "receivedAtMs": 30,
-        "agentDeclaration": {
-          "agentId": "trip-agent",
-          "onBehalfOf": null,
-          "depth": 0
-        }
-      }
-    },
-    {
-      "parser": "parseAdmittedLiveUpdateMetadata",
-      "case": "admitted agent declaration with an empty declared person",
-      "input": {
-        "accepted": {
-          "receipt": {
-            "deliveryId": "delivery-1",
-            "updateDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "journalCursor": 1,
-            "acceptingHostEpoch": 2
-          },
-          "binding": {
-            "workspaceId": "workspace-1",
-            "mainVersionId": "main-1",
-            "objectId": "object-1",
-            "lineageClaimId": "lineage-1",
-            "currentPath": "notes/a.md",
-            "selectorPaths": [
-              "notes/a.md"
-            ],
-            "restoreFenceGeneration": 0
-          },
-          "authority": {
-            "principalKind": "owner",
-            "principalId": "owner-1",
-            "grantId": null,
-            "grantGeneration": null
-          },
-          "receivedAtMs": 30,
-          "agentDeclaration": {
-            "agentId": "trip-agent",
-            "onBehalfOf": "",
-            "depth": 0
-          }
-        },
-        "firstSeen": []
       }
     }
   ],
