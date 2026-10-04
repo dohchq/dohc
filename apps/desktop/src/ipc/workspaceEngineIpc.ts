@@ -215,6 +215,7 @@ export function createWorkspaceEngineIpc<
         agent: (author) => author.agentRunId ? (author.onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent") : author.agentId === "dohc-mcp" ? "Agent" : author.agentId,
         automation: (automationId) => automationAuthor(workspaceId, automationId),
         named: (author) => namedAuthorLabel(workspaceId, author),
+        person: (author) => (author.onBehalfOf ?? author.humanId) === localPersonId() ? "You" : "Another person",
       };
     }
 

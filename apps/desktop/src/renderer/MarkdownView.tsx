@@ -206,6 +206,8 @@ export function MarkdownView(props: {
   chatMentionsAvailable?: boolean;
   onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: FileSaveState) => void;
+  // A live document became read-only while it was open.
+  onLiveReadOnly?: () => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
   knownFiles?: ReadonlyArray<WikilinkFile>;
   pendingUndo?: PendingTextUndo;
@@ -744,6 +746,14 @@ export function MarkdownView(props: {
   }, [surfaceMode, props.path]);
 
   const { onSaveStateChange } = props;
+  const onLiveReadOnly = useRef(props.onLiveReadOnly);
+  onLiveReadOnly.current = props.onLiveReadOnly;
+  // Once each time the live document turns read-only, with or without an
+  // edit waiting: the shell asks whether the share behind it ended.
+  const liveReadOnly = engine.readOnlyWhileEditing || engine.saveState === "read-only";
+  useEffect(() => {
+    if (liveReadOnly) onLiveReadOnly.current?.();
+  }, [liveReadOnly]);
 
   // Parse-once + visible-first: the memo stops re-parses on
   // unrelated re-renders (collab status flips, save-state ticks), and the
@@ -1874,7 +1884,13 @@ export function MarkdownView(props: {
           hasSetAsideEdit={hasSetAsideEdit}
         />
       ) : null}
-      <OrphanedDraftNotices workspaceId={props.workspaceId} path={props.path} />
+      <OrphanedDraftNotices
+        workspaceId={props.workspaceId}
+        path={props.path}
+        message={engine.readOnlyWhileEditing
+          ? "This document became read-only. Copy your text to keep it."
+          : undefined}
+      />
     </>
   );
 

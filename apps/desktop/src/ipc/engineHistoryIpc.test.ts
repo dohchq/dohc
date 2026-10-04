@@ -25,6 +25,7 @@ const names: EngineMomentAuthorNames = {
   automation: (automationId) =>
     automationId.startsWith("collection:") ? { name: `Named ${automationId}`, collection: "Tasks" } : null,
   named: (author) => `${author.userId}@example.com (Edit)`,
+  person: (author) => author.onBehalfOf === "ada" ? "You" : "Another person",
 };
 
 const TEXT_SHA = "a".repeat(64);
@@ -72,6 +73,11 @@ describe("listEngineMomentsForIpc", () => {
     expect(response.moments[0]?.authors).toEqual(authors);
     expect(response.moments[0]).not.toHaveProperty("namedAuthor");
     expect(response.moments[0]).not.toHaveProperty("automationAuthor");
+    // Several authors read as each of them, in order; none stands in for the rest.
+    expect(response.moments[0]?.authorLabels).toEqual([
+      "You", "Agent", "Named collection:Tasks#stamp in Tasks", "ana@example.com (Edit)",
+      "Edit link · holder holder", "Link holder public",
+    ]);
   });
 
   it("does not reclassify an unknown daemon failure", async () => {
@@ -150,7 +156,9 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     const agentNamer = vi.fn(names.agent);
     const record = engineMomentDetailForIpc(detail, { ...names, agent: agentNamer });
     expect(record).not.toHaveProperty("agentAuthorName");
-    expect(agentNamer).not.toHaveBeenCalled();
+    // Each author reads on its own; the agent does not stand in for the person.
+    expect(record.authorLabels).toEqual(["You", "Another person"]);
+    expect(agentNamer).toHaveBeenCalledTimes(1);
     expect(record.authors).toEqual(detail.moment.authors);
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
   });

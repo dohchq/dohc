@@ -1528,6 +1528,9 @@ export const EngineMomentRecord = z.object({
     grantGeneration: z.number().int().positive(),
     principalId: z.string().min(1).max(500),
   }).strict().optional(),
+  // Present when more than one author wrote the moment: how each reads, in
+  // the order of `authors`. The singleton author fields stay absent then.
+  authorLabels: z.array(z.string().min(1).max(4096)).min(2).optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic

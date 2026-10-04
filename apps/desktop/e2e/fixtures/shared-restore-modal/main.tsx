@@ -36,7 +36,7 @@ let status = { operationId: "restore", document: documentKey, path, phase: "nati
   onUpdateState: () => () => {},
   async ownerRestore(input: { action: string }) {
     if (input.action === "options") {
-      return { document: documentKey, path, grants: [], points: [], nextBeforeCursor: null, nextGrantCursor: null,
+      return { document: documentKey, path, grants: [], points: [], authors: [], nextBeforeCursor: null, nextGrantCursor: null,
         pendingOperation: { operationId: "restore", phase: "native-fenced", proposalDigest: null } };
     }
     if (input.action === "status") return status;

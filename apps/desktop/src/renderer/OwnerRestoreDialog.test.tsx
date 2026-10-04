@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import {act, cleanup, fireEvent, render, screen} from "@testing-library/react";
+import {act, cleanup, fireEvent, render, screen, within} from "@testing-library/react";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {afterEach, expect, it, vi} from "vitest";
 import {OwnerRestoreDialog} from "./OwnerRestoreDialog";
@@ -10,6 +10,8 @@ import {deferred} from "../testing/deferred";
 const documentKey = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "lineage"};
 const binding = {...documentKey, currentPath: "notes.md", selectorPaths: ["notes.md"], restoreFenceGeneration: 1};
 const digest = "a".repeat(64), proposalDigest = "b".repeat(64);
+const owner = {principalKind: "owner" as const, principalId: "owner", grantId: null, grantGeneration: null};
+const reader = {principalKind: "named" as const, principalId: "reader", grantId: "grant", grantGeneration: 1};
 const receipt = (cursor: number) => ({deliveryId: `event-${cursor}`, updateDigest: digest, journalCursor: cursor, acceptingHostEpoch: parseHostEpoch(1)});
 function reviewFixture() {
   return OwnerRestoreReview.parse({operationId: "restore", workspaceId: "workspace", binding, proposalDigest, candidateDigest: digest,
@@ -33,7 +35,8 @@ function fixture(pointCursor = 0) {
   const recipients = [{grantId: "grant", principalKind: "link" as const, email: null, userId: null},
     {grantId: "dependent", principalKind: "user" as const, email: "reader@example.test", userId: "reader"}];
   const options = {document: documentKey, path: "notes.md", grants: [{...recipients[0]!, shareId: "share", generation: 1}],
-    points: [{cursor: pointCursor, receivedAtMs: pointCursor ? 1788922800000 : null, kind: pointCursor ? "accepted" : "baseline", receiptDigest: digest}], nextBeforeCursor: null, nextGrantCursor: null, pendingOperation: null};
+    points: [{cursor: pointCursor, receivedAtMs: pointCursor ? 1788922800000 : null, kind: pointCursor ? "accepted" : "baseline", receiptDigest: digest,
+      authority: pointCursor ? owner : null}], authors: [], nextBeforeCursor: null, nextGrantCursor: null, pendingOperation: null};
   const call = vi.fn(async (input: OwnerRestoreRequest): Promise<unknown> => {
     if (input.action === "options") return options;
     if (input.action === "plan") return {intent, path: "notes.md", recipients};
@@ -234,7 +237,9 @@ it("identifies the accepted restore point in the review", async () => {
   });
   render(<OwnerRestoreDialog {...f.props} />); await openStop("7");
   fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
-  expect(screen.getByText("Change 7")).toBeTruthy();
+  const point = screen.getByText(/^Restore point:/);
+  expect(point.textContent).toBe(`Restore point: ${new Date(1788922800000).toLocaleString()} · Owner`);
+  expect(point.dataset.journalCursor).toBe("7");
   expect(document.querySelector("time")?.dateTime).toBe(new Date(1788922800000).toISOString());
 });
 
@@ -245,4 +250,46 @@ it("rejects a missing accepted time, a fabricated baseline time, and dates the r
   for (const selectedPointReceivedAtMs of [null, undefined, Number.MAX_SAFE_INTEGER]) {
     expect(OwnerRestoreReview.safeParse({...accepted, selectedPointReceivedAtMs}).success).toBe(false);
   }
+});
+
+it("names people by the email the relay resolved, in the choices and in the review", async () => {
+  const f = fixture(), original = f.call.getMockImplementation()!, at = 1788922800000;
+  const point = (cursor: number, authority: typeof owner | typeof reader | null, receivedAtMs: number | null = at) =>
+    ({cursor, receivedAtMs: authority ? receivedAtMs : null, kind: authority ? "accepted" : "baseline", receiptDigest: digest, authority});
+  const grant = {grantId: "grant", principalKind: "user" as const, userId: "reader", email: "reader@example.test", shareId: "share", generation: 1};
+  const stranger = {...reader, principalId: "stranger", grantId: "old-grant"};
+  f.call.mockImplementation(async input => input.action === "options" ? {...f.options, grants: [grant],
+    points: [point(4, reader), point(3, reader), point(2, stranger), point(1, owner, at - 60_000), point(0, null)],
+    authors: [{grantId: "grant", principalKind: "user", userId: "reader", email: "reader@example.test"},
+      {grantId: "old-grant", principalKind: "user", userId: "stranger", email: null}]} : original(input));
+  render(<OwnerRestoreDialog {...f.props} />);
+  const access = await screen.findByRole("combobox", {name: "Access to stop"});
+  expect(within(access).getByRole("option", {name: "reader@example.test"})).toBeTruthy();
+  const points = screen.getByRole("combobox", {name: "Shared restore point"});
+  const shown = new Date(at).toLocaleString();
+  expect([...points.querySelectorAll("option")].map(option => [option.value, option.textContent])).toEqual([
+    ["", "Choose a change"],
+    ["4", `${shown} · reader@example.test (2 of 2)`],
+    ["3", `${shown} · reader@example.test (1 of 2)`],
+    // An account the relay could not name keeps its ID rather than a guessed name.
+    ["2", `${shown} · Account stranger`],
+    ["1", `${new Date(at - 60_000).toLocaleString()} · Owner`],
+    ["0", "Before accepted edits"],
+  ]);
+  // The review names the same people its choices named.
+  const options = f.call.getMockImplementation()!;
+  f.call.mockImplementation(async input => {
+    if (input.action !== "review") return options(input);
+    const review = reviewFixture();
+    for (const event of review.acceptedEvents.slice(0, 2)) Object.assign(event.metadata.accepted, {authority: reader});
+    return {status: f.status(), result: review};
+  });
+  fireEvent.change(points, {target: {value: "1"}});
+  fireEvent.change(access, {target: {value: "grant"}});
+  fireEvent.click(screen.getByRole("button", {name: "Review affected access"}));
+  await screen.findByText("Stop access before restoring?");
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
+  const rows = [...screen.getByTestId("owner-restore-dialog").querySelectorAll("li")].map(row => row.textContent!.split(" · ")[0]);
+  expect(rows).toContain("reader@example.test");
+  expect(rows.join()).not.toContain("Account reader");
 });

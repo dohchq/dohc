@@ -880,10 +880,11 @@ pub fn apply_committed(
             }
             // The settlement that covers this delivery names its declared
             // agent, and this owner's own native update names the author its
-            // journal row recorded. A full interval refuses before anything is
-            // written, so nothing is truncated. Settling releases it, unless an
-            // earlier moment still reserves its authors until its file write
-            // lands.
+            // journal row recorded. A person the owner shared with, or an Edit
+            // share link, is named from the relay's authority, never the frame.
+            // A full interval refuses before anything is written, so nothing is
+            // truncated. Settling releases it, unless an earlier moment still
+            // reserves its authors until its file write lands.
             let own = own_draft(tx, &key, &event.metadata.accepted.receipt)?;
             // This owner's own native update delivers exactly what its outbox
             // entry declared.
@@ -902,6 +903,9 @@ pub fn apply_committed(
                     actor.as_deref(),
                     attribution.as_ref(),
                 ));
+            }
+            if let Some(shared) = event.metadata.accepted.authority.shared_author() {
+                authors.push(crate::author_coverage::shared_json(&shared)?);
             }
             match crate::author_coverage::admit_accepted_in(tx, &key, &authors) {
                 Err(CollabError::AuthorCapacity)
@@ -3420,6 +3424,19 @@ mod tests {
         assert_eq!(
             persons(&store),
             vec![None, Some("guest-1".to_owned()), None]
+        );
+        // The moment that settles these frames names the collaborator and the
+        // link from the same authority, so History says who changed the file.
+        let interval = store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+            .unwrap()
+            .json();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&interval).unwrap(),
+            serde_json::json!([
+                {"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"},
+                {"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1},
+            ]),
         );
 
         let body_only = event("body-only", 4, source.plaintext_insert(0, "body"));

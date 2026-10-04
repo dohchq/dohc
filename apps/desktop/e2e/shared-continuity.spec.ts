@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page, type TestInfo } from "@playwright/test";
 import type { DohcDesktopBridge, EngineMomentRecord } from "../src/ipc/bridgeContract";
 import { assertDesktopEngineHealthy, launchDesktopApp, type LaunchedDesktopApp } from "./helpers/desktopApp";
 import { DohcCliFailure, runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
@@ -54,6 +54,16 @@ const EDIT_NOT_YET_SAVED = `dohc: The edit is in ${PATH}, but dohc has not saved
 
 const editor = (page: Page) => page.getByTestId("markdown-editor");
 const saveState = (page: Page) => page.getByTestId("markdown-save-state");
+
+/** A desktop window as the person sees it, for layout review. It stays in the local report. */
+async function attachScreen(testInfo: TestInfo, page: Page, name: string): Promise<void> {
+  await testInfo.attach(name, { contentType: "image/png", body: await page.screenshot() });
+}
+
+/** A document workflow sends no Collection changes, so no notice in this window speaks of them. */
+async function expectNoCollectionNotice(page: Page): Promise<void> {
+  await expect(page.getByText(/Collection changes/)).toHaveCount(0);
+}
 
 async function cliRead(temp: TempWorkspace): Promise<string> {
   return (await runDohcCli(temp, ["document", "read", PATH])).stdout;
@@ -503,19 +513,35 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await typeAfter(page, H1, ` ${R1}`);
       // A shared session reports saved once the server's host accepted the edit.
       await expect(saveState(page)).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
+      await expectNoCollectionNotice(page);
     });
 
     await test.step("the idle owner's editor and the agent see the recipient's edit", async () => {
       await expect(editor(owner!.page)).toContainText(R1, { timeout: 60_000 });
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, R1]), { timeout: 60_000 }).toBe(true);
+      // The owner's History names the recipient's change by the relay's
+      // authority for it, shown as their account email.
+      const page = owner!.page;
+      const recipientUserId = await accountId(recipientAccount.email);
+      await expect.poll(async () => {
+        const history = await page.evaluate(({ workspaceId }) =>
+          (window as unknown as { dohcDesktop: Api }).dohcDesktop.listEngineMoments({ workspaceId, limit: 100 }), { workspaceId: workspace.workspaceId });
+        return "moments" in history
+          ? history.moments.filter(moment => moment.path === PATH && moment.namedAuthor?.userId === recipientUserId).map(moment => moment.namedAuthor!.label)
+          : [];
+      }, { timeout: 60_000 }).toContainEqual(expect.stringContaining(recipientAccount.email));
+      await openHistoryView(page);
+      await expect(page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`, { hasText: recipientAccount.email }).first())
+        .toBeVisible({ timeout: 60_000 });
+      await attachScreen(testInfo, page, "owner History names the recipient");
     });
 
     await test.step("the owner stops the recipient's access and restores the document to before their edit", async () => {
       const page = owner!.page;
       const recipientUserId = await accountId(recipientAccount.email);
       const dialog = await openSharedRestore(page);
-      // Restore lists an account recipient by account ID, not email.
-      const recipientLabel = `Account ${recipientUserId}`;
+      // Restore names the recipient by their account email.
+      const recipientLabel = recipientAccount.email;
       const access = dialog.getByLabel("Access to stop");
       await expect(access.locator("option", { hasText: recipientLabel })).toHaveCount(1, { timeout: 60_000 });
       await access.selectOption({ label: recipientLabel });
@@ -523,11 +549,16 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // which keeps the owner's and agent's work.
       const point = stack!.acceptedCursorBefore(workspace.workspaceId, PATH, recipientUserId);
       const pointSelect = dialog.getByLabel("Shared restore point");
-      await expect(pointSelect.locator(`option[value="${point}"]`)).toHaveText(new RegExp(` · Change ${point}$`));
+      // A choice says when and who made the change, never an internal change
+      // number. Its value stays the exact accepted cursor.
+      await expect(pointSelect.locator(`option[value="${point}"]`)).toHaveText(/ · Owner( \(\d+ of \d+\))?$/);
+      await expect(pointSelect.locator("option", { hasText: /Change \d+/ })).toHaveCount(0);
       await pointSelect.selectOption({ value: String(point) });
+      await attachScreen(testInfo, page, "restore choices");
       await dialog.getByRole("button", { name: "Review affected access" }).click();
       await expect(dialog.getByRole("heading", { name: "Stop access before restoring?" })).toBeVisible();
       await expect(dialog.getByRole("listitem").filter({ hasText: recipientLabel })).toHaveCount(1);
+      await attachScreen(testInfo, page, "restore stop access");
       // The recipient can still edit, so read-only afterwards proves the stop.
       await expect(saveState(recipient!.page)).toHaveAttribute("data-state", "saved");
       await expect(editor(recipient!.page)).toHaveAttribute("contenteditable", "true");
@@ -540,10 +571,16 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       expect(restored).toContain(A1);
       expect(restored).toContain(HA);
       expect(restored).not.toContain(R1);
-      // The review names the recipient by account ID, not by name or email.
+      const restorePoint = dialog.getByText(/^Restore point:/);
+      await expect(restorePoint).toHaveAttribute("data-journal-cursor", String(point));
+      await expect(restorePoint).toHaveText(/ · Owner$/);
+      await attachScreen(testInfo, page, "restore review before and after");
+      // The review names the recipient by the same email, not an account ID.
       const removed = dialog.locator("details", { has: page.locator("summary", { hasText: /^Removed by this restore/ }) });
       await removed.locator("summary").first().click();
-      await expect(removed).toContainText(`Account ${recipientUserId}`);
+      await expect(removed).toContainText(recipientAccount.email);
+      await expect(removed).not.toContainText(`Account ${recipientUserId}`);
+      await attachScreen(testInfo, page, "restore review removed changes");
       await testInfo.attach("attribution", {
         contentType: "application/json",
         body: JSON.stringify({
@@ -634,6 +671,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect.poll(() => cliRead(ownerTemp), { timeout: 60_000 }).toContain(R2);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, H2, A2, R2], [R1]), { timeout: 60_000 }).toBe(true);
       await expect(owner!.page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 60_000 });
+      await expectNoCollectionNotice(page);
     });
 
     await test.step("the stopped recipient's access stays ended", async () => {
@@ -643,7 +681,18 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(saveState(page)).toHaveAttribute("data-state", "read-only");
       await expect(editor(page)).toHaveAttribute("contenteditable", "false");
       await expect(editor(page)).not.toContainText(R2);
-      await expectActiveAccess(owner!.page, [`Account ${await accountId(newRecipientAccount.email)}`]);
+      // The window says the share ended without the person asking: the
+      // document turning read-only made it ask the relay, and the relay said so.
+      await expect(page.getByTestId("shared-view-banner")).toContainText(/This share was ended/, { timeout: 60_000 });
+      await expect(page.getByTestId("shared-view-refresh")).toHaveCount(0);
+      // Any text set aside when access ended stays copyable.
+      const setAside = page.getByTestId("orphaned-draft-notice");
+      testInfo.annotations.push({ type: "stopped recipient set-aside notices", description: (await setAside.allInnerTexts()).join(" | ") || "none" });
+      if (await setAside.count()) await expect(page.getByTestId("orphaned-draft-copy").first()).toBeVisible();
+      await expect(editor(page)).toHaveAttribute("contenteditable", "false");
+      await expectNoCollectionNotice(page);
+      await attachScreen(testInfo, page, "stopped recipient");
+      await expectActiveAccess(owner!.page, [newRecipientAccount.email]);
     });
 
     await test.step("both hosted agents' attribution survives the owner's last restart", async () => {

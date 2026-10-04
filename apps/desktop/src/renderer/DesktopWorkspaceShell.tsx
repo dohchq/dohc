@@ -3821,6 +3821,7 @@ export function DesktopWorkspaceShell(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
   refreshShareViewRef.current = refreshShareView;
+  const refreshAfterLiveReadOnly = useCallback(() => void refreshShareViewRef.current(), []);
   useEffect(() => {
     // One automatic refresh when a shared view opens; afterwards on demand.
     if (workspaceIsReady && shareView && !shareViewEnded && !shareViewDamaged) {
@@ -3875,9 +3876,9 @@ export function DesktopWorkspaceShell(props: {
     // Read for any share view, not only one that can still send: changes
     // already sent stay withdrawable after a downgrade, and a surface that
     // stopped reading them would hide the only way back.
-    if (!isShareView) return;
+    if (!isShareView || !workspaceIsReady) return;
     void reloadMyShareChanges().catch(() => undefined);
-  }, [isShareView, reloadMyShareChanges]);
+  }, [isShareView, workspaceIsReady, reloadMyShareChanges]);
   const sendShareChanges = useCallback(async () => {
     const token = myShareChangeToken.current;
     // The newest token this call owns. The reload below takes a fresh one, and
@@ -3925,7 +3926,8 @@ export function DesktopWorkspaceShell(props: {
   }, [workspaceId, reloadMyShareChanges]);
   useShareDirectWrites({
     workspaceId,
-    enabled: shareViewDocumentsWritable,
+    // Main refuses a push from a window it has not opened the view in yet.
+    enabled: shareViewDocumentsWritable && workspaceIsReady,
     ownerName: shareGranterName,
     refreshShareView,
     sendShareChanges,
@@ -5158,6 +5160,10 @@ export function DesktopWorkspaceShell(props: {
                 }
                 onScrollConsumed={consumeSearchScrollTarget}
                 onSaveStateChange={editorCallbacks.onSaveStateChange}
+                // A document in an Edit share view that turns read-only may
+                // mean the owner ended access. The refresh asks the relay, and
+                // only the relay says so.
+                onLiveReadOnly={shareViewDocumentsWritable ? refreshAfterLiveReadOnly : undefined}
                 surfaceKey={editorGroup.id}
                 onSurfaceReady={onRestoredFileSurfaceReady}
                 registerDraftFlush={editorCallbacks.registerDraftFlush}

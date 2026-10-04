@@ -72,6 +72,13 @@ describe("engineMomentSourceLabel", () => {
     }));
     expect(submission).not.toBe(link);
   });
+  it("names every author of a moment several wrote, and none in place of the rest", () => {
+    expect(engineMomentSourceLabel(moment({ id: "mixed", origin: "local-file",
+      authorLabels: ["trip-agent", "ana@example.com (Edit)"] }))).toBe("trip-agent, ana@example.com (Edit)");
+    expect(engineMomentSourceLabel(moment({ id: "many", origin: "local-file",
+      authorLabels: ["You", "trip-agent", "ana@example.com (Edit)", "ben@example.com (Edit)", "Edit link · holder 3f9a2c1d"] })))
+      .toBe("You, trip-agent, ana@example.com (Edit) and 2 more");
+  });
   it("labels a public principal without inventing an agent identity", () => {
     expect(engineMomentSourceLabel(moment({id: "public", publicAuthor: {kind: "public", principalId: "holder-2", grantId: "grant-1"}}))).toBe("Link holder holder-2");
   });

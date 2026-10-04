@@ -28,6 +28,25 @@ export interface EngineMomentAuthorNames {
   agent(author: Extract<MomentAuthor, {kind: "agent"}>): string | undefined;
   automation(automationId: string): { name: string; collection?: string } | null;
   named(author: Extract<MomentAuthor, {kind: "named"}>): string;
+  // "You" for this computer's person; no other person's name is known here.
+  person(author: Extract<MomentAuthor, {kind: "human"}>): string;
+}
+
+// How one of several authors reads. A moment one author wrote keeps the
+// singleton fields below instead.
+function authorLabel(author: MomentAuthor, names: EngineMomentAuthorNames): string {
+  switch (author.kind) {
+    case "agent": return names.agent(author) ?? "Agent";
+    case "human": return names.person(author);
+    case "named": return names.named(author);
+    case "link": return `Edit link · holder ${author.principalId.slice(0, 8)}`;
+    case "public": return `Link holder ${author.principalId}`;
+    case "automation": {
+      const automation = names.automation(author.automationId);
+      if (!automation) return "Automation";
+      return automation.collection === undefined ? automation.name : `${automation.name} in ${automation.collection}`;
+    }
+  }
 }
 
 export async function listEngineMomentsForIpc(
@@ -81,6 +100,11 @@ function engineMomentBaseForIpc(
     ...automationAuthorOf(author, names),
     ...(author?.kind === "named"
       ? { namedAuthor: { userId: author.userId, label: names.named(author) } }
+      : {}),
+    // Several authors: each of them, in the order the moment recorded them.
+    // None stands in for the rest.
+    ...(moment.authors !== undefined && moment.authors.length > 1
+      ? { authorLabels: moment.authors.map((each) => authorLabel(each, names)) }
       : {}),
     ...(moment.metadata.summary !== undefined
       ? { summary: moment.metadata.summary }

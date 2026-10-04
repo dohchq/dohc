@@ -66,8 +66,13 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
 // it never reads like an app submission from a link holder. Everything else
 // keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">,
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">,
 ): string {
+  if (moment.authorLabels) {
+    const [first, second, third, ...rest] = moment.authorLabels;
+    const shown = [first, second, third].filter((label): label is string => label !== undefined).join(", ");
+    return rest.length ? `${shown} and ${rest.length} more` : shown;
+  }
   if (moment.publicAuthor) return `Link holder ${moment.publicAuthor.principalId}`;
   if (moment.linkAuthor) return `Edit link · holder ${moment.linkAuthor.principalId.slice(0, 8)}`;
   if (moment.automationAuthor) {
@@ -83,7 +88,7 @@ export function engineMomentSourceLabel(
 // Where a moment came from, as one line of History. An automation's name
 // and Collection follow the ⚡ mark, in words, so nothing waits behind hover.
 export function EngineMomentSource(props: {
-  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor">;
+  moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName" | "publicAuthor" | "linkAuthor" | "automationAuthor" | "namedAuthor" | "authorLabels">;
   testId: string;
   id?: string;
 }) {

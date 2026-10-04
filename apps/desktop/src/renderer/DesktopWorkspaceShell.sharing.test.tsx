@@ -539,6 +539,38 @@ describe("shared view send changes", () => {
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
   });
 
+  // Main refuses the window's calls until it has opened the view there. A
+  // push sent before that read as "could not send your Collection changes"
+  // beside an edit that saved.
+  it("pushes only once main has opened the view in this window", async () => {
+    const status = deferred<typeof SHARE_STATUS>();
+    const bridge = makeShareBridge();
+    let admitted = false;
+    bridge.openWorkspace = vi.fn(async () => {
+      const opened = await status.promise;
+      admitted = true;
+      return opened;
+    });
+    bridge.getSyncStatus = vi.fn(() => status.promise);
+    bridge.pushShareDirectWrites.mockImplementation(async () => {
+      if (!admitted) throw new Error("Share changes stopped because this window changed workspaces.");
+      return { status: "pushed", writes: [] };
+    });
+    bridge.listMyShareChanges.mockImplementation(async () => {
+      if (!admitted) throw new Error("Share changes stopped because this window changed workspaces.");
+      return { proposals: [{ proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 1 }] };
+    });
+    renderShell(bridge, EDIT_SHARE);
+    await screen.findByTestId("shared-view-banner");
+    expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
+    expect(bridge.listMyShareChanges).not.toHaveBeenCalled();
+
+    await act(async () => status.resolve(SHARE_STATUS));
+    await waitFor(() => expect(bridge.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
+    expect(await screen.findByTestId("share-changes-state")).toHaveProperty("dataset.state", "open");
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
   it("pushes nothing from a share view that cannot write", async () => {
     const bridge = makeShareBridge();
     renderShell(bridge, { ...SHARE_VIEW, shareView: { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" } });

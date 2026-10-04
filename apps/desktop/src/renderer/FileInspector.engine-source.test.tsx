@@ -90,7 +90,7 @@ describe("engine markdown source view", () => {
     const saveStateListeners = new Set<
       (event: {
         sessionId: string;
-        state: "settling" | "saved" | "error" | "deleted";
+        state: "settling" | "saved" | "error" | "deleted" | "read-only";
         seq: number;
       }) => void
     >();
@@ -155,7 +155,7 @@ describe("engine markdown source view", () => {
         (
           listener: (event: {
             sessionId: string;
-            state: "settling" | "saved" | "error" | "deleted";
+            state: "settling" | "saved" | "error" | "deleted" | "read-only";
             seq: number;
           }) => void,
         ) => {
@@ -175,7 +175,7 @@ describe("engine markdown source view", () => {
       }
     };
     const pushSaveState = (
-      state: "settling" | "saved" | "error" | "deleted",
+      state: "settling" | "saved" | "error" | "deleted" | "read-only",
       seq: number,
     ) => {
       for (const listener of saveStateListeners) listener({ sessionId, state, seq });
@@ -339,6 +339,51 @@ describe("engine markdown source view", () => {
     expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
       "This file was deleted while you had it open. It is in the system trash, or this workspace's .dohc/trash.",
     );
+  });
+
+  // A share whose access ended refuses the edit. The notice says what
+  // happened to the text and keeps Copy; the shell asks whether the share ended.
+  it("sets aside an edit refused as read-only and reports the read-only turn once", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const refused = vi.fn();
+    render(<FileInspector workspaceId="ws-1" path="a.md" onLiveReadOnly={refused} />);
+    await screen.findByTestId("markdown-source-toggle");
+
+    await user.type(screen.getByTestId("page-title"), " Retitled");
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
+    act(() => pushSaveState("read-only", 1));
+
+    expect((await screen.findByTestId("orphaned-draft-notice")).textContent).toContain(
+      "This document became read-only. Copy your text to keep it.",
+    );
+    expect(screen.getByTestId("orphaned-draft-copy")).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("false"),
+    );
+    expect(refused).toHaveBeenCalledTimes(1);
+  });
+
+  // Read-only with nothing waiting still asks once, and keeps the text copyable.
+  it("reports a read-only turn with no edit waiting once", async () => {
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    const readOnly = vi.fn();
+    render(<FileInspector workspaceId="ws-1" path="a.md" onLiveReadOnly={readOnly} />);
+    await screen.findByTestId("markdown-source-toggle");
+
+    act(() => pushSaveState("read-only", 0));
+    await waitFor(() => expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("read-only"));
+    act(() => pushSaveState("read-only", 0));
+    expect(readOnly).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
+      "This document became read-only. Copy your text to keep it.",
+    );
+    expect(screen.getByTestId("orphaned-draft-copy")).toBeTruthy();
+    // The session stays read-only; a later report is not a new turn.
+    act(() => pushSaveState("saved", 0));
+    expect(readOnly).toHaveBeenCalledTimes(1);
   });
 
   it("does not relabel an older set-aside edit as part of this deletion", async () => {

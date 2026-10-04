@@ -319,7 +319,7 @@ describe("registered owner restore handler", () => {
     }
     if (substitution === "path") {
       input = {workspaceId, action: "options", path: "notes.md"};
-      response = {document, path: "other.md", grants: [], points: [], nextBeforeCursor: null, nextGrantCursor: null, pendingOperation: null};
+      response = {document, path: "other.md", grants: [], points: [], authors: [], nextBeforeCursor: null, nextGrantCursor: null, pendingOperation: null};
     }
     h.request.mockResolvedValue(response);
     await expect(h.invoke(CHANNELS.ownerRestore, input)).rejects.toThrow();

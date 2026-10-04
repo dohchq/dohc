@@ -17,10 +17,11 @@ const textDetail: WorkspaceEngineMomentDetail = {protected: false, moment: {...b
 async function open(detail: WorkspaceEngineMomentDetail) {
   const moment = engineMomentDetailForIpc(detail, {
     named: () => "Someone you shared with",
+    person: () => "You",
     agent: () => "Owner",
     automation: (automationId) => ({ name: automationId, collection: "Tasks" }),
   });
-  const ownerRestore = vi.fn().mockResolvedValue({document: {workspaceId: "workspace"}, grants: [], points: [], pendingOperation: null,
+  const ownerRestore = vi.fn().mockResolvedValue({document: {workspaceId: "workspace"}, grants: [], points: [], authors: [], pendingOperation: null,
     nextGrantCursor: null, nextBeforeCursor: null});
   vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn().mockResolvedValue({moment}), ownerRestore});
   render(<EngineMomentDiffPage workspaceId="workspace" tabPath={momentDiffTabPath(moment.id)}

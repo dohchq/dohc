@@ -1,5 +1,5 @@
 import {z} from "zod";
-import {parseAdmittedLiveUpdateMetadata, parseLiveDocumentKey, parseLiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
+import {parseAdmittedLiveUpdateMetadata, parseLiveDocumentKey, parseLiveUpdateReceipt, parseServerDerivedLiveUpdateAuthority} from "@dohc/live-session-contract/live-update-admission";
 import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 
 const id = z.string().min(1).max(512), digest = z.string().regex(/^[a-f0-9]{64}$/), integer = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -9,6 +9,7 @@ function parsed<T>(parse: (input: unknown) => T) {
   });
 }
 const document = parsed(parseLiveDocumentKey), binding = parsed(parseLiveObjectBinding), receipt = parsed(parseLiveUpdateReceipt);
+const authority = parsed(parseServerDerivedLiveUpdateAuthority);
 export const OwnerRestorePhase = z.enum(["authority-invalidated", "fenced", "old-cut-applied", "native-fenced", "relay-admitted", "native-applied", "settled", "resumed"]);
 export const OwnerRestoreIntent = z.object({
   deliveryKind: z.enum(["bootstrap", "owner"]), operationId: id, document, shareId: id, grantId: id,
@@ -29,7 +30,9 @@ export const OwnerRestoreGrantCursor = z.object({shareCreatedAtMs: integer, shar
     cursor => (cursor.grantCreatedAtMs === null) === (cursor.grantId === null), "Invalid restore grant cursor.");
 export const OwnerRestoreOptions = z.object({document, path: z.string(),
   grants: z.array(OwnerRestoreRecipient.extend({shareId: id, generation: integer.min(1)})),
-  points: z.array(z.object({cursor: integer, receivedAtMs: integer.nullable(), kind: z.enum(["baseline", "accepted"]), receiptDigest: digest})),
+  points: z.array(z.object({cursor: integer, receivedAtMs: integer.nullable(), kind: z.enum(["baseline", "accepted"]), receiptDigest: digest,
+    authority: authority.nullable()}).refine(point => (point.kind === "baseline") === (point.authority === null), "Invalid restore point author.")),
+  authors: z.array(OwnerRestoreRecipient),
   nextBeforeCursor: integer.nullable(), nextGrantCursor: OwnerRestoreGrantCursor.nullable(), pendingOperation: z.object({operationId: id, phase: OwnerRestorePhase, proposalDigest: digest.nullable()}).nullable(),
 });
 export const OwnerRestorePlan = z.object({intent: OwnerRestoreIntent, path: z.string(), recipients: z.array(OwnerRestoreRecipient)});
