@@ -949,13 +949,14 @@ test('run journal reads saved headers and progress, and a refused run leaves non
   assert.deepEqual(others, []);
   assert.deepEqual(run, { claimId: 'c1', startedAtMs: 1000, finishedAtMs: 1600, outcome: { state: 'done' }, headerBytes: Buffer.byteLength(header),
     findMs: null, planMs: null, writeMs: null, writes: null,
+    appendMs: null, appendCount: null,
     progressBytes: Buffer.byteLength(progress), progressLines: 3, fieldWrites: 5, created: 2, createdPaths: ['p'] });
   const bytes = await journalBytes(root, automation);
   assert.equal(bytes.progressBytes, Buffer.byteLength(progress));
   assert.ok(bytes.headerBytes > Buffer.byteLength(header));
   const measured = [
-    { kind: 'step', ordinal: 0, effects: [], findMs: 12, planMs: 3 },
-    { kind: 'step', ordinal: 1, effects: [{}, {}], findMs: 8, planMs: 7 },
+    { kind: 'step', ordinal: 0, effects: [], findMs: 12, planMs: 3, appendMs: 0, appendCount: 0 },
+    { kind: 'step', ordinal: 1, effects: [{}, {}], findMs: 8, planMs: 7, appendMs: 31, appendCount: 2 },
     { kind: 'effect', ordinal: 1, writes: [{ kind: 'field' }, { kind: 'field' }], writeMs: 25, writeCount: 1 },
     { kind: 'effect', ordinal: 1, writes: [], writeMs: 0, writeCount: 1 },
   ];
@@ -973,6 +974,13 @@ test('run journal reads saved headers and progress, and a refused run leaves non
     { findMs: 22, planMs: null, writeMs: 25, writes: 2 });
   assert.deepEqual(await timing([...measured, { kind: 'effect', ordinal: 1, writes: [] }]),
     { findMs: 20, planMs: 10, writeMs: null, writes: null });
+  await timing(measured);
+  assert.deepEqual((await readRunJournal(root, automation)).map(({ appendMs, appendCount }) => ({ appendMs, appendCount })),
+    [{ appendMs: 31, appendCount: 2 }]);
+  await timing([...measured, { kind: 'effect', ordinal: 1, writes: [] }]);
+  assert.equal((await readRunJournal(root, automation))[0].appendMs, null);
+  await timing([{ kind: 'step', ordinal: 0, effects: [], findMs: 0, planMs: 0 }]);
+  assert.equal((await readRunJournal(root, automation))[0].appendMs, null);
 });
 
 const proc = (pid, name, cpuMs, workingSetBytes = 0, commandLine = 'dohc.exe') => ({ pid, name, commandLine, createdAt: `t${pid}`, cpuMs, workingSetBytes, privateBytes: workingSetBytes / 2 });
@@ -1126,11 +1134,11 @@ test('automation observer reads changed text and rejects a run that never settle
 test('summary reports automation cases per kind and keeps missing measurements missing', async () => {
   const sample = (start, inputToNextPaintMs) => ({ start, dispatchToTwoRafMs: 20, inputToNextPaintMs });
   const row = (name, fields) => ({ name, expected: 'done', outcome: 'done', pass: true, visibility: null, verification: { ok: true, settledOnDiskObservedMs: 300 },
-    triggerToSettledPaintedMs: 900, startMs: 400, runMs: 450, findMs: 25, planMs: 15, writeMs: 300, writes: 50,
+    triggerToSettledPaintedMs: 900, startMs: 400, runMs: 450, findMs: 25, planMs: 15, writeMs: 300, writes: 50, appendMs: 40, appendCount: 50,
     journal: { headerPeakBytesSampled: 8000, runs: [{ headerBytes: 700, progressBytes: 5000, fieldWrites: 200, created: 0 }] },
     cpuMs: { main: 300, engine: 200, renderer: 50 }, peakBytes: { main: { privateBytes: 1e8 } }, longTasks: [{ duration: 60 }, { duration: 80 }], typing: null, ...fields });
   const refused = row('find-500', { expected: 'refused', outcome: 'refused', startMs: null, runMs: null,
-    findMs: null, planMs: null, writeMs: null, writes: null, journal: { headerPeakBytesSampled: 0, runs: [] } });
+    findMs: null, planMs: null, writeMs: null, writes: null, appendMs: null, appendCount: null, journal: { headerPeakBytesSampled: 0, runs: [] } });
   const summary = await summarize({ label: 'baseline', status: 'failed', settings: {}, limits: [], runs: [
     { index: 1, collectionAutomations: { findCap: 50, writeCap: 200, fixtureSha256: 'f', document: { cases: [row('baseline'), refused] },
       dataset: { cases: [row('baseline-typing', { pass: false, typing: { samplesDuringRun: 2, samples: [sample(1, 24), sample(2, null), sample(3, 99)] } })] } } },
@@ -1141,7 +1149,7 @@ test('summary reports automation cases per kind and keeps missing measurements m
   assert.deepEqual(automations.document.baseline.triggerToSettledPaintedMs, { count: 1, p50: 900, p95: 900, max: 900 });
   assert.deepEqual([automations.document.baseline.longTaskCount.max, automations.document.baseline.longTaskTotalMs.max, automations.document.baseline.fieldWrites], [2, 140, [200]]);
   assert.deepEqual(automations.document['find-500'].startMs, { count: 0, p50: null, p95: null, max: null });
-  for (const [field, value] of Object.entries({ findMs: 25, planMs: 15, writeMs: 300, writes: 50 })) {
+  for (const [field, value] of Object.entries({ findMs: 25, planMs: 15, writeMs: 300, writes: 50, appendMs: 40, appendCount: 50 })) {
     assert.deepEqual(automations.document.baseline[field], { count: 1, p50: value, p95: value, max: value });
     assert.deepEqual(automations.document['find-500'][field], { count: 0, p50: null, p95: null, max: null });
   }

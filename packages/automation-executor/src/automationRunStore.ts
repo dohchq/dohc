@@ -137,6 +137,8 @@ const StepSchema = z.object({
   ordinal: z.number().int().nonnegative(),
   findMs: z.number().nonnegative().optional(),
   planMs: z.number().nonnegative().optional(),
+  appendMs: z.number().nonnegative().optional(),
+  appendCount: z.number().int().nonnegative().optional(),
   effects: z.array(EffectSchema),
   output: OutputSchema.optional(),
   collections: z.array(CollectionRefSchema).optional(),
@@ -338,6 +340,9 @@ export interface StoredStep {
   findMs?: number;
   /** Planning and formula evaluation, excluding reads. */
   planMs?: number;
+  /** Effect-result appends, persisted by the existing run save. */
+  appendMs?: number;
+  appendCount?: number;
   destinations?: Array<{ path: string; rules: { datasetId: string; revision: number; revisionSha256: string } | null }>;
   ordinal: number;
   effects: Array<PlannedEffect | DatasetEffect>;

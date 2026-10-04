@@ -688,6 +688,7 @@ async function automationCase(instance, runDir, kind, spec, surface) {
     triggerToSettledPaintedMs: observed.paintedMs - observed.triggerMs, triggerToSettledMatchedMs: observed.matchedMs - observed.triggerMs,
     startMs: run ? run.startedAtMs - triggerEpochMs : null, runMs: Number.isFinite(run?.finishedAtMs) ? run.finishedAtMs - run.startedAtMs : null,
     findMs: run?.findMs ?? null, planMs: run?.planMs ?? null, writeMs: run?.writeMs ?? null, writes: run?.writes ?? null,
+    appendMs: run?.appendMs ?? null, appendCount: run?.appendCount ?? null,
     journal: { runs: run ? [run] : [], headerPeakBytesSampled: during.headerPeakBytes },
     elapsedMs: after.completedAtMs - before.completedAtMs, cpuMs: cpuByKind(before, after, pid),
     peakBytes: peakByKind([before, ...during.snapshots, after], pid),

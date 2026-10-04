@@ -98,11 +98,14 @@ Each case records:
 - `runMs`, from `startedAtMs` to `finishedAtMs`, which covers every Find, formula evaluation and write;
 - `findMs`, the sum of saved steps' reads and Finds, and `planMs`, their planning and formula evaluation;
 - `writeMs`, the sum of saved effects' application times, and `writes`, their completed application count. One Set effect can change several fields on one record. Kept or skipped results still count as completed applications;
+- `appendMs` and `appendCount`, the sum and count of measured effect-result appends, including opening, appending, flushing and closing the progress file;
 - the saved run's header and progress bytes, and the header's sampled peak;
 - CPU per process kind until the run settles. The formula evaluator runs on a worker thread in main, so its CPU is part of main CPU;
 - sampled peak memory per process kind, and renderer long tasks until the settle text painted.
 
-Stage times use the executor's clock. Step lines carry `findMs` and `planMs`; effect lines carry `writeMs` and `writeCount`. Reads include acquiring read access and checking permissions. Each effect's result append and run-level setup remain outside stage totals. Created-record and replan lines saved during effect application count toward `writeMs`. Timing adds no journal writes or flushes.
+Stage times use the executor's clock. Step lines carry `findMs`, `planMs`, `appendMs` and `appendCount`; effect lines carry `writeMs` and `writeCount`. Reads include acquiring read access and checking permissions. Append totals measure the executor's awaited `appendEffect` call, including store queueing and filesystem checks. The existing final save persists them. Run setup and step saves remain outside stage totals. Created-record and replan lines saved during effect application count toward `writeMs`. Timing adds no journal writes or flushes.
+
+Append timing stays missing if a resumed step has effects whose append timing was not saved, or if its count does not cover every saved effect. A measured step with no effects has zero append time and count.
 
 A run refused before saving its first plan leaves its times and count missing. A later refusal retains measurements only for saved stages. Older journals without timing fields, and totals with an unmeasured saved stage, stay missing. The summary reports sample count, p50, p95 and maximum for each metric. Snapshots come about once a second, so a short memory or header peak can be missed.
 Soak growth includes allocator and garbage-collector timing. It is not a leak proof.
