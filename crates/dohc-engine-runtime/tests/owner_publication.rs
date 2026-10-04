@@ -7,13 +7,13 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::{path::PathBuf, sync::Arc};
 
 struct Fixture {
-    root: ScratchDir,
     db: PathBuf,
     store: EngineStore,
     binding: dohc_engine_collab::LiveObjectBinding,
     doc: Ydoc,
     bytes: Vec<u8>,
     text: String,
+    root: ScratchDir,
 }
 
 impl Fixture {
