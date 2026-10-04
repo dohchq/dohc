@@ -43,7 +43,7 @@ const PATH = "notes/live.txt";
 it("keeps owner draft durability distinct from native settlement and preserves it on close", async () => {
   const engine = new YdocLoopbackEngine();
   const path = "notes/owner.md";
-  engine.seedFile({workspace: WORKSPACE, versionId: VERSION, path, content: "seed", contentKind: "richdoc"});
+  engine.seedFile({workspace: WORKSPACE, versionId: VERSION, path, objectId: "owner-object", content: "seed", contentKind: "richdoc"});
   const seedAdapter = new YdocLiveAdapter(engine);
   const seed = await seedAdapter.openSession({workspace: WORKSPACE,versionId:VERSION,path,contentKind:"richdoc"});
   engine.markSessionReplicated(seed.sessionId);

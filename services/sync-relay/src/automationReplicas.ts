@@ -1,6 +1,13 @@
 import {createHash, randomBytes} from "node:crypto";
 import {mkdir, readdir, rm} from "node:fs/promises";
 import {join} from "node:path";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as Latch from "effect/Latch";
+import * as Queue from "effect/Queue";
+import * as Result from "effect/Result";
 import type {Event, JsonValue} from "@dohc/workspace-engine-client";
 import {createEngineClient, type EngineClient} from "@dohc/workspace-engine-client/daemon";
 import type {SyncRelayStorage} from "./storage";
@@ -90,15 +97,17 @@ export async function startAutomationReplicas(options: {
     step(): Promise<boolean>;
     busy(): boolean;
   }>();
+  // Replicas an engine exit is closing, until their close settles. One that
+  // failed stays for close() to report.
+  const retiring = new Set<Promise<void>>();
   let client: {engine: EngineClient; exited: AbortController} | undefined;
   let starting: Promise<{engine: EngineClient; exited: AbortController}> | undefined;
   let requestId = 0;
   const nextRequestId = () => ++requestId;
-  let active: Promise<void> | undefined, requested = false, timer: ReturnType<typeof setTimeout> | undefined;
-  // The armed timer only retries workspaces that failed, so a pass asked
-  // for meanwhile need not wait for it.
-  let retryingWorkspaces = false;
-  let deadline: ReturnType<typeof setTimeout> | undefined;
+  // A pass asked for, with the delay before it. The first one asked for keeps its delay.
+  const wakes = Effect.runSync(Queue.dropping<number>(1));
+  // Open while no pass is asked for, waiting, running, or retrying.
+  const idle = Latch.makeUnsafe(false);
   let retryMs = RETRY_FIRST_MS;
   let reconciled = false;
   // The workspaces whose part of the last pass failed, with why.
@@ -118,7 +127,12 @@ export async function startAutomationReplicas(options: {
         onExit: () => {
           exited.abort();
           // Every replica opened in it is gone; the next pass opens them again.
-          for (const replica of [...replicas.values()]) if (replica.client === started) void replica.close();
+          for (const replica of [...replicas.values()]) {
+            if (replica.client !== started) continue;
+            const closing = replica.close();
+            retiring.add(closing);
+            closing.then(() => retiring.delete(closing), () => {});
+          }
           schedule(RETRY_FIRST_MS);
         },
         onStderr: text => console.error("[automation-replicas]", text.trimEnd()),
@@ -171,7 +185,7 @@ export async function startAutomationReplicas(options: {
       {relay: {baseUrl: relay.origin, bearerToken}, identity: {kind: "join", replicationEpoch: row.replicationEpoch,
         streamIdentity: row.streamIdentity}, maxPagesPerPull: 8});
     let chain: Promise<unknown> = Promise.resolve();
-    // Pushes, then pulls, each for at most `rounds`. Answers whether it caught up.
+    let closing: Promise<void> | undefined;
     // Pushes, then pulls, each for at most `rounds`, so a copy that always
     // has more to push still pulls. Answers whether it caught up.
     let running = 0;
@@ -218,21 +232,23 @@ export async function startAutomationReplicas(options: {
       busy(): boolean {
         return running > 0;
       },
-      async close(): Promise<void> {
-        if (replicas.get(row.workspaceId) !== replica) return;
-        replicas.delete(row.workspaceId);
-        failedSyncs.delete(row.workspaceId);
-        closed.abort();
-        await chain;
-        await release();
-        options.onChanged?.(row.workspaceId);
+      /** Every caller waits for the same close, which waits for the sync running in it. */
+      close(): Promise<void> {
+        return closing ??= (async () => {
+          replicas.delete(row.workspaceId);
+          failedSyncs.delete(row.workspaceId);
+          closed.abort();
+          await chain;
+          await release();
+          options.onChanged?.(row.workspaceId);
+        })();
       },
     };
     try {
       // A pulled moment lands in the main version, as on a computer that joins.
       await request(engineClient, "versions.ensureMain", {workspaceId: row.workspaceId}, handle);
       // A copy with a long history catches up over several passes, after the others.
-      if (!(await replica.step())) requested = true;
+      if (!(await replica.step())) schedule();
     } catch (error) {
       // A replica that never opened fully leaves nothing open behind.
       await release();
@@ -257,16 +273,23 @@ export async function startAutomationReplicas(options: {
     } catch (error) {
       if (signal.aborted) throw error;
       failedSyncs.set(workspaceId, error);
-      options.onError?.(error, workspaceId);
+      observe(() => options.onError?.(error, workspaceId));
       return false;
     }
   }
 
-  // Answers whether every workspace's part succeeded.
+  // onError and onReconciled only observe: one that throws is logged, and the passes go on.
+  function observe(callback: () => void): void {
+    try {
+      callback();
+    } catch (error) {
+      try { console.error("[automation-replicas] A callback failed.", error); } catch { /* Nothing is left to report it to. */ }
+    }
+  }
+
   // Answers whether every workspace's part succeeded, and throws for a
   // failure that is no one workspace's, once every workspace had its turn.
   async function reconcile(): Promise<boolean> {
-    requested = false;
     let ok = true;
     let passFailure: unknown = null;
     await engine();
@@ -279,7 +302,7 @@ export async function startAutomationReplicas(options: {
         if (row !== null && !replicas.has(workspaceId)) await open(row);
         else if (row !== null && failedSyncs.has(workspaceId)) {
           const retry = replicas.get(workspaceId)!;
-          if (!retry.busy() && !(await retry.step())) requested = true;
+          if (!retry.busy() && !(await retry.step())) schedule();
         }
       }) && ok;
     }
@@ -332,73 +355,134 @@ export async function startAutomationReplicas(options: {
       if (replica.busy()) continue;
       ok = await each(replica.workspaceId, async () => {
         // A copy with more to sync goes on in the next pass, after the others.
-        if (!(await replica.step())) requested = true;
+        if (!(await replica.step())) schedule();
       }) && ok;
     }
     if (passFailure !== null) throw passFailure;
     return ok;
   }
 
+  // An unref'd wait, so a pending one never holds the process open.
+  const sleep = (ms: number) => Effect.callback<void>((resume) => {
+    const timer = setTimeout(() => resume(Effect.void), ms);
+    timer.unref();
+    return Effect.sync(() => clearTimeout(timer));
+  });
+
   function schedule(delayMs = 100): void {
     if (signal.aborted) return;
-    requested = true;
-    if (active) return;
-    if (timer && retryingWorkspaces) { clearTimeout(timer); timer = undefined; }
-    if (!timer) arm(delayMs);
+    idle.closeUnsafe();
+    Queue.offerUnsafe(wakes, delayMs);
   }
 
-  // One pass after `delayMs`. A pass that fails runs again after a delay
-  // that doubles up to a minute; a pass asked for meanwhile runs soon after.
-  function arm(delayMs: number): void {
-    retryingWorkspaces = false;
-    timer = setTimeout(() => {
-      timer = undefined;
-      let retry: number | null = null, workspacesFailed = false;
-      active = reconcile().then((ok) => {
-        reconciled = true;
-        options.onReconciled?.();
-        if (ok) { retryMs = RETRY_FIRST_MS; return; }
-        // A workspace that failed tries again, as a failed pass does.
-        workspacesFailed = true;
-        retry = retryMs;
-        retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
-      }, error => {
-        reconciled = false;
-        if (signal.aborted) return;
-        options.onError?.(error);
-        retry = retryMs;
-        retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
-      }).finally(() => {
-        active = undefined;
-        if (signal.aborted) return;
-        // A failed pass waits out its delay; a failed workspace does not hold up a pass asked for.
-        if (retry !== null && !workspacesFailed) { requested = true; arm(retry); }
-        else if (requested) arm(100);
-        else if (retry !== null) { requested = true; arm(retry); retryingWorkspaces = true; }
-        armDeadline();
-      });
-    }, delayMs);
-    timer.unref();
-  }
+  // The next pass asked for, after its delay. Until one is, the replicas are settled.
+  const asked = Effect.suspend(() => {
+    if (Queue.sizeUnsafe(wakes) === 0) idle.openUnsafe();
+    return Queue.take(wakes);
+  }).pipe(Effect.flatMap(sleep));
 
-  // A replica leaves, or goes, at a time and not after a write: wake for the
-  // nearest such deadline.
-  function armDeadline(): void {
-    clearTimeout(deadline);
+  // A replica leaves, or goes, at a time and not after a write: the wait for
+  // the nearest such deadline.
+  function untilDeadline(): number | undefined {
     let next = Number.POSITIVE_INFINITY;
     for (const row of storage.listAutomationWorkspaces()) {
       if (failedSyncs.has(row.workspaceId)) continue;
       if (row.leftAtMs !== null) next = Math.min(next, row.leftAtMs + AUTOMATION_WORKSPACE_KEEP_AFTER_LEAVING_MS);
       else if (row.unwantedSinceMs !== null) next = Math.min(next, row.unwantedSinceMs + AUTOMATION_WORKSPACE_LEAVE_AFTER_MS);
     }
-    if (next === Number.POSITIVE_INFINITY) return;
-    deadline = setTimeout(() => schedule(0), Math.min(Math.max(next - nowMs(), 0), DEADLINE_MAX_WAIT_MS));
-    deadline.unref();
+    return next === Number.POSITIVE_INFINITY ? undefined : Math.min(Math.max(next - nowMs(), 0), DEADLINE_MAX_WAIT_MS);
   }
+
+  // The wait for the nearest deadline, as the last pass found it. None until a
+  // pass finds one, and none after a pass that could not look.
+  let deadline: number | undefined;
+
+  // A pass, then its look for the nearest deadline. Either failing fails the
+  // pass; when both do, the pass's own failure is the one reported.
+  async function pass(): Promise<boolean> {
+    deadline = undefined;
+    let ok: boolean;
+    try {
+      ok = await reconcile();
+    } catch (error) {
+      try { deadline = untilDeadline(); } catch { /* The pass's failure comes first. */ }
+      throw error;
+    }
+    deadline = untilDeadline();
+    return ok;
+  }
+
+  // One pass at a time, each after the wait the one before it left. A pass
+  // that fails runs again after a delay that doubles up to a minute.
+  const passes = Effect.gen(function* () {
+    let wait: Effect.Effect<void> = asked;
+    for (;;) {
+      wait = yield* Effect.scoped(Effect.gen(function* () {
+        // The last pass's deadline can ask for a pass while this one runs.
+        const armed = deadline;
+        if (armed !== undefined) {
+          yield* Effect.acquireRelease(Effect.sync(() => {
+            const timer = setTimeout(() => schedule(0), armed);
+            timer.unref();
+            return timer;
+          }), (timer) => Effect.sync(() => clearTimeout(timer)));
+        }
+        yield* wait;
+        // This pass does what was asked for until now.
+        yield* Queue.clear(wakes);
+        // A pass runs to its end, so close() waits for its work.
+        const result = yield* Effect.uninterruptible(Effect.result(Effect.tryPromise({try: pass, catch: (error) => error})));
+        reconciled = Result.isSuccess(result);
+        if (Result.isSuccess(result)) observe(() => options.onReconciled?.());
+        else if (!signal.aborted) observe(() => options.onError?.(result.failure));
+        const retry = retryMs;
+        retryMs = Result.isSuccess(result) && result.success ? RETRY_FIRST_MS : Math.min(retryMs * 2, RETRY_MAX_MS);
+        // A failed pass waits out its delay, however many passes are asked for meanwhile.
+        if (Result.isFailure(result)) return sleep(retry);
+        if (Queue.sizeUnsafe(wakes) > 0) return sleep(100);
+        if (result.success) return asked;
+        // A failed workspace tries again, unless a pass is asked for first, which keeps its own delay.
+        return Effect.raceFirst(sleep(retry).pipe(Effect.as(Effect.void)), Queue.take(wakes).pipe(Effect.map(sleep))).pipe(Effect.flatten);
+      }));
+    }
+  });
 
   await mkdir(options.root, {recursive: true, mode: 0o700});
   const stopWatching = observeRelayWrites(storage, () => schedule());
   schedule(0);
+  const worker = Effect.runFork(passes.pipe(Effect.tapCause((cause) => Effect.sync(() => {
+    reconciled = false;
+    if (!Cause.hasInterruptsOnly(cause)) console.error("[automation-replicas] Passes stopped.", Cause.squash(cause));
+  }))));
+  // The passes end when close() stops them, or on a failure nothing in them expects.
+  const stopped = Fiber.await(worker).pipe(Effect.flatMap((exit) =>
+    Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause) ? Effect.failCause(exit.cause) : Effect.void));
+  let shutdown: Promise<void> | undefined;
+  // Each step runs even if one before it failed. The first failure is the one reported.
+  const close = (): Promise<void> => {
+    if (shutdown) return shutdown;
+    shutdown = Promise.resolve().then(() => Effect.runPromise(Fiber.interrupt(worker).pipe(
+      Effect.andThen(stopped),
+      Effect.ensuring(Effect.promise(async () => {
+        const closes = await Promise.allSettled([...retiring, ...[...replicas.values()].map((replica) => replica.close())]);
+        const failed = closes.find((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+        if (failed) throw failed.reason;
+      })),
+      Effect.ensuring(Effect.promise(async () => {
+        if (!client) return;
+        client.engine.close();
+        await client.engine.waitForExit();
+      })),
+    )));
+    storage.unavailable.removeEventListener("abort", closeUnavailable);
+    lifetime.abort();
+    stopWatching();
+    return shutdown;
+  };
+  // Storage that stops closes the replicas too, and close() callers wait for that.
+  const closeUnavailable = () => { close().catch((error: unknown) => console.error("[automation-replicas] Close failed.", error)); };
+  if (storage.unavailable.aborted) closeUnavailable();
+  else storage.unavailable.addEventListener("abort", closeUnavailable, {once: true});
   return {
     /** The daemon is running and a pass completed, even if individual workspaces failed. */
     get unavailable(): boolean {
@@ -410,20 +494,12 @@ export async function startAutomationReplicas(options: {
     reconcile(): void { schedule(); },
     /** The workspaces whose copy failed to open, sync, leave, or go in the last pass, with why. */
     failedSyncs(): ReadonlyMap<string, unknown> { return failedSyncs; },
-    /** Resolves once no pass is waiting or running. */
+    /** Resolves once no pass is asked for, waiting, running, or retrying. Rejects if the passes stopped on a failure. */
     async settled(): Promise<void> {
-      while (timer || active) {
-        if (timer) await new Promise(resolve => setTimeout(resolve, 0));
-        else await active;
-      }
+      await Effect.runPromise(Effect.raceFirst(idle.await, stopped));
     },
-    async close(): Promise<void> {
-      lifetime.abort(); stopWatching(); clearTimeout(timer); clearTimeout(deadline); timer = undefined;
-      await active;
-      for (const replica of [...replicas.values()]) await replica.close();
-      const current = client ?? (starting ? await starting.catch(() => undefined) : undefined);
-      if (current) { current.engine.close(); await current.engine.waitForExit(); }
-    },
+    /** Stops the passes, then closes every replica and the engine, waiting for work that ignores the abort. */
+    close,
   };
 }
 

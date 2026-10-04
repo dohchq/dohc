@@ -73,6 +73,8 @@ pub struct OwnerDraftAppendInput {
     pub append_key: String,
     pub update: Vec<u8>,
     pub now_ms: i64,
+    /// The agent the edit declared, kept with its delivery. Never authority.
+    pub agent_declaration: Option<dohc_engine_domain::AgentDeclaration>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -249,6 +251,7 @@ pub fn append_draft_cached(
             input.append_key,
             input.update,
             input.now_ms,
+            input.agent_declaration.as_ref(),
         )?;
         let proof = draft_proof(tx, &input.binding, input.expected_revision)?;
         let approx_bytes = encoded_len
@@ -523,6 +526,8 @@ pub fn open_draft_in(
     Ok(OwnerDraft { observed, doc })
 }
 
+/// Enrollment and restore capture queue merged native state, which declares
+/// no agent. An editor's draft goes through [`append_draft_cached`].
 pub fn append_draft_in_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -534,7 +539,7 @@ pub fn append_draft_in_tx(
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
     require_workspace(workspace_id, &binding.workspace_id)?;
     let draft = open_draft_in(tx, binding, expected_revision)?;
-    append_prepared_draft_in_tx(tx, workspace_id, &draft, append_key, update, now_ms)
+    append_prepared_draft_in_tx(tx, workspace_id, &draft, append_key, update, now_ms, None)
         .map(|(result, _)| result)
 }
 
@@ -545,6 +550,7 @@ fn append_prepared_draft_in_tx(
     append_key: String,
     update: Vec<u8>,
     now_ms: i64,
+    agent_declaration: Option<&dohc_engine_domain::AgentDeclaration>,
 ) -> Result<(OwnerOutboxAppendResult, usize), OwnerOutboxError> {
     let binding = &draft.observed.binding;
     require_workspace(workspace_id, &binding.workspace_id)?;
@@ -573,6 +579,8 @@ fn append_prepared_draft_in_tx(
             created_at_ms: now_ms,
         },
         None,
+        Some(draft.observed.revision),
+        agent_declaration,
     )?;
     Ok((result, encoded_len))
 }
@@ -580,7 +588,7 @@ fn append_prepared_draft_in_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_domain::{VersionedTextStore, WriteText};
+    use dohc_engine_domain::{AgentDeclaration, VersionedTextStore, WriteText};
     use dohc_test_scratch::ScratchDir;
 
     #[test]
@@ -598,6 +606,7 @@ mod tests {
                 append_key: append_key.into(),
                 update,
                 now_ms: 3,
+                agent_declaration: None,
             };
             append_draft_cached(
                 &mut store,
@@ -651,6 +660,232 @@ mod tests {
                 .read_with(|conn| list_drafts_in(conn, "other-workspace", None, 1))
                 .unwrap()
                 .is_empty());
+        }
+    }
+
+    /// An observed draft's store and writer cache, as the engine actor holds them.
+    struct Drafts {
+        store: EngineStore,
+        cache: crate::WriterDocCache,
+        binding: LiveObjectBinding,
+    }
+
+    impl Drafts {
+        fn append(
+            &mut self,
+            append_key: &str,
+            update: &[u8],
+            agent_declaration: Option<AgentDeclaration>,
+        ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
+            let observed = self
+                .store
+                .read_with(|c| read_observed_in(c, &self.binding))
+                .unwrap()
+                .unwrap();
+            let input = OwnerDraftAppendInput {
+                binding: self.binding.clone(),
+                expected_revision: observed.revision,
+                append_key: append_key.into(),
+                update: update.to_vec(),
+                now_ms: 3,
+                agent_declaration,
+            };
+            append_draft_cached(
+                &mut self.store,
+                &mut self.cache,
+                "workspace",
+                input,
+                &NoFaults,
+            )
+        }
+
+        fn assert_refused(
+            &mut self,
+            append_key: &str,
+            update: &[u8],
+            agent_declaration: Option<AgentDeclaration>,
+        ) {
+            assert!(matches!(
+                self.append(append_key, update, agent_declaration),
+                Err(OwnerOutboxError::AppendKeyMismatch)
+            ));
+        }
+    }
+
+    fn pending_declarations(store: &EngineStore, outbox_id: &str) -> Vec<Option<AgentDeclaration>> {
+        super::super::read_pending(store, "workspace", outbox_id)
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| entry.agent_declaration)
+            .collect()
+    }
+
+    /// The entry header a paged read serves for `sequence`.
+    fn entry_header(store: &EngineStore, outbox_id: &str, sequence: i64) -> serde_json::Value {
+        let page = |cursor| {
+            let result = read_pending_page(store, "workspace", outbox_id, cursor, 1 << 20);
+            let Ok(OwnerOutboxPageResult::Page(page)) = result else {
+                panic!("an unchanged snapshot reads a page");
+            };
+            page
+        };
+        let snapshot = page(None).cursor.snapshot;
+        let header = page(Some(OwnerOutboxReadCursor {
+            snapshot,
+            part: OwnerOutboxReadPart::EntryHeader,
+            sequence,
+            offset: 0,
+        }));
+        serde_json::from_slice(&header.bytes).unwrap()
+    }
+
+    /// What the entry for `delivery_id` keeps after its receipt.
+    fn acknowledged_declaration(store: &EngineStore, delivery_id: &str) -> Option<String> {
+        store
+            .read_with(|c| {
+                c.query_row(
+                    "SELECT agent_declaration_json FROM owner_ydoc_outbox_entries \
+                     WHERE delivery_id=?1 AND pending=0",
+                    [delivery_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(read_sql)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn agent_declarations_bind_append_keys_and_survive_ack_and_reopen() {
+        let declared = AgentDeclaration {
+            agent_id: "trip-agent".into(),
+            on_behalf_of: Some("local-person".into()),
+            depth: 2,
+        };
+        let changed = [
+            Some(AgentDeclaration {
+                agent_id: "other-agent".into(),
+                ..declared.clone()
+            }),
+            Some(AgentDeclaration {
+                on_behalf_of: None,
+                ..declared.clone()
+            }),
+            Some(AgentDeclaration {
+                depth: 3,
+                ..declared.clone()
+            }),
+            None,
+        ];
+        let agent = Some(declared.clone());
+        let wire = serde_json::json!({
+            "agentId": "trip-agent",
+            "onBehalfOf": "local-person",
+            "depth": 2
+        });
+        // A cache that retains nothing reopens each draft cold.
+        for capacity in [0, 64 * 1024 * 1024] {
+            let (dir, mut store, observed, checkpoint) = fixture();
+            install(&mut store, &observed, &checkpoint);
+            let mut drafts = Drafts {
+                store,
+                cache: crate::WriterDocCache::with_limits_for_test(16, capacity),
+                binding: observed.binding.clone(),
+            };
+            let owner = Ydoc::wire();
+            owner.apply(&checkpoint).unwrap();
+            let agent_edit = owner.richdoc_append_paragraph("agent edit");
+            let own_edit = owner.richdoc_append_paragraph("person edit");
+            let refuses = |drafts: &mut Drafts| {
+                for declaration in changed.clone() {
+                    drafts.assert_refused("agent", &agent_edit, declaration);
+                }
+                drafts.assert_refused("person", &own_edit, agent.clone());
+            };
+
+            let first = drafts.append("agent", &agent_edit, agent.clone()).unwrap();
+            let second = drafts.append("person", &own_edit, None).unwrap();
+            // Each draft records the enrolled revision it was queued under.
+            for result in [&first, &second] {
+                let revision: Option<i64> = drafts
+                    .store
+                    .read_with(|c| {
+                        c.query_row(
+                            "SELECT draft_binding_revision FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                            [&result.delivery_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(read_sql)
+                    })
+                    .unwrap();
+                assert_eq!(revision, Some(observed.revision));
+            }
+            assert_eq!(
+                drafts.append("agent", &agent_edit, agent.clone()).unwrap(),
+                first
+            );
+            refuses(&mut drafts);
+            let fork = Ydoc::wire();
+            fork.apply(&checkpoint).unwrap();
+            let other_bytes = fork.richdoc_append_paragraph("other bytes");
+            drafts.assert_refused("agent", &other_bytes, agent.clone());
+            let invalid = AgentDeclaration {
+                agent_id: String::new(),
+                ..declared.clone()
+            };
+            assert!(matches!(
+                drafts.append("invalid", &other_bytes, Some(invalid)),
+                Err(OwnerOutboxError::InvalidInput(_))
+            ));
+            assert_eq!(
+                pending_declarations(&drafts.store, &first.outbox_id),
+                vec![agent.clone(), None]
+            );
+            assert_eq!(
+                entry_header(&drafts.store, &first.outbox_id, first.sequence)["agentDeclaration"],
+                wire
+            );
+            let plain = entry_header(&drafts.store, &first.outbox_id, second.sequence);
+            assert!(plain.get("agentDeclaration").is_none());
+
+            // The relay accepts the agent's draft. Its receipt releases the
+            // bytes and keeps what the draft declared.
+            feed(&mut drafts.store, &observed, 2, agent_edit.clone());
+            let receipt = OwnerDeliveryReceipt {
+                delivery_id: first.delivery_id.clone(),
+                update_digest: first.update_digest.clone(),
+                journal_cursor: 2,
+                accepting_host_epoch: 1,
+            };
+            super::super::acknowledge(&mut drafts.store, "workspace", &first.outbox_id, &[receipt])
+                .unwrap();
+            let expected_json = serde_json::to_string(&declared).unwrap();
+            assert_eq!(
+                acknowledged_declaration(&drafts.store, &first.delivery_id),
+                Some(expected_json.clone())
+            );
+            assert_eq!(
+                drafts.append("agent", &agent_edit, agent.clone()).unwrap(),
+                first
+            );
+            refuses(&mut drafts);
+
+            drop(drafts);
+            let mut drafts = Drafts {
+                store: EngineStore::open(&dir.join("engine.db"), 13).unwrap(),
+                cache: crate::WriterDocCache::with_limits_for_test(16, capacity),
+                binding: observed.binding.clone(),
+            };
+            assert_eq!(
+                acknowledged_declaration(&drafts.store, &first.delivery_id),
+                Some(expected_json)
+            );
+            assert_eq!(
+                pending_declarations(&drafts.store, &first.outbox_id),
+                vec![None]
+            );
+            refuses(&mut drafts);
+            assert_eq!(drafts.append("person", &own_edit, None).unwrap(), second);
         }
     }
 

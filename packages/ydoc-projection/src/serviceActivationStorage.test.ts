@@ -1,5 +1,7 @@
 import {ServiceActivationDriver} from "../../../services/sync-relay/src/serviceActivationDriver.js"
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js"
+import {LiveDocumentWork} from "../../../services/sync-relay/src/liveDocumentWork.js"
+import {parseLiveDocumentKey,type LiveUpdateHostApplicationAck,type LiveUpdateReceipt} from '@dohc/live-session-contract/live-update-admission'
 import {createHash} from 'node:crypto'
 import {mkdtempSync,rmSync} from 'node:fs'
 import {createRequire} from 'node:module'
@@ -14,7 +16,7 @@ import {createLiveMarkdownRegistrationValidator,createLiveMarkdownJournalValidat
 import {openSyncRelayStorage} from '../../../services/sync-relay/src/storage.js'
 import {createLiveJournalHistoryAuthority} from '../../../services/sync-relay/src/storage/liveJournalHistory.js'
 import {ServiceActivationStaleCut} from '../../../services/sync-relay/src/storage/serviceActivation.js'
-import {requireStopRestoreOwnerOrigin,type StopRestoreBasis} from '../../../services/sync-relay/src/storage/liveRestoreOperation.js'
+import {requireStopRestoreOwnerOrigin,type StopRestoreBasis,type StopRestoreIntent} from '../../../services/sync-relay/src/storage/liveRestoreOperation.js'
 import type {StorageContext} from '../../../services/sync-relay/src/storage/context.js'
 
 const {DatabaseSync}=createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
@@ -321,6 +323,27 @@ it('rejects changed retained activation provenance when opening or revalidating 
     expect(()=>owner.delivery.openOwnerDelivery({host,document:f.document,actor})).toThrow()
   }finally{f.close()}
 })
+// Native adoption of an ordinary activation saves sha256 of ["ordinary-replication", cut evidence, retained source],
+// and a restore proposal returns that digest. The relay must record the same one, whatever order the source arrived in.
+it('records the native ordinary-replication evidence for an activated service owner',()=>{
+  const f=fixture();try{
+    f.capture.source=Object.fromEntries(Object.entries(f.capture.source).reverse()) as typeof f.capture.source
+    const owner=ownerCapture(f);owner.acknowledge()
+    const origin=JSON.parse(String(f.raw.prepare('SELECT origin_json FROM sync_relay_live_delivery_owners').get()!.origin_json))
+    const cut=owner.capture.cut,s=f.capture.source
+    const cutEvidence=hash(Buffer.from(JSON.stringify([owner.capture.binding,cut.relayDatabaseNamespace,cut.sourceMomentId,cut.sourceDigest,
+      cut.sourceByteLength,cut.baselineMomentRelaySequence,cut.baselineRegisteredAtMs,cut.expectedLocalSequence,[]])))
+    const nativeSource=`{"version":1,"relayDatabaseNamespace":"history","workspaceId":"workspace","mainVersionId":"main","objectId":"object",`+
+      `"lineageClaimId":"${f.document.lineageClaimId}","currentPath":"docs/a.md","replicationEpoch":"epoch","streamIdentity":"stream",`+
+      `"committedCursor":3,"baseOriginId":"origin","baseOriginSeq":1,"baseRelaySeq":2,"sourceMomentId":"${s.sourceMomentId}",`+
+      `"sourceDigest":"${s.sourceDigest}","sourceByteLength":${s.sourceByteLength},"nativeHeadSequence":2,`+
+      `"fullStateDigest":"${s.fullStateDigest}","fullStateByteLength":${s.fullStateByteLength}}`
+    expect(origin.originEvidenceDigest).toBe(hash(Buffer.from(`["ordinary-replication","${cutEvidence}",${nativeSource}]`)))
+    expect(origin.originEvidenceDigest).not.toBe(cutEvidence)
+    expect(owner.delivery.openOwnerDelivery({host,document:f.document,actor}).assertCurrent).not.toThrow()
+  }finally{f.close()}
+})
+
 it('checks the frozen service origin separately from the original baseline when guarding restore',()=>{
   const f=fixture();try{
     const owner=ownerCapture(f);owner.acknowledge()
@@ -340,7 +363,7 @@ it('checks the frozen service origin separately from the original baseline when 
   }finally{f.close()}
 })
 
-it('requires exact seed application ACK and supports lost completion responses',()=>{
+it('requires exact seed application ACK and supports lost completion responses',async()=>{
   const f=fixture();try{
     f.prepare()
     const access=f.store.pending(f.document,host), delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
@@ -371,6 +394,13 @@ it('requires exact seed application ACK and supports lost completion responses',
     complete();complete()
     expect(f.store.read('workspace','docs/a.md',1_000_000)!.completed).toBe(true)
     expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).toBe('current')
+    // While its activated native session is held, stopping access uses that session's verified owner transport.
+    const drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    try{
+      const active=activationDriver(f,vi.fn(async()=>f.capture))
+      expect(await active.driver.activate(active.target,new AbortController().signal)).toMatchObject({kind:'done'})
+      expect(active.driver.restoreConsumer(f.document)).toBe(active.driver.consumer(f.document).consumer)
+    }finally{drain.mockRestore()}
     f.raw.exec("UPDATE sync_relay_live_documents SET restore_fence_generation=2")
     expect(()=>f.store.resume({document:f.document,activationId:f.capture.activationId,host,registeredAtMs:5,guard(){}})).toThrow()
     f.raw.exec("UPDATE sync_relay_live_documents SET admission_state='closed'")
@@ -405,18 +435,335 @@ it('rolls back the full activation when its retained-state quota charge fails',(
   }finally{f.close()}
 })
 
-function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:ReturnType<typeof vi.fn>,sendRequest=vi.fn(async()=>({result:{released:true}}))){
+type RunDocument=ConstructorParameters<typeof ServiceActivationDriver>[0]['runDocument']
+function activationDriver(f:ReturnType<typeof fixture>,captureOwnerActivation:ReturnType<typeof vi.fn>,sendRequest:ReturnType<typeof vi.fn>=vi.fn(async()=>({result:{released:true}})),
+  runDocument:RunDocument=(_document,_signal,operation)=>operation(),native:object={}){
   const pull=vi.fn(async()=>({hasMore:false})),target={workspaceId:'workspace',path:'docs/a.md',shareId:'share'}
   const driver=new ServiceActivationDriver({storage:f.storage,history:f.history,host,
-    client:{captureOwnerActivation,sendRequest} as never,
+    client:{...native,captureOwnerActivation,sendRequest} as never,
     workspaces:new Map([['workspace',{handle:'native-workspace',ordinary:{pull} as never}]]),
     config:{targets:[target],validateBaseline,validateJournal,validateAdmission:validateJournal,maxCaptureBytes:1_000_000,maxEntriesPerDrain:10,maxBytesPerDrain:1_000_000,
       maxDocumentsPerPass:1,pollIntervalMs:1000,passDeadlineMs:10_000},
     adoption:{maxBytes:1_000_000,maxEvents:10},nextRequestId:()=>1,deadlineMs:1000,assertCurrent(){},registered(){},
-    runDocument:(_document,_signal,operation)=>operation(),
+    runDocument,
   })
   return {driver,target,pull}
 }
+
+// A completed service activation: adopted, seed accepted and applied natively.
+function completeActivation(f:ReturnType<typeof fixture>){
+  f.prepare()
+  const access=f.store.pending(f.document,host),delivery=f.storage.createLiveCommittedDeliveryStore(f.history,access)
+  const adoption=delivery.captureOwnerCut({host,document:f.document,actor,adoptionId:f.capture.activationId,
+    expectedLocalSequence:2,maxBytes:1_000_000,maxEvents:100,throughCursor:0})
+  delivery.acknowledgeOwnerAdoption(adoption,{adoptionId:f.capture.activationId,localYDocSequence:2,terminalCursor:0,adoptionReplayed:false})
+  const current=f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor},access)
+  const cut=f.storage.readLiveUpdateJournalCut({document:f.document})
+  if(current.kind!=='current' || cut.kind!=='cut')throw new Error('Missing activation authority')
+  const validation=validateJournal({document:f.document,currentPath:current.binding.currentPath,
+    checkpoint:cut.cut.checkpoint.bytes,suffix:cut.cut.suffix.map(row=>row.bytes),candidate:f.capture.fullState})
+  f.storage.commitLiveUpdateJournal({host,actor,expectedAuthority:current.authority,
+    metadata:{deliveryId:'seed',updateDigest:hash(f.capture.fullState),binding:current.binding},cutToken:cut.cut,validation,
+    updateBytes:f.capture.fullState,receivedAtMs:4},access)
+  const owner=delivery.openOwnerDelivery({host,document:f.document,actor})
+  const event=delivery.nextOwnerApplication(owner)!
+  delivery.acknowledgeOwnerDeliveryApplication(owner,{...event.metadata.accepted.receipt,localYDocSequence:2,applicationReplayed:false})
+  f.store.complete({document:f.document,host,access,nativeState:{adoptionId:f.capture.activationId,pendingBytes:0},guard(){}})
+}
+function deferred(){
+  let resolve!:()=>void
+  const promise=new Promise<void>(done=>{resolve=done})
+  return {promise,resolve}
+}
+// The relay row change advanceStopRestoreFence commits, and its exact reversal.
+function fenceRestore(f:ReturnType<typeof fixture>,fence:number){
+  f.raw.prepare("UPDATE sync_relay_live_documents SET admission_state='closed',restore_fence_generation=? WHERE admission_state='open' AND restore_fence_generation=?")
+    .run(fence+1,fence)
+  expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).not.toBe('current')
+}
+function reopen(f:ReturnType<typeof fixture>,fence:number){
+  f.raw.prepare("UPDATE sync_relay_live_documents SET admission_state='open',restore_fence_generation=?").run(fence)
+}
+const ownerTip=(f:ReturnType<typeof fixture>)=>Number(f.raw.prepare('SELECT tip_cursor FROM sync_relay_live_delivery_owners').get()!.tip_cursor)
+// Admits an owner edit after the seed for the next drain to apply natively.
+function commitEdit(f:ReturnType<typeof fixture>){
+  const current=f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}),cut=f.storage.readLiveUpdateJournalCut({document:f.document})
+  if(current.kind!=='current' || cut.kind!=='cut')throw new Error('Missing owner authority')
+  const doc=new Y.Doc();Y.applyUpdate(doc,f.capture.fullState);const before=Y.encodeStateVector(doc)
+  doc.getMap('frontmatter').set('title','Edited again')
+  const bytes=Y.encodeStateAsUpdate(doc,before);doc.destroy()
+  const validation=validateJournal({document:f.document,currentPath:current.binding.currentPath,
+    checkpoint:cut.cut.checkpoint.bytes,suffix:cut.cut.suffix.map(row=>row.bytes),candidate:bytes})
+  const committed=f.storage.commitLiveUpdateJournal({host,actor,expectedAuthority:current.authority,
+    metadata:{deliveryId:'edit',updateDigest:hash(bytes),binding:current.binding},cutToken:cut.cut,validation,updateBytes:bytes,receivedAtMs:5})
+  if(!committed.admitted)throw new Error(JSON.stringify(committed.result))
+  return committed.admitted.metadata.accepted.receipt
+}
+// Native replies for the resumed, adopted service owner. `park` holds the next
+// call to one method after it enters, until the test releases it.
+function nativeOwner(f:ReturnType<typeof fixture>){
+  const durable=new Map<string,LiveUpdateHostApplicationAck>()
+  let parked:{method:string;entered:ReturnType<typeof deferred>;release:ReturnType<typeof deferred>;lose:boolean}|undefined
+  const hold=async(method:string)=>{
+    const held=parked;if(held?.method!==method)return false
+    parked=undefined;held.entered.resolve();await held.release.promise
+    return held.lose
+  }
+  const sendRequest=vi.fn(async(request:{id:number;method:string;params:Record<string,unknown>})=>{
+    await hold(request.method)
+    if(request.method==='liveApplication.register')return {id:request.id,result:{registrationId:7}}
+    if(request.method==='liveApplication.ownerState')return {id:request.id,result:{adoptionId:f.capture.activationId,
+      expectedLocalSequence:f.capture.source.nativeHeadSequence,throughCursor:0,outboxId:null,pendingBytes:0,outboxState:'active'}}
+    if(request.method==='liveApplication.settle'){
+      const terminal=request.params.terminalReceipt as LiveUpdateReceipt|null
+      return {id:request.id,result:{status:'settled',settlement:{settlementId:'settlement',previousCursor:0,terminalCursor:terminal?.journalCursor??0,
+        applicationCount:0,localYDocSequence:3,momentId:'settled-moment',markdownDigest:'c'.repeat(64),materialized:true,collectionReconcileRequired:false}}}
+    }
+    throw new Error(`Unexpected native request ${request.method}.`)
+  })
+  const sendLiveApplication=vi.fn(async(request:{id:number},event:{metadata:{accepted:{receipt:LiveUpdateReceipt}}})=>{
+    const ack={...event.metadata.accepted.receipt,localYDocSequence:3,applicationReplayed:false}
+    durable.set(ack.deliveryId,ack)
+    if(await hold('sendLiveApplication'))throw new Error('Native application response was lost.')
+    return {id:request.id,result:{status:'applied',ack}}
+  })
+  const readLiveApplicationAck=vi.fn(async(_request:unknown,receipt:LiveUpdateReceipt)=>{
+    const ack=durable.get(receipt.deliveryId);return ack?{...ack,applicationReplayed:true}:null
+  })
+  return {client:{sendRequest,sendLiveApplication,readLiveApplicationAck},
+    park(method:string,lose=false){parked={method,entered:deferred(),release:deferred(),lose};return parked}}
+}
+
+// A completed driver whose document work runs through real serialization, with
+// a barrier that reports when an activation has passed its precheck and queued.
+function serializedActivation(f:ReturnType<typeof fixture>,native?:ReturnType<typeof nativeOwner>['client']){
+  const work=new LiveDocumentWork(),key=JSON.stringify(parseLiveDocumentKey(f.document))
+  let entered=deferred()
+  const runDocument:RunDocument=(document,signal,operation)=>{
+    entered.resolve()
+    return work.run(JSON.stringify(parseLiveDocumentKey(document)),signal,operation)
+  }
+  const send=native?.sendRequest??vi.fn(async()=>({result:{released:true}})),capture=vi.fn(async()=>f.capture)
+  completeActivation(f)
+  const d=activationDriver(f,capture,send,runDocument,native),signal=new AbortController().signal
+  const fence=Number(f.raw.prepare('SELECT restore_fence_generation AS fence FROM sync_relay_live_documents').get()!.fence)
+  // Queue an activation behind other document work, apply `change` while it
+  // waits, then let it run.
+  const queueBehind=async(change:()=>void,settle?:Parameters<typeof d.driver.activate>[2])=>{
+    const holder=deferred(),holding=work.run(key,signal,()=>holder.promise)
+    entered=deferred()
+    const queued=d.driver.activate(d.target,signal,settle)
+    await entered.promise
+    expect(work.busy(key)).toBe(true)
+    change()
+    holder.resolve();await holding
+    return queued
+  }
+  return {d,work,key,send,capture,signal,fence,queueBehind}
+}
+
+// Proves: an activation that passed its precheck and then waited for document
+// work rechecks the exact binding under that work. A restore fence there is
+// pending, not damaged evidence: no engine request, readiness cleared, and the
+// same cut and owner continue once the exact binding opens. Periodic settlement
+// runs inside that same work. It does not drive the restore lifecycle or the
+// native fence; it applies the relay row change advanceStopRestoreFence commits.
+it('reports a restore fence that lands while a completed activation waits for document work',async()=>{
+  const f=fixture()
+  try{
+    const {d,work,key,send,capture,signal,fence,queueBehind}=serializedActivation(f)
+    const settle=vi.fn(async()=>{expect(work.busy(key)).toBe(true)})
+    let drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    expect(await d.driver.activate(d.target,signal,settle)).toMatchObject({kind:'done'})
+    expect(settle).toHaveBeenCalledTimes(1)
+    drain.mockRestore()
+
+    const queued=queueBehind(()=>{
+      f.raw.prepare("UPDATE sync_relay_live_documents SET admission_state='closed',restore_fence_generation=? WHERE admission_state='open' AND restore_fence_generation=?")
+        .run(fence+1,fence)
+      expect(f.storage.resolveCurrentLiveDocumentBinding({document:f.document,actor}).kind).not.toBe('current')
+    },settle)
+    await expect(queued).resolves.toMatchObject({kind:'pending'})
+    expect(send).not.toHaveBeenCalled()
+    expect(settle).toHaveBeenCalledTimes(1)
+    expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
+    expect(d.driver.workspaceReady('workspace')).toBe(false)
+
+    // The exact binding opens again: activation proceeds on the same cut and owner.
+    f.raw.prepare("UPDATE sync_relay_live_documents SET admission_state='open',restore_fence_generation=?").run(fence)
+    drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    expect(await d.driver.activate(d.target,signal,settle)).toMatchObject({kind:'done'})
+    drain.mockRestore()
+    expect(settle).toHaveBeenCalledTimes(2)
+    expect(d.driver.workspaceReady('workspace')).toBe(true)
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(d.pull).not.toHaveBeenCalled()
+    expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_service_activations').get()).toEqual({n:1})
+    expect(f.raw.prepare('SELECT count(*) AS n FROM sync_relay_live_delivery_owners').get()).toEqual({n:1})
+    expect(f.store.read('workspace','docs/a.md',1_000_000)!.source).toEqual(f.capture.source)
+
+    // Damaged owner evidence on an open binding is still an integrity failure.
+    f.raw.exec("UPDATE sync_relay_live_delivery_owners SET origin_json=json_set(origin_json,'$.sourceMomentId','unrelated-source')")
+    await expect(d.driver.activate(d.target,signal,settle)).rejects.toThrow('Committed delivery evidence is damaged or conflicts.')
+    expect(send).not.toHaveBeenCalled()
+    expect(settle).toHaveBeenCalledTimes(2)
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+// A binding that opens at another generation while an activation waits is not
+// drained with the old owner. The next pass recaptures the retained source and
+// revalidates it against the new binding.
+it('revalidates a binding that changed while an activation waited for document work',async()=>{
+  const f=fixture()
+  try{
+    const {d,capture,signal,fence,queueBehind}=serializedActivation(f)
+    const drain=vi.spyOn(OwnerCommittedDelivery.prototype,'drain').mockResolvedValue({kind:'done'} as never)
+    expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
+    const queued=queueBehind(()=>{
+      f.raw.prepare('UPDATE sync_relay_live_documents SET restore_fence_generation=?').run(fence+1)
+    })
+    await expect(queued).resolves.toMatchObject({kind:'pending'})
+    expect(drain).toHaveBeenCalledTimes(1)
+    expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
+    // The resumed source does not match the new generation, so it is refused.
+    await expect(d.driver.activate(d.target,signal)).rejects.toThrow()
+    expect(capture).toHaveBeenCalledTimes(2)
+    expect(capture).toHaveBeenLastCalledWith(expect.objectContaining({workspace:'native-workspace'}),'docs/a.md',1_000_000,expect.any(AbortSignal),f.capture.activationId)
+    expect(drain).toHaveBeenCalledTimes(1)
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+// Proves: a fence already visible when the next pass starts clears readiness
+// before any engine work, keeps the active consumer for the restore, and the
+// same owner continues once the exact binding opens.
+it('clears readiness when a restore fence is visible before the next activation',async()=>{
+  const f=fixture()
+  try{
+    const native=nativeOwner(f),{d,capture,signal,fence}=serializedActivation(f,native.client)
+    expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
+    const active=d.driver.consumer(f.document).consumer,calls=native.client.sendRequest.mock.calls.length
+    fenceRestore(f,fence)
+    expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
+    await expect(d.driver.activate(d.target,signal)).resolves.toMatchObject({kind:'pending'})
+    expect(native.client.sendRequest).toHaveBeenCalledTimes(calls)
+    expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
+    expect(d.driver.workspaceReady('workspace')).toBe(false)
+    expect(d.driver.restoreConsumer(f.document)).toBe(active)
+    reopen(f,fence)
+    expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
+    expect(d.driver.consumer(f.document).consumer).toBe(active)
+    expect(d.driver.workspaceReady('workspace')).toBe(true)
+    expect(capture).toHaveBeenCalledTimes(1)
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+// Proves: a fence committed while real owner delivery awaits native application
+// is pending, not damaged evidence. Neither the applied reply nor durable ACK
+// recovery after a lost reply is acknowledged on the fenced binding, and the
+// same owner applies the entry once the exact binding opens.
+it.each([['applied',false],['lost',true]] as const)('reports a restore fence during native owner application with an %s reply',async(_reply,lose)=>{
+  const f=fixture()
+  try{
+    const native=nativeOwner(f),{d,capture,signal,fence}=serializedActivation(f,native.client)
+    expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
+    const edit=commitEdit(f),tip=ownerTip(f)
+    const parked=native.park('sendLiveApplication',lose),pass=d.driver.activate(d.target,signal)
+    await parked.entered.promise
+    fenceRestore(f,fence)
+    parked.release.resolve()
+    await expect(pass).resolves.toMatchObject({kind:'pending'})
+    expect(ownerTip(f)).toBe(tip)
+    expect(native.client.readLiveApplicationAck).not.toHaveBeenCalled()
+    expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
+    expect(d.driver.workspaceReady('workspace')).toBe(false)
+    reopen(f,fence)
+    expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
+    expect(ownerTip(f)).toBe(edit.journalCursor)
+    expect(capture).toHaveBeenCalledTimes(1)
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+// Proves: a fence committed while settlement awaits native output does not
+// leave the pass done or ready, and the materialized result is not cached as
+// this binding's settlement.
+it('reports a restore fence during native settlement without publishing readiness',async()=>{
+  const f=fixture()
+  try{
+    const native=nativeOwner(f),{d,signal,fence}=serializedActivation(f,native.client)
+    const settle=(consumer:OwnerCommittedDelivery,document:Parameters<OwnerCommittedDelivery['settle']>[0],joined:AbortSignal)=>consumer.settle(document,joined)
+    const parked=native.park('liveApplication.settle'),pass=d.driver.activate(d.target,signal,settle)
+    await parked.entered.promise
+    fenceRestore(f,fence)
+    parked.release.resolve()
+    await expect(pass).resolves.toMatchObject({kind:'pending'})
+    expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
+    expect(d.driver.workspaceReady('workspace')).toBe(false)
+    reopen(f,fence)
+    const settled=native.client.sendRequest.mock.calls.filter(([request])=>request.method==='liveApplication.settle').length
+    expect(await d.driver.activate(d.target,signal,settle)).toMatchObject({kind:'done'})
+    expect(native.client.sendRequest.mock.calls.filter(([request])=>request.method==='liveApplication.settle')).toHaveLength(settled+1)
+    expect(d.driver.workspaceReady('workspace')).toBe(true)
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+// Proves: readiness is published only after a final exact-binding check, even
+// when the settlement callback itself cannot detect the fence.
+it('does not publish readiness when the binding is fenced while settlement runs',async()=>{
+  const f=fixture()
+  try{
+    const native=nativeOwner(f),{d,signal,fence}=serializedActivation(f,native.client)
+    await expect(d.driver.activate(d.target,signal,async()=>{fenceRestore(f,fence)})).resolves.toMatchObject({kind:'pending'})
+    expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
+    expect(d.driver.workspaceReady('workspace')).toBe(false)
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+// Proves: cancellation during settlement wins over a fence and over an
+// unchanged binding, and first readiness is not published.
+it.each([['a fenced',true],['an unchanged',false]] as const)('keeps cancellation when settlement resolves after an abort with %s binding',async(_binding,fence)=>{
+  const f=fixture()
+  try{
+    const native=nativeOwner(f),{d,fence:generation}=serializedActivation(f,native.client)
+    const abort=new AbortController(),reason=new Error('Pass cancelled.')
+    await expect(d.driver.activate(d.target,abort.signal,async()=>{if(fence)fenceRestore(f,generation);abort.abort(reason)})).rejects.toBe(reason)
+    expect(()=>d.driver.consumer(f.document)).toThrow('incomplete')
+    expect(d.driver.workspaceReady('workspace')).toBe(false)
+  }finally{vi.restoreAllMocks();f.close()}
+})
+
+// Proves: damaged owner evidence on an unchanged open binding during a native
+// await stays an integrity failure rather than an expected fence.
+it('keeps damaged owner evidence on an open binding as an integrity failure during native application',async()=>{
+  const f=fixture()
+  try{
+    const native=nativeOwner(f),{d,signal}=serializedActivation(f,native.client)
+    expect(await d.driver.activate(d.target,signal)).toMatchObject({kind:'done'})
+    commitEdit(f);const tip=ownerTip(f)
+    const parked=native.park('sendLiveApplication'),pass=d.driver.activate(d.target,signal)
+    await parked.entered.promise
+    f.raw.exec("UPDATE sync_relay_live_delivery_owners SET origin_json=json_set(origin_json,'$.sourceMomentId','unrelated-source')")
+    parked.release.resolve()
+    await expect(pass).rejects.toThrow('Committed delivery evidence is damaged or conflicts.')
+    expect(ownerTip(f)).toBe(tip)
+  }finally{vi.restoreAllMocks();f.close()}
+})
+// Proves: a restore cannot start while the document's service activation is
+// pending, before or after native adoption. Once fenced, that activation could
+// never complete, and the service restore consumer requires a completed one.
+it.each([['before',false],['after',true]] as const)('refuses to start a restore while service activation is pending %s native adoption',(_when,adopted)=>{
+  const f=fixture();try{
+    if(adopted)ownerCapture(f).acknowledge();else f.prepare()
+    f.raw.exec("INSERT INTO sync_relay_share_grants(grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id) VALUES ('grant','share','user','reader',NULL,'edit',1,'active',0,NULL,NULL)")
+    expect(()=>f.storage.readStopRestorePlan({document:f.document,ownerUserId:'owner',operationId:'restore',shareId:'share',grantId:'grant',
+      restorePointCursor:0,restorePointReceiptDigest:f.document.lineageClaimId,maxOutputBytes:1_000_000})).toThrow('conflicts with current authority')
+    const intent:StopRestoreIntent={deliveryKind:adopted?'owner':'bootstrap',operationId:'restore',ownerUserId:'owner',document:f.document,
+      shareId:'share',grantId:'grant',expectedGrantGeneration:1,expectedDependentGrantIds:[],expectedFence:1,restorePointCursor:0,
+      restorePointReceiptDigest:f.document.lineageClaimId}
+    expect(()=>f.storage.beginStopRestore(intent,40)).toThrow('conflicts with current authority')
+    expect(f.storage.getShareGrant('grant')).toMatchObject({status:'active',generation:1})
+    expect(f.raw.prepare('SELECT admission_state,restore_fence_generation AS fence FROM sync_relay_live_documents').get()).toEqual({admission_state:'open',fence:1})
+  }finally{f.close()}
+})
 it('releases a real captured session after a stale cut without retaining another source',async()=>{
   const f=fixture();try{
     f.raw.exec("INSERT INTO sync_relay_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms) VALUES ('workspace','other',1,'object.snapshot','{}',3)")

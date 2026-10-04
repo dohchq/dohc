@@ -1,4 +1,5 @@
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
+import { parseAgentDeclaration } from "@dohc/live-session-contract/live-update-admission";
 import {
   filterOpForShare,
   groupChannelIsOrdinary,
@@ -241,6 +242,10 @@ export function createShareReadQueries(
               )
             : null;
         if (payload === null) continue;
+        if (audience === "authenticated" && row.opKind === "moment.append") {
+          const authors = declaredAgentAuthors(row.payloadJson);
+          if (authors) (payload as Record<string, unknown>).authors = authors;
+        }
         ops.push({
           relaySeq: row.relaySeq,
           ...(audience === "authenticated" ? { originId: row.originId } : {}),
@@ -436,6 +441,39 @@ export function createShareReadQueries(
     historicalSharedBlob,
     linkRevisionByteLength,
   };
+}
+
+// The native moment-author budgets in dohc-engine-domain/src/store.rs.
+const MAX_SHARED_MOMENT_AUTHORS = 1_024;
+const MAX_SHARED_AUTHOR_JSON_BYTES = 128 * 1024;
+
+/** Declared provenance only, added after the selected moment passes the share filter. */
+function declaredAgentAuthors(payloadJson: string): Array<Record<string, unknown>> | null {
+  const raw = (JSON.parse(payloadJson) as Record<string, unknown>).authors;
+  if (!Array.isArray(raw) || raw.length > MAX_SHARED_MOMENT_AUTHORS) return null;
+  const authors: Array<Record<string, unknown>> = [];
+  for (const value of raw) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const author = value as Record<string, unknown>;
+    if (author.kind !== "agent") continue;
+    try {
+      const declaration = parseAgentDeclaration({
+        agentId: author.agentId,
+        onBehalfOf: author.onBehalfOf ?? null,
+        depth: author.depth === undefined ? 0 : author.depth,
+      });
+      authors.push({
+        kind: "agent", agentId: declaration.agentId,
+        ...(declaration.onBehalfOf !== null && !declaration.onBehalfOf.startsWith("local:")
+          ? { onBehalfOf: declaration.onBehalfOf } : {}),
+        ...(declaration.depth > 0 ? { depth: declaration.depth } : {}),
+      });
+    } catch {
+      // Optional malformed provenance does not discard an authorized file change.
+    }
+  }
+  return authors.length > 0 && Buffer.byteLength(JSON.stringify(authors), "utf8") <= MAX_SHARED_AUTHOR_JSON_BYTES
+    ? authors : null;
 }
 
 // The objects whose after-content in an admitted row is `sha256`: the moment's

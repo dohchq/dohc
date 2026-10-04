@@ -1,14 +1,19 @@
 use super::*;
-use dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor;
+use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_storage::TxnOutcome;
 
 const PAGE_SIZE: usize = 64;
+pub(crate) const SUPERSEDED: &str =
+    "A later restore replaced this save. Open the file to continue.";
 
+/// The row becomes ready only once the authenticated owner binding equals
+/// `binding` and its accepted cursor reaches `terminal_cursor`.
 pub(super) fn enqueue(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     payload: &MomentAppendPayload,
-    owner: &OwnerDraftDescriptor,
+    relay_namespace: &str,
+    binding: &LiveObjectBinding,
     terminal_cursor: i64,
 ) -> Result<(), SyncError> {
     tx.execute(
@@ -19,11 +24,11 @@ pub(super) fn enqueue(
             envelope.workspace_id,
             envelope.origin_id,
             envelope.origin_seq,
-            owner.binding.main_version_id,
-            owner.binding.object_id,
-            owner.binding.lineage_claim_id,
-            owner.relay_database_namespace,
-            serde_json::to_string(&owner.binding).map_err(SyncError::corrupt)?,
+            binding.main_version_id,
+            binding.object_id,
+            binding.lineage_claim_id,
+            relay_namespace,
+            serde_json::to_string(binding).map_err(SyncError::corrupt)?,
             terminal_cursor
         ],
     )
@@ -81,18 +86,23 @@ pub(crate) fn drain_and_claim(
 ) -> Result<PendingSettlementReport, SyncError> {
     let search_policy = search_policy_for_store(store);
     let result = store.write_with(faults, |tx| {
+        // A row is ready at its exact binding and cursor, or superseded once the
+        // same document has reached a later restore generation: generations
+        // never move backwards, so its binding can no longer return.
         let mut stmt = tx.prepare(
             "SELECT p.origin_id,p.origin_seq,l.payload_json,l.recorded_at_ms,p.applied,\
-                    p.main_version_id,p.object_id,p.record_facts_json \
+                    p.main_version_id,p.object_id,p.record_facts_json,\
+                    p.applied=0 AND json(p.binding_json)!=json(b.binding_json) \
              FROM owner_pending_settlements p \
              JOIN replication_log l ON l.workspace_id=p.workspace_id \
                AND l.origin_id=p.origin_id AND l.origin_seq=p.origin_seq \
              LEFT JOIN ydoc_owner_bindings b ON b.workspace_id=p.workspace_id \
                AND b.main_version_id=p.main_version_id AND b.object_id=p.object_id \
                AND b.lineage_claim_id=p.lineage_claim_id \
-             WHERE p.workspace_id=?1 AND (p.applied=1 OR \
-               (p.terminal_cursor<=b.accepted_cursor AND p.relay_namespace=b.relay_database_namespace \
-                AND json(p.binding_json)=json(b.binding_json))) \
+             WHERE p.workspace_id=?1 AND (p.applied=1 OR (p.relay_namespace=b.relay_database_namespace AND (\
+               (p.terminal_cursor<=b.accepted_cursor AND json(p.binding_json)=json(b.binding_json)) \
+               OR (json_extract(b.binding_json,'$.restoreFenceGeneration')>json_extract(p.binding_json,'$.restoreFenceGeneration') \
+                AND json_remove(b.binding_json,'$.restoreFenceGeneration')=json_remove(p.binding_json,'$.restoreFenceGeneration'))))) \
              ORDER BY p.checked_sequence,p.terminal_cursor,p.origin_id,p.origin_seq LIMIT 65",
         ).map_err(SyncError::corrupt)?;
         let mut rows = stmt.query([workspace_id]).map_err(SyncError::corrupt)?;
@@ -102,6 +112,9 @@ pub(crate) fn drain_and_claim(
             let object: String = row.get(6).map_err(SyncError::corrupt)?;
             let key = DocKey::new(workspace_id, &version, &object).map_err(SyncError::corrupt)?;
             let encoded: String = row.get(2).map_err(SyncError::corrupt)?;
+            // Each queued row is a bound owner's host settlement, which an open
+            // owner editor does not defer. It waits only once the owner is unbound.
+            let deferred = leases.is_live(&key) && !is_bound_owner(tx, &key);
             ready.push((ReplicationEnvelope {
                 workspace_id: workspace_id.to_owned(),
                 origin_id: row.get(0).map_err(SyncError::corrupt)?,
@@ -110,7 +123,7 @@ pub(crate) fn drain_and_claim(
                 payload: serde_json::from_str(&encoded).map_err(SyncError::corrupt)?,
                 recorded_at_ms: row.get(3).map_err(SyncError::corrupt)?,
                 relay_seq: None,
-            }, row.get::<_, bool>(4).map_err(SyncError::corrupt)?, leases.is_live(&key), row.get::<_, Option<String>>(7).map_err(SyncError::corrupt)?));
+            }, row.get::<_, bool>(4).map_err(SyncError::corrupt)?, deferred, row.get::<_, Option<String>>(7).map_err(SyncError::corrupt)?, row.get::<_, bool>(8).map_err(SyncError::corrupt)?));
             if ready.len() > PAGE_SIZE { break; }
         }
         drop(rows);
@@ -123,10 +136,12 @@ pub(crate) fn drain_and_claim(
         let mut record_facts = Vec::new();
         let mut envelopes = Vec::new();
         let checked_sequence: i64 = tx.query_row("SELECT COALESCE(MAX(checked_sequence),0)+1 FROM owner_pending_settlements WHERE workspace_id=?1", [workspace_id], |r| r.get(0)).map_err(SyncError::corrupt)?;
-        for (envelope, applied, live, facts_json) in ready {
+        for (envelope, applied, deferred, facts_json, superseded) in ready {
             tx.execute("UPDATE owner_pending_settlements SET checked_sequence=?4 WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3", params![workspace_id,envelope.origin_id,envelope.origin_seq,checked_sequence]).map_err(SyncError::persist)?;
-            if live { continue; }
-            if !applied {
+            if deferred { continue; }
+            if superseded {
+                refuse(tx, workspace_id, &envelope, crate::RefusalReason::InvalidInput { reason: SUPERSEDED.into() })?;
+            } else if !applied {
                 let payload: MomentAppendPayload = serde_json::from_value(envelope.payload.clone()).map_err(SyncError::corrupt)?;
                 envelope.validate()?;
                 validate_payload_bounds(&payload)?;
@@ -145,10 +160,7 @@ pub(crate) fn drain_and_claim(
                         tx.execute_batch("ROLLBACK TO owner_settlement_replay; RELEASE owner_settlement_replay").map_err(SyncError::persist)?;
                         if matches!(error, SyncError::RetryableState { .. }) { continue; }
                         let Some(reason) = crate::apply::refusal_reason(&error) else { return Err(error); };
-                        crate::apply::persist_refusal(tx, &crate::ReplicationRefusal { workspace_id:workspace_id.to_owned(), origin_id:envelope.origin_id.clone(), origin_seq:envelope.origin_seq, op_kind:envelope.op_kind.clone(), reason })?;
-                        tx.execute("UPDATE replication_log SET apply_disposition='refused' WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3", params![workspace_id,envelope.origin_id,envelope.origin_seq]).map_err(SyncError::persist)?;
-                        // A refused envelope remains inspectable after the queue clears.
-                        retain_refused_moment_blobs(tx, &envelope)?;
+                        refuse(tx, workspace_id, &envelope, reason)?;
                     }
                 }
             } else if let Some(facts_json) = facts_json {
@@ -177,4 +189,29 @@ pub(crate) fn drain_and_claim(
         changes,
         record_facts,
     })
+}
+
+fn refuse(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    envelope: &ReplicationEnvelope,
+    reason: crate::RefusalReason,
+) -> Result<(), SyncError> {
+    crate::apply::persist_refusal(
+        tx,
+        &crate::ReplicationRefusal {
+            workspace_id: workspace_id.to_owned(),
+            origin_id: envelope.origin_id.clone(),
+            origin_seq: envelope.origin_seq,
+            op_kind: envelope.op_kind.clone(),
+            reason,
+        },
+    )?;
+    tx.execute(
+        "UPDATE replication_log SET apply_disposition='refused' WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+        params![workspace_id, envelope.origin_id, envelope.origin_seq],
+    )
+    .map_err(SyncError::persist)?;
+    // A refused envelope remains inspectable after the queue clears.
+    retain_refused_moment_blobs(tx, envelope)
 }

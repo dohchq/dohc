@@ -2134,11 +2134,14 @@ fn ydoc_file_holds_head(
 
 /// Record that the workspace file holds this lineage up to its current head,
 /// for a settle that proved it without writing. An open that finds the two
-/// still equal knows the lineage is not ahead of its file.
+/// still equal knows the lineage is not ahead of its file. For an accepted
+/// prefix the file holds only accepted content, so the interval is consumed
+/// and the native boundary stays below the owner's private tail.
 fn record_file_holds_head(
     store: &mut EngineStore,
     key: &DocKey,
     verified_projection_sha: Option<&str>,
+    accepted_prefix: bool,
     faults: &dyn FaultInjector,
 ) -> Result<(), RuntimeError> {
     let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
@@ -2150,15 +2153,19 @@ fn record_file_holds_head(
         )
         .map_err(StorageError::persist_public)
     })?;
-    if settled == Some(head)
+    if (accepted_prefix || settled == Some(head))
         && pending_empty
         && verified_projection_sha.is_none_or(|sha| last_sha.as_deref() == Some(sha))
     {
         return Ok(());
     }
     let recorded = store.write_with(faults, |tx| {
-        dohc_engine_collab::author_coverage::advance_in(tx, key, false)
-            .map_err(StorageError::persist_public)?;
+        if accepted_prefix {
+            dohc_engine_collab::author_coverage::advance_accepted_prefix_in(tx, key, false)
+        } else {
+            dohc_engine_collab::author_coverage::advance_in(tx, key, false)
+        }
+        .map_err(StorageError::persist_public)?;
         tx.execute(
             "UPDATE ydoc_docs SET \
              last_settled_sha=COALESCE(?4,last_settled_sha) \
@@ -2457,6 +2464,12 @@ pub(super) fn ydoc_settle_on_store(
             &cold_doc
         }
     };
+    // While the adopted owner's own edits wait for the relay, a live
+    // settlement projects only what the relay accepted. Its file and moment
+    // never carry the private tail, and the native head keeps it.
+    let accepted_prefix = live_audit.and_then(|audit| audit.accepted_prefix());
+    let settles_prefix = accepted_prefix.is_some();
+    let doc = accepted_prefix.unwrap_or(doc);
     // A doc holding unintegrated remote updates (missing cross-origin
     // dependency) must not settle: the projection would omit pending remote
     // content and last_settled_sha would record that incomplete artifact as
@@ -2647,20 +2660,29 @@ pub(super) fn ydoc_settle_on_store(
     } else {
         ydoc_settle_disk_preimage(root_dir, path, expected_head_sha.as_deref(), &projected_sha)?
     };
+    // A live settlement names its own moment unless the head already is its
+    // latest audited settlement.
+    let reuses_head = match (live_audit, head_probe.as_ref()) {
+        (Some(audit), Some(head)) => store.read_with(|conn| {
+            audit.reuses_head_in(conn, &head.latest_moment_id, &head.blob_sha256)
+        })?,
+        _ => true,
+    };
     // Idempotent no-op: when the lineage's last settled content is exactly
     // this projection, re-settling would mint a duplicate moment (the
     // fingerprint's previous-moment input changed) and a redundant
     // materialization job — the TS driver only settles when the projection
     // differs. Answer with the current head instead (its pending job, if
     // any, was replayed above).
-    if (dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
-        == Some(projected_sha.as_str())
-        || probe_sha.as_deref() == Some(projected_sha.as_str()))
+    if reuses_head
+        && (dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
+            == Some(projected_sha.as_str())
+            || probe_sha.as_deref() == Some(projected_sha.as_str()))
         && matches!(&disk_preimage, Some(Preimage::Present(disk_sha)) if *disk_sha == projected_sha)
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
         // Exact projection and disk equality restore the proof a prior prune cleared.
-        record_file_holds_head(store, key, Some(&projected_sha), faults)?;
+        record_file_holds_head(store, key, Some(&projected_sha), settles_prefix, faults)?;
         if let Some(audit) = live_audit {
             let recorded = store.write_with(faults, |tx| {
                 let id = audit.record_in_tx(
@@ -2715,7 +2737,7 @@ pub(super) fn ydoc_settle_on_store(
         )
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
-        record_file_holds_head(store, key, None, faults)?;
+        record_file_holds_head(store, key, None, false, faults)?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
@@ -2836,8 +2858,13 @@ pub(super) fn ydoc_settle_on_store(
         // Coverage and the unresolved attempt commit with the moment and job.
         // The projection was taken from the doc at the current head, and this
         // actor is the store's only writer, so the head has not moved since.
-        dohc_engine_collab::author_coverage::advance_moment_in(tx, key, &result.moment.moment_id)
-            .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
+        dohc_engine_collab::author_coverage::advance_moment_in(
+            tx,
+            key,
+            &result.moment.moment_id,
+            settles_prefix,
+        )
+        .map_err(|error| DomainError::Storage(StorageError::persist_public(error)))?;
         tx.execute(
             "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",

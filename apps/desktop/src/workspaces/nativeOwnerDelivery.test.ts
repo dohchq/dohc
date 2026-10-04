@@ -14,7 +14,7 @@ vi.mock("./ownerYDocFrameDelivery", () => ({OwnerYDocFrameDelivery: class {
 vi.mock("./ownerYDocOutbox", () => ({OwnerYDocOutboxDrainer: class {drainOnce = mock.drain; dispose() {}}}));
 const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1};
 const config = parseDesktopOwnerDeliveryConfig({version: 1, nativeConfigPath: "C:/native.json", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2},
-  relayUrl: "https://relay.example.test", frames: {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+  relayUrl: "https://relay.example.test", frames: {receive: {maxFrameBytes: 2048, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
     maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096},
   attemptTimeoutMs: 5000, retryDelayMs: 1000, documents: [{binding, relayDatabaseNamespace: "namespace", shareId: "share"}]});
 afterEach(() => vi.clearAllMocks());

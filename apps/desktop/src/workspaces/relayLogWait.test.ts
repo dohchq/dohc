@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { RelayUnauthorizedError } from "@dohc/workspace-contracts/relay";
+import { describe, expect, it, vi } from "vitest";
 import { createRelayLogWait } from "./relayLogWait";
 
 const IDENTITY = { replicationEpoch: "epoch-1", streamIdentity: "stream-1" };
@@ -54,5 +55,57 @@ describe("held relay log reads", () => {
     await expect(wait(4, signal)).rejects.toThrow(/coordinate/u);
     await expect(wait(4, signal)).resolves.toBe(true);
     expect(relay.urls.filter((url) => url.endsWith("/bootstrap"))).toHaveLength(2);
+  });
+
+  it("bounds the coordinate read and the held read with one deadline the caller can abort", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const signals: Array<AbortSignal | null | undefined> = [];
+    const fetch = async (resource: string | URL | Request, init?: RequestInit) => {
+      signals.push(init?.signal);
+      return String(resource).endsWith("/bootstrap")
+        ? Response.json({ ok: true, hasContent: true, ...IDENTITY })
+        : Response.json({ ok: true, hasMore: true });
+    };
+    const wait = createRelayLogWait({
+      workspaceId: "workspace",
+      relay: { baseUrl: "http://relay.test", token: "token", fetch },
+      holdMs: 25_000,
+    });
+    const caller = new AbortController();
+    await expect(wait(4, caller.signal)).resolves.toBe(true);
+    expect(timeout.mock.calls).toEqual([[40_000]]);
+    expect(signals).toHaveLength(2);
+    expect(signals[0]).toBe(signals[1]);
+    caller.abort();
+    expect(signals[0]?.aborted).toBe(true);
+    timeout.mockRestore();
+  });
+
+  it("releases a refused read's body before it rejects, and still reports the refusal if that fails", async () => {
+    let release!: () => void;
+    let cancelled = 0;
+    const refused = (status: number, cancel: () => Promise<void>) =>
+      new Response(new ReadableStream({ cancel: () => { cancelled += 1; return cancel(); } }), { status });
+    const answers = [
+      () => refused(401, () => new Promise<void>((resolve) => { release = resolve; })),
+      () => refused(401, () => Promise.reject(new Error("socket gone"))),
+    ];
+    const fetch = async (resource: string | URL | Request) =>
+      String(resource).endsWith("/bootstrap")
+        ? Response.json({ ok: true, hasContent: true, ...IDENTITY })
+        : answers.shift()!();
+    const wait = createRelayLogWait({
+      workspaceId: "workspace",
+      relay: { baseUrl: "http://relay.test", token: "token", fetch },
+    });
+    let settled = false;
+    const first = wait(4, new AbortController().signal).finally(() => { settled = true; });
+    await vi.waitFor(() => expect(cancelled).toBe(1));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release();
+    await expect(first).rejects.toBeInstanceOf(RelayUnauthorizedError);
+    await expect(wait(4, new AbortController().signal)).rejects.toBeInstanceOf(RelayUnauthorizedError);
+    expect(cancelled).toBe(2);
   });
 });

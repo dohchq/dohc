@@ -985,6 +985,9 @@ impl EngineService {
                 "workspace.close"
                     | "search.queryChatMessagesGranular"
                     | "chats.readState.listUnreadFileThreads"
+                    | "history.page"
+                    | "moments.get"
+                    | "versionedText.readBlob"
             )
         {
             return Err(WireError::new(
@@ -1042,7 +1045,7 @@ mod tests {
                     "relay": {"baseUrl": "https://relay.example", "bearerToken": "actual-owner-credential"}},
                 {"root": private.path(), "workspaceId": "private", "maxRegistrations": 4}
             ],
-            "ingress": {"aggregateBytes": 400_000_000, "applicationWorkingReserveBytes": 1_000_000,
+            "ingress": {"aggregateBytes": 512 * 1024 * 1024, "applicationWorkingReserveBytes": 8 * 1024 * 1024,
                 "maxUploads": 2, "uploadDeadlineMs": 30_000}
         })).unwrap();
         let (service, owner, _ingress) = EngineService::configured_live_host(config).await.unwrap();

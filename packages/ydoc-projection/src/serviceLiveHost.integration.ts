@@ -51,7 +51,7 @@ it.each(["before-native-fence", "after-native-fence"] as const)("bootstraps and 
       maxOutputBytes: 1_000_000, maxReadBytes: 4_000_000}, workingReserveBytes: 4_000_000},
     restore: {maxBytes: 1_000_000, maxEvents: 100, aggregateBytes: 17_000_000,
       workingReserveBytes: 1_000_000, maxOperations: 1, validation: policy},
-    ingress: { aggregateBytes: 400_000_000, applicationWorkingReserveBytes: 1_000_000, maxUploads: 2, uploadDeadlineMs: 30_000 },
+    ingress: { aggregateBytes: 512 * 1024 * 1024, applicationWorkingReserveBytes: 8 * 1024 * 1024, maxUploads: 2, uploadDeadlineMs: 30_000 },
     client: { aggregateBytes: 200_000_000, maxUploads: 2, connectTimeoutMs: 30_000, requestDeadlineMs: 30_000 } }));
   let doc = markdownToYDoc("Hello");
   const frameChanges = createNamedFrameChanges(32);

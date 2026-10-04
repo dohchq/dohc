@@ -1,0 +1,7 @@
+@import "../../../src/renderer/styles.css";
+@source "./main.tsx";
+@source "../../../src/renderer/Overlay.tsx";
+@source "../../../src/renderer/OwnerRestoreDialog.tsx";
+@source "../../../src/renderer/ui/controls.tsx";
+@source "../../../src/renderer/workbench/NoticeCenter.tsx";
+@source "../../../src/renderer/shell/copyDetails.tsx";

@@ -5,7 +5,7 @@ import type {
 } from "@dohc/workspace-engine-client";
 import { OwnerYDocOutboxReadChangedError } from "@dohc/workspace-engine-client";
 import type { HostEpoch } from "@dohc/live-session-contract/host-control";
-import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
+import type { AgentDeclaration, LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 
 export interface FreshOwnerAuthority {
   /** Opaque, attempt-scoped authority. The outbox never persists it. */
@@ -32,6 +32,8 @@ export interface OwnerYDocDeliveryEnvelope {
   readonly deliveryId: string;
   readonly update: Uint8Array;
   readonly updateDigest: string;
+  /** The agent the queued edit declared; absent when it declared none. */
+  readonly agentDeclaration?: AgentDeclaration;
 }
 
 export type OwnerYDocDeliveryResult =
@@ -74,6 +76,7 @@ function envelopeFor(
     deliveryId: entry.deliveryId,
     update: entry.update,
     updateDigest: entry.updateDigest,
+    ...(entry.agentDeclaration ? { agentDeclaration: entry.agentDeclaration } : {}),
   };
 }
 

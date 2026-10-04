@@ -1,8 +1,6 @@
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import {
   parseLiveDocumentKey,
-  parseLiveUpdateDigest,
-  parseLiveUpdateIdentifier,
   type LiveDocumentKey,
   type LiveUpdateReceipt,
 } from "@dohc/live-session-contract/live-update-admission";
@@ -18,36 +16,12 @@ import {deliverStopRestore, snapshotStopRestoreLookup} from "./liveRestoreDelive
 import type {StopRestoreLookup} from "./storage/liveRestoreOperation";
 import type {LiveRestorePreparation} from "./liveRestorePreparation";
 import {LiveHostRegistrations, sameLiveHostDocument} from "./liveHostRegistration";
+import {settlementResult, type CommittedSettlement} from "./liveSettlement";
 export { createLiveJournalHistoryAuthority, type LiveJournalHistoryAuthority };
 
 export type CommittedDeliveryOutcome =
   | { kind: "done"; terminalReceipt: LiveUpdateReceipt | null }
   | { kind: "pending"; reason: string };
-
-export interface CommittedSettlement {
-  settlementId: string;
-  previousCursor: number;
-  terminalCursor: number;
-  applicationCount: number;
-  localYDocSequence: number;
-  momentId: string;
-  markdownDigest: string;
-  materialized: boolean;
-  collectionReconcileRequired: boolean;
-}
-
-export function settlementResult(value: unknown, terminal: LiveUpdateReceipt | null): CommittedSettlement {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid native settlement response.");
-  const response = value as Record<string, unknown>;
-  if (Object.keys(response).sort().join() !== "settlement,status" || response.status !== "settled" || !response.settlement || typeof response.settlement !== "object" || Array.isArray(response.settlement)) throw new Error("Invalid native settlement response.");
-  const row = response.settlement as Record<string, unknown>;
-  if (Object.keys(row).sort().join() !== "applicationCount,collectionReconcileRequired,localYDocSequence,markdownDigest,materialized,momentId,previousCursor,settlementId,terminalCursor") throw new Error("Invalid native settlement fields.");
-  for (const key of ["previousCursor", "terminalCursor", "applicationCount", "localYDocSequence"]) {
-    if (typeof row[key] !== "number" || !Number.isSafeInteger(row[key]) || row[key] < 0) throw new Error("Invalid native settlement integer.");
-  }
-  if (row.terminalCursor !== (terminal?.journalCursor ?? 0) || Number(row.previousCursor) > Number(row.terminalCursor) || Number(row.applicationCount) > Number(row.terminalCursor) - Number(row.previousCursor) || typeof row.materialized !== "boolean" || typeof row.collectionReconcileRequired !== "boolean") throw new Error("Native settlement coverage mismatch.");
-  return { settlementId: parseLiveUpdateIdentifier(row.settlementId,"settlement ID"), previousCursor: Number(row.previousCursor), terminalCursor: Number(row.terminalCursor), applicationCount: Number(row.applicationCount), localYDocSequence: Number(row.localYDocSequence), momentId: parseLiveUpdateIdentifier(row.momentId,"moment ID"), markdownDigest: parseLiveUpdateDigest(row.markdownDigest), materialized: row.materialized, collectionReconcileRequired: row.collectionReconcileRequired };
-}
 
 /** Private configured-host consumer; the caller supplies an authenticated, provisioned connection. */
 export class LiveCommittedDelivery {
@@ -110,7 +84,7 @@ export class LiveCommittedDelivery {
     if (this.#active.has(key))
       throw new Error("A committed delivery drain already owns this document.");
     this.#active.add(key);
-    let drain;
+    let drain: ReturnType<LiveCommittedDeliveryStore["open"]> | undefined;
     const aborted = () => {
       if (signal?.aborted) throw signal.reason;
     };
@@ -118,6 +92,8 @@ export class LiveCommittedDelivery {
       aborted();
       drain = this.#store.open({ host: this.#connection.host, document });
       let registration = await this.#registrations.ensure(drain.baseline.binding, signal);
+      // A materialized settlement released the host's author coverage, and nothing applied since.
+      let settledSinceApply = false;
       for (;;) {
         aborted();
         const next = this.#store.next(drain);
@@ -161,6 +137,20 @@ export class LiveCommittedDelivery {
         if (result?.status === "pending") {
           if (typeof result.reason !== "string")
             throw new Error("Invalid committed delivery pending result.");
+          if (result.reason === "settlement-required" && next.kind !== "bootstrap") {
+            // The host's author coverage is full. Settle once through what it
+            // applied, then offer the identical event again.
+            if (settledSinceApply) throw new Error("The host still requires settlement after settling everything it applied.");
+            const settling = await this.#connection.client.sendRequest({ id: this.#connection.nextRequestId(), method: "liveApplication.settle",
+              workspace: this.#connection.workspace, params: { registrationId: registration.id, terminalReceipt: next.predecessor ? { ...next.predecessor } : null },
+              deadlineMs: this.#connection.deadlineMs }, signal);
+            aborted();
+            const settled = settlementResult(settling.result, next.predecessor);
+            // Its file write has not landed; the next pass retries after it does.
+            if (!settled.materialized) return { kind: "pending", reason: "settlement-materialization-pending" };
+            settledSinceApply = true;
+            continue;
+          }
           return { kind: "pending", reason: result.reason };
         }
         if (next.kind === "bootstrap") {
@@ -172,6 +162,7 @@ export class LiveCommittedDelivery {
             throw new Error("Invalid durable application acknowledgement.");
           this.#store.acknowledge(drain, next.predecessor, result.ack);
         }
+        settledSinceApply = false;
       }
     } finally {
       if (drain) this.#store.close(drain);

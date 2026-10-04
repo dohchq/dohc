@@ -15,6 +15,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { pushWithIdentity } from "./pushWithIdentity";
+import { startRelayWatch } from "./relayWatch";
 
 export interface RelaySyncOperations {
   claim(): Promise<void>;
@@ -71,7 +72,9 @@ export interface CloudSyncEngineOptions {
   // resolves whether it does. After every pull the engine waits past that
   // pull's cursor and pulls when this resolves true, so an idle desktop
   // receives another device's edits, including into a document it has open,
-  // without polling. A rejection backs the next wait off.
+  // without polling. A rejection backs the next wait off. The engine aborts
+  // `signal` when it no longer needs the answer, and waits for the promise to
+  // settle before it waits again or stops.
   waitForChange?: (since: number, signal: AbortSignal) => Promise<boolean>;
   // How long the engine waits after a pass before it pulls again on its own:
   // the fallback for a change `waitForChange` missed. Omitted, the engine
@@ -158,11 +161,6 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let backoffDueAtMs: number | null = null;
   // The pull a quiet engine makes on its own after `idlePullMs`.
   let idlePullTimer: ReturnType<typeof setTimeout> | undefined;
-  // The wait on the relay for a change past `watchSince`, or its restart.
-  let watch: AbortController | undefined;
-  let watchTimer: ReturnType<typeof setTimeout> | undefined;
-  let watchSince: number | undefined;
-  let watchDelayMs = initialBackoffMs;
   // The cursor a reported change was past, until a pass starts to pull it.
   let changeReported: number | undefined;
   // What the pass that just pulled reached. The wait restarts from it once
@@ -176,6 +174,25 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // `syncing` while it ran.
   let changeEvents = 0;
   let chain: Promise<void> = Promise.resolve();
+  // The wait on the relay for a change past the last pull.
+  const watch = options.waitForChange && startRelayWatch({
+    wait: options.waitForChange,
+    initialDelayMs: initialBackoffMs,
+    maxDelayMs: maxBackoffMs,
+    changed: (since) => {
+      // The pass that pulls this change restarts the wait.
+      changeReported = since;
+      queuePull();
+    },
+    failed: (error) => {
+      // The sign-in expired: the engine stops, and the status says so.
+      if (error instanceof RelayUnauthorizedError) {
+        handleFailure(error, undefined, true);
+        return;
+      }
+      console.error(`[desktop] relay change wait failed for ${options.rootDir}:`, error);
+    },
+  });
 
   function emitChange(): void {
     changeEvents += 1;
@@ -188,9 +205,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     emitChange();
   }
 
-  function clearTimers(): void {
+  // Settles once the wait on the relay has ended.
+  function clearTimers(): Promise<void> {
     clearPassTimers();
-    stopWatch();
+    return watch?.stop() ?? Promise.resolve();
   }
 
   // The timers that would start another pass. A pass leaves the wait on the
@@ -214,71 +232,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     }
   }
 
-  function stopWatch(): void {
-    watch?.abort();
-    watch = undefined;
-    if (watchTimer !== undefined) {
-      clearTimeout(watchTimer);
-      watchTimer = undefined;
-    }
-  }
-
   // Wait past the cursor a successful pull reached. A pull that served a
   // reported change and did not move past it would see the same change at
   // once, so that wait backs off instead of turning into a loop of passes.
   function watchPast(cursor: number, servedChange: number | undefined): void {
-    if (options.waitForChange === undefined || stopped || authExpired) return;
-    const stuck = servedChange !== undefined && cursor <= servedChange;
-    if (!stuck && watchSince === cursor && (watch !== undefined || watchTimer !== undefined)) return;
-    stopWatch();
-    watchSince = cursor;
-    if (stuck) {
-      scheduleWatch();
-      return;
-    }
-    watchDelayMs = initialBackoffMs;
-    runWatch();
-  }
-
-  function scheduleWatch(): void {
-    const delay = watchDelayMs;
-    watchDelayMs = Math.min(maxBackoffMs, watchDelayMs * 2);
-    watchTimer = setTimeout(() => {
-      watchTimer = undefined;
-      runWatch();
-    }, delay);
-  }
-
-  function runWatch(): void {
-    const wait = options.waitForChange;
-    const since = watchSince;
-    if (wait === undefined || since === undefined || stopped || authExpired) return;
-    const controller = new AbortController();
-    watch = controller;
-    wait(since, controller.signal).then(
-      (changed) => {
-        if (watch !== controller) return;
-        watch = undefined;
-        if (!changed) {
-          runWatch();
-          return;
-        }
-        // The pass that pulls this change restarts the wait.
-        changeReported = since;
-        queuePull();
-      },
-      (error: unknown) => {
-        if (watch !== controller) return;
-        watch = undefined;
-        // The sign-in expired: the engine stops, and the status says so.
-        if (error instanceof RelayUnauthorizedError) {
-          handleFailure(error, undefined, true);
-          return;
-        }
-        console.error(`[desktop] relay change wait failed for ${options.rootDir}:`, error);
-        scheduleWatch();
-      },
-    );
+    watch?.watchPast(cursor, servedChange !== undefined && cursor <= servedChange);
   }
 
   // A pull that records no local change, so it cannot show "Local changes".
@@ -342,7 +300,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       stopped = true;
       // The expired sign-in is the state now; an older failure is not.
       syncFailure = null;
-      clearTimers();
+      void clearTimers();
       emitChange();
       return;
     }
@@ -351,7 +309,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       updateRequired = error.update;
       stopped = true;
       syncFailure = null;
-      clearTimers();
+      void clearTimers();
       emitChange();
       return;
     }
@@ -624,8 +582,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
 
     async stop() {
       stopped = true;
-      clearTimers();
-      await chain;
+      await Promise.all([clearTimers(), chain]);
     },
   };
 }

@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { execFile } from "node:child_process";
+import { execFile, type ExecFileException } from "node:child_process";
 import { access } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { desktopRoot } from "./desktopApp";
@@ -13,6 +13,19 @@ const cliEndpointFile = process.platform === "win32"
   ? "dohc-cli-endpoint"
   : "dohc-cli.sock";
 const cliTokenFile = "dohc-cli-token";
+
+/** A dohc run that did not succeed, with exactly what it printed. */
+export class DohcCliFailure extends Error {
+  constructor(
+    message: string,
+    readonly exitCode: ExecFileException["code"],
+    readonly stdout: string,
+    readonly stderr: string,
+    options: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
 
 export function runDohcCli(
   workspace: Pick<TempWorkspace, "homeDir" | "rootPath">,
@@ -43,8 +56,11 @@ export function runDohcCli(
       (error, stdout, stderr) => {
         if (error) {
           rejectRun(
-            new Error(
+            new DohcCliFailure(
               `dohc ${args.join(" ")} failed: ${stderr.trim() || error.message}`,
+              error.code,
+              stdout,
+              stderr,
               { cause: error },
             ),
           );

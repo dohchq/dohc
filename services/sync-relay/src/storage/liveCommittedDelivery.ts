@@ -11,7 +11,7 @@ import {HOST_CONTROL_IDENTIFIER_MAX_BYTES} from "@dohc/live-session-contract/hos
 import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHistoryDigest} from "../liveAcceptedHistory";
 import type {NativeRestoreHistoryProof} from "../liveRestoreProposal";
 export type {RestoreLifecycle} from "../liveRestoreLifecycle";
-import type { LiveOwnerAdoptionCut } from "@dohc/workspace-engine-client/daemon";
+import type { LiveOwnerAdoptionCut, NativeOwnerActivationSource } from "@dohc/workspace-engine-client/daemon";
 import { isDeepStrictEqual } from "node:util";
 import {
   parseLiveUpdateDigest,
@@ -66,7 +66,7 @@ import {
 import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
 import { nativeRestoreFence, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
-import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
+import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, nativeSourceAgentDeclaration, type RestoreProofBudget} from "../liveRestoreProposal";
 import {validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
 import {readRestoreReviewHistory} from "./liveRestoreReview";
 import {assertWorkspaceQuota} from "./workspaces";
@@ -247,7 +247,8 @@ export class LiveCommittedDeliveryStore {
   readonly #drains = new WeakMap<CommittedDeliveryDrain, DrainCapture>();
   readonly #storage: StorageContext;
   readonly #history: LiveJournalHistoryAuthority;
-  readonly #ownerCuts = new WeakMap<OwnerCutCapture,{ host: LiveHostConnectionCoordinate; document: LiveDocumentKey; digest: string }>();
+  readonly #ownerCuts = new WeakMap<OwnerCutCapture,{ host: LiveHostConnectionCoordinate; document: LiveDocumentKey; digest: string;
+    activation: NativeOwnerActivationSource | null }>();
   readonly #ownerDeliveries = new WeakMap<OwnerDeliveryCapture,{host: LiveHostConnectionCoordinate;document: LiveDocumentKey;highWater: number}>();
   readonly #restores = new WeakMap<StopRestoreCutCapture,RestoreCapture>();
   constructor(storage: StorageContext, history: LiveJournalHistoryAuthority, private readonly activation?: ServiceActivationAccess) {
@@ -326,12 +327,18 @@ export class LiveCommittedDeliveryStore {
     capture.assertCurrent();
     return saved;
   }
-  ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number;adoptionId:string} {
+  /**
+   * `sequence` is the greatest native sequence delivery proved. `adoptionSequence`
+   * is the native head the host adopted at, as its adoption ACK confirmed.
+   */
+  ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number;adoptionId:string;adoptionSequence: number} {
     const {host,document} = this.#ownerDelivery(capture), row = this.#ownerRow(host,document); integrity(row);
     const terminal = JSON.parse(String(row.tip_receipt_json)), parsed = terminal === null ? null : parseLiveUpdateReceipt(terminal);
     integrity((parsed?.journalCursor ?? 0) === row.tip_cursor);
     integrity(authorityInteger(row.tip_application_sequence) <= authorityInteger(row.tip_sequence));
-    return {terminal: parsed,sequence: authorityInteger(row.tip_sequence),adoptionId:parseLiveUpdateIdentifier(JSON.parse(String(row.origin_json)).adoptionId)};
+    const origin = JSON.parse(String(row.origin_json));
+    return {terminal: parsed,sequence: authorityInteger(row.tip_sequence),adoptionId:parseLiveUpdateIdentifier(origin.adoptionId),
+      adoptionSequence: authorityInteger(origin.expectedLocalSequence)};
   }
   nextOwnerApplication(capture: OwnerDeliveryCapture): AdmittedLiveUpdate | undefined {
     const {document,highWater} = this.#ownerDelivery(capture), progress = this.ownerDeliveryProgress(capture);
@@ -446,7 +453,7 @@ export class LiveCommittedDeliveryStore {
     };
     assertCurrent();
     const capture = { binding: structuredClone(captured.binding), cut: captured.cut, assertCurrent };
-    this.#ownerCuts.set(capture,{ host,document,digest: ownerCutDigest(capture) });
+    this.#ownerCuts.set(capture,{ host,document,digest: ownerCutDigest(capture),activation: captured.source.activation?.source ?? null });
     return capture;
   }
   #ownerCapture(capture: OwnerCutCapture) {
@@ -460,13 +467,16 @@ export class LiveCommittedDeliveryStore {
       .get(this.#history.namespace,...documentParams(document),host.hostId);
   }
   acknowledgeOwnerAdoption(capture: OwnerCutCapture, value: unknown): void {
-    const { host,document } = this.#ownerCapture(capture), cut = capture.cut;
+    const { host,document,activation } = this.#ownerCapture(capture), cut = capture.cut;
     const ack = baselineRecord(value,["adoptionId","localYDocSequence","terminalCursor","adoptionReplayed"]);
     integrity(ack.adoptionId === cut.adoptionId && ack.localYDocSequence === cut.expectedLocalSequence && ack.terminalCursor === (cut.terminalReceipt?.journalCursor ?? 0) && typeof ack.adoptionReplayed === "boolean");
     const { baselineBytes: _baseline,events: _events,...header } = cut;
-    const originEvidenceDigest = createHash("sha256").update(JSON.stringify([capture.binding, cut.relayDatabaseNamespace, cut.sourceMomentId,
+    const cutEvidenceDigest = createHash("sha256").update(JSON.stringify([capture.binding, cut.relayDatabaseNamespace, cut.sourceMomentId,
       cut.sourceDigest, cut.sourceByteLength, cut.baselineMomentRelaySequence, cut.baselineRegisteredAtMs, cut.expectedLocalSequence,
       cut.events.map(event => canonicalAcceptedMetadata(event.metadata))])).digest("hex");
+    // Native adoption of an ordinary service activation also binds its retained source, as native evidence does.
+    const originEvidenceDigest = activation === null ? cutEvidenceDigest
+      : createHash("sha256").update(JSON.stringify(["ordinary-replication", cutEvidenceDigest, activation])).digest("hex");
     const originEventCount = cut.events.length;
     const originHistoryEvidenceDigest = cut.events.reduce((previous, event, index) => nextAcceptedHistoryDigest(previous, index + 1, event.metadata),
       initialAcceptedHistoryDigest(this.#history.namespace, document));
@@ -1151,7 +1161,7 @@ export class LiveCommittedDeliveryStore {
     integrity(receipt.point.journalCursor === selected.point.journalCursor && receipt.point.receiptDigest === selected.point.receiptDigest);
     const ownerOrigin = receipt.fence.operation.origin.kind === "owner" ? this.captureStopRestoreOwnerOrigin(request, historyBudget) : null;
     for (const source of receipt.nativeSources) {
-      if (source.source.origin.kind === "adoptionSeed") integrity(ownerOrigin && source.source.nativeSequence === ownerOrigin.expectedLocalSequence);
+      if ("adoptionId" in source.source && source.source.origin.kind === "adoptionSeed") integrity(ownerOrigin && source.source.nativeSequence === ownerOrigin.expectedLocalSequence);
     }
     const verifySources = () => {
       const operation=readStopRestoreInTransaction(this.#storage,lookup);integrity(operation);
@@ -1163,7 +1173,8 @@ export class LiveCommittedDeliveryStore {
         const metadata=ownedSourceBytes?revalidateAcceptedHistoryDelivery(this.#storage,lookup,sourceBudget,ownedSourceBytes[index]!):readAcceptedHistoryDelivery(this.#storage,lookup,sourceBudget);
         if (!metadata) {integrity(source.acceptedReceipt === null); continue;}
         integrity(isDeepStrictEqual(source.acceptedReceipt, metadata.accepted.receipt) && metadata.accepted.authority.principalKind === "owner" &&
-          metadata.accepted.receipt.updateDigest === source.updateDigest);
+          metadata.accepted.receipt.updateDigest === source.updateDigest &&
+          isDeepStrictEqual(nativeSourceAgentDeclaration(source), metadata.accepted.agentDeclaration));
       }
       integrity(sameReceipt(accepted.proof.terminal, operation.terminal));
       let origin: unknown;

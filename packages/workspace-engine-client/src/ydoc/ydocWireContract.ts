@@ -1,9 +1,12 @@
 import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import * as Result from "effect/Result";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import type { JsonValue } from "../protocol";
 import type { AutomationRunAttribution } from "@dohc/workspace-contracts/collection";
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
+import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 
 export const YDOC_METHOD = {
   open: "ydoc.open",
@@ -105,18 +108,62 @@ function decodeYdocSchema<S extends Schema.ConstraintDecoder<unknown>>(
 }
 
 const YdocContentKindSchema = Schema.Literals(["richdoc", "plaintext", "scene"]);
-const OwnerDraftSchema = mutableStruct({
-  binding: mutableStruct({
-    workspaceId: Schema.String, mainVersionId: Schema.String, objectId: Schema.String,
-    lineageClaimId: Schema.String, currentPath: Schema.String,
-    selectorPaths: Schema.mutable(Schema.Array(Schema.String)), restoreFenceGeneration: Schema.Int,
-  }),
-  relayDatabaseNamespace: Schema.String, revision: Schema.Int,
-  acceptedCursor: Schema.Int, nativeHeadSequence: Schema.Int,
-  outboxId: Schema.NullOr(Schema.String), pendingBytes: Schema.Int,
-  state: Schema.NullOr(Schema.Literals(["active", "sealed", "quarantined"])),
+const LiveIdentifierSchema = Schema.String.check(Schema.makeFilter((value) => {
+  try {
+    parseLiveUpdateIdentifier(value);
+    return true;
+  } catch (error) {
+    return (error as TypeError).message;
+  }
+}));
+const PositiveSafeIntegerSchema = Schema.Int.check(Schema.isGreaterThan(0));
+const NonnegativeSafeIntegerSchema = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const OwnerAppendFields = {
+  outboxId: LiveIdentifierSchema,
+  sequence: PositiveSafeIntegerSchema,
+  deliveryId: LiveIdentifierSchema,
+  updateDigest: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+  pendingBytes: PositiveSafeIntegerSchema,
+  state: Schema.Literals(["active", "sealed"]),
+};
+const OwnerYDocOutboxAppendResultSchema = Schema.Struct({
+  ...OwnerAppendFields,
+  oldestEntryAtMs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 });
+export type OwnerYDocOutboxAppendResult = typeof OwnerYDocOutboxAppendResultSchema.Type;
+
+export function decodeOwnerYDocOutboxAppendResult(value: unknown): OwnerYDocOutboxAppendResult {
+  const decoded = Schema.decodeUnknownResult(OwnerYDocOutboxAppendResultSchema)(value);
+  if (Result.isFailure(decoded)) {
+    throw new TypeError(`Invalid owner outbox append result: ${decoded.failure.message}`);
+  }
+  return decoded.success;
+}
+
+const LiveObjectBindingSchema = Schema.declareConstructor<LiveObjectBinding>()([], () => (value) => Effect.try({
+  try: () => parseLiveObjectBinding(value),
+  catch: (error) => new SchemaIssue.InvalidValue({ message: (error as TypeError).message }),
+}));
+const OwnerDraftSchema = mutableStruct({
+  binding: LiveObjectBindingSchema,
+  relayDatabaseNamespace: LiveIdentifierSchema, revision: PositiveSafeIntegerSchema,
+  acceptedCursor: NonnegativeSafeIntegerSchema, nativeHeadSequence: NonnegativeSafeIntegerSchema,
+  outboxId: Schema.NullOr(LiveIdentifierSchema), pendingBytes: NonnegativeSafeIntegerSchema,
+  state: Schema.NullOr(Schema.Literals(["active", "sealed", "quarantined"])),
+}).check(Schema.makeFilter((draft) =>
+  draft.outboxId === null
+    ? (draft.state === null && draft.pendingBytes === 0) || "An absent draft parent must have null state and zero pending bytes."
+    : draft.state !== null || "A draft parent must have a state.",
+));
 export type YdocOwnerDraft = typeof OwnerDraftSchema.Type;
+
+export function decodeOwnerYDocDraftDescriptor(value: unknown): YdocOwnerDraft {
+  const decoded = Schema.decodeUnknownResult(OwnerDraftSchema)(value, { onExcessProperty: "error" });
+  if (Result.isFailure(decoded)) {
+    throw new TypeError(`Invalid draft descriptor: ${decoded.failure.message}`);
+  }
+  return decoded.success;
+}
 const ArtifactAssetDescriptorSchema = mutableStruct({
   id: Schema.String,
   mimeType: Schema.String,
@@ -154,11 +201,7 @@ const RecordUpdateResultSchema = Schema.Union([mutableStruct({
   lineageClaimId: Schema.NullOr(Schema.String),
 }), mutableStruct({
   lineageClaimId: Schema.String,
-  ownerDraft: mutableStruct({
-    outboxId: Schema.String, sequence: Schema.Int, deliveryId: Schema.String,
-    updateDigest: Schema.String, pendingBytes: Schema.Int,
-    state: Schema.Literals(["active", "sealed", "quarantined"]),
-  }),
+  ownerDraft: mutableStruct(OwnerAppendFields),
 })]);
 const ResyncResultSchema = mutableStruct({
   ownerDraft: Schema.optionalKey(OwnerDraftSchema),

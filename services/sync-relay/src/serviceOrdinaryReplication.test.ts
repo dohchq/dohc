@@ -93,7 +93,7 @@ it("leaves failed native materialization uncommitted and retries the page", asyn
 it.each([false, undefined, "success"])("does not accept native materialization result %s as success", async materialized => {
   const f = fixture(), original = f.sendRequest.getMockImplementation()!;
   f.sendRequest.mockImplementation(async request => request.method === "sync.materializePendingCursor" ? {result: {materialized}} as never : original(request));
-  await expect(f.driver.pull()).rejects.toThrow("materialization");
+  await expect(f.driver.pull()).rejects.toThrow("sync.materializePendingCursor result");
   expect(f.methods()).not.toContain("sync.commitCursor");
 });
 
@@ -169,10 +169,50 @@ it("does not retry authorization failures or start publication", async () => {
   expect(f.methods()).toEqual(["sync.adoptJoinIdentity"]);
 });
 
+it("pages publication within the pull bound while each page makes progress", async () => {
+  const f = fixture(), original = f.sendRequest.getMockImplementation()!;
+  const pages = [{pushed: 3, hasMore: true}, {pushed: 2, hasMore: true}, {pushed: 1, hasMore: false}];
+  f.sendRequest.mockImplementation(async request => request.method === "sync.push" ?
+    {result: {status: "complete", ...pages.shift()!, sharingDeclined: [], ownerAdmissionPending: []}} as never : original(request));
+  expect(await f.driver.publish()).toEqual({pushed: 5, hasMore: true});
+  expect(f.methods().filter(method => method === "sync.push")).toHaveLength(2);
+});
+
+it("stops publication at a page without progress or one waiting for owner admission, without throwing", async () => {
+  const pending = [{workspaceId: "workspace", originId: "owner", originSeq: 9, versionId: "main", objectId: "other", path: "other.md"}];
+  for (const [answer, expected] of [
+    [{pushed: 0, hasMore: true, ownerAdmissionPending: []}, {pushed: 0, hasMore: true}],
+    [{pushed: 4, hasMore: true, ownerAdmissionPending: pending}, {pushed: 4, hasMore: true}],
+  ] as const) {
+    const f = fixture(), original = f.sendRequest.getMockImplementation()!;
+    f.sendRequest.mockImplementation(async request => request.method === "sync.push" ?
+      {result: {status: "complete", sharingDeclined: [], ...answer}} as never : original(request));
+    expect(await f.driver.publish()).toEqual(expected);
+    expect(f.methods().filter(method => method === "sync.push")).toHaveLength(1);
+  }
+});
+
 it("pushes only on explicit request and preserves the native continuation result", async () => {
   const f = fixture();
   await f.driver.pull();
   expect(f.methods()).not.toContain("sync.push");
   expect(await f.driver.push()).toEqual({pushed: 1, hasMore: false, sharingDeclined: []});
   expect(f.methods().filter(method => method === "sync.adoptJoinIdentity")).toHaveLength(1);
+});
+
+
+it.each([
+  {changedPaths: [{path: "work.md", operation: "write", contentKind: "text"}]},
+  {refusals: [{originId: "peer", originSeq: 1, opKind: "text.write", code: "invalid", reason: "refused"}]},
+  {pendingCursor: {kind: "shareView", token: "issued-1"}},
+  {status: "crashedAfterApply"},
+])("rejects malformed native pages before materializing or committing: %j", async patch => {
+  const f = fixture(), original = f.sendRequest.getMockImplementation()!;
+  const onPage = vi.fn();
+  f.sendRequest.mockImplementation(async request => request.method === "sync.pull" ?
+    {result: {...page(), ...patch}} as never : original(request));
+  await expect(f.driver.pull(undefined, onPage)).rejects.toThrow("sync.pull result");
+  expect(f.methods()).not.toContain("sync.materializePendingCursor");
+  expect(f.methods()).not.toContain("sync.commitCursor");
+  expect(onPage).not.toHaveBeenCalled();
 });

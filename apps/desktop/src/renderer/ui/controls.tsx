@@ -93,21 +93,24 @@ export const IconButton = forwardRef<HTMLButtonElement, NativeButtonProps>(
   },
 );
 
-/** Quiet count/status pill. Semantics change the TEXT color, never the fill. */
+const pillToneClass = {
+  muted: "text-muted",
+  success: "text-success",
+  warning: "text-warning",
+  danger: "text-danger",
+  agent: "text-agent",
+} as const;
+
+/** Quiet count/status pill. A tone changes the TEXT color, never the fill. */
 export function Pill({
-  className,
+  tone = "muted",
   children,
 }: {
-  className?: string;
+  tone?: keyof typeof pillToneClass;
   children: ReactNode;
 }) {
   return (
-    <span
-      className={cx(
-        "rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px] text-muted",
-        className,
-      )}
-    >
+    <span className={cx("rounded-full border border-line bg-panel-2 px-2 py-0.5 text-[11px]", pillToneClass[tone])}>
       {children}
     </span>
   );

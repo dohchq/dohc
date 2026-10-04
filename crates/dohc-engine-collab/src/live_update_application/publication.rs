@@ -1,4 +1,5 @@
 use super::*;
+use restore_content::Budget;
 
 /// Reconstruct only native accepted history. No host handle or authority escapes.
 pub(crate) fn read_native_accepted_in(
@@ -6,6 +7,166 @@ pub(crate) fn read_native_accepted_in(
     key: &DocKey,
     remaining: &mut usize,
 ) -> Result<Option<(LiveObjectBinding, String, crate::Ydoc)>, ApplicationError> {
+    let mut budget = Budget {
+        remaining: *remaining,
+    };
+    let result = native_accepted(conn, key, &mut budget);
+    *remaining = budget.remaining;
+    result
+}
+
+fn native_accepted(
+    conn: &Connection,
+    key: &DocKey,
+    budget: &mut Budget,
+) -> Result<Option<(LiveObjectBinding, String, crate::Ydoc)>, ApplicationError> {
+    let Some(held) = registration_in(conn, key, budget)? else {
+        return Ok(None);
+    };
+    current_in(conn, &held, budget)?;
+    let through =
+        settlement::latest_receipt_in(conn, &held, budget)?.map_or(0, |r| r.journal_cursor);
+    let history = accepted_history::read_inner(
+        conn,
+        &held,
+        through,
+        budget,
+        accepted_history::CHECKPOINT_EVENTS as usize,
+        false,
+    )?;
+    Ok(Some((held.binding, held.namespace, history.doc)))
+}
+
+/// The accepted head that the restore producing this exact binding replaced,
+/// from that restore's verified resume evidence. None when the current
+/// generation is not a resumed restore of this registration.
+pub(crate) fn read_restore_predecessor_in(
+    conn: &Connection,
+    key: &DocKey,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    remaining: &mut usize,
+) -> Result<Option<String>, ApplicationError> {
+    let mut budget = Budget {
+        remaining: *remaining,
+    };
+    let result = restore_predecessor(conn, key, namespace, binding, &mut budget);
+    *remaining = budget.remaining;
+    result
+}
+
+fn restore_predecessor(
+    conn: &Connection,
+    key: &DocKey,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    budget: &mut Budget,
+) -> Result<Option<String>, ApplicationError> {
+    let Some(held) = registration_in(conn, key, budget)? else {
+        return Ok(None);
+    };
+    if held.namespace != namespace || held.binding != *binding {
+        return Ok(None);
+    }
+    current_in(conn, &held, budget)?;
+    let b = &held.binding;
+    let generation = "FROM live_restore_fences WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND new_generation=?6";
+    let p = params![
+        held.namespace,
+        b.workspace_id,
+        b.main_version_id,
+        b.object_id,
+        b.lineage_claim_id,
+        b.restore_fence_generation
+    ];
+    let length: i64 = conn
+        .query_row(
+            &format!("SELECT coalesce(sum(length(CAST(operation_id AS BLOB))),0) {generation}"),
+            p,
+            |r| r.get(0),
+        )
+        .map_err(read_sql)?;
+    budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+    let operation: Option<String> = conn
+        .query_row(&format!("SELECT operation_id {generation}"), p, |r| {
+            r.get(0)
+        })
+        .optional()
+        .map_err(read_sql)?;
+    let Some(operation) = operation else {
+        return Ok(None);
+    };
+    restore_resume::replaced_head(conn, &held, &operation, budget)
+}
+
+/// The restore registration check, charged to a publication proof's budget.
+pub(crate) fn require_restore_registration_in(
+    conn: &Connection,
+    key: &DocKey,
+    namespace: &str,
+    binding: &LiveObjectBinding,
+    remaining: &mut usize,
+) -> Result<(), ApplicationError> {
+    let mut budget = Budget {
+        remaining: *remaining,
+    };
+    let result = charge_sql(
+        conn,
+        &mut budget,
+        &format!(
+            "SELECT {}",
+            fence_registration("workspace_id=?1 AND main_version_id=?2 AND object_id=?3")
+        ),
+        params![key.workspace_id, key.version_id, key.object_id],
+    )
+    .and_then(|()| restore_fence::require_registration(conn, key, namespace, binding));
+    *remaining = budget.remaining;
+    result
+}
+
+/// The text restore_fence::require_registration reads from the document's newest fence.
+fn fence_registration(document: &str) -> String {
+    format!("coalesce((SELECT length(CAST(relay_database_namespace AS BLOB))+coalesce(length(CAST(resume_receipt_json AS BLOB)),0) FROM live_restore_fences WHERE {document} ORDER BY new_generation DESC LIMIT 1),0)")
+}
+
+fn charge_sql(
+    conn: &Connection,
+    budget: &mut Budget,
+    sql: &str,
+    parameters: &[&dyn rusqlite::ToSql],
+) -> Result<(), ApplicationError> {
+    let length: i64 = conn
+        .query_row(sql, parameters, |r| r.get(0))
+        .map_err(read_sql)?;
+    budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)
+}
+
+/// `sync::current` after charging the raw text it reads: the workspace's main
+/// version, this registration's binding row, the newest restore fence, and
+/// the durable marker.
+fn current_in(
+    conn: &Connection,
+    held: &Registration,
+    budget: &mut Budget,
+) -> Result<(), ApplicationError> {
+    let b = &held.binding;
+    let fence = fence_registration("workspace_id=?2 AND main_version_id=?3 AND object_id=?4");
+    charge_sql(conn, budget, &format!("SELECT coalesce((SELECT length(CAST(main_version_id AS BLOB)) FROM versioned_workspaces WHERE workspace_id=?2),0)
+        +coalesce((SELECT length(CAST(lineage_claim_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(host_id AS BLOB))+length(CAST(instance_id AS BLOB))+length(CAST(connection_id AS BLOB)) FROM live_device_application_bindings WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4),0)
+        +{fence}
+        +coalesce((SELECT coalesce(length(CAST(content_kind AS BLOB)),0)+coalesce(length(CAST(regime AS BLOB)),0)+coalesce(length(CAST(lineage_claim_status AS BLOB)),0)+coalesce(length(CAST(lineage_claim_id AS BLOB)),0)+coalesce(length(CAST(lineage_parent_claim_id AS BLOB)),0)+coalesce(length(CAST(lineage_epoch_tag AS BLOB)),0)+coalesce(length(CAST(path AS BLOB)),0)+coalesce(length(CAST(base_origin_id AS BLOB)),0) FROM ydoc_docs WHERE workspace_id=?2 AND version_id=?3 AND object_id=?4),0)"),
+        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id])?;
+    sync::current(conn, held).map(|_| ())
+}
+
+/// One binding row per relay namespace; up to two rows are read to detect a conflict.
+fn registration_in(
+    conn: &Connection,
+    key: &DocKey,
+    budget: &mut Budget,
+) -> Result<Option<Registration>, ApplicationError> {
+    charge_sql(conn, budget, "SELECT coalesce(sum(n),0) FROM (SELECT length(CAST(relay_database_namespace AS BLOB))+length(CAST(lineage_claim_id AS BLOB))+length(CAST(current_path AS BLOB))+length(CAST(selector_paths_json AS BLOB))+length(CAST(host_id AS BLOB))+length(CAST(instance_id AS BLOB))+length(CAST(connection_id AS BLOB)) AS n FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2)",
+        params![key.workspace_id, key.version_id, key.object_id])?;
     let mut query = conn.prepare("SELECT relay_database_namespace,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,host_id,host_epoch,instance_id,connection_id,available FROM live_device_application_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 LIMIT 2").map_err(read_sql)?;
     let records = query
         .query_map(
@@ -51,20 +212,5 @@ pub(crate) fn read_native_accepted_in(
     };
     held.binding.validate_canonical().map_err(invalid)?;
     held.coordinate.validate()?;
-    sync::current(conn, &held)?;
-    let through = settlement::latest_receipt(conn, &held)?.map_or(0, |r| r.journal_cursor);
-    let mut budget = restore_content::Budget {
-        remaining: *remaining,
-    };
-    let result = accepted_history::read_inner(
-        conn,
-        &held,
-        through,
-        &mut budget,
-        accepted_history::CHECKPOINT_EVENTS as usize,
-        false,
-    );
-    *remaining = budget.remaining;
-    let history = result?;
-    Ok(Some((held.binding, held.namespace, history.doc)))
+    Ok(Some(held))
 }
