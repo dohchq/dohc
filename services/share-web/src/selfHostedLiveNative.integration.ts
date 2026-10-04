@@ -10,7 +10,7 @@ import { Client, Pool } from "pg";
 import { expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
+import { createLiveValidationExecutor } from "../../sync-relay/src/liveValidation.js";
 import { createEngineClient } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
 import { serveFetchHandler } from "@dohc/service-http";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
@@ -185,7 +185,9 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     const relayRead = new DatabaseSync(join(root, "relay/relay.sqlite"), {readOnly: true});
     closes.push(async () => relayRead.close());
     const profile = selfHostLiveProfile();
-    const {storage, history} = deployment, frameChanges = createNamedFrameChanges(profile.namedLive.maxListeners), validate = createLiveMarkdownJournalValidator(profile.validation);
+    const validation = createLiveValidationExecutor();
+    closes.push(() => validation.close());
+    const {storage, history} = deployment, frameChanges = createNamedFrameChanges(profile.namedLive.maxListeners), validate = validation.validator(profile.validation);
     const resolveActor = createSessionActorResolver(relayAuth);
     const serviceReplication = createServiceHostReplication({storage, prefix: "dohc-service-v1.",
       authorize: input => authorizeServiceHostReplication(storage, {key: Buffer.from(ticketKey), namespace: history.namespace, ...input})});
