@@ -8,7 +8,7 @@ const productionInputs = { "@dohc/site": ["@dohc/desktop"] };
 // These inputs include ordinary tests and separate native/browser proofs.
 // Test consumers do not become changed production packages themselves.
 const testInputs = {
-  "@dohc/desktop": ["@dohc/site"],
+  "@dohc/desktop": ["@dohc/site", "@dohc/share-web", "@dohc/workspace-api", "@dohc/workspace-postgres"],
   "@dohc/workspace-auth": ["@dohc/workspace-postgres"],
   "@dohc/ydoc-projection": ["@dohc/sync-relay", "@dohc/workspace-engine-client", "@dohc/share-web", "@dohc/desktop",
     "@dohc/service-http", "@dohc/workspace-auth"],
@@ -16,7 +16,7 @@ const testInputs = {
   "@dohc/sync-relay": ["@dohc/share-web", "@dohc/desktop"],
   "@dohc/workspace-api": ["@dohc/workspace-postgres"],
 };
-// These browser helpers do not feed desktop unit tests or packaging scripts.
+// These helpers feed browser proofs and the declared desktop test below.
 // The onboarding helper imports the API harness, which reads Postgres SQL.
 const desktopProofInputs = {
   "@dohc/workspace-api": ["e2e/helpers/selfHostOnboarding.ts"],
@@ -25,7 +25,8 @@ const desktopProofInputs = {
 };
 // Keep a helper wrapper from hiding a new unit-test dependency on these inputs.
 const desktopProofConsumers = {
-  "apps/desktop/e2e/helpers/selfHostOnboarding": ["apps/desktop/e2e/self-host-onboarding.spec.ts", "apps/desktop/e2e/shared-continuity.spec.ts"],
+  "apps/desktop/e2e/helpers/selfHostOnboarding": ["apps/desktop/e2e/self-host-onboarding.spec.ts", "apps/desktop/e2e/shared-continuity.spec.ts",
+    "apps/desktop/src/workspaces/twoDaemonSync.e2e.test.ts"],
   "apps/desktop/e2e/helpers/sharedDatasetBrowser": [
     "apps/desktop/e2e/apps.spec.ts", "apps/desktop/e2e/collection-link-lane.spec.ts",
     "apps/desktop/e2e/dataset-completion.spec.ts", "apps/desktop/e2e/dataset-shared-form.spec.ts",
@@ -36,6 +37,9 @@ const desktopProofConsumers = {
 const externalTestFiles = {
   "@dohc/desktop": {
     "@dohc/site": ["src/renderer/tokens.test.ts", "src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"],
+    "@dohc/share-web": ["src/workspaces/twoDaemonSync.e2e.test.ts"],
+    "@dohc/workspace-api": ["src/workspaces/twoDaemonSync.e2e.test.ts"],
+    "@dohc/workspace-postgres": ["src/workspaces/twoDaemonSync.e2e.test.ts"],
   },
   "@dohc/ydoc-projection": {
     "@dohc/desktop": ["src/liveRestoreDrain.test.ts", "src/ownerDesktopTransport.test.ts"],

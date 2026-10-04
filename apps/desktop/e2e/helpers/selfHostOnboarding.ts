@@ -85,7 +85,7 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
 // The same public origin routes to separate services, like the self-host proxy.
 // Bodies, headers, and status codes pass through unchanged; no route mints credentials.
 // With a certificate it terminates TLS, and it forwards live editing's WebSocket upgrades.
-async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">) {
+export async function startServerProxy(tls?: Pick<LocalhostCa, "certificate" | "key">) {
   let authInternalUrl: string | undefined;
   let relayUrl: string | undefined;
   const upstreams = new Set<ReturnType<typeof requestHttp>>();

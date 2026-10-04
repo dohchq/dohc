@@ -56,6 +56,7 @@ test("fixture reports an ordinary nonzero command exit as status", { timeout: 20
 
 test("verification selects packages and proofs and prepares before parallel jobs", { concurrency: 2 }, async (t) => {
   const siteFiles = ["src/renderer/tokens.test.ts", "src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"];
+  const serviceFiles = ["src/workspaces/twoDaemonSync.e2e.test.ts"];
   const cases = [];
   for (const [mode, job, fault, changed = "pnpm-lock.yaml", full = false] of [
     ["pr", null, null], ["pr", "rust", null], ["pr", "js", null],
@@ -79,10 +80,11 @@ test("verification selects packages and proofs and prepares before parallel jobs
     const siteOnly = changed === "apps/site/src/index.ts" && !full;
     const selected = changed === "packages/fixture/src/index.ts" ? ["@dohc/fixture"]
       : changed === "packages/mcp/src/index.ts" ? ["@dohc/mcp", "@dohc/share-web"]
-      : changed === "services/workspace-api/src/index.ts" ? ["@dohc/workspace-api"]
+      : changed === "services/workspace-api/src/index.ts" ? ["@dohc/desktop", "@dohc/workspace-api"]
       : siteOnly ? ["@dohc/desktop", "@dohc/site"]
       : ["@dohc/desktop", "@dohc/fixture", "@dohc/mcp", "@dohc/share-web", "@dohc/site", "@dohc/unrelated", "@dohc/workspace-api"];
-    const desktopScripts = js && selected.includes("@dohc/desktop") && !siteOnly;
+    const selectedDesktopFiles = siteOnly ? siteFiles : changed === "services/workspace-api/src/index.ts" ? serviceFiles : undefined;
+    const desktopScripts = js && selected.includes("@dohc/desktop") && !selectedDesktopFiles;
     const desktop = mode !== "pr" || desktopScripts || js && changed === "services/workspace-api/src/index.ts";
     const nativeProof = js && selected.includes("@dohc/share-web");
     const accounts = js && selected.includes("@dohc/workspace-api");
@@ -127,7 +129,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
       `);
       put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/.env.local\n");
       put("apps/desktop/package.json", '{"name":"@dohc/desktop","scripts":{"test":"unused","test:unit":"vitest run","test:scripts":"scripts","test:scripts:isolated":"isolated","test:scripts:runtime":"runtime"}}');
-      for (const file of siteFiles) put(`apps/desktop/${file}`, "// fixture compatibility test\n");
+      for (const file of [...siteFiles, ...serviceFiles]) put(`apps/desktop/${file}`, "// fixture compatibility test\n");
       for (const name of ["fixture", "mcp", "share-web", "site", "unrelated", "workspace-api"]) {
         const path = `${name === "workspace-api" ? "services" : name === "site" ? "apps" : "packages"}/${name}`;
         put(`${path}/package.json`, JSON.stringify({name:`@dohc/${name}`,scripts:{test:"vitest run"}}));
@@ -256,7 +258,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
           }
           if(command==='pnpm' && args[2]==='run' && ['test','test:unit'].includes(args[3])) {
             assert.deepEqual(args,['--filter',args[1],'run',args[1]==='@dohc/desktop'?'test:unit':'test',args[1]==='@dohc/desktop'?args[4]:'--maxWorkers=4',
-              ...(args[1]==='@dohc/desktop' && ${siteOnly} ? ${JSON.stringify(siteFiles)} : [])]);
+              ...(args[1]==='@dohc/desktop' ? ${JSON.stringify(selectedDesktopFiles ?? [])} : [])]);
             assert.ok(${JSON.stringify(selected)}.includes(args[1]),'Unselected package executed: '+args[1]);
             assert.equal(options.env.POSTGRES_URL,${JSON.stringify(database ? "postgres://dohc:dohc@127.0.0.1:1234/dohc" : "")});
             for(const flag of ['DOHC_REQUIRE_POSTGRES','DOHC_REQUIRE_ENGINE_E2E'])assert.equal(options.env[flag],'1');
@@ -424,7 +426,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
           assert.deepEqual(report.javascript.packages,selected);
           assert.deepEqual(report.javascript.proofs,{accounts,selfHostNative:nativeProof,desktop,statesPage});
           assert.equal(report.javascript.desktopScripts, desktopScripts);
-          assert.deepEqual(report.javascript.testFiles, siteOnly ? {"@dohc/desktop": siteFiles} : {});
+          assert.deepEqual(report.javascript.testFiles, selectedDesktopFiles ? {"@dohc/desktop": selectedDesktopFiles} : {});
           const tests=JSON.parse(readFileSync(report.jsTests,"utf8"));
           assert.equal(tests.proofs, nativeProof || browser);
           assert.equal(tests.steps.filter(step => step.name === "proofs").length, nativeProof || browser ? 1 : 0);
@@ -437,7 +439,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
             assert.equal(calls.filter(({args}) => args[3] === script).length, desktopScripts ? 1 : 0);
           }
           assert.equal(calls.some(({args}) => args[3] === "test:scripts"), false);
-          if (siteOnly) assert.deepEqual(tests.packages.find(pkg => pkg.name === "@dohc/desktop").files, siteFiles);
+          if (selectedDesktopFiles) assert.deepEqual(tests.packages.find(pkg => pkg.name === "@dohc/desktop").files, selectedDesktopFiles);
         }
       }
     } finally { rmSync(root, { recursive: true, force: true }); }

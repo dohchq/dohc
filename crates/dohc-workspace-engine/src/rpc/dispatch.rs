@@ -428,6 +428,10 @@ impl EngineService {
                 self.owner_ydoc_outbox_quarantine(&ctx, request.workspace, request.params)
                     .await?
             }
+            "ydoc.adoptCollectionRecord" => {
+                Box::pin(self.ydoc_adopt_collection_record(&ctx, request.workspace, request.params))
+                    .await?
+            }
             "ydoc.settle" => {
                 self.ydoc_settle(&ctx, request.workspace, request.params)
                     .await?
@@ -1399,6 +1403,7 @@ mod tests {
             "watcher.status",
             "workspace.close",
             "workspace.open",
+            "ydoc.adoptCollectionRecord",
             "ydoc.close",
             "ydoc.evict",
             "ydoc.open",

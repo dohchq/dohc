@@ -420,6 +420,15 @@ fn owner_binding_read_failure_does_not_acknowledge_moment() {
 
 #[test]
 fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pending_draft() {
+    observed_owner_settlement_scenario(false);
+}
+
+#[test]
+fn observed_owner_settlement_completes_only_its_matching_collection_adoption() {
+    observed_owner_settlement_scenario(true);
+}
+
+fn observed_owner_settlement_scenario(with_collection: bool) {
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
     use dohc_engine_collab::owner_outbox::{
         OwnerOutboxLimits,
@@ -440,12 +449,63 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
     seed_text_moment(
         &mut store,
         "object",
-        "owner.md",
+        "tasks/owner.md",
         initial_text,
         &initial_moment,
         None,
         true,
     );
+    let record_id = if with_collection {
+        seed_text_moment(
+            &mut store,
+            "schema",
+            "tasks/collection.yaml",
+            "fields: {}\n",
+            "schema",
+            None,
+            true,
+        );
+        seed_text_moment(
+            &mut store,
+            "collection-other",
+            "tasks/other.md",
+            "# Other\n",
+            "other",
+            None,
+            true,
+        );
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")
+            })
+            .unwrap();
+        let record_id: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT record_id FROM collection_records WHERE object_id='object'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        Some(record_id)
+    } else {
+        None
+    };
+    let adoption_state = |store: &EngineStore, object: &str| -> String {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT adoption_state FROM collection_records WHERE object_id=?1",
+                    [object],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap()
+    };
+    if with_collection {
+        assert_eq!(adoption_state(&store, "object"), "pending-lossless");
+    }
     let key = DocKey::new("ws", "main", "object").unwrap();
     dohc_engine_collab::claim_base(
         &mut store,
@@ -457,7 +517,7 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
     )
     .unwrap();
     store
-        .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path='owner.md'", []))
+        .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path='tasks/owner.md'", []))
         .unwrap();
     let doc = store
         .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
@@ -469,8 +529,8 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             main_version_id: "main".into(),
             object_id: "object".into(),
             lineage_claim_id: hex_sha256(&original),
-            current_path: "owner.md".into(),
-            selector_paths: vec!["owner.md".into()],
+            current_path: "tasks/owner.md".into(),
+            selector_paths: vec!["tasks/owner.md".into()],
             restore_fence_generation: 0,
         },
         relay_database_namespace: "relay".into(),
@@ -497,7 +557,14 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
         .iter()
         .enumerate()
     {
-        let update = doc.richdoc_append_paragraph(text);
+        let before = doc.encode_state_vector();
+        if index == 0 {
+            if let Some(record_id) = &record_id {
+                doc.frontmatter_set("id", record_id).unwrap();
+            }
+        }
+        doc.richdoc_append_paragraph(text);
+        let update = doc.diff(&before).unwrap();
         let result = store
             .write_with(&NoFaults, |tx| {
                 apply_frame_in_tx(
@@ -564,8 +631,8 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             &old_id,
             "object",
             "write",
-            "owner.md",
-            "owner.md",
+            "tasks/owner.md",
+            "tasks/owner.md",
             initial_text,
             &initial_moment,
             &texts[0],
@@ -576,7 +643,14 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
         1,
         "ws",
         present_text_payload(
-            &latest_id, "object", "write", "owner.md", "owner.md", &texts[0], &old_id, &texts[1],
+            &latest_id,
+            "object",
+            "write",
+            "tasks/owner.md",
+            "tasks/owner.md",
+            &texts[0],
+            &old_id,
+            &texts[1],
         ),
     );
     let before = snapshot(&store, "object");
@@ -617,6 +691,9 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
         matches!(old_result.primary, ApplyDisposition::Applied(ref result) if result.materialization_changes.is_empty() && result.conflicts_opened == 0)
     );
     assert_eq!(snapshot(&store, "object"), before);
+    if with_collection {
+        assert_eq!(adoption_state(&store, "object"), "pending-lossless");
+    }
     assert_eq!(
         store
             .read_with(|conn| conn.query_row(
@@ -641,8 +718,8 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             &mismatch_id,
             "object",
             "write",
-            "owner.md",
-            "owner.md",
+            "tasks/owner.md",
+            "tasks/owner.md",
             &texts[0],
             &old_id,
             mismatch_text,
@@ -659,6 +736,13 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
         crate::apply_moment_envelope(&mut store, &latest, &NoFaults, &crate::AlwaysLive).unwrap(),
         ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
+    if with_collection {
+        assert_eq!(adoption_state(&store, "object"), "adopted");
+        assert_eq!(
+            adoption_state(&store, "collection-other"),
+            "pending-lossless"
+        );
+    }
     assert_eq!(
         store
             .read_with(|conn| conn.query_row(
@@ -690,6 +774,9 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
         apply_moment_envelope(&mut store, &old, &NoFaults).unwrap(),
         ApplyOutcome::new(ApplyDisposition::Skipped)
     );
+    if with_collection {
+        return;
+    }
     let renamed = envelope(
         "renamed",
         0,
@@ -698,7 +785,7 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             &format!("moment-ydoc-{}", "d".repeat(64)),
             "object",
             "rename",
-            "owner.md",
+            "tasks/owner.md",
             "moved.md",
             &texts[1],
             &latest_id,
@@ -742,8 +829,8 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             &future_id,
             "object",
             "write",
-            "owner.md",
-            "owner.md",
+            "tasks/owner.md",
+            "tasks/owner.md",
             &texts[1],
             &latest_id,
             &future_text,
@@ -871,7 +958,7 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
     )
     .unwrap();
     assert_eq!(leased.changes.len(), 1);
-    assert_eq!(leased.changes[0].path, "owner.md");
+    assert_eq!(leased.changes[0].path, "tasks/owner.md");
     assert!(leased.report_id.is_some());
     assert!(!leased.has_more);
     assert_eq!(
@@ -903,7 +990,7 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
     };
     assert!(!has_more);
     assert_eq!(settled_changes.len(), 1);
-    assert_eq!(settled_changes[0].path, "owner.md");
+    assert_eq!(settled_changes[0].path, "tasks/owner.md");
     assert!(applied_cursor.settlement_report_id.is_some());
     assert_eq!(
         store

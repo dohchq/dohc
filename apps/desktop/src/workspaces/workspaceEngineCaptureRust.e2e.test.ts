@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import { defaultWorkspaceMode, type WatcherEvent } from "@dohc/workspace-core";
 import type {
@@ -100,6 +101,60 @@ async function listDaemonPathMoments(
   );
   return page.moments.filter((moment) => moment.path === path);
 }
+
+it.skipIf(engine.missing).each([false, true])(
+  "preserves hand-made Markdown opened before adoption (later edit=%s)",
+  async laterEdit => {
+    const root = await createTestScratch("dohc-open-lossless-adoption-");
+    const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+    await lifecycle.start();
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+    const workspace = { workspaceId: "open-lossless-adoption", rootPath: root, attachmentId: Symbol("lossless") };
+    const errors: unknown[] = [];
+    const capture = createAttachedWorkspaceEngineCapture({ ...workspace, rustEngineSessions: sessions, settleDebounceMs: 60_000,
+      onError: (_context, error) => { errors.push(error); } });
+    const original = "A setext heading\n================\n\n* first\n* second\n";
+    try {
+      const adapter = await sessions.run(workspace, async ({ client, workspace: handle }) =>
+        new VersionedLiveAdapter(client, handle, { workspaceId: workspace.workspaceId }));
+      await adapter.ensureMainVersion({ workspaceId: workspace.workspaceId });
+      for (const [path, text] of [["tasks/collection.yaml", "fields: {}\n"], ["tasks/record.md", original]]) {
+        await adapter.writeTextFile({ workspaceId: workspace.workspaceId, versionId: "main", path: path!, text: text!, publish: true,
+          metadata: { origin: "api" } });
+      }
+      await expect.poll(async () => (await adapter.listPendingCollectionAdoptions()).adoptions.length,
+        { timeout: 60_000 }).toBe(1);
+      const session = await capture.openYDocSession({ path: "tasks/record.md", contentKind: "richdoc", onRemoteUpdate: () => undefined });
+      if (laterEdit) {
+        await session.applyDecidedLocalUpdate(doc => {
+          const scratch = new Y.Doc();
+          try { Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc)); const before = Y.encodeStateVector(scratch);
+            patchFrontmatter(scratch, new Map([["Name", "Edited"]])); return Y.encodeStateAsUpdate(scratch, before);
+          } finally { scratch.destroy(); }
+        }, undefined, { idempotencyKey: "lossless-edit" });
+      }
+      await capture.flush();
+      await expect.poll(async () => (await adapter.listPendingCollectionAdoptions()).adoptions.length,
+        { timeout: 60_000 }).toBe(0);
+      const adopted = await readFile(join(root, "tasks/record.md"), "utf8");
+      if (laterEdit) {
+        expect(adopted).toBe(original);
+        expect(session.doc.getMap("frontmatter").get("id")).toBeUndefined();
+        expect((await adapter.queryCollectionRecords({ collectionPath: "tasks" })).records).toEqual([]);
+      } else {
+        expect(adopted.replace(/^---\nid: [^\n]+\n---\n\n/, "")).toBe(original);
+        expect(session.doc.getMap("frontmatter").get("id")).toBeTruthy();
+        await session.settleNow();
+        expect(await readFile(join(root, "tasks/record.md"), "utf8")).toBe(adopted);
+      }
+      expect(errors).toEqual([]);
+      await session.close();
+    } finally {
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll(); await lifecycle.stop();
+    }
+  }, 120_000,
+);
 
 it.skipIf(engine.missing)(
   "adopts rich collection Markdown through the shared Y.Doc importer without flattening it",
