@@ -101,6 +101,9 @@ export interface LiveCheckpointAuthorCoverage {
   readonly deletionRanges: readonly LiveUpdateStructRange[];
 }
 export function parseLiveCheckpointCoverage(value: unknown): readonly LiveCheckpointAuthorCoverage[] {
+  return checkpointCoverage(value, parseLiveUpdateStructRanges);
+}
+function checkpointCoverage(value: unknown, parseRanges: typeof parseLiveUpdateStructRanges): readonly LiveCheckpointAuthorCoverage[] {
   if (!Array.isArray(value) || value.length > 1024) throw new TypeError("Invalid checkpoint coverage.");
   const identities = new Set<string>();
   const coverage = Array.from(value, item => {
@@ -109,7 +112,7 @@ export function parseLiveCheckpointCoverage(value: unknown): readonly LiveCheckp
     const identity = JSON.stringify([author.kind, author.kind === "agent" ? author.onBehalfOf ?? null : null, author.kind === "human" ? author.humanId : author.kind === "link" ? author.publicPrincipalId : author.agentId]);
     if (identities.has(identity)) throw new TypeError("Duplicate checkpoint author.");
     identities.add(identity);
-    return { author, structRanges: parseLiveUpdateStructRanges(entry.structRanges), deletionRanges: parseLiveUpdateStructRanges(entry.deletionRanges) };
+    return { author, structRanges: parseRanges(entry.structRanges), deletionRanges: parseRanges(entry.deletionRanges) };
   });
   if (new TextEncoder().encode(JSON.stringify(coverage.map(entry => entry.author))).byteLength > 128 * 1024) throw new TypeError("Checkpoint authors exceed byte bound.");
   return coverage;
@@ -466,6 +469,31 @@ export function parseLiveUpdateStructRanges(
 export function parseAdmittedLiveUpdateMetadata(
   value: unknown,
 ): AdmittedLiveUpdateMetadata {
+  return admittedMetadata(value, parseLiveUpdateStructRanges);
+}
+
+/** Admitted wire and retained evidence must already have sorted, disjoint, non-adjacent ranges. */
+export function parseCanonicalAdmittedLiveUpdateMetadata(value: unknown): AdmittedLiveUpdateMetadata {
+  return admittedMetadata(value, canonicalRanges);
+}
+
+function canonicalRanges(value: unknown): readonly LiveUpdateStructRange[] {
+  try {
+    if (!Array.isArray(value)) throw new TypeError();
+    const ranges: LiveUpdateStructRange[] = [];
+    for (let index = 0; index < value.length; index++) {
+      if (!Object.hasOwn(value, index)) throw new TypeError();
+      const range = parseLiveUpdateStructRange(value[index]);
+      const prior = ranges.at(-1);
+      if (prior && (range.clientId < prior.clientId ||
+        (range.clientId === prior.clientId && range.startClock <= prior.endClock))) throw new TypeError();
+      ranges.push(range);
+    }
+    return ranges;
+  } catch { throw new TypeError("Invalid live application range."); }
+}
+
+function admittedMetadata(value: unknown, parseRanges: typeof parseLiveUpdateStructRanges): AdmittedLiveUpdateMetadata {
   const record = exactRecord(
     value,
     "AdmittedLiveUpdateMetadata",
@@ -474,8 +502,8 @@ export function parseAdmittedLiveUpdateMetadata(
   if (Object.hasOwn(record, "canonicalVersion") && record.canonicalVersion !== 2) throw new TypeError("Unknown canonical version.");
   return {
     accepted: parseRelayAcceptedLiveUpdate(record.accepted),
-    firstSeen: parseLiveUpdateStructRanges(record.firstSeen),
-    ...(record.canonicalVersion === 2 ? {canonicalVersion: 2 as const, authorSnapshot: parseLiveAuthorSnapshot(record.authorSnapshot), firstSeenDeletes: parseLiveUpdateStructRanges(record.firstSeenDeletes), ...(Object.hasOwn(record, "checkpointCoverage") ? {checkpointCoverage: parseLiveCheckpointCoverage(record.checkpointCoverage)} : {})} : {}),
+    firstSeen: parseRanges(record.firstSeen),
+    ...(record.canonicalVersion === 2 ? {canonicalVersion: 2 as const, authorSnapshot: parseLiveAuthorSnapshot(record.authorSnapshot), firstSeenDeletes: parseRanges(record.firstSeenDeletes), ...(Object.hasOwn(record, "checkpointCoverage") ? {checkpointCoverage: checkpointCoverage(record.checkpointCoverage, parseRanges)} : {})} : {}),
   };
 }
 

@@ -33,6 +33,7 @@ export {
   LIVE_UPDATE_YJS_START_CLOCK_MAX,
   parseAdmittedLiveUpdate,
   parseAdmittedLiveUpdateMetadata,
+  parseCanonicalAdmittedLiveUpdateMetadata,
   parseLiveCheckpointCoverage,
   parseLiveDocumentKey,
   parseAgentDeclaration,

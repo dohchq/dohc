@@ -1,7 +1,7 @@
 import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
 import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import {parseAdmittedLiveUpdateMetadata, parseAgentDeclaration, parseLiveUpdateDigest, parseLiveUpdateIdentifier,
+import {parseCanonicalAdmittedLiveUpdateMetadata, parseAgentDeclaration, parseLiveUpdateDigest, parseLiveUpdateIdentifier,
   parseLiveUpdateReceipt, parseLiveUpdateStructRange} from "@dohc/live-session-contract/live-update-admission";
 import {parseNativeRestoreFenceReceipt} from "./liveRestoreFence";
 import {configRecord} from "./deviceLiveHostConfig";
@@ -94,7 +94,7 @@ function historyProof(value: unknown, namespace: string, maximum: number) {
   if (checkpoint.canonicalVersion !== undefined) require(checkpoint.eventCount > 0);
   if (checkpoint.eventCount === 0) require(checkpoint.evidenceDigest === initialAcceptedHistoryDigest(namespace, checkpoint.binding)
     && checkpoint.stateDigest === checkpoint.binding.lineageClaimId);
-  const suffix = array(row.suffix, Math.min(maximum, 4094), value => canonicalVersionedAcceptedMetadata(parseAdmittedLiveUpdateMetadata(value)));
+  const suffix = array(row.suffix, Math.min(maximum, 4094), value => canonicalVersionedAcceptedMetadata(parseCanonicalAdmittedLiveUpdateMetadata(value)));
   let count = checkpoint.eventCount, evidence = checkpoint.evidenceDigest, terminal = checkpoint.terminal;
   let canonicalVersion = checkpoint.canonicalVersion ?? 1;
   for (const event of suffix) {

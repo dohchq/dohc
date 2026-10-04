@@ -13,6 +13,7 @@ import {
   LIVE_UPDATE_YJS_START_CLOCK_MAX,
   parseAdmittedLiveUpdate,
   parseAdmittedLiveUpdateMetadata,
+  parseCanonicalAdmittedLiveUpdateMetadata,
   parseAgentDeclaration,
   parseLiveDocumentKey,
   parseLiveUpdateAcceptResult,
@@ -628,6 +629,47 @@ describe("receipt and relay admission records", () => {
     ]);
     expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, route: "device" })).toThrow();
     expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, updateBytes: [1] })).toThrow();
+  });
+});
+
+describe("canonical admitted metadata", () => {
+  const human = {kind: "human" as const, humanId: "alice", humanName: "Alice"};
+  const valid = [{clientId: 7, startClock: 0, endClock: 3}, {clientId: 7, startClock: 5, endClock: 10}];
+  const invalid = [
+    [{clientId: 7, startClock: 0, endClock: 3}, {clientId: 7, startClock: 3, endClock: 10}],
+    [{clientId: 7, startClock: 0, endClock: 6}, {clientId: 7, startClock: 5, endClock: 10}],
+    [{clientId: 7, startClock: 0, endClock: 3}, {clientId: 6, startClock: 5, endClock: 10}],
+    [{clientId: -1, startClock: 0, endClock: 3}],
+  ];
+
+  it.each([undefined, 2] as const)("refuses non-canonical firstSeen for version %s", canonicalVersion => {
+    for (const firstSeen of invalid) {
+      expect(() => parseCanonicalAdmittedLiveUpdateMetadata({accepted, firstSeen,
+        ...(canonicalVersion === 2 ? {canonicalVersion, authorSnapshot: [human], firstSeenDeletes: []} : {})}))
+        .toThrow("Invalid live application range.");
+    }
+  });
+
+  it.each(["firstSeenDeletes", "structRanges", "deletionRanges"])("refuses non-canonical v2 %s", field => {
+    for (const ranges of invalid) {
+      expect(() => parseCanonicalAdmittedLiveUpdateMetadata({accepted, firstSeen: valid, canonicalVersion: 2,
+        authorSnapshot: [human], firstSeenDeletes: field === "firstSeenDeletes" ? ranges : [],
+        checkpointCoverage: [{author: human, structRanges: field === "structRanges" ? ranges : valid,
+          deletionRanges: field === "deletionRanges" ? ranges : []}]}))
+        .toThrow("Invalid live application range.");
+    }
+  });
+
+  it("preserves canonical ranges and owns every copy", () => {
+    const metadata = {accepted, firstSeen: valid, canonicalVersion: 2, authorSnapshot: [human], firstSeenDeletes: valid,
+      checkpointCoverage: [{author: human, structRanges: valid, deletionRanges: valid}]};
+    const parsed = parseCanonicalAdmittedLiveUpdateMetadata(metadata);
+    expect(parsed).toEqual(metadata);
+    expect(parsed.firstSeen).not.toBe(valid);
+    expect(parsed.firstSeen[0]).not.toBe(valid[0]);
+    expect(parsed.firstSeenDeletes).not.toBe(valid);
+    expect(parsed.checkpointCoverage![0]!.structRanges).not.toBe(valid);
+    expect(parsed.checkpointCoverage![0]!.deletionRanges).not.toBe(valid);
   });
 });
 

@@ -1,6 +1,6 @@
 import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
-import {parseAdmittedLiveUpdateMetadata,parseLiveUpdateDigest,parseLiveUpdateIdentifier,type AdmittedLiveUpdateMetadata} from "@dohc/live-session-contract/live-update-admission";
+import {parseCanonicalAdmittedLiveUpdateMetadata,parseLiveUpdateDigest,parseLiveUpdateIdentifier,type AdmittedLiveUpdateMetadata} from "@dohc/live-session-contract/live-update-admission";
 import {parseNativeRestoreFenceReceipt} from "../liveRestoreFence";
 import {configRecord} from "../deviceLiveHostConfig";
 import type {RestoreLifecycle} from "../liveRestoreLifecycle";
@@ -29,7 +29,7 @@ export function parseRestoreAdmission(value:unknown):RestoreAdmission {
   return {proposalDigest:parseLiveUpdateDigest(r.proposalDigest),candidateDigest:parseLiveUpdateDigest(r.candidateDigest),
     preparation:{fence:parseNativeRestoreFenceReceipt(p.fence),point:{journalCursor:authorityInteger(point.journalCursor),
       receiptDigest:parseLiveUpdateDigest(point.receiptDigest),markdownDigest:parseLiveUpdateDigest(point.markdownDigest),projectionDigest:parseLiveUpdateDigest(point.projectionDigest)}},
-    nativeSourceManifestDigest:parseLiveUpdateDigest(r.nativeSourceManifestDigest),admitted:parseAdmittedLiveUpdateMetadata(r.admitted),
+    nativeSourceManifestDigest:parseLiveUpdateDigest(r.nativeSourceManifestDigest),admitted:parseCanonicalAdmittedLiveUpdateMetadata(r.admitted),
     checkpointDigest:parseLiveUpdateDigest(r.checkpointDigest),sourceRanges,recordedAtMs:authorityInteger(r.recordedAtMs)};
 }
 export function readRestoreAdmission(db:SqliteDb,namespace:string,operationId:string,maxBytes=Number.MAX_SAFE_INTEGER,chargeBytes?:(value:number)=>void):RestoreAdmission {

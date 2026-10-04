@@ -4,7 +4,7 @@ import { WebSocket } from "ws";
 import { EngineClient, FrameDecoder, FrameType, encodeFrame, DEFAULT_MAX_BLOB_BYTES, NATIVE_RESTORE_STATUS, type Frame } from "@dohc/workspace-engine-client/daemon";
 import { DeviceCreditWindow } from "@dohc/service-http";
 import { deviceLiveHostReceive, type DeviceControlLimits, type DeviceLiveHostStart } from "@dohc/live-session-contract/device-control";
-import { parseAdmittedLiveUpdateMetadata, type LiveUpdateStructRange } from "@dohc/live-session-contract/live-update-admission";
+import { parseCanonicalAdmittedLiveUpdateMetadata, type LiveUpdateStructRange } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
@@ -331,7 +331,7 @@ export function startExistingOwnerDeviceTransport(options: {
           for (let offset = 0; offset < rangeBytes; offset += 16) firstSeen.push({ clientId: Number(packed.readBigUInt64LE(offset)),startClock: packed.readUInt32LE(offset+8),endClock: packed.readUInt32LE(offset+12) });
           const extensions: unknown = packed.length === rangeBytes ? {} : JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(packed.subarray(rangeBytes)));
           if (typeof extensions !== "object" || extensions === null || Array.isArray(extensions) || Object.hasOwn(extensions,"accepted") || Object.hasOwn(extensions,"firstSeen")) throw new TypeError("Invalid admitted extension attachment.");
-          const metadata = parseAdmittedLiveUpdateMetadata({ ...extensions, accepted: operation.params.accepted, firstSeen });
+          const metadata = parseCanonicalAdmittedLiveUpdateMetadata({ ...extensions, accepted: operation.params.accepted, firstSeen });
           const response = await config.client.sendLiveApplication(native,{ metadata,updateBytes: update },signal);
           owner.assertCurrent();
           if ((response.result as { status?: unknown }).status === "applied") await owner.remoteApplied(update);
