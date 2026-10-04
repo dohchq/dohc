@@ -901,8 +901,8 @@ mod tests {
     use super::*;
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::{
-        Arc,
         atomic::{AtomicUsize, Ordering},
+        Arc,
     };
 
     fn count_reads(conn: &Connection) -> Arc<AtomicUsize> {
@@ -1100,10 +1100,9 @@ mod tests {
             [&json],
         )
         .unwrap();
-        assert!(
-            conn.blob_open("main", "restores", "application_json", 1, true)
-                .is_err()
-        );
+        assert!(conn
+            .blob_open("main", "restores", "application_json", 1, true)
+            .is_err());
         let queries = count_reads(&conn);
         let previous = "0".repeat(64);
         let parsed = parse(
@@ -1120,7 +1119,10 @@ mod tests {
             parsed.evidence_digest,
             next_digest(&previous, 1, &metadata).unwrap()
         );
-        assert!(queries.load(Ordering::Relaxed) <= 3);
+        assert!(
+            queries.load(Ordering::Relaxed) <= 4,
+            "three statements plus the coverage subquery, independent of chunks"
+        );
         for token in [
             serde_json::json!("x".repeat(STRING_TOKEN_BYTES + 1)),
             serde_json::json!(10000000000000000_u64),
@@ -1133,18 +1135,16 @@ mod tests {
                 [damaged.to_string()],
             )
             .unwrap();
-            assert!(
-                parse(
-                    &conn,
-                    "restores",
-                    "application_json",
-                    "FROM restores".into(),
-                    vec![],
-                    &previous,
-                    1
-                )
-                .is_err()
-            );
+            assert!(parse(
+                &conn,
+                "restores",
+                "application_json",
+                "FROM restores".into(),
+                vec![],
+                &previous,
+                1
+            )
+            .is_err());
         }
     }
 

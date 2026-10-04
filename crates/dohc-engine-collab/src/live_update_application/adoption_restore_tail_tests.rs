@@ -671,8 +671,8 @@ fn native_restore_tail_does_not_infer_generic_pending_provenance_from_matching_b
 
 /// An adopted owner's native agent edit declares the agent its journal row
 /// recorded, as an editor's draft declares it, with no draft proof. A retry
-/// reads back the same entry. The owner's own acceptance and restore require
-/// exactly that declaration. A person's or an automation's edit declares none.
+/// reads back the same entry. Restore verifies that native source declaration.
+/// A person's or an automation's edit declares none.
 #[test]
 fn adopted_native_agent_edit_declares_its_recorded_agent() {
     let mut f = Fixture::new();
@@ -719,52 +719,6 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
             .table_row_count("owner_ydoc_outbox_entries")
             .unwrap(),
         1
-    );
-    // Its delivery accepted without the declaration is not this entry's.
-    let undeclared = AdmittedLiveUpdate {
-        metadata: AdmittedLiveUpdateMetadata {
-            accepted: RelayAcceptedLiveUpdate {
-                receipt: LiveUpdateReceipt {
-                    delivery_id: entry.delivery_id.clone(),
-                    update_digest: entry.update_digest.clone(),
-                    journal_cursor: 7,
-                    accepting_host_epoch: 1,
-                },
-                binding: f.binding.clone(),
-                authority: ServerDerivedLiveUpdateAuthority::Owner {
-                    principal_id: "owner".into(),
-                },
-                received_at_ms: 7,
-            },
-            first_seen: vec![],
-
-            canonical_version: Some(2),
-
-            author_snapshot: Some(vec![]),
-
-            first_seen_deletes: Some(vec![]),
-
-            checkpoint_coverage: None,
-        },
-        update_bytes: entry.update.clone(),
-    };
-    assert!(matches!(
-        apply_committed(
-            &mut f.store,
-            &mut WriterDocCache::new(),
-            &f.handle,
-            undeclared,
-            &NoFaults,
-            100_000_000,
-            |_, _, _, _| Ok(()),
-        ),
-        Err(ApplicationError::Conflict)
-    ));
-    assert_eq!(
-        f.store
-            .table_row_count("live_device_update_applications")
-            .unwrap(),
-        0
     );
     // Restore classifies the native source with its derived declaration, and
     // refuses a stored one the source does not derive.
@@ -843,6 +797,57 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
             .unwrap();
         assert_eq!(declared, None);
     }
+}
+
+#[test]
+fn adopted_native_agent_edit_accepts_a_capped_snapshot_without_agent_credit() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let entry = native_tail_edit(&mut f, "Agent pending", 11);
+    let undeclared = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: entry.delivery_id.clone(),
+                    update_digest: entry.update_digest.clone(),
+                    journal_cursor: 7,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 7,
+            },
+            first_seen: vec![],
+
+            canonical_version: Some(2),
+
+            author_snapshot: Some(vec![]),
+
+            first_seen_deletes: Some(vec![]),
+
+            checkpoint_coverage: None,
+        },
+        update_bytes: entry.update.clone(),
+    };
+    let result = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        undeclared,
+        &NoFaults,
+        100_000_000,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap();
+    assert!(matches!(result, ApplicationResult::Applied(..)));
+    assert_eq!(
+        f.store
+            .table_row_count("live_device_update_applications")
+            .unwrap(),
+        1
+    );
 }
 
 /// An enrolled owner's pending draft names no native journal update. Restore

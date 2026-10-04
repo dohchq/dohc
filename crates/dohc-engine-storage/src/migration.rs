@@ -3514,9 +3514,9 @@ mod tests {
             assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('live_device_update_applications') WHERE name='admitted_metadata_json'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
             drop(conn);
             let image = std::fs::read(&path).unwrap();
-            let err = crate::EngineStore::open(&path, 2_000)
-                .err()
-                .expect("opening declared history refuses");
+            let Err(err) = crate::EngineStore::open(&path, 2_000) else {
+                panic!("opening declared history refuses");
+            };
             assert!(
                 std::error::Error::source(&err)
                     .unwrap()
@@ -3600,6 +3600,7 @@ mod tests {
             )
             .unwrap();
             if conflict {
+                conn.execute("INSERT INTO replication_log (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('workspace','peer',0,'live.audit','{}',1,1)", []).unwrap();
                 conn.execute(
                     "INSERT INTO live_audit_event_conflicts VALUES ('workspace','peer',0,?1)",
                     [&chunk],
