@@ -30,11 +30,14 @@ describe("states page", () => {
     for (const title of ["Buttons", "Copy", "State mark", "Menu", "Text inputs", "List rows", "Toasts", "Notices", "Dialog"]) {
       expect(screen.getAllByRole("heading", { name: title })).toHaveLength(2);
     }
-    // Every forced state names an element the capture can find. The menu's
-    // rows exist once it is open, and the capture opens it first.
-    for (const theme of ["light", "dark"]) fireEvent.click(screen.getByTestId(`states-menu-${theme}`));
+    // Every forced state names an element the capture can find. A menu's
+    // rows exist while it is open, and one menu is open at a time, so each
+    // mark inside a menu opens it, is checked, and closes it again.
     for (const mark of document.querySelectorAll<HTMLElement>("[data-force-target]")) {
+      const trigger = mark.querySelector<HTMLElement>("[aria-haspopup='menu']");
+      if (trigger) fireEvent.click(trigger);
       expect(mark.querySelector(mark.dataset.forceTarget ?? "")).not.toBeNull();
+      if (trigger) fireEvent.click(trigger);
     }
 
     unmount();

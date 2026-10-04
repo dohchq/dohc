@@ -1216,11 +1216,12 @@ describe("collection authoring", () => {
 
     // Deleting a view drops its configuration, so one click only arms the
     // button; the confirming click runs the rewrite.
-    const deleteButton = await screen.findByLabelText("Delete view My board");
-    fireEvent.click(deleteButton);
-    expect(deleteButton.textContent).toBe("Confirm delete");
+    fireEvent.click(await screen.findByLabelText("Delete view My board"));
+    // Arming swaps the control for the danger confirm under the same name.
+    const confirmButton = screen.getByLabelText("Delete view My board");
+    expect(confirmButton.textContent).toBe("Confirm delete");
     expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(2);
-    fireEvent.click(deleteButton);
+    fireEvent.click(confirmButton);
     await waitFor(() =>
       expect(bridge.writeWorkspaceText).toHaveBeenCalledTimes(3),
     );

@@ -2416,6 +2416,45 @@ describe("RelayShareDialog", () => {
     expect(bridgeMock.retuneRelayShareLink).not.toHaveBeenCalled();
   });
 
+  it("arrowing a link access choice changes the draft and makes no bridge call", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("view-link", { shareId: "share-view", access: "view" })],
+      supportedLinkAccess: ["view", "comment", "edit"],
+    });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    await screen.findByTestId("share-link-row-view-link");
+    const bridgeCalls = () =>
+      Object.values(bridgeMock).reduce((count, mocked) => count + mocked.mock.calls.length, 0);
+
+    const linkAccess = screen.getByRole("radiogroup", { name: "Link access" });
+    const callsBefore = bridgeCalls();
+    within(linkAccess).getByRole("radio", { name: "View" }).focus();
+    await user.keyboard("{ArrowRight}");
+    expect(within(linkAccess).getByRole("radio", { name: "Comment" }).getAttribute("aria-checked")).toBe("true");
+    expect(bridgeCalls()).toBe(callsBefore);
+
+    await user.click(
+      within(screen.getByTestId("share-link-row-view-link")).getByRole("button", { name: "Change access" }),
+    );
+    const newAccess = within(screen.getByTestId("share-link-confirmation")).getByRole("radiogroup", {
+      name: "New link access",
+    });
+    expect(within(newAccess).getByRole("radio", { name: "Comment" }).getAttribute("aria-checked")).toBe("true");
+    within(newAccess).getByRole("radio", { name: "Comment" }).focus();
+    await user.keyboard("{ArrowRight}");
+    expect(within(newAccess).getByRole("radio", { name: "Edit" }).getAttribute("aria-checked")).toBe("true");
+    expect(bridgeCalls()).toBe(callsBefore);
+    expect(bridgeMock.retuneRelayShareLink).not.toHaveBeenCalled();
+  });
+
   it("replaces the URL on widening and preserves it on narrowing", async () => {
     const viewRow = readableLink("retune-link", {
       shareId: "share-retune",

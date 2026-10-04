@@ -116,7 +116,7 @@ function ResponsePanel({ workspaceId, grantId, disabled, onBusyChange }: { works
       <SecondaryButton disabled={!!busy || disabled} onClick={() => void undo(continuation)}>{error || (counts?.failed ?? 0) > 0 ? "Retry removal" : "Continue removing responses"}</SecondaryButton>
       <SecondaryButton disabled={!!busy || disabled} onClick={() => { setContinuation(null); setError(null); }}>Stop here</SecondaryButton>
     </div> : null}
-    {confirmation ? createPortal(<ConfirmDialog title="Remove this holder’s responses?" confirmLabel="Remove responses"
+    {confirmation ? createPortal(<ConfirmDialog intent="danger" title="Remove this holder’s responses?" confirmLabel="Remove responses"
       testId="app-responses-confirm" cancelTestId="app-responses-cancel" confirmTestId="app-responses-remove"
       onCancel={() => { setConfirmation(null); focusAfterConfirm.current?.focus(); }} onConfirm={() => void undo(confirmation)}>
       <p className="text-[13px] text-muted">This removes up to 100 responses from this holder on this link, including responses outside this page.</p>

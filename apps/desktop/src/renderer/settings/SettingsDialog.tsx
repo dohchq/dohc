@@ -52,11 +52,11 @@ import { ScheduleHostRow } from "./ScheduleHostRow";
 import {
   ColorControl,
   HueControl,
-  SegmentedControl,
   SettingRow,
   SwitchControl,
   TextControl,
 } from "./SettingRow";
+import { SegmentedControl } from "../ui/SegmentedControl";
 import { SharedByMeList } from "./SharedByMeList";
 import { SharedWithMeList } from "./SharedWithMeList";
 import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { DatasetPendingAttemptsPage } from "@dohc/cli/dataset";
 import { Overlay } from "./Overlay";
-import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { DangerButton, SecondaryButton } from "./ui/controls";
 
 type PendingResponseEntry = DatasetPendingAttemptsPage["entries"][number];
 export type PendingResponsesPage = DatasetPendingAttemptsPage;
@@ -56,7 +56,7 @@ function Pending(props: CollectionPendingResponsesDialogProps) {
     <div className="flex justify-end gap-2"><SecondaryButton disabled={busy} onClick={() => void load()}>Refresh</SecondaryButton><SecondaryButton disabled={busy || !page?.nextAfter} onClick={() => { if (page?.nextAfter) void load(page.nextAfter); }}>More responses</SecondaryButton></div>
     {selected && <Overlay onClose={() => { if (!busy) setSelected(null); }} panelProps={{ role: "alertdialog", "aria-modal": true, "aria-label": "Clear pending response", className: "dohc-elevated dohc-pop-in flex w-[min(480px,92vw)] flex-col gap-4 rounded-xl border border-line bg-panel p-5 text-ink" }}>
       <h2 className="m-0 text-sm font-semibold">{selected.outcome === "committed" ? "Clear retry" : "Cancel response"} for {selected.operation}?</h2><p className="m-0 text-[13px] text-muted">{selected.outcome === "committed" ? "The response is saved. The participant may not have seen its confirmation. Clearing lets them submit again. This cannot be undone." : "Cancellation stops this response and prevents its old retry from saving later. The participant must start again. This cannot be undone."}</p>
-      <div className="flex justify-end gap-2"><SecondaryButton disabled={busy} onClick={() => setSelected(null)}>Keep retry</SecondaryButton><PrimaryButton disabled={busy} onClick={() => void reconcile()}>{selected.outcome === "committed" ? "Clear retry" : "Cancel response"}</PrimaryButton></div>
+      <div className="flex justify-end gap-2"><SecondaryButton disabled={busy} onClick={() => setSelected(null)}>Keep retry</SecondaryButton><DangerButton disabled={busy} onClick={() => void reconcile()}>{selected.outcome === "committed" ? "Clear retry" : "Cancel response"}</DangerButton></div>
     </Overlay>}
   </Overlay>;
 }

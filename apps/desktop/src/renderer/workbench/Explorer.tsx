@@ -1,5 +1,5 @@
 import { useFocusSurface } from "../ui/focusReturn";
-import { SectionLabel } from "../ui/controls";
+import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
@@ -2007,24 +2007,19 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
               ) : null}
             </div>
             <div className="flex shrink-0 justify-end gap-2 border-t border-line p-3">
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(null)}
-                className="rounded border border-line px-3 py-1 text-xs text-muted hover:text-ink"
-              >
+              <SecondaryButton onClick={() => setConfirmDelete(null)} className="h-8 py-0">
                 Cancel
-              </button>
-              <button
-                type="button"
+              </SecondaryButton>
+              <DangerButton
                 data-testid="confirm-delete"
                 onClick={() => {
                   performDeletes(confirmDelete);
                   setConfirmDelete(null);
                 }}
-                className="rounded bg-danger px-3 py-1 text-xs text-bg"
+                className="h-8 py-0 text-xs"
               >
                 Delete
-              </button>
+              </DangerButton>
             </div>
           </div>
         </Overlay>

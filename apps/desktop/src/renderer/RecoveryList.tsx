@@ -1,4 +1,5 @@
 import { CopyButton } from "./ui/CopyButton";
+import { DangerButton, SecondaryButton } from "./ui/controls";
 import { useState } from "react";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import {
@@ -40,22 +41,12 @@ export function DismissDraftControls(props: { onDismiss: () => void }) {
   return (
     <span className="flex items-center gap-2">
       <span className="text-[11px] text-danger">Deletes the only copy.</span>
-      <button
-        type="button"
-        data-testid="recovery-dismiss-confirm"
-        onClick={props.onDismiss}
-        className="rounded-md border border-danger px-2 py-0.5 text-[11px] text-danger transition-colors hover:bg-danger/10"
-      >
+      <DangerButton size="compact" data-testid="recovery-dismiss-confirm" onClick={props.onDismiss}>
         Dismiss edit
-      </button>
-      <button
-        type="button"
-        data-testid="recovery-dismiss-cancel"
-        onClick={() => setConfirming(false)}
-        className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-      >
+      </DangerButton>
+      <SecondaryButton size="compact" data-testid="recovery-dismiss-cancel" onClick={() => setConfirming(false)}>
         Keep
-      </button>
+      </SecondaryButton>
     </span>
   );
 }

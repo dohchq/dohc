@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { StopAndRestoreResult, StopAndRestoreTarget } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
-import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { DangerButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { useRequestSequence } from "./useRequestSequence";
 
 // Stop and restore (ADR 0013): the owner picks a person they shared this
@@ -305,7 +305,7 @@ export function StopAndRestoreDialog({
           <SecondaryButton data-testid="stop-and-restore-undo" onClick={() => void undo()}>Undo</SecondaryButton>
         ) : null}
         {state.kind === "choose" ? (
-          <PrimaryButton data-testid="stop-and-restore-confirm" onClick={() => void stop()}>Stop and restore</PrimaryButton>
+          <DangerButton data-testid="stop-and-restore-confirm" onClick={() => void stop()}>Stop and restore</DangerButton>
         ) : null}
         {state.kind === "waiting" ? <PrimaryButton onClick={() => void stop()}>Try again</PrimaryButton> : null}
       </div>

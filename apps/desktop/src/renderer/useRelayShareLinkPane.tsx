@@ -20,7 +20,8 @@ import type { RelayShareTarget } from "./RelayShareDialog";
 import { bridge } from "./bridge";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
-import { PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
+import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
+import { SegmentedControl } from "./ui/SegmentedControl";
 
 type LinkAccess = "view" | "comment" | "edit";
 
@@ -375,29 +376,13 @@ function LinkAccessChoice(props: {
   onChange: (access: LinkAccess) => void;
 }) {
   return (
-    <div
-      role="radiogroup"
-      aria-label={props.ariaLabel}
-      className="flex rounded-lg border border-line bg-panel-2 p-0.5"
-    >
-      {LINK_ACCESS_OPTIONS.filter(option => props.supported.includes(option.value)).map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          role="radio"
-          aria-checked={props.access === option.value}
-          disabled={props.disabled}
-          onClick={() => props.onChange(option.value)}
-          className={`flex-1 rounded-md px-2.5 py-1 text-xs transition-colors disabled:opacity-50 ${
-            props.access === option.value
-              ? "bg-bg text-ink shadow-sm"
-              : "text-muted hover:text-ink"
-          }`}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
+    <SegmentedControl
+      label={props.ariaLabel}
+      value={props.access}
+      options={LINK_ACCESS_OPTIONS.filter((option) => props.supported.includes(option.value))}
+      disabled={props.disabled}
+      onChange={props.onChange}
+    />
   );
 }
 
@@ -542,6 +527,14 @@ export function useRelayShareLinkPane(props: {
       : confirmation?.kind === "end"
         ? "Ending…"
         : retuneLabels.pending;
+  // Ending or resetting a link retires its credential, and so does widening
+  // its access. Narrowing keeps the same link.
+  const LinkConfirm =
+    confirmation?.kind === "reset" || confirmation?.kind === "end" || confirmationWidens
+      ? DangerButton
+      : PrimaryButton;
+  // Making access independent grants; the other three take something away.
+  const OwnerConfirm = ownerConfirmation?.kind === "promote" ? SecondaryButton : DangerButton;
 
   useLayoutEffect(() => {
     stopAllOwnerActivity();
@@ -2300,12 +2293,14 @@ export function useRelayShareLinkPane(props: {
                               <SecondaryButton
                                 disabled={ownerMutationBusy !== null}
                                 onClick={() => setOwnerConfirmation(null)}
+                                className="h-8 py-0"
                               >
                                 Cancel
                               </SecondaryButton>
-                              <SecondaryButton
+                              <OwnerConfirm
                                 disabled={ownerMutationBusy !== null}
                                 aria-busy={ownerMutationBusy !== null}
+                                className="h-8 py-0 text-xs"
                                 onClick={() =>
                                   executeOwnerConfirmation(ownerConfirmation)
                                 }
@@ -2317,7 +2312,7 @@ export function useRelayShareLinkPane(props: {
                                     : ownerConfirmation.kind === "promote"
                                       ? "Make independent"
                                       : "End access"}
-                              </SecondaryButton>
+                              </OwnerConfirm>
                             </div>
                           </div>
                         ) : null}
@@ -2445,14 +2440,14 @@ export function useRelayShareLinkPane(props: {
                 >
                   Cancel
                 </SecondaryButton>
-                <PrimaryButton
+                <LinkConfirm
                   disabled={mutationBusy !== null}
                   onClick={() => void mutateLink(confirmation, confirmationRow)}
                 >
                   {mutationBusy?.grantId === confirmationRow.grantId
                     ? confirmationPendingLabel
                     : confirmationActionLabel}
-                </PrimaryButton>
+                </LinkConfirm>
               </div>
             </div>
           ) : null}

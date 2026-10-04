@@ -31,6 +31,13 @@ const rowSecondaryButtonClass =
   "inline-flex h-6 max-w-full items-center gap-1 rounded-md border border-line bg-transparent px-2 text-xs text-muted transition-colors hover:bg-hover hover:text-ink aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-muted";
 const compactSecondaryButtonClass =
   "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-hover hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50";
+// The primary recipe on the danger fill, for the confirm of an action that
+// removes or revokes something. Paper text on danger clears AA in both
+// themes (tokens.test.ts guards the pair).
+const dangerButtonClass =
+  "rounded-lg bg-danger px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
+const compactDangerButtonClass =
+  "h-7 cursor-pointer rounded-md bg-danger px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 dohc-focus-visible focus-visible:outline-offset-1 disabled:cursor-wait disabled:opacity-50";
 
 /** Filled brand-accent CTA — at most one per surface. */
 export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
@@ -40,6 +47,21 @@ export const PrimaryButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
         ref={ref}
         type={type ?? "button"}
         className={cx(size === "compact" ? compactPrimaryButtonClass : primaryButtonClass, className)}
+        {...rest}
+      />
+    );
+  },
+);
+
+/** Filled danger confirm for an action that removes or revokes something.
+ * Ordinary confirms keep PrimaryButton. */
+export const DangerButton = forwardRef<HTMLButtonElement, ActionButtonProps>(
+  function DangerButton({ className, type, size, ...rest }, ref) {
+    return (
+      <button
+        ref={ref}
+        type={type ?? "button"}
+        className={cx(size === "compact" ? compactDangerButtonClass : dangerButtonClass, className)}
         {...rest}
       />
     );

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Overlay } from "../Overlay";
-import { PrimaryButton, SecondaryButton } from "./controls";
+import { DangerButton, PrimaryButton, SecondaryButton } from "./controls";
 
 type ConfirmDialogProps = {
   title: string;
@@ -13,12 +13,15 @@ type ConfirmDialogProps = {
   confirmTestId: string;
   /** Confirm waits for a choice the dialog asks for. */
   confirmDisabled?: boolean;
+  /** `danger` when confirming removes or revokes something. */
+  intent?: "default" | "danger";
 };
 
 // The card alone. ConfirmDialog puts it in an Overlay; the states page
 // renders it over a frame with no keyboard behavior.
 export function ConfirmDialogCard(props: ConfirmDialogProps) {
   const titleId = `${props.testId}-title`;
+  const Confirm = props.intent === "danger" ? DangerButton : PrimaryButton;
   return (
     <div
       data-testid={props.testId}
@@ -35,9 +38,9 @@ export function ConfirmDialogCard(props: ConfirmDialogProps) {
         <SecondaryButton data-testid={props.cancelTestId} onClick={props.onCancel} className="h-8 py-0">
           Cancel
         </SecondaryButton>
-        <PrimaryButton data-testid={props.confirmTestId} disabled={props.confirmDisabled} onClick={props.onConfirm} className="h-8 py-0 text-xs">
+        <Confirm data-testid={props.confirmTestId} disabled={props.confirmDisabled} onClick={props.onConfirm} className="h-8 py-0 text-xs">
           {props.confirmLabel}
-        </PrimaryButton>
+        </Confirm>
       </div>
     </div>
   );

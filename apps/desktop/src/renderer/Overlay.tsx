@@ -80,6 +80,9 @@ export function Overlay(props: {
     function onKeyDown(event: KeyboardEvent): void {
       if (!isTopOverlay(idRef.current)) return;
       if (event.key === "Escape") {
+        // One Escape closes one surface: a menu open inside the dialog takes
+        // this one, and the next reaches the dialog.
+        if (event.target instanceof Element && event.target.closest("[role='menu']")) return;
         event.stopPropagation();
         onCloseRef.current?.();
         return;

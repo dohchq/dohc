@@ -3,12 +3,13 @@ import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { DocumentMenu } from "../DocumentMenu";
 import { OverlayFrame } from "../Overlay";
-import { ColorControl, HueControl, SegmentedControl, SwitchControl, TextControl } from "../settings/SettingRow";
+import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
 import { CopyDetailsButton } from "../shell/copyDetails";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
-import { EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { MoreMenu } from "../ui/MoreMenu";
+import { SegmentedControl } from "../ui/SegmentedControl";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
 import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
@@ -194,6 +195,7 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
       </div>
       <OverlayFrame panelRef={panelRef}>
         <ConfirmDialogCard
+          intent="danger"
           title="Delete 12 files from Research?"
           confirmLabel="Delete files"
           onCancel={noop}
@@ -212,11 +214,12 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
   );
 }
 
+// Two options, so five controls fit on one row of the segmented part.
 const themeOptions = [
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
-  { value: "system", label: "System" },
 ];
+const themeOptionsLightDisabled = [{ ...themeOptions[0]!, disabled: true }, themeOptions[1]!];
 
 const menuItems = [
   { label: "Rename", onSelect: noop },
@@ -260,6 +263,18 @@ function Pane(props: { theme: "light" | "dark" }) {
           <PrimaryButton size="compact" data-force-state="hover">Save</PrimaryButton>
           <PrimaryButton size="compact" data-force-state="focus-visible">Save</PrimaryButton>
           <PrimaryButton size="compact" disabled>Save</PrimaryButton>
+        </Specimen>
+        <Specimen label="danger: rest, hover, focus-visible, disabled">
+          <DangerButton>Delete</DangerButton>
+          <DangerButton data-force-state="hover">Delete</DangerButton>
+          <DangerButton data-force-state="focus-visible">Delete</DangerButton>
+          <DangerButton disabled>Delete</DangerButton>
+        </Specimen>
+        <Specimen label="danger compact">
+          <DangerButton size="compact">Delete</DangerButton>
+          <DangerButton size="compact" data-force-state="hover">Delete</DangerButton>
+          <DangerButton size="compact" data-force-state="focus-visible">Delete</DangerButton>
+          <DangerButton size="compact" disabled>Delete</DangerButton>
         </Specimen>
         <Specimen label="secondary: rest, hover, focus-visible, disabled">
           <SecondaryButton>Cancel</SecondaryButton>
@@ -320,7 +335,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="segmented" title="Segmented control">
-        <Specimen label="rest, hover on first, focus-visible on checked">
+        <Specimen label="rest, hover on first, focus-visible on checked, one option disabled, group disabled">
           <SegmentedControl label="Theme" value="dark" options={themeOptions} onChange={noop} />
           <span data-force-state="hover" data-force-target="[role=radio]">
             <SegmentedControl label="Theme" value="dark" options={themeOptions} onChange={noop} />
@@ -328,6 +343,8 @@ function Pane(props: { theme: "light" | "dark" }) {
           <span data-force-state="focus-visible" data-force-target="[aria-checked=true]">
             <SegmentedControl label="Theme" value="dark" options={themeOptions} onChange={noop} />
           </span>
+          <SegmentedControl label="Theme" value="dark" options={themeOptionsLightDisabled} onChange={noop} />
+          <SegmentedControl label="Theme" value="dark" options={themeOptions} disabled onChange={noop} />
         </Specimen>
       </Section>
 
@@ -463,10 +480,11 @@ function Pane(props: { theme: "light" | "dark" }) {
         </ul>
       </Section>
 
-      {/* Both menus are opened by the capture, and their boxes are tall
-          enough for the open menu and its shadow. The ••• menu's first row
-          takes keyboard focus when it opens; forcing focus there draws the
-          same row the same way whether or not focus has since moved on. */}
+      {/* Both menus are opened by the capture, one at a time, and their
+          boxes are tall enough for the open menu and its shadow. A menu's
+          first row takes keyboard focus when it opens; forcing focus there
+          draws the same row the same way whether or not focus has since
+          moved on. */}
       <Section part="menu" title="Menu">
         <Specimen label="rows: keyboard-active, hover, rest, disabled">
           <div
@@ -482,7 +500,11 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="document-menu" title="Document menu">
-        <div className="flex h-64 w-56 items-start justify-end">
+        <div
+          className="flex h-64 w-56 items-start justify-end"
+          data-force-state="focus"
+          data-force-target="[role=menuitem]:nth-child(1)"
+        >
           <DocumentMenu workspaceId="states" suggestedName="states" getMarkdown={() => null} />
         </div>
       </Section>
