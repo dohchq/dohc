@@ -2903,7 +2903,7 @@ describe('validateOrderedLiveUpdateCut', () => {
     )
     if (strictReadAny?.body === undefined) throw new Error('missing strict readAny')
     const fingerprintBranch = strictReadAny.body.statements.find(ts.isIfStatement)
-    expect(fingerprintBranch?.expression.getText(sourceAst)).toBe('captureFingerprints')
+    expect(fingerprintBranch?.expression.getText(sourceAst)).toBe('this.captureFingerprints')
     expect(fingerprintBranch?.elseStatement).toBeUndefined()
     const valuesOnlyCalls = descendants(strictReadAny).filter(node => (
       ts.isCallExpression(node) && node.expression.getText(sourceAst) === 'readAnyValue'
@@ -2929,7 +2929,7 @@ describe('validateOrderedLiveUpdateCut', () => {
     }
     expect(jsonDigestParent !== undefined && ts.isIfStatement(jsonDigestParent)).toBe(true)
     if (jsonDigestParent !== undefined && ts.isIfStatement(jsonDigestParent)) {
-      expect(jsonDigestParent.expression.getText(sourceAst)).toBe('captureFingerprints')
+      expect(jsonDigestParent.expression.getText(sourceAst)).toBe('this.captureFingerprints')
     }
 
     const scanString = descendants(jsonAst).find(
