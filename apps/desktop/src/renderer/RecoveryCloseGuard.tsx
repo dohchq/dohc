@@ -18,6 +18,7 @@ import {
 import { Overlay } from "./Overlay";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
+import { DangerButton, SecondaryButton } from "./ui/controls";
 
 type UnloadKind = "close" | "reload" | "update" | "quit";
 
@@ -599,10 +600,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
               <RecoveryList rows={liveDrafts} showWorkspace />
             </div>
             <div className="mt-4 flex justify-end gap-2">
-              <button
-                type="button"
+              <SecondaryButton
                 data-testid="recovery-close-goback"
                 autoFocus
+                className="h-8 py-0"
                 onClick={() => {
                   // Going back on a round cancels it for every window: the
                   // originating install settles, and no other window's
@@ -618,12 +619,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                     answerRound(round, "cancel");
                   }
                 }}
-                className="h-8 cursor-pointer rounded-md border border-line px-3 text-xs text-muted hover:bg-hover hover:text-ink"
               >
                 Go back
-              </button>
-              <button
-                type="button"
+              </SecondaryButton>
+              <DangerButton
                 data-testid="recovery-close-anyway"
                 onClick={() => {
                   // Resume exactly what the user asked for: a requested
@@ -682,10 +681,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                     if (uncovered) showCloseWarning({ kind, resume });
                   });
                 }}
-                className="h-8 cursor-pointer rounded-md bg-accent px-3 text-xs font-semibold text-bg hover:opacity-90"
+                className="h-8 py-0 text-xs"
               >
                 {UNLOAD_COPY[closeWarning.kind].confirm}
-              </button>
+              </DangerButton>
             </div>
         </Overlay>
       ) : null}

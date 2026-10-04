@@ -423,6 +423,7 @@ export function AutomationRuns(props: {
   const dialog = shownPreview === null ? null : (
     <ConfirmDialog
       title="Undo this run?"
+      intent={shownPreview.preview.deletes + shownPreview.preview.unchecked > 0 ? "danger" : "default"}
       confirmLabel={shownPreview.preview.deletes + shownPreview.preview.unchecked > 0
         ? `Undo and delete ${count(shownPreview.preview.deletes + shownPreview.preview.unchecked, "record", "records")}`
         : "Undo"}

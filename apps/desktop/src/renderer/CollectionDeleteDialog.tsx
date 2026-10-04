@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import { Overlay } from "./Overlay";
-import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { DangerButton, SecondaryButton } from "./ui/controls";
 import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog";
 
 export interface CollectionDeletePreview {
@@ -72,7 +72,7 @@ function Delete(props: CollectionDeleteDialogProps) {
       {props.onExport && <SecondaryButton disabled={busy} onClick={() => setExporting(true)}>{exported ? "Save another recovery file" : "Save recovery file first"}</SecondaryButton>}
       {exported&&<p className="m-0 text-[12px] text-muted">Recovery file saved</p>}
       <label className="flex items-start gap-2 text-[13px] text-ink"><input type="checkbox" checked={acknowledged} disabled={busy || !page} onChange={event => setAcknowledged(event.target.checked)} />I understand that dohc cannot undo this deletion.</label>
-      <div className="flex justify-end gap-2"><SecondaryButton disabled={busy} onClick={props.onClose}>Cancel</SecondaryButton><PrimaryButton disabled={busy || !page || !acknowledged} onClick={() => void deleteCollection()}>{lock.current ? "Deleting…" : "Delete Collection permanently"}</PrimaryButton></div>
+      <div className="flex justify-end gap-2"><SecondaryButton disabled={busy} onClick={props.onClose}>Cancel</SecondaryButton><DangerButton disabled={busy || !page || !acknowledged} onClick={() => void deleteCollection()}>{lock.current ? "Deleting…" : "Delete Collection permanently"}</DangerButton></div>
     </section>
   </Overlay>{exporting&&props.onExport&&<CollectionRecoveryExportDialog collectionName={props.name} onExport={props.onExport} onClose={()=>setExporting(false)} onError={props.onError} onSaved={path=>{if(!alive.current)return;setExported(true);props.onSaved?.(path);}}/>}</>;
 }

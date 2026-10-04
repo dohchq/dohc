@@ -8,7 +8,7 @@ import { nextDue, UnknownTimeZoneError } from "@dohc/workspace-contracts/automat
 import type { CheckCollectionAutomationResult, ListAutomationGroupsResult, ListAutomationPeopleResult, ListAutomationTargetsResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
-import { IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { DangerButton, IconButton, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { useRequestSequence } from "../useRequestSequence";
 import { RUN_TIME, Sentence, StatusLine } from "./AutomationParts";
 import {
@@ -3049,7 +3049,7 @@ export function AutomationBuilder(props: {
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <SecondaryButton onClick={props.onStay} className="h-8 py-0">Keep editing</SecondaryButton>
-              <SecondaryButton onClick={props.onLeave} className="h-8 py-0">Discard</SecondaryButton>
+              <DangerButton onClick={props.onLeave} className="h-8 py-0 text-xs">Discard</DangerButton>
               <PrimaryButton
                 onClick={() => {
                   setSaveChosen(true);

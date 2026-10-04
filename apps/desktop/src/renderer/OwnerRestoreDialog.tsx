@@ -1,7 +1,7 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import {bridge} from "./bridge";
 import {Overlay} from "./Overlay";
-import {PrimaryButton, SecondaryButton} from "./ui/controls";
+import {DangerButton, PrimaryButton, SecondaryButton} from "./ui/controls";
 import {useRequestSequence} from "./useRequestSequence";
 import {ipcErrorMessage} from "./ipcError";
 import {ownerRestoreOutcomes} from "./ownerRestoreOutcomes";
@@ -174,10 +174,10 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
           restorePointCursor: selected.cursor, restorePointReceiptDigest: selected.receiptDigest});
         if (current(token)) setState({kind: "stop", plan});
       })}>Review affected access</PrimaryButton>}
-      {state.kind === "stop" && <PrimaryButton disabled={busy} onClick={() => void perform(async token => {
+      {state.kind === "stop" && <DangerButton disabled={busy} onClick={() => void perform(async token => {
         const stopped = await bridge().ownerRestore({workspaceId, action: "begin", intent: state.plan.intent});
         if (!current(token)) return; operation.current = stopped; await review(token);
-      })}>Stop access</PrimaryButton>}
+      })}>Stop access</DangerButton>}
       {state.kind === "review" && <PrimaryButton disabled={busy} onClick={() => void perform(token => confirm(token, state.review.proposalDigest))}>Restore file</PrimaryButton>}
       {(state.kind === "pending" || state.kind === "error") && <PrimaryButton disabled={busy} onClick={() => void perform(token => operation.current ? review(token) : load(token))}>Retry</PrimaryButton>}
     </div>

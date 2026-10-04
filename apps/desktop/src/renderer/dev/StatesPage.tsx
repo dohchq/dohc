@@ -7,7 +7,7 @@ import { ColorControl, HueControl, SwitchControl, TextControl } from "../setting
 import { CopyDetailsButton } from "../shell/copyDetails";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
-import { EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { FolderChip, Step } from "../ui/Step";
@@ -194,6 +194,7 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
       </div>
       <OverlayFrame panelRef={panelRef}>
         <ConfirmDialogCard
+          intent="danger"
           title="Delete 12 files from Research?"
           confirmLabel="Delete files"
           onCancel={noop}
@@ -261,6 +262,18 @@ function Pane(props: { theme: "light" | "dark" }) {
           <PrimaryButton size="compact" data-force-state="hover">Save</PrimaryButton>
           <PrimaryButton size="compact" data-force-state="focus-visible">Save</PrimaryButton>
           <PrimaryButton size="compact" disabled>Save</PrimaryButton>
+        </Specimen>
+        <Specimen label="danger: rest, hover, focus-visible, disabled">
+          <DangerButton>Delete</DangerButton>
+          <DangerButton data-force-state="hover">Delete</DangerButton>
+          <DangerButton data-force-state="focus-visible">Delete</DangerButton>
+          <DangerButton disabled>Delete</DangerButton>
+        </Specimen>
+        <Specimen label="danger compact">
+          <DangerButton size="compact">Delete</DangerButton>
+          <DangerButton size="compact" data-force-state="hover">Delete</DangerButton>
+          <DangerButton size="compact" data-force-state="focus-visible">Delete</DangerButton>
+          <DangerButton size="compact" disabled>Delete</DangerButton>
         </Specimen>
         <Specimen label="secondary: rest, hover, focus-visible, disabled">
           <SecondaryButton>Cancel</SecondaryButton>
