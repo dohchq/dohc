@@ -915,6 +915,14 @@ function initializeLiveJournalSchema(db: SqliteDb): void {
 }
 
 export function initializeSyncRelaySchema(db: SqliteDb): void {
+    const legacy = "sync_relay_live_update_agent_declarations";
+    if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?").get(legacy)) {
+      if (db.prepare(`SELECT 1 FROM ${legacy} LIMIT 1`).get()) {
+        throw new Error("Cannot open a relay store with declared v1 accepted evidence. Its data is unchanged. Reset the development relay store to use v2 authors.");
+      }
+      db.exec(`DROP TABLE ${legacy}`);
+      db.prepare("DELETE FROM sync_relay_migrations WHERE migration_id=?").run("live-update-agent-declarations-v1");
+    }
     db.exec(`
       CREATE TABLE IF NOT EXISTS sync_relay_workspaces (
         workspace_id TEXT PRIMARY KEY,

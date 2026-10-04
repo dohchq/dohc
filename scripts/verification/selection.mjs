@@ -10,7 +10,8 @@ const productionInputs = { "@dohc/site": ["@dohc/desktop"] };
 const testInputs = {
   "@dohc/desktop": ["@dohc/site"],
   "@dohc/workspace-auth": ["@dohc/workspace-postgres"],
-  "@dohc/ydoc-projection": ["@dohc/sync-relay", "@dohc/workspace-engine-client", "@dohc/share-web", "@dohc/desktop"],
+  "@dohc/ydoc-projection": ["@dohc/sync-relay", "@dohc/workspace-engine-client", "@dohc/share-web", "@dohc/desktop",
+    "@dohc/service-http", "@dohc/workspace-auth"],
   "@dohc/share-web": ["@dohc/desktop", "@dohc/mcp", "@dohc/cli", "@dohc/workspace-postgres", "@dohc/workspace-engine-client"],
   "@dohc/sync-relay": ["@dohc/share-web", "@dohc/desktop"],
   "@dohc/workspace-api": ["@dohc/workspace-postgres"],
@@ -20,11 +21,11 @@ const testInputs = {
 const desktopProofInputs = {
   "@dohc/workspace-api": ["e2e/helpers/selfHostOnboarding.ts"],
   "@dohc/workspace-postgres": ["e2e/helpers/selfHostOnboarding.ts"],
-  "@dohc/share-web": ["e2e/helpers/sharedDatasetBrowser.ts"],
+  "@dohc/share-web": ["e2e/helpers/selfHostOnboarding.ts", "e2e/helpers/sharedDatasetBrowser.ts"],
 };
 // Keep a helper wrapper from hiding a new unit-test dependency on these inputs.
 const desktopProofConsumers = {
-  "apps/desktop/e2e/helpers/selfHostOnboarding": ["apps/desktop/e2e/self-host-onboarding.spec.ts"],
+  "apps/desktop/e2e/helpers/selfHostOnboarding": ["apps/desktop/e2e/self-host-onboarding.spec.ts", "apps/desktop/e2e/shared-continuity.spec.ts"],
   "apps/desktop/e2e/helpers/sharedDatasetBrowser": [
     "apps/desktop/e2e/apps.spec.ts", "apps/desktop/e2e/collection-link-lane.spec.ts",
     "apps/desktop/e2e/dataset-completion.spec.ts", "apps/desktop/e2e/dataset-shared-form.spec.ts",
@@ -78,7 +79,13 @@ function sharedInput(path) {
     || /^apps\/desktop\/scripts\//u.test(path);
 }
 
-function result(selected, affected, full, reason) {
+// The states page compares every shared renderer part with its pixel
+// baselines, so a renderer change or a change to the gallery itself runs it.
+function statesPageInput(path) {
+  return /^apps\/desktop\/(?:src\/renderer\/|e2e\/states-page)/u.test(path);
+}
+
+function result(selected, affected, full, reason, statesPage = full) {
   const testFiles = {};
   if (!full) for (const name of selected) {
     if (affected.has(name)) continue;
@@ -93,6 +100,7 @@ function result(selected, affected, full, reason) {
     selfHostNative: selected.has("@dohc/share-web"),
     desktop: desktopScripts || Object.keys(desktopProofInputs).some(input => affected.has(input)),
   };
+  proofs.statesPage = proofs.desktop && statesPage;
   return {
     packages: [...selected].sort(), affected: [...affected].sort(), full, reason, proofs, testFiles, desktopScripts,
     repository: full ? "full" : "source",
@@ -131,7 +139,8 @@ export function selectJavaScript(files, packages, { full = false } = {}) {
   } while (affected.size !== previousSize);
   const selected = new Set(affected);
   for (const pkg of packages) if (testInputs[pkg.name]?.some(input => affected.has(input))) selected.add(pkg.name);
-  return result(selected, affected, false, files.length ? "Changed packages, production dependents, and external test consumers." : "No JavaScript inputs changed.");
+  return result(selected, affected, false, files.length ? "Changed packages, production dependents, and external test consumers." : "No JavaScript inputs changed.",
+    files.some(path => statesPageInput(path.replaceAll("\\", "/"))));
 }
 
 // This guard checks literal imports, CSS sources, and fixture paths. Computed

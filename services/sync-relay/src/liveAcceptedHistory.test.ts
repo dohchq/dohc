@@ -70,3 +70,13 @@ it("refuses downgrade across a v2 checkpoint boundary", () => {
   history.suffix = [modern(second)];history.evidenceDigest = proofDigest(history);
   expect(parseNativeRestoreProposalReceipt(JSON.stringify(receipt), budget).acceptedHistory.checkpoint.canonicalVersion).toBe(2);
 });
+
+const shared = JSON.parse(readFileSync(new URL("../../../packages/live-session-contract/vectors/live-update-admission-vectors.json", import.meta.url), "utf8")) as {
+  acceptedHistoryDigests: {case: string; namespace: string; document: import("@dohc/live-session-contract").LiveDocumentKey;
+    initialDigest: string; eventCount: number; metadata: AdmittedLiveUpdateMetadata; canonicalJson: string; eventDigest: string}[];
+};
+it.each(shared.acceptedHistoryDigests.map(row => [row.case, row] as const))("matches the shared accepted-history vector: %s", (_case, row) => {
+  expect(initialAcceptedHistoryDigest(row.namespace, row.document)).toBe(row.initialDigest);
+  expect(JSON.stringify(canonicalVersionedAcceptedMetadata(row.metadata))).toBe(row.canonicalJson);
+  expect(nextVersionedAcceptedHistoryDigest(row.initialDigest, row.eventCount, row.metadata)).toBe(row.eventDigest);
+});

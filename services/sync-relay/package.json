@@ -33,6 +33,7 @@
     "@dohc/workspace-engine-client": "workspace:*",
     "@dohc/ydoc-projection": "workspace:*",
     "better-auth": "^1.6.26",
+    "effect": "4.0.0",
     "esbuild": "0.28.1",
     "pg": "^8.22.0",
     "ws": "8.21.3"

@@ -1,3 +1,4 @@
+import { parseLiveAuthorContext, type LiveAuthorContext } from "./liveAuthorship.js";
 import { parseHostEpoch, type HostEpoch } from "./hostControl.js";
 import {
   LIVE_OBJECT_BINDING_IDENTIFIER_MAX_BYTES,
@@ -30,6 +31,9 @@ export interface LiveMembershipFrame {
 }
 // RESULT success: header + string length/identifier + digest + tag + three u64 + bool.
 export const LIVE_FRAME_MINIMUM_MAX_BYTES = LIVE_FRAME_HEADER_BYTES + 4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 32 + 1 + 24 + 1;
+// BEGIN submit-update: fixed fields, delivery/account/agent identifiers, optional name and scope, and tags.
+export const LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES = LIVE_FRAME_HEADER_BYTES + 8 + 1 + 8 + 32 +
+  5 * (4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES) + 6;
 
 export interface LiveFrameReceivePolicy {
   readonly maxFrameBytes: number;
@@ -45,7 +49,7 @@ export type LiveFrameBegin = {
 } & (
   | { readonly purpose: "client-vector" }
   | { readonly purpose: "initial-sync"; readonly appliedThroughJournalCursor: number }
-  | { readonly purpose: "submit-update"; readonly deliveryId: string }
+  | { readonly purpose: "submit-update"; readonly deliveryId: string; readonly authorContext?: LiveAuthorContext }
   | { readonly purpose: "applied-update"; readonly journalCursor: number }
 );
 export type LiveFrame =
@@ -107,6 +111,20 @@ function byteView(value: unknown): Uint8Array {
     return new Uint8Array(buffer, offsetGetter.call(value), lengthGetter.call(value));
   } catch { throw new LiveFrameError("invalid"); }
 }
+function authorContext(value: unknown): LiveAuthorContext {
+  try {
+    const kind = discriminant(value, "kind");
+    const fields = kind === "account" ? ["kind", "accountId"] : kind === "link" ? ["kind", "publicPrincipalId"] : ["kind"];
+    const declared = Object.hasOwn(value as object, "agent");
+    const source = record(value, [...fields, ...(declared ? ["agent"] : [])]);
+    if (declared) {
+      const keys = Reflect.ownKeys(source.agent as object);
+      requireFrame(keys.every(key => typeof key === "string" && ["agentId", "agentName", "onBehalfOf", "depth"].includes(key)));
+      source.agent = record(source.agent, keys as string[]);
+    }
+    return parseLiveAuthorContext(source);
+  } catch { throw new LiveFrameError("invalid"); }
+}
 const policyFields = ["maxFrameBytes", "maxStateVectorBytes", "maxUpdateBytes", "maxSyncBytes"] as const;
 function policy(value: unknown): LiveFrameReceivePolicy {
   const source = record(value, policyFields);
@@ -161,11 +179,13 @@ function snapshotFrame(value: unknown, maxFrameBytes: number): LiveFrame {
     case "begin": {
       const purpose = discriminant(value, "purpose");
       requireFrame(typeof purpose === "string" && Object.hasOwn(purposeCodes, purpose));
-      const extra = purpose === "initial-sync" ? ["appliedThroughJournalCursor"] : purpose === "submit-update" ? ["deliveryId"] : purpose === "applied-update" ? ["journalCursor"] : [];
+      const declared = purpose === "submit-update" && Object.hasOwn(value as object, "authorContext");
+      const extra = purpose === "initial-sync" ? ["appliedThroughJournalCursor"] : purpose === "submit-update" ? ["deliveryId", ...(declared ? ["authorContext"] : [])] : purpose === "applied-update" ? ["journalCursor"] : [];
       const r = record(value, ["kind", "purpose", "transferId", "totalBytes", "digest", ...extra]);
       const common = { kind, transferId: integer(r.transferId, true), totalBytes: integer(r.totalBytes, true), digest: parseLiveUpdateDigest(r.digest) } as const;
       if (purpose === "initial-sync") return { ...common, purpose, appliedThroughJournalCursor: integer(r.appliedThroughJournalCursor) };
-      if (purpose === "submit-update") return { ...common, purpose, deliveryId: parseLiveUpdateIdentifier(r.deliveryId) };
+      if (purpose === "submit-update") return { ...common, purpose, deliveryId: parseLiveUpdateIdentifier(r.deliveryId),
+        ...(declared ? { authorContext: authorContext(r.authorContext) } : {}) };
       if (purpose === "applied-update") return { ...common, purpose, journalCursor: integer(r.journalCursor, true) };
       return { ...common, purpose: "client-vector" };
     }
@@ -271,7 +291,26 @@ function payload(w: Writer, frame: LiveFrame) {
     case "begin":
       w.number(frame.transferId, 8); w.number(purposeCodes[frame.purpose], 1); w.number(frame.totalBytes, 8); w.digest(frame.digest);
       if (frame.purpose === "initial-sync") w.number(frame.appliedThroughJournalCursor, 8);
-      if (frame.purpose === "submit-update") w.string(frame.deliveryId);
+      if (frame.purpose === "submit-update") {
+        w.string(frame.deliveryId);
+        const context = frame.authorContext;
+        if (context) {
+          w.number(context.kind === "account" ? 1 : context.kind === "link" ? 2 : 3, 1);
+          if (context.kind === "account") w.string(context.accountId);
+          if (context.kind === "link") w.string(context.publicPrincipalId);
+          const agent = context.agent;
+          w.number(agent ? 1 : 0, 1);
+          if (agent) {
+            w.string(agent.agentId);
+            for (const field of ["agentName", "onBehalfOf"] as const) {
+              w.number(agent[field] !== undefined ? 1 : 0, 1);
+              if (agent[field] !== undefined) w.string(agent[field]);
+            }
+            w.number(agent.depth !== undefined ? 1 : 0, 1);
+            if (agent.depth !== undefined) w.number(agent.depth, 1);
+          }
+        }
+      }
       if (frame.purpose === "applied-update") w.number(frame.journalCursor, 8);
       break;
     case "chunk": w.number(frame.transferId, 8); w.number(frame.offset, 8); w.raw(frame.bytes); break;
@@ -330,7 +369,28 @@ function decodeFrame(value: Uint8Array, maxFrameBytes: number, copyChunk: boolea
       const purpose = fromCode(purposeCodes, r.number(1));
       const common = { kind, transferId, totalBytes: integer(r.number(8), true), digest: r.digest() } as const;
       if (purpose === "initial-sync") frame = { ...common, purpose, appliedThroughJournalCursor: r.number(8) };
-      else if (purpose === "submit-update") frame = { ...common, purpose, deliveryId: parseLiveUpdateIdentifier(r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES)) };
+      else if (purpose === "submit-update") {
+        const deliveryId = parseLiveUpdateIdentifier(r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES));
+        if (r.offset === bytes.length) frame = { ...common, purpose, deliveryId };
+        else {
+          const tag = r.number(1);
+          requireFrame(tag >= 1 && tag <= 3);
+          const context: Record<string, unknown> = tag === 1 ? {kind: "account", accountId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES)}
+            : tag === 2 ? {kind: "link", publicPrincipalId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES)} : {kind: "signed-out"};
+          const declared = r.number(1); requireFrame(declared <= 1);
+          if (declared) {
+            const agent: Record<string, unknown> = {agentId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES)};
+            for (const field of ["agentName", "onBehalfOf"] as const) {
+              const present = r.number(1); requireFrame(present <= 1);
+              if (present) agent[field] = r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
+            }
+            const depth = r.number(1); requireFrame(depth <= 1);
+            if (depth) agent.depth = r.number(1);
+            context.agent = agent;
+          }
+          frame = { ...common, purpose, deliveryId, authorContext: authorContext(context) };
+        }
+      }
       else if (purpose === "applied-update") frame = { ...common, purpose, journalCursor: integer(r.number(8), true) };
       else frame = { ...common, purpose };
       break;
@@ -498,6 +558,10 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
     if (frame.kind === "welcome" || frame.kind === "hello") Object.freeze(frame.receivePolicy);
     if (frame.kind === "result" && frame.result === "success") Object.freeze(frame.ack);
     if (frame.kind === "membership") Object.freeze(frame.members);
+    if (frame.kind === "begin" && frame.purpose === "submit-update" && frame.authorContext) {
+      if (frame.authorContext.agent) Object.freeze(frame.authorContext.agent);
+      Object.freeze(frame.authorContext);
+    }
     if (frame.kind === "welcome" || frame.kind === "hello") {
       requireFrame(!state.greeted && (frame.kind === "welcome" ? sender === "server" : sender === "client"), "state");
       if (sender === role) requireFrame(policyFields.every(field => frame.receivePolicy[field] === limits.receive[field]), "state");

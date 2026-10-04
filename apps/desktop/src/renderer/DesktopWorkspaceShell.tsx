@@ -1413,12 +1413,15 @@ export function DesktopWorkspaceShell(props: {
     );
   }, [refreshFiles, reportShellError]);
 
-  // A shared view has no engine history surface: the share's open installs
-  // no capture, and every engine-moments call could only error. Capability
-  // identity comes from main's registry summary. This gates the history
-  // surface and, below, the versions surface and collections, from the same
-  // fact.
+  // A shared view has no recorder: the share's open installs no capture, so
+  // it records nothing and restores nothing. Capability identity comes from
+  // main's registry summary. This gates the versions surface and collections,
+  // and restore, from the same fact.
   const isShareView = Boolean(props.workspace.shareView);
+  // History reads are separate. A shared view reads the history its share
+  // imported, list and detail only, from its own store.
+  const historyReadable = (status: SyncStatusResult | null) =>
+    isShareView ? !status?.engineStoreRefused : !statusSaysNoRecorder(status);
   // An Edit share view reads and makes document Collections (ADR 0013).
   const shareViewEditsCollections =
     props.workspace.shareView?.access === "edit" &&
@@ -1564,7 +1567,7 @@ export function DesktopWorkspaceShell(props: {
     // after a failed capture build the renderer's own read still
     // says engine-on, and every listEngineMoments call would error.
     const token = ++engineHistoryToken.current;
-    if (!isShareView && !statusSaysNoRecorder(syncStatusLane.latest())) {
+    if (historyReadable(syncStatusLane.latest())) {
       // Four reads ride one refresh, and they answer four different
       // questions. One batch made every answer hostage to the worst of them:
       // a try-state failure discarded a history page the engine had already
@@ -1604,7 +1607,8 @@ export function DesktopWorkspaceShell(props: {
         (error) =>
           reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
       );
-      tryStateLane.settle(
+      // A shared view has no versions, so it has no try run to read.
+      if (!isShareView) tryStateLane.settle(
         token,
         bridge().getTryInVersionState({ workspaceId }),
         (trySession) => trySession.state,
@@ -4025,12 +4029,7 @@ export function DesktopWorkspaceShell(props: {
   // empty list, and what that placeholder claims comes from main's status —
   // or, for a shared view, the registry capability and the share's live
   // state — never from the renderer's own capability read.
-  const historyOffCopy = historyOffPlaceholderCopy(
-    syncStatus,
-    shareView
-      ? { ended: shareViewEnded, granterEmail: shareView.granterEmail }
-      : null,
-  );
+  const historyOffCopy = historyOffPlaceholderCopy(syncStatus);
   // The rail needs no capture-decision clause of its own, unlike the surfaces
   // that call on mount. Only `refreshHistory` and the open effect
   // commit a status, and both now answer after the decision, so a null status
@@ -4038,7 +4037,7 @@ export function DesktopWorkspaceShell(props: {
   // no page to show, which is already a load state. Adding the clause here
   // would render the same thing from a second place.
   const historyTimeline =
-    !isShareView && !statusSaysNoRecorder(syncStatus) ? (
+    historyReadable(syncStatus) ? (
     // The timeline renders only when a read ANSWERED. Flattening a
     // null page into an empty list told the user a workspace with real
     // history had no changes, whenever a read was in flight or had failed.
@@ -4921,23 +4920,9 @@ export function DesktopWorkspaceShell(props: {
               // the share fact alone left the failed-build cause open: the
               // page still mounted, called readEngineMoment and fell into its
               // own error state.
-              !captureAvailable ? (
-                isShareView ? (
-                  // A persisted moment-diff tab on a shared view.
-                  // Virtual tabs survive restore, so this tab outlives the
-                  // History surface that opened it — and that surface no
-                  // longer exists here. The page would ask main for a
-                  // moment a shared view has none of. It states the same
-                  // capability the History placeholder states, and the tab
-                  // stays closeable.
-                  <div
-                    data-testid="moment-diff-share-view"
-                    className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
-                  >
-                    A shared view records no history. Close this tab to go back
-                    to the shared files.
-                  </div>
-                ) : !captureDecided ? (
+              // A shared view opens a moment its share imported, read-only.
+              !(isShareView ? captureDecided && historyReadable(syncStatus) : captureAvailable) ? (
+                !captureDecided ? (
                   // Main has not decided yet. The tab must not mount the page
                   // and must not state a capability either: neither read the
                   // shell has done proves anything about what main recorded,
@@ -4960,6 +4945,7 @@ export function DesktopWorkspaceShell(props: {
                 <EngineMomentDiffPage
                   workspaceId={workspaceId}
                   tabPath={tabPath ?? ""}
+                  readOnly={isShareView}
                   onBeforeRestore={beginLineageOperation}
                   onOpenFile={openFile}
                   onPathResolved={rememberMomentDiffPath}

@@ -1503,6 +1503,21 @@ describe("sync relay handler", () => {
     ).toThrow(/well-formed Unicode/u);
   });
 
+  it("accepts an agent resolution without person delegation and hashes its bare author shadows", () => {
+    const fixture = compactConflictResolveFixture();
+    const context = fixture.payload.effectContext as { author: { onBehalfOf: string | null } };
+    context.author.onBehalfOf = null;
+    const effects = fixture.payload.effects as Array<{ payloadSha256: string }>;
+    fixture.shadows.forEach((shadow, index) => {
+      const authors = shadow.authors as Array<Record<string, unknown>>;
+      delete authors[0].onBehalfOf;
+      effects[index].payloadSha256 = sha256(stableJsonStringify(shadow));
+    });
+    expect(new Set(referencedBlobShas("conflict.resolve", JSON.stringify(fixture.payload), {
+      workspaceId: "workspace-a", recordedAtMs: 21,
+    }))).toEqual(new Set(fixture.blobs.keys()));
+  });
+
   it("pins the canonical JSON hashes for compact conflict moment shadows", () => {
     const fixture = compactConflictResolveFixture();
     expect(

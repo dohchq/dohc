@@ -1,5 +1,6 @@
 import {requireResumedBinding,retainedRestoreLifecycle} from "./liveRestoreLifecycleStorage";
 import {readServiceActivationOrigin} from "./serviceActivationOrigin";
+import {readServiceActivation} from "./serviceActivationAccess";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -106,6 +107,11 @@ function snapshot(input: StopRestoreIntent): StopRestoreIntent {
 }
 function owner(storage: StorageContext, workspaceId: string, ownerUserId: string): void {
   if (!storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) refuse();
+}
+// A fence would strand a pending service activation: it can no longer complete,
+// and service restore continues only a completed one.
+function requireNoPendingActivation(storage: StorageContext, document: LiveDocumentKey): void {
+  if (readServiceActivation(storage, document)?.completion_json === null) refuse();
 }
 function basis(storage: StorageContext, intent: StopRestoreIntent, authority: StoredLiveDocumentAuthority): StopRestoreBasis {
   const share = storage.getShare(intent.shareId), control = storage.getLiveHostControl();
@@ -217,6 +223,7 @@ export function readStopRestorePlan(storage: StorageContext, input: StopRestoreP
     const row = storage.db.prepare(`SELECT restore_fence_generation,baseline_digest,current_path FROM sync_relay_live_documents
       WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=? AND lineage_state='current' AND admission_state='open'`).get(...key(document));
     if (!row) refuse();
+    requireNoPendingActivation(storage, document);
     const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
     const selector = storedSelector && effectiveShareSelector(storedSelector, grant.access);
     if (!selector || !isLiveEditShareSelector(selector) || !canonicalLiveSelector(share, selector) ||
@@ -268,6 +275,7 @@ export function beginStopRestore(storage: StorageContext, input: StopRestoreInte
     if (!document || document.restore_fence_generation !== intent.expectedFence ||
       Number(document.baseline_moment_relay_seq) <= storage.getEpochLogFloor(intent.document.workspaceId) ||
       !currentLiveDocumentMoment(storage, intent.document, String(document.current_path))) refuse();
+    requireNoPendingActivation(storage, intent.document);
     const existing = storage.db.prepare(`SELECT 1 FROM ${table} WHERE workspace_id=? AND main_version_id=? AND object_id=? AND phase<>'resumed'`).get(...key(intent.document).slice(0, 3));
     if (existing) refuse();
     const previous=storage.db.prepare(`SELECT operation_id,new_fence,lineage_claim_id,phase FROM ${table} WHERE relay_database_namespace=? AND workspace_id=? AND main_version_id=? AND object_id=? ORDER BY new_fence DESC LIMIT 1`)

@@ -16,7 +16,7 @@ import { createRequire } from 'node:module';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
 import { automationCases, automationFixtureDigest, automationOf, busyShare, classifyOutcome, cpuByKind, DATASET_NAME, datasetAutomationDefinition, datasetListRequest, datasetRowValues, datasetSetupRequest, DEFAULT_LIMITS,
-  documentAutomationFiles, documentValues, journalBytes, observeAutomationRun, outcomeTexts, peakByKind, readDocumentCase, readRunJournal, TRIGGER,
+  dismissToasts, documentAutomationFiles, documentValues, journalBytes, noticeForPress, observeAutomationRun, outcomeTexts, peakByKind, readAutomationNotices, readDocumentCase, readRunJournal, runForPress, TRIGGER,
   verifyCase, waitForQuiet, WIDE_SET } from './packaged-collection-automations.mjs';
 import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
 
@@ -822,19 +822,102 @@ test('dataset rows map back to field names and a list asks for one case', () => 
   assert.equal(datasetRowValues({ values: trigger }).Name, 'Trigger');
 });
 
-test('settle text counts only a limit refusal as refused', () => {
-  const failed = text => classifyOutcome({ outcome: 'failed', text });
-  assert.equal(failed('find-500 did not finish. A Find matched more than 50 records. Narrow its condition, then try again.'), 'refused');
-  assert.equal(failed('x did not finish. This run would change more than 200 fields. Narrow its Find steps.'), 'refused');
-  assert.equal(failed('x did not finish. This run would change more data than dohc can save for it.'), 'refused');
-  assert.equal(failed('x did not finish. dohc cannot find the Collection automation-bench.'), 'failed');
-  assert.equal(failed(undefined), 'failed');
-  assert.equal(classifyOutcome({ outcome: 'done', text: 'Ran x on Trigger' }), 'done');
+test('settle texts distinguish automation outcomes and names', () => {
   const baseline = outcomeTexts('baseline', 'Trigger');
   assert.deepEqual(baseline.done, ['Ran baseline on Trigger']);
+  assert.deepEqual(baseline.skipped, ['baseline made no changes to Trigger']);
+  assert.deepEqual(baseline.ended, ['baseline finished on Trigger']);
   // A case's words never match another case's settle text.
   const typing = Object.values(outcomeTexts('baseline-typing', 'Trigger')).flat();
   assert.ok(Object.values(baseline).flat().every(phrase => typing.every(text => !text.includes(phrase))));
+});
+
+test('a title-only failure with no Notice body stays failed', () => {
+  const observed = { outcome: 'failed', text: 'Automation "find-500" failed' };
+  assert.equal(classifyOutcome(observed), 'failed');
+  assert.equal(classifyOutcome(observed, null), 'failed');
+});
+
+test('a press uses its own saved run', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-press-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const automation = automationOf('document', 'find-500');
+  const folder = join(root, '.dohc', 'automations', 'runs', 'f1');
+  await mkdir(folder, { recursive: true });
+  const save = (claimId, startedAtMs) => writeFile(join(folder, `run-${claimId}.json`), JSON.stringify({
+    claimId, startedAtMs, automationId: `collection:object-a#${automation.name}`,
+    collections: [{ collectionId: 'object-a', path: automation.collectionPath }], outcome: { state: 'failed' },
+  }));
+  await save('old', 1000);
+  const previousRuns = await readRunJournal(root, automation);
+  const missing = runForPress(await readRunJournal(root, automation), previousRuns);
+  assert.equal(missing, null);
+
+  await save('current', 2000);
+  const current = runForPress(await readRunJournal(root, automation), previousRuns);
+  assert.equal(current.claimId, 'current');
+
+  const beforeNextPress = await readRunJournal(root, automation);
+  await save('next', 3000);
+  const next = runForPress(await readRunJournal(root, automation), beforeNextPress);
+  assert.equal(next.claimId, 'next');
+});
+
+test('step-1 refusals in both Collections use the new Notice body with no saved run or open panel', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dohc-automation-notice-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspaceId = 'bench-workspace';
+  const cases = automationCases(DEFAULT_LIMITS).filter(spec => spec.expected === 'refused');
+  assert.deepEqual(cases.map(spec => spec.name), ['find-500', 'five-finds', 'find-over-cap', 'find-500-typing']);
+  for (const kind of ['document', 'dataset']) {
+    for (const spec of cases) {
+      const automation = automationOf(kind, spec.name), other = automationOf(kind === 'document' ? 'dataset' : 'document', spec.name);
+      const title = `Automation "${spec.name}" failed`;
+      const body = 'The Find in step 1 matched more than 50 records. Narrow its condition, then try again.';
+      const row = (noticeId, targetAutomation = automation, overrides = {}) => ({
+        noticeId, kind: 'automation-failed', workspaceId, title, body,
+        target: { path: `${targetAutomation.collectionPath}/automations.yaml`, automation: `collection:object-a#${targetAutomation.name}` }, ...overrides,
+      });
+      const old = row('old'), current = row('current');
+      let notices = [old, row('old-other', other)];
+      const p = fakePage(t, '<main><button></button><div data-testid="notice-toasts" id="toasts"></div></main>');
+      let lists = 0;
+      p.window.dohcDesktop = { listNotices: async payload => {
+        assert.deepEqual(Object.keys(payload), []);
+        lists++;
+        return { account: null, notices };
+      } };
+      const page = { evaluate: callback => p.run(callback) };
+      const previousNotices = await readAutomationNotices(page);
+      const previousRuns = await readRunJournal(root, automation);
+      const button = `${spec.name} for ${TRIGGER[kind].label}`;
+      p.document.querySelector('button').setAttribute('aria-label', button);
+      const pending = p.run(observeAutomationRun, { button, texts: outcomeTexts(spec.name, TRIGGER[kind].label), timeoutMs: 1000 });
+      p.document.querySelector('button').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+      notices = [old, row('new-other', other), row('new-workspace', automation, { workspaceId: 'elsewhere' }),
+        row('new-automation', automation, { target: { ...current.target, automation: 'collection:object-a#bench-baseline' } }),
+        row('new-kind', automation, { kind: 'agent' }), current];
+      p.document.getElementById('toasts').insertAdjacentHTML('beforeend', `<div data-testid="sent-notice-toast"><span>${title}</span></div>`);
+      await mutations();
+      p.frame();
+      const observed = await pending;
+      assert.equal(observed.text, title);
+      assert.deepEqual(await readRunJournal(root, automation), []);
+      const run = runForPress(await readRunJournal(root, automation), previousRuns);
+      assert.equal(run, null);
+      const listed = await readAutomationNotices(page);
+      const notice = noticeForPress(listed, previousNotices, workspaceId, automation);
+      assert.equal(notice.noticeId, 'current');
+      assert.equal(notice.body, body, 'the receipt reason comes from this press\'s Notice body');
+      assert.equal(classifyOutcome(observed, notice.body), 'refused');
+      assert.equal(classifyOutcome(observed, 'The Collection is unavailable.'), 'failed');
+      assert.equal(classifyOutcome({ outcome: 'done', text: 'Ran' }, body), 'done');
+      assert.equal(noticeForPress(previousNotices, previousNotices, workspaceId, automation), null);
+      assert.equal(lists, 2);
+      assert.equal(p.document.querySelector('[data-testid="notice-center"]'), null);
+      assert.equal(p.frames.size + p.timers.size, 0);
+    }
+  }
 });
 
 test('run journal reads saved headers and progress, and a refused run leaves none', async t => {
@@ -920,6 +1003,26 @@ test('quiet wait needs consecutive quiet intervals and gives up at its deadline'
 });
 
 const automationHtml = '<main><button aria-label="baseline for Trigger"><span>baseline</span></button><button aria-label="other for Trigger">other</button><div id="cells"></div><div data-testid="notice-toasts" id="toasts"></div></main>';
+test('automation presses dismiss both workspace and failed-run toasts before a repeated title', async t => {
+  const p = fakePage(t, `${automationHtml}<button aria-label="Close" id="unrelated">Close another panel</button>`);
+  const toasts = p.document.getElementById('toasts');
+  toasts.insertAdjacentHTML('beforeend', '<div><button aria-label="Dismiss workspace notice">Dismiss</button></div><div data-testid="sent-notice-toast"><span>Automation "baseline" failed</span><button aria-label="Close">Close</button></div>');
+  for (const button of toasts.querySelectorAll('button')) button.addEventListener('click', () => button.parentElement.remove());
+  await dismissToasts({ locator: selector => ({
+    count: async () => p.document.querySelectorAll(selector).length,
+    first: () => ({ click: async () => p.document.querySelector(selector).click() }),
+  }) });
+  assert.equal(toasts.childElementCount, 0);
+  assert.ok(p.document.getElementById('unrelated'), 'only Notice toasts are dismissed');
+  const pending = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 1000 });
+  p.document.querySelector('[aria-label="baseline for Trigger"]').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+  toasts.insertAdjacentHTML('beforeend', '<div data-testid="sent-notice-toast"><span>Automation "baseline" failed</span><button aria-label="Close">Close</button></div>');
+  await mutations();
+  assert.equal(p.frames.size, 1, 'the same title in a fresh toast settles the next press');
+  p.frame();
+  assert.equal((await pending).outcome, 'failed');
+});
+
 test('automation observer times a press on its own button to the painted settle text', async t => {
   const p = fakePage(t, automationHtml);
   const toasts = p.document.getElementById('toasts');
@@ -949,15 +1052,70 @@ test('automation observer times a press on its own button to the painted settle 
   assert.equal(p.frames.size + p.timers.size, 0);
 });
 
+test('every document and dataset case settles on its failed-run toast, including a title without a reason', async t => {
+  for (const kind of ['document', 'dataset']) {
+    for (const spec of automationCases(DEFAULT_LIMITS)) {
+      const label = TRIGGER[kind].label;
+      const button = `${spec.name} for ${label}`;
+      const p = fakePage(t, '<main><button></button><div data-testid="notice-toasts" id="toasts"></div></main>');
+      p.document.querySelector('button').setAttribute('aria-label', button);
+      const pending = p.run(observeAutomationRun, { button, texts: outcomeTexts(spec.name, label), timeoutMs: 1000 });
+      p.document.querySelector('button').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+      const title = `Automation "${spec.name}" failed`;
+      p.document.getElementById('toasts').insertAdjacentHTML('beforeend', `<div data-testid="sent-notice-toast"><span class="sr-only">From an automation</span><span>${title}</span><button>Try again</button><button>Open</button></div>`);
+      await mutations();
+      assert.equal(p.frames.size, 1, `${kind} ${spec.name} failed-run Notice must settle`);
+      p.frame();
+      const observed = await pending;
+      assert.equal(observed.outcome, 'failed');
+      assert.equal(observed.text, `From an automation${title}Try againOpen`);
+      assert.equal(classifyOutcome(observed), 'failed', 'a title alone does not prove a limit refusal');
+      assert.equal(p.frames.size + p.timers.size, 0);
+    }
+  }
+});
+
+test('automation observer ignores unrelated updates inside an old failed Notice', async t => {
+  for (const notice of ['<div data-testid="sent-notice-toast">', '<li data-notice-row>']) {
+    const p = fakePage(t, `${automationHtml}<div data-testid="notice-center">${notice}<span>Automation "baseline" failed</span><time id="age">Just now</time><button id="retry">Try again</button></${notice.startsWith('<li') ? 'li' : 'div'}></div>`);
+    const pending = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 1000 });
+    p.document.querySelector('[aria-label="baseline for Trigger"]').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+    p.document.getElementById('age').firstChild.data = '1 minute ago';
+    p.document.getElementById('retry').insertAdjacentHTML('beforeend', '<span>Retry</span>');
+    await mutations();
+    assert.equal(p.frames.size, 0, 'a stale title cannot match an unrelated age or button update');
+    p.document.getElementById('toasts').insertAdjacentHTML('beforeend', '<div>Automation "baseline" failed</div>');
+    await mutations();
+    p.frame();
+    assert.equal((await pending).outcome, 'failed');
+  }
+});
+
+test('automation observer preserves did-not-start and main recovery failure titles', async t => {
+  for (const text of ['baseline did not start. The Collection is unavailable.', 'Automation "baseline" did not finish', 'Automation "baseline" switched off']) {
+    const p = fakePage(t, automationHtml);
+    const pending = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 1000 });
+    p.document.querySelector('[aria-label="baseline for Trigger"]').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
+    p.document.getElementById('toasts').insertAdjacentHTML('beforeend', `<div>${text}</div>`);
+    await mutations();
+    assert.equal(p.frames.size, 1, text);
+    p.frame();
+    const observed = await pending;
+    assert.deepEqual([observed.outcome, observed.text], ['failed', text]);
+  }
+});
+
 test('automation observer reads changed text and rejects a run that never settles', async t => {
-  const p = fakePage(t, `${automationHtml}<div data-testid="notice-center"><p id="notice">Waiting</p></div>`);
+  const reason = 'The Find in step 1 matched more than 50 records. Narrow its condition, then try again.';
+  const p = fakePage(t, `${automationHtml}<div data-testid="notice-center"><li data-notice-row><span id="notice">Waiting</span><p>${reason}</p></li></div>`);
   const pending = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 1000 });
   p.document.querySelector('[aria-label="baseline for Trigger"]').dispatchEvent(new p.window.MouseEvent('mousedown', { bubbles: true }));
-  p.document.getElementById('notice').firstChild.data = 'baseline did not finish. A Find matched more than 50 records.';
+  p.document.getElementById('notice').firstChild.data = 'Automation "baseline" failed';
   await mutations();
+  assert.equal(p.frames.size, 1);
   p.frame();
   const failed = await pending;
-  assert.deepEqual([failed.outcome, classifyOutcome(failed)], ['failed', 'refused']);
+  assert.deepEqual([failed.outcome, failed.text, classifyOutcome(failed)], ['failed', 'Automation "baseline" failed', 'failed']);
   const silent = p.run(observeAutomationRun, { button: 'baseline for Trigger', texts: outcomeTexts('baseline', 'Trigger'), timeoutMs: 120 });
   const rejected = assert.rejects(silent, /baseline for Trigger did not settle within 120ms/);
   p.step(); p.step(); p.step();

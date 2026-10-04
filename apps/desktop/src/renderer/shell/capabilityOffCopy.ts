@@ -6,21 +6,9 @@ import { engineStoreRefusalCopy, type SyncStatusResult } from "../../ipc/bridgeC
 // has not landed proves nothing: main may be recording, and "not being
 // recorded" would then be a false privacy assurance.
 // Each cause is one line, per the empty-state recipe (copy.md): what is
-// missing, then the next step its surface really has.
-export function historyOffPlaceholderCopy(
-  syncStatus: SyncStatusResult | null,
-  share: { ended: boolean; granterEmail: string | null } | null,
-): string {
-  if (share) {
-    // A capability, not a failure: a shared view is fed
-    // by the share's pull and records no history here. The next step matches
-    // the surface — Refresh exists only while the share is live, so an ended
-    // share must not name it — and the ended line names who acted, as the
-    // banner does.
-    return share.ended
-      ? `A shared view records no history. ${share.granterEmail ?? "The person who shared it"} ended this share. You can still open the files it shared.`
-      : "A shared view records no history. Refresh the shared view to get the latest shared changes.";
-  }
+// missing, then the next step its surface really has. A shared view reads the
+// history its share imported, so it reaches this only when its store is refused.
+export function historyOffPlaceholderCopy(syncStatus: SyncStatusResult | null): string {
   if (syncStatus?.engineStoreRefused) {
     return engineStoreRefusalCopy(syncStatus.engineStoreRefused);
   }

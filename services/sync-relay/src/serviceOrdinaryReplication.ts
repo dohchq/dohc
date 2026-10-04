@@ -1,3 +1,4 @@
+import { decodeOrdinarySyncResult, type OrdinarySyncMethodResultMap } from "@dohc/workspace-engine-client/relay-wire";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { SharingDeclined } from "@dohc/workspace-contracts/relay";
 
@@ -53,10 +54,7 @@ export function parseServiceOrdinaryReplicationConfig(value: unknown): ServiceOr
   return Object.freeze({relay: Object.freeze({baseUrl, bearerToken: text(relay.bearerToken)}), identity, maxPagesPerPull});
 }
 
-interface OrdinaryRefusal {
-  readonly workspaceId: string; readonly originId: string; readonly originSeq: number;
-  readonly opKind: string; readonly code: string; readonly reason: string;
-}
+type OrdinaryRefusal = OrdinarySyncMethodResultMap["sync.pull"]["refusals"][number];
 export interface ServiceOrdinaryPullPage {
   readonly nextCursor: number;
   readonly fetched: number; readonly applied: number; readonly refused: number; readonly skipped: number; readonly conflictsOpened: number;
@@ -64,16 +62,6 @@ export interface ServiceOrdinaryPullPage {
   readonly sharingDeclined: readonly SharingDeclined[];
   /** The paths the page wrote or deleted, in any version. */
   readonly changedPaths: readonly string[];
-}
-function array(value: unknown): unknown[] {
-  if (!Array.isArray(value)) throw new Error("Invalid ordinary replication list.");
-  return value;
-}
-function declines(value: unknown): SharingDeclined[] {
-  return array(value).map(value => {
-    const row = record(value);
-    return {path: text(row.path), constraint: text(row.constraint), limitBytes: integer(row.limitBytes), observedBytes: integer(row.observedBytes)};
-  });
 }
 /** One pass at a time. Native materialization must finish before the cursor commits. */
 export class ServiceOrdinaryReplication {
@@ -93,7 +81,7 @@ export class ServiceOrdinaryReplication {
     const response = await c.client.sendRequest({id: c.nextRequestId(), workspace: c.workspace,
       deadlineMs: c.deadlineMs, method, params: {workspaceId: c.workspaceId, ...params}}, signal);
     this.#check(signal);
-    return record(response.result);
+    return response.result;
   }
   async #run<T>(callerSignal: AbortSignal | undefined, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
     if (this.#running) throw new Error("Ordinary replication is already running.");
@@ -104,8 +92,8 @@ export class ServiceOrdinaryReplication {
       if (!this.#initialized) {
         const identity = this.#config.identity;
         const joined = identity.kind === "join";
-        const result = await this.#request(joined ? "sync.adoptJoinIdentity" : "sync.claim",
-          joined ? {replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity} : {}, signal);
+        const result = record(await this.#request(joined ? "sync.adoptJoinIdentity" : "sync.claim",
+          joined ? {replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity} : {}, signal));
         if (result[joined ? "adopted" : "claimed"] !== true) throw new Error("Ordinary relay identity setup did not complete.");
         this.#initialized = true;
       }
@@ -118,29 +106,20 @@ export class ServiceOrdinaryReplication {
       const pages: ServiceOrdinaryPullPage[] = [];
       let previous: number | undefined;
       for (let index = 0; index < this.#config.maxPagesPerPull; index++) {
-        const result = await this.#request("sync.pull", {}, signal);
-        if (result.status !== "complete" || typeof result.hasMore !== "boolean") throw new Error("Ordinary pull did not complete.");
-        const nextCursor = integer(result.nextCursor);
+        const result = decodeOrdinarySyncResult("sync.pull", await this.#request("sync.pull", {}, signal));
+        const {nextCursor, pendingCursor: cursor} = result;
         if (previous !== undefined && (nextCursor < previous || (result.hasMore && nextCursor === previous))) {
           throw new Error("Ordinary pull made no cursor progress.");
         }
-        const pending = fields(result.pendingCursor, ["kind", "token"]);
-        if (pending.kind !== "relay") throw new Error("Ordinary pull returned a foreign cursor.");
-        const cursor = {kind: "relay", token: text(pending.token)};
-        const page = {nextCursor, fetched: integer(result.fetched), applied: integer(result.applied), refused: integer(result.refused),
-          skipped: integer(result.skipped), conflictsOpened: integer(result.conflictsOpened),
-          refusals: array(result.refusals).map(value => {
-            const row = record(value);
-            return {workspaceId: text(row.workspaceId), originId: text(row.originId), originSeq: integer(row.originSeq),
-              opKind: text(row.opKind), code: text(row.code), reason: text(row.reason)};
-          }), sharingDeclined: declines(result.sharingDeclined),
-          changedPaths: array(result.changedPaths).map(value => text(record(value).path))};
-        const materialized = await this.#request("sync.materializePendingCursor", {pendingCursor: cursor}, signal);
-        if (materialized.materialized !== true) throw new Error("Ordinary workspace materialization did not complete.");
+        const page = {nextCursor, fetched: result.fetched, applied: result.applied, refused: result.refused,
+          skipped: result.skipped, conflictsOpened: result.conflictsOpened, refusals: result.refusals,
+          sharingDeclined: result.sharingDeclined, changedPaths: result.changedPaths.map(row => row.path)};
+        decodeOrdinarySyncResult("sync.materializePendingCursor",
+          await this.#request("sync.materializePendingCursor", {pendingCursor: cursor}, signal));
         this.#check(signal);
-        const committed = await this.#request("sync.commitCursor", {pendingCursor: cursor}, signal);
-        if (committed.committed !== true) throw new Error("Ordinary relay cursor did not commit.");
-        page.sharingDeclined.push(...declines(committed.sharingDeclined));
+        const committed = decodeOrdinarySyncResult("sync.commitCursor",
+          await this.#request("sync.commitCursor", {pendingCursor: cursor}, signal));
+        page.sharingDeclined.push(...committed.sharingDeclined);
         pages.push(page);
         onPage?.(page);
         previous = nextCursor;
@@ -149,12 +128,31 @@ export class ServiceOrdinaryReplication {
       return {nextCursor: previous!, hasMore: true, pages};
     });
   }
+  async #push(signal: AbortSignal) {
+    const result = decodeOrdinarySyncResult("sync.push", await this.#request("sync.push", {}, signal));
+    return {pushed: result.pushed, hasMore: result.hasMore, sharingDeclined: result.sharingDeclined,
+      admissionPending: result.ownerAdmissionPending.length > 0};
+  }
   async push(callerSignal?: AbortSignal) {
     return this.#run(callerSignal, async signal => {
-      const result = await this.#request("sync.push", {}, signal);
-      if (result.status !== "complete" || typeof result.hasMore !== "boolean") throw new Error("Ordinary push did not complete.");
-      if (array(result.ownerAdmissionPending).length > 0) throw new Error("Ordinary publication is waiting for owner admission.");
-      return {pushed: integer(result.pushed), hasMore: result.hasMore, sharingDeclined: declines(result.sharingDeclined)};
+      const {admissionPending, ...page} = await this.#push(signal);
+      if (admissionPending) throw new Error("Ordinary publication is waiting for owner admission.");
+      return page;
+    });
+  }
+  /**
+   * Pushes up to maxPagesPerPull pages, stopping once a page pushes nothing or
+   * waits for owner admission. The caller checks what it needed reached the relay.
+   */
+  async publish(callerSignal?: AbortSignal) {
+    return this.#run(callerSignal, async signal => {
+      let pushed = 0, hasMore = true;
+      for (let index = 0; index < this.#config.maxPagesPerPull && hasMore; index++) {
+        const page = await this.#push(signal);
+        pushed += page.pushed; hasMore = page.hasMore;
+        if (page.pushed === 0 || page.admissionPending) break;
+      }
+      return {pushed, hasMore};
     });
   }
 }

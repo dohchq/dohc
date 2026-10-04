@@ -1,5 +1,8 @@
 use super::*;
-use crate::owner_outbox::{OwnerOutboxNativeOrigin, OwnerOutboxNativeSource};
+use crate::owner_outbox::{
+    OwnerOutboxDraftOrigin, OwnerOutboxDraftSource, OwnerOutboxNativeOrigin,
+    OwnerOutboxNativeSource, OwnerOutboxSource,
+};
 
 /// A retained pending queue identity. Admission, when present, is separate evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,7 +16,7 @@ pub struct NativeRestoreSource {
     pub update_digest: String,
     pub byte_length: i64,
     pub created_at_ms: i64,
-    pub source: OwnerOutboxNativeSource,
+    pub source: OwnerOutboxSource,
     pub accepted_receipt: Option<LiveUpdateReceipt>,
 }
 
@@ -116,7 +119,51 @@ pub(super) fn classify(
         {
             return Err(ApplicationError::Conflict);
         }
-        let mut query=conn.prepare("SELECT sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,length(CAST(native_source_json AS BLOB)),length(CAST(append_key AS BLOB))+length(CAST(delivery_id AS BLOB))+length(CAST(update_digest AS BLOB))+length(CAST(update_blob_digest AS BLOB)) FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT ?2").map_err(read_sql)?;
+        // Only an enrolled owner's editor queues a draft, and the entry keeps
+        // the observed binding revision it was queued under. That enrollment
+        // must still observe this binding, or its restore successor, in this
+        // relay namespace. Any other entry without a native source is refused.
+        let scope = "FROM ydoc_owner_bindings WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND relay_database_namespace=?5";
+        let observed_length: Option<i64> = conn
+            .query_row(
+                &format!("SELECT length(CAST(binding_json AS BLOB)) {scope}"),
+                params![
+                    b.workspace_id,
+                    b.main_version_id,
+                    b.object_id,
+                    b.lineage_claim_id,
+                    held.namespace
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(read_sql)?;
+        let enrolled_revision = match observed_length {
+            None => None,
+            Some(observed_length) => {
+                budget.charge(
+                    usize::try_from(observed_length).map_err(|_| ApplicationError::Corrupt)?,
+                )?;
+                let (observed, revision): (String, i64) = conn
+                    .query_row(
+                        &format!("SELECT binding_json,binding_revision {scope}"),
+                        params![
+                            b.workspace_id,
+                            b.main_version_id,
+                            b.object_id,
+                            b.lineage_claim_id,
+                            held.namespace
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(read_sql)?;
+                let observed: LiveObjectBinding =
+                    serde_json::from_str(&observed).map_err(|_| ApplicationError::Corrupt)?;
+                (observed == *b || crate::owner_outbox::enrollment::restore_successor(b, &observed))
+                    .then_some(revision)
+            }
+        };
+        let mut query=conn.prepare("SELECT sequence,append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,length(CAST(native_source_json AS BLOB)),length(CAST(append_key AS BLOB))+length(CAST(delivery_id AS BLOB))+length(CAST(update_digest AS BLOB))+length(CAST(update_blob_digest AS BLOB)),length(CAST(agent_declaration_json AS BLOB)),draft_binding_revision FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1 ORDER BY sequence LIMIT ?2").map_err(read_sql)?;
         let mut rows = query
             .query(params![outbox, max_events as i64 + 1])
             .map_err(read_sql)?;
@@ -154,47 +201,91 @@ pub(super) fn classify(
             let length: i64 = row.get(5).map_err(read_sql)?;
             let created: i64 = row.get(6).map_err(read_sql)?;
             let source_length: Option<i64> = row.get(7).map_err(read_sql)?;
+            let declaration_length: Option<i64> = row.get(9).map_err(read_sql)?;
+            let draft_revision: Option<i64> = row.get(10).map_err(read_sql)?;
             if created < 0
                 || sequence < 1
                 || sequence >= next
                 || update_digest != update_blob
                 || length <= 0
                 || length as u64 > crate::limits::MAX_YDOC_UPDATE_BYTES as u64
+                || (source_length.is_some() && draft_revision.is_some())
             {
                 return Err(ApplicationError::Corrupt);
             }
-            budget.charge(
-                usize::try_from(source_length.ok_or(invalid(
+            if source_length.is_none()
+                && !draft_revision.is_some_and(|revision| {
+                    enrolled_revision.is_some_and(|current| (1..=current).contains(&revision))
+                })
+            {
+                return Err(invalid(
                     "restore pending source has no trusted native association",
-                ))?)
-                .map_err(|_| ApplicationError::Corrupt)?,
-            )?;
-            let json:String=conn.query_row("SELECT native_source_json FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2",params![outbox,sequence],|row|row.get(0)).map_err(read_sql)?;
-            let source: OwnerOutboxNativeSource =
-                serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
-            source
-                .validate(&append_key)
-                .map_err(|_| ApplicationError::Corrupt)?;
-            source
-                .verify_retained_row(conn)
-                .map_err(|_| ApplicationError::Corrupt)?;
-            let (id, covered) = owner.ok_or(ApplicationError::Conflict)?;
-            if sequence <= covered {
-                return Err(ApplicationError::Corrupt);
+                ));
             }
-            if source.binding != *b
-                || source.adoption_id != *id
-                || source.update_digest != update_digest
-                || source.native_sequence > input.fence.local_head_sequence
-                || match source.origin {
-                    OwnerOutboxNativeOrigin::AdoptionSeed => {
-                        source.native_sequence != origin_sequence
-                    }
-                    OwnerOutboxNativeOrigin::NativeUpdate { .. } => false,
+            let declaration = match declaration_length {
+                None => None,
+                Some(declaration_length) => {
+                    budget.charge(
+                        usize::try_from(declaration_length)
+                            .map_err(|_| ApplicationError::Corrupt)?,
+                    )?;
+                    let json:String=conn.query_row("SELECT agent_declaration_json FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2",params![outbox,sequence],|row|row.get(0)).map_err(read_sql)?;
+                    crate::owner_outbox::stored_declaration(Some(json))
+                        .map_err(|_| ApplicationError::Corrupt)?
                 }
-            {
-                return Err(ApplicationError::Conflict);
-            }
+            };
+            let source = if let Some(source_length) = source_length {
+                budget.charge(
+                    usize::try_from(source_length).map_err(|_| ApplicationError::Corrupt)?,
+                )?;
+                let json:String=conn.query_row("SELECT native_source_json FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2",params![outbox,sequence],|row|row.get(0)).map_err(read_sql)?;
+                let source: OwnerOutboxNativeSource =
+                    serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+                source
+                    .validate(&append_key)
+                    .map_err(|_| ApplicationError::Corrupt)?;
+                source
+                    .verify_retained_row(conn)
+                    .map_err(|_| ApplicationError::Corrupt)?;
+                // An adopted native update declares exactly the agent its
+                // journal row recorded, and nothing else.
+                if declaration
+                    != source
+                        .agent_declaration()
+                        .map_err(|_| ApplicationError::Corrupt)?
+                {
+                    return Err(ApplicationError::Corrupt);
+                }
+                let (id, covered) = owner.ok_or(ApplicationError::Conflict)?;
+                if sequence <= covered {
+                    return Err(ApplicationError::Corrupt);
+                }
+                if source.binding != *b
+                    || source.adoption_id != *id
+                    || source.update_digest != update_digest
+                    || source.native_sequence > input.fence.local_head_sequence
+                    || match source.origin {
+                        OwnerOutboxNativeOrigin::AdoptionSeed => {
+                            source.native_sequence != origin_sequence
+                        }
+                        OwnerOutboxNativeOrigin::NativeUpdate { .. } => false,
+                    }
+                {
+                    return Err(ApplicationError::Conflict);
+                }
+                OwnerOutboxSource::Native(source)
+            } else {
+                if owner.is_some_and(|(_, covered)| sequence <= covered) {
+                    return Err(ApplicationError::Corrupt);
+                }
+                OwnerOutboxSource::Draft(OwnerOutboxDraftSource {
+                    binding: b.clone(),
+                    update_digest: update_digest.clone(),
+                    origin: OwnerOutboxDraftOrigin::OwnerDraft {
+                        agent_declaration: declaration.clone(),
+                    },
+                })
+            };
             if delivery_id != crate::owner_outbox::delivery_id(&outbox, sequence, &update_digest) {
                 return Err(ApplicationError::Corrupt);
             }
@@ -204,7 +295,10 @@ pub(super) fn classify(
             }
             let admitted = accepted_history::accepted_source(conn, held, &delivery_id, budget)?;
             let accepted_receipt = if let Some(metadata) = admitted {
+                // The receipt is this entry's own delivery: the same bytes,
+                // binding, owner authority, and declaration.
                 if metadata.accepted.receipt.update_digest != update_digest
+                    || !metadata.matches_draft_declaration(declaration.as_ref())
                     || metadata.accepted.binding != *b
                     || metadata.accepted.receipt.journal_cursor
                         > operation.terminal.as_ref().map_or(0, |r| r.journal_cursor)

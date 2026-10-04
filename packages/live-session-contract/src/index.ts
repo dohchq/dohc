@@ -35,6 +35,7 @@ export {
   parseAdmittedLiveUpdateMetadata,
   parseLiveCheckpointCoverage,
   parseLiveDocumentKey,
+  parseAgentDeclaration,
   parseLiveUpdateAcceptResult,
   parseLiveUpdateDigest,
   parseLiveUpdateHostApplicationAck,
@@ -51,6 +52,7 @@ export {
   type AdmittedLiveUpdate,
   type AdmittedLiveUpdateMetadata,
   type LiveCheckpointAuthorCoverage,
+  type AgentDeclaration,
   type LiveDocumentKey,
   type LiveUpdateAcceptResult,
   type LiveUpdateHostApplicationAck,
@@ -82,6 +84,7 @@ export {
 export {
   LIVE_FRAME_HEADER_BYTES,
   LIVE_FRAME_MINIMUM_MAX_BYTES,
+  LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
   LiveFrameError,
   encodeLiveFrame,
   decodeLiveFrame,

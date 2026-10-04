@@ -13,6 +13,7 @@
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
 use crate::live_object_binding::LiveObjectBinding;
 use crate::{durable, CollabError, DocKey, Regime, WriterDocCache};
+use dohc_engine_domain::AgentDeclaration;
 use dohc_engine_storage::{
     get_binary_blob, hex_sha256, EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
 };
@@ -25,7 +26,9 @@ const SAFE: i64 = 9_007_199_254_740_991;
 
 mod accepted_history;
 mod publication;
-pub(crate) use publication::read_native_accepted_in;
+pub(crate) use publication::{
+    read_native_accepted_in, read_restore_predecessor_in, require_restore_registration_in,
+};
 mod ack_read;
 mod sync;
 pub use ack_read::{read_application_ack, LiveApplicationAckIdentity};
@@ -55,6 +58,7 @@ pub use restore_content::{
     NativeRestoreSource,
 };
 pub use restore_fence::require_open as require_restore_open;
+pub(crate) use restore_fence::require_registration as require_restore_registration;
 pub use restore_fence::{
     current_generation as restore_generation, require_generation as require_restore_generation,
 };
@@ -80,6 +84,12 @@ pub enum ApplicationError {
     ConfiguredByteBudgetExceeded,
     #[error("live application commit acknowledgement was interrupted")]
     Interrupted,
+    #[error("this document's settlement moments must reach the relay before a restore fence")]
+    PublicationPending,
+    #[error(
+        "this document's last settlement must reach its file before its interval can name another author"
+    )]
+    MaterializationPending,
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
@@ -377,6 +387,16 @@ pub enum LiveAuthorEntry {
         depth: Option<u8>,
     },
 }
+impl From<AgentDeclaration> for LiveAuthorEntry {
+    fn from(declaration: AgentDeclaration) -> Self {
+        Self::Agent {
+            agent_id: declaration.agent_id,
+            agent_name: None,
+            on_behalf_of: declaration.on_behalf_of,
+            depth: Some(u8::try_from(declaration.depth).unwrap_or(u8::MAX)),
+        }
+    }
+}
 impl LiveAuthorEntry {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         match self {
@@ -498,6 +518,31 @@ pub fn validate_checkpoint_coverage(
     Ok(())
 }
 impl AdmittedLiveUpdateMetadata {
+    pub fn admitted_declaration(&self) -> Option<AgentDeclaration> {
+        self.author_snapshot
+            .as_ref()?
+            .iter()
+            .find_map(|author| match author {
+                LiveAuthorEntry::Agent {
+                    agent_id,
+                    on_behalf_of,
+                    depth,
+                    ..
+                } => Some(AgentDeclaration {
+                    agent_id: agent_id.clone(),
+                    on_behalf_of: on_behalf_of.clone(),
+                    depth: u32::from(depth.unwrap_or(0)),
+                }),
+                _ => None,
+            })
+    }
+
+    pub fn matches_draft_declaration(&self, declaration: Option<&AgentDeclaration>) -> bool {
+        self.admitted_declaration()
+            .as_ref()
+            .is_none_or(|admitted| Some(admitted) == declaration)
+    }
+
     pub fn validate_extensions(&self) -> Result<(), ApplicationError> {
         match (
             self.canonical_version,
@@ -526,6 +571,33 @@ impl AdmittedLiveUpdateMetadata {
         }
     }
 }
+/// Native state replay uses bounded records, not a cumulative proof-read budget.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeHistoryReconstruction {
+    pub working_reserve_bytes: usize,
+}
+impl NativeHistoryReconstruction {
+    pub const MAX_RANGES: usize = (crate::limits::MAX_YDOC_UPDATE_BYTES - 2) / 5;
+    pub const HEADER_BYTES: usize = 643_576;
+    pub const CHUNK_BYTES: usize = 256 * 1024;
+
+    /// Conservative Rust buffer spans plus the existing engine working allowance.
+    /// This is admission accounting, not an allocator or SQLite heap measurement.
+    pub fn reservation_bytes(self) -> Option<usize> {
+        crate::limits::MAX_YDOC_UPDATE_BYTES
+            .checked_mul(4)?
+            .checked_add(Self::HEADER_BYTES.checked_mul(6)?)?
+            .checked_add(Self::CHUNK_BYTES.checked_mul(2)?)?
+            .checked_add(self.working_reserve_bytes)
+    }
+}
+
+#[derive(Clone)]
+pub struct AdmittedNativeHistoryReconstruction {
+    pub policy: NativeHistoryReconstruction,
+    pub reservation: std::sync::Arc<dyn Send + Sync>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmittedLiveUpdate {
     pub metadata: AdmittedLiveUpdateMetadata,
@@ -690,6 +762,11 @@ pub enum ApplicationPending {
     BaselineUnavailable,
     ApplicabilityUnavailable,
     BindingMismatch,
+    /// The current interval cannot name this delivery's declared agent within
+    /// its author bounds, and nothing was written. A settlement of the current
+    /// terminal that materializes releases the interval, after which the same
+    /// delivery applies.
+    SettlementRequired,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplicationResult {
@@ -1011,6 +1088,29 @@ pub fn apply_committed(
             }) {
                 return Err(ApplicationError::Conflict.into());
             }
+            let own = own_draft(tx, &key, &event.metadata.accepted.receipt)?;
+            if own.as_ref().is_some_and(|own| {
+                !event.metadata.matches_draft_declaration(own.declaration.as_ref())
+            }) {
+                return Err(ApplicationError::Conflict.into());
+            }
+            let authors = event.metadata.author_snapshot.as_ref()
+                .map(|authors| authors.iter().map(|author| serde_json::to_string(&[author])).collect::<Result<Vec<_>, _>>())
+                .transpose().map_err(|_| ApplicationError::Corrupt)?
+                .unwrap_or_default();
+            match crate::author_coverage::admit_accepted_in(tx, &key, &authors) {
+                Err(CollabError::AuthorCapacity)
+                    if crate::author_coverage::unresolved_in(tx, &key)? =>
+                {
+                    return Err(ApplicationError::MaterializationPending.into());
+                }
+                Err(CollabError::AuthorCapacity) => {
+                    return Ok(ApplicationResult::Pending(
+                        ApplicationPending::SettlementRequired,
+                    ));
+                }
+                result => result?,
+            }
             mutation_attempted = true;
             let append = durable::record_authorized_update_in_tx(
                 tx,
@@ -1061,7 +1161,10 @@ pub fn apply_committed(
                 // the relay's log. The claim keeps its history-row key, so it
                 // dedupes as before, and the cursor lets the relay place it.
                 facts.live_cursor = Some(event.metadata.accepted.receipt.journal_cursor);
-                match own_draft_attribution(tx, &key, &event.metadata.accepted.receipt)? {
+                let admitted_actor = if event.metadata.canonical_version == Some(2) {
+                    event.metadata.admitted_declaration().map(|declaration| (Some(declaration.agent_id.clone()), Some(declaration.attribution())))
+                } else { own.and_then(|own| own.author) };
+                match admitted_actor {
                     Some((actor, attribution)) => {
                         facts.author_origin_id = actor;
                         facts.attribution = attribution;
@@ -1136,24 +1239,26 @@ pub fn apply_committed(
     }
 }
 
-/// The actor and attribution this engine recorded for a native update it
-/// drafted, when the accepted frame is that draft: the relay accepted the
-/// draft's own delivery, with the same bytes, for the same document.
-#[allow(clippy::type_complexity)]
-fn own_draft_attribution(
-    tx: &Transaction<'_>,
-    key: &DocKey,
-    receipt: &LiveUpdateReceipt,
-) -> Result<
-    Option<(
+/// This engine's own adopted native update, when the accepted frame is its
+/// delivery: the relay accepted the entry's own delivery, with the same
+/// bytes, for the same document.
+struct OwnDraft {
+    author: Option<(
         Option<String>,
         Option<dohc_engine_domain::ChangeAttribution>,
     )>,
-    ApplicationError,
-> {
-    let source: Option<String> = tx
+    /// The agent the outbox entry declared for its delivery.
+    declaration: Option<AgentDeclaration>,
+}
+
+fn own_draft(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    receipt: &LiveUpdateReceipt,
+) -> Result<Option<OwnDraft>, ApplicationError> {
+    let entry: Option<(String, Option<String>)> = tx
         .query_row(
-            "SELECT e.native_source_json FROM owner_ydoc_outbox_entries e \
+            "SELECT e.native_source_json,e.agent_declaration_json FROM owner_ydoc_outbox_entries e \
              JOIN owner_ydoc_outboxes o ON o.outbox_id = e.outbox_id \
              WHERE e.delivery_id = ?1 AND e.update_digest = ?2 \
                AND o.workspace_id = ?3 AND o.main_version_id = ?4 AND o.object_id = ?5 \
@@ -1165,36 +1270,22 @@ fn own_draft_attribution(
                 key.version_id,
                 key.object_id
             ],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(read_sql)?;
-    let Some(source) = source else {
+    let Some((source, declaration)) = entry else {
         return Ok(None);
     };
     let source: crate::owner_outbox::OwnerOutboxNativeSource =
         serde_json::from_str(&source).map_err(|_| ApplicationError::Corrupt)?;
-    let crate::owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {
-        actor_origin_id,
-        actor_kind,
-        on_behalf_of,
-        chain_depth,
-        ..
-    } = source.origin
-    else {
-        return Ok(None);
-    };
-    let attribution = match (actor_kind, chain_depth) {
-        (Some(kind), Some(depth)) => Some(dohc_engine_domain::ChangeAttribution {
-            actor_kind: dohc_engine_domain::ChangeActorKind::parse(&kind)
-                .ok_or(ApplicationError::Corrupt)?,
-            on_behalf_of,
-            depth: u32::try_from(depth).map_err(|_| ApplicationError::Corrupt)?,
-            run: None,
-        }),
-        _ => None,
-    };
-    Ok(Some((actor_origin_id, attribution)))
+    Ok(Some(OwnDraft {
+        author: source
+            .native_author()
+            .map_err(|_| ApplicationError::Corrupt)?,
+        declaration: crate::owner_outbox::stored_declaration(declaration)
+            .map_err(|_| ApplicationError::Corrupt)?,
+    }))
 }
 
 struct ApplicationRecord {
@@ -2039,6 +2130,250 @@ mod tests {
     fn reopen(store: EngineStore, dir: &ScratchDir) -> EngineStore {
         drop(store);
         EngineStore::open(&dir.join("engine.db"), 20).unwrap()
+    }
+
+    fn declared(agent_id: &str) -> Option<AgentDeclaration> {
+        Some(AgentDeclaration {
+            agent_id: agent_id.into(),
+            on_behalf_of: Some("owner-1".into()),
+            depth: 1,
+        })
+    }
+
+    fn snapshot(metadata: &mut AdmittedLiveUpdateMetadata, declaration: Option<AgentDeclaration>) {
+        metadata.canonical_version = Some(2);
+        metadata.author_snapshot =
+            Some(declaration.into_iter().map(LiveAuthorEntry::from).collect());
+        metadata.first_seen_deletes = Some(vec![]);
+    }
+
+    #[test]
+    fn declared_delivery_replays_after_reopen_and_refuses_a_changed_declaration() {
+        let (dir, mut store, mut cache, _owner, handle) = fixture();
+        let source = Ydoc::wire();
+        let mut agent = event("agent", 1, source.plaintext_insert(0, "agent"));
+        snapshot(&mut agent.metadata, declared("trip-agent 旅行"));
+        let person = event("person", 2, source.plaintext_insert(5, " person"));
+        let first = ack(apply(&mut store, &mut cache, &handle, agent.clone()));
+        ack(apply(&mut store, &mut cache, &handle, person.clone()));
+        let refused =
+            |store: &mut EngineStore, cache: &mut WriterDocCache, update: &AdmittedLiveUpdate| {
+                apply_committed(
+                    store,
+                    cache,
+                    &handle,
+                    update.clone(),
+                    &NoFaults,
+                    100_000_000,
+                    |_, _, _, _| Ok(()),
+                )
+            };
+        let mut changed = vec![agent.clone(), agent.clone(), agent.clone(), person.clone()];
+        snapshot(&mut changed[0].metadata, declared("other-agent"));
+        snapshot(&mut changed[1].metadata, None);
+        if let LiveAuthorEntry::Agent { depth, .. } =
+            &mut changed[2].metadata.author_snapshot.as_mut().unwrap()[0]
+        {
+            *depth = Some(2);
+        }
+        snapshot(&mut changed[3].metadata, declared("trip-agent 旅行"));
+        store = reopen(store, &dir);
+        for update in &changed {
+            assert!(matches!(
+                refused(&mut store, &mut cache, update),
+                Err(ApplicationError::Conflict)
+            ));
+        }
+        let mut expected = first;
+        expected.application_replayed = true;
+        assert_eq!(ack(apply(&mut store, &mut cache, &handle, agent)), expected);
+        assert!(ack(apply(&mut store, &mut cache, &handle, person)).application_replayed);
+        let stored: String = store.read_with(|conn| conn.query_row(
+            "SELECT admitted_metadata_json FROM live_device_update_applications WHERE delivery_id='agent'", [], |row| row.get(0)
+        )).unwrap();
+        let metadata: AdmittedLiveUpdateMetadata = serde_json::from_str(&stored).unwrap();
+        assert_eq!(metadata.admitted_declaration(), declared("trip-agent 旅行"));
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE live_device_update_applications SET admitted_metadata_json='{}' WHERE delivery_id='agent'", []).unwrap();
+            Ok::<_, StorageError>(())
+        }).unwrap();
+        assert!(matches!(
+            refused(&mut store, &mut cache, &changed[1]),
+            Err(ApplicationError::Corrupt)
+        ));
+    }
+
+    fn deliver_declared(
+        store: &mut EngineStore,
+        cache: &mut WriterDocCache,
+        handle: &ApplicationHandle,
+        cursor: i64,
+        bytes: Vec<u8>,
+        declaration: &AgentDeclaration,
+    ) -> Result<ApplicationResult, ApplicationError> {
+        let mut update = event(&format!("declared-{cursor}"), cursor, bytes);
+        snapshot(&mut update.metadata, Some(declaration.clone()));
+        apply_committed(
+            store,
+            cache,
+            handle,
+            update,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        )
+    }
+
+    fn interval_len(store: &EngineStore) -> usize {
+        store
+            .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
+            .unwrap()
+            .len()
+    }
+
+    /// Accepted deliveries' declared agents and local edits' authors share
+    /// one interval and its bounds. At the boundary a new identity of either
+    /// kind is refused before any write, even for a delivery whose bytes
+    /// deduplicate natively; a known identity still applies. While an earlier
+    /// moment reserves its authors, settling cannot help, so the delivery
+    /// fails instead of asking for a settlement.
+    #[test]
+    fn declared_and_local_authors_share_one_interval_bound() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        // Escaped quotes make each author as large as the contract allows.
+        let large = |index: usize| AgentDeclaration {
+            agent_id: format!("{index:03}{}", "\"".repeat(509)),
+            on_behalf_of: Some("\"".repeat(512)),
+            depth: 1,
+        };
+        // Every delivery after the first carries the first's bytes again.
+        let bytes = Ydoc::wire().plaintext_insert(0, "x");
+        let mut admitted = 0;
+        let refused = loop {
+            assert!(admitted < 80, "the author bound never refused");
+            let cursor = admitted as i64 + 1;
+            match deliver_declared(
+                &mut store,
+                &mut cache,
+                &handle,
+                cursor,
+                bytes.clone(),
+                &large(admitted),
+            )
+            .unwrap()
+            {
+                ApplicationResult::Applied(..) => admitted += 1,
+                ApplicationResult::Pending(ApplicationPending::SettlementRequired) => {
+                    break cursor;
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        assert!(admitted > 1);
+        let unchanged = |store: &EngineStore| {
+            (
+                count(store, "live_device_update_applications"),
+                count(store, "ydoc_updates"),
+                interval_len(store),
+            )
+        };
+        let before = unchanged(&store);
+        assert_eq!(before, (admitted as i64, 1, admitted));
+
+        // A local edit by a new identity meets the same full interval.
+        let local = large(999);
+        let attribution = local.attribution();
+        let append =
+            |store: &mut EngineStore, cache: &mut WriterDocCache, actor: &str, text: &str| {
+                durable::record_local_update(
+                    store,
+                    cache,
+                    &key(),
+                    &Ydoc::wire().plaintext_insert(0, text),
+                    durable::LocalAppend {
+                        actor_origin_id: Some(actor),
+                        attribution: Some(&attribution),
+                        ..Default::default()
+                    },
+                    &NoFaults,
+                    1,
+                    |_, _, _| Ok(()),
+                )
+            };
+        assert!(matches!(
+            append(&mut store, &mut cache, &local.agent_id, "new"),
+            Err(CollabError::AuthorCapacity)
+        ));
+        assert_eq!(unchanged(&store), before);
+        // A local edit by an agent a delivery already declared applies.
+        append(&mut store, &mut cache, &large(0).agent_id, "known").unwrap();
+        assert_eq!(interval_len(&store), admitted);
+
+        // While an earlier moment's file write is unresolved, a settlement
+        // cannot release the interval: the delivery fails and writes nothing.
+        let at_refusal = unchanged(&store);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE ydoc_docs SET settle_prior_update_seq=-1", [])
+                    .map_err(write_sql)
+            })
+            .unwrap();
+        assert!(matches!(
+            deliver_declared(
+                &mut store,
+                &mut cache,
+                &handle,
+                refused,
+                bytes.clone(),
+                &large(admitted)
+            ),
+            Err(ApplicationError::MaterializationPending)
+        ));
+        assert_eq!(unchanged(&store), at_refusal);
+
+        // A settlement that resolves releases the interval, and the same
+        // refused delivery then applies and names only its agent.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE ydoc_docs SET settle_prior_update_seq=NULL", [])
+                    .map_err(write_sql)?;
+                crate::author_coverage::advance_in(tx, &key(), false)?;
+                Ok::<_, ApplicationError>(())
+            })
+            .unwrap();
+        assert!(matches!(
+            deliver_declared(
+                &mut store,
+                &mut cache,
+                &handle,
+                refused,
+                bytes,
+                &large(admitted)
+            )
+            .unwrap(),
+            ApplicationResult::Applied(..)
+        ));
+        assert_eq!(interval_len(&store), 1);
+    }
+
+    #[test]
+    fn accepted_headers_refuse_parallel_declarations() {
+        let owner = event("owner", 1, Ydoc::wire().plaintext_insert(0, "x"));
+        let mut value = serde_json::to_value(owner.metadata).unwrap();
+        value["accepted"]["agentDeclaration"] =
+            serde_json::json!({"agentId":"agent","onBehalfOf":null,"depth":0});
+        assert!(parse_admitted_metadata(value).is_err());
+    }
+
+    #[test]
+    fn draft_snapshot_omission_is_allowed_but_present_agent_must_match() {
+        let mut metadata = event("owner", 1, Ydoc::wire().plaintext_insert(0, "x")).metadata;
+        snapshot(&mut metadata, None);
+        assert!(metadata.matches_draft_declaration(declared("agent").as_ref()));
+        snapshot(&mut metadata, declared("agent"));
+        assert!(metadata.matches_draft_declaration(declared("agent").as_ref()));
+        assert!(!metadata.matches_draft_declaration(declared("other").as_ref()));
+        assert!(!metadata.matches_draft_declaration(None));
     }
 
     fn warm_cache(store: &mut EngineStore, cache: &mut WriterDocCache) {

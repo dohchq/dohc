@@ -59,7 +59,7 @@ function fixture() {
   let requestId = 0;
   const run = () => drainOwnerOutbox({storage: relay.storage,client: client as unknown as EngineClient,
     admission: {shares: new Map([[document.workspaceId,"share"]]),maxEntriesPerDrain: 1,maxBytesPerDrain: 10_000,validate},
-    workspace: "handle",host,registrationId: 1,binding,nextRequestId: () => ++requestId,deadlineMs: 1_000,
+    workspace: "handle",host,registrationId: 1,binding,adoption: {adoptionId: "adoption",sequence: 1,applied() {}},nextRequestId: () => ++requestId,deadlineMs: 1_000,
     assertCurrent() {},applyThrough});
   return {relay,document,host,binding,entry,pending,receipts,applyThrough,validate,commit,run};
 }

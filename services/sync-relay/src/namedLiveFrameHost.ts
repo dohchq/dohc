@@ -1,3 +1,5 @@
+import type { StorageContext } from "./storage/context.js";
+import { parseLiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { EngineClient, NativeAppliedPosition } from "@dohc/workspace-engine-client/daemon";
@@ -11,7 +13,7 @@ import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.j
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
-import type { TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
+import { deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
 import { createAccountlessPathProjection } from "./accountlessPathProjection.js";
 export { createNamedFrameChanges, type NamedFrameChanges } from "./liveHostChanges.js";
 
@@ -209,6 +211,7 @@ function captureLiveFrameHost(options: {
       try {
         const deliveryId = parseLiveUpdateIdentifier(input.deliveryId), updateDigest = parseLiveUpdateDigest(input.updateDigest);
         const updateBytes = input.updateBytes;
+        const authorContext = input.authorContext === undefined ? undefined : parseLiveAuthorContext(input.authorContext);
         if (updateBytes.length < 1 || updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "capacity-refused" };
         if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest) return { result: "refused", reason: "invalid-update" };
         const read = storage.readLiveUpdateJournalCut({ document });
@@ -219,12 +222,13 @@ function captureLiveFrameHost(options: {
         }
         const validation = await validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
           suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes,
-          retainStateUpdate: liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata), []) }, signal);
+          retainStateUpdate: liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata),
+            deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount)) }, signal);
         check(signal);
         if (validation.kind === "retry") return {result: "retry", reason: validation.reason};
         const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
           ...(trustedAccount ? {trustedAccount} : {}),
-          metadata: { deliveryId, updateDigest, binding }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
+          metadata: { deliveryId, updateDigest, binding, ...(authorContext ? {authorContext} : {}) }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
         if (committed.result.kind === "refused") return { result: "refused", reason: committed.result.reason };
         if (committed.result.kind === "retry") return { result: "retry", reason: committed.result.reason };
         // An ambiguous drain can still have committed the application. Read the exact durable ACK.

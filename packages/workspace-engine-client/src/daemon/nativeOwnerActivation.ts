@@ -52,7 +52,14 @@ export function parseNativeOwnerActivationSource(value: unknown, path: string, m
     source.replicationEpoch, source.streamIdentity, source.baseOriginId, source.sourceMomentId]) {
     if (typeof value !== "string" || value.length < 1 || value.length > 4096 || value.includes("\0")) return invalid();
   }
-  return {...source};
+  // Native serializes the source in this field order, and adoption evidence hashes that JSON.
+  return {version: source.version, relayDatabaseNamespace: source.relayDatabaseNamespace, workspaceId: source.workspaceId,
+    mainVersionId: source.mainVersionId, objectId: source.objectId, lineageClaimId: source.lineageClaimId,
+    currentPath: source.currentPath, replicationEpoch: source.replicationEpoch, streamIdentity: source.streamIdentity,
+    committedCursor: source.committedCursor, baseOriginId: source.baseOriginId, baseOriginSeq: source.baseOriginSeq,
+    baseRelaySeq: source.baseRelaySeq, sourceMomentId: source.sourceMomentId, sourceDigest: source.sourceDigest,
+    sourceByteLength: source.sourceByteLength, nativeHeadSequence: source.nativeHeadSequence,
+    fullStateDigest: source.fullStateDigest, fullStateByteLength: source.fullStateByteLength};
 }
 
 export function parseNativeOwnerActivation(value: unknown, bytes: Buffer, path: string, maxBytes: number): NativeOwnerActivation {

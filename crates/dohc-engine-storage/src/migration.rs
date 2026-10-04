@@ -2693,6 +2693,24 @@ UPDATE moments SET author_json = json_array(json(author_json))
       AND json_type(author_json) = 'object';
 ";
 
+/// Only the owner's delivery declares, and the agent ID and depth are present
+/// together. An enrolled owner's draft records the observed binding revision
+/// it was queued under; a draft never names a native source.
+const V2_LIVE_APPLICATION_AGENT_DECLARATIONS_DDL: &str = "\
+ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN draft_binding_revision INTEGER
+    CHECK (draft_binding_revision IS NULL OR (native_source_json IS NULL
+        AND draft_binding_revision BETWEEN 1 AND 9007199254740991));
+ALTER TABLE live_device_update_applications ADD COLUMN declared_agent_id TEXT
+    CHECK (declared_agent_id IS NULL OR (principal_kind = 'owner'
+        AND length(CAST(declared_agent_id AS BLOB)) BETWEEN 1 AND 512));
+ALTER TABLE live_device_update_applications ADD COLUMN declared_on_behalf_of TEXT
+    CHECK (declared_on_behalf_of IS NULL OR (declared_agent_id IS NOT NULL
+        AND length(CAST(declared_on_behalf_of AS BLOB)) BETWEEN 1 AND 512));
+ALTER TABLE live_device_update_applications ADD COLUMN declared_depth INTEGER
+    CHECK ((declared_depth IS NULL) = (declared_agent_id IS NULL)
+        AND (declared_depth IS NULL OR declared_depth BETWEEN 0 AND 64));
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2855,10 +2873,27 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: V2_YDOC_LIVE_EDIT_AUTHORS_DDL,
         sets_user_version: None,
     },
+    // The agent an owner's queued draft declared, kept with its delivery
+    // after the relay's receipt. Null for every entry that declared none.
     Migration {
         ordinal: 27,
+        id: "v2-owner-draft-agent-declarations",
+        sql: "ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN agent_declaration_json TEXT CHECK (agent_declaration_json IS NULL OR json_valid(agent_declaration_json));",
+        sets_user_version: None,
+    },
+    // The agent the owner declared for an applied delivery, beside the
+    // authority the relay derived, and the enrollment proof of an owner's
+    // queued draft. Null for every delivery and entry without them.
+    Migration {
+        ordinal: 28,
+        id: "v2-live-application-agent-declarations",
+        sql: V2_LIVE_APPLICATION_AGENT_DECLARATIONS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 29,
         id: "v2-live-admitted-metadata-receipts",
-        sql: "ALTER TABLE live_device_update_applications ADD COLUMN admitted_metadata_json TEXT CHECK (admitted_metadata_json IS NULL OR json_valid(admitted_metadata_json)); ALTER TABLE live_audit_events ADD COLUMN canonical_version INTEGER NOT NULL DEFAULT 1 CHECK (canonical_version IN (1,2));",
+        sql: "ALTER TABLE live_device_update_applications DROP COLUMN declared_on_behalf_of; ALTER TABLE live_device_update_applications DROP COLUMN declared_depth; ALTER TABLE live_device_update_applications DROP COLUMN declared_agent_id; ALTER TABLE live_device_update_applications ADD COLUMN admitted_metadata_json TEXT CHECK (admitted_metadata_json IS NULL OR json_valid(admitted_metadata_json)); ALTER TABLE live_audit_events ADD COLUMN canonical_version INTEGER NOT NULL DEFAULT 1 CHECK (canonical_version IN (1,2));",
         sets_user_version: None,
     },
 ];
@@ -3040,6 +3075,18 @@ fn apply_transactional(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(StorageError::migration)?;
+
+    if migration.id == "v2-live-admitted-metadata-receipts" {
+        let declared: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE declared_agent_id IS NOT NULL OR declared_on_behalf_of IS NOT NULL OR declared_depth IS NOT NULL) OR EXISTS(SELECT 1 FROM live_accepted_updates WHERE json_type(metadata_json, '$.accepted.agentDeclaration') IS NOT NULL)",
+            [], |row| row.get(0),
+        ).map_err(StorageError::migration)?;
+        if declared {
+            return Err(StorageError::MigrationFailed { source: Some(
+                "Migration 29 cannot open a store with declared v1 accepted evidence. Its data is unchanged. For a development reset, delete <workspace>/.dohc/engine.".into(),
+            ) });
+        }
+    }
 
     tx.execute_batch(migration.sql)
         .map_err(StorageError::migration)?;
@@ -3223,8 +3270,16 @@ mod tests {
                 "33ec61e3e1f37d0908e6e5eac829e9e5a749e2834e4ce42729716fc32fe5d938",
             ),
             (
+                "v2-owner-draft-agent-declarations",
+                "7bb36813afe82921b70fa48a9fe0fa99bf0506f041bf1781e57892fc03d9d867",
+            ),
+            (
+                "v2-live-application-agent-declarations",
+                "047aea88c31886283062cc9f717639888ddc3129ba6bb927ff3e94404224eec5",
+            ),
+            (
                 "v2-live-admitted-metadata-receipts",
-                "38b94a5201c516660137d7f28c61747e373a03621ae2add162f11eaf3a43889f",
+                "384caa34711fd4cc1431c153d3e567f33b4c99e8f5428175f7c76c64f7ef83c3",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

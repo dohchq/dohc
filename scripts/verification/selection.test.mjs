@@ -36,7 +36,7 @@ test("site changes select renderer compatibility without native preparation or d
   ]});
   for (const file of plan.testFiles["@dohc/desktop"]) assert.ok(existsSync(join(root, "apps/desktop", file)), file);
   assert.equal(plan.desktopScripts, false);
-  assert.deepEqual(plan.proofs, { accounts: false, selfHostNative: false, desktop: false });
+  assert.deepEqual(plan.proofs, { accounts: false, selfHostNative: false, desktop: false, statesPage: false });
   assert.deepEqual(plan.needs, { postgres: false, engine: false, desktop: false });
 });
 
@@ -88,6 +88,7 @@ test("new desktop consumers cannot silently reuse browser-only input coverage", 
   for (const [input, helper] of [
     ["services/workspace-api/e2e/harness", "selfHostOnboarding"],
     ["packages/workspace-postgres/src/db/migrations/0001_better_auth.sql", "selfHostOnboarding"],
+    ["services/share-web/src/testing/localhostCa", "selfHostOnboarding"],
     ["services/share-web/src/server", "sharedDatasetBrowser"],
   ]) {
     const source = `import "../../../../${input}";`;
@@ -121,11 +122,24 @@ test("new site imports cannot escape the selected desktop compatibility files", 
   }
 });
 
+test("renderer and states-page inputs add the pixel gallery to the desktop proofs", () => {
+  for (const input of ["apps/desktop/src/renderer/ui/controls.tsx", "apps/desktop/src/renderer/styles.css",
+    "apps/desktop/e2e/states-page.spec.ts", "apps/desktop/e2e/states-page.spec.ts-snapshots/buttons-light-win32.png"]) {
+    const plan = select([input]);
+    assert.equal(plan.proofs.desktop, true, input);
+    assert.equal(plan.proofs.statesPage, true, input);
+  }
+  for (const input of ["apps/desktop/src/main.ts", "apps/desktop/e2e/apps.spec.ts", "services/workspace-api/src/main.ts"]) {
+    assert.equal(select([input]).proofs.statesPage, false, input);
+  }
+  assert.equal(select(["apps/site/src/ProductDemo.tsx"], {full: true}).proofs.statesPage, true);
+});
+
 test("desktop changes cover the site consumer and native delivery test inputs", () => {
   const plan = select(["apps/desktop/src/workspaces/nativeOwnerDelivery.ts"]);
   assert.deepEqual(plan.affected, ["@dohc/desktop", "@dohc/site"]);
   assert.deepEqual(plan.packages, ["@dohc/desktop", "@dohc/share-web", "@dohc/site", "@dohc/sync-relay", "@dohc/ydoc-projection"]);
-  assert.deepEqual(plan.proofs, { accounts: false, selfHostNative: true, desktop: true });
+  assert.deepEqual(plan.proofs, { accounts: false, selfHostNative: true, desktop: true, statesPage: false });
   assert.equal(plan.desktopScripts, true);
   assert.deepEqual(plan.testFiles, {"@dohc/ydoc-projection": ["src/liveRestoreDrain.test.ts", "src/ownerDesktopTransport.test.ts"]});
 });
@@ -148,11 +162,21 @@ test("new desktop imports cannot silently escape the selected compatibility file
   assert.deepEqual(uncoveredWorkspaceInputs([{path: "packages/ydoc-projection/src/liveRestoreDrain.test.ts", source}], packages), []);
 });
 
+test("Y.Doc transport tests declare the relay HTTP and auth sources they import", () => {
+  const source = 'import "../../service-http/src/index.js"; import "../../workspace-auth/src/session.js";';
+  assert.deepEqual(uncoveredWorkspaceInputs([{path: "packages/ydoc-projection/src/ownerDesktopTransport.test.ts", source}], packages), []);
+  assert.deepEqual(uncoveredWorkspaceInputs([{path: "packages/ydoc-projection/src/import-export.ts", source}], packages)
+    .map(finding => finding.input), ["@dohc/service-http", "@dohc/workspace-auth"]);
+  for (const input of ["packages/service-http/src/index.ts", "packages/workspace-auth/src/session.ts"]) {
+    assert.ok(select([input]).packages.includes("@dohc/ydoc-projection"), input);
+  }
+});
+
 test("database migrations include consumers that read SQL outside their manifests", () => {
   const plan = select(["packages/workspace-postgres/src/db/migrations/0001_better_auth.sql"]);
   assert.deepEqual(plan.affected, ["@dohc/workspace-postgres"]);
   assert.deepEqual(plan.packages, ["@dohc/share-web", "@dohc/workspace-api", "@dohc/workspace-auth", "@dohc/workspace-postgres"]);
-  assert.deepEqual(plan.proofs, { accounts: true, selfHostNative: true, desktop: true });
+  assert.deepEqual(plan.proofs, { accounts: true, selfHostNative: true, desktop: true, statesPage: false });
   assert.deepEqual(plan.needs, { postgres: true, engine: true, desktop: true });
 });
 
@@ -160,7 +184,7 @@ test("account API changes retain browser and desktop onboarding proofs", () => {
   const plan = select(["services/workspace-api/src/main.ts"]);
   assert.deepEqual(plan.affected, ["@dohc/workspace-api"]);
   assert.deepEqual(plan.packages, ["@dohc/workspace-api"]);
-  assert.deepEqual(plan.proofs, { accounts: true, selfHostNative: false, desktop: true });
+  assert.deepEqual(plan.proofs, { accounts: true, selfHostNative: false, desktop: true, statesPage: false });
 });
 
 test("share changes include relay and Y.Doc tests that import its source", () => {
@@ -202,7 +226,7 @@ test("shared, native, fixture, config, and unknown inputs select all packages", 
     assert.equal(plan.full, true, path);
     assert.equal(plan.repository, "full", path);
     assert.deepEqual(plan.packages, packages.map(pkg => pkg.name).sort(), path);
-    assert.deepEqual(plan.proofs, { accounts: true, selfHostNative: true, desktop: true }, path);
+    assert.deepEqual(plan.proofs, { accounts: true, selfHostNative: true, desktop: true, statesPage: true }, path);
   }
 });
 

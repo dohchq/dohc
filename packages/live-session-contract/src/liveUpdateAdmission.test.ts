@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import vectors from "../vectors/live-update-admission-vectors.json";
 import {
+  AGENT_DECLARATION_MAX_DEPTH,
   LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
   LIVE_UPDATE_REFUSAL_VALUES,
   LIVE_UPDATE_RETRY_VALUES,
@@ -12,6 +13,7 @@ import {
   LIVE_UPDATE_YJS_START_CLOCK_MAX,
   parseAdmittedLiveUpdate,
   parseAdmittedLiveUpdateMetadata,
+  parseAgentDeclaration,
   parseLiveDocumentKey,
   parseLiveUpdateAcceptResult,
   parseLiveUpdateDigest,
@@ -313,6 +315,55 @@ describe("live-update text and digest fields", () => {
         },
       }),
     ).toThrow();
+  });
+});
+
+describe("agent declarations", () => {
+  it("keeps every field, with a null onBehalfOf and the depth bounds", () => {
+    for (const declaration of [
+      { agentId: "trip-agent", onBehalfOf: "local-person", depth: 0 },
+      { agentId: "trip-agent", onBehalfOf: null, depth: AGENT_DECLARATION_MAX_DEPTH },
+    ]) {
+      expect(parseAgentDeclaration(declaration)).toEqual(declaration);
+    }
+  });
+
+  it("records declarations only in submission context and admitted snapshots", () => {
+    const agent = {agentId: "trip-agent-ü", onBehalfOf: "人", depth: 2};
+    const authorContext = {kind: "account", accountId: "owner-1", agent};
+    const submission = {deliveryId: "delivery-1", updateDigest: digestA, binding};
+    expect(parseLiveUpdateSubmissionMetadata({...submission, authorContext}).authorContext).toEqual(authorContext);
+    expect(parseLiveUpdateSubmissionMetadata(submission)).not.toHaveProperty("authorContext");
+    const metadata = {...admittedMetadata, canonicalVersion: 2, authorSnapshot: [{kind: "agent", ...agent}], firstSeenDeletes: []};
+    expect(parseAdmittedLiveUpdateMetadata(metadata).authorSnapshot).toEqual(metadata.authorSnapshot);
+    expect(() => parseRelayAcceptedLiveUpdate({...accepted, agentDeclaration: {...agent}})).toThrow(TypeError);
+  });
+
+  it("refuses an undefined, null, or malformed declaration member and any other member", () => {
+    const submission = { deliveryId: "delivery-1", updateDigest: digestA, binding };
+    for (const agentDeclaration of [undefined, null, {}, { agentId: "agent", onBehalfOf: null, depth: 65 }]) {
+      expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, agentDeclaration })).toThrow(TypeError);
+      expect(() => parseLiveUpdateSubmissionMetadata({ ...submission, agentDeclaration })).toThrow(TypeError);
+    }
+    const agentDeclaration = { agentId: "agent", onBehalfOf: null, depth: 0 };
+    expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, agentDeclaration, agent: "agent" })).toThrow(TypeError);
+    expect(() => parseLiveUpdateReceipt({ ...receipt, agentDeclaration })).toThrow(TypeError);
+  });
+
+  it("refuses the engine's out-of-bounds values and any other field", () => {
+    for (const declaration of [
+      { agentId: "", onBehalfOf: null, depth: 0 },
+      { agentId: "agent\u0085", onBehalfOf: null, depth: 0 },
+      { agentId: "agent", onBehalfOf: "", depth: 0 },
+      { agentId: "a".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 1), onBehalfOf: null, depth: 0 },
+      { agentId: "agent", onBehalfOf: null, depth: AGENT_DECLARATION_MAX_DEPTH + 1 },
+      { agentId: "agent", onBehalfOf: null, depth: -1 },
+      { agentId: "agent", onBehalfOf: null, depth: 1.5 },
+      { agentId: "agent", depth: 0 },
+      { agentId: "agent", onBehalfOf: null, depth: 0, principalId: "owner-1" },
+    ]) {
+      expect(() => parseAgentDeclaration(declaration)).toThrow(TypeError);
+    }
   });
 });
 

@@ -13,6 +13,8 @@ import {
   createRelaySyncEngine,
   type RelaySyncOperations,
 } from "./relaySyncEngine";
+import { createRelayLogWait } from "./relayLogWait";
+import { relayApiFetch } from "./sharedChannels";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
 // The push/pull transport is injected; the capture is not over-mocked — its
@@ -77,8 +79,9 @@ function capture(): WorkspaceEngineCapture {
   } as unknown as WorkspaceEngineCapture;
 }
 
-// The relay's held reads, answered by the test one at a time.
-function relayWaits() {
+// The relay's held reads, answered by the test one at a time. Like a fetch,
+// a read ends when it is aborted, unless `ignoreAbort` says it does not.
+function relayWaits(options: { ignoreAbort?: boolean } = {}) {
   const started: Array<{
     since: number;
     signal: AbortSignal;
@@ -89,7 +92,9 @@ function relayWaits() {
     wait: (since: number, signal: AbortSignal) =>
       new Promise<boolean>((resolve, reject) => {
         started.push({ since, signal, resolve, reject });
+        if (!options.ignoreAbort) signal.addEventListener("abort", () => reject(signal.reason));
       }),
+    read: (index: number) => started[index]!,
     sinces: () => started.map((read) => read.since),
     current: () => started.at(-1),
     answer: (changed: boolean) => started.at(-1)!.resolve(changed),
@@ -1280,8 +1285,202 @@ describe("relaySyncEngine", () => {
     const polledAtStart = vi.mocked(polled.runRelaySync).mock.calls.length;
     await vi.advanceTimersByTimeAsync(60_000);
     expect(vi.mocked(polled.runRelaySync).mock.calls.length - polledAtStart).toBe(12);
-    await sync.stop();
     await polling.stop();
+    // This read ignores its abort, so stop waits for the hold to end.
+    const readsAtStop = reads.length;
+    const stopping = sync.stop();
+    await vi.advanceTimersByTimeAsync(25_000);
+    await stopping;
+    expect(reads).toHaveLength(readsAtStop);
+  });
+
+  it("waits on stop for a held read that ignores its abort, alongside the running pass", async () => {
+    const waits = relayWaits({ ignoreAbort: true });
+    const cap = capture();
+    const sync = engine({ capture: cap, waitForChange: waits.wait });
+    await sync.start();
+    await vi.advanceTimersByTimeAsync(0);
+    let finishPull!: () => void;
+    pullMock.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { finishPull = resolve; });
+      return pullResult();
+    });
+    sync.queueSync();
+    await vi.advanceTimersByTimeAsync(100);
+
+    const stops: string[] = [];
+    const first = sync.stop().then(() => stops.push("first"));
+    const second = sync.stop().then(() => stops.push("second"));
+    expect(waits.current()?.signal.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000);
+    finishPull();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stops).toEqual([]);
+
+    // The read answers after stop. That answer starts no pass.
+    waits.answer(true);
+    await Promise.all([first, second]);
+    expect(stops).toEqual(["first", "second"]);
+    expect(waits.sinces()).toHaveLength(1);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts the read at once for a new cursor, and starts only the newest after the old read ends", async () => {
+    const waits = relayWaits({ ignoreAbort: true });
+    const cap = capture();
+    pullMock.mockResolvedValueOnce(pullResult({ nextCursor: 5 }));
+    const sync = engine({ capture: cap, waitForChange: waits.wait });
+    await sync.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(waits.sinces()).toEqual([5]);
+
+    pullMock.mockResolvedValueOnce(pullResult({ nextCursor: 6 }));
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(waits.read(0).signal.aborted).toBe(true);
+    pullMock.mockResolvedValueOnce(pullResult({ nextCursor: 7 }));
+    await sync.retryNow({ countsAsAttempt: true });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(waits.sinces()).toEqual([5]);
+
+    // The replaced read reports a change. It is stale, so no pass runs.
+    waits.read(0).resolve(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(waits.sinces()).toEqual([5, 7]);
+    expect(cap.runRelaySync).toHaveBeenCalledTimes(3);
+    expect(waits.read(1).signal.aborted).toBe(false);
+    const stopping = sync.stop();
+    waits.read(1).resolve(false);
+    await stopping;
+  });
+
+  it("ignores a refused sign-in from a read that was replaced or stopped", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const waits = relayWaits({ ignoreAbort: true });
+    const onChange = vi.fn();
+    const cap = capture();
+    pullMock.mockResolvedValueOnce(pullResult({ nextCursor: 5 }));
+    const sync = engine({ capture: cap, onChange, waitForChange: waits.wait });
+    await sync.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    pullMock.mockResolvedValueOnce(pullResult({ nextCursor: 6 }));
+    await sync.retryNow({ countsAsAttempt: true });
+    onChange.mockClear();
+    waits.read(0).reject(new RelayUnauthorizedError());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sync.snapshot().authExpired).toBe(false);
+    expect(waits.sinces()).toEqual([5, 6]);
+
+    const stopping = sync.stop();
+    waits.read(1).reject(new RelayUnauthorizedError());
+    await stopping;
+    expect(sync.snapshot().authExpired).toBe(false);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("leaves no wait timer behind when it stops during a wait's backoff", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const waits = relayWaits();
+    const sync = engine({ capture: capture(), waitForChange: waits.wait });
+    await sync.start();
+    await vi.advanceTimersByTimeAsync(0);
+    waits.fail(new Error("relay unavailable"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await sync.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(waits.sinces()).toHaveLength(1);
+    errorSpy.mockRestore();
+  });
+
+  it("waits on stop for the coordinate read and for a refused read's body to be released", async () => {
+    const bootstraps: Array<{ signal: AbortSignal; answer: () => void }> = [];
+    let releaseBody!: () => void;
+    let bodyCancelled!: () => void;
+    const cancelling = new Promise<void>((resolve) => { bodyCancelled = resolve; });
+    const fetch = vi.fn(async (resource: string | URL | Request, init?: RequestInit) => {
+      if (String(resource).endsWith("/bootstrap")) {
+        // A coordinate read that ignores its abort.
+        return await new Promise<Response>((resolve) => {
+          bootstraps.push({
+            signal: init!.signal!,
+            answer: () => resolve(Response.json({ ok: true, hasContent: true, replicationEpoch: "e", streamIdentity: "s" })),
+          });
+        });
+      }
+      const body = new ReadableStream({
+        cancel: () => {
+          bodyCancelled();
+          return new Promise<void>((resolve) => { releaseBody = resolve; });
+        },
+      });
+      return new Response(body, { status: 409 });
+    });
+    const relay = { baseUrl: "http://relay.test", token: "token", fetch };
+
+    const first = engine({ capture: capture(), waitForChange: createRelayLogWait({ workspaceId: "w", relay }) });
+    await first.start();
+    await vi.advanceTimersByTimeAsync(0);
+    let firstStopped = false;
+    const firstStopping = first.stop().then(() => { firstStopped = true; });
+    expect(bootstraps[0]!.signal.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(firstStopped).toBe(false);
+    bootstraps[0]!.answer();
+    await firstStopping;
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const second = engine({ capture: capture(), waitForChange: createRelayLogWait({ workspaceId: "w", relay }) });
+    await second.start();
+    await vi.advanceTimersByTimeAsync(0);
+    bootstraps[1]!.answer();
+    await cancelling;
+    let secondStopped = false;
+    const secondStopping = second.stop().then(() => { secondStopped = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(secondStopped).toBe(false);
+    releaseBody();
+    await secondStopping;
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("waits on stop for a version refusal's body to be released", async () => {
+    const refused = Response.json({ ok: false, code: "api_version_too_new" }, { status: 400 });
+    const relay = {
+      baseUrl: "http://relay.test",
+      token: "token",
+      fetch: relayApiFetch(async (resource) =>
+        String(resource).endsWith("/bootstrap")
+          ? Response.json({ ok: true, hasContent: true, replicationEpoch: "e", streamIdentity: "s" })
+          : refused),
+    };
+    let releaseBody!: () => void;
+    const cancel = vi.spyOn(ReadableStream.prototype, "cancel").mockImplementation(
+      () => new Promise<void>((resolve) => { releaseBody = resolve; }),
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const sync = engine({ capture: capture(), waitForChange: createRelayLogWait({ workspaceId: "w", relay }) });
+      await sync.start();
+      await vi.waitFor(() => expect(cancel).toHaveBeenCalled());
+      expect(cancel.mock.contexts).toEqual([refused.body]);
+      let stopped = false;
+      const stopping = sync.stop().then(() => { stopped = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(stopped).toBe(false);
+      releaseBody();
+      await stopping;
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      cancel.mockRestore();
+      errorSpy.mockRestore();
+    }
   });
 
   it("treats typed 401 as terminal authExpired and stops accumulating queued work", async () => {

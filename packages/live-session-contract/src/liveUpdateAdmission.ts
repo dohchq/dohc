@@ -50,6 +50,19 @@ export type ServerDerivedLiveUpdateAuthority =
       readonly grantGeneration: number;
     };
 
+/**
+ * Native owner draft input: the agent, its declared scope, and chain depth.
+ * Delivery converts this into recording context before admission; accepted
+ * history credits only the admitted author snapshot.
+ */
+export interface AgentDeclaration {
+  readonly agentId: string;
+  readonly onBehalfOf: string | null;
+  readonly depth: number;
+}
+
+export const AGENT_DECLARATION_MAX_DEPTH = 64;
+
 export interface LiveUpdateSubmissionMetadata {
   readonly deliveryId: string;
   readonly updateDigest: string;
@@ -162,6 +175,7 @@ const ACCEPTED_FIELDS = [
   "receivedAtMs",
 ] as const;
 const STRUCT_RANGE_FIELDS = ["clientId", "startClock", "endClock"] as const;
+const AGENT_DECLARATION_FIELDS = ["agentId", "onBehalfOf", "depth"] as const;
 const ADMITTED_METADATA_FIELDS = ["accepted", "firstSeen"] as const;
 const APPLICATION_ACK_FIELDS = [
   ...RECEIPT_FIELDS,
@@ -311,6 +325,25 @@ export function parseServerDerivedLiveUpdateAuthority(
   };
 }
 
+/** The engine's bounds: an identifier with no Unicode control character. */
+function declaredIdentifier(value: unknown, name: string): string {
+  const identifier = parseLiveUpdateIdentifier(value, name);
+  if (/\p{Cc}/u.test(identifier)) {
+    throw new TypeError(`${name} must not contain control characters.`);
+  }
+  return identifier;
+}
+
+export function parseAgentDeclaration(value: unknown): AgentDeclaration {
+  const record = exactRecord(value, "AgentDeclaration", AGENT_DECLARATION_FIELDS);
+  return {
+    agentId: declaredIdentifier(record.agentId, "agentId"),
+    onBehalfOf:
+      record.onBehalfOf === null ? null : declaredIdentifier(record.onBehalfOf, "onBehalfOf"),
+    depth: boundedInteger(record.depth, "depth", 0, AGENT_DECLARATION_MAX_DEPTH),
+  };
+}
+
 export function parseLiveUpdateSubmissionMetadata(
   value: unknown,
 ): LiveUpdateSubmissionMetadata {
@@ -360,10 +393,11 @@ export function parseRelayAcceptedLiveUpdate(
   value: unknown,
 ): RelayAcceptedLiveUpdate {
   const record = exactRecord(value, "RelayAcceptedLiveUpdate", ACCEPTED_FIELDS);
+  const authority = parseServerDerivedLiveUpdateAuthority(record.authority);
   return {
     receipt: parseLiveUpdateReceipt(record.receipt),
     binding: parseLiveObjectBinding(record.binding),
-    authority: parseServerDerivedLiveUpdateAuthority(record.authority),
+    authority,
     receivedAtMs: nonNegativeSafeInteger(record.receivedAtMs, "receivedAtMs"),
   };
 }

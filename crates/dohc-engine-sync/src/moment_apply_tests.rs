@@ -115,7 +115,7 @@ fn maximum_live_author_summary_journals_with_payload_headroom() {
 }
 
 #[test]
-fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history() {
+fn outbound_moment_authors_keep_local_people_and_replicate_agents_and_automations() {
     use dohc_engine_domain::{ChangeActorKind, ChangeAttribution, moment_author_json};
     for kind in [
         ChangeActorKind::Human,
@@ -194,6 +194,19 @@ fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history(
                     )
                 })
                 .expect("read outbound journal");
+            let local_history = VersionedTextStore::new(&mut source)
+                .get_moment("ws", "created-moment")
+                .unwrap()
+                .unwrap();
+            assert_eq!(local_history.author_json.as_deref(), Some(author.as_str()));
+            if kind == ChangeActorKind::Human {
+                assert!(op.payload.get("authors").is_none());
+            } else {
+                assert_eq!(
+                    op.payload["authors"],
+                    serde_json::from_str::<Value>(&author).unwrap()
+                );
+            }
             hydrate_texts(&mut peer, &["created by a live document"]);
             assert_eq!(
                 apply_moment_envelope(&mut peer, &op, &NoFaults).expect("peer apply"),
@@ -204,11 +217,14 @@ fn declared_moment_authors_round_trip_from_the_outbound_journal_to_peer_history(
                 .get_moment("ws", "created-moment")
                 .expect("peer history")
                 .expect("replicated moment");
-            assert_eq!(
-                serde_json::from_str::<Value>(history.author_json.as_deref().expect("author"))
-                    .unwrap(),
-                serde_json::from_str::<Value>(&author).unwrap(),
-            );
+            if kind == ChangeActorKind::Human {
+                assert!(history.author_json.is_none());
+            } else {
+                assert_eq!(
+                    serde_json::from_str::<Value>(history.author_json.as_deref().unwrap()).unwrap(),
+                    serde_json::from_str::<Value>(&author).unwrap(),
+                );
+            }
         }
     }
 }
@@ -611,8 +627,36 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             .unwrap(),
         1
     );
+    // An open owner editor does not defer the host's settlement, but a
+    // settlement at the accepted cursor must still equal accepted state.
+    let mismatch_text = "a settlement the host never accepted";
+    hydrate_texts(&mut store, &[mismatch_text]);
+    let mismatch_id = format!("moment-ydoc-{}", "f".repeat(64));
+    retain_audit(&store, &mismatch_id, mismatch_text, 2);
+    let mismatch = envelope(
+        "mismatch",
+        0,
+        "ws",
+        present_text_payload(
+            &mismatch_id,
+            "object",
+            "write",
+            "owner.md",
+            "owner.md",
+            &texts[0],
+            &old_id,
+            mismatch_text,
+        ),
+    );
+    assert!(matches!(
+        crate::apply_moment_envelope(&mut store, &mismatch, &NoFaults, &crate::AlwaysLive)
+            .unwrap()
+            .primary,
+        ApplyDisposition::Refused(_)
+    ));
+    assert_eq!(snapshot(&store, "object"), before);
     assert_eq!(
-        apply_moment_envelope(&mut store, &latest, &NoFaults).unwrap(),
+        crate::apply_moment_envelope(&mut store, &latest, &NoFaults, &crate::AlwaysLive).unwrap(),
         ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
     assert_eq!(
@@ -661,6 +705,13 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             &texts[1],
         ),
     );
+    // Any other change to an open document still waits for its editor.
+    assert!(matches!(
+        crate::apply_moment_envelope(&mut store, &renamed, &NoFaults, &crate::AlwaysLive),
+        Err(SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    ));
     assert!(matches!(
         apply_moment_envelope(&mut store, &renamed, &NoFaults)
             .unwrap()
@@ -710,6 +761,19 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             "unrelated ordinary file",
         ),
     );
+    // So does an open document without an owner binding. Its own origin keeps
+    // the host's sequence out of it: host seq 2 has not arrived yet.
+    let unbound = ReplicationEnvelope {
+        origin_id: "unbound".into(),
+        origin_seq: 0,
+        ..unrelated.clone()
+    };
+    assert!(matches!(
+        crate::apply_moment_envelope(&mut store, &unbound, &NoFaults, &crate::AlwaysLive),
+        Err(SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    ));
     let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
     *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
         ops: vec![future_moment.clone(), unrelated],
@@ -797,6 +861,8 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
     let dohc_engine_storage::TxnOutcome::Committed(result) = result else {
         panic!("frame must commit")
     };
+    // The parked settlement no longer waits for the owner's open editor. It
+    // writes accepted state only; the pending draft stays out of the file.
     let leased = crate::moment_apply::pending::drain_and_claim(
         &mut store,
         "ws",
@@ -804,9 +870,20 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
         &crate::AlwaysLive,
     )
     .unwrap();
-    assert!(leased.changes.is_empty());
-    assert!(leased.report_id.is_none());
+    assert_eq!(leased.changes.len(), 1);
+    assert_eq!(leased.changes[0].path, "owner.md");
+    assert!(leased.report_id.is_some());
     assert!(!leased.has_more);
+    assert_eq!(
+        store
+            .read_with(|conn| conn.query_row(
+                "SELECT blob_sha256 FROM snapshots WHERE object_id='object'",
+                [],
+                |row| row.get::<_, String>(0)
+            ))
+            .unwrap(),
+        text_sha(&future_text)
+    );
     *client.transport().pull.lock().unwrap() = Some(crate::PullResponse {
         ops: vec![],
         next_cursor: 2,
@@ -889,6 +966,488 @@ fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pe
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn restore_settlement_imported_before_the_owner_reaches_its_generation_waits_then_materializes() {
+    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
+    let RestoreOwner {
+        _scratch,
+        mut store,
+        observed,
+        checkpoint,
+        initial_text,
+        initial_moment,
+    } = restore_owner();
+    let (restored, restored_text) = restored_host(&checkpoint, "restored by the owner");
+    let next = LiveObjectBinding {
+        restore_fence_generation: 1,
+        ..observed.binding.clone()
+    };
+    let retain_audit =
+        |store: &EngineStore,
+         binding: &LiveObjectBinding,
+         namespace: &str,
+         id: &str,
+         text: &str| { retain_restore_audit(store, binding, namespace, id, text, 1) };
+    let settlement = |origin: &str, id: &str, text: &str| {
+        restore_settlement(origin, id, &initial_text, &initial_moment, text)
+    };
+    let before = snapshot(&store, "object");
+
+    // Only an audited settlement of the owner's own document at a later
+    // restore generation is a reason to wait. Anything else is still refused.
+    let changed = |change: fn(&mut LiveObjectBinding)| {
+        let mut binding = next.clone();
+        change(&mut binding);
+        binding
+    };
+    let same_generation = LiveObjectBinding {
+        selector_paths: vec!["owner.md".into(), "other.md".into()],
+        ..observed.binding.clone()
+    };
+    // Each payload names the restored text; only the audit differs.
+    let other_text = "a restore with other content";
+    let restored_audit = restored_text.as_str();
+    let cases = vec![
+        ("unaudited", None),
+        (
+            "same-generation",
+            Some((same_generation, "relay", restored_audit)),
+        ),
+        (
+            "other-path",
+            Some((
+                changed(|b| b.current_path = "moved.md".into()),
+                "relay",
+                restored_audit,
+            )),
+        ),
+        (
+            "other-lineage",
+            Some((
+                changed(|b| b.lineage_claim_id = "f".repeat(64)),
+                "relay",
+                restored_audit,
+            )),
+        ),
+        (
+            "other-workspace",
+            Some((
+                changed(|b| b.workspace_id = "other".into()),
+                "relay",
+                restored_audit,
+            )),
+        ),
+        (
+            "other-namespace",
+            Some((next.clone(), "other-relay", restored_audit)),
+        ),
+        ("other-digest", Some((next.clone(), "relay", other_text))),
+    ];
+    hydrate_texts(&mut store, &[&restored_text, other_text]);
+    for (index, (origin, audit)) in cases.into_iter().enumerate() {
+        let id = format!("moment-ydoc-{index}{}", "1".repeat(63));
+        if let Some((binding, namespace, audited)) = audit {
+            retain_audit(&store, &binding, namespace, &id, audited);
+        }
+        assert!(
+            matches!(
+                apply_moment_envelope(
+                    &mut store,
+                    &settlement(origin, &id, &restored_text),
+                    &NoFaults
+                )
+                .unwrap()
+                .primary,
+                ApplyDisposition::Refused(_)
+            ),
+            "{origin} must be refused"
+        );
+    }
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        0
+    );
+    assert_eq!(snapshot(&store, "object"), before);
+
+    // Ordinary sync imports the restore's settlement before the authenticated
+    // owner feed reaches generation 1. It waits instead of being refused.
+    let restore_id = format!("moment-ydoc-{}", "b".repeat(64));
+    retain_audit(&store, &next, "relay", &restore_id, &restored_text);
+    // A settlement the host never accepted waits on the same binding.
+    let forged_text = "a restore the host never accepted";
+    hydrate_texts(&mut store, &[forged_text]);
+    let forged_id = format!("moment-ydoc-{}", "c".repeat(64));
+    retain_audit(&store, &next, "relay", &forged_id, forged_text);
+    for (origin, id, text) in [
+        ("host", &restore_id, restored_text.as_str()),
+        ("forged", &forged_id, forged_text),
+    ] {
+        assert_eq!(
+            apply_moment_envelope(&mut store, &settlement(origin, id, text), &NoFaults).unwrap(),
+            ApplyOutcome::new(ApplyDisposition::Applied(0))
+        );
+    }
+    let parked: Vec<String> = store
+        .read_with(|conn| {
+            conn.prepare("SELECT binding_json FROM owner_pending_settlements ORDER BY origin_id")?
+                .query_map([], |row| row.get(0))?
+                .collect()
+        })
+        .unwrap();
+    assert_eq!(parked, vec![serde_json::to_string(&next).unwrap(); 2]);
+    assert_eq!(snapshot(&store, "object"), before);
+    let waiting =
+        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert!(waiting.report_id.is_none());
+    assert!(waiting.changes.is_empty());
+    assert_eq!(snapshot(&store, "object"), before);
+
+    // The authenticated owner feed reaches the restore generation.
+    let advanced = enroll_restore(&mut store, &next, &restored, 1, &observed.limits);
+    assert_eq!(
+        (advanced.binding, advanced.accepted_cursor),
+        (next.clone(), 1)
+    );
+
+    // The replay repeats every check against the authenticated binding: the
+    // restore reaches the file, and audit alone never authorizes content.
+    let settled =
+        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert_eq!(settled.changes.len(), 1);
+    assert_eq!(settled.changes[0].path, "owner.md");
+    assert_eq!(
+        snapshot(&store, "object").map(|(_, _, digest, moment)| (digest, moment)),
+        Some((text_sha(&restored_text), restore_id.clone()))
+    );
+    assert_eq!(disposition(&store, "forged").as_deref(), Some("refused"));
+    assert_ne!(disposition(&store, "host").as_deref(), Some("refused"));
+}
+
+#[test]
+fn restore_settlement_skipped_by_a_later_generation_is_refused_and_released() {
+    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
+    let RestoreOwner {
+        _scratch,
+        mut store,
+        observed,
+        checkpoint,
+        initial_text,
+        initial_moment,
+    } = restore_owner();
+    let generation = |restore_fence_generation| LiveObjectBinding {
+        restore_fence_generation,
+        ..observed.binding.clone()
+    };
+    let (_, skipped_text) = restored_host(&checkpoint, "restored at generation 1");
+    let (latest, latest_text) = restored_host(&checkpoint, "restored at generation 2");
+    hydrate_texts(&mut store, &[&skipped_text, &latest_text]);
+    let skipped_id = format!("moment-ydoc-{}", "b".repeat(64));
+    let latest_id = format!("moment-ydoc-{}", "c".repeat(64));
+    retain_restore_audit(
+        &store,
+        &generation(1),
+        "relay",
+        &skipped_id,
+        &skipped_text,
+        1,
+    );
+    retain_restore_audit(&store, &generation(2), "relay", &latest_id, &latest_text, 2);
+    let skipped = restore_settlement(
+        "first-restore",
+        &skipped_id,
+        &initial_text,
+        &initial_moment,
+        &skipped_text,
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &skipped, &NoFaults).unwrap(),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        1
+    );
+    let before = snapshot(&store, "object");
+
+    // The authenticated owner feed skips generation 1, so its settlement can
+    // never become ready. The drain refuses it instead of writing it.
+    let advanced = enroll_restore(&mut store, &generation(2), &latest, 2, &observed.limits);
+    assert_eq!(
+        (advanced.binding, advanced.accepted_cursor),
+        (generation(2), 2)
+    );
+    let report =
+        crate::moment_apply::pending::drain_and_claim(&mut store, "ws", &NoFaults, &NoLiveLeases)
+            .unwrap();
+    assert!(report.changes.is_empty());
+    assert!(report.report_id.is_some());
+    assert_eq!(snapshot(&store, "object"), before);
+    assert_eq!(
+        disposition(&store, "first-restore").as_deref(),
+        Some("refused")
+    );
+    assert_eq!(
+        store
+            .read_with(|conn| conn.query_row(
+                "SELECT reason_message FROM replication_pending_refusals WHERE origin_id='first-restore'",
+                [],
+                |row| row.get::<_, String>(0)
+            ))
+            .unwrap(),
+        crate::moment_apply::pending::SUPERSEDED
+    );
+
+    // Committing the report releases the queue row; the refused envelope
+    // keeps its text for inspection.
+    let committed = crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &crate::RelayCursor {
+            bootstrap_complete: true,
+            cursor: 1,
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            settlement_report_id: report.report_id,
+        },
+        &NoFaults,
+        &NoLiveLeases,
+        4,
+    )
+    .unwrap();
+    assert!(matches!(
+        committed,
+        dohc_engine_storage::TxnOutcome::Committed(_)
+    ));
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .table_row_count("owner_pending_settlement_blobs")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .read_with(|conn| conn.query_row(
+                "SELECT COUNT(*) FROM replication_refused_moment_blobs \
+                 WHERE origin_id='first-restore' AND role='payload-after' AND text_sha256=?1",
+                [text_sha(&skipped_text)],
+                |row| row.get::<_, i64>(0)
+            ))
+            .unwrap(),
+        1
+    );
+
+    // The current generation's own settlement still applies at its exact binding.
+    let latest_settlement = restore_settlement(
+        "second-restore",
+        &latest_id,
+        &initial_text,
+        &initial_moment,
+        &latest_text,
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &latest_settlement, &NoFaults).unwrap(),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    assert_eq!(
+        snapshot(&store, "object").map(|(_, _, digest, moment)| (digest, moment)),
+        Some((text_sha(&latest_text), latest_id))
+    );
+}
+
+/// An owner observed at restore generation 0 and accepted cursor 0.
+struct RestoreOwner {
+    _scratch: ScratchDir,
+    store: EngineStore,
+    observed: dohc_engine_collab::owner_outbox::draft::ObservedOwnerBinding,
+    checkpoint: Vec<u8>,
+    initial_text: String,
+    initial_moment: String,
+}
+
+fn restore_owner() -> RestoreOwner {
+    use dohc_engine_collab::live_object_binding::LiveObjectBinding;
+    use dohc_engine_collab::owner_outbox::{
+        OwnerOutboxLimits,
+        draft::{ObservedOwnerBinding, install_observed_binding_in_tx},
+    };
+    let (scratch, mut store) = test_store();
+    crate::adopt_join_identity(&mut store, "ws", "local", "epoch", "stream", 1, &NoFaults).unwrap();
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
+    ))
+    .unwrap();
+    let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    let initial_text = fixture["markdown"].as_str().unwrap().to_owned();
+    let initial_moment = format!("moment-ydoc-{}", "a".repeat(64));
+    seed_text_moment(
+        &mut store,
+        "object",
+        "owner.md",
+        &initial_text,
+        &initial_moment,
+        None,
+        true,
+    );
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    dohc_engine_collab::claim_base(
+        &mut store,
+        &key,
+        YdocContentKind::Richdoc,
+        &original,
+        &NoFaults,
+        2,
+    )
+    .unwrap();
+    store
+        .read_with(|conn| conn.execute("UPDATE ydoc_docs SET path='owner.md'", []))
+        .unwrap();
+    let checkpoint = store
+        .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+        .unwrap()
+        .encode_full_state();
+    let observed = ObservedOwnerBinding {
+        binding: LiveObjectBinding {
+            workspace_id: "ws".into(),
+            main_version_id: "main".into(),
+            object_id: "object".into(),
+            lineage_claim_id: hex_sha256(&original),
+            current_path: "owner.md".into(),
+            selector_paths: vec!["owner.md".into()],
+            restore_fence_generation: 0,
+        },
+        relay_database_namespace: "relay".into(),
+        revision: 1,
+        accepted_cursor: 0,
+        native_head_sequence: store
+            .read_with(|conn| dohc_engine_collab::read_marker_in(conn, &key))
+            .unwrap()
+            .unwrap()
+            .head_update_seq,
+        checkpoint_digest: hex_sha256(&checkpoint),
+        limits: OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 60_000,
+        },
+    };
+    store
+        .write_with(&NoFaults, |tx| {
+            install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)
+        })
+        .unwrap();
+    RestoreOwner {
+        _scratch: scratch,
+        store,
+        observed,
+        checkpoint,
+        initial_text,
+        initial_moment,
+    }
+}
+
+/// The host's state once a restore that appends `paragraph` is accepted.
+fn restored_host(checkpoint: &[u8], paragraph: &str) -> (Ydoc, String) {
+    let host = Ydoc::wire();
+    host.apply(checkpoint).unwrap();
+    let _ = host.richdoc_append_paragraph(paragraph);
+    let text = host.project(YdocContentKind::Richdoc).unwrap().content;
+    (host, text)
+}
+
+/// The audit parser is covered separately. Seed its committed output.
+fn retain_restore_audit(
+    store: &EngineStore,
+    binding: &dohc_engine_collab::live_object_binding::LiveObjectBinding,
+    namespace: &str,
+    id: &str,
+    text: &str,
+    terminal_cursor: i64,
+) {
+    let record = format!(
+        "{{\"momentId\":{},\"relayDatabaseNamespace\":{},\"binding\":{},\"terminalCursor\":{terminal_cursor}}}",
+        serde_json::to_string(id).unwrap(),
+        serde_json::to_string(namespace).unwrap(),
+        serde_json::to_string(binding).unwrap()
+    );
+    store.read_with(|conn| conn.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,'ws',?2,?3,?4)", params![id, hex_sha256(record.as_bytes()), record, text_sha(text)])).unwrap();
+}
+
+fn restore_settlement(
+    origin: &str,
+    id: &str,
+    initial_text: &str,
+    initial_moment: &str,
+    text: &str,
+) -> ReplicationEnvelope {
+    envelope(
+        origin,
+        0,
+        "ws",
+        present_text_payload(
+            id,
+            "object",
+            "write",
+            "owner.md",
+            "owner.md",
+            initial_text,
+            initial_moment,
+            text,
+        ),
+    )
+}
+
+/// The authenticated owner feed reaches `binding` at the host cut `cursor`.
+fn enroll_restore(
+    store: &mut EngineStore,
+    binding: &dohc_engine_collab::live_object_binding::LiveObjectBinding,
+    host: &Ydoc,
+    cursor: i64,
+    limits: &dohc_engine_collab::owner_outbox::OwnerOutboxLimits,
+) -> dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor {
+    use dohc_engine_collab::owner_outbox::enrollment::{
+        OwnerEnrollmentInput, OwnerEnrollmentPreparation, enroll_in_tx, prepare_in,
+    };
+    let captured = match store
+        .read_with(|conn| prepare_in(conn, binding, "relay"))
+        .unwrap()
+    {
+        OwnerEnrollmentPreparation::Capture { captured } => captured,
+        OwnerEnrollmentPreparation::Observed { .. } => panic!("a restore generation captures"),
+    };
+    let input = OwnerEnrollmentInput {
+        binding: binding.clone(),
+        relay_database_namespace: "relay".into(),
+        captured,
+        journal_cursor: cursor,
+        checkpoint: host.encode_full_state(),
+        host_vector: host.encode_state_vector(),
+    };
+    let advanced = store
+        .write_with(&NoFaults, |tx| enroll_in_tx(tx, "ws", &input, limits, 3))
+        .unwrap();
+    let dohc_engine_storage::TxnOutcome::Committed(advanced) = advanced else {
+        panic!("enrollment must commit")
+    };
+    advanced
+}
+
+fn disposition(store: &EngineStore, origin: &str) -> Option<String> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT apply_disposition FROM replication_log WHERE origin_id=?1",
+                [origin],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
 }
 
 #[test]

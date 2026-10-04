@@ -518,7 +518,10 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
   try {
     const limits = parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS));
     const delivery = deviceDeliveryConfig ? readRelayDeviceDeliveryConfig(deviceDeliveryConfig,limits) : undefined;
-    if (ownerAdmissionPath && delivery) ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds);
+    if (ownerAdmissionPath && delivery) {
+      ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds);
+      ownerAdmission.admission.trustedAccount = async accountId => ({accountId, name: (await lookupUserDisplayName(accountId))?.trim() || accountId});
+    }
     deviceControl = createDeviceControl({
       storage, relayExchangeKey: relayExchangeKey ?? "",
       hosts: new Set((process.env.DOHC_RELAY_DEVICE_CONTROL_HOSTS ?? "").split(",")),
@@ -540,9 +543,10 @@ if (deviceControl) {
 }
 const ownerAdmissionRun = ownerAdmission && deviceControl && deployment ? startOwnerAdmission({config: ownerAdmission,storage,history: deployment.history,control: deviceControl,
   onError: error => console.error("[sync-relay] private owner delivery:",error)}) : undefined;
-server.once("close",() => ownerAdmissionRun?.close());
-process.once("SIGINT",() => ownerAdmissionRun?.close());
-process.once("SIGTERM",() => ownerAdmissionRun?.close());
+const stopOwnerAdmission = () => {void ownerAdmissionRun?.close().catch(error => console.error("[sync-relay] private owner delivery shutdown:",error));};
+server.once("close",stopOwnerAdmission);
+process.once("SIGINT",stopOwnerAdmission);
+process.once("SIGTERM",stopOwnerAdmission);
 const serviceHostConfig = process.env.DOHC_RELAY_SERVICE_HOST_CONFIG;
 if (serviceHostConfig && !deployment) fatal("FATAL: A service host requires an initialized relay deployment.");
 const configuredServiceHost = serviceHostConfig && deployment
@@ -642,6 +646,7 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    await ownerAdmissionRun?.close();
     await automations?.close();
     await selfHost?.close();
     await configuredServiceHost?.close();

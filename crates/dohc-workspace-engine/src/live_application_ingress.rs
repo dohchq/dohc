@@ -6,8 +6,9 @@ use crate::rpc::live_application::{
 };
 use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_collab::live_update_application::{
-    AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveApplicationBootstrap,
-    LiveUpdateStructRange, RelayAcceptedLiveUpdate, parse_admitted_metadata,
+    AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, AdmittedNativeHistoryReconstruction,
+    LiveApplicationBootstrap, LiveUpdateStructRange, NativeHistoryReconstruction,
+    RelayAcceptedLiveUpdate, parse_admitted_metadata,
 };
 use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::limits::MAX_WIRE_INTEGER;
@@ -39,7 +40,7 @@ pub struct LiveApplicationIngressConfig {
 }
 
 impl LiveApplicationIngressConfig {
-    fn reservation_bytes(&self, update_bytes: usize, ranges: usize) -> Option<usize> {
+    fn assembly_reservation_bytes(&self, update_bytes: usize, ranges: usize) -> Option<usize> {
         // The current raw readback Vec grows geometrically. Charge twice its
         // element length in addition to the final input Vec and update copy.
         update_bytes
@@ -52,6 +53,33 @@ impl LiveApplicationIngressConfig {
             .checked_add(MAX_HEADER_BYTES.checked_mul(3)?)?
             .checked_add(MAX_CHUNK_BYTES.checked_mul(2)?)?
             .checked_add(self.application_working_reserve_bytes)
+    }
+
+    fn reconstruction(&self) -> NativeHistoryReconstruction {
+        NativeHistoryReconstruction {
+            working_reserve_bytes: self.application_working_reserve_bytes,
+        }
+    }
+
+    fn reservation_bytes(&self, update_bytes: usize, ranges: usize) -> Option<usize> {
+        let assembly = self.assembly_reservation_bytes(update_bytes, ranges)?;
+        // The exact incoming range Vec stays owned by the actor. Persisting its
+        // JSON uses an exactly-sized String; replay streams historical ranges.
+        let ranges_bytes = ranges.checked_mul(size_of::<LiveUpdateStructRange>())?;
+        let replay = self
+            .reconstruction()
+            .reservation_bytes()?
+            .checked_add(ranges_bytes)?;
+        // The persisted JSON is dropped by INSERT before checkpoint replay.
+        // Two update spans cover incoming bytes and native append/read scratch.
+        let persistence = ranges
+            .checked_mul(76)?
+            .checked_add(ranges_bytes)?
+            .checked_add(update_bytes.checked_mul(2)?)?
+            .checked_add(MAX_HEADER_BYTES.checked_mul(6)?)?
+            .checked_add(MAX_CHUNK_BYTES.checked_mul(2)?)?
+            .checked_add(self.application_working_reserve_bytes)?;
+        Some(assembly.max(replay).max(persistence))
     }
 
     pub fn minimum_aggregate_bytes(&self) -> Option<usize> {
@@ -214,9 +242,18 @@ pub(crate) struct SettlementAdmission {
     budget: Arc<Semaphore>,
     slots: Arc<Semaphore>,
     bytes: u32,
+    reconstruction: NativeHistoryReconstruction,
 }
 
 impl SettlementAdmission {
+    pub(crate) fn reserve_reconstruction(
+        &self,
+    ) -> Result<AdmittedNativeHistoryReconstruction, WireError> {
+        Ok(AdmittedNativeHistoryReconstruction {
+            policy: self.reconstruction,
+            reservation: self.reserve()?,
+        })
+    }
     pub(crate) fn reserve(&self) -> Result<Arc<dyn Send + Sync>, WireError> {
         let overloaded = || WireError::new(ErrorCode::Overloaded, "live-settlement-capacity");
         let upload = self
@@ -253,7 +290,7 @@ impl LiveApplicationIngress {
         // The configured working reserve remains charged while the actor hydrates Yrs.
         let bytes = self
             .config
-            .reservation_bytes(MAX_YDOC_UPDATE_BYTES * 2, 0)
+            .assembly_reservation_bytes(MAX_YDOC_UPDATE_BYTES * 2, 0)
             .and_then(|n| n.checked_add(MAX_YDOC_UPDATE_BYTES * 10))
             .filter(|n| *n <= self.config.aggregate_bytes)
             .and_then(|n| u32::try_from(n).ok())
@@ -262,6 +299,7 @@ impl LiveApplicationIngress {
             budget: self.budget.clone(),
             slots: self.upload_slots.clone(),
             bytes,
+            reconstruction: self.config.reconstruction(),
         })
     }
     pub(crate) fn sync_admission(
@@ -277,6 +315,7 @@ impl LiveApplicationIngress {
             budget: self.budget.clone(),
             slots: self.upload_slots.clone(),
             bytes,
+            reconstruction: self.config.reconstruction(),
         })
     }
 
@@ -308,10 +347,11 @@ impl LiveApplicationIngress {
     ) -> Result<SettlementAdmission, WireError> {
         // Receipt strings, their serialized audit identities, and cold Y.Doc projection
         // stay charged to the same admission budget as incoming applications.
-        let bytes = max_applications
-            .checked_mul(8192)
-            .and_then(|bytes| bytes.checked_add(self.config.application_working_reserve_bytes))
-            .and_then(|bytes| bytes.checked_add(MAX_HEADER_BYTES * 3))
+        let bytes = self
+            .config
+            .reconstruction()
+            .reservation_bytes()
+            .and_then(|bytes| bytes.checked_add(max_applications.checked_mul(8192)?))
             .filter(|bytes| {
                 max_applications > 0
                     && self.config.application_working_reserve_bytes > 0
@@ -323,6 +363,7 @@ impl LiveApplicationIngress {
             budget: self.budget.clone(),
             slots: self.upload_slots.clone(),
             bytes,
+            reconstruction: self.config.reconstruction(),
         })
     }
 
@@ -816,6 +857,64 @@ fn overloaded() -> WireError {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn supported_profile_prices_streamed_replay_and_maximum_incoming_metadata() {
+        let mut config = config();
+        config.application_working_reserve_bytes = 8 * 1024 * 1024;
+        let ranges = NativeHistoryReconstruction::MAX_RANGES;
+        let minimum = config.minimum_aggregate_bytes().unwrap();
+        let persistence = ranges * (76 + size_of::<LiveUpdateStructRange>())
+            + 2 * MAX_YDOC_UPDATE_BYTES
+            + 6 * MAX_HEADER_BYTES
+            + 2 * MAX_CHUNK_BYTES
+            + config.application_working_reserve_bytes;
+        assert_eq!(minimum, persistence);
+        assert!(minimum < 512 * 1024 * 1024);
+        let ingress =
+            LiveApplicationIngress::new(Arc::new(EngineService::new()), config.clone()).unwrap();
+        assert!(ingress.settlement_admission(128).is_ok());
+        assert!(
+            config.reservation_bytes(2, 0).unwrap()
+                >= config.reconstruction().reservation_bytes().unwrap()
+        );
+        config.aggregate_bytes = minimum - 1;
+        assert!(LiveApplicationIngress::new(Arc::new(EngineService::new()), config).is_err());
+        assert!(
+            NativeHistoryReconstruction {
+                working_reserve_bytes: usize::MAX
+            }
+            .reservation_bytes()
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn admitted_reconstruction_guard_holds_exact_bytes_through_clones_and_overload() {
+        let (_scratch, service, _owner, _workspace, _, _) = fixture().await;
+        let mut config = config();
+        config.application_working_reserve_bytes = 8 * 1024 * 1024;
+        let ingress = LiveApplicationIngress::new(service, config).unwrap();
+        let admission = ingress.settlement_admission(128).unwrap();
+        let capacity = ingress.budget.available_permits();
+        let first = admission.reserve_reconstruction().unwrap();
+        assert_eq!(first.policy.working_reserve_bytes, 8 * 1024 * 1024);
+        let charge = first.policy.reservation_bytes().unwrap() + 128 * 8192;
+        assert_eq!(capacity - ingress.budget.available_permits(), charge);
+        let retained = first.clone();
+        drop(first);
+        assert_eq!(capacity - ingress.budget.available_permits(), charge);
+        let second = admission.reserve_reconstruction().unwrap();
+        let error = match admission.reserve_reconstruction() {
+            Ok(_) => panic!("overloaded work admitted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ErrorCode::Overloaded);
+        drop(second);
+        drop(retained);
+        assert_eq!(ingress.budget.available_permits(), capacity);
+        assert_eq!(ingress.upload_slots.available_permits(), 2);
+    }
+
     #[tokio::test]
     async fn settlement_shares_ingress_slots_and_keeps_its_reservation_until_disposal() {
         let (_scratch, service, _owner, workspace, _, _) = fixture().await;

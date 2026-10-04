@@ -1,10 +1,11 @@
+import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
 import {connectOwnerLiveTransport, type OwnerLiveTransport} from "@dohc/sync-relay/owner-live-transport";
-import {createLiveFrameSession, decodeLiveFrameSync, encodeLiveFrame, LiveFrameError,
+import {createLiveFrameSession, decodeLiveFrameSync, encodeLiveFrame, LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, LiveFrameError,
   type LiveFrame, type LiveFrameBegin, type LiveFrameSessionPolicy} from "@dohc/live-session-contract/live-frame";
 import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import type {LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
+import {parseAgentDeclaration, type AgentDeclaration, type LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import type {FreshOwnerAuthority, OwnerAuthorityResult, OwnerYDocDelivery, OwnerYDocDeliveryEnvelope,
   OwnerYDocDeliveryResult} from "./ownerYDocOutbox";
 
@@ -27,6 +28,7 @@ export interface OwnerYDocFrameDeliveryOptions {
   attemptTimeoutMs: number;
   signal: AbortSignal;
   freshBearer(signal: AbortSignal): Promise<string>;
+  authenticatedAccountId?(signal: AbortSignal): Promise<string | undefined>;
   acceptedState: OwnerAcceptedState;
   connect?: typeof connectOwnerLiveTransport;
 }
@@ -65,7 +67,8 @@ interface Attempt {
   nextTransfer: number;
   maxFrameBytes: number;
   cursor: number;
-  envelope?: Pick<OwnerYDocDeliveryEnvelope, "deliveryId" | "update" | "updateDigest">;
+  accountId?: string;
+  envelope?: Pick<OwnerYDocDeliveryEnvelope, "deliveryId" | "update" | "updateDigest"> & {authorContext?: LiveAuthorContext};
   receipt?: LiveUpdateReceipt;
   stopTimer?: ReturnType<typeof setTimeout>;
 }
@@ -79,6 +82,8 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
   constructor(options: OwnerYDocFrameDeliveryOptions) {
     this.options = {...options, frames: {...options.frames, receive: {...options.frames.receive}}};
     createLiveFrameSession("client", this.options.frames).close();
+    // A queued draft can declare an agent, so this route must carry the largest declared submission.
+    if (this.options.frames.receive.maxFrameBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES || this.options.frames.maxControlBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES) throw new TypeError("Invalid owner frame policy.");
     if (!Number.isSafeInteger(options.attemptTimeoutMs) || options.attemptTimeoutMs < 1 || options.attemptTimeoutMs > 2_147_483_647) throw new TypeError("Invalid owner attempt timeout.");
     this.routeUrl({workspaceId: "check", objectId: "check", lineageClaimId: "a".repeat(64)});
   }
@@ -127,6 +132,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
       if (!(state.stateVector instanceof Uint8Array) || state.stateVector.length > this.options.frames.receive.maxStateVectorBytes ||
           !Number.isSafeInteger(state.journalCursor) || state.journalCursor < 0) throw new Error("Invalid native accepted state.");
       attempt.vector = Uint8Array.from(state.stateVector); attempt.cursor = state.journalCursor;
+      attempt.accountId = await this.options.authenticatedAccountId?.(attempt.signal); this.check(attempt);
       const bearer = await abortable(this.options.freshBearer(attempt.signal), attempt.signal); this.check(attempt);
       const transport = await abortable((this.options.connect ?? connectOwnerLiveTransport)({url: this.routeUrl(binding), bearer,
         maxFrameBytes: attempt.maxFrameBytes, signal: attempt.signal, receive: bytes => this.receive(attempt, bytes), closed: () => {if (this.active === attempt) this.stop(attempt);}}), attempt.signal);
@@ -142,7 +148,12 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
     const attempt = this.active;
     if (!attempt || !this.current(attempt) || attempt.authority !== authority || attempt.envelope || !isDeepStrictEqual(attempt.binding, envelopeValue.binding)) return {kind: "retry"};
     if (envelopeValue.update.length > this.options.frames.receive.maxUpdateBytes || digest(envelopeValue.update) !== envelopeValue.updateDigest) {this.stop(attempt); return {kind: "retry"};}
-    attempt.envelope = {deliveryId: envelopeValue.deliveryId, updateDigest: envelopeValue.updateDigest, update: Uint8Array.from(envelopeValue.update)};
+    const declared = envelopeValue.agentDeclaration;
+    let agentDeclaration: AgentDeclaration | undefined;
+    try {agentDeclaration = declared === undefined ? undefined : parseAgentDeclaration(declared);} catch {this.stop(attempt); return {kind: "retry"};}
+    attempt.envelope = {deliveryId: envelopeValue.deliveryId, updateDigest: envelopeValue.updateDigest, update: Uint8Array.from(envelopeValue.update),
+      ...(attempt.accountId && agentDeclaration ? {authorContext: {kind: "account", accountId: attempt.accountId, agent: {agentId: agentDeclaration.agentId,
+        ...(agentDeclaration.onBehalfOf !== null ? {onBehalfOf: agentDeclaration.onBehalfOf} : {}), depth: agentDeclaration.depth}}} : {})};
     void this.pump(attempt);
     return attempt.delivered.promise;
   }
@@ -166,7 +177,8 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
             attempt.transfer = {begin: {kind: "begin", purpose: "client-vector", transferId: attempt.nextTransfer++, totalBytes: attempt.vector.length, digest: digest(attempt.vector)}, bytes: attempt.vector, begun: false, offset: 0};
           } else if (attempt.authority && attempt.envelope && !attempt.submitted) {
             const entry = attempt.envelope;
-            attempt.transfer = {begin: {kind: "begin", purpose: "submit-update", deliveryId: entry.deliveryId, transferId: attempt.nextTransfer++, totalBytes: entry.update.length, digest: entry.updateDigest}, bytes: entry.update, begun: false, offset: 0};
+            attempt.transfer = {begin: {kind: "begin", purpose: "submit-update", deliveryId: entry.deliveryId, transferId: attempt.nextTransfer++, totalBytes: entry.update.length, digest: entry.updateDigest,
+              ...(entry.authorContext ? {authorContext: entry.authorContext} : {})}, bytes: entry.update, begun: false, offset: 0};
           } else return;
           control = attempt.controls[0];
         }
@@ -202,6 +214,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
       const lease = attempt.protocol.receive(owned), {frame, transfer} = lease.value;
       try {
         if (frame.kind === "welcome") {
+          if (frame.receivePolicy.maxFrameBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES) throw new Error("Owner route frame policy is too small.");
           attempt.maxFrameBytes = Math.min(attempt.maxFrameBytes, frame.receivePolicy.maxFrameBytes);
           attempt.authority = Object.freeze({value: Object.freeze({}), hostEpoch: frame.hostEpoch});
         } else if (frame.kind === "close") {this.stop(attempt); return;}

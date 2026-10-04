@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { parseNativeOwnerActivation } from "./nativeOwnerActivation";
+import { parseNativeOwnerActivation, parseNativeOwnerActivationSource } from "./nativeOwnerActivation";
 
 function fixture() {
   const baseline = Buffer.from([0, 0]), full = Buffer.from([1, 1, 1]);
@@ -43,6 +43,18 @@ describe("native imported owner activation", () => {
     const { row, bytes } = fixture();
     change(row);
     expect(() => parseNativeOwnerActivation(row, bytes, "notes.md", 1000)).toThrow();
+  });
+
+  it("returns the source in native field order whatever order it arrives in", () => {
+    const { row } = fixture();
+    const reversed = Object.fromEntries(Object.entries(row.source).reverse());
+    // The JSON serde writes for ImportedOwnerSource, which native adoption evidence hashes.
+    expect(JSON.stringify(parseNativeOwnerActivationSource(reversed, "notes.md", 1000))).toBe(
+      `{"version":1,"relayDatabaseNamespace":"relay","workspaceId":"workspace","mainVersionId":"main","objectId":"object",` +
+      `"lineageClaimId":"${row.source.lineageClaimId}","currentPath":"notes.md","replicationEpoch":"epoch","streamIdentity":"stream",` +
+      `"committedCursor":10,"baseOriginId":"peer","baseOriginSeq":2,"baseRelaySeq":8,"sourceMomentId":"source",` +
+      `"sourceDigest":"${row.source.sourceDigest}","sourceByteLength":6,"nativeHeadSequence":1,` +
+      `"fullStateDigest":"${row.source.fullStateDigest}","fullStateByteLength":3}`);
   });
 
   it("rejects byte corruption and output over budget", () => {

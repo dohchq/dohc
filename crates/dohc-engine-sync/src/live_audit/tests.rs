@@ -176,6 +176,7 @@ fn deferred_settlement_exports_its_companion_moment_after_evidence_once() {
         &f.handle,
         Some(receipt),
         8,
+        dohc_engine_collab::live_update_application::NativeHistoryReconstruction { working_reserve_bytes: 8 * 1024 * 1024 },
         |store, audit| {
             let b = audit.binding();
             let key = dohc_engine_collab::DocKey::new(
@@ -656,6 +657,143 @@ fn import_source(f: &Fixture) -> (ScratchDir, std::path::PathBuf, EngineStore) {
         );
     }
     (scratch, path, store)
+}
+
+#[test]
+fn declared_owner_history_exports_and_imports_with_its_agent() {
+    use dohc_engine_collab::live_update_application::{
+        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult, LiveUpdateReceipt,
+        RelayAcceptedLiveUpdate, ServerDerivedLiveUpdateAuthority, apply_committed,
+    };
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let declaration = dohc_engine_domain::AgentDeclaration {
+        agent_id: "trip-agent 旅行".into(),
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+    };
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "declared-delivery".into(),
+                    update_digest: hex_sha256(&f.bytes),
+                    journal_cursor: 1,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 200,
+            },
+            first_seen: Vec::new(),
+
+            canonical_version: Some(2),
+
+            author_snapshot: Some(
+                (Some(declaration.clone()))
+                    .into_iter()
+                    .map(dohc_engine_collab::live_update_application::LiveAuthorEntry::from)
+                    .collect(),
+            ),
+
+            first_seen_deletes: Some(vec![]),
+
+            checkpoint_coverage: None,
+        },
+        update_bytes: f.bytes.clone(),
+    };
+    assert!(matches!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |tx, namespace, binding, count| journal_live_event_in_tx(
+                tx, namespace, binding, count, 200
+            )
+            .map(|_| ())
+            .map_err(|error| {
+                dohc_engine_collab::live_update_application::ApplicationError::Storage(
+                    dohc_engine_storage::StorageError::persist_public(error),
+                )
+            })
+        )
+        .unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    let ops = operations(&f.store);
+    let audit = ops
+        .iter()
+        .find(|op| op.op_kind == application_record::EVENT_OP)
+        .unwrap()
+        .clone();
+    let (_scratch, path, mut receiver) = open_store();
+    let blobs: Vec<Vec<u8>> = f
+        .store
+        .read_with(|conn| {
+            conn.prepare("SELECT bytes FROM binary_blobs")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+    receiver
+        .write_with(&NoFaults, |tx| {
+            for bytes in &blobs {
+                put_binary_blob(tx, bytes)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    for mut op in ops {
+        op.relay_seq = Some(op.origin_seq + 1);
+        let result = crate::apply_replication_envelope(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Applied(_)),
+            "{}: {:?}",
+            op.op_kind,
+            result.primary
+        );
+    }
+    drop(receiver);
+    let receiver = EngineStore::open(&path, 300).unwrap();
+    assert_eq!(count(&receiver, "live_audit_events"), 1);
+    assert_eq!(count(&receiver, "live_device_update_applications"), 0);
+    let manifest: chunks::Manifest =
+        serde_json::from_value(audit.payload["manifest"].clone()).unwrap();
+    receiver
+        .read_with(|conn| {
+            let mut reader = chunks::ChunkReader::new(conn, &manifest).unwrap();
+            let record: serde_json::Value = serde_json::from_reader(&mut reader).unwrap();
+            reader.finish().unwrap();
+            let accepted = &record["metadata"]["accepted"];
+            assert_eq!(
+                record["metadata"]["authorSnapshot"][0],
+                serde_json::to_value(
+                    dohc_engine_collab::live_update_application::LiveAuthorEntry::from(
+                        declaration.clone()
+                    )
+                )
+                .unwrap()
+            );
+            // The declaration sits beside the authority; it never replaces it.
+            assert_eq!(accepted["authority"]["principalKind"], "owner");
+            assert_eq!(accepted["authority"]["principalId"], "owner");
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
 }
 
 #[test]

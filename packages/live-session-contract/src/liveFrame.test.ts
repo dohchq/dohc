@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import vectors from "../vectors/live-frame-vectors.json";
 import { parseHostEpoch } from "./hostControl.js";
 import {
+  LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
   LIVE_FRAME_MINIMUM_MAX_BYTES,
   LiveFrameError,
   createLiveFrameSession,
@@ -121,6 +122,45 @@ describe("live frame codec", () => {
     expect(() => encodeLiveFrame(frame, 585)).toThrow();
     expect(() => createLiveFrameSession("client", { ...limits, receive: { ...receivePolicy, maxFrameBytes: 585 } })).toThrow();
     expect(encodeLiveFrame({ ...begin("submit-update"), deliveryId: "x".repeat(512) } as LiveFrame, 586)).toHaveLength(577);
+  });
+  it("carries explicit account, link, and signed-out recording context", () => {
+    const plain = begin("submit-update");
+    expect(decodeLiveFrame(encodeLiveFrame(plain, 586), 586)).not.toHaveProperty("authorContext");
+    const contexts = [
+      {kind: "account", accountId: "owner", agent: {agentId: "trip-agent", agentName: "Trip agent", onBehalfOf: "person", depth: 2}},
+      {kind: "link", publicPrincipalId: "public", agent: {agentId: "agent"}},
+      {kind: "signed-out"},
+    ] as const;
+    for (const authorContext of contexts) {
+      const frame = {...plain, authorContext} as LiveFrame;
+      expect(decodeLiveFrame(encodeLiveFrame(frame, 586), 586)).toEqual(frame);
+    }
+    // Independent literal: account tag, owner string, no agent.
+    const head = "0000000000000001" + "03" + "0000000000000002" + "00".repeat(32) + "0000000164";
+    const literal = "444c49560103000000000041" + head + "01" + "000000056f776e6572" + "00";
+    expect(hex(encodeLiveFrame({...plain, authorContext: {kind: "account", accountId: "owner"}} as LiveFrame, 586))).toBe(literal);
+  });
+  it("bounds recording context and rejects malformed or raw declarations", () => {
+    const largest = {...begin("submit-update"), deliveryId: "x".repeat(512), authorContext: {kind: "account", accountId: "a".repeat(512),
+      agent: {agentId: "b".repeat(512), agentName: "c".repeat(512), onBehalfOf: "d".repeat(512), depth: 64}}} as LiveFrame;
+    expect(LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES).toBe(2647);
+    expect(encodeLiveFrame(largest, LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES)).toHaveLength(LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES);
+    expect(() => encodeLiveFrame(largest, LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES - 1)).toThrow();
+    for (const authorContext of [undefined, null, {kind: "account"}, {kind: "account", accountId: "a", agent: {agentId: "b", depth: 65}}]) {
+      expect(() => encodeLiveFrame({...begin("submit-update"), authorContext} as LiveFrame, 586)).toThrow(LiveFrameError);
+    }
+    expect(() => encodeLiveFrame({...begin("submit-update"), agentDeclaration: {agentId: "a", onBehalfOf: null, depth: 0}} as unknown as LiveFrame, 586)).toThrow();
+    expect(() => encodeLiveFrame({...begin("client-vector"), authorContext: {kind: "signed-out"}} as LiveFrame, 586)).toThrow();
+  });
+  it("carries recording context through the live route and owns nested fields", () => {
+    const {client, server} = makeLive();
+    const authorContext = {kind: "account", accountId: "owner", agent: {agentId: "trip-agent", depth: 1}} as const;
+    const frame = {...begin("submit-update", 2), authorContext} as LiveFrame;
+    const received = deliver(client, server, frame);
+    try {
+      expect(received.value.frame).toEqual(frame);
+      expect(Object.isFrozen((received.value.frame as typeof frame & {authorContext: typeof authorContext}).authorContext.agent)).toBe(true);
+    } finally {received.value.transfer?.release(); received.release();}
   });
   it("rejects corrupt headers, unsafe integers and unchecked announcements", () => {
     const literal = bytes(vectors.frames.find(v => v.name === "chunk")!.hex);

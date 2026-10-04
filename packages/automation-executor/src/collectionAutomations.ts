@@ -1149,6 +1149,8 @@ export class CollectionAutomations {
   private chain: Promise<void> = Promise.resolve();
   /** Serializes reach verdict updates. */
   private verdictChain: Promise<unknown> = Promise.resolve();
+  /** Verdict changes remain unsaved until the store confirms the save. */
+  private verdictsDirty = false;
   private opened: Promise<void> | null = null;
   private state: "closed" | "open" | "paused" | "disposed" = "closed";
   /** Rises at each pause and close, so an open that began before one stops. */
@@ -3999,16 +4001,17 @@ export class CollectionAutomations {
   }
 
   /**
-   * Runs `update` on the verdicts in order and saves them when it changed
-   * any. A step that starts or stops waiting for a current editor raises
+   * Runs `update` on the verdicts in order and saves unsaved changes.
+   * A step that starts or stops waiting for a current editor raises
    * the hold notices once.
    */
   private updateVerdicts<T>(update: () => T, save = false): Promise<T> {
     const next = this.verdictChain.then(async () => {
       const before = this.verdictSeq;
       const result = update();
+      this.verdictsDirty ||= save || this.verdictSeq !== before;
       // Nothing overwrites a file dohc could not read until someone resets it.
-      if (!this.verdictsUnreadable && (save || this.verdictSeq !== before)) {
+      if (!this.verdictsUnreadable && this.verdictsDirty) {
         // An edited automation starts its verdicts again, so the old
         // definition's go.
         const hashes = new Map(this.everyAutomation().map(({ automationId, automation }) => [automationId, definitionHash(automation)]));
@@ -4023,6 +4026,7 @@ export class CollectionAutomations {
           pending, taken: this.reachTakenAt,
         });
         this.savedPending = pending;
+        this.verdictsDirty = false;
         // A step that stops, waits, or runs again changes which fields its
         // automation sets.
         this.options.onAutomationsChanged();

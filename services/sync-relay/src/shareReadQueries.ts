@@ -1,4 +1,5 @@
 import { createAccountlessPathProjection } from "./accountlessPathProjection";
+import {parseLiveAuthorSnapshot} from "@dohc/live-session-contract";
 import {
   filterOpForShare,
   groupChannelIsOrdinary,
@@ -241,6 +242,10 @@ export function createShareReadQueries(
               )
             : null;
         if (payload === null) continue;
+        if (audience === "authenticated" && row.opKind === "moment.append") {
+          const authors = admittedMomentAuthors(row.payloadJson);
+          if (authors) (payload as Record<string, unknown>).authors = authors;
+        }
         ops.push({
           relaySeq: row.relaySeq,
           ...(audience === "authenticated" ? { originId: row.originId } : {}),
@@ -437,6 +442,31 @@ export function createShareReadQueries(
     historicalSharedBlob,
     linkRevisionByteLength,
   };
+}
+
+// The native moment-author budgets in dohc-engine-domain/src/store.rs.
+const MAX_SHARED_MOMENT_AUTHORS = 1_024;
+const MAX_SHARED_AUTHOR_JSON_BYTES = 128 * 1024;
+
+/** Author summaries from the selected durable moment, projected through the same shared shape. */
+function admittedMomentAuthors(payloadJson: string): Array<Record<string, unknown>> | null {
+  const raw = (JSON.parse(payloadJson) as Record<string, unknown>).authors;
+  if (!Array.isArray(raw) || raw.length > MAX_SHARED_MOMENT_AUTHORS) return null;
+  const authors: Array<Record<string, unknown>> = [];
+  for (const value of raw) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const author = value as Record<string, unknown>;
+    if (author.kind !== "human" && author.kind !== "link" && author.kind !== "agent") continue;
+    if (author.kind === "human" && (typeof author.humanName !== "string" || String(author.humanId).startsWith("local:"))) continue;
+    const publicAuthor = author.kind === "agent" ? {kind: "agent", agentId: author.agentId,
+      ...(author.agentName === undefined ? {} : {agentName: author.agentName}),
+      ...(author.onBehalfOf === undefined || String(author.onBehalfOf).startsWith("local:") ? {} : {onBehalfOf: author.onBehalfOf}),
+      ...(author.depth === undefined || author.depth === 0 ? {} : {depth: author.depth})} : author;
+    try {authors.push({...parseLiveAuthorSnapshot([publicAuthor])[0]!});}
+    catch { /* Optional malformed provenance does not discard an authorized file change. */ }
+  }
+  return authors.length > 0 && Buffer.byteLength(JSON.stringify(authors), "utf8") <= MAX_SHARED_AUTHOR_JSON_BYTES
+    ? authors : null;
 }
 
 // The objects whose after-content in an admitted row is `sha256`: the moment's

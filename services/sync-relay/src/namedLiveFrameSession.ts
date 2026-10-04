@@ -1,3 +1,4 @@
+import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { createHash } from "node:crypto";
 import {
   createLiveFrameSession, encodeLiveFrame, encodeLiveFrameSync, LiveFrameError,
@@ -24,7 +25,8 @@ export interface NamedFrameHostSession {
   readonly invalidated: AbortSignal;
   assertCurrent(): void;
   openSync(clientVector: Uint8Array, signal: AbortSignal): Promise<NamedFrameSync>;
-  submit(input: { deliveryId: string; updateDigest: string; updateBytes: Uint8Array }, signal: AbortSignal): Promise<NamedFrameSubmissionResult>;
+  /** Recording context is checked against the authenticated route by admission. */
+  submit(input: { deliveryId: string; updateDigest: string; updateBytes: Uint8Array; authorContext?: LiveAuthorContext }, signal: AbortSignal): Promise<NamedFrameSubmissionResult>;
   close(): void;
 }
 export interface NamedFrameTransport {
@@ -199,7 +201,8 @@ export function createNamedLiveFrameSession(options: {
           submitting = true;
           run(async () => {
             try {
-              const accepted = await host.submit({ deliveryId: begin.deliveryId, updateDigest: begin.digest, updateBytes }, lifetime.signal);
+              const accepted = await host.submit({ deliveryId: begin.deliveryId, updateDigest: begin.digest, updateBytes,
+                ...(begin.authorContext ? { authorContext: begin.authorContext } : {}) }, lifetime.signal);
               check();
               result = accepted.result === "success" ? { kind: "result", ...accepted } :
                 { kind: "result", deliveryId: begin.deliveryId, updateDigest: begin.digest, ...accepted };

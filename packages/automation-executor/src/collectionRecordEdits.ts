@@ -15,6 +15,9 @@ import {
 } from "@dohc/workspace-contracts";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import * as Y from "yjs";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
 import {
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEditsRefused,
@@ -631,76 +634,60 @@ async function recordPathFor(
  * The wait ends at the caller's signal or ADOPTION_DEADLINE_MS, whichever
  * comes first.
  */
-function waitForRecord(
+async function waitForRecord(
   context: CollectionRecordEditContext,
   collectionPath: string,
   path: string,
   onStage: (stage: CreationStage) => void,
 ): Promise<{ path: string; recordId: string }> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let checking = false;
-    let checkAgain = false;
-    let lastError: unknown;
-    const finish = (
-      outcome: { path: string; recordId: string } | { error: Error },
-    ): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadline);
-      unsubscribe();
-      context.signal.removeEventListener("abort", expire);
-      if ("error" in outcome) reject(outcome.error);
-      else resolve(outcome);
-    };
-    const check = async (): Promise<void> => {
-      if (checking) {
-        checkAgain = true;
-        return;
-      }
-      checking = true;
-      do {
-        checkAgain = false;
-        try {
-          const recordId = await fileRecordId(context, path);
-          if (
-            recordId !== null &&
-            (await recordPathFor(context, collectionPath, recordId)) === path
-          ) {
-            finish({ path, recordId });
-          }
-        } catch (error) {
-          // The engine can refuse mid-reconcile (a Collection reloading);
-          // its next announcement answers. One that stays broken reaches
-          // the deadline with this refusal as the cause.
-          lastError = error;
-        }
-      } while (checkAgain && !settled);
-      checking = false;
-    };
-    const expire = (): void => {
-      finish({
-        error: new Error(
-          `dohc created ${path}, but the engine did not add it to the Collection in time.`,
-          lastError === undefined ? undefined : { cause: lastError },
-        ),
-      });
-    };
-    const deadline = setTimeout(expire, ADOPTION_DEADLINE_MS);
-    let unsubscribe = () => {};
+  let lastError: unknown;
+  const expired = (): Error => new Error(
+    `dohc created ${path}, but the engine did not add it to the Collection in time.`,
+    lastError === undefined ? undefined : { cause: lastError },
+  );
+  const wait = Effect.gen(function* () {
+    const changes = yield* Queue.sliding<void>(1);
     onStage("capture");
-    try {
-      unsubscribe = context.onRecordsChanged((paths) => {
-        if (paths === null || paths.includes(path)) void check();
-      });
-    } catch (error) {
-      clearTimeout(deadline);
-      reject(error);
-      return;
-    }
+    yield* Effect.acquireRelease(
+      Effect.try({
+        try: () => context.onRecordsChanged((paths) => {
+          if (paths === null || paths.includes(path)) Queue.offerUnsafe(changes, undefined);
+        }),
+        catch: error => error,
+      }),
+      unsubscribe => Effect.sync(unsubscribe),
+    );
     onStage("index");
-    context.signal.addEventListener("abort", expire, { once: true });
-    if (context.signal.aborted) expire();
-    else void check();
-  });
+    if (context.signal.aborted) return yield* Effect.fail(expired());
+    yield* Queue.offer(changes, undefined);
+    while (true) {
+      yield* Queue.take(changes);
+      const adopted = yield* Effect.gen(function* () {
+        const recordId = yield* Effect.tryPromise({
+          try: () => fileRecordId(context, path),
+          catch: error => error,
+        });
+        if (recordId === null) return null;
+        const found = yield* Effect.tryPromise({
+          try: () => recordPathFor(context, collectionPath, recordId),
+          catch: error => error,
+        });
+        return found === path ? { path, recordId } : null;
+      }).pipe(Effect.catch(error => {
+        // A refusal during reconciliation can recover on the next announcement.
+        lastError = error;
+        return Effect.succeed(null);
+      }));
+      if (adopted !== null) return adopted;
+    }
+  }).pipe(
+    Effect.scoped,
+    Effect.timeoutOrElse({
+      duration: ADOPTION_DEADLINE_MS,
+      orElse: () => Effect.fail(expired()),
+    }),
+  );
+  const exit = await Effect.runPromiseExit(wait, { signal: context.signal });
+  if (exit._tag === "Success") return exit.value;
+  throw Cause.hasInterruptsOnly(exit.cause) ? expired() : Cause.squash(exit.cause);
 }

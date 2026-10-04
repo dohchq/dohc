@@ -39,6 +39,16 @@ it.each(["active","sealed"] as const)("drains an old, large %s queue after fresh
   } finally {f.close();}
 });
 
+it("delivers the agent the queued edit declared with its entry", async () => {
+  const f = fixture("active");
+  try {
+    const agentDeclaration = {agentId: "trip-agent", onBehalfOf: null, depth: 0};
+    Object.assign(f.pending.entry!, {agentDeclaration});
+    expect(await f.drainer.drainOnce()).toBe("acknowledged");
+    expect(f.delivery.deliver.mock.calls[0]![1]).toMatchObject({deliveryId: "delivery", agentDeclaration});
+  } finally {f.close();}
+});
+
 it("keeps quarantine frozen without requesting fresh authority or delivering", async () => {
   const f = fixture("quarantined");
   try {

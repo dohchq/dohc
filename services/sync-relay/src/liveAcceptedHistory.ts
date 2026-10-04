@@ -5,6 +5,10 @@ import {parseLiveAuthorSnapshot} from "@dohc/live-session-contract/live-authorsh
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
+/**
+ * The exact JSON the relay and the native engine hash. An absent agent
+ * declaration has no member, so an undeclared event keeps its bytes.
+ */
 export function canonicalAcceptedMetadata(metadata: AdmittedLiveUpdateMetadata): AdmittedLiveUpdateMetadata {
   const {receipt: r, binding: b, authority: a, receivedAtMs} = metadata.accepted;
   return {accepted: {

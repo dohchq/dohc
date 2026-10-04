@@ -1,3 +1,6 @@
+import type { StorageContext } from "./storage/context.js";
+import { deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
@@ -17,6 +20,7 @@ export type LiveAdmissionValidation = LiveJournalValidation | {
 
 export interface OwnerOutboxAdmission {
   readonly activation?: ServiceActivationAccess;
+  trustedAccount?(accountId: string): TrustedLiveAccount | undefined | Promise<TrustedLiveAccount | undefined>;
   readonly shares: ReadonlyMap<string,string>;
   readonly maxEntriesPerDrain: number;
   readonly maxBytesPerDrain: number;
@@ -24,15 +28,30 @@ export interface OwnerOutboxAdmission {
     retainStateUpdate?: boolean}, signal?: AbortSignal): LiveAdmissionValidation | Promise<LiveAdmissionValidation>;
 }
 
+/**
+ * The adoption this queue belongs to, as the relay recorded it from the host's
+ * adoption ACK. A divergent adoption queues its local seed first, under
+ * `owner-adoption:sha256([adoptionId, sequence, updateDigest])`. `applied` is
+ * called once this pass proves no such seed still waits: the queue is empty,
+ * its head is later work, or the host acknowledged applying the seed.
+ */
+export interface OwnerOutboxAdoption {
+  readonly adoptionId: string;
+  readonly sequence: number;
+  applied(): void;
+}
+
 /** Runs within one authenticated device delivery and rechecks standing at every await. */
 export async function drainOwnerOutbox(options: {
   storage: SyncRelayStorage; admission: OwnerOutboxAdmission; client: EngineClient;
   workspace: string; host: LiveHostConnectionCoordinate; registrationId: number;
-  binding: LiveObjectBinding; nextRequestId(): number; deadlineMs: number; signal?: AbortSignal;
+  binding: LiveObjectBinding; adoption: OwnerOutboxAdoption; nextRequestId(): number; deadlineMs: number; signal?: AbortSignal;
   assertCurrent(): void;
   applyThrough(receipt: LiveUpdateReceipt): Promise<LiveUpdateHostApplicationAck | null>;
 }): Promise<{admittedEntries: number; hasMore: boolean; retryReady?: boolean}> {
-  const {storage,admission,client,registrationId,binding,host,signal} = options;
+  const {storage,admission,client,registrationId,binding,host,signal,adoption} = options;
+  const seedKey = (updateDigest: string) => `owner-adoption:${createHash("sha256")
+    .update(JSON.stringify([adoption.adoptionId,adoption.sequence,updateDigest])).digest("hex")}`;
   for (const value of [admission.maxEntriesPerDrain,admission.maxBytesPerDrain]) {
     if (!Number.isSafeInteger(value) || value < 1) throw new Error("Invalid owner drain budget.");
   }
@@ -49,7 +68,7 @@ export async function drainOwnerOutbox(options: {
     return {outboxId: status.outboxId, pendingBytes: status.pendingBytes};
   };
   const status = await readStatus(), outboxId = status.outboxId;
-  if (status.pendingBytes === 0) return {admittedEntries: 0, hasMore: false};
+  if (status.pendingBytes === 0) {adoption.applied(); return {admittedEntries: 0, hasMore: false};}
   if (typeof outboxId !== "string") throw new Error("Invalid owner outbox identity.");
   let receivedBytes = 0, admittedEntries = 0;
   const byteBudget = new Error("Owner drain byte budget exceeded.");
@@ -75,8 +94,13 @@ export async function drainOwnerOutbox(options: {
       const pending = await outbox.readDeliveryHead(outboxId,binding); check();
       if (!isDeepStrictEqual(pending.binding,binding) || pending.baseUpdateDigest !== binding.lineageClaimId) throw new Error("Owner outbox binding changed.");
       if (pending.state === "quarantined") throw new Error("Owner outbox requires explicit recovery.");
-      if (!pending.entry) return {admittedEntries, hasMore: false};
+      if (!pending.entry) {adoption.applied(); return {admittedEntries, hasMore: false};}
       const entry = pending.entry;
+      // The seed is the queue's first entry, so a later head proves it applied.
+      // Another adoption's key here means this queue is not the one recorded.
+      const seed = entry.appendKey === seedKey(entry.updateDigest);
+      if (!seed && entry.appendKey.startsWith("owner-adoption:")) throw new Error("Owner outbox holds another adoption's seed.");
+      if (!seed) adoption.applied();
       const shareId = admission.shares.get(binding.workspaceId);
       const share = shareId ? storage.getShare(shareId) : null;
       if (!share || share.workspaceId !== binding.workspaceId) throw new Error("Owner share is unavailable.");
@@ -86,16 +110,27 @@ export async function drainOwnerOutbox(options: {
       if (current.kind !== "current" || !isDeepStrictEqual(current.host,host) || !isDeepStrictEqual(current.binding,binding)) throw new Error("Owner standing changed.");
       const cut = storage.readLiveUpdateJournalCut({document});
       if (cut.kind !== "cut") throw new Error("Owner journal is unavailable.");
+      const declared = entry.agentDeclaration;
+      const trustedAccount = declared ? await admission.trustedAccount?.(current.authority.principalId) ??
+        {accountId: current.authority.principalId, name: current.authority.principalId} : undefined;
+      check();
+      if (trustedAccount && trustedAccount.accountId !== current.authority.principalId) throw new Error("Owner account changed.");
+      const authorContext = declared && trustedAccount ? {kind: "account" as const, accountId: trustedAccount.accountId,
+        agent: {agentId: declared.agentId, ...(declared.onBehalfOf !== null ? {onBehalfOf: declared.onBehalfOf} : {}), depth: declared.depth}} : undefined;
       const validation = await admission.validate({document,currentPath: binding.currentPath,checkpoint: cut.cut.checkpoint.bytes,
         suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update,
-        retainStateUpdate: liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata), [])}, signal);
+        retainStateUpdate: liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata),
+          deriveLiveAuthorSnapshot(storage as StorageContext, current.authority, authorContext, trustedAccount))}, signal);
       check();
       if (validation.kind === "retry") {
         await validation.waitForCapacity(signal); check();
         return {admittedEntries, hasMore: true, retryReady: true};
       }
       const committed = storage.commitLiveUpdateJournal({host,actor,expectedAuthority: current.authority,
-        metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding},cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);
+        ...(trustedAccount ? {trustedAccount} : {}),
+        metadata: {deliveryId: entry.deliveryId,updateDigest: entry.updateDigest,binding,
+          ...(authorContext ? {authorContext} : {})},
+        cutToken: cut.cut,validation,updateBytes: entry.update,receivedAtMs: Date.now()}, admission.activation);
       if (committed.result.kind === "retry") return {admittedEntries, hasMore: true, retryReady: true};
       if (committed.result.kind !== "accepted") throw new Error("Owner update admission refused.");
       const receipt = committed.result.receipt;
@@ -106,6 +141,7 @@ export async function drainOwnerOutbox(options: {
         ack.journalCursor !== receipt.journalCursor || ack.acceptingHostEpoch !== receipt.acceptingHostEpoch) {
         throw new Error("Native application ACK identity changed.");
       }
+      if (seed) adoption.applied();
       await outbox.acknowledge(outboxId,[committed.result.receipt]); check();
       admittedEntries++;
     }
