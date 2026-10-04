@@ -46,6 +46,17 @@ describe("electronLaunchArgs", () => {
     expect(args.filter((arg) => !arg.startsWith("--"))).toEqual([MAIN]);
   });
 
+  it("places a test's own switches before the entry", () => {
+    const args = electronLaunchArgs({
+      mainEntry: MAIN,
+      userDataDir: "/tmp/dohc/electron-user-data",
+      switches: ["--disable-gpu"],
+      platform: "linux",
+    });
+    expect(args).toContain("--disable-gpu");
+    expect(args.at(-1)).toBe(MAIN);
+  });
+
   it("keeps --no-sandbox on linux only", () => {
     const linux = electronLaunchArgs({
       mainEntry: MAIN,

@@ -162,6 +162,16 @@ test("new desktop imports cannot silently escape the selected compatibility file
   assert.deepEqual(uncoveredWorkspaceInputs([{path: "packages/ydoc-projection/src/liveRestoreDrain.test.ts", source}], packages), []);
 });
 
+test("Y.Doc transport tests declare the relay HTTP and auth sources they import", () => {
+  const source = 'import "../../service-http/src/index.js"; import "../../workspace-auth/src/session.js";';
+  assert.deepEqual(uncoveredWorkspaceInputs([{path: "packages/ydoc-projection/src/ownerDesktopTransport.test.ts", source}], packages), []);
+  assert.deepEqual(uncoveredWorkspaceInputs([{path: "packages/ydoc-projection/src/import-export.ts", source}], packages)
+    .map(finding => finding.input), ["@dohc/service-http", "@dohc/workspace-auth"]);
+  for (const input of ["packages/service-http/src/index.ts", "packages/workspace-auth/src/session.ts"]) {
+    assert.ok(select([input]).packages.includes("@dohc/ydoc-projection"), input);
+  }
+});
+
 test("database migrations include consumers that read SQL outside their manifests", () => {
   const plan = select(["packages/workspace-postgres/src/db/migrations/0001_better_auth.sql"]);
   assert.deepEqual(plan.affected, ["@dohc/workspace-postgres"]);

@@ -5,9 +5,9 @@ import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHis
 import type {NativeRestoreHistoryProof} from "../liveRestoreProposal";
 import type {StorageContext} from "./context";
 import {authorityInteger} from "./liveDocumentAuthority";
-import {assertJournalCheckpointPosition, decodeJournalMetadata, decodeJournalRow, documentParams, verifyJournalHistoryMetadata, verifyJournalHistoryRow, verifyJournalRow} from "./liveUpdateJournal";
+import {AGENT_DECLARATION_STORED_BYTES, assertJournalCheckpointPosition, decodeJournalMetadata, decodeJournalRow, documentParams, readAgentDeclarations, verifyJournalHistoryMetadata, verifyJournalHistoryRow, verifyJournalRow} from "./liveUpdateJournal";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
-import {LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE} from "./schema";
+import {LIVE_JOURNAL_TABLE, LIVE_JOURNAL_PROVENANCE, LIVE_JOURNAL_AGENT_DECLARATIONS} from "./schema";
 
 const documentWhere = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
 function require(value: unknown): asserts value {if (!value) throw new Error("Accepted journal history is damaged.");}
@@ -31,7 +31,9 @@ function chargeStoredMetadata(storage: StorageContext, where: string, params: un
   const metadata = storage.db.prepare(`SELECT COALESCE(SUM(${metadataLengths}+8*7),0) AS bytes FROM ${LIVE_JOURNAL_TABLE} WHERE ${where}`).get(...params)!;
   const provenance = storage.db.prepare(`SELECT COALESCE(SUM(${provenanceLengths}),0) AS bytes FROM ${LIVE_JOURNAL_PROVENANCE}
     WHERE journal_cursor IN (SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${where})`).get(...params)!;
-  budget.chargeBytes(authorityInteger(metadata.bytes) + authorityInteger(provenance.bytes));
+  const declarations = storage.db.prepare(`SELECT COALESCE(SUM(${AGENT_DECLARATION_STORED_BYTES}),0) AS bytes FROM ${LIVE_JOURNAL_AGENT_DECLARATIONS}
+    WHERE journal_cursor IN (SELECT journal_cursor FROM ${LIVE_JOURNAL_TABLE} WHERE ${where})`).get(...params)!;
+  budget.chargeBytes(authorityInteger(metadata.bytes) + authorityInteger(provenance.bytes) + authorityInteger(declarations.bytes));
 }
 function boundedMetadata(storage: StorageContext, document: LiveDocumentKey, cursor: number, budget: RestoreHistoryBudget) {
   const params = documentParams(document);
@@ -40,7 +42,9 @@ function boundedMetadata(storage: StorageContext, document: LiveDocumentKey, cur
   require(header);
   const provenance = storage.db.prepare(`SELECT COUNT(*) AS count,COALESCE(SUM(length(CAST(workspace_id AS BLOB))+length(CAST(main_version_id AS BLOB))+
     length(CAST(object_id AS BLOB))+length(CAST(lineage_claim_id AS BLOB))+8*4),0) AS bytes FROM ${LIVE_JOURNAL_PROVENANCE} WHERE journal_cursor=?`).get(cursor)!;
-  budget.chargeBytes(authorityInteger(header.bytes, 1) + authorityInteger(provenance.bytes));
+  const declaration = storage.db.prepare(`SELECT COALESCE(SUM(${AGENT_DECLARATION_STORED_BYTES}),0) AS bytes FROM ${LIVE_JOURNAL_AGENT_DECLARATIONS}
+    WHERE journal_cursor=?`).get(cursor)!;
+  budget.chargeBytes(authorityInteger(header.bytes, 1) + authorityInteger(provenance.bytes) + authorityInteger(declaration.bytes));
   const raw = storage.db.prepare(`SELECT ${metadataColumns} FROM ${LIVE_JOURNAL_TABLE} WHERE ${documentWhere} AND journal_cursor=?`).get(...params, cursor)!;
   const ranges = storage.db.prepare(`SELECT * FROM ${LIVE_JOURNAL_PROVENANCE} WHERE journal_cursor=? ORDER BY client_id,start_clock`).all(cursor);
   require(ranges.length === provenance.count);
@@ -142,9 +146,10 @@ function captureAcceptedHistory(storage: StorageContext, input: {
     const cursor=authorityInteger(range.journal_cursor,1), ranges=provenance.get(cursor)??[];
     ranges.push(range);provenance.set(cursor,ranges);
   }
+  const declarations=readAgentDeclarations(storage.db,`${documentWhere} AND journal_cursor>? AND journal_cursor<=?`,[...params,floor,through]);
   for (const [index,raw] of rows.entries()) {
     require(raw.journal_cursor===headers[index]!.journal_cursor);
-    const row = decodeJournalRow(storage.db, raw,provenance.get(authorityInteger(raw.journal_cursor,1))??[]); verifyContent(row);
+    const row = decodeJournalRow(storage.db, raw,provenance.get(authorityInteger(raw.journal_cursor,1))??[],declarations); verifyContent(row);
     require(row.history.metadataBytes === Buffer.byteLength(JSON.stringify(canonicalAcceptedMetadata(row.admitted.metadata))));
     require(row.history.namespace === namespace && !row.checkpoint && count < Number.MAX_SAFE_INTEGER);
     require(row.admitted.metadata.accepted.binding.currentPath===c.binding.currentPath &&

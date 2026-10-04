@@ -24,7 +24,7 @@ pub struct OwnerEnrollmentInput {
 }
 
 /// The same observed document at a strictly later restore generation.
-fn restore_successor(current: &LiveObjectBinding, next: &LiveObjectBinding) -> bool {
+pub fn restore_successor(current: &LiveObjectBinding, next: &LiveObjectBinding) -> bool {
     next.restore_fence_generation > current.restore_fence_generation
         && LiveObjectBinding {
             restore_fence_generation: current.restore_fence_generation,

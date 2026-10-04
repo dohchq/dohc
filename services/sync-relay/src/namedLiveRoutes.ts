@@ -5,7 +5,7 @@ import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import { readBoundedJson, refuseDeviceControl } from "@dohc/service-http";
 import { parseLiveTicketAudience, parseLiveTicketToken } from "@dohc/live-session-contract/live-ticket";
-import { createLiveFrameSession, type LiveFrameSessionPolicy } from "@dohc/live-session-contract/live-frame";
+import { createLiveFrameSession, LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, type LiveFrameSessionPolicy } from "@dohc/live-session-contract/live-frame";
 import { parseLiveUpdateIdentifier, parseLiveUpdateDigest, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { SyncRelayStorage } from "./storage.js";
@@ -85,6 +85,11 @@ function createLiveRoutes(input: BrowserRouteOptions | OwnerRouteOptions) {
   const frames = { ...options.frames, receive: { ...options.frames.receive } }, bounds = { ...options.bounds };
   createLiveFrameSession("server", frames).close();
   if (frames.receive.maxFrameBytes > limits.maxPendingBytes) throw new TypeError("Named route send capacity is smaller than one frame.");
+  // Only the owner route admits an agent declaration, so only it must receive the largest declared submission.
+  if (kind === "owner" && (frames.receive.maxFrameBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES ||
+    frames.maxControlBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES)) {
+    throw new TypeError("The owner route must receive the largest declared submission.");
+  }
   const wsOptions = { noServer: true as const, clientTracking: false, perMessageDeflate: false as const, autoPong: false,
     maxPayload: frames.receive.maxFrameBytes, maxFragments: limits.maxFragments, maxBufferedChunks: limits.maxBufferedChunks,
     closeTimeout: limits.drainTimeoutMs, handleProtocols: () => "dohc-live-v1" };

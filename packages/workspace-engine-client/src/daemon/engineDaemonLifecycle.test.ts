@@ -164,6 +164,7 @@ function fakeBinary(): string {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   for (const path of scratchPaths.splice(0)) {
     rmSync(path, { recursive: true, force: true });
   }
@@ -1377,6 +1378,67 @@ describe("Rust engine daemon lifecycle", () => {
     resolveExit();
     await stop;
     expect(stopped).toBe(true);
+  });
+
+  it("cancels an unref restart backoff during shutdown", async () => {
+    let exit: EngineClientSpawnOptions["onExit"];
+    const client = new FakeClient();
+    const launch = vi.fn(async (options: EngineClientSpawnOptions) => {
+      exit = options.onExit;
+      return client;
+    });
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(), launch, initialBackoffMs: 60_000, maxBackoffMs: 60_000,
+    });
+    await lifecycle.start();
+    await startupSmokeDone(client);
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    let stopped = false;
+    let stop: Promise<void> | undefined;
+    try {
+      exit?.(1, null);
+      const backoffIndex = timers.mock.calls.findIndex(([, delay]) => delay === 60_000);
+      expect(backoffIndex).toBeGreaterThanOrEqual(0);
+      expect(timers.mock.results[backoffIndex]!.value.hasRef()).toBe(false);
+      stop = lifecycle.stop().then(() => {stopped = true;});
+      await vi.waitFor(() => expect(stopped).toBe(true), WAIT);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(launch).toHaveBeenCalledTimes(1);
+    } finally {
+      await vi.advanceTimersByTimeAsync(60_000);
+      await (stop ?? lifecycle.stop());
+    }
+  });
+
+  it("stops waiting for injected backoff and observes its late rejection", async () => {
+    const waiting = deferred(), entered = deferred();
+    let exit: EngineClientSpawnOptions["onExit"];
+    const client = new FakeClient();
+    const launch = vi.fn(async (options: EngineClientSpawnOptions) => {
+      exit = options.onExit;
+      return client;
+    });
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(), launch,
+      sleep: () => {entered.resolve(); return waiting.promise;},
+    });
+    await lifecycle.start();
+    await startupSmokeDone(client);
+    let stopped = false;
+    let stop: Promise<void> | undefined;
+    try {
+      exit?.(1, null);
+      await entered.promise;
+      stop = lifecycle.stop().then(() => {stopped = true;});
+      await vi.waitFor(() => expect(stopped).toBe(true), WAIT);
+      waiting.reject(new Error("Injected wait failed after shutdown."));
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(launch).toHaveBeenCalledTimes(1);
+    } finally {
+      waiting.resolve();
+      await (stop ?? lifecycle.stop());
+    }
   });
 
   it("waits for an in-flight launch and leaves no daemon starting on shutdown", async () => {

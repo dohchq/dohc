@@ -354,6 +354,260 @@ fn share_view_write_op(seq: i64, path: &str, sha256: &str) -> ShareReplicationEn
     }
 }
 
+#[test]
+fn share_view_replay_keeps_declared_agents_in_list_and_detail_through_replay_and_restart() {
+    let (_scratch, database, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let body = b"Agent edited while hosted.".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let authors = json!([
+        {"kind":"agent","agentId":"trip-agent-hosted","onBehalfOf":"opaque-relay-owner","depth":0,
+         "agentRunId":"private-run","principalId":"fabricated-authority","private":{"path":"private/hidden.md"}},
+        {"kind":"agent","agentId":"chained-agent 旅行","onBehalfOf":"local:private-person","depth":64},
+        {"kind":"human","humanId":"private-human"},
+        {"kind":"automation","automationId":"private-automation","depth":1},
+        {"kind":"public","principalId":"fabricated-principal","grantId":"fabricated-grant"}
+    ]);
+    let expected = json!([
+        {"kind":"agent","agentId":"trip-agent-hosted","onBehalfOf":"opaque-relay-owner"},
+        {"kind":"agent","agentId":"chained-agent 旅行","depth":64}
+    ]);
+    let binary = share_view_binary_write_op(1, "docs/blob.bin", &sha);
+    let mut rename = share_view_write_op(2, "docs/continued.md", &sha);
+    rename.payload["operation"] = json!("rename");
+    rename.payload["payloadBeforePath"] = json!("docs/plan.md");
+    let mut deletion = share_view_write_op(3, "docs/blob.bin", &sha);
+    deletion.payload = json!({"versionId":"main","operation":"delete","path":"docs/blob.bin"});
+    let mut wrong_version = share_view_write_op(5, "docs/other.md", &sha);
+    wrong_version.payload["versionId"] = json!("other-version");
+    let mut ops = vec![
+        share_view_write_op(0, "docs/plan.md", &sha),
+        binary,
+        rename,
+        deletion,
+        share_view_write_op(4, "private/hidden.md", &sha),
+        wrong_version,
+    ];
+    for op in &mut ops {
+        op.payload["authors"] = authors.clone();
+        op.payload["momentId"] = json!("owner-source-moment");
+        op.payload["metadata"] = json!({"origin":"user","summary":"private-summary","correlationId":"private-correlation"});
+    }
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops,
+                    next_cursor: 6,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+    let first = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .unwrap();
+    assert_eq!((first.applied, first.skipped), (5, 2));
+    let read = |store: &mut EngineStore| {
+        let versioned = VersionedTextStore::new(store);
+        let page = versioned
+            .list_moments(&dohc_engine_domain::ListMomentsQuery {
+                workspace_id: "ws".to_owned(),
+                version_id: Some("main".to_owned()),
+                object_id: None,
+                limit: 20,
+                before_moment_order: None,
+            })
+            .unwrap();
+        assert_eq!(page.moments.len(), 5);
+        assert!(
+            page.moments
+                .iter()
+                .any(|moment| moment.path == "docs/plan.md"
+                    && moment.after_text.as_deref() == Some("Agent edited while hosted."))
+        );
+        for row in &page.moments {
+            let detail = versioned.get_moment("ws", &row.moment_id).unwrap().unwrap();
+            assert_eq!(detail.author_json, row.author_json);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(row.author_json.as_deref().unwrap())
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(detail.metadata_origin, "sync");
+            assert!(detail.metadata_summary.is_none() && detail.metadata_correlation_id.is_none());
+        }
+        assert!(
+            versioned
+                .get_moment("ws", "owner-source-moment")
+                .unwrap()
+                .is_none()
+        );
+        page
+    };
+    let original = read(&mut engine);
+    let replay = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .unwrap();
+    assert_eq!(replay.applied, 0);
+    assert_eq!(read(&mut engine), original);
+    drop(engine);
+    let mut engine = EngineStore::open(&database, 2_000).unwrap();
+    assert_eq!(read(&mut engine), original);
+}
+
+#[test]
+fn share_view_replay_discards_invalid_or_oversized_provenance_without_losing_content() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let body = b"Selected content remains.".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let valid =
+        json!({"kind":"agent","agentId":"é".repeat(256),"onBehalfOf":"opaque-owner","depth":1});
+    let mut mixed = vec![
+        json!({"kind":"agent","agentId":""}),
+        json!({"kind":"agent","agentId":"é".repeat(257)}),
+        json!({"kind":"agent","agentId":"bad\u{0085}id"}),
+        json!({"kind":"agent","agentId":1}),
+        json!({"kind":"agent","agentId":"agent","onBehalfOf":""}),
+        json!({"kind":"agent","agentId":"agent","onBehalfOf":"bad\nprincipal"}),
+        json!({"kind":"agent","agentId":"agent","onBehalfOf":1}),
+    ];
+    for depth in [json!(-1), json!(1.5), json!(65), json!(null), json!("1")] {
+        mixed.push(json!({"kind":"agent","agentId":"agent","depth":depth}));
+    }
+    mixed.push(valid.clone());
+    let short = json!({"kind":"agent","agentId":"agent"});
+    let cases = [
+        json!(mixed),
+        json!(null),
+        json!({}),
+        json!([]),
+        json!([{"kind":"agent","agentId":""}]),
+        json!(vec![short.clone(); 1_024]),
+        json!(vec![short; 1_025]),
+        json!(vec![json!({"kind":"agent","agentId":"x".repeat(512)}); 257]),
+    ];
+    let ops = cases
+        .into_iter()
+        .enumerate()
+        .map(|(index, authors)| {
+            let mut op = share_view_write_op(index as i64, &format!("docs/{index}.md"), &sha);
+            op.payload["authors"] = authors;
+            op
+        })
+        .collect();
+    let client = RelaySyncClient::new(
+        PagedShareRelay::new(
+            [],
+            [(
+                0,
+                ShareViewResponse {
+                    ops,
+                    next_cursor: 8,
+                    has_more: false,
+                },
+            )],
+        )
+        .with_view_blobs([(sha, body)]),
+    );
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &tracked_grant(["docs"]),
+            &NoFaults,
+        )
+        .unwrap();
+    assert_eq!((outcome.applied, outcome.skipped), (8, 0));
+    let versioned = VersionedTextStore::new(&mut engine);
+    let page = versioned
+        .list_moments(&dohc_engine_domain::ListMomentsQuery {
+            workspace_id: "ws".to_owned(),
+            version_id: Some("main".to_owned()),
+            object_id: None,
+            limit: 20,
+            before_moment_order: None,
+        })
+        .unwrap();
+    assert_eq!(page.moments.len(), 8);
+    for moment in page.moments {
+        assert_eq!(
+            moment.after_text.as_deref(),
+            Some("Selected content remains.")
+        );
+        match moment.path.as_str() {
+            "docs/0.md" => assert_eq!(
+                serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap())
+                    .unwrap(),
+                json!([valid])
+            ),
+            "docs/5.md" => assert_eq!(
+                serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap())
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1_024
+            ),
+            _ => assert!(moment.author_json.is_none()),
+        }
+    }
+}
+
+#[test]
+fn share_view_fork_snapshots_do_not_inherit_an_unrelated_agent_declaration() {
+    let (_scratch, _path, mut engine) = open_store();
+    seed_replication_version(&mut engine, "main", "main");
+    let body = b"Shared fork snapshot.".to_vec();
+    let sha = dohc_engine_storage::hex_sha256(&body);
+    let client = RelaySyncClient::new(PagedShareRelay::new([], [(0, ShareViewResponse {
+        ops: vec![ShareReplicationEnvelope {
+            origin_id: "peer".to_owned(), origin_seq: 0, op_kind: "version.create".to_owned(),
+            payload: json!({"versionId":"shared-version", "authors":[{"kind":"agent","agentId":"unrelated-agent"}],
+                "forkSnapshots":[{"path":"docs/plan.md","blobSha256":sha,"contentKind":"text"}]}),
+            recorded_at_ms: 10,
+        }], next_cursor: 1, has_more: false,
+    })]).with_view_blobs([(sha, body)]));
+    let outcome = client
+        .pull_share_view(
+            &mut engine,
+            "ws",
+            "share",
+            &version_grant(["docs"], "shared-version"),
+            &NoFaults,
+        )
+        .unwrap();
+    assert_eq!((outcome.applied, outcome.skipped), (1, 0));
+    let page = VersionedTextStore::new(&mut engine)
+        .list_moments(&dohc_engine_domain::ListMomentsQuery {
+            workspace_id: "ws".to_owned(),
+            version_id: Some("main".to_owned()),
+            object_id: None,
+            limit: 10,
+            before_moment_order: None,
+        })
+        .unwrap();
+    assert_eq!(page.moments.len(), 1);
+    assert!(page.moments[0].author_json.is_none());
+}
+
 /// The same served write, on the version a share pinned. A version share's
 /// served moments name that version, never `main` — the relay's
 /// `targetVersionId` decides which, and this mirrors it in the fixture.

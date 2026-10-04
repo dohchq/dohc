@@ -60,6 +60,21 @@ fn native_tail_apply(
     delivery: String,
     cursor: i64,
 ) -> LiveUpdateHostApplicationAck {
+    // The relay accepts this owner's own delivery as its entry declared it.
+    let declared: Option<Option<String>> = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT agent_declaration_json FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                [&delivery],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .unwrap();
+    let agent_declaration = declared
+        .flatten()
+        .map(|json| serde_json::from_str(&json).unwrap());
     let event = AdmittedLiveUpdate {
         metadata: AdmittedLiveUpdateMetadata {
             accepted: RelayAcceptedLiveUpdate {
@@ -74,6 +89,7 @@ fn native_tail_apply(
                     principal_id: "owner".into(),
                 },
                 received_at_ms: cursor,
+                agent_declaration,
             },
             first_seen: vec![],
         },
@@ -192,6 +208,7 @@ fn native_restore_classifies_a_lost_ack_before_the_accepted_checkpoint() {
                                 principal_id: "owner".into(),
                             },
                             received_at_ms: ordinal,
+                            agent_declaration: None,
                         },
                         first_seen: vec![],
                     },
@@ -221,12 +238,10 @@ fn native_restore_classifies_a_lost_ack_before_the_accepted_checkpoint() {
         proposal.receipt().native_sources[0].accepted_receipt,
         Some(old_receipt)
     );
-    assert_eq!(
-        proposal.receipt().native_sources[0].source.native_sequence,
-        1
-    );
+    let native = proposal.receipt().native_sources[0].source.native().unwrap();
+    assert_eq!(native.native_sequence, 1);
     assert!(
-        matches!(&proposal.receipt().native_sources[0].source.origin,
+        matches!(&native.origin,
         owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {actor_origin_id:Some(id), ..} if id=="native-agent")
     );
     assert_eq!(native_tail_inventory(&f.store), before);
@@ -280,7 +295,7 @@ fn native_restore_tail_retains_interleaved_pending_context_with_descending_termi
                 .receipt()
                 .native_sources
                 .iter()
-                .map(|s| s.source.native_sequence)
+                .map(|s| s.source.native().unwrap().native_sequence)
                 .collect::<Vec<_>>(),
             vec![1, 2, 4]
         );
@@ -414,7 +429,11 @@ fn native_restore_tail_retains_adoption_seed_without_admitting_it() {
     let proposal = native_tail_prepare(&mut f, input).unwrap();
     assert_eq!(proposal.receipt().native_sources.len(), 1);
     assert!(matches!(
-        proposal.receipt().native_sources[0].source.origin,
+        proposal.receipt().native_sources[0]
+            .source
+            .native()
+            .unwrap()
+            .origin,
         owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
     ));
     assert!(proposal.receipt().native_sources[0]
@@ -638,6 +657,340 @@ fn native_restore_tail_does_not_infer_generic_pending_provenance_from_matching_b
     assert_eq!(inventory, native_tail_inventory(&f.store));
 }
 
+/// An adopted owner's native agent edit declares the agent its journal row
+/// recorded, as an editor's draft declares it, with no draft proof. A retry
+/// reads back the same entry. The owner's own acceptance and restore require
+/// exactly that declaration. A person's or an automation's edit declares none.
+#[test]
+fn adopted_native_agent_edit_declares_its_recorded_agent() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let entry = native_tail_edit(&mut f, "Agent pending", 11);
+    let expected = dohc_engine_domain::AgentDeclaration {
+        agent_id: "native-agent".into(),
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+    };
+    assert_eq!(entry.agent_declaration, Some(expected.clone()));
+    let stored = |f: &Fixture| -> (Option<String>, Option<i64>, i64) {
+        f.store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT agent_declaration_json,draft_binding_revision,json_extract(native_source_json,'$.nativeSequence') FROM owner_ydoc_outbox_entries WHERE delivery_id=?1",
+                    [&entry.delivery_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .unwrap()
+    };
+    let (declaration, revision, native_sequence) = stored(&f);
+    assert_eq!(declaration, Some(serde_json::to_string(&expected).unwrap()));
+    assert_eq!(revision, None);
+    // The source derives the declaration, so a retry of the same native
+    // update finds its entry unchanged.
+    let key = f.key.clone();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            owner_outbox::append_adopted_local_update_in_tx(
+                tx,
+                &key,
+                "owner.md",
+                native_sequence,
+                &entry.update,
+                99,
+            )
+        })
+        .unwrap();
+    assert_eq!(stored(&f), (declaration, None, native_sequence));
+    assert_eq!(
+        f.store
+            .table_row_count("owner_ydoc_outbox_entries")
+            .unwrap(),
+        1
+    );
+    // Its delivery accepted without the declaration is not this entry's.
+    let undeclared = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: entry.delivery_id.clone(),
+                    update_digest: entry.update_digest.clone(),
+                    journal_cursor: 7,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 7,
+                agent_declaration: None,
+            },
+            first_seen: vec![],
+        },
+        update_bytes: entry.update.clone(),
+    };
+    assert!(matches!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            undeclared,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        ),
+        Err(ApplicationError::Conflict)
+    ));
+    assert_eq!(
+        f.store
+            .table_row_count("live_device_update_applications")
+            .unwrap(),
+        0
+    );
+    // Restore classifies the native source with its derived declaration, and
+    // refuses a stored one the source does not derive.
+    let input = native_tail_input(&mut f, None, 0);
+    let proposal = native_tail_prepare(&mut f, input.clone()).unwrap();
+    assert_eq!(
+        proposal.receipt().native_sources[0]
+            .source
+            .native()
+            .unwrap()
+            .agent_declaration()
+            .unwrap(),
+        Some(expected)
+    );
+    f.store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE owner_ydoc_outbox_entries SET agent_declaration_json=json_set(agent_declaration_json,'$.agentId','other-agent')",
+                [],
+            )
+            .map_err(write_sql)
+        })
+        .unwrap();
+    assert!(native_tail_prepare(&mut f, input).is_err());
+
+    for kind in [
+        dohc_engine_domain::ChangeActorKind::Human,
+        dohc_engine_domain::ChangeActorKind::Automation,
+    ] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let update = f
+            .doc
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Not an agent")
+            .unwrap();
+        let key = f.key.clone();
+        let attribution = dohc_engine_domain::ChangeAttribution {
+            actor_kind: kind,
+            on_behalf_of: Some("owner".into()),
+            depth: 0,
+            run: None,
+        };
+        crate::record_local_update(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.key,
+            &update,
+            crate::LocalAppend {
+                actor_origin_id: Some("someone"),
+                attribution: Some(&attribution),
+                ..Default::default()
+            },
+            &NoFaults,
+            11,
+            |tx, outcome, _| {
+                owner_outbox::append_adopted_local_update_in_tx(
+                    tx,
+                    &key,
+                    "owner.md",
+                    outcome.seq,
+                    &update,
+                    11,
+                )
+            },
+        )
+        .unwrap();
+        let declared: Option<String> = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT agent_declaration_json FROM owner_ydoc_outbox_entries",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(declared, None);
+    }
+}
+
+/// An enrolled owner's pending draft names no native journal update. Restore
+/// keeps it as an owner draft source with its delivery identity and declared
+/// agent; an accepted draft also carries its own receipt, whose declaration
+/// must be the draft's.
+#[test]
+fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
+    let declaration = dohc_engine_domain::AgentDeclaration {
+        agent_id: "trip-agent 旅行".into(),
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+    };
+    for accepted in [false, true] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        let update = f
+            .doc
+            .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Agent draft")
+            .unwrap();
+        let entry = owner_outbox::append(
+            &mut f.store,
+            "workspace",
+            owner_outbox::OwnerOutboxAppendInput {
+                binding: f.binding.clone(),
+                base_update: f.cut.baseline_bytes.clone(),
+                append_key: "agent-draft".into(),
+                update: update.clone(),
+                limits: f.cut.outbox_limits.clone(),
+                created_at_ms: 11,
+            },
+        )
+        .unwrap();
+        let (terminal, applied_sequence) = if accepted {
+            let receipt = LiveUpdateReceipt {
+                delivery_id: entry.delivery_id.clone(),
+                update_digest: entry.update_digest.clone(),
+                journal_cursor: 7,
+                accepting_host_epoch: 1,
+            };
+            let event = AdmittedLiveUpdate {
+                metadata: AdmittedLiveUpdateMetadata {
+                    accepted: RelayAcceptedLiveUpdate {
+                        receipt: receipt.clone(),
+                        binding: f.binding.clone(),
+                        authority: ServerDerivedLiveUpdateAuthority::Owner {
+                            principal_id: "owner".into(),
+                        },
+                        received_at_ms: 7,
+                        agent_declaration: Some(declaration.clone()),
+                    },
+                    first_seen: vec![],
+                },
+                update_bytes: update.clone(),
+            };
+            let ApplicationResult::Applied(ack, _) = apply_committed(
+                &mut f.store,
+                &mut WriterDocCache::new(),
+                &f.handle,
+                event,
+                &NoFaults,
+                100_000_000,
+                |_, _, _, _| Ok(()),
+            )
+            .unwrap() else {
+                panic!("application refused")
+            };
+            (Some(receipt), ack.local_ydoc_sequence)
+        } else {
+            let key = f.key.clone();
+            f.store
+                .write_with(&NoFaults, |tx| {
+                    durable::record_authorized_update_in_tx(tx, &key, &update, None, None, 11)
+                })
+                .unwrap();
+            (None, 0)
+        };
+        // An enrollment observes this binding, and the entry keeps the agent
+        // its editor declared. Its draft proof is set below.
+        let namespace = f.handle.registration.lock().unwrap().namespace.clone();
+        let binding_json = serde_json::to_string(&f.binding).unwrap();
+        let declaration_json = serde_json::to_string(&declaration).unwrap();
+        let b = f.binding.clone();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE owner_ydoc_outbox_entries SET agent_declaration_json=?1 WHERE delivery_id=?2",
+                    params![declaration_json, entry.delivery_id],
+                )
+                .map_err(write_sql)?;
+                tx.execute(
+                    "INSERT INTO ydoc_owner_bindings (workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,relay_database_namespace,binding_revision,accepted_cursor,native_head_sequence,checkpoint_digest,max_pending_bytes,max_pending_age_ms) VALUES (?1,?2,?3,?4,?5,?6,1,0,0,?4,1000000,60000)",
+                    params![b.workspace_id, b.main_version_id, b.object_id, b.lineage_claim_id, binding_json, namespace],
+                )
+                .map_err(write_sql)?;
+                Ok::<_, ApplicationError>(())
+            })
+            .unwrap();
+        let input = native_tail_input(&mut f, terminal.clone(), applied_sequence);
+        let inventory = native_tail_inventory(&f.store);
+        // A generic entry queued before enrollment carries no draft proof.
+        // Neither does a revision the enrollment never reached, another
+        // relay's enrollment, or an enrollment observing another binding.
+        let path = f.binding.current_path.clone();
+        for mutation in [
+            String::new(),
+            "UPDATE owner_ydoc_outbox_entries SET draft_binding_revision=2".into(),
+            "UPDATE owner_ydoc_outbox_entries SET draft_binding_revision=1; \
+             UPDATE ydoc_owner_bindings SET relay_database_namespace='other-relay'"
+                .into(),
+            format!(
+                "UPDATE ydoc_owner_bindings SET relay_database_namespace='{namespace}', \
+                 binding_json=json_set(binding_json,'$.currentPath','elsewhere.md')"
+            ),
+        ] {
+            f.store
+                .write_with(&NoFaults, |tx| tx.execute_batch(&mutation).map_err(write_sql))
+                .unwrap();
+            assert!(
+                native_tail_prepare(&mut f, input.clone()).is_err(),
+                "accepted {mutation:?}"
+            );
+            assert_eq!(inventory, native_tail_inventory(&f.store));
+        }
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_owner_bindings SET binding_json=json_set(binding_json,'$.currentPath',?1)",
+                    [&path],
+                )
+                .map_err(write_sql)
+            })
+            .unwrap();
+        let proposal = native_tail_prepare(&mut f, input.clone()).unwrap();
+        let sources = &proposal.receipt().native_sources;
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].delivery_id, entry.delivery_id);
+        assert_eq!(sources[0].append_key, "agent-draft");
+        assert_eq!(sources[0].accepted_receipt, terminal);
+        assert!(sources[0].source.native().is_none());
+        assert_eq!(
+            serde_json::to_value(&sources[0].source).unwrap(),
+            serde_json::json!({
+                "binding": f.binding,
+                "updateDigest": entry.update_digest,
+                "origin": {
+                    "kind": "ownerDraft",
+                    "agentDeclaration": {"agentId": "trip-agent 旅行", "onBehalfOf": "owner", "depth": 1},
+                },
+            })
+        );
+        assert_eq!(inventory, native_tail_inventory(&f.store));
+        // The draft's declaration is part of its identity: a changed one
+        // no longer matches its accepted receipt or the saved proposal.
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE owner_ydoc_outbox_entries SET agent_declaration_json=json_set(agent_declaration_json,'$.agentId','other-agent')",
+                    [],
+                )
+                .map_err(write_sql)
+            })
+            .unwrap();
+        assert!(native_tail_prepare(&mut f, input).is_err());
+    }
+}
+
 #[test]
 fn native_restore_tail_keeps_adoption_seed_overlap_separate_from_admission() {
     let mut f = Fixture::new();
@@ -672,7 +1025,11 @@ fn native_restore_tail_keeps_adoption_seed_overlap_separate_from_admission() {
         Some(receipt)
     );
     assert!(matches!(
-        proposal.receipt().native_sources[0].source.origin,
+        proposal.receipt().native_sources[0]
+            .source
+            .native()
+            .unwrap()
+            .origin,
         owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
     ));
     assert_eq!(inventory, native_tail_inventory(&f.store));
@@ -715,12 +1072,16 @@ fn native_restore_tail_accepts_trusted_deduped_pre_adoption_source_as_overlappin
             .receipt()
             .native_sources
             .iter()
-            .map(|source| source.source.native_sequence)
+            .map(|source| source.source.native().unwrap().native_sequence)
             .collect::<Vec<_>>(),
         vec![1, 1]
     );
     assert!(matches!(
-        proposal.receipt().native_sources[1].source.origin,
+        proposal.receipt().native_sources[1]
+            .source
+            .native()
+            .unwrap()
+            .origin,
         owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate { .. }
     ));
     assert!(proposal
@@ -759,6 +1120,7 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
                     principal_id: "restoring-owner".into(),
                 },
                 received_at_ms: 80,
+                agent_declaration: None,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
         },
@@ -929,6 +1291,7 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
                     principal_id: "restoring-owner".into(),
                 },
                 received_at_ms: 80,
+                agent_declaration: None,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
         },
@@ -1076,4 +1439,100 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
         )
         .unwrap();
     assert_eq!(historic.binding.restore_fence_generation, 1);
+}
+
+#[test]
+fn restored_owner_capacity_rescue_streams_past_a_large_prior_proof_and_private_tail() {
+    restored_owner_capacity_rescue(350,true);
+}
+
+#[test]
+fn restored_owner_capacity_rescue_streams_past_a_large_baseline_restore_proof_and_private_tail() {
+    restored_owner_capacity_rescue(700,false);
+}
+
+fn restored_owner_capacity_rescue(events:i64,select_terminal:bool) {
+    let seed=Fixture::new();
+    let baseline=seed.cut.baseline_bytes.clone();
+    let source:String=seed.store.read_with(|conn|conn.query_row("SELECT text FROM blobs WHERE sha256=?1",[&seed.cut.source_digest],|r|r.get(0))).unwrap();
+    drop(seed);
+    let mut selectors=vec!["owner.md".into()];
+    selectors.extend((0..99).map(|i|format!("z{i:02}{}", "x".repeat(1020)))); selectors.sort();
+    let mut f=Fixture::with_source_selectors(source,baseline.clone(),selectors);
+    f.adopt().unwrap();
+    let mut terminal=None;
+    let mut sequence=0;
+    for cursor in 1..=events {
+        let ack=native_tail_apply(&mut f,baseline.clone(),format!("proof-{cursor}"),cursor);
+        sequence=ack.local_ydoc_sequence;
+        terminal=Some(LiveUpdateReceipt {delivery_id:ack.delivery_id,update_digest:ack.update_digest,journal_cursor:cursor,accepting_host_epoch:1});
+    }
+    let mut preparation=native_tail_input(&mut f,terminal,sequence);
+    // The selected current point retains a second authentic copy of the
+    // accepted suffix: >60MiB of proof with half as many ingress operations.
+    if select_terminal {preparation.point.journal_cursor=events;}
+    let coordinate=f.handle.registration.lock().unwrap().coordinate.clone();
+    const PROOF_BYTES:usize=512*1024*1024;
+    let proposal=f._owner.prepare_restore(&mut f.store,preparation.clone(),coordinate.clone(),PROOF_BYTES,1000,&NoFaults).unwrap();
+    let proof_length:i64=f.store.read_with(|conn|conn.query_row("SELECT length(CAST(proposal_json AS BLOB)) FROM live_restore_fences",[],|r|r.get(0))).unwrap();
+    assert!(proof_length>60*1024*1024);
+    let mut binding=f.binding.clone(); binding.restore_fence_generation=1;
+    let input=NativeRestoreApplication {
+        preparation,candidate_digest:proposal.receipt().candidate_digest.clone(),native_source_manifest_digest:proposal.receipt().native_source_manifest_digest.clone(),
+        admitted:AdmittedLiveUpdateMetadata {
+            accepted:RelayAcceptedLiveUpdate {
+                receipt:LiveUpdateReceipt {delivery_id:"proof-restore".into(),update_digest:proposal.receipt().candidate_digest.clone(),journal_cursor:events+1,accepting_host_epoch:1},
+                binding:binding.clone(),authority:ServerDerivedLiveUpdateAuthority::Owner {principal_id:"owner".into()},received_at_ms:events+1,agent_declaration:None,
+            },first_seen:proposal.receipt().replacement_ranges.clone(),
+        },
+    };
+    drop(proposal);
+    f._owner.apply_restore(&mut f.store,&mut WriterDocCache::new(),input.clone(),coordinate.clone(),PROOF_BYTES,1000,events+2,&NoFaults,|_,_,_,_|Ok(())).unwrap();
+    let settled=f._owner.with_restore_settlement(&mut f.store,input.clone(),coordinate.clone(),PROOF_BYTES,1000,|store,audit|restore_content::tests::record_test_projection(store,audit,"large-proof-restored")).unwrap();
+    f._owner.resume_restore(&mut f.store,NativeRestoreResume {application:input,settlement_id:settled.settlement_id},coordinate.clone(),PROOF_BYTES,1000,events+3,&NoFaults,|_,_,_,_|Ok(())).unwrap();
+    f.binding=binding;
+    f.doc=f.store.read_with(|conn|durable::load_doc_in(conn,&f.key)).unwrap();
+    f.handle=f._owner.register(&mut f.store,"namespace".into(),coordinate,f.binding.clone()).unwrap();
+    {
+        let held=f.handle.registration.lock().unwrap();
+        let resumed=f.store.read_with(|conn|restore_resume::generation(conn,&held)).unwrap().unwrap();
+        assert_eq!(resumed.application_receipt.journal_cursor,events+1);
+        assert_eq!(resumed.binding,f.binding);
+    }
+    let peer=Ydoc::wire(); peer.apply(&f.doc.encode_full_state()).unwrap();
+    native_tail_edit(&mut f,"Private after restore",events+4);
+    let remote=peer.richdoc_append_paragraph("Accepted after restore");
+    let mut cursor=events+2;
+    let mut terminal=None;
+    let blocked=loop {
+        assert!(cursor<events+82);
+        let event=AdmittedLiveUpdate {
+            metadata:AdmittedLiveUpdateMetadata {
+                accepted:RelayAcceptedLiveUpdate {
+                    receipt:LiveUpdateReceipt {delivery_id:format!("post-restore-{cursor}"),update_digest:hex_sha256(&remote),journal_cursor:cursor,accepting_host_epoch:1},
+                    binding:f.binding.clone(),authority:ServerDerivedLiveUpdateAuthority::Owner {principal_id:"owner".into()},received_at_ms:cursor,
+                    agent_declaration:Some(AgentDeclaration {agent_id:format!("{cursor:03}{}", "\"".repeat(509)),on_behalf_of:Some("\"".repeat(512)),depth:1}),
+                },first_seen:vec![],
+            },update_bytes:remote.clone(),
+        };
+        let result=apply_committed(&mut f.store,&mut WriterDocCache::new(),&f.handle,event.clone(),&NoFaults,8*1024*1024,|_,_,_,_|Ok(())).unwrap();
+        match result {
+            ApplicationResult::Applied(..)=> {terminal=Some(event.metadata.accepted.receipt);cursor+=1;}
+            ApplicationResult::Pending(ApplicationPending::SettlementRequired)=>break event,
+            other=>panic!("unexpected {other:?}"),
+        }
+    };
+    let rescue=with_settlement(&mut f.store,&f.handle,terminal.clone(),128,NativeHistoryReconstruction {working_reserve_bytes:8*1024*1024},|store,audit| {
+        let doc=audit.accepted_prefix().expect("private tail needs accepted state");
+        let text=doc.project(ContentKind::Richdoc)?.content;
+        assert!(text.contains("Accepted after restore")); assert!(!text.contains("Private after restore"));
+        restore_content::tests::record_test_projection(store,audit,"rescued-after-restore")
+    }).unwrap();
+    let text:String=f.store.read_with(|conn|conn.query_row("SELECT text FROM blobs WHERE sha256=?1",[&rescue.markdown_digest],|r|r.get(0))).unwrap();
+    assert!(text.contains("Accepted after restore")); assert!(!text.contains("Private after restore"));
+    let held=f.handle.registration.lock().unwrap();
+    assert!(matches!(f.store.read_with(|conn|accepted_history::read(conn,&held,terminal.unwrap().journal_cursor,&mut restore_content::Budget {remaining:60*1024*1024},4095)),Err(ApplicationError::ConfiguredByteBudgetExceeded)));
+    drop(held);
+    let retry=apply_committed(&mut f.store,&mut WriterDocCache::new(),&f.handle,blocked,&NoFaults,8*1024*1024,|_,_,_,_|Ok(())).unwrap();
+    assert!(matches!(retry,ApplicationResult::Applied(..)));
 }

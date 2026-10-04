@@ -3,14 +3,15 @@ use crate::RuntimeError;
 use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_collab::live_object_binding::LiveObjectBinding;
 use dohc_engine_collab::live_update_application::{
-    AdmittedLiveUpdate, ApplicationError, ApplicationHandle, ApplicationHostCoordinate,
-    ApplicationOwner, ApplicationResult, BootstrapResult, LiveApplicationAckIdentity,
-    LiveApplicationBootstrap, LiveSettlementResult, LiveUpdateHostApplicationAck,
-    LiveUpdateReceipt, NativeRestoreApplication, NativeRestoreApplicationReceipt,
-    NativeRestoreFence, NativeRestoreFenceReceipt, NativeRestorePreparation, NativeRestoreProposal,
-    NativeRestoreResume, NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut,
-    adopt_owner_committed, apply_committed, bootstrap_committed, read_application_ack,
-    validate_application_binding, with_settlement,
+    AdmittedLiveUpdate, AdmittedNativeHistoryReconstruction, ApplicationError, ApplicationHandle,
+    ApplicationHostCoordinate, ApplicationOwner, ApplicationResult, BootstrapResult,
+    LiveApplicationAckIdentity, LiveApplicationBootstrap, LiveSettlementResult,
+    LiveUpdateHostApplicationAck, LiveUpdateReceipt, NativeRestoreApplication,
+    NativeRestoreApplicationReceipt, NativeRestoreFence, NativeRestoreFenceReceipt,
+    NativeRestorePreparation, NativeRestoreProposal, NativeRestoreResume,
+    NativeRestoreResumeReceipt, OwnerAdoptionAck, OwnerAdoptionCut, adopt_owner_committed,
+    apply_committed, bootstrap_committed, read_application_ack, validate_application_binding,
+    with_settlement,
 };
 use dohc_engine_collab::live_update_application::{
     AppliedPosition, AppliedSyncCut, AppliedSyncPolicy, NextAppliedUpdate,
@@ -568,7 +569,7 @@ impl ActorLiveApplicationHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: tokio_util::sync::CancellationToken,
-        reservation: Arc<dyn Send + Sync>,
+        reconstruction: AdmittedNativeHistoryReconstruction,
     ) -> Result<LiveSettlementResult, RuntimeError> {
         current(&self.actor, &self.token)?;
         let (reply, receive) = oneshot::channel();
@@ -584,7 +585,7 @@ impl ActorLiveApplicationHandle {
                 now_ms,
                 faults,
                 cancel: token,
-                reservation,
+                reconstruction,
                 reply,
             })))
             .await
@@ -826,7 +827,7 @@ pub(super) enum Request {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         cancel: tokio_util::sync::CancellationToken,
-        reservation: Arc<dyn Send + Sync>,
+        reconstruction: AdmittedNativeHistoryReconstruction,
         reply: Reply<LiveSettlementResult>,
     },
     Bootstrap {
@@ -1159,9 +1160,10 @@ impl Request {
                 now_ms,
                 faults,
                 cancel,
-                reservation: _reservation,
+                reconstruction,
                 reply,
             } => {
+                let _reservation = reconstruction.reservation;
                 let result = registry.owner(&workspace_id, &token).and_then(|_| {
                     if cancel.is_cancelled() {
                         return Err(RuntimeError::ActorUnavailable);
@@ -1171,6 +1173,7 @@ impl Request {
                         &application,
                         terminal,
                         max_applications,
+                        reconstruction.policy,
                         |store, audit| {
                             settle_audited(
                                 store,

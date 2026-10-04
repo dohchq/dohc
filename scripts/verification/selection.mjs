@@ -10,7 +10,8 @@ const productionInputs = { "@dohc/site": ["@dohc/desktop"] };
 const testInputs = {
   "@dohc/desktop": ["@dohc/site"],
   "@dohc/workspace-auth": ["@dohc/workspace-postgres"],
-  "@dohc/ydoc-projection": ["@dohc/sync-relay", "@dohc/workspace-engine-client", "@dohc/share-web", "@dohc/desktop"],
+  "@dohc/ydoc-projection": ["@dohc/sync-relay", "@dohc/workspace-engine-client", "@dohc/share-web", "@dohc/desktop",
+    "@dohc/service-http", "@dohc/workspace-auth"],
   "@dohc/share-web": ["@dohc/desktop", "@dohc/mcp", "@dohc/cli", "@dohc/workspace-postgres", "@dohc/workspace-engine-client"],
   "@dohc/sync-relay": ["@dohc/share-web", "@dohc/desktop"],
   "@dohc/workspace-api": ["@dohc/workspace-postgres"],

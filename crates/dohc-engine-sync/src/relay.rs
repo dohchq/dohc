@@ -18,6 +18,7 @@ use crate::hydration::VerifiedBlob;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 
 mod direct_write;
+mod share_authors;
 use crate::{
     ApplyDisposition, ApplyOutcome, BlobKind, ObservedBytes, RelayError, ReplicationEnvelope,
     ShareDisposition, SyncError, blob_ceiling,
@@ -4565,7 +4566,7 @@ fn replay_share_write<T: RelayTransport>(
                 metadata_origin: "sync".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
-                author_json: None,
+                author_json: share_authors::declared_agent_authors(envelope),
                 now_ms: envelope.recorded_at_ms,
                 request_id: Some(request_id.clone()),
             };
@@ -4600,7 +4601,7 @@ fn replay_share_write<T: RelayTransport>(
                 metadata_origin: "sync".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
-                author_json: None,
+                author_json: share_authors::declared_agent_authors(envelope),
                 now_ms: envelope.recorded_at_ms,
                 request_id: Some(request_id),
             };
@@ -4702,7 +4703,7 @@ fn replay_share_delete(
         metadata_origin: "sync".to_owned(),
         metadata_summary: None,
         metadata_correlation_id: None,
-        author_json: None,
+        author_json: share_authors::declared_agent_authors(envelope),
         now_ms: envelope.recorded_at_ms,
     };
     let result = replay_share_change(

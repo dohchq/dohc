@@ -2693,6 +2693,24 @@ UPDATE moments SET author_json = json_array(json(author_json))
       AND json_type(author_json) = 'object';
 ";
 
+/// Only the owner's delivery declares, and the agent ID and depth are present
+/// together. An enrolled owner's draft records the observed binding revision
+/// it was queued under; a draft never names a native source.
+const V2_LIVE_APPLICATION_AGENT_DECLARATIONS_DDL: &str = "\
+ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN draft_binding_revision INTEGER
+    CHECK (draft_binding_revision IS NULL OR (native_source_json IS NULL
+        AND draft_binding_revision BETWEEN 1 AND 9007199254740991));
+ALTER TABLE live_device_update_applications ADD COLUMN declared_agent_id TEXT
+    CHECK (declared_agent_id IS NULL OR (principal_kind = 'owner'
+        AND length(CAST(declared_agent_id AS BLOB)) BETWEEN 1 AND 512));
+ALTER TABLE live_device_update_applications ADD COLUMN declared_on_behalf_of TEXT
+    CHECK (declared_on_behalf_of IS NULL OR (declared_agent_id IS NOT NULL
+        AND length(CAST(declared_on_behalf_of AS BLOB)) BETWEEN 1 AND 512));
+ALTER TABLE live_device_update_applications ADD COLUMN declared_depth INTEGER
+    CHECK ((declared_depth IS NULL) = (declared_agent_id IS NULL)
+        AND (declared_depth IS NULL OR declared_depth BETWEEN 0 AND 64));
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2853,6 +2871,23 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 26,
         id: "v2-ydoc-live-edit-authors",
         sql: V2_YDOC_LIVE_EDIT_AUTHORS_DDL,
+        sets_user_version: None,
+    },
+    // The agent an owner's queued draft declared, kept with its delivery
+    // after the relay's receipt. Null for every entry that declared none.
+    Migration {
+        ordinal: 27,
+        id: "v2-owner-draft-agent-declarations",
+        sql: "ALTER TABLE owner_ydoc_outbox_entries ADD COLUMN agent_declaration_json TEXT CHECK (agent_declaration_json IS NULL OR json_valid(agent_declaration_json));",
+        sets_user_version: None,
+    },
+    // The agent the owner declared for an applied delivery, beside the
+    // authority the relay derived, and the enrollment proof of an owner's
+    // queued draft. Null for every delivery and entry without them.
+    Migration {
+        ordinal: 28,
+        id: "v2-live-application-agent-declarations",
+        sql: V2_LIVE_APPLICATION_AGENT_DECLARATIONS_DDL,
         sets_user_version: None,
     },
 ];
@@ -3215,6 +3250,14 @@ mod tests {
             (
                 "v2-ydoc-live-edit-authors",
                 "33ec61e3e1f37d0908e6e5eac829e9e5a749e2834e4ce42729716fc32fe5d938",
+            ),
+            (
+                "v2-owner-draft-agent-declarations",
+                "7bb36813afe82921b70fa48a9fe0fa99bf0506f041bf1781e57892fc03d9d867",
+            ),
+            (
+                "v2-live-application-agent-declarations",
+                "047aea88c31886283062cc9f717639888ddc3129ba6bb927ff3e94404224eec5",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

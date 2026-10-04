@@ -1,3 +1,4 @@
+import { decodeOrdinarySyncResult } from "@dohc/workspace-engine-client/relay-wire";
 import { runInKeyedLane } from "../keyedLane";
 import {
   RelayApiVersionError,
@@ -22,7 +23,6 @@ import {
   type PullShareViewResult,
   type ShareViewRefusal,
   type SharingDeclined,
-  type OwnerAdmissionPending,
   type PullWorkspaceFromRelayResult,
   type PushSharedChannelResult,
   type PushWorkspaceToRelayResult,
@@ -350,62 +350,22 @@ function assertRelayPullProgress(
 function changedPaths(
   value: JsonValue | undefined,
   label: string,
-  allowSecret: true,
-): Array<{
-  versionId: string;
-  path: string;
-  operation: "write" | "delete";
-  contentKind: "text" | "binary" | "secret";
-}>;
-function changedPaths(
-  value: JsonValue | undefined,
-  label: string,
-  allowSecret?: false,
-): Array<{
-  path: string;
-  operation: "write" | "delete";
-  contentKind: "text" | "binary";
-}>;
-function changedPaths(
-  value: JsonValue | undefined,
-  label: string,
-  allowSecret = false,
-): Array<{
-  path: string;
-  operation: "write" | "delete";
-  contentKind: "text" | "binary" | "secret";
-}> {
+): Array<{ path: string; operation: "write" | "delete"; contentKind: "text" | "binary" }> {
   if (!Array.isArray(value)) {
     throw new Error(`Rust engine ${label}.changedPaths must be an array.`);
   }
   return value.map((entry, index) => {
     const record = resultRecord(entry, `${label}.changedPaths[${index}]`);
-    const versionId = allowSecret
-      ? stringField(record, "versionId", `${label}.changedPaths[${index}]`)
-      : undefined;
     const path = stringField(record, "path", `${label}.changedPaths[${index}]`);
     const operation = record.operation;
     const contentKind = record.contentKind;
     if (operation !== "write" && operation !== "delete") {
-      throw new Error(
-        `Rust engine ${label}.changedPaths[${index}].operation is invalid.`,
-      );
+      throw new Error(`Rust engine ${label}.changedPaths[${index}].operation is invalid.`);
     }
-    if (
-      contentKind !== "text" &&
-      contentKind !== "binary" &&
-      !(allowSecret && contentKind === "secret")
-    ) {
-      throw new Error(
-        `Rust engine ${label}.changedPaths[${index}].contentKind is invalid.`,
-      );
+    if (contentKind !== "text" && contentKind !== "binary") {
+      throw new Error(`Rust engine ${label}.changedPaths[${index}].contentKind is invalid.`);
     }
-    return {
-      ...(versionId !== undefined ? { versionId } : {}),
-      path,
-      operation,
-      contentKind,
-    };
+    return {path, operation, contentKind};
   });
 }
 
@@ -434,35 +394,6 @@ function shareViewRefusals(
       opKind: stringField(record, "opKind", at),
       code: stringField(record, "code", at),
       detail: stringField(record, "detail", at),
-    };
-  });
-}
-
-function ownerAdmissionPending(value: unknown): OwnerAdmissionPending[] {
-  if (!Array.isArray(value)) throw new Error("Rust engine sync.push.ownerAdmissionPending must be an array.");
-  return value.map(item => {
-    const row = resultRecord(item, "sync.push.ownerAdmissionPending");
-    const text = (key: string) => stringField(row, key, "sync.push.ownerAdmissionPending");
-    return {workspaceId: text("workspaceId"), originId: text("originId"), originSeq: numberField(row, "originSeq", "sync.push.ownerAdmissionPending"),
-      versionId: text("versionId"), objectId: text("objectId"), path: text("path")};
-  });
-}
-
-function sharingDeclined(
-  value: JsonValue | undefined,
-  label: string,
-): SharingDeclined[] {
-  if (!Array.isArray(value)) {
-    throw new Error(`Rust engine ${label}.sharingDeclined must be an array.`);
-  }
-  return value.map((entry, index) => {
-    const at = `${label}.sharingDeclined[${index}]`;
-    const record = resultRecord(entry, at);
-    return {
-      path: stringField(record, "path", at),
-      constraint: stringField(record, "constraint", at),
-      limitBytes: numberField(record, "limitBytes", at),
-      observedBytes: numberField(record, "observedBytes", at),
     };
   });
 }
@@ -774,22 +705,13 @@ export class EngineRelayClient {
     const commitCursor = async (
       cursor: Record<string, JsonValue | undefined>,
     ): Promise<CommitRelayCursorResult> => {
-      const result = resultRecord(
+      const result = decodeOrdinarySyncResult("sync.commitCursor",
         await request("sync.commitCursor", {
           workspaceId: workspace.workspaceId,
           pendingCursor: cursor,
         }),
-        "sync.commitCursor",
       );
-      if (!booleanField(result, "committed", "sync.commitCursor")) {
-        throw new Error("Rust engine sync.commitCursor did not commit.");
-      }
-      return {
-        sharingDeclined: sharingDeclined(
-          result.sharingDeclined,
-          "sync.commitCursor",
-        ),
-      };
+      return { sharingDeclined: result.sharingDeclined };
     };
 
     const appendDeclines = (
@@ -837,20 +759,16 @@ export class EngineRelayClient {
 
     return {
       push: async () => {
-        const result = resultRecord(
+        const result = decodeOrdinarySyncResult("sync.push",
           await request("sync.push", { workspaceId: workspace.workspaceId }),
-          "sync.push",
         );
         return {
-          pushed: numberField(result, "pushed", "sync.push"),
+          pushed: result.pushed,
           // The daemon owns all origin selection; desktop callers only consume
           // the count, so no origin identifiers cross the process boundary.
           originsPushed: [],
-          ownerAdmissionPending: ownerAdmissionPending(result.ownerAdmissionPending),
-          sharingDeclined: sharingDeclined(
-            result.sharingDeclined,
-            "sync.push",
-          ),
+          ownerAdmissionPending: result.ownerAdmissionPending,
+          sharingDeclined: result.sharingDeclined,
         };
       },
       pull: async (materializePage) => {
@@ -871,13 +789,10 @@ export class EngineRelayClient {
           }
         >();
         for (;;) {
-          const result = resultRecord(
+          const result = decodeOrdinarySyncResult("sync.pull",
             await request("sync.pull", { workspaceId: workspace.workspaceId }),
-            "sync.pull",
           );
-          const cursor = pendingCursor(result.pendingCursor, "sync.pull");
-          const pageCursor = numberField(result, "nextCursor", "sync.pull");
-          const hasMore = booleanField(result, "hasMore", "sync.pull");
+          const { pendingCursor: cursor, nextCursor: pageCursor, hasMore } = result;
           assertRelayPullProgress(
             "sync.pull",
             previousCursor,
@@ -886,33 +801,15 @@ export class EngineRelayClient {
           );
           previousCursor = pageCursor;
           nextCursor = pageCursor;
-          fetched += numberField(result, "fetched", "sync.pull");
-          applied += numberField(result, "applied", "sync.pull");
-          skipped += numberField(result, "skipped", "sync.pull");
-          conflictsOpened += numberField(
-            result,
-            "conflictsOpened",
-            "sync.pull",
-          );
-          appendDeclines(
-            declines,
-            sharingDeclined(result.sharingDeclined, "sync.pull"),
-          );
-          const pageChangedPaths = changedPaths(
-            result.changedPaths,
-            "sync.pull",
-            true,
-          );
+          fetched += result.fetched;
+          applied += result.applied;
+          skipped += result.skipped;
+          conflictsOpened += result.conflictsOpened;
+          appendDeclines(declines, result.sharingDeclined);
+          const pageChangedPaths = result.changedPaths;
           for (const path of pageChangedPaths) {
             changed.set(`${path.versionId}\0${path.path}`, path);
           }
-          if (!Array.isArray(result.refusals)) throw new Error("Rust engine sync.pull.refusals must be an array.");
-          result.refusals.forEach((entry, index) => {
-            const at = `sync.pull.refusals[${index}]`;
-            const row = resultRecord(entry, at);
-            return { originId: stringField(row, "originId", at), originSeq: numberField(row, "originSeq", at),
-              opKind: stringField(row, "opKind", at), code: stringField(row, "code", at), reason: stringField(row, "reason", at) };
-          });
           try {
             await materializePage(pageChangedPaths);
             appendDeclines(declines, (await commitCursor(cursor)).sharingDeclined);

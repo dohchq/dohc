@@ -517,14 +517,14 @@ impl EngineService {
                 "live-application-retired",
             ));
         }
-        let (max_applications, reservation) = self.configured_settlement_admission(&ctx)?;
+        let (max_applications, reconstruction) = self.configured_settlement_admission(&ctx)?;
         let now_ms = super::request::now_ms()?;
         let token = cancellation.token();
         let guard = Arc::new(ApplicationOutputGuard {
             registration: registration.clone(),
             cancel: ctx.cancel.clone(),
             deadline: ctx.deadline,
-            _reservation: reservation.clone(),
+            _reservation: reconstruction.reservation.clone(),
         });
         let mut retirement = RetireOnCancellation(Some(host));
         let operation = tokio::spawn(async move {
@@ -538,7 +538,7 @@ impl EngineService {
                     now_ms,
                     Arc::new(NoFaults),
                     token,
-                    reservation,
+                    reconstruction,
                 )
                 .await
         });
@@ -1104,6 +1104,7 @@ fn pending_result(
         ApplicationPending::BaselineUnavailable => "baseline-unavailable",
         ApplicationPending::ApplicabilityUnavailable => "applicability-unavailable",
         ApplicationPending::BindingMismatch => "binding-mismatch",
+        ApplicationPending::SettlementRequired => "settlement-required",
     }})
 }
 
@@ -1598,7 +1599,7 @@ mod tests {
             "version": 1, "relayNamespace": "cancel-test",
             "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
             "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
-            "ingress": {"aggregateBytes":400_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
             "settlement": {"maxApplicationsPerSettlement":4}
         })).unwrap();
         let (service, owner, ingress) = EngineService::configured_live_host(configuration)
@@ -1758,7 +1759,7 @@ mod tests {
             "version": 1, "relayNamespace": "completion-test",
             "host": {"hostId":"host","hostEpoch":1,"instanceId":"instance","connectionId":"connection"},
             "workspaces": [{"root":scratch.path(),"workspaceId":"workspace","maxRegistrations":4}],
-            "ingress": {"aggregateBytes":400_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":1,"uploadDeadlineMs":30_000},
+            "ingress": {"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":1,"uploadDeadlineMs":30_000},
             "settlement": {"maxApplicationsPerSettlement":4}
         })).unwrap();
         let (service, owner, ingress) = EngineService::configured_live_host(configuration)

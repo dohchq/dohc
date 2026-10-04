@@ -175,6 +175,11 @@ export function createDeviceLiveDelivery(options: {
       await drain(document, signal);
       check();
       const consumer = consumers.get(document.workspaceId)!;
+      // A stream starts only after the host applied the adoption's divergent
+      // seed. Later queued work may still be pending; open streams keep working.
+      if (consumer instanceof OwnerCommittedDelivery && !consumer.adoptionSeedApplied(document)) {
+        throw new Error("The host has not applied the owner's adopted document yet.");
+      }
       const registration = consumer.captureRegistration(binding);
       return Object.freeze({client: client!, workspace: consumer.workspace, registrationId: registration.id, binding: registration.binding,
         coordinate: host, invalidated: AbortSignal.any([invalidated.signal, registration.invalidated]),

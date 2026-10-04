@@ -91,8 +91,8 @@ pub use chats::{
     resolve_thread_message, thread_has_message, validate_follow_target,
 };
 pub use collections::{
-    AutomationRunAttribution, COLLECTION_SCHEMA_FILENAME, ChangeActorKind, ChangeAttribution,
-    CollectionAdoptionCandidate, CollectionDetails, CollectionFieldChangeFact,
+    AgentDeclaration, AutomationRunAttribution, COLLECTION_SCHEMA_FILENAME, ChangeActorKind,
+    ChangeAttribution, CollectionAdoptionCandidate, CollectionDetails, CollectionFieldChangeFact,
     CollectionFieldHistoryEntry, CollectionFieldType, CollectionFieldValue, CollectionFilter,
     CollectionFilterOperator, CollectionHistoryValue, CollectionIndexedValue,
     CollectionIndexedValueValidation, CollectionListPage, CollectionPendingAdoption,
