@@ -1439,8 +1439,14 @@ export function DesktopWorkspaceShell(props: {
   );
   useEffect(() => {
     if (!workspaceIsReady) return;
-    void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error, () => { void refreshDatasets(); }));
-  }, [workspaceIsReady, refreshDatasets, reportShellError]);
+    const refresh = () => {
+      if (workspaceAdmission.superseded) return;
+      void refreshDatasets().catch(error => {
+        if (!workspaceAdmission.superseded) reportShellError("Could not read Collections.", error, refresh);
+      });
+    };
+    refresh();
+  }, [workspaceIsReady, workspaceAdmission, refreshDatasets, reportShellError]);
   // One issue counter for every engine read the shell orders: the history
   // page, the status lanes, the workspace open, the agent observation, and
   // the version callbacks. Bumped on unmount, so a slow response for one
@@ -3334,16 +3340,19 @@ export function DesktopWorkspaceShell(props: {
       filesRefreshMode = "skip";
       if (mode !== "skip" || !hasCommittedListing()) {
         void refreshFiles(mode === "full" ? {} : { allowCached: true }).catch(
-          (error) =>
-            reportShellError("Could not refresh workspace files.", error),
+          (error) => {
+            if (!workspaceAdmission.superseded) reportShellError("Could not refresh workspace files.", error);
+          },
         );
       }
-      void refreshHistory().catch((error) =>
-        reportShellError("Could not refresh history.", error),
-      );
+      void refreshHistory().catch((error) => {
+        if (!workspaceAdmission.superseded) reportShellError("Could not refresh history.", error);
+      });
       if (!isShareView || shareViewReadsCollections) void refreshCollections();
       if (!isShareView) {
-        void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error));
+        void refreshDatasets().catch(error => {
+          if (!workspaceAdmission.superseded) reportShellError("Could not read Collections.", error);
+        });
         void refreshKeptCopies();
       }
     });
@@ -3369,6 +3378,7 @@ export function DesktopWorkspaceShell(props: {
   }, [
     workspaceId,
     workspaceIsReady,
+    workspaceAdmission,
     refreshFiles,
     refreshHistory,
     reportShellError,
@@ -3724,9 +3734,10 @@ export function DesktopWorkspaceShell(props: {
   );
   const shareSkippedToken = useRef(0);
   const reloadShareSkipped = useCallback(async () => {
+    if (workspaceAdmission.superseded) return;
     const token = ++shareSkippedToken.current;
     const workspaces = await props.refreshWorkspaceRegistry();
-    if (token !== shareSkippedToken.current) return;
+    if (workspaceAdmission.superseded || token !== shareSkippedToken.current) return;
     const entry = workspaces.find(
       (candidate) => candidate.workspaceId === workspaceId,
     );
@@ -3735,7 +3746,7 @@ export function DesktopWorkspaceShell(props: {
     // without deleting the record, so this reads the marker rather than the
     // record's presence.
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
-  }, [props.refreshWorkspaceRegistry, workspaceId]);
+  }, [props.refreshWorkspaceRegistry, workspaceId, workspaceAdmission]);
   const {
     automationHolds, automationHoldsUnreadable, allowAutomationHold, resetAutomationHolds, revealAutomationHolds,
     automationStops, dismissAutomationStops,
@@ -3752,11 +3763,13 @@ export function DesktopWorkspaceShell(props: {
 
   const refreshShareView = useCallback(async (): Promise<ShareViewRefresh> => {
     if (!shareView) return "current";
-    if (shareViewDamaged) return "stale";
+    if (!workspaceIsReady || workspaceAdmission.superseded || shareViewDamaged) return "stale";
     const token = ++shareRefreshToken.current;
+    const isCurrent = () => !workspaceAdmission.superseded && token === shareRefreshToken.current;
     setShareRefreshing(true);
     const repaintAfterChange = async () => {
       await refreshFiles();
+      if (!isCurrent()) return;
       setVersionEpoch((epoch) => epoch + 1);
     };
     const bestEffortRepaint = async () => {
@@ -3771,10 +3784,10 @@ export function DesktopWorkspaceShell(props: {
     };
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
-      if (token !== shareRefreshToken.current) return "stale";
+      if (!isCurrent()) return "stale";
       if (!outcome.ok) {
         if (outcome.changedPaths > 0) await bestEffortRepaint();
-        if (token !== shareRefreshToken.current) return "stale";
+        if (!isCurrent()) return "stale";
         reportShellError(
           "Couldn't refresh the shared view.",
           new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
@@ -3796,13 +3809,16 @@ export function DesktopWorkspaceShell(props: {
       if (outcome.changedPaths > 0) {
         await repaintAfterChange();
       }
+      if (!isCurrent()) return "stale";
       return outcome.status === "ended" ? "ended" : "current";
     } catch (error) {
+      if (!isCurrent()) return "stale";
       // A store only a newer dohc opens stops the whole workspace, and the
       // stop state already says so. A toast would repeat it.
       const status = await bridge()
         .getSyncStatus({ workspaceId })
         .catch(() => null);
+      if (!isCurrent()) return "stale";
       if (
         status?.engineStoreRefused != null &&
         engineStoreRefusalRecovery(status.engineStoreRefused) === "update"
@@ -3818,11 +3834,13 @@ export function DesktopWorkspaceShell(props: {
       // only on the success path would keep that invisible until a lucky
       // refresh or a remount. Start this after the listing, but do not let a
       // slow registry read keep the Refresh control disabled.
-      if (token === shareRefreshToken.current) setShareRefreshing(false);
-      void reloadShareSkipped().catch(() => undefined);
+      if (isCurrent()) {
+        setShareRefreshing(false);
+        void reloadShareSkipped().catch(() => undefined);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
+  }, [shareView?.shareId, shareViewEnded, workspaceId, workspaceIsReady, workspaceAdmission, reloadShareSkipped]);
   refreshShareViewRef.current = refreshShareView;
   useEffect(() => {
     // One automatic refresh when a shared view opens; afterwards on demand.
@@ -3929,6 +3947,7 @@ export function DesktopWorkspaceShell(props: {
   useShareDirectWrites({
     workspaceId,
     enabled: shareViewDocumentsWritable,
+    ready: workspaceIsReady,
     ownerName: shareGranterName,
     refreshShareView,
     sendShareChanges,
@@ -4687,7 +4706,7 @@ export function DesktopWorkspaceShell(props: {
             <button
               type="button"
               data-testid="shared-view-refresh"
-              disabled={shareRefreshing}
+              disabled={shareRefreshing || !workspaceIsReady}
               onClick={() => void refreshShareView()}
               className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
             >
