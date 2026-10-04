@@ -1,7 +1,7 @@
 import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
 import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import {parseAdmittedLiveUpdateMetadata, parseLiveUpdateDigest, parseLiveUpdateIdentifier,
+import {parseAdmittedLiveUpdateMetadata, parseAgentDeclaration, parseLiveUpdateDigest, parseLiveUpdateIdentifier,
   parseLiveUpdateReceipt, parseLiveUpdateStructRange} from "@dohc/live-session-contract/live-update-admission";
 import {parseNativeRestoreFenceReceipt} from "./liveRestoreFence";
 import {configRecord} from "./deviceLiveHostConfig";
@@ -20,11 +20,44 @@ function array<T>(value: unknown, maximum: number, parse: (value: unknown) => T)
   if (!Array.isArray(value) || value.length > maximum) throw new TypeError("Native restore array exceeds its configured bound.");
   return value.map(parse);
 }
+/**
+ * An enrolled owner's queued draft. It names no adoption or native journal
+ * sequence: its append key is the draft's own, and its agent declaration is
+ * the one the draft stored, absent when it declared none.
+ */
+function ownerDraftSource(row: Record<string, unknown>, binding: ReturnType<typeof parseLiveObjectBinding>) {
+  const source = configRecord(row.source, ["binding", "updateDigest", "origin"]);
+  const origin = configRecord(source.origin, ["kind"], ["agentDeclaration"]);
+  require(origin.kind === "ownerDraft");
+  const sourceBinding = parseLiveObjectBinding(source.binding), updateDigest = parseLiveUpdateDigest(row.updateDigest);
+  require(isDeepStrictEqual(binding, sourceBinding) && isDeepStrictEqual(source.binding, sourceBinding) && source.updateDigest === updateDigest);
+  const agentDeclaration = Object.hasOwn(origin, "agentDeclaration") ? parseAgentDeclaration(origin.agentDeclaration) : undefined;
+  return {appendKey: parseLiveUpdateIdentifier(row.appendKey), updateDigest,
+    source: {binding: sourceBinding, updateDigest, origin: {kind: "ownerDraft" as const, ...(agentDeclaration ? {agentDeclaration} : {})}}};
+}
+
 function nativeSource(value: unknown) {
   const row = configRecord(value, ["outboxId", "outboxSequence", "binding", "appendKey", "deliveryId", "updateDigest",
     "byteLength", "createdAtMs", "source", "acceptedReceipt"]);
+  const binding = parseLiveObjectBinding(row.binding);
+  require(isDeepStrictEqual(row.binding, binding));
+  const draft = typeof row.source === "object" && row.source !== null && !Object.hasOwn(row.source, "adoptionId")
+    ? ownerDraftSource(row, binding) : null;
+  const identity = draft ?? adoptedSource(row, binding);
+  const {updateDigest} = identity;
+  require(row.outboxId === `owner-outbox-${textDigest(`${binding.workspaceId}\0${JSON.stringify(row.binding)}\0${binding.lineageClaimId}`)}`);
+  require(row.deliveryId === `owner-delivery-${textDigest(`${row.outboxId}\0${row.outboxSequence}\0${updateDigest}`)}`);
+  require(integer(row.byteLength, 1) <= 20_971_520);
+  return {outboxId: parseLiveUpdateIdentifier(row.outboxId), outboxSequence: integer(row.outboxSequence, 1), binding,
+    appendKey: identity.appendKey, deliveryId: parseLiveUpdateIdentifier(row.deliveryId), updateDigest,
+    byteLength: integer(row.byteLength, 1), createdAtMs: integer(row.createdAtMs), source: identity.source,
+    acceptedReceipt: row.acceptedReceipt === null ? null : parseLiveUpdateReceipt(row.acceptedReceipt)};
+}
+
+/** A native update an adopted owner retained, or the adoption's seed. */
+function adoptedSource(row: Record<string, unknown>, binding: ReturnType<typeof parseLiveObjectBinding>) {
   const source = configRecord(row.source, ["binding", "adoptionId", "nativeSequence", "updateDigest", "origin"]);
-  const binding = parseLiveObjectBinding(row.binding), sourceBinding = parseLiveObjectBinding(source.binding);
+  const sourceBinding = parseLiveObjectBinding(source.binding);
   const origin = configRecord(source.origin, ["kind"], ["actorOriginId", "actorKind", "onBehalfOf", "chainDepth", "recordedAtMs"]);
   if (origin.kind === "adoptionSeed") configRecord(origin, ["kind"]);
   else {
@@ -41,18 +74,10 @@ function nativeSource(value: unknown) {
   }
   const updateDigest = parseLiveUpdateDigest(row.updateDigest), nativeSequence = integer(source.nativeSequence, origin.kind === "nativeUpdate" ? 1 : 0);
   const adoptionId = parseLiveUpdateIdentifier(source.adoptionId);
-  require(isDeepStrictEqual(binding, sourceBinding) && isDeepStrictEqual(row.binding, binding) &&
-    isDeepStrictEqual(source.binding, sourceBinding) && source.updateDigest === updateDigest);
+  require(isDeepStrictEqual(binding, sourceBinding) && isDeepStrictEqual(source.binding, sourceBinding) && source.updateDigest === updateDigest);
   const expectedKey = origin.kind === "adoptionSeed" ? `owner-adoption:${digest([adoptionId, nativeSequence, updateDigest])}` : `adopted-local:${digest(source)}`;
   require(row.appendKey === expectedKey);
-  require(row.outboxId === `owner-outbox-${textDigest(`${binding.workspaceId}\0${JSON.stringify(row.binding)}\0${binding.lineageClaimId}`)}`);
-  require(row.deliveryId === `owner-delivery-${textDigest(`${row.outboxId}\0${row.outboxSequence}\0${updateDigest}`)}`);
-  require(integer(row.byteLength, 1) <= 20_971_520);
-  return {outboxId: parseLiveUpdateIdentifier(row.outboxId), outboxSequence: integer(row.outboxSequence, 1), binding,
-    appendKey: expectedKey, deliveryId: parseLiveUpdateIdentifier(row.deliveryId), updateDigest,
-    byteLength: integer(row.byteLength, 1), createdAtMs: integer(row.createdAtMs),
-    source: {binding: sourceBinding, adoptionId, nativeSequence, updateDigest, origin},
-    acceptedReceipt: row.acceptedReceipt === null ? null : parseLiveUpdateReceipt(row.acceptedReceipt)};
+  return {appendKey: expectedKey, updateDigest, source: {binding: sourceBinding, adoptionId, nativeSequence, updateDigest, origin}};
 }
 
 function historyProof(value: unknown, namespace: string, maximum: number) {
@@ -106,9 +131,13 @@ export function parseNativeRestoreProposalReceipt(json: string, budget: RestoreP
   for (let i = 0; i < nativeSources.length; i++) {
     const source = nativeSources[i]!, prior = nativeSources[i - 1];
     require(isDeepStrictEqual(source.binding, fence.operation.oldBinding));
-    require(fence.operation.origin.kind === "owner" && source.source.adoptionId === fence.operation.origin.id &&
-      source.source.nativeSequence <= fence.localHeadSequence);
-    if (prior) require(prior.outboxId === source.outboxId && prior.outboxSequence < source.outboxSequence);
+    // A draft queue has no adoption: the native engine admits it only for its exact enrolled owner state.
+    if ("adoptionId" in source.source) {
+      require(fence.operation.origin.kind === "owner" && source.source.adoptionId === fence.operation.origin.id &&
+        source.source.nativeSequence <= fence.localHeadSequence);
+    }
+    if (prior) require(prior.outboxId === source.outboxId && prior.outboxSequence < source.outboxSequence &&
+      ("adoptionId" in prior.source) === ("adoptionId" in source.source));
     if (source.acceptedReceipt) require(source.acceptedReceipt.deliveryId === source.deliveryId && source.acceptedReceipt.updateDigest === source.updateDigest);
   }
   return {fence, point: {journalCursor: integer(point.journalCursor), receiptDigest: parseLiveUpdateDigest(point.receiptDigest),
@@ -120,6 +149,20 @@ export function parseNativeRestoreProposalReceipt(json: string, budget: RestoreP
     nativeSourceManifestDigest: manifestDigest};
 }
 export type NativeRestoreProposalReceipt = ReturnType<typeof parseNativeRestoreProposalReceipt>;
+type NativeRestoreSourceIdentity = Pick<NativeRestoreProposalReceipt["nativeSources"][number], "source">;
+
+/**
+ * What an accepted copy of this source must declare: the draft's own agent, or
+ * the agent a native update's retained attribution names, as
+ * `AgentDeclaration::from_change` derives it. Absent for anything else.
+ */
+export function nativeSourceAgentDeclaration(source: NativeRestoreSourceIdentity) {
+  if (!("adoptionId" in source.source)) return source.source.origin.agentDeclaration;
+  const {origin} = source.source;
+  return origin.kind === "nativeUpdate" && origin.actorKind === "agent" && origin.actorOriginId !== null
+    ? parseAgentDeclaration({agentId: origin.actorOriginId, onBehalfOf: origin.onBehalfOf, depth: origin.chainDepth})
+    : undefined;
+}
 
 export function decodeNativeRestoreProposal(bytes: Uint8Array, budget: RestoreProofBudget) {
   integer(budget.maxBytes, 1);integer(budget.maxEvents, 1);

@@ -239,6 +239,7 @@ impl EngineService {
                     append_key: params.append_key,
                     update: bytes,
                     now_ms: now_ms()?,
+                    agent_declaration: None,
                 },
                 cancellation.token(),
                 guard.reservation.clone(),

@@ -134,6 +134,10 @@ impl RuntimeError {
                         "owner-outbox-configured-budget-mismatch"
                     }
                     ApplicationError::Interrupted => "operation-crashed",
+                    ApplicationError::PublicationPending => "live-application-publication-pending",
+                    ApplicationError::MaterializationPending => {
+                        "settlement-materialization-pending"
+                    }
                 }
             }
             RuntimeError::Sync(err) => err.code(),

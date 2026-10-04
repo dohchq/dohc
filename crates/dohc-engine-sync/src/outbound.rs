@@ -6,6 +6,84 @@ use rusqlite::{Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx};
 
+/// The relay derives person attribution; installation identities stay local.
+pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool {
+    let Some(authors) = payload
+        .get_mut("authors")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    let original_len = authors.len();
+    authors
+        .retain(|author| author.get("kind").and_then(serde_json::Value::as_str) != Some("human"));
+    if authors.len() == original_len {
+        return false;
+    }
+    if authors.is_empty() {
+        payload
+            .as_object_mut()
+            .expect("moment payload is an object")
+            .remove("authors");
+    }
+    true
+}
+
+pub(crate) fn relay_person_id(id: &str) -> Option<&str> {
+    (!id.starts_with("local:")).then_some(id)
+}
+
+/// Persist repaired wire payloads before sending, preserving exact echo checks.
+pub(crate) fn repair_queued_moment_authors(
+    store: &mut dohc_engine_storage::EngineStore,
+    ops: &mut [crate::ReplicationEnvelope],
+    faults: &dyn dohc_engine_storage::FaultInjector,
+) -> Result<dohc_engine_storage::TxnOutcome<()>, SyncError> {
+    use dohc_engine_storage::TxnOutcome;
+    let repairs: Vec<_> = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, op)| {
+            if op.op_kind != "moment.append" {
+                return None;
+            }
+            let mut payload = op.payload.clone();
+            omit_local_person_authors(&mut payload).then_some((index, payload))
+        })
+        .collect();
+    if repairs.is_empty() {
+        return Ok(TxnOutcome::Committed(()));
+    }
+    let outcome = store.write_with(faults, |tx| {
+        let mut repaired = Vec::new();
+        for (index, payload) in repairs {
+            let op = &ops[index];
+            let payload_json = serde_json::to_string(&payload).map_err(SyncError::corrupt)?;
+            let updated = tx
+                .execute(
+                    "UPDATE replication_log SET payload_json=?1 \
+                 WHERE workspace_id=?2 AND origin_id=?3 AND origin_seq=?4 \
+                   AND op_kind='moment.append' AND imported=0",
+                    params![payload_json, op.workspace_id, op.origin_id, op.origin_seq],
+                )
+                .map_err(SyncError::persist)?;
+            if updated == 1 {
+                repaired.push((index, payload));
+            }
+        }
+        Ok::<_, SyncError>(repaired)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(repaired) => {
+            for (index, payload) in repaired {
+                ops[index].payload = payload;
+            }
+            Ok(TxnOutcome::Committed(()))
+        }
+        TxnOutcome::Crashed { committed } => Ok(TxnOutcome::Crashed { committed }),
+    }
+}
+
 struct MomentPayloadRow {
     moment_id: String,
     version_id: String,
@@ -37,6 +115,21 @@ struct MomentPayloadRow {
     before_metadata_correlation_id: Option<String>,
 }
 
+/// Accepted text a published moment names as its before-image in place of
+/// the moment's local preimage. The local rollback tuple is unchanged.
+pub(crate) struct PortableBefore {
+    pub moment_id: String,
+    pub version_id: String,
+    pub object_id: String,
+    pub path: String,
+    pub blob_sha256: String,
+    pub byte_length: i64,
+    pub recorded_at_ms: i64,
+    pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
+}
+
 /// Project one committed domain moment into the relay-visible log.
 ///
 /// The caller must check [`crate::workspace_replicates_with_relay_in_tx`]
@@ -46,7 +139,19 @@ pub fn journal_moment_append_in_tx(
     workspace_id: &str,
     moment_id: &str,
 ) -> Result<(), SyncError> {
-    let (payload, recorded_at_ms) = moment_append_payload_in_tx(tx, workspace_id, moment_id)?;
+    let (payload, recorded_at_ms) = moment_payload_in_tx(tx, workspace_id, moment_id, None)?;
+    journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
+}
+
+/// [`journal_moment_append_in_tx`] with `before` as the whole public before group.
+pub(crate) fn journal_moment_append_from_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    before: &PortableBefore,
+) -> Result<(), SyncError> {
+    let (payload, recorded_at_ms) =
+        moment_payload_in_tx(tx, workspace_id, moment_id, Some(before))?;
     journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
 }
 
@@ -54,6 +159,15 @@ pub(crate) fn moment_append_payload_in_tx(
     tx: &Transaction<'_>,
     workspace_id: &str,
     moment_id: &str,
+) -> Result<(serde_json::Value, i64), SyncError> {
+    moment_payload_in_tx(tx, workspace_id, moment_id, None)
+}
+
+fn moment_payload_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    portable_before: Option<&PortableBefore>,
 ) -> Result<(serde_json::Value, i64), SyncError> {
     let row = tx
         .query_row(
@@ -167,6 +281,55 @@ pub(crate) fn moment_append_payload_in_tx(
         "beforeLatestMomentId": row.before_latest_moment_id,
         "beforeMetadata": before_metadata,
     });
+    if let Some(before) = portable_before {
+        let fields = serde_json::json!({
+            "payloadBeforePath": before.path,
+            "payloadBeforeContentKind": "text",
+            "payloadBeforeBlobSha256": before.blob_sha256,
+            "payloadBeforeByteLength": before.byte_length,
+            "beforePresent": "present",
+            "beforeObjectId": before.object_id,
+            "beforeVersionId": before.version_id,
+            "beforePath": before.path,
+            "beforeBlobSha256": before.blob_sha256,
+            "beforeContentKind": "text",
+            "beforeByteLength": before.byte_length,
+            "beforeUpdatedAtMs": before.recorded_at_ms,
+            "beforeLatestMomentId": before.moment_id,
+            "beforeMetadata": {
+                "origin": replicated_moment_origin(&before.metadata_origin),
+                "summary": before.metadata_summary,
+                "correlationId": before.metadata_correlation_id,
+            },
+        });
+        let object = payload
+            .as_object_mut()
+            .expect("moment payload is an object");
+        for (field, value) in fields.as_object().expect("before group is an object") {
+            object.insert(field.clone(), value.clone());
+        }
+    }
+    omit_local_person_authors(&mut payload);
+    if let Some(authors) = payload
+        .get_mut("authors")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for author in authors {
+            if matches!(
+                author.get("kind").and_then(serde_json::Value::as_str),
+                Some("agent" | "automation")
+            ) && author
+                .get("onBehalfOf")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| relay_person_id(id).is_none())
+            {
+                author
+                    .as_object_mut()
+                    .expect("author with kind is an object")
+                    .remove("onBehalfOf");
+            }
+        }
+    }
     if measured_json_len(&payload)? > PAYLOAD_PACKING_TARGET_BYTES {
         payload["beforeMetadata"] = serde_json::Value::Null;
     }

@@ -215,6 +215,11 @@ it("uses an existing client for bounded owner adoption and refuses ordinary remo
     expect(singleton.sendRequest.mock.lastCall?.[0]).toMatchObject({method: "ydoc.ownerOutbox.readPending",params: {outboxId: "outbox"}});
     await peer!.sendRequest({id: 22,method: "liveApplication.ownerState",workspace: "ws-ordinary",params: {registrationId: 9}});
     const beforeFence = owner.finishHandoff.mock.calls.length;
+    // A fence refused for unpublished settlements changes nothing and keeps the registration.
+    singleton.sendRequest.mockResolvedValueOnce({result: {status: "pending",reason: "publication-pending"}});
+    expect((await peer!.sendRequest({id: 25,method: "liveApplication.fenceRestore",workspace: "ws-ordinary",params: {operation: operation as never}})).result)
+      .toEqual({status: "pending",reason: "publication-pending"});
+    expect(owner.finishHandoff).toHaveBeenCalledTimes(beforeFence);
     singleton.sendRequest.mockResolvedValueOnce({result: {status: "fenced",receipt}});
     await peer!.sendRequest({id: 23,method: "liveApplication.fenceRestore",workspace: "ws-ordinary",params: {operation: operation as never}});
     expect(owner.finishHandoff).toHaveBeenCalledTimes(beforeFence + 1);

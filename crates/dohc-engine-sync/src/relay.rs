@@ -18,6 +18,7 @@ use crate::hydration::VerifiedBlob;
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
 
 mod direct_write;
+mod share_authors;
 use crate::{
     ApplyDisposition, ApplyOutcome, BlobKind, ObservedBytes, RelayError, ReplicationEnvelope,
     ShareDisposition, SyncError, blob_ceiling,
@@ -1118,7 +1119,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let mut attempt = 0_u8;
 
             loop {
-                let ops = list_replication_ops(
+                let mut ops = list_replication_ops(
                     store,
                     workspace_id,
                     &origin_id,
@@ -1128,6 +1129,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .map_err(local)?;
                 if ops.is_empty() {
                     break;
+                }
+                match crate::outbound::repair_queued_moment_authors(store, &mut ops, faults)
+                    .map_err(local)?
+                {
+                    TxnOutcome::Committed(()) => {}
+                    TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
                 }
                 let prefix =
                     crate::owner_publication_prefix(store, workspace_id, &ops, max_read_bytes)
@@ -4559,7 +4566,7 @@ fn replay_share_write<T: RelayTransport>(
                 metadata_origin: "sync".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
-                author_json: None,
+                author_json: share_authors::declared_agent_authors(envelope),
                 now_ms: envelope.recorded_at_ms,
                 request_id: Some(request_id.clone()),
             };
@@ -4594,7 +4601,7 @@ fn replay_share_write<T: RelayTransport>(
                 metadata_origin: "sync".to_owned(),
                 metadata_summary: None,
                 metadata_correlation_id: None,
-                author_json: None,
+                author_json: share_authors::declared_agent_authors(envelope),
                 now_ms: envelope.recorded_at_ms,
                 request_id: Some(request_id),
             };
@@ -4696,7 +4703,7 @@ fn replay_share_delete(
         metadata_origin: "sync".to_owned(),
         metadata_summary: None,
         metadata_correlation_id: None,
-        author_json: None,
+        author_json: share_authors::declared_agent_authors(envelope),
         now_ms: envelope.recorded_at_ms,
     };
     let result = replay_share_change(

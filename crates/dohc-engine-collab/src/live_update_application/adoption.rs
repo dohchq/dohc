@@ -51,6 +51,9 @@ mod tests {
             Self::with_source(text, bytes)
         }
         fn with_source(text: String, bytes: Vec<u8>) -> Self {
+            Self::with_source_selectors(text, bytes, vec!["owner.md".into()])
+        }
+        fn with_source_selectors(text: String, bytes: Vec<u8>, selectors: Vec<String>) -> Self {
             let scratch = ScratchDir::new_named("existing-owner-adoption").unwrap();
             let mut store = EngineStore::open(&scratch.join("engine.db"), 0).unwrap();
             VersionedTextStore::new(&mut store)
@@ -102,7 +105,7 @@ mod tests {
                 object_id: "object".into(),
                 lineage_claim_id: hex_sha256(&bytes),
                 current_path: "owner.md".into(),
-                selector_paths: vec!["owner.md".into()],
+                selector_paths: selectors,
                 restore_fence_generation: 0,
             };
             let mut owner = ApplicationOwner::new("workspace".into()).unwrap();
@@ -217,6 +220,7 @@ mod tests {
                             principal_id: "owner".into(),
                         },
                         received_at_ms: 4,
+                        agent_declaration: None,
                     },
                     first_seen: vec![],
                 },
@@ -703,6 +707,9 @@ mod tests {
             &f.handle,
             Some(event.metadata.accepted.receipt.clone()),
             10,
+            NativeHistoryReconstruction {
+                working_reserve_bytes: 8 * 1024 * 1024,
+            },
             |_, audit| Ok(audit.result("test".into(), "test-moment".into(), "a".repeat(64), false)),
         );
         let result = result.unwrap();
@@ -1392,6 +1399,9 @@ pub fn adopt_owner_committed(
             }).map_err(|_|ApplicationError::Corrupt)?;
         }
         let terminal_cursor = cut.terminal_receipt.as_ref().map_or(0,|r|r.journal_cursor);
+        // From adoption on, the interval names only authors of accepted
+        // content. Carry the authors of local edits no settlement named yet.
+        crate::author_coverage::fold_in(tx, &key, i64::MAX)?;
         tx.execute("INSERT INTO live_owner_adoptions(relay_database_namespace,adoption_id,workspace_id,main_version_id,object_id,lineage_claim_id,binding_json,source_moment_id,source_digest,source_byte_length,baseline_moment_relay_sequence,baseline_registered_at_ms,evidence_digest,coverage_digest,covered_outbox_sequence,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,host_coordinate_json,max_pending_bytes,max_pending_age_ms)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
             params![held.namespace,cut.adoption_id,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,binding_json,cut.source_moment_id,cut.source_digest,cut.source_byte_length,cut.baseline_moment_relay_sequence,cut.baseline_registered_at_ms,evidence_digest,coverage,covered_sequence,marker.head_update_seq,terminal_cursor,serde_json::to_string(&cut.terminal_receipt).map_err(|_|ApplicationError::Corrupt)?,serde_json::to_string(&held.coordinate).map_err(|_|ApplicationError::Corrupt)?,cut.outbox_limits.max_pending_bytes,cut.outbox_limits.max_pending_age_ms]).map_err(write_sql)?;
@@ -1542,7 +1552,29 @@ pub(super) fn read_origin(
     conn: &Connection,
     held: &Registration,
 ) -> Result<Option<AdoptedOrigin>, ApplicationError> {
+    read_origin_with(conn, held, None)
+}
+
+/// With a budget, the adoption row, its source metadata, the original
+/// snapshot, and any resumed generation are charged before they are read.
+pub(super) fn read_origin_with(
+    conn: &Connection,
+    held: &Registration,
+    mut budget: Option<&mut restore_content::Budget>,
+) -> Result<Option<AdoptedOrigin>, ApplicationError> {
     let b = &held.binding;
+    if let Some(budget) = budget.as_deref_mut() {
+        let length: i64 = conn.query_row(
+            "SELECT coalesce((SELECT length(CAST(a.binding_json AS BLOB))+length(CAST(a.source_moment_id AS BLOB))+length(CAST(a.source_digest AS BLOB))+length(CAST(a.terminal_receipt_json AS BLOB))+length(CAST(a.adoption_id AS BLOB))
+               +coalesce((SELECT sum(length(CAST(s.descriptor_json AS BLOB))) FROM ydoc_owner_activation_sources s WHERE s.activation_id=a.adoption_id),0)
+               +coalesce((SELECT sum(length(CAST(o.source_moment_id AS BLOB))+length(CAST(o.source_blob_sha256 AS BLOB))) FROM ydoc_owner_base_sources o WHERE o.workspace_id=a.workspace_id AND o.version_id=a.main_version_id AND o.object_id=a.object_id AND o.lineage_claim_id=a.lineage_claim_id),0)
+               +coalesce((SELECT sum(length(CAST(n.snapshot_blob_sha256 AS BLOB))) FROM ydoc_snapshots n WHERE n.workspace_id=a.workspace_id AND n.version_id=a.main_version_id AND n.object_id=a.object_id AND n.up_to_seq=0),0)
+             FROM live_owner_adoptions a WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5),0)",
+            params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],
+            |r| r.get(0),
+        ).map_err(read_sql)?;
+        budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+    }
     let raw: Option<(String,String,String,i64,i64,String,String)> = conn.query_row(
         "SELECT binding_json,source_moment_id,source_digest,local_ydoc_sequence,terminal_cursor,terminal_receipt_json,adoption_id FROM live_owner_adoptions
          WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
@@ -1555,6 +1587,15 @@ pub(super) fn read_origin(
     };
     let binding: LiveObjectBinding =
         serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
+    // This document selected the row, and its decoded binding scopes the
+    // source reads below. It must name this document before any of them.
+    if binding.workspace_id != b.workspace_id
+        || binding.main_version_id != b.main_version_id
+        || binding.object_id != b.object_id
+        || binding.lineage_claim_id != b.lineage_claim_id
+    {
+        return Err(ApplicationError::Conflict);
+    }
     let Some((verified_moment, verified_digest, _, _)) =
         read_adoption_source_metadata(conn, &held.namespace, &adoption_id, &binding)?
     else {
@@ -1568,7 +1609,7 @@ pub(super) fn read_origin(
     if original.as_deref() != Some(b.lineage_claim_id.as_str()) {
         return Err(ApplicationError::Corrupt);
     }
-    restore_resume::validate_origin_binding(conn, held, &binding)?;
+    restore_resume::validate_origin_binding_with(conn, held, &binding, budget)?;
     let terminal: Option<LiveUpdateReceipt> =
         serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?;
     if let Some(receipt) = &terminal {

@@ -255,6 +255,214 @@ fn bad_cut_capture_race_and_capacity_failure_leave_original_work_unchanged() {
     }
 }
 
+/// An enrolled owner with an unsent draft, and the host checkpoint of a later
+/// restore generation that does not contain that draft.
+fn enrolled_with_unsent_draft() -> (
+    ScratchDir,
+    EngineStore,
+    ObservedOwnerBinding,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+) {
+    let (dir, mut store, observed, checkpoint) = fixture();
+    let first = input(&store, &observed, checkpoint.clone());
+    enroll(&mut store, &first, &observed.limits).unwrap();
+    let draft = Ydoc::wire();
+    draft.apply(&checkpoint).unwrap();
+    let unsent = draft.richdoc_append_paragraph("unsent before restore");
+    store
+        .write_with(&NoFaults, |tx| {
+            super::super::draft::append_draft_in_tx(
+                tx,
+                "workspace",
+                &observed.binding,
+                1,
+                "unsent".into(),
+                unsent.clone(),
+                5,
+            )
+        })
+        .unwrap();
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    host.richdoc_append_paragraph("restored on the host");
+    (
+        dir,
+        store,
+        observed,
+        checkpoint,
+        unsent,
+        bounded(&host).unwrap(),
+    )
+}
+fn next_generation(observed: &ObservedOwnerBinding) -> LiveObjectBinding {
+    LiveObjectBinding {
+        restore_fence_generation: observed.binding.restore_fence_generation + 1,
+        ..observed.binding.clone()
+    }
+}
+fn successor_input(
+    store: &EngineStore,
+    binding: &LiveObjectBinding,
+    checkpoint: Vec<u8>,
+) -> OwnerEnrollmentInput {
+    let captured = match store
+        .read_with(|conn| prepare_in(conn, binding, "relay"))
+        .unwrap()
+    {
+        OwnerEnrollmentPreparation::Capture { captured } => captured,
+        OwnerEnrollmentPreparation::Observed { .. } => {
+            panic!("a later restore generation captures before it commits")
+        }
+    };
+    let host = Ydoc::wire();
+    host.apply(&checkpoint).unwrap();
+    OwnerEnrollmentInput {
+        binding: binding.clone(),
+        relay_database_namespace: "relay".into(),
+        captured,
+        journal_cursor: 12,
+        checkpoint,
+        host_vector: host.encode_state_vector(),
+    }
+}
+fn old_generation_queue(conn: &Connection) -> (String, Option<String>, Option<String>, Vec<u8>) {
+    let (state, reason, observed, digest): (String, Option<String>, Option<String>, String) = conn.query_row(
+        "SELECT o.state,o.quarantine_reason,o.observed_binding_json,e.update_blob_digest FROM owner_ydoc_outboxes o JOIN owner_ydoc_outbox_entries e USING(outbox_id) WHERE o.restore_fence_generation=0 AND e.pending=1",
+        [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+    (
+        state,
+        reason,
+        observed,
+        bounded_blob(conn, &digest).unwrap(),
+    )
+}
+
+#[test]
+fn later_restore_generation_installs_the_host_checkpoint_and_quarantines_unsent_work() {
+    let (_dir, mut store, observed, checkpoint, unsent, host) = enrolled_with_unsent_draft();
+    let key = key(&observed.binding).unwrap();
+    let next = next_generation(&observed);
+    let input = successor_input(&store, &next, host.clone());
+    // Preparation only captured: the old generation is still the observed one.
+    assert_eq!(
+        store
+            .read_with(|conn| super::super::draft::descriptor_for_key_in(conn, &key))
+            .unwrap()
+            .unwrap()
+            .binding,
+        observed.binding
+    );
+    let result = enroll(&mut store, &input, &observed.limits).unwrap();
+    assert_eq!(
+        (
+            result.binding.clone(),
+            result.revision,
+            result.accepted_cursor
+        ),
+        (next.clone(), 2, 12)
+    );
+    assert_eq!((result.outbox_id, result.pending_bytes), (None, 0));
+    store
+        .read_with(|conn| {
+            assert_eq!(
+                bounded(&crate::load_doc_in(conn, &key).map_err(collab)?)?,
+                host
+            );
+            assert_eq!(
+                bounded(&open_draft_in(conn, &next, 2)?.doc)?,
+                host,
+                "the unsent draft is not merged into the restore"
+            );
+            let (state, reason, recorded, preserved) = old_generation_queue(conn);
+            assert_eq!(
+                (state.as_str(), reason.as_deref()),
+                ("quarantined", Some("restore-fenced"))
+            );
+            assert_eq!(
+                serde_json::from_str::<LiveObjectBinding>(&recorded.unwrap()).unwrap(),
+                next
+            );
+            assert_eq!(preserved, unsent);
+            assert_ne!(host, checkpoint);
+            assert!(matches!(
+                prepare_in(conn, &next, "relay")?,
+                OwnerEnrollmentPreparation::Observed { .. }
+            ));
+            assert!(
+                prepare_in(conn, &observed.binding, "relay").is_err(),
+                "a generation never moves backwards"
+            );
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+    assert!(
+        enroll(&mut store, &input, &observed.limits).is_err(),
+        "the committed transition does not replay"
+    );
+}
+
+#[test]
+fn restore_generation_refuses_another_namespace_or_document_identity() {
+    let (_dir, store, observed, ..) = enrolled_with_unsent_draft();
+    let next = next_generation(&observed);
+    let moved = LiveObjectBinding {
+        current_path: "other.md".into(),
+        selector_paths: vec!["other.md".into()],
+        ..next.clone()
+    };
+    let same_generation = LiveObjectBinding {
+        restore_fence_generation: observed.binding.restore_fence_generation,
+        ..moved.clone()
+    };
+    store
+        .read_with(|conn| {
+            assert!(prepare_in(conn, &next, "other-relay").is_err());
+            assert!(prepare_in(conn, &moved, "relay").is_err());
+            assert!(prepare_in(conn, &same_generation, "relay").is_err());
+            Ok::<_, OwnerOutboxError>(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn refused_restore_generation_leaves_the_old_generation_and_its_unsent_work() {
+    for failure in ["vector", "capture", "cursor", "namespace"] {
+        let (_dir, mut store, observed, checkpoint, unsent, host) = enrolled_with_unsent_draft();
+        let key = key(&observed.binding).unwrap();
+        let mut input = successor_input(&store, &next_generation(&observed), host);
+        match failure {
+            "vector" => input.host_vector = vec![0],
+            "capture" => input.captured.native_head_sequence += 1,
+            "cursor" => input.journal_cursor = 8,
+            "namespace" => input.relay_database_namespace = "other-relay".into(),
+            _ => unreachable!(),
+        }
+        assert!(
+            enroll(&mut store, &input, &observed.limits).is_err(),
+            "{failure}"
+        );
+        store
+            .read_with(|conn| {
+                let draft = super::super::draft::descriptor_for_key_in(conn, &key)?.unwrap();
+                assert_eq!(
+                    (draft.binding, draft.revision, draft.accepted_cursor),
+                    (observed.binding.clone(), 1, 9)
+                );
+                assert_eq!(
+                    bounded(&crate::load_doc_in(conn, &key).map_err(collab)?)?,
+                    checkpoint
+                );
+                let (state, reason, _, preserved) = old_generation_queue(conn);
+                assert_eq!((state.as_str(), reason), ("active", None));
+                assert_eq!(preserved, unsent);
+                Ok::<_, OwnerOutboxError>(())
+            })
+            .unwrap();
+    }
+}
+
 #[test]
 fn enrollment_folds_unsettled_authors_before_removing_native_update_rows() {
     let (_dir, mut store, observed, checkpoint) = fixture();

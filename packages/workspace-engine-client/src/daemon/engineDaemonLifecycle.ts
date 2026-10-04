@@ -5,6 +5,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import { performance } from "node:perf_hooks";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
 
 import type { Event, JsonValue, Request, Response, WorkspaceHandle } from "../protocol";
 import {
@@ -280,7 +282,8 @@ export class EngineDaemonLifecycle {
   ) => Promise<EngineDaemonClient>;
   private readonly fileExists: (path: string) => boolean;
   private readonly tokenFactory: () => string;
-  private readonly sleep: (delayMs: number) => Promise<void>;
+  private readonly sleep: (delayMs: number) => Effect.Effect<void, unknown>;
+  private readonly stopController = new AbortController();
   private readonly monotonicNowMs: () => number;
   private readonly wallNowMs: () => number;
   private client: EngineDaemonClient | null = null;
@@ -344,13 +347,14 @@ export class EngineDaemonLifecycle {
     // create-exclusive file rather than persisting this token normally.
     this.tokenFactory =
       options.tokenFactory ?? (() => randomBytes(32).toString("hex"));
-    this.sleep =
-      options.sleep ??
-      ((delayMs) =>
-        new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, delayMs);
-          timer.unref();
-        }));
+    const sleep = options.sleep;
+    this.sleep = sleep
+      ? delayMs => Effect.tryPromise({try: () => sleep(delayMs), catch: error => error})
+      : delayMs => Effect.callback<void>(resume => {
+        const timer = setTimeout(() => resume(Effect.void), delayMs);
+        timer.unref();
+        return Effect.sync(() => clearTimeout(timer));
+      });
     this.monotonicNowMs = options.monotonicNowMs ?? (() => performance.now());
     this.wallNowMs = options.wallNowMs ?? (() => Date.now());
   }
@@ -568,6 +572,7 @@ export class EngineDaemonLifecycle {
 
   private async stopOnce(): Promise<void> {
     this.stopping = true;
+    this.stopController.abort();
     this.running = false;
     this.clearHealthyResetTimer();
     this.clearPingTimer();
@@ -988,7 +993,13 @@ export class EngineDaemonLifecycle {
           2 ** (attempt - 1),
         this.options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS,
       );
-      if (delay > 0) await this.sleep(delay);
+      if (delay > 0) {
+        const exit = await Effect.runPromiseExit(this.sleep(delay), {signal: this.stopController.signal});
+        if (exit._tag === "Failure") {
+          if (Cause.hasInterruptsOnly(exit.cause)) return;
+          throw Cause.squash(exit.cause);
+        }
+      }
       if (this.stopping) return;
       try {
         await this.launchTracked("blocking");

@@ -1,10 +1,13 @@
 import {openSync, readSync, closeSync} from "node:fs";
 import {isAbsolute} from "node:path";
-import {createLiveFrameSession, type LiveFrameSessionPolicy} from "@dohc/live-session-contract/live-frame";
+import {createLiveFrameSession, LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES, type LiveFrameSessionPolicy} from "@dohc/live-session-contract/live-frame";
 import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 import {canonicalRelayUrl} from "./syncCode";
 import type {OwnerYDocDrainResult} from "./ownerYDocOutbox";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import {ownerDeliveryWait} from "./ownerDeliveryWait";
 
 export interface DesktopOwnerDeliveryDocument {
   binding: LiveObjectBinding;
@@ -36,6 +39,7 @@ export function parseDesktopOwnerDeliveryConfig(value: unknown): DesktopOwnerDel
   if (value.version !== 1 || !relayUrl || !Array.isArray(value.documents) || value.documents.length === 0) throw new TypeError("Invalid owner delivery targets.");
   const frames = structuredClone(value.frames) as LiveFrameSessionPolicy;
   createLiveFrameSession("client", frames).close();
+  if (frames.receive.maxFrameBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES || frames.maxControlBytes < LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES) throw new TypeError("Owner delivery frames must carry the largest declared submission.");
   if (typeof value.nativeConfigPath !== "string" || !isAbsolute(value.nativeConfigPath)) throw new TypeError("Native owner ingress configuration path must be absolute.");
   fields(value.nativeClient, ["aggregateBytes", "maxUploads"]);
   const nativeClient = {aggregateBytes: value.nativeClient.aggregateBytes as number, maxUploads: value.nativeClient.maxUploads as number};
@@ -69,20 +73,28 @@ export function startDesktopOwnerDelivery(options: {
   onError(error: unknown): void;
 }) {
   const config = structuredClone(options.config), lifetime = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined, active: Promise<void> | undefined, next = 0;
-  function schedule(delayMs: number) {if (!lifetime.signal.aborted) {timer = setTimeout(run, delayMs); timer.unref();}}
-  function run() {
-    timer = undefined;
-    if (lifetime.signal.aborted || active) return;
-    const document = config.documents[next]!; next = (next + 1) % config.documents.length;
-    const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(config.attemptTimeoutMs)]);
-    let result: OwnerYDocDrainResult = "retry";
-    active = Promise.resolve().then(() => options.runPass(document, signal)).then(value => {result = value;})
-      .catch(error => {if (!lifetime.signal.aborted) {try {options.onError(error);} catch { /* Logging cannot abandon retry scheduling. */ }}})
-      .finally(() => {active = undefined; schedule(result === "acknowledged" ? 0 : config.retryDelayMs);});
-  }
-  schedule(0);
+  let next = 0;
+  const finished = Effect.runPromiseExit(Effect.gen(function* () {
+    yield* ownerDeliveryWait(0);
+    while (!lifetime.signal.aborted) {
+      const document = config.documents[next]!; next = (next + 1) % config.documents.length;
+      const signal = AbortSignal.any([lifetime.signal, AbortSignal.timeout(config.attemptTimeoutMs)]);
+      // Abort the actual pass, then await its native/network resource release.
+      const result = yield* Effect.uninterruptible(Effect.tryPromise({
+        try: () => options.runPass(document, signal),
+        catch: error => error,
+      })).pipe(Effect.catch(error => {
+        if (!lifetime.signal.aborted) {try {options.onError(error);} catch { /* Logging cannot abandon retries. */ }}
+        return Effect.succeed<OwnerYDocDrainResult>("retry");
+      }));
+      yield* ownerDeliveryWait(result === "acknowledged" ? 0 : config.retryDelayMs);
+    }
+  }), {signal: lifetime.signal});
   return {
-    async stop(): Promise<void> {lifetime.abort(); clearTimeout(timer); await active;},
+    async stop(): Promise<void> {
+      lifetime.abort();
+      const exit = await finished;
+      if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause);
+    },
   };
 }

@@ -1296,17 +1296,63 @@ fn build_http_transport(
     configuration: RelayConfiguration,
 ) -> Result<HttpRelayTransport, RelayError> {
     #[cfg(debug_assertions)]
-    if configuration.allow_insecure_loopback_for_tests {
-        HttpRelayTransport::new_insecure_loopback_for_tests(
-            configuration.base_url,
-            configuration.bearer_token,
-        )
-    } else {
-        HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)
+    {
+        let test_ca = test_relay_ca(
+            std::env::var_os(TEST_RELAY_CA_MODE_ENV).as_deref(),
+            std::env::var_os(TEST_RELAY_CA_FILE_ENV).as_deref(),
+        )?;
+        build_debug_http_transport(configuration, test_ca)
     }
     #[cfg(not(debug_assertions))]
     {
         HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)
+    }
+}
+
+/// A local test relay behind a fixture CA needs both settings: the mode set to
+/// "1" and the absolute path of one CA certificate. Either one alone, or a
+/// malformed value, refuses every relay request instead of falling back.
+#[cfg(debug_assertions)]
+const TEST_RELAY_CA_MODE_ENV: &str = "DOHC_ENGINE_TEST_RELAY_CA_MODE";
+#[cfg(debug_assertions)]
+const TEST_RELAY_CA_FILE_ENV: &str = "DOHC_ENGINE_TEST_RELAY_CA_FILE";
+
+#[cfg(debug_assertions)]
+fn test_relay_ca_refused() -> RelayError {
+    RelayError::Local("relay-test-ca-invalid".to_owned())
+}
+
+#[cfg(debug_assertions)]
+fn test_relay_ca(
+    mode: Option<&std::ffi::OsStr>,
+    file: Option<&std::ffi::OsStr>,
+) -> Result<Option<Vec<u8>>, RelayError> {
+    match (mode, file) {
+        (None, None) => Ok(None),
+        (Some(mode), Some(file)) if mode == "1" && std::path::Path::new(file).is_absolute() => {
+            std::fs::read(file)
+                .map(Some)
+                .map_err(|_| test_relay_ca_refused())
+        }
+        _ => Err(test_relay_ca_refused()),
+    }
+}
+
+#[cfg(debug_assertions)]
+fn build_debug_http_transport(
+    configuration: RelayConfiguration,
+    test_ca: Option<Vec<u8>>,
+) -> Result<HttpRelayTransport, RelayError> {
+    let RelayConfiguration {
+        base_url,
+        bearer_token: token,
+        allow_insecure_loopback_for_tests: insecure,
+    } = configuration;
+    match (insecure, test_ca) {
+        (false, None) => HttpRelayTransport::new(base_url, token),
+        (true, None) => HttpRelayTransport::new_insecure_loopback_for_tests(base_url, token),
+        (false, Some(ca)) => HttpRelayTransport::new_with_test_ca_for_tests(base_url, token, &ca),
+        (true, Some(_)) => Err(test_relay_ca_refused()),
     }
 }
 
@@ -1993,6 +2039,70 @@ mod share_view_identity_tests {
             record(&mut store, ShareAccess::Edit),
             ShareViewIdentityRecord::AlreadyRecorded,
             "every refresh calls this; a second row would split the log",
+        );
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod test_relay_ca_tests {
+    use super::*;
+    use dohc_engine_testkit::ScratchDir;
+    use std::ffi::OsStr;
+
+    const UNPARSED_CA: &[u8] = b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+
+    fn configuration(base_url: &str, insecure: bool) -> RelayConfiguration {
+        RelayConfiguration {
+            base_url: base_url.to_owned(),
+            bearer_token: "token".to_owned(),
+            allow_insecure_loopback_for_tests: insecure,
+        }
+    }
+
+    #[test]
+    fn a_partial_or_malformed_opt_in_refuses_instead_of_falling_back() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let ca = scratch.join("ca.pem");
+        std::fs::write(&ca, UNPARSED_CA).expect("CA file");
+        let ca = ca.as_os_str();
+        let missing = scratch.join("missing.pem");
+        let one = Some(OsStr::new("1"));
+
+        assert_eq!(test_relay_ca(None, None), Ok(None));
+        let read = test_relay_ca(one, Some(ca));
+        assert_eq!(read, Ok(Some(UNPARSED_CA.to_vec())));
+        for (mode, file) in [
+            (one, None),
+            (None, Some(ca)),
+            (Some(OsStr::new("0")), Some(ca)),
+            (Some(OsStr::new("true")), Some(ca)),
+            (one, Some(OsStr::new("ca.pem"))),
+            (one, Some(missing.as_os_str())),
+        ] {
+            assert_eq!(
+                test_relay_ca(mode, file),
+                Err(test_relay_ca_refused()),
+                "mode {mode:?} with file {file:?} must refuse"
+            );
+        }
+    }
+
+    #[test]
+    fn the_test_ca_selects_its_own_constructor_and_never_the_plaintext_one() {
+        let ca = Some(UNPARSED_CA.to_vec());
+        let build = |base_url, insecure, ca: Option<Vec<u8>>| {
+            build_debug_http_transport(configuration(base_url, insecure), ca)
+        };
+        assert!(build("https://relay.example", false, None).is_ok());
+        assert!(build("http://127.0.0.1:1", true, None).is_ok());
+        assert!(build("https://127.0.0.1:1", false, ca.clone()).is_ok());
+        assert!(
+            build("https://relay.example", false, ca.clone()).is_err(),
+            "with a test CA, only an IP-literal loopback relay is reachable"
+        );
+        assert!(
+            build("http://127.0.0.1:1", true, ca).is_err(),
+            "a test CA and the plaintext loopback opt-in together must refuse"
         );
     }
 }

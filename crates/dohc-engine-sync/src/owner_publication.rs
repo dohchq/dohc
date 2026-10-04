@@ -1,7 +1,7 @@
 use crate::{ReplicationEnvelope, SyncError};
 use dohc_engine_collab::{
     DocKey,
-    owner_outbox::publication::{PublicationContentKind, PublicationProof, contains_in},
+    owner_outbox::publication::{PublicationContentKind, PublicationProof, PublicationReader},
 };
 use dohc_engine_storage::{EngineStore, hex_sha256};
 use serde::Serialize;
@@ -200,6 +200,9 @@ pub fn owner_publication_prefix(
     max_read_bytes: usize,
 ) -> Result<OwnerPublicationPrefix, SyncError> {
     store.read_with(|conn| {
+        // One snapshot lets consecutive references to a document reuse its accepted read.
+        let read_tx = conn.unchecked_transaction().map_err(SyncError::persist)?;
+        let mut reader = PublicationReader::new(&read_tx);
         let mut remaining = max_read_bytes;
         for (allowed_ops, op) in ops.iter().enumerate() {
             if op.workspace_id != workspace {
@@ -213,18 +216,18 @@ pub fn owner_publication_prefix(
                         reason: "queued owner key is malformed",
                     },
                 )?;
-                let allowed = contains_in(
-                    conn,
-                    &key,
-                    &reference.path,
-                    reference.lineage.as_deref(),
-                    reference.kind,
-                    &reference.digest,
-                    &mut remaining,
-                )
-                .map_err(|_| {
-                    crate::error::local_corruption("queued owner publication proof is invalid")
-                })?;
+                let allowed = reader
+                    .contains(
+                        &key,
+                        &reference.path,
+                        reference.lineage.as_deref(),
+                        reference.kind,
+                        &reference.digest,
+                        &mut remaining,
+                    )
+                    .map_err(|_| {
+                        crate::error::local_corruption("queued owner publication proof is invalid")
+                    })?;
                 if allowed == PublicationProof::BudgetExhausted {
                     if allowed_ops == 0 {
                         return Err(SyncError::InvalidInput {

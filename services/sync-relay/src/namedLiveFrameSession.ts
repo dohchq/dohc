@@ -4,7 +4,7 @@ import {
   type LiveFrame, type LiveFrameBegin, type LiveFrameLease, type LiveFrameSessionPolicy, type LiveFrameSync,
 } from "@dohc/live-session-contract/live-frame";
 import type { HostEpoch } from "@dohc/live-session-contract/host-control";
-import type { LiveUpdateHostApplicationAck, LiveUpdateRefusal, LiveUpdateRetry } from "@dohc/live-session-contract/live-update-admission";
+import type { AgentDeclaration, LiveUpdateHostApplicationAck, LiveUpdateRefusal, LiveUpdateRetry } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveMembershipSession } from "./liveMembership";
 
 export interface NamedFrameAppliedUpdate { readonly journalCursor: number; readonly updateBytes: Uint8Array }
@@ -24,7 +24,8 @@ export interface NamedFrameHostSession {
   readonly invalidated: AbortSignal;
   assertCurrent(): void;
   openSync(clientVector: Uint8Array, signal: AbortSignal): Promise<NamedFrameSync>;
-  submit(input: { deliveryId: string; updateDigest: string; updateBytes: Uint8Array }, signal: AbortSignal): Promise<NamedFrameSubmissionResult>;
+  /** Only the owner route accepts an agent declaration; others refuse it. */
+  submit(input: { deliveryId: string; updateDigest: string; updateBytes: Uint8Array; agentDeclaration?: AgentDeclaration }, signal: AbortSignal): Promise<NamedFrameSubmissionResult>;
   close(): void;
 }
 export interface NamedFrameTransport {
@@ -199,7 +200,8 @@ export function createNamedLiveFrameSession(options: {
           submitting = true;
           run(async () => {
             try {
-              const accepted = await host.submit({ deliveryId: begin.deliveryId, updateDigest: begin.digest, updateBytes }, lifetime.signal);
+              const accepted = await host.submit({ deliveryId: begin.deliveryId, updateDigest: begin.digest, updateBytes,
+                ...(begin.agentDeclaration ? { agentDeclaration: begin.agentDeclaration } : {}) }, lifetime.signal);
               check();
               result = accepted.result === "success" ? { kind: "result", ...accepted } :
                 { kind: "result", deliveryId: begin.deliveryId, updateDigest: begin.digest, ...accepted };

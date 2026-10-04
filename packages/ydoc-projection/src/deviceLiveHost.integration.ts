@@ -61,7 +61,7 @@ it("delivers through the outbound TLS device pipe and replays a lost durable ack
     hostEpoch: credential.hostEpoch, instanceId: credential.instanceId, maxQueuedBytes: 4_000_000, shutdownGraceMs: 5000,
     workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }],
     settlement: { maxApplicationsPerSettlement: 8 },
-    ingress: { aggregateBytes: 400_000_000, applicationWorkingReserveBytes: 1_000_000, maxUploads: 2, uploadDeadlineMs: 30_000 } }));
+    ingress: { aggregateBytes: 512 * 1024 * 1024, applicationWorkingReserveBytes: 8 * 1024 * 1024, maxUploads: 2, uploadDeadlineMs: 30_000 } }));
   writeFileSync(relayConfig, JSON.stringify({ version: 1, workspaceIds: ["workspace"], maxQueuedBytes: 4_000_000, maxActiveDrains: 2,
     client: { aggregateBytes: 200_000_000, maxUploads: 2, connectTimeoutMs: 30_000, requestDeadlineMs: 30_000, maxFrameBytes: 1_048_576 } }));
   const limits = { maxConnections: 4, maxHeaderBytes: 8192, maxCredentialBytes: 4096, maxPayloadBytes: 4096,

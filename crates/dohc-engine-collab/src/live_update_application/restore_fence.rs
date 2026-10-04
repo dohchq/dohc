@@ -29,6 +29,11 @@ pub struct NativeRestoreFenceReceipt {
     pub recorded_at_ms: i64,
 }
 
+// This document lineage's settlements whose moments have not reached the relay:
+// local moments above the origin's pushed cursor, then settlements a retained
+// history export has not journaled yet. Unpushed rows bound the scan, not history.
+const UNPUBLISHED_SETTLEMENT_MOMENTS: &str = "SELECT EXISTS(SELECT 1 FROM sync_identity i JOIN replication_log r ON r.workspace_id=i.workspace_id AND r.origin_id=i.origin_id WHERE i.workspace_id=?1 AND r.origin_seq>COALESCE((SELECT pushed_seq FROM sync_relay_push_state p WHERE p.workspace_id=?1 AND p.origin_id=i.origin_id),-1) AND r.imported=0 AND r.op_kind='moment.append' AND EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?2 AND s.workspace_id=?1 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.moment_id=json_extract(r.payload_json,'$.momentId'))) OR EXISTS(SELECT 1 FROM live_audit_pending_exports e JOIN live_device_settlements s ON s.relay_database_namespace=e.relay_database_namespace AND s.workspace_id=e.workspace_id AND s.main_version_id=e.main_version_id AND s.object_id=e.object_id AND s.lineage_claim_id=e.lineage_claim_id AND s.terminal_cursor>e.after_settlement_cursor WHERE e.workspace_id=?1 AND e.relay_database_namespace=?2 AND e.main_version_id=?3 AND e.object_id=?4 AND e.lineage_claim_id=?5)";
+
 pub fn require_open(conn: &Connection, key: &DocKey) -> Result<(), CollabError> {
     let stopped: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM live_restore_fences WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3)",
@@ -63,7 +68,8 @@ pub fn require_generation(
     }
 }
 
-pub(super) fn require_registration(
+/// No restore fence is active, and a resumed one names exactly this binding and namespace.
+pub(crate) fn require_registration(
     conn: &Connection,
     key: &DocKey,
     namespace: &str,
@@ -280,6 +286,15 @@ impl ApplicationOwner {
             }) {
                 return Err(ApplicationError::Interrupted);
             }
+            // A settlement moment's before-image is publishable only while its
+            // generation is current. Refuse until the relay acknowledged this
+            // document's journaled settlement moments.
+            let unpublished: bool = tx.query_row(
+                UNPUBLISHED_SETTLEMENT_MOMENTS,
+                params![b.workspace_id,held.namespace,b.main_version_id,b.object_id,b.lineage_claim_id],
+                |r| r.get(0),
+            ).map_err(read_sql)?;
+            if unpublished { return Err(ApplicationError::PublicationPending); }
             let marker = marker(tx, b)?;
             let (terminal, sequence) = applied_tip(tx, &held, &input)?;
             if terminal != input.terminal || sequence != input.applied_sequence || marker.head_update_seq < sequence {

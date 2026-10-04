@@ -450,18 +450,26 @@ fn has_any_user_object(conn: &Connection) -> Result<bool, StorageError> {
 }
 
 fn validate_v2(conn: &Connection) -> Result<(), StorageError> {
+    let mut missing_tables: std::collections::HashSet<&[u8]> = REQUIRED_TABLES
+        .iter()
+        .map(|table| table.as_bytes())
+        .collect();
+    {
+        let mut statement = conn
+            .prepare("SELECT name FROM sqlite_schema WHERE type = 'table'")
+            .map_err(StorageError::corrupt)?;
+        let mut rows = statement.query([]).map_err(StorageError::corrupt)?;
+        while let Some(row) = rows.next().map_err(StorageError::corrupt)? {
+            // Match BINARY TEXT names without decoding unrelated schema names.
+            if let rusqlite::types::ValueRef::Text(name) =
+                row.get_ref(0).map_err(StorageError::corrupt)?
+            {
+                missing_tables.remove(name);
+            }
+        }
+    }
     for table in REQUIRED_TABLES {
-        let present: bool = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-                [table],
-                |_| Ok(true),
-            )
-            .or_else(|err| match err {
-                rusqlite::Error::QueryReturnedNoRows => Ok(false),
-                other => Err(StorageError::corrupt(other)),
-            })?;
-        if !present {
+        if missing_tables.contains(table.as_bytes()) {
             return Err(StorageError::StateCorrupt { source: None });
         }
     }
@@ -618,5 +626,232 @@ mod tests {
                 "open must reject a store missing {table}"
             );
         }
+    }
+
+    fn closed_schema_image() -> Vec<u8> {
+        let directory = dohc_test_scratch::ScratchDir::new_named("schema-image").unwrap();
+        let path = directory.path().join("store.sqlite");
+        drop(crate::EngineStore::open(&path, 0).unwrap());
+        assert!(!path.with_file_name("store.sqlite-wal").exists());
+        assert!(!path.with_file_name("store.sqlite-shm").exists());
+        std::fs::read(path).unwrap()
+    }
+
+    fn copied_schema_connection(
+        image: &[u8],
+    ) -> (
+        dohc_test_scratch::ScratchDir,
+        std::path::PathBuf,
+        rusqlite::Connection,
+    ) {
+        let directory = dohc_test_scratch::ScratchDir::new_named("schema-copy").unwrap();
+        let path = directory.path().join("store.sqlite");
+        std::fs::write(&path, image).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        (directory, path, conn)
+    }
+
+    #[test]
+    fn v2_validation_rejects_each_missing_required_table() {
+        let image = closed_schema_image();
+        for table in REQUIRED_TABLES {
+            let (_directory, _path, conn) = copied_schema_connection(&image);
+            super::validate_v2(&conn).unwrap();
+            conn.execute_batch(&format!("DROP TABLE \"{table}\""))
+                .unwrap();
+            assert!(
+                matches!(
+                    super::validate_v2(&conn),
+                    Err(crate::StorageError::StateCorrupt { source: None })
+                ),
+                "missing {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn v2_validation_refuses_missing_tables_before_querying_the_ledger() {
+        let image = closed_schema_image();
+        let (_directory, _path, conn) = copied_schema_connection(&image);
+        conn.execute_batch(
+            "DROP TABLE live_audit_base_publications; DROP TABLE engine_migrations;",
+        )
+        .unwrap();
+        assert!(matches!(
+            super::validate_v2(&conn),
+            Err(crate::StorageError::StateCorrupt { source: None })
+        ));
+    }
+
+    #[test]
+    fn v2_validation_requires_exact_main_table_names() {
+        let image = closed_schema_image();
+        for substitute in [
+            "CREATE VIEW live_audit_base_publications AS SELECT 1 AS value;",
+            "CREATE TABLE LIVE_AUDIT_BASE_PUBLICATIONS (value);",
+            "CREATE TEMP TABLE live_audit_base_publications (value);",
+            "ATTACH DATABASE ':memory:' AS other; \
+             CREATE TABLE other.live_audit_base_publications (value);",
+        ] {
+            let (_directory, _path, conn) = copied_schema_connection(&image);
+            conn.execute_batch("DROP TABLE live_audit_base_publications;")
+                .unwrap();
+            conn.execute_batch(substitute).unwrap();
+            assert!(
+                matches!(
+                    super::validate_v2(&conn),
+                    Err(crate::StorageError::StateCorrupt { source: None })
+                ),
+                "substitute cannot repair main: {substitute}"
+            );
+        }
+    }
+
+    #[test]
+    fn v2_validation_accepts_extra_names_and_existing_virtual_tables() {
+        let image = closed_schema_image();
+        let (_directory, _path, conn) = copied_schema_connection(&image);
+        conn.execute_batch(
+            "CREATE TABLE unrelated_extra (value); \
+             CREATE TABLE \"額外\" (value); \
+             CREATE TEMP TABLE live_audit_base_publications (value); \
+             ATTACH DATABASE ':memory:' AS other; \
+             CREATE TABLE other.live_audit_base_publications (value);",
+        )
+        .unwrap();
+        super::validate_v2(&conn).unwrap();
+        super::integrity_check(&conn).unwrap();
+    }
+
+    #[test]
+    fn v2_validation_does_not_decode_unrelated_malformed_text_names() {
+        let image = closed_schema_image();
+        let (_directory, _path, conn) = copied_schema_connection(&image);
+        conn.execute_batch(
+            "CREATE TABLE unrelated_extra (value); \
+             PRAGMA writable_schema = ON; \
+             UPDATE sqlite_schema SET name = CAST(X'80' AS TEXT) \
+             WHERE name = 'unrelated_extra'; \
+             PRAGMA writable_schema = OFF;",
+        )
+        .unwrap();
+        let raw: Vec<u8> = conn
+            .query_row(
+                "SELECT name FROM sqlite_schema \
+                 WHERE type = 'table' AND CAST(name AS BLOB) = X'80'",
+                [],
+                |row| match row.get_ref(0)? {
+                    rusqlite::types::ValueRef::Text(bytes) => Ok(bytes.to_vec()),
+                    _ => panic!("fixture must retain the malformed TEXT value"),
+                },
+            )
+            .unwrap();
+        assert!(std::str::from_utf8(&raw).is_err());
+        super::validate_v2(&conn).unwrap();
+    }
+
+    #[test]
+    fn v2_validation_does_not_accept_blob_names_as_text_names() {
+        let image = closed_schema_image();
+        let (_directory, _path, conn) = copied_schema_connection(&image);
+        conn.execute_batch(
+            "PRAGMA writable_schema = ON; \
+             UPDATE sqlite_schema SET name = CAST(name AS BLOB) \
+             WHERE name = 'live_audit_base_publications'; \
+             PRAGMA writable_schema = OFF;",
+        )
+        .unwrap();
+        let matches: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                ["live_audit_base_publications"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            matches, 0,
+            "the original TEXT predicate excludes BLOB names"
+        );
+        assert!(matches!(
+            super::validate_v2(&conn),
+            Err(crate::StorageError::StateCorrupt { source: None })
+        ));
+    }
+
+    #[test]
+    fn v2_validation_requires_the_baseline_ledger_row() {
+        let image = closed_schema_image();
+        let (_directory, _path, conn) = copied_schema_connection(&image);
+        let deleted = conn
+            .execute(
+                "DELETE FROM engine_migrations WHERE id = ?1",
+                [super::BASELINE_MIGRATION_ID],
+            )
+            .unwrap();
+        assert_eq!(deleted, 1);
+        assert!(matches!(
+            super::validate_v2(&conn),
+            Err(crate::StorageError::StateCorrupt { source: None })
+        ));
+    }
+
+    #[test]
+    fn v2_validation_rechecks_committed_ddl_and_both_real_open_paths() {
+        let image = closed_schema_image();
+        let (_directory, path, conn) = copied_schema_connection(&image);
+        super::validate_v2(&conn).unwrap();
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer
+            .execute_batch("BEGIN IMMEDIATE; DROP TABLE live_audit_base_publications; COMMIT;")
+            .unwrap();
+        assert!(matches!(
+            super::validate_v2(&conn),
+            Err(crate::StorageError::StateCorrupt { source: None })
+        ));
+        drop(writer);
+        drop(conn);
+        assert!(matches!(
+            crate::EngineStore::open(&path, 1),
+            Err(crate::StorageError::StateCorrupt { source: None })
+        ));
+        assert!(matches!(
+            crate::EngineStore::open_read_only(&path),
+            Err(crate::StorageError::StateCorrupt { source: None })
+        ));
+    }
+
+    #[test]
+    fn v2_validation_does_not_reuse_names_from_another_database() {
+        let image = closed_schema_image();
+        let (_first_directory, _first_path, first) = copied_schema_connection(&image);
+        let (_second_directory, _second_path, second) = copied_schema_connection(&image);
+        super::validate_v2(&first).unwrap();
+        second
+            .execute_batch("DROP TABLE live_audit_base_publications;")
+            .unwrap();
+        assert!(matches!(
+            super::validate_v2(&second),
+            Err(crate::StorageError::StateCorrupt { source: None })
+        ));
+        super::validate_v2(&first).unwrap();
+    }
+
+    #[test]
+    fn v2_validation_preserves_busy_as_a_transient_lock() {
+        let image = closed_schema_image();
+        let (_directory, path, writer) = copied_schema_connection(&image);
+        writer
+            .pragma_update(None, "journal_mode", "DELETE")
+            .unwrap();
+        let reader = rusqlite::Connection::open(&path).unwrap();
+        reader.busy_timeout(std::time::Duration::ZERO).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE;").unwrap();
+        assert!(matches!(
+            super::validate_v2(&reader),
+            Err(crate::StorageError::FileLocked)
+        ));
+        writer.execute_batch("ROLLBACK;").unwrap();
+        super::validate_v2(&reader).unwrap();
     }
 }

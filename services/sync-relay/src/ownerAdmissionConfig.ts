@@ -1,5 +1,7 @@
 import {openSync,readSync,closeSync} from "node:fs";
 import {isAbsolute} from "node:path";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
 import {parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
 // The relay builder bundles this declared dependency without publishing its private validator.
 import {liveValidation} from "./liveValidation.js";
@@ -48,11 +50,12 @@ export function startOwnerAdmission(options: {
   config: ReturnType<typeof readOwnerAdmissionConfig>; storage: SyncRelayStorage; history: LiveJournalHistoryAuthority;
   control: Pick<ReturnType<typeof createDeviceControl>,"settle">; onError(error: unknown): void;
 }) {
-  let timer: ReturnType<typeof setTimeout> | undefined, stopped = false, workspaceIndex = 0, afterObject = "", lastError: string | undefined;
+  let workspaceIndex = 0, afterObject = "", lastError: string | undefined;
   const stop = new AbortController(), workspaces = [...options.config.admission.shares.keys()];
+  const lifetime = AbortSignal.any([stop.signal,options.storage.unavailable]);
   const store = options.storage.createLiveCommittedDeliveryStore(options.history);
   const pass = async () => {
-    const signal = AbortSignal.any([stop.signal,options.storage.unavailable,AbortSignal.timeout(options.config.passDeadlineMs)]);
+    const signal = AbortSignal.any([lifetime,AbortSignal.timeout(options.config.passDeadlineMs)]);
     try {
       let visited = 0, completedWorkspaces = 0;
       while (!signal.aborted && visited < options.config.maxDocumentsPerPass && completedWorkspaces < workspaces.length) {
@@ -65,10 +68,27 @@ export function startOwnerAdmission(options: {
       lastError = undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!stopped && !options.storage.unavailable.aborted && message !== lastError) {lastError = message; options.onError(error);}
+      if (!lifetime.aborted && message !== lastError) {
+        lastError = message;
+        try {options.onError(error);} catch { /* Reporting must not stop delivery. */ }
+      }
     }
-    if (!stopped && !options.storage.unavailable.aborted) {timer = setTimeout(() => {void pass();},options.config.pollIntervalMs); timer.unref();}
   };
-  void pass();
-  return {close() {stopped = true; stop.abort(); clearTimeout(timer);}};
+  const pause = Effect.callback<void>(resume => {
+    const timer = setTimeout(() => resume(Effect.void),options.config.pollIntervalMs);
+    timer.unref();
+    return Effect.sync(() => clearTimeout(timer));
+  });
+  // Keep ownership until settlement finishes, even when it ignores abort.
+  const finished = Effect.runPromiseExit(Effect.gen(function* () {
+    while (true) {
+      yield* Effect.uninterruptible(Effect.promise(pass));
+      yield* pause;
+    }
+  }),{signal: lifetime});
+  return {async close() {
+    stop.abort();
+    const exit = await finished;
+    if (exit._tag === "Failure" && !Cause.hasInterruptsOnly(exit.cause)) throw Cause.squash(exit.cause);
+  }};
 }

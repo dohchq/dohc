@@ -40,13 +40,16 @@ export function parseServiceActivationConfig(value:unknown){
     maxDocumentsPerPass:positive(row.maxDocumentsPerPass),pollIntervalMs:positive(row.pollIntervalMs),passDeadlineMs:positive(row.passDeadlineMs)});
 }
 export type ServiceActivationConfig=NonNullable<ReturnType<typeof parseServiceActivationConfig>>;
+type Owner={consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;
+  binding:LiveObjectBinding;target:string;actor:{ownerUserId:string;shareId:string}};
+const fenced={kind:"pending" as const,reason:"Service binding is fenced or unavailable."};
 
 export class ServiceActivationDriver {
   readonly #store;
   readonly #completedTargets=new Set<string>();
   readonly #restoreConsumers=new Map<string,OwnerCommittedDelivery>();
   readonly #staleLeases=new Map<string,{activationId:string;sessionId:string}>();
-  readonly #owners=new Map<string,{consumer:OwnerCommittedDelivery;transport:ReturnType<typeof serviceOwnerTransport>;completed:boolean;activationPending:boolean;binding:LiveObjectBinding}>();
+  readonly #owners=new Map<string,Owner>();
   constructor(readonly options:{storage:SyncRelayStorage;history:LiveJournalHistoryAuthority;client:EngineClient;host:LiveHostConnectionCoordinate;
     workspaces:ReadonlyMap<string,{handle:string;ordinary:ServiceOrdinaryReplication}>;config:ServiceActivationConfig;
     adoption:{maxBytes:number;maxEvents:number};restore?:LiveRestorePreparation;nextRequestId():number;deadlineMs:number;
@@ -59,7 +62,6 @@ export class ServiceActivationDriver {
   }
   restoreConsumer(document:LiveDocumentKey){
     const o=this.options,key=JSON.stringify(parseLiveDocumentKey(document));
-    const existing=this.#restoreConsumers.get(key);if(existing)return existing;
     const target=o.config.targets.find(target=>{
       if(target.workspaceId!==document.workspaceId)return false;
       const saved=this.#store.read(target.workspaceId,target.path,o.config.maxCaptureBytes);
@@ -67,8 +69,16 @@ export class ServiceActivationDriver {
     });
     const workspace=o.workspaces.get(document.workspaceId);
     if(!target || !workspace)throw new Error("Service restore source is unavailable.");
+    // Stopping access re-registers the retained owner. Only the activated session's
+    // verified transport can check that adoption; native registration takes the binding alone.
+    const activated=this.#owners.get(key);
+    if(activated && !activated.activationPending)return activated.consumer;
+    // Without that session, as after a restart, only a restore whose old cut
+    // already applied can continue, because it does not register again.
+    const existing=this.#restoreConsumers.get(key);if(existing)return existing;
     const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:o.client,workspace:workspace.handle,host:o.host,
       deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
+      publishOrdinary:signal=>workspace.ordinary.publish(signal),
       ownerAdmission:{shares:new Map([[target.workspaceId,target.shareId]]),maxEntriesPerDrain:o.config.maxEntriesPerDrain,
         maxBytesPerDrain:o.config.maxBytesPerDrain,validate:o.config.validateAdmission}});
     this.#restoreConsumers.set(key,consumer);return consumer;
@@ -76,12 +86,13 @@ export class ServiceActivationDriver {
   workspaceReady(workspaceId:string){
     return this.options.config.targets.filter(target=>target.workspaceId===workspaceId).every(target=>this.#completedTargets.has(JSON.stringify([target.workspaceId,target.path])));
   }
-  consumer(document:LiveDocumentKey){
-    const owner=this.#owners.get(JSON.stringify(parseLiveDocumentKey(document)));
-    if(!owner?.completed)throw new Error("Service document activation is incomplete.");
+  consumer(value:LiveDocumentKey){
+    const document=parseLiveDocumentKey(value),owner=this.#owners.get(JSON.stringify(document));
+    if(!owner?.completed || this.#invalidated(owner,document))throw new Error("Service document activation is incomplete.");
     return owner;
   }
-  async activate(target:ServiceActivationConfig["targets"][number],signal:AbortSignal){
+  async activate(target:ServiceActivationConfig["targets"][number],signal:AbortSignal,
+    settle?:(consumer:OwnerCommittedDelivery,document:LiveDocumentKey,signal:AbortSignal)=>Promise<unknown>){
     const o=this.options,c=o.config,workspace=o.workspaces.get(target.workspaceId);
     if(!workspace)throw new Error("Service activation workspace is not attached.");
     const check=()=>{signal.throwIfAborted();o.assertCurrent();};
@@ -102,15 +113,10 @@ export class ServiceActivationDriver {
     let document=saved?parseLiveDocumentKey({workspaceId:saved.source.workspaceId,mainVersionId:saved.source.mainVersionId,
       objectId:saved.source.objectId,lineageClaimId:saved.source.lineageClaimId}):undefined;
     let owner=document?this.#owners.get(JSON.stringify(document)):undefined;
-    if(owner?.completed && saved && document){
-      const current=o.storage.resolveCurrentLiveDocumentBinding({document,actor:{kind:"owner",userId:saved.ownerUserId,shareId:saved.shareId}});
-      if(current.kind!=="current"){
-        this.#completedTargets.delete(targetKey);
-        return {kind:"pending" as const,reason:"Service binding is fenced or unavailable."};
-      }
-      if(!isDeepStrictEqual(current.binding,owner.binding)){
-        owner.completed=false;this.#completedTargets.delete(targetKey);this.#owners.delete(JSON.stringify(document));owner=undefined;
-      }
+    if(owner?.completed && document && this.#invalidated(owner,document)){
+      // A fenced binding keeps its owner for the restore; another binding activates again.
+      owner=this.#owners.get(JSON.stringify(document));
+      if(owner)return fenced;
     }
     if(!owner){
       if(!saved){
@@ -144,22 +150,53 @@ export class ServiceActivationDriver {
         nextRequestId:o.nextRequestId,assertCurrent:o.assertCurrent});
       const consumer=new OwnerCommittedDelivery(o.storage,o.history,{client:transport.client,workspace:workspace.handle,
         host:o.host,deadlineMs:o.deadlineMs,nextRequestId:o.nextRequestId,bounds:o.adoption,restore:o.restore,
+        publishOrdinary:signal=>workspace.ordinary.publish(signal),
         ownerAdmission:{activation:resumed.access,shares:new Map([[target.workspaceId,target.shareId]]),
           maxEntriesPerDrain:c.maxEntriesPerDrain,maxBytesPerDrain:c.maxBytesPerDrain,validate:c.validateAdmission}});
-      owner={consumer,transport,binding:resumed.binding,completed:false,activationPending:!resumed.completed};
+      owner={consumer,transport,binding:resumed.binding,completed:false,activationPending:!resumed.completed,
+        target:targetKey,actor:{ownerUserId:saved.ownerUserId,shareId:saved.shareId}};
       this.#owners.set(JSON.stringify(document),owner);
     }
     const held=owner;
     return o.runDocument(document!,signal,async()=>{
-    const outcome=await held.consumer.drain(document!,signal);check();
-    if(outcome.kind!=="done")return outcome;
-    if(held.activationPending){
-      const nativeState=await held.transport.state(request(),signal);check();
-      this.#store.complete({document:document!,host:o.host,access:this.#store.pending(document!,o.host),nativeState,guard:check});
-      held.activationPending=false;
+    // A restore can fence the binding while this pass waits for the document
+    // or for the engine. Readiness waits until the exact binding opens again;
+    // another binding reactivates on a later pass.
+    if(!held.activationPending && this.#invalidated(held,document!))return fenced;
+    try{
+      const outcome=await held.consumer.drain(document!,signal);check();
+      if(outcome.kind!=="done")return outcome;
+      if(held.activationPending){
+        const nativeState=await held.transport.state(request(),signal);check();
+        this.#store.complete({document:document!,host:o.host,access:this.#store.pending(document!,o.host),nativeState,guard:check});
+        held.activationPending=false;
+      }
+      if(settle)await settle(held.consumer,document!,signal);
+    }catch(error){
+      // Storage refuses delivery on a fenced binding. Only that is pending;
+      // cancellation, lost standing, and damage on the same binding still fail.
+      check();
+      if(!held.activationPending && this.#invalidated(held,document!))return fenced;
+      throw error;
     }
+    check();
+    if(this.#invalidated(held,document!))return fenced;
     held.completed=true;this.#completedTargets.add(targetKey);
     return {kind:"done" as const,document:document!};
     });
+  }
+  // Clears readiness when the owner may no longer use its exact binding.
+  #invalidated(owner:Owner,document:LiveDocumentKey){
+    const current=this.#currentBinding(document,owner.actor);
+    if(isDeepStrictEqual(current,owner.binding))return false;
+    owner.completed=false;this.#completedTargets.delete(owner.target);
+    const key=JSON.stringify(document);
+    if(current && this.#owners.get(key)===owner)this.#owners.delete(key);
+    return true;
+  }
+  // The exact binding the owner may use now, or null while it is fenced or unavailable.
+  #currentBinding(document:LiveDocumentKey,saved:{ownerUserId:string;shareId:string}){
+    const current=this.options.storage.resolveCurrentLiveDocumentBinding({document,actor:{kind:"owner",userId:saved.ownerUserId,shareId:saved.shareId}});
+    return current.kind==="current"?current.binding:null;
   }
 }

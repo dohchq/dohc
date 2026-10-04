@@ -449,31 +449,46 @@ it("leaves claims pending without an executor and forgets their private press re
 });
 
 
+async function expectSavedReach(run: Awaited<ReturnType<typeof executorFor>>, verdict: "stopped" | "held") {
+  await run.executor.automationsIn("People");
+  expect({
+    verdicts: (await run.store.readReachVerdicts()).verdicts,
+    errors: run.errors,
+  }).toMatchObject({
+    verdicts: expect.arrayContaining([expect.objectContaining({
+      automationId, step: JSON.stringify(["operation", DATASET, EDIT]), verdict,
+    })]),
+    errors: [],
+  });
+}
+
 it.each(["fresh", "rebuilt", "removed-while-off"])("holds a removed editor's dataset step on a %s server copy", async copy => {
   const f = await fixture();
   f.addEditor();
   // This step can run only after the editor is removed: they cannot use its operation.
   f.host.setDataGrant(owner, { ...scope, grantId: editor.grantId, grant: null });
   const old = await executorFor(f);
-  await vi.waitFor(async () => expect((await old.store.readReachVerdicts()).verdicts).toEqual(expect.arrayContaining([expect.objectContaining({ verdict: "stopped" })])), { timeout: 30_000 });
+  await expectSavedReach(old, "stopped");
   await old.executor.dispose();
   f.storage.tx(() => f.storage.db.prepare("UPDATE sync_relay_share_grants SET status='revoked',revoked_at_ms=2 WHERE grant_id=?").run(editor.grantId));
   if (copy === "removed-while-off") await rm(join(f.directory, "metadata"), { recursive: true });
   const next = await executorFor(f, false, copy);
-  await vi.waitFor(async () => expect((await next.store.readReachVerdicts()).verdicts.length).toBeGreaterThan(0), { timeout: 30_000 });
+  await expectSavedReach(next, "held");
   expect(next.executor.holds()).toEqual(expect.arrayContaining([expect.objectContaining({ step: JSON.stringify(["operation", DATASET, EDIT]) })]));
   const released = vi.spyOn(f.ledger, "release");
   await f.create();
-  await vi.waitFor(() => expect(released).toHaveBeenCalled(), { timeout: 30_000 });
+  await expect.poll(() => ({ released: released.mock.calls.length > 0, errors: next.errors }))
+    .toEqual({ released: true, errors: [] });
   expect(f.ledger.claims(automationId).claims).toMatchObject([{ state: "pending", attempts: 0 }]);
   expect((await f.host.invoke(owner, { ...scope, ...rules, operationId: READ, input: {}, idempotencyKey: "held-read" })).result)
     .toMatchObject({ rows: [{ values: { [NAME]: "Before" } }] });
   await next.executor.dispose();
   const restarted = await executorFor(f, false, copy);
-  await vi.waitFor(() => expect(restarted.executor.holds()).toEqual(expect.arrayContaining([expect.objectContaining({ step: JSON.stringify(["operation", DATASET, EDIT]) })])), { timeout: 30_000 });
+  await restarted.executor.automationsIn("People");
+  expect(restarted.executor.holds()).toEqual(expect.arrayContaining([expect.objectContaining({ step: JSON.stringify(["operation", DATASET, EDIT]) })]));
   expect(next.errors).toEqual([]);
   expect(restarted.errors).toEqual([]);
-}, 90_000);
+});
 
 it("selects wanted workspaces with one indexed query regardless of dataset count", async () => {
   const f = await fixture();

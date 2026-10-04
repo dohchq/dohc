@@ -92,7 +92,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }], settlement: { maxApplicationsPerSettlement: 8 },
     restore: {maxBytes: 1000000, maxEvents: 100, aggregateBytes: 20000000, workingReserveBytes: 1000000, maxOperations: 1, validation: validationPolicy},
     sync: { policy: { maxClientVectorBytes: 100000, maxHostVectorBytes: 100000, maxOutputBytes: 1000000, maxReadBytes: 4000000 }, workingReserveBytes: 4000000 },
-    ingress: { aggregateBytes: 400000000, applicationWorkingReserveBytes: 1000000, maxUploads: 4, uploadDeadlineMs: 30000 },
+    ingress: { aggregateBytes: 512 * 1024 * 1024, applicationWorkingReserveBytes: 8 * 1024 * 1024, maxUploads: 4, uploadDeadlineMs: 30000 },
     client: { aggregateBytes: 200000000, maxUploads: 4, connectTimeoutMs: 30000, requestDeadlineMs: 30000 } }));
   const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(16), validate = createLiveMarkdownJournalValidator(validationPolicy);
   let released!: () => void;
@@ -301,7 +301,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     for (const recipient of [first, peer]) await browserExpect(recipient.editor).toHaveAttribute("contenteditable", "false");
     expect(frameChanges.listenerCount()).toBe(0); results.grantRetired = true;
     await first.page.getByRole("button", {name: "Refresh files", exact: true}).click();
-    await browserExpect(first.page.getByRole("alert")).toContainText("could not open this invitation");
+    await browserExpect(first.page.getByRole("alert")).toContainText("The owner removed your access.");
     await browserExpect(first.page.getByRole("button", {name: "docs/a.md", exact: true})).toHaveCount(0);
     await first.page.screenshot({path: join(root, "revoked.png"), fullPage: true});
     expect(browserErrors).toEqual([]);
