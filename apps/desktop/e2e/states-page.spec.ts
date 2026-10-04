@@ -25,10 +25,11 @@ import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspac
 // backdrop blur, an animation's end state, anything only the GPU draws, or
 // how a part looks at a display scale other than 100%. Every section is
 // held to a whole-pixel height so a height change in one section moves the
-// sections below it by whole pixels, which leaves their captures alone with
-// known exceptions: two antialiased outlines still change, the focus-visible
-// primary button's bottom corners in buttons and the first step's circle in
-// steps, plus toasts from a 2px move and empty from 4px. The baselines were
+// sections below it by whole pixels, which leaves their captures mostly
+// alone: a move still changes a few antialiased edge pixels in some parts
+// below it, such as the first step's circle in steps and the toasts. Expect
+// those parts' pairs to change when a section above them changes height,
+// and check that only edge pixels differ. The baselines were
 // taken on Windows; Playwright names them per platform.
 
 const STATES_PAGE_HASH = "#/dev/states";

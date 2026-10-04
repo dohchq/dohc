@@ -3,12 +3,13 @@ import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { DocumentMenu } from "../DocumentMenu";
 import { OverlayFrame } from "../Overlay";
-import { ColorControl, HueControl, SegmentedControl, SwitchControl, TextControl } from "../settings/SettingRow";
+import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
 import { CopyDetailsButton } from "../shell/copyDetails";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
 import { EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { MoreMenu } from "../ui/MoreMenu";
+import { SegmentedControl } from "../ui/SegmentedControl";
 import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AutomationBadge } from "../workbench/AutomationBadge";
@@ -211,11 +212,12 @@ function DialogSpecimen(props: { theme: "light" | "dark" }) {
   );
 }
 
+// Two options, so five controls fit on one row of the segmented part.
 const themeOptions = [
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
-  { value: "system", label: "System" },
 ];
+const themeOptionsLightDisabled = [{ ...themeOptions[0]!, disabled: true }, themeOptions[1]!];
 
 const menuItems = [
   { label: "Rename", onSelect: noop },
@@ -319,7 +321,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="segmented" title="Segmented control">
-        <Specimen label="rest, hover on first, focus-visible on checked">
+        <Specimen label="rest, hover on first, focus-visible on checked, one option disabled, group disabled">
           <SegmentedControl label="Theme" value="dark" options={themeOptions} onChange={noop} />
           <span data-force-state="hover" data-force-target="[role=radio]">
             <SegmentedControl label="Theme" value="dark" options={themeOptions} onChange={noop} />
@@ -327,6 +329,8 @@ function Pane(props: { theme: "light" | "dark" }) {
           <span data-force-state="focus-visible" data-force-target="[aria-checked=true]">
             <SegmentedControl label="Theme" value="dark" options={themeOptions} onChange={noop} />
           </span>
+          <SegmentedControl label="Theme" value="dark" options={themeOptionsLightDisabled} onChange={noop} />
+          <SegmentedControl label="Theme" value="dark" options={themeOptions} disabled onChange={noop} />
         </Specimen>
       </Section>
 
