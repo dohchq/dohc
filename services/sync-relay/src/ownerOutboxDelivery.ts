@@ -2,7 +2,7 @@ import type { StorageContext } from "./storage/context.js";
 import { deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
+import { limitLiveDeclaredAgents, liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
 import type { ServiceActivationAccess } from "./storage/serviceActivationAccess";
 import { OwnerYDocOutbox } from "@dohc/workspace-engine-client";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
@@ -120,7 +120,8 @@ export async function drainOwnerOutbox(options: {
       const validation = await admission.validate({document,currentPath: binding.currentPath,checkpoint: cut.cut.checkpoint.bytes,
         suffix: cut.cut.suffix.map(row => row.bytes),candidate: entry.update,
         retainStateUpdate: liveAuthorCheckpointAnticipated(cut.cut.suffix.map(row => row.metadata),
-          deriveLiveAuthorSnapshot(storage as StorageContext, current.authority, authorContext, trustedAccount))}, signal);
+          limitLiveDeclaredAgents(cut.cut.suffix.map(row => row.metadata), current.authority,
+            deriveLiveAuthorSnapshot(storage as StorageContext, current.authority, authorContext, trustedAccount)))}, signal);
       check();
       if (validation.kind === "retry") {
         await validation.waitForCapacity(signal); check();

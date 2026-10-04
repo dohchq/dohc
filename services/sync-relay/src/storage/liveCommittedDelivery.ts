@@ -1176,7 +1176,7 @@ export class LiveCommittedDeliveryStore {
         if (!metadata) {integrity(source.acceptedReceipt === null); continue;}
         integrity(isDeepStrictEqual(source.acceptedReceipt, metadata.accepted.receipt) && metadata.accepted.authority.principalKind === "owner" &&
           metadata.accepted.receipt.updateDigest === source.updateDigest &&
-          nativeSourceAuthorMatches(this.#storage, source, metadata));
+          nativeSourceAuthorMatches(this.#storage, source, metadata, sourceBudget));
       }
       integrity(sameReceipt(accepted.proof.terminal, operation.terminal));
       let origin: unknown;

@@ -75,6 +75,8 @@ it("upgrades an existing v1 row with canonical version 1 and no attributed autho
   closeTestStorage(storage);
   const db = inspectDatabase(path);
   removeAuthorshipMigration(db);
+  db.exec(`CREATE TABLE sync_relay_live_update_agent_declarations (journal_cursor INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, on_behalf_of TEXT, depth INTEGER NOT NULL) STRICT`);
+  db.prepare("INSERT INTO sync_relay_migrations VALUES (?,1)").run("live-update-agent-declarations-v1");
   db.prepare(`INSERT INTO ${journal} (delivery_id,update_digest,workspace_id,main_version_id,object_id,lineage_claim_id,
     current_path,selector_paths_json,restore_fence_generation,principal_kind,principal_id,accepting_host_epoch,
     received_at_ms,update_bytes,relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes)
@@ -87,6 +89,22 @@ it("upgrades an existing v1 row with canonical version 1 and no attributed autho
   expect(check.prepare(`SELECT * FROM ${journal}`).get()).toEqual({...before, canonical_version: 1,
     author_context_json: null, author_snapshot_json: null, first_seen_deletes_json: "[]", checkpoint_coverage_json: null, seed_first_seen_json: "[]"});
   expect(marker(check)?.migration_id).toBe(LIVE_AUTHOR_MIGRATION);
+  expect(check.prepare("SELECT 1 FROM sqlite_schema WHERE name='sync_relay_live_update_agent_declarations'").get()).toBeUndefined();
+});
+
+it("refuses declared v1 relay evidence before migration and preserves its rows and schema", async () => {
+  const {path, db} = await closedDatabase();
+  removeAuthorshipMigration(db);
+  db.exec(`CREATE TABLE sync_relay_live_update_agent_declarations (journal_cursor INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, on_behalf_of TEXT, depth INTEGER NOT NULL) STRICT`);
+  db.prepare("INSERT INTO sync_relay_migrations VALUES (?,1)").run("live-update-agent-declarations-v1");
+  db.prepare("INSERT INTO sync_relay_live_update_agent_declarations VALUES (1,?,?,2)").run("trip-agent-ü", "人");
+  const before = schemaSnapshot(db);
+  const rows = db.prepare("SELECT * FROM sync_relay_live_update_agent_declarations").all();
+  db.close();
+  expect(() => reopenTestStorage(path)).toThrow("Cannot open a relay store with declared v1 accepted evidence. Its data is unchanged.");
+  const check = inspectDatabase(path);
+  expect(schemaSnapshot(check)).toEqual(before);
+  expect(check.prepare("SELECT * FROM sync_relay_live_update_agent_declarations").all()).toEqual(rows);
 });
 
 it("refuses a missing marker without adopting or repairing migrated objects", async () => {

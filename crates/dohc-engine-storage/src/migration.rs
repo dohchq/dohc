@@ -3065,6 +3065,27 @@ pub(crate) fn run_migrations(
     Ok(MigrationOutcome::Applied { newly_applied })
 }
 
+pub(crate) fn refuse_declared_v1_evidence(conn: &Connection) -> Result<(), StorageError> {
+    let has_columns: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('live_device_update_applications') WHERE name='declared_agent_id')", [], |row| row.get(0),
+    ).map_err(StorageError::migration)?;
+    let declared_application = has_columns && conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE declared_agent_id IS NOT NULL OR declared_on_behalf_of IS NOT NULL OR declared_depth IS NOT NULL)", [], |row| row.get::<_, bool>(0),
+    ).map_err(StorageError::migration)?;
+    let has_history: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='live_accepted_updates')", [], |row| row.get(0),
+    ).map_err(StorageError::migration)?;
+    let declared_history = has_history && conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_accepted_updates WHERE json_type(metadata_json, '$.accepted.agentDeclaration') IS NOT NULL)", [], |row| row.get::<_, bool>(0),
+    ).map_err(StorageError::migration)?;
+    if declared_application || declared_history {
+        return Err(StorageError::MigrationFailed { source: Some(
+            "Migration 29 cannot open a store with declared v1 accepted evidence. Its data is unchanged. For a development reset, delete <workspace>/.dohc/engine.".into(),
+        ) });
+    }
+    Ok(())
+}
+
 fn apply_transactional(
     conn: &mut Connection,
     migration: &Migration,
@@ -3077,15 +3098,7 @@ fn apply_transactional(
         .map_err(StorageError::migration)?;
 
     if migration.id == "v2-live-admitted-metadata-receipts" {
-        let declared: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE declared_agent_id IS NOT NULL OR declared_on_behalf_of IS NOT NULL OR declared_depth IS NOT NULL) OR EXISTS(SELECT 1 FROM live_accepted_updates WHERE json_type(metadata_json, '$.accepted.agentDeclaration') IS NOT NULL)",
-            [], |row| row.get(0),
-        ).map_err(StorageError::migration)?;
-        if declared {
-            return Err(StorageError::MigrationFailed { source: Some(
-                "Migration 29 cannot open a store with declared v1 accepted evidence. Its data is unchanged. For a development reset, delete <workspace>/.dohc/engine.".into(),
-            ) });
-        }
+        refuse_declared_v1_evidence(&tx)?;
     }
 
     tx.execute_batch(migration.sql)
@@ -3383,6 +3396,131 @@ mod tests {
             .iter()
             .position(|migration| migration.id == id)
             .expect("a shipped migration")
+    }
+
+    fn migration_29_history_fixture(conn: &Connection) -> (String, String) {
+        conn.execute(
+            "INSERT INTO versioned_workspaces VALUES ('workspace', 'main')",
+            [],
+        )
+        .unwrap();
+        let digest = crate::blob::put_binary_blob(conn, &[0, 0]).unwrap();
+        let metadata = format!(
+            r#"{{"accepted":{{"receipt":{{"deliveryId":"delivery","updateDigest":"{digest}","journalCursor":1,"acceptingHostEpoch":1}},"binding":{{"workspaceId":"workspace","mainVersionId":"main","objectId":"object","lineageClaimId":"lineage","currentPath":"docs/a.md","selectorPaths":["docs"],"restoreFenceGeneration":0}},"authority":{{"grantGeneration":null,"grantId":null,"principalId":"owner","principalKind":"owner"}},"receivedAtMs":30}},"firstSeen":[]}}"#
+        );
+        let initial = crate::blob::hex_sha256(
+            br#"["accepted-history-v1",["relay","workspace","main","object","lineage"]]"#,
+        );
+        let evidence = crate::blob::hex_sha256(
+            format!(r#"["accepted-event-v1","{initial}",1,{metadata}]"#).as_bytes(),
+        );
+        conn.execute("INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id) VALUES ('relay','workspace','delivery','main','object','lineage','docs/a.md','[\"docs\"]',0,?1,2,1,1,'owner','owner',30,0,1,'host',1,'instance','connection')", [&digest]).unwrap();
+        conn.execute("INSERT INTO live_accepted_updates (relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,event_count,journal_cursor,delivery_id,metadata_json,update_sha256,suffix_count,suffix_bytes,evidence_digest) VALUES ('relay','workspace','main','object','lineage',1,1,'delivery',?1,?2,1,2,?3)", rusqlite::params![metadata,digest,evidence]).unwrap();
+        (metadata, evidence)
+    }
+
+    fn migration_29_application_evidence(conn: &Connection) -> String {
+        conn.query_row("SELECT json_array(relay_database_namespace,workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id,declared_agent_id,declared_on_behalf_of,declared_depth) FROM live_device_update_applications", [], |row| row.get(0)).unwrap()
+    }
+
+    fn migration_29_history_evidence(conn: &Connection) -> (String, String) {
+        conn.query_row(
+            "SELECT metadata_json,evidence_digest FROM live_accepted_updates",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn migration_29_refuses_declared_v1_columns_or_metadata_without_changing_data() {
+        for declared_columns in [true, false] {
+            let dir = tempdir();
+            let path = dir.join("engine.db");
+            let mut conn = open_bare(&path);
+            let ctx = MigrationContext::current(1_000);
+            let before = migration_index("v2-live-admitted-metadata-receipts");
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+            migration_29_history_fixture(&conn);
+            if declared_columns {
+                conn.execute("UPDATE live_device_update_applications SET declared_agent_id='trip-agent',declared_on_behalf_of='owner',declared_depth=2", []).unwrap();
+            } else {
+                conn.execute("UPDATE live_accepted_updates SET metadata_json=json_set(metadata_json,'$.accepted.agentDeclaration',json('{\"agentId\":\"trip-agent\",\"onBehalfOf\":null,\"depth\":2}'))", []).unwrap();
+            }
+            let original_application = migration_29_application_evidence(&conn);
+            let original_history = migration_29_history_evidence(&conn);
+            let err = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+                .expect_err("declared v1 evidence must stop migration 29");
+            assert!(matches!(err, StorageError::MigrationFailed { .. }));
+            let cause = std::error::Error::source(&err).unwrap().to_string();
+            assert!(cause.contains("declared v1 accepted evidence"), "{cause}");
+            assert!(cause.contains("<workspace>/.dohc/engine"), "{cause}");
+            assert_eq!(
+                migration_29_application_evidence(&conn),
+                original_application
+            );
+            assert_eq!(migration_29_history_evidence(&conn), original_history);
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM engine_migrations WHERE ordinal=29",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('live_device_update_applications') WHERE name='admitted_metadata_json'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+            drop(conn);
+            let image = std::fs::read(&path).unwrap();
+            let err = crate::EngineStore::open(&path, 2_000)
+                .err()
+                .expect("opening declared history refuses");
+            assert!(
+                std::error::Error::source(&err)
+                    .unwrap()
+                    .to_string()
+                    .contains("declared v1 accepted evidence")
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                image,
+                "refusing the store preserves its database bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_29_upgrades_undeclared_v1_history_without_changing_its_evidence() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let mut conn = open_bare(&path);
+        let ctx = MigrationContext::current(1_000);
+        let before = migration_index("v2-live-admitted-metadata-receipts");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let original = migration_29_history_fixture(&conn);
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert_eq!(migration_29_history_evidence(&conn), original);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('live_device_update_applications') WHERE name IN ('declared_agent_id','declared_on_behalf_of','declared_depth')", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('live_device_update_applications') WHERE name='admitted_metadata_json'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('live_audit_events') WHERE name='canonical_version'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM pragma_table_info('owner_ydoc_outbox_entries') WHERE name='agent_declaration_json'", [], |row| row.get::<_, i64>(0)).unwrap(), 1, "native request declarations remain available");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM engine_migrations WHERE ordinal=29",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        drop(conn);
+        let store = crate::EngineStore::open(&path, 2_000).unwrap();
+        assert_eq!(
+            store
+                .read_with(|conn| Ok::<_, rusqlite::Error>(migration_29_history_evidence(conn)))
+                .unwrap(),
+            original
+        );
     }
 
     #[test]

@@ -39,7 +39,9 @@ export function deriveLiveAuthorSnapshot(storage: StorageContext, authority: Ser
   if (context.kind === "account") {
     if (authority.principalKind === "link" || context.accountId !== authority.principalId ||
         trustedAccount?.accountId !== authority.principalId) return [];
-    authors.push({kind: "human",humanId: trustedAccount.accountId,humanName: trustedAccount.name});
+    let humanName = trustedAccount.name;
+    try { parseLiveUpdateIdentifier(humanName); } catch { humanName = "Unnamed"; }
+    authors.push({kind: "human",humanId: trustedAccount.accountId,humanName});
   } else if (context.kind === "link") {
     if (authority.principalKind !== "link") return [];
     const mapping = storage.db.prepare("SELECT public_principal_id FROM sync_relay_app_public_principals WHERE grant_id=? AND principal_id=?")

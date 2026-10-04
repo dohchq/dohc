@@ -1,4 +1,5 @@
 import {parsePublicEditRelease} from "@dohc/security-contract";
+import {accountDisplayName} from "./discussionRoutes";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
@@ -520,7 +521,7 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
     const delivery = deviceDeliveryConfig ? readRelayDeviceDeliveryConfig(deviceDeliveryConfig,limits) : undefined;
     if (ownerAdmissionPath && delivery) {
       ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds);
-      ownerAdmission.admission.trustedAccount = async accountId => ({accountId, name: (await lookupUserDisplayName(accountId))?.trim() || accountId});
+      ownerAdmission.admission.trustedAccount = async accountId => ({accountId, name: await accountDisplayName(lookupUserDisplayName, accountId) ?? "Unnamed"});
     }
     deviceControl = createDeviceControl({
       storage, relayExchangeKey: relayExchangeKey ?? "",

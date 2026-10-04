@@ -901,8 +901,8 @@ mod tests {
     use super::*;
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     fn count_reads(conn: &Connection) -> Arc<AtomicUsize> {
@@ -1100,9 +1100,10 @@ mod tests {
             [&json],
         )
         .unwrap();
-        assert!(conn
-            .blob_open("main", "restores", "application_json", 1, true)
-            .is_err());
+        assert!(
+            conn.blob_open("main", "restores", "application_json", 1, true)
+                .is_err()
+        );
         let queries = count_reads(&conn);
         let previous = "0".repeat(64);
         let parsed = parse(
@@ -1132,16 +1133,18 @@ mod tests {
                 [damaged.to_string()],
             )
             .unwrap();
-            assert!(parse(
-                &conn,
-                "restores",
-                "application_json",
-                "FROM restores".into(),
-                vec![],
-                &previous,
-                1
-            )
-            .is_err());
+            assert!(
+                parse(
+                    &conn,
+                    "restores",
+                    "application_json",
+                    "FROM restores".into(),
+                    vec![],
+                    &previous,
+                    1
+                )
+                .is_err()
+            );
         }
     }
 

@@ -983,6 +983,11 @@ pub(super) fn accepted_source(
         initial_digest(held)?
     } else {
         let p = parameters(held);
+        let length: i64 = conn.query_row(
+            &format!("SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6"),
+            params![p[0], p[1], p[2], p[3], p[4], count - 1], |r| r.get(0),
+        ).map_err(read_sql)?;
+        budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
         let sql = format!(
             "SELECT evidence_digest,metadata_json FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6"
         );

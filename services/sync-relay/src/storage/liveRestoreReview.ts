@@ -82,7 +82,7 @@ export function readRestoreReviewHistory(storage: StorageContext, input: {
       // The relay accepted the source's own declaration, absent when it named none.
       require(accepted.accepted.receipt.updateDigest === source.updateDigest && accepted.accepted.authority.principalKind === "owner" &&
         isDeepStrictEqual(accepted.accepted.binding, source.binding) &&
-        nativeSourceAuthorMatches(storage, source, accepted));
+        nativeSourceAuthorMatches(storage, source, accepted, budget));
       if (source.acceptedReceipt) require(isDeepStrictEqual(source.acceptedReceipt, accepted.accepted.receipt));
     } else require(source.acceptedReceipt === null);
     const {acceptedReceipt: _receipt, ...native} = source;

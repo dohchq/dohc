@@ -6,6 +6,8 @@ import {openRelayDeployment} from "../relayDeployment.js";
 import type {SyncRelayStorage} from "../storage.js";
 import type {StorageContext} from "./context.js";
 import {readAcceptedHistoryDelivery, readAcceptedHistoryInterval, RestoreHistoryBudget} from "./liveAcceptedHistory.js";
+import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors.js";
+import type {NativeRestoreProposalReceipt} from "../liveRestoreProposal.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 
@@ -20,6 +22,25 @@ const declarations = (f: Fixture) =>
   f.raw.prepare("SELECT author_snapshot_json FROM sync_relay_live_update_journal WHERE author_context_json IS NOT NULL ORDER BY journal_cursor").all();
 const admittedAgent = (metadata: import("@dohc/live-session-contract").AdmittedLiveUpdateMetadata | undefined) => metadata?.authorSnapshot?.find(author => author.kind === "agent");
 const expectedAgent = {kind: "agent", ...declared};
+
+it("charges native request context before loading it for restore association", () => {
+  const f = registered({deployment: true});
+  try {
+    const result = f.storage.commitLiveUpdateJournal(declare(f.capture(f.update(), "context-budget"), declared));
+    expect(result.result.kind).toBe("accepted");
+    const metadata = result.admitted!.metadata;
+    const source = {source: {origin: {kind: "ownerDraft", agentDeclaration: declared}}} as NativeRestoreProposalReceipt["nativeSources"][number];
+    const contextBytes = Number(f.raw.prepare("SELECT length(CAST(author_context_json AS BLOB)) AS bytes FROM sync_relay_live_update_journal WHERE delivery_id='context-budget'").get()!.bytes);
+    expect(() => nativeSourceAuthorMatches(f.storage as unknown as StorageContext, source, metadata, new RestoreHistoryBudget(contextBytes - 1, 1)))
+      .toThrow("Restore history exceeds configured byte bounds.");
+    const budget = new RestoreHistoryBudget(contextBytes, 1);
+    expect(nativeSourceAuthorMatches(f.storage as unknown as StorageContext, source, metadata, budget)).toBe(true);
+    expect(budget.bytes).toBe(0);
+    f.raw.prepare("UPDATE sync_relay_live_update_journal SET author_context_json=? WHERE delivery_id='context-budget'").run(JSON.stringify({kind: "account", accountId: "x".repeat(1_000_000)}));
+    expect(() => nativeSourceAuthorMatches(f.storage as unknown as StorageContext, source, metadata, new RestoreHistoryBudget(contextBytes, 1)))
+      .toThrow("Restore history exceeds configured byte bounds.");
+  } finally {f.close();}
+});
 
 it("binds an owner's declared agent to its delivery and refuses a changed, added, or removed declaration", () => {
   const f = registered({deployment: true});

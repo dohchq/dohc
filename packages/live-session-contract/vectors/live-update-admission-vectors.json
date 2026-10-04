@@ -2767,7 +2767,7 @@
       "eventDigest": "ff31ce6590c8a8cf8a6095d29f68a2df1c91476e54882336f06b7e5790701ab6"
     },
     {
-      "case": "owner event with a Unicode agent declaration",
+      "case": "owner event with a Unicode author snapshot",
       "namespace": "relay",
       "document": {
         "workspaceId": "workspace",

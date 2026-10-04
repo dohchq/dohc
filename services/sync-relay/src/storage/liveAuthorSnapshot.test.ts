@@ -43,6 +43,16 @@ it.each([owner, named])("uses the trusted account name for matching $principalKi
     .toEqual([{ kind: "human", humanId: "owner", humanName: "Trusted owner" }, { kind: "agent", ...agent }]);
 });
 
+it.each(["", "x".repeat(513), "ü".repeat(257), "Owner\u0000", "\ud800"])("keeps owner attribution bounded when the trusted name is invalid", name => {
+  expect(deriveLiveAuthorSnapshot(fixture(), owner, {kind: "account", accountId: "owner"}, {...account, name}))
+    .toEqual([{kind: "human", humanId: "owner", humanName: "Unnamed"}]);
+});
+
+it.each(["x".repeat(512), "ü".repeat(256), "Renamed owner"])("retains valid owner names at the byte boundary and after a rename", name => {
+  expect(deriveLiveAuthorSnapshot(fixture(), owner, {kind: "account", accountId: "owner"}, {...account, name}))
+    .toEqual([{kind: "human", humanId: "owner", humanName: name}]);
+});
+
 it.each<LiveAuthorContext | undefined>([undefined, { kind: "signed-out" }, { kind: "signed-out", agent },
   { kind: "account", accountId: "other", agent }, { kind: "link", publicPrincipalId: "public_other", agent }])
   ("keeps absent, signed-out, or mismatched account context unnamed: %j", context => {

@@ -3,7 +3,7 @@ import { parseLiveAuthorContext } from "@dohc/live-session-contract/live-authors
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { EngineClient, NativeAppliedPosition } from "@dohc/workspace-engine-client/daemon";
-import { liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
+import { limitLiveDeclaredAgents, liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
 import { parseRedeemedLiveTicket, type RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import { parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseServerDerivedLiveUpdateAuthority, type ServerDerivedLiveUpdateAuthority, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
@@ -223,7 +223,8 @@ function captureLiveFrameHost(options: {
         const validation = await validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
           suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes,
           retainStateUpdate: liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata),
-            deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount)) }, signal);
+            limitLiveDeclaredAgents(cut.suffix.map(row => row.metadata), authority,
+              deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount))) }, signal);
         check(signal);
         if (validation.kind === "retry") return {result: "retry", reason: validation.reason};
         const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,

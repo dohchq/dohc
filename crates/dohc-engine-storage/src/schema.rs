@@ -257,6 +257,7 @@ pub(crate) fn open_engine_db_with_root_token(
     // Step 3: classify from read-only queries. A rejected store returns here
     // before any persistent pragma runs, so the file is left byte-unchanged.
     let disposition = classify_fingerprint(&conn)?;
+    crate::migration::refuse_declared_v1_evidence(&conn)?;
 
     // Step 4: the store is ours — closing may checkpoint again, and the
     // file-mutating pragmas are now safe.
@@ -307,6 +308,7 @@ pub(crate) fn open_engine_db_read_only(
     if classify_fingerprint(&conn)? != Disposition::ExistingV2 {
         return Err(StorageError::StateCorrupt { source: None });
     }
+    crate::migration::refuse_declared_v1_evidence(&conn)?;
     validate_v2(&conn)?;
     integrity_check(&conn)?;
     stop_counting(&conn)?;

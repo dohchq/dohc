@@ -25,7 +25,7 @@ import { parseNamedLiveConfig } from "./namedLiveConfig.js";
 import type { StorageContext } from "./storage/context.js";
 
 const exchangeKey = "test-exchange-key-".repeat(3), relayHost = "relay.example.test";
-// The owner route must receive the largest declared submission, 1611 bytes.
+// The owner route must receive the largest declared submission, 2647 bytes.
 const frames = { receive: { maxFrameBytes: 2048, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096 },
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096 };
 const bounds = { maxClientVectorBytes: 1024, maxSyncOutputBytes: 4096, maxAppliedUpdateBytes: 4096, maxSubmissionBytes: 4096, maxAdmissionBytes: 16384 };
@@ -481,8 +481,8 @@ it("opens the owner bearer route without a recipient, browser cookie, ticket, or
 });
 
 it.each([
-  { ...frames, receive: { ...frames.receive, maxFrameBytes: 1610 } },
-  { ...frames, maxControlBytes: 1610 },
+  { ...frames, receive: { ...frames.receive, maxFrameBytes: 2646 } },
+  { ...frames, maxControlBytes: 2646 },
 ])("refuses an owner route whose frame or control budget cannot carry the largest declared submission", ownerFrames => {
   type OwnerRoute = Parameters<typeof createOwnerLiveRoutes>[0];
   expect(() => createOwnerLiveRoutes({ storage: {} as OwnerRoute["storage"], resolveActor: async () => { throw new UnauthorizedError(); },
@@ -496,7 +496,7 @@ it("accepts an owner route at the largest declared submission's frame and contro
   const route = createOwnerLiveRoutes({ storage: {} as OwnerRoute["storage"], resolveActor: async () => { throw new UnauthorizedError(); },
     captureNative: async () => { throw new Error("No host opens in this test."); },
     hosts: new Set([relayHost]), publicOrigin: audience, exchangeKey,
-    frames: { ...frames, receive: { ...frames.receive, maxFrameBytes: 1611 }, maxControlBytes: 1611 },
+    frames: { ...frames, receive: { ...frames.receive, maxFrameBytes: 2647 }, maxControlBytes: 2647 },
     bounds, limits, validate: createLiveMarkdownJournalValidator(policy) });
   route.close();
 });
