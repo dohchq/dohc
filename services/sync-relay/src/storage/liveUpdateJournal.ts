@@ -131,7 +131,7 @@ function journalBindingFromRow(raw: Record<string, unknown>): LiveObjectBinding 
   return binding;
 }
 function journalMetadataWithBinding(db: SqliteDb, raw: Record<string, unknown>, binding: LiveObjectBinding,
-  provenance?: Record<string, unknown>[]): AdmittedLiveUpdate["metadata"] {
+  provenance?: Record<string, unknown>[], snapshots?: Map<string, LiveAuthorSnapshot>): AdmittedLiveUpdate["metadata"] {
   const cursor = authorityInteger(raw.journal_cursor, 1);
   const rows = provenance ?? db.prepare(`SELECT * FROM ${LIVE_JOURNAL_PROVENANCE} WHERE journal_cursor=? ORDER BY client_id,start_clock`).all(cursor);
   const firstSeen = rows.map(row => {
@@ -148,24 +148,34 @@ function journalMetadataWithBinding(db: SqliteDb, raw: Record<string, unknown>, 
   const receivedAtMs = raw.received_at_ms;
   if (typeof receivedAtMs !== "number" || !Number.isSafeInteger(receivedAtMs) || receivedAtMs < 0) throw new TypeError("receivedAtMs must be a non-negative safe integer.");
   journalIntegrity(raw.canonical_version === 1 || raw.canonical_version === 2);
-  const seed = journalRanges(JSON.parse(String(raw.seed_first_seen_json)));
-  const credited = subtractJournalRanges(firstSeen, seed);
-  journalIntegrity(subtractJournalRanges(seed, firstSeen).length === 0);
+  const seed = raw.seed_first_seen_json === "[]" ? [] : journalRanges(JSON.parse(String(raw.seed_first_seen_json)));
+  const credited = seed.length === 0 ? firstSeen : subtractJournalRanges(firstSeen, seed);
+  if (seed.length !== 0) journalIntegrity(subtractJournalRanges(seed, firstSeen).length === 0);
   const extension = raw.canonical_version === 2 ? {
-    canonicalVersion: 2 as const, authorSnapshot: parseLiveAuthorSnapshot(JSON.parse(String(raw.author_snapshot_json))),
-    firstSeenDeletes: journalRanges(JSON.parse(String(raw.first_seen_deletes_json))),
+    canonicalVersion: 2 as const, authorSnapshot: journalAuthorSnapshot(raw.author_snapshot_json, snapshots),
+    firstSeenDeletes: raw.first_seen_deletes_json === "[]" ? [] : journalRanges(JSON.parse(String(raw.first_seen_deletes_json))),
     ...(raw.checkpoint_coverage_json === null ? {} : {checkpointCoverage: parseLiveCheckpointCoverage(JSON.parse(String(raw.checkpoint_coverage_json)))})
   } : {};
   if (raw.canonical_version === 1) journalIntegrity(raw.author_snapshot_json === null && raw.author_context_json === null &&
     raw.first_seen_deletes_json === "[]" && raw.checkpoint_coverage_json === null && seed.length === 0);
-  return { accepted: { receipt, binding, authority, receivedAtMs }, firstSeen: parseLiveUpdateStructRanges(credited), ...extension };
+  return { accepted: { receipt, binding, authority, receivedAtMs }, firstSeen: credited, ...extension };
+}
+function journalAuthorSnapshot(value: unknown, snapshots?: Map<string, LiveAuthorSnapshot>): LiveAuthorSnapshot {
+  journalIntegrity(typeof value === "string");
+  const cached = snapshots?.get(value);
+  // Reuse validation for identical stored bytes only within this SQLite read.
+  // Each row owns its entries so callers cannot change another row's credit.
+  if (cached) return cached.map(author => ({...author}));
+  const parsed = parseLiveAuthorSnapshot(JSON.parse(value));
+  snapshots?.set(value, parsed.map(author => ({...author})));
+  return parsed;
 }
 export function decodeJournalRow(db: SqliteDb, raw: Record<string, unknown>, provenance?: Record<string, unknown>[]): DecodedJournalRow {
   return journalRowWithBinding(db, raw, journalBindingFromRow(raw), provenance);
 }
 function journalRowWithBinding(db: SqliteDb, raw: Record<string, unknown>, binding: LiveObjectBinding,
-  provenance?: Record<string, unknown>[]): DecodedJournalRow {
-  const metadata=journalMetadataWithBinding(db,raw,binding,provenance);
+  provenance?: Record<string, unknown>[], snapshots?: Map<string, LiveAuthorSnapshot>): DecodedJournalRow {
+  const metadata=journalMetadataWithBinding(db,raw,binding,provenance,snapshots);
   journalIntegrity((raw.validation_checkpoint_sha256 === null) === (raw.validation_checkpoint_bytes === null));
   const checkpoint = raw.validation_checkpoint_sha256 === null ? null : {
     digest: parseLiveUpdateDigest(raw.validation_checkpoint_sha256), bytes: journalBytes(raw.validation_checkpoint_bytes),
@@ -706,6 +716,7 @@ function readJournalCut(storage: StorageContext, document: LiveDocumentKey, expe
     let previousBinding: { raw: Record<string, unknown>; binding: LiveObjectBinding } | undefined;
     const matchingSuffix = expected?.highWater === highWater ? expected.suffix : undefined;
     if (matchingSuffix) journalIntegrity(matchingSuffix.length === rawSuffix.length);
+    const snapshots = new Map<string, LiveAuthorSnapshot>();
     const suffix = rawSuffix.map((raw, index) => {
       if (matchingSuffix) {
         const entry = matchingSuffix[index]!;
@@ -722,7 +733,7 @@ function readJournalCut(storage: StorageContext, document: LiveDocumentKey, expe
         raw.restore_fence_generation === prior.raw.restore_fence_generation
         ? { ...prior.binding, selectorPaths: [...prior.binding.selectorPaths] } : journalBindingFromRow(raw);
       previousBinding = { raw, binding };
-      const row = journalRowWithBinding(storage.db, raw, binding, provenance.get(authorityInteger(raw.journal_cursor, 1)) ?? []), receipt = row.admitted.metadata.accepted.receipt;
+      const row = journalRowWithBinding(storage.db, raw, binding, provenance.get(authorityInteger(raw.journal_cursor, 1)) ?? [], snapshots), receipt = row.admitted.metadata.accepted.receipt;
       journalIntegrity(receipt.journalCursor > last && receipt.journalCursor <= (highWater ?? 0) && row.checkpoint === null);
       last = receipt.journalCursor; suffixBytes += row.admitted.updateBytes.byteLength;
       return { cursor: receipt.journalCursor, digest: receipt.updateDigest, bytes: row.admitted.updateBytes, metadata: row.admitted.metadata };
