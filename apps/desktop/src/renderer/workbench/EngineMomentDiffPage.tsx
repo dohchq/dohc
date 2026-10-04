@@ -229,10 +229,14 @@ export function EngineMomentDiffPage({
   // rides the encrypted path end to end).
   const isProtected = moment.protected === true;
   // Who wrote this change directly, when the owner can stop them and restore
-  // what they wrote: a person they shared with, or an Edit share link.
-  const stopTarget: StopTarget | null = moment.namedAuthor
+  // what they wrote: a person they shared with, or an Edit share link. Only
+  // the relay's direct-write lane carries such a change in, as "sync"; that
+  // lane's ledger is what Stop and restore reverts. A live document's change
+  // names its collaborator too, and restores through Restore shared file.
+  const directWrite = moment.origin === "sync";
+  const stopTarget: StopTarget | null = directWrite && moment.namedAuthor
     ? { target: { kind: "person", userId: moment.namedAuthor.userId }, label: moment.namedAuthor.label }
-    : moment.linkAuthor
+    : directWrite && moment.linkAuthor
       ? { target: { kind: "link", grantId: moment.linkAuthor.grantId }, label: "Edit link" }
       : null;
   // Each side presents by its own kind (see momentDiffSides).

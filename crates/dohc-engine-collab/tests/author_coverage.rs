@@ -790,8 +790,8 @@ fn every_author_field_at_its_maximum_fits_one_entry() {
         serde_json::from_str(&authors.json()).expect("author list");
     assert_eq!(
         entries.iter().map(|entry| entry.to_string().len()).max(),
-        Some(author_coverage::MAX_AUTHOR_ENTRY_BYTES),
-        "the automation entry is the derived worst case"
+        Some(author_coverage::MAX_AUTHOR_ENTRY_BYTES - 14),
+        "the automation entry is the largest local one, 14 bytes under the largest Edit link"
     );
 }
 

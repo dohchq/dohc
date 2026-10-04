@@ -41,6 +41,10 @@ export type OwnerRestoreOptions = {
 
 /** The longest account email the route adds to a grant or an author. */
 export const MAX_RESTORE_EMAIL_BYTES = 320;
+// Identifiers are at most 512 bytes and at most double when escaped. One
+// accepted point with its named author and email stays under 6 KiB. The
+// baseline and both continuation cursors stay under 4 KiB.
+const MAX_RESTORE_POINT_BYTES = 6 * 1024, RESTORE_TAIL_BYTES = 4 * 1024;
 const key = (document: LiveDocumentKey) => [document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
 const whereDocument = "workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?";
 function bounded(bytes: number) {
@@ -63,7 +67,8 @@ export function parseOwnerRestoreGrantCursor(value: unknown): OwnerRestoreGrantC
   } catch {throw badRequest("Invalid restore grant cursor.");}
 }
 
-function grantPage(storage: StorageContext, input: OwnerRestoreOptionsInput, charge: (value: unknown, reserve?: number) => void) {
+function grantPage(storage: StorageContext, input: OwnerRestoreOptionsInput, charge: (value: unknown, reserve?: number) => void,
+  fits: (value: unknown, reserve: number) => boolean) {
   let cursor = input.grantCursor === undefined ? null : parseOwnerRestoreGrantCursor(input.grantCursor);
   let resumeShare = cursor?.grantId != null, inspected = 0, selectorBytes = 0;
   const grants: OwnerRestoreOptions["grants"] = [];
@@ -101,6 +106,7 @@ function grantPage(storage: StorageContext, input: OwnerRestoreOptionsInput, cha
       WHERE share_id=? AND (created_at_ms,grant_id)>(?,?) ORDER BY created_at_ms,grant_id LIMIT ?`)
       .iterate(shareId, grantTime, grantId, MAX_LOG_PAGE_SIZE - inspected)) {
       inspected++;
+      const previous = cursor;
       cursor = {shareId, shareCreatedAtMs, grantCreatedAtMs: authorityInteger(row.created_at_ms), grantId: parseLiveUpdateIdentifier(row.grant_id)};
       if (row.status === "active" && row.access === "edit") {
         bounded(authorityInteger(row.bytes) + Buffer.byteLength(cursor.grantId!));
@@ -112,7 +118,10 @@ function grantPage(storage: StorageContext, input: OwnerRestoreOptionsInput, cha
           generation: authorityInteger(grant.generation, 1), principalKind,
           userId: grant.principal_user_id === null ? null : parseLiveUpdateIdentifier(grant.principal_user_id),
           email: grant.principal_email === null ? null : String(grant.principal_email)};
-        charge(recipient, recipient.principalKind === "user" ? MAX_RESTORE_EMAIL_BYTES : 0); grants.push(recipient);
+        const reserve = recipient.principalKind === "user" ? MAX_RESTORE_EMAIL_BYTES : 0;
+        // A full page ends before this grant, and the next page starts with it.
+        if (grants.length > 0 && !fits(recipient, reserve)) return {grants, nextGrantCursor: previous};
+        charge(recipient, reserve); grants.push(recipient);
       }
       if (inspected === MAX_LOG_PAGE_SIZE) return {grants, nextGrantCursor: cursor};
     }
@@ -188,7 +197,10 @@ export function readOwnerRestoreOptions(storage: StorageContext, input: OwnerRes
     }
     let bytes = Buffer.byteLength(JSON.stringify(result));
     const charge = (value: unknown, reserve = 0) => {bytes += Buffer.byteLength(JSON.stringify(value)) + 1 + reserve; bounded(bytes);};
-    Object.assign(result, grantPage(storage, input, charge));
+    // Grants leave room for a restore point, the baseline, and the cursors.
+    const fits = (value: unknown, reserve: number) => bytes + Buffer.byteLength(JSON.stringify(value)) + 1 + reserve <=
+      MAX_PAYLOAD_JSON_BYTES - MAX_RESTORE_POINT_BYTES - RESTORE_TAIL_BYTES;
+    Object.assign(result, grantPage(storage, input, charge, fits));
     if (beforeCursor !== undefined && !storage.db.prepare(`SELECT 1 FROM sync_relay_live_update_journal
       WHERE relay_database_namespace=? AND ${whereDocument} AND journal_cursor=?`).get(namespace, ...key(document), beforeCursor)) retired();
     for (const point of storage.db.prepare(`SELECT journal_cursor,received_at_ms,update_digest,principal_kind,principal_id,grant_id,
@@ -204,8 +216,9 @@ export function readOwnerRestoreOptions(storage: StorageContext, input: OwnerRes
       const author: StopRestoreRecipient | null = principalKind === "named" && !result.authors.some(known => known.grantId === grantId)
         ? {grantId: grantId!, principalKind: "user", userId: principalId, email: null} : null;
       const cost = Buffer.byteLength(JSON.stringify(value)) + 1 + (author ? Buffer.byteLength(JSON.stringify(author)) + 1 + MAX_RESTORE_EMAIL_BYTES : 0);
-      // Many long authorities end the page early; the next page continues from here.
-      if (result.points.length > 0 && bytes + cost > MAX_PAYLOAD_JSON_BYTES) {
+      // Many long authorities end the page early, leaving room for the
+      // baseline and the cursors; the next page continues from here.
+      if (result.points.length > 0 && bytes + cost > MAX_PAYLOAD_JSON_BYTES - RESTORE_TAIL_BYTES) {
         result.nextBeforeCursor = result.points.at(-1)!.cursor; break;
       }
       bytes += cost; bounded(bytes); result.points.push(value);

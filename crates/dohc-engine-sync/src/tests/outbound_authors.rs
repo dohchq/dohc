@@ -2,8 +2,12 @@ use super::*;
 use dohc_engine_domain::WriteText;
 
 #[test]
-fn queued_author_repair_omits_only_people() {
+fn queued_author_repair_omits_people_and_shared_authors() {
     let human = json!({"kind":"human","humanId":"person","onBehalfOf":"owner"});
+    // The relay mints these, and refuses them from a client.
+    let named = json!({"kind":"named","userId":"ana","grantId":"grant","grantGeneration":2});
+    let link = json!({"kind":"link","grantId":"grant","grantGeneration":2,"principalId":"holder"});
+    let public = json!({"kind":"public","principalId":"holder","grantId":"grant"});
     let agent =
         json!({"kind":"agent","agentId":"agent","onBehalfOf":"owner","agentRunId":"run","depth":3});
     let automation =
@@ -13,7 +17,15 @@ fn queued_author_repair_omits_only_people() {
         json!({"kind":"automation","automationId":"rule","onBehalfOf":"local:456","depth":4});
     for (authors, expected) in [
         (json!([human]), None),
+        (json!([named]), None),
+        (json!([human, named, link, public]), None),
         (json!([human, agent]), Some(json!([agent]))),
+        (json!([agent, named, link]), Some(json!([agent]))),
+        // An unknown kind is not this repair's to judge; validation refuses it.
+        (
+            json!([named, {"kind":"other"}]),
+            Some(json!([{"kind":"other"}])),
+        ),
         (json!([agent, automation]), Some(json!([agent, automation]))),
         (json!([local_agent]), Some(json!([local_agent]))),
         (json!([local_automation]), Some(json!([local_automation]))),
@@ -23,11 +35,13 @@ fn queued_author_repair_omits_only_people() {
         ),
     ] {
         let mut payload = json!({"authors": authors, "momentId":"moment"});
-        crate::outbound::omit_local_person_authors(&mut payload);
+        crate::outbound::omit_relay_attributed_authors(&mut payload);
         assert_eq!(payload.get("authors"), expected.as_ref());
         assert_eq!(payload["momentId"], "moment");
         let repaired = payload.clone();
-        assert!(!crate::outbound::omit_local_person_authors(&mut payload));
+        assert!(!crate::outbound::omit_relay_attributed_authors(
+            &mut payload
+        ));
         assert_eq!(payload, repaired);
     }
 }
@@ -72,15 +86,19 @@ fn queue_legacy_moment(engine: &mut EngineStore, authors: serde_json::Value) -> 
 }
 
 #[test]
-fn queued_human_authors_are_durably_repaired_before_push_and_echo() {
+fn queued_human_and_shared_authors_are_durably_repaired_before_push_and_echo() {
     for authors in [
         json!([{"kind":"human","humanId":"person"}]),
         json!([{"kind":"human","humanId":"person"},{"kind":"agent","agentId":"agent","onBehalfOf":"owner"}]),
+        // A live settlement names the collaborator the relay accepted the
+        // edit from. This computer keeps it; the wire does not carry it.
+        json!([{"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1}]),
+        json!([{"kind":"agent","agentId":"agent","onBehalfOf":"owner"},{"kind":"link","grantId":"grant","grantGeneration":1,"principalId":"holder"}]),
     ] {
         let (_scratch, path, mut engine) = open_store();
         let original_authors = authors.clone();
         let mut expected = queue_legacy_moment(&mut engine, authors);
-        crate::outbound::omit_local_person_authors(&mut expected);
+        crate::outbound::omit_relay_attributed_authors(&mut expected);
         let client = RelaySyncClient::new(FakeRelay::default());
         let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
         assert_eq!(

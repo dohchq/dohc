@@ -358,11 +358,15 @@ describe("engine markdown source view", () => {
     expect((await screen.findByTestId("orphaned-draft-notice")).textContent).toContain(
       "This document became read-only. Copy your text to keep it.",
     );
-    expect(screen.getByTestId("orphaned-draft-copy")).toBeTruthy();
     await waitFor(() =>
       expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("false"),
     );
     expect(refused).toHaveBeenCalledTimes(1);
+    // Copy returns the refused edit, not only the last saved text.
+    await user.click(screen.getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toContain("title: Plan Retitled"),
+    );
   });
 
   // Read-only with nothing waiting still asks once, and keeps the text copyable.
@@ -384,6 +388,24 @@ describe("engine markdown source view", () => {
     // The session stays read-only; a later report is not a new turn.
     act(() => pushSaveState("saved", 0));
     expect(readOnly).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not relabel an older set-aside edit as part of a read-only turn", async () => {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    captureOrphanedDraft("ws-1", "a.md", "Older set-aside text");
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+
+    await user.type(screen.getByTestId("page-title"), " Retitled");
+    await waitFor(() => expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalled());
+    act(() => pushSaveState("read-only", 1));
+
+    await waitFor(() => expect(screen.getAllByTestId("orphaned-draft-notice")).toHaveLength(2));
+    const notices = screen.getAllByTestId("orphaned-draft-notice").map((notice) => notice.textContent ?? "");
+    expect(notices.filter((text) => text.includes("This document became read-only."))).toHaveLength(1);
+    expect(notices.filter((text) => text.includes("This document reopened before your last edit saved."))).toHaveLength(1);
   });
 
   it("does not relabel an older set-aside edit as part of this deletion", async () => {

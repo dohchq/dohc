@@ -297,6 +297,44 @@ describe("owner restore options", () => {
     expect(next.points[0].cursor).toBe(first.nextBeforeCursor - 1);
   });
 
+  it("pages a long access list by bytes, with room held for every email, and reaches every grant once", async () => {
+    const f = await fixture();
+    const insert = f.raw.prepare(`INSERT INTO sync_relay_share_grants (grant_id,share_id,principal_kind,principal_user_id,access,generation,status,created_at_ms)
+      VALUES (?,?,'user',?,'edit',1,'active',1)`);
+    f.raw.exec("BEGIN");
+    for (let index = 0; index < 400; index++) {
+      insert.run(`grant-${String(index).padStart(3, "0")}-${"g".repeat(26)}`, scope.shareId, `user-${index}-`.padEnd(300, "u"));
+    }
+    f.raw.exec("COMMIT");
+    const email = `${"a".repeat(306)}@example.com`;
+    const route = createOwnerRestoreRoutes({storage: f.storage, host: () => ({restoreConfigured: true}) as never,
+      newId: () => "unused", nowMs: () => 1, lookupUserEmail: () => email});
+    const read = async (grantCursor?: unknown) => {
+      const response = await route(new Request("http://relay.test", {method: "POST", body: JSON.stringify({path: binding.currentPath,
+        ...(grantCursor === undefined ? {} : {grantCursor})})}), {route: "owner-restore", action: "options", workspaceId: scope.workspaceId}, ownerUserId);
+      const text = await response.text();
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(MAX_PAYLOAD_JSON_BYTES);
+      return JSON.parse(text);
+    };
+    const seen: string[] = [];
+    let page = await read(), pages = 1;
+    // Bytes, not the row count, end the first page, and it still lists the baseline.
+    expect(page.grants.length).toBeLessThan(400);
+    expect(page.nextGrantCursor).not.toBeNull();
+    expect(page.points.map((point: {cursor: number}) => point.cursor)).toEqual([0]);
+    for (;;) {
+      seen.push(...page.grants.map((grant: {grantId: string; email: string | null}) => {
+        expect(grant.email).toBe(email);
+        return grant.grantId;
+      }));
+      if (page.nextGrantCursor === null) break;
+      page = await read(page.nextGrantCursor); pages++;
+    }
+    expect(pages).toBeGreaterThan(1);
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).toHaveLength(401);
+  });
+
   it("refuses to answer options when the workspace changes owner during the email lookup", async () => {
     const f = await fixture(); f.point(1);
     const owned = vi.spyOn(f.storage, "workspaceIsOwnedBy");

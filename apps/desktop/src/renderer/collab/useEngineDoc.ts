@@ -110,6 +110,8 @@ export type UseEngineDoc = {
   // Main refused a live edit because this workspace became read-only after
   // the session opened. The rejected document is retained for recovery only.
   readOnlyWhileEditing: boolean;
+  // The recovery row that read-only transition created, if it still exists.
+  readOnlyDraftId: number | null;
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
@@ -220,6 +222,9 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const readOnlyWhileEditing =
     outcome?.kind === "bound" &&
     settled?.readOnlyTransition?.token === outcome.token;
+  const readOnlyDraftId = readOnlyWhileEditing
+    ? (settled?.readOnlyTransition?.draftId ?? null)
+    : null;
   const permanentFailureWhileEditing =
     outcome?.kind === "bound" &&
     settled?.permanentFailure?.token === outcome.token;
@@ -253,6 +258,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     recoveryAssets,
     permanentFailureWhileEditing,
     readOnlyWhileEditing,
+    readOnlyDraftId,
     removalInProgress,
     artifactAssets,
     readArtifactAsset,

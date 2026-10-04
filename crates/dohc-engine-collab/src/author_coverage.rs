@@ -660,4 +660,25 @@ mod tests {
         assert!(covered.journal_bytes() <= MAX_INTERVAL_AUTHOR_BYTES);
         assert!(covered.json().len() <= dohc_engine_domain::MAX_AUTHOR_JSON_BYTES);
     }
+
+    /// Identifiers made only of quotes escape to twice their size. An Edit
+    /// link named that way still fits one entry at every valid generation.
+    #[test]
+    fn an_escaped_link_author_fits_one_entry_at_every_generation() {
+        let quotes = "\"".repeat(512);
+        let link = |grant_generation: i64| {
+            shared_json(&SharedChangeAuthor::Link {
+                grant_id: quotes.clone(),
+                grant_generation,
+                principal_id: quotes.clone(),
+            })
+            .unwrap()
+        };
+        let mut covered = Authors::default();
+        for generation in [1, 100, 9_007_199_254_740_991] {
+            admit(&mut covered, &link(generation)).expect("a known link applies");
+        }
+        assert_eq!(covered.len(), 1);
+        assert_eq!(covered.json().len() - "[]".len(), MAX_AUTHOR_ENTRY_BYTES);
+    }
 }

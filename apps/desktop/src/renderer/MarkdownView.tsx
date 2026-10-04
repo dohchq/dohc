@@ -1887,9 +1887,8 @@ export function MarkdownView(props: {
       <OrphanedDraftNotices
         workspaceId={props.workspaceId}
         path={props.path}
-        message={engine.readOnlyWhileEditing
-          ? "This document became read-only. Copy your text to keep it."
-          : undefined}
+        message="This document became read-only. Copy your text to keep it."
+        messageDraftId={engine.readOnlyDraftId}
       />
     </>
   );

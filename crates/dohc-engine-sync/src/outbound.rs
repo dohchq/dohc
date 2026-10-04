@@ -6,8 +6,10 @@ use rusqlite::{Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx};
 
-/// The relay derives person attribution; installation identities stay local.
-pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool {
+/// The relay derives person attribution and mints shared authors (named,
+/// link, public), so those stay in this computer's history and never reach
+/// the wire. Any other author is left for validation to judge.
+pub(crate) fn omit_relay_attributed_authors(payload: &mut serde_json::Value) -> bool {
     let Some(authors) = payload
         .get_mut("authors")
         .and_then(serde_json::Value::as_array_mut)
@@ -15,8 +17,12 @@ pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool
         return false;
     };
     let original_len = authors.len();
-    authors
-        .retain(|author| author.get("kind").and_then(serde_json::Value::as_str) != Some("human"));
+    authors.retain(|author| {
+        !matches!(
+            author.get("kind").and_then(serde_json::Value::as_str),
+            Some("human" | "named" | "link" | "public")
+        )
+    });
     if authors.len() == original_len {
         return false;
     }
@@ -48,7 +54,7 @@ pub(crate) fn repair_queued_moment_authors(
                 return None;
             }
             let mut payload = op.payload.clone();
-            omit_local_person_authors(&mut payload).then_some((index, payload))
+            omit_relay_attributed_authors(&mut payload).then_some((index, payload))
         })
         .collect();
     if repairs.is_empty() {
@@ -309,7 +315,7 @@ fn moment_payload_in_tx(
             object.insert(field.clone(), value.clone());
         }
     }
-    omit_local_person_authors(&mut payload);
+    omit_relay_attributed_authors(&mut payload);
     if let Some(authors) = payload
         .get_mut("authors")
         .and_then(serde_json::Value::as_array_mut)

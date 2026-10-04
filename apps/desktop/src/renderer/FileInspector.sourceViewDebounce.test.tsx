@@ -52,6 +52,7 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     recoveryAssets: null,
     permanentFailureWhileEditing: false,
     readOnlyWhileEditing: false,
+    readOnlyDraftId: null,
     removalInProgress: null,
     artifactAssets: [],
     readArtifactAsset: async () => {

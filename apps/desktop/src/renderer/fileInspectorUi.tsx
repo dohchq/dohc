@@ -153,6 +153,8 @@ export function OrphanedDraftNotices(props: {
   workspaceId: string;
   path: string;
   message?: string;
+  // When set, the message explains only this draft; older drafts keep theirs.
+  messageDraftId?: number | null;
 }) {
   const drafts = useOrphanedDrafts(props.workspaceId, props.path);
   if (drafts.length === 0) return null;
@@ -165,7 +167,7 @@ export function OrphanedDraftNotices(props: {
           className="flex items-center justify-between gap-2 border-b border-line bg-panel px-4 py-1 text-[11px]"
         >
           <span className="text-danger">
-            {props.message ??
+            {(props.messageDraftId === undefined || props.messageDraftId === draft.id ? props.message : undefined) ??
               "This document reopened before your last edit saved. Copy your text to keep it."}
           </span>
           <div className="flex items-center gap-2">

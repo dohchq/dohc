@@ -332,7 +332,8 @@ export type EngineDocLeaseSnapshot = {
     draftId: number | null;
     cause: DocumentGoneCause;
   } | null;
-  readOnlyTransition: { token: number } | null;
+  // The draft this transition set aside, when it set one aside.
+  readOnlyTransition: { token: number; draftId: number | null } | null;
   permanentFailure: { token: number } | null;
   sceneRecoveryAssets: {
     token: number;
@@ -786,7 +787,7 @@ function createEngineDocSession(
     );
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token },
+      readOnlyTransition: { token, draftId: recovery.draftId },
     }));
     reportSaveState("read-only");
     enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
@@ -901,7 +902,7 @@ function createEngineDocSession(
     if (disposed) return;
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token },
+      readOnlyTransition: { token, draftId: null },
     }));
     const bound = retiredBinding ?? binding;
     if (bound) {

@@ -685,10 +685,12 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // document turning read-only made it ask the relay, and the relay said so.
       await expect(page.getByTestId("shared-view-banner")).toContainText(/This share was ended/, { timeout: 60_000 });
       await expect(page.getByTestId("shared-view-refresh")).toHaveCount(0);
-      // Any text set aside when access ended stays copyable.
-      const setAside = page.getByTestId("orphaned-draft-notice");
-      testInfo.annotations.push({ type: "stopped recipient set-aside notices", description: (await setAside.allInnerTexts()).join(" | ") || "none" });
-      if (await setAside.count()) await expect(page.getByTestId("orphaned-draft-copy").first()).toBeVisible();
+      // The text this window held when access ended stays copyable.
+      await expect(page.getByTestId("orphaned-draft-notice").first())
+        .toContainText("Copy your text to keep it.");
+      await recipient!.app.evaluate(({ clipboard }) => clipboard.writeText(""));
+      await page.getByTestId("orphaned-draft-copy").first().click();
+      await expect.poll(() => recipient!.app.evaluate(({ clipboard }) => clipboard.readText())).toContain(R1);
       await expect(editor(page)).toHaveAttribute("contenteditable", "false");
       await expectNoCollectionNotice(page);
       await attachScreen(testInfo, page, "stopped recipient");
