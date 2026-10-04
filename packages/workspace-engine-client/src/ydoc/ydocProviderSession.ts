@@ -98,7 +98,8 @@ export interface EngineYdocProviderSessionOptions {
   // user's edits to the file, so a dropped failure here is silent data loss:
   // the caller must surface it, not just retry-if-reconnectable.
   onSettleError?: (error: unknown, token: number) => void;
-  onSettled?: (result: YdocSettleResult, token: number) => void | Promise<void>;
+  // Return false when artifact verification failed, so close retries settlement.
+  onSettled?: (result: YdocSettleResult, token: number) => boolean | void | Promise<boolean | void>;
   settleDebounceMs?: number;
   scheduleSettle?: (fn: () => void, ms: number) => () => void;
 }
@@ -215,6 +216,14 @@ export async function openEngineYdocProviderSession(
   let cancelSettle: (() => void) | null = null;
   let localEditError: unknown = null;
   let closeError: unknown = null;
+  // Count every Y.Doc update, including deletion-only edits and resyncs.
+  // A state vector alone does not cover deletions. Replacements and pending
+  // resyncs also withdraw proof, even when their bytes have not arrived yet.
+  let documentRevision = 0;
+  let settledRevision = -1;
+  let observedDoc = session.doc;
+  const noteDocumentChange = (): void => { documentRevision += 1; };
+  observedDoc.on("update", noteDocumentChange);
 
   function notifyError(
     callback: ((error: unknown) => void) | undefined,
@@ -233,6 +242,14 @@ export async function openEngineYdocProviderSession(
   // ever name the one settle that minted it.
   let settleTokens = 0;
 
+  function notifySettleStart(token: number): void {
+    try {
+      options.onSettleStart?.(token);
+    } catch {
+      // Observer boundary, like notifyError.
+    }
+  }
+
   function notifySettleError(error: unknown, token: number): void {
     try {
       options.onSettleError?.(error, token);
@@ -249,23 +266,24 @@ export async function openEngineYdocProviderSession(
   async function runSettle(summary?: string): Promise<YdocSettleResult> {
     // Each outcome names its settle, including a failure before the native write.
     const token = ++settleTokens;
-    try {
-      options.onSettleStart?.(token);
-    } catch {
-      // Observer boundary, like notifyError.
-    }
+    notifySettleStart(token);
     // Register recovery before awaiting it so teardown waits for the whole write.
     const operation = settleChain.then(async () => {
       try {
+        settledRevision = -1;
         await journalChain;
         await session.resyncIfNeeded();
         await session.resendMissingState();
         if (localEditError !== null) throw localEditError;
+        const revision = documentRevision;
         const result = await session.settle(
           summary !== undefined ? { summary } : undefined,
         );
-        // onSettled is what lands the .md; its failure is a save failure too.
-        await options.onSettled?.(result, token);
+        // Artifact verification must finish before close can reuse this settle.
+        const verified = await options.onSettled?.(result, token);
+        if (result.materialized && verified !== false && revision === documentRevision) {
+          settledRevision = revision;
+        }
         // Any settle that reached disk resets the retry ladder.
         transientRetryMs = settleDebounceMs;
         return result;
@@ -334,21 +352,29 @@ export async function openEngineYdocProviderSession(
     requestSettle();
   });
   const unsubscribeRemoteError = session.onRemoteApplyError((error) => {
+    noteDocumentChange();
     options.onRemoteApplyError?.(error);
   });
   const unsubscribeResync = session.onResyncNeeded((error) => {
+    noteDocumentChange();
     options.onResyncNeeded?.(error);
   });
   const unsubscribeReplacement = session.onLineageReplaced(
     (replacement, recoveredPaths) => {
+      observedDoc.off("update", noteDocumentChange);
+      observedDoc = replacement;
+      observedDoc.on("update", noteDocumentChange);
+      noteDocumentChange();
       options.onLineageReplaced?.(replacement, recoveredPaths);
     },
   );
   const unsubscribeSessionError = session.onSessionError((error) => {
+    noteDocumentChange();
     notifyError(options.onSessionError, error);
     scheduleTransientSettleRetry(error);
   });
   const unsubscribeOwnerDraft = session.onOwnerDraftChanged(() => {
+    noteDocumentChange();
     if (!closed) requestSettle();
   });
   if (session.ownerDraft) requestSettle();
@@ -467,13 +493,35 @@ export async function openEngineYdocProviderSession(
     async close(closeOptions) {
       if (await beginTeardown()) return;
       let preCloseError: unknown;
+      // Reuse verification only after pending resyncs land. Replicated
+      // release still settles engine-only changes; local-only release keeps
+      // the engine's coverage guard and refusal/escalation below.
       if (
         closeOptions?.settle !== false &&
         session.ownerDraft === undefined &&
         localEditError === null
       ) {
         try {
-          await runSettle(closeOptions?.summary ?? "session close");
+          await session.resyncIfNeeded();
+          if (settledRevision !== documentRevision || session.missingLocalState) {
+            await runSettle(closeOptions?.summary ?? "session close");
+          } else if (session.lineageClaimId !== null) {
+            // Replicated lineage can contain owner frames whose notice has
+            // not arrived. Settle it without repeating artifact verification,
+            // then release separately so terminal refusals still release.
+            const token = ++settleTokens;
+            try {
+              const result = await session.settle({ summary: closeOptions?.summary ?? "session close" });
+              if (!result.materialized) {
+                throw new Error("dohc could not write the file (blocked target). The write is pending a retry.");
+              }
+            } catch (error) {
+              // Reuse has no success callback. Give failures an observable token.
+              notifySettleStart(token);
+              notifySettleError(error, token);
+              throw error;
+            }
+          }
         } catch (error) {
           preCloseError = error;
         }
@@ -522,6 +570,7 @@ export async function openEngineYdocProviderSession(
           await session.close({ settle: true });
         }
         if (ownsAdapter) adapter.dispose();
+        observedDoc.off("update", noteDocumentChange);
         closeComplete = true;
         closeError = null;
       } catch (error) {
@@ -562,6 +611,7 @@ export async function openEngineYdocProviderSession(
         throw error;
       }
       if (ownsAdapter) adapter.dispose();
+      observedDoc.off("update", noteDocumentChange);
       closeComplete = true;
       closeError = null;
     },

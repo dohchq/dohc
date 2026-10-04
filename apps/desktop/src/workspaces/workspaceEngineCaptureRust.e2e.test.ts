@@ -730,14 +730,12 @@ it.skipIf(engine.missing)(
       states.length = 0;
       errors.length = 0;
 
-      // A clean close: nothing was typed since the settle, so the release
-      // prunes, which is what proves the refusal benign — the file belongs to
-      // the outside author and this document's text is a settled moment in
-      // History. The refusal is still reported as it happens and withdrawn
-      // after the release; the editor's last word is what it acts on.
+      // Nothing was typed since the verified settle. Close reuses that
+      // settlement and releases the lease without settling or reporting save
+      // states or errors. The outside author's bytes remain on disk.
       await expect(session.close()).resolves.toBeUndefined();
-      expect(states).toEqual(["settling", "error", "changed-on-disk"]);
-      expect(errors).toEqual(["ydoc settle of note.md"]);
+      expect(states).toEqual([]);
+      expect(errors).toEqual([]);
 
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
 
