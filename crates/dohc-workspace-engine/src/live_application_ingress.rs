@@ -24,7 +24,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const RANGE_BYTES: usize = 16;
 // Worst-case canonical request with 100 selectors and six-byte JSON escapes.
-const MAX_HEADER_BYTES: usize = 643_576;
+const MAX_HEADER_BYTES: usize = dohc_engine_storage::limits::MAX_LIVE_ACCEPTED_HEADER_BYTES;
 const MAX_CHUNK_BYTES: usize = 256 * 1024;
 mod adoption;
 mod restore;
