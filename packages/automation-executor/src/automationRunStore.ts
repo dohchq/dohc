@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readdir, readFile, rename, rm, rmdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { lstat, mkdir, open, readdir, readFile, readlink, realpath, rename, rm, rmdir } from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { AutomationChangeKind } from "@dohc/workspace-engine-client";
@@ -775,6 +776,62 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   const runsFolder = async (automationId: string) =>
     realFolder(join(await realFolder(join(await base(), "runs")), hashName(automationId)));
   const runName = (claimId: string, keySeed: string) => `${hashName(claimId)}-${keySeed.replace(/[^a-z0-9-]/g, "")}`;
+  type AppendLocation = {
+    automationId: string;
+    claimId: string;
+    keySeed: string;
+    folder: string;
+    path: string;
+    guards: Array<{ path: string; stats: BigIntStats; link: string | null }>;
+  };
+  const appendLocations = new WeakMap<StoredRun, AppendLocation>();
+  // Include lexical ancestors as well as the resolved paths. Replacing a
+  // workspace alias or one of its parents must not redirect a running run.
+  const ancestors = (path: string): string[] => {
+    const paths: string[] = [];
+    for (let current = resolve(path); ; current = dirname(current)) {
+      paths.push(current);
+      if (dirname(current) === current) return paths;
+    }
+  };
+  const rememberAppendLocation = async (run: StoredRun, folder: string): Promise<AppendLocation> => {
+    const [realRoot, resolvedFolder] = await Promise.all([realpath(rootPath), realpath(folder)]);
+    const paths = [...new Set([rootPath, realRoot, folder, resolvedFolder].flatMap(ancestors))];
+    const guards = await Promise.all(paths.map(async (path) => {
+      const stats = await lstat(path, { bigint: true });
+      return { path, stats, link: stats.isSymbolicLink() ? await readlink(path) : null };
+    }));
+    for (const path of [folder, dirname(folder), dirname(dirname(folder)), dirname(dirname(dirname(folder)))]) {
+      const stats = guards.find(guard => guard.path === resolve(path))!.stats;
+      if (stats.isSymbolicLink() || !stats.isDirectory()) {
+        throw new Error(`${path} must be a folder inside this workspace.`);
+      }
+    }
+    const location = {
+      automationId: run.automationId, claimId: run.claimId, keySeed: run.keySeed,
+      folder, path: join(folder, `${runName(run.claimId, run.keySeed)}${PROGRESS_SUFFIX}`), guards,
+    };
+    appendLocations.set(run, location);
+    return location;
+  };
+  const checkAppendLocation = async (run: StoredRun, location: AppendLocation): Promise<void> => {
+    if (run.automationId !== location.automationId || run.claimId !== location.claimId || run.keySeed !== location.keySeed) {
+      throw new Error("This run stopped because its saved identity changed.");
+    }
+    // Each append still checks every directory entry, without repeating
+    // resolution or creation. Identity also refuses a new plain folder.
+    await Promise.all(location.guards.map(async ({ path, stats: before, link }) => {
+      const [current, target] = await Promise.all([
+        lstat(path, { bigint: true }).catch(() => null),
+        link === null ? null : readlink(path).catch(() => null),
+      ]);
+      if (current === null || current.dev !== before.dev || current.ino !== before.ino || current.birthtimeNs !== before.birthtimeNs
+        || current.isSymbolicLink() !== before.isSymbolicLink() || current.isDirectory() !== before.isDirectory() || target !== link) {
+        throw new Error("This run stopped because its saved folders changed. Restore the folders before continuing.");
+      }
+    }));
+  };
+
   // The unfinished Undos, keyed by automation and run, read once; null when
   // their file cannot be read, so nothing counts as finished.
   let undos: Map<string, { automationId: string; claimId: string; run: string }> | null | undefined;
@@ -856,8 +913,10 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
   // Appends one line durably. A torn line a crash left at the end goes first,
   // so the new line starts on a line of its own.
   const appendLine = async (run: StoredRun, line: ProgressLine) => {
-    const folder = await runsFolder(run.automationId);
-    const path = join(folder, `${runName(run.claimId, run.keySeed)}${PROGRESS_SUFFIX}`);
+    let location = appendLocations.get(run);
+    if (location === undefined) location = await rememberAppendLocation(run, await runsFolder(run.automationId));
+    await checkAppendLocation(run, location);
+    const { folder, path } = location;
     const text = `${JSON.stringify(line)}\n`;
     const existing = await lstat(path).catch(() => null);
     if (existing !== null) {
@@ -993,7 +1052,10 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
       for (const file of await readdir(folder)) {
         if (!file.startsWith(prefix) || !file.endsWith(HEADER_SUFFIX) || file.endsWith(PROGRESS_SUFFIX)) continue;
         const run = await readRun(folder, file.slice(0, -HEADER_SUFFIX.length), automationId);
-        if (run?.claimId === claimId) found.push(run);
+        if (run?.claimId === claimId) {
+          await rememberAppendLocation(run, folder);
+          found.push(run);
+        }
         else unreadable = true;
       }
       return { runs: found, unreadable };
@@ -1003,7 +1065,10 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         const plan = `${JSON.stringify(header(run))}\n`;
         const progress = progressText(run);
         if (Buffer.byteLength(plan) > MAX_RUN_FILE_BYTES || Buffer.byteLength(progress) > MAX_RUN_FILE_BYTES) throw tooLarge();
-        const folder = await runsFolder(run.automationId);
+        let location = appendLocations.get(run);
+        if (location === undefined) location = await rememberAppendLocation(run, await runsFolder(run.automationId));
+        await checkAppendLocation(run, location);
+        const folder = location.folder;
         const name = runName(run.claimId, run.keySeed);
         if (expiring?.folder === hashName(run.automationId)) {
           const group = expiring.groups.get(hashName(run.claimId));

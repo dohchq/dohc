@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFile, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTestScratch, metadataDirAt, testMetadataDir } from "./testScratch";
@@ -23,6 +23,111 @@ function run(claimId: string, state: "done" | "failed" | null, atMs: number, set
 }
 
 describe("the automation run store", () => {
+  const runFolders = (root: string) => [
+    join(root, ".dohc"),
+    join(root, ".dohc", "automations"),
+    join(root, ".dohc", "automations", "runs"),
+    join(root, ".dohc", "automations", "runs", hashOf(AUTOMATION)),
+  ];
+
+  it("resolves a saved run once and keeps appends attached to that run", async () => {
+    const root = await createTestScratch("dohc-append-resolved-");
+    let resolutions = 0;
+    const store = createAutomationRunStore(root, metadataDirAt((path) => {
+      resolutions++;
+      return join(path, ".dohc");
+    }));
+    const saved = run("atc_one", null, 1);
+    await store.save(saved);
+    const opened = resolutions;
+    await store.appendStep(saved, { ordinal: 1, effects: [] });
+    await store.appendEffect(saved, { ordinal: 1, writes: [] });
+    expect(resolutions).toBe(opened);
+    saved.claimId = "another-claim";
+    await expect(store.appendEffect(saved, { ordinal: 1, writes: [] })).rejects.toThrow();
+  });
+
+
+  it.each([0, 1, 2, 3])("refuses a replaced directory at depth %s after an append", async (depth) => {
+    const root = await createTestScratch("dohc-append-replaced-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("atc_one", null, 1);
+    await store.save(saved);
+    const effect = { ordinal: 1, writes: [] };
+    await store.appendEffect(saved, effect);
+    const folder = runFolders(root)[depth]!;
+    await rename(folder, `${folder}-old`);
+    await mkdir(folder);
+    await expect(store.appendEffect(saved, effect)).rejects.toThrow();
+    expect(await readdir(folder)).toEqual([]);
+  });
+
+  it.each([0, 1, 2, 3])("refuses a link at depth %s after the run opens", async (depth) => {
+    const root = await createTestScratch("dohc-append-link-");
+    const outside = await createTestScratch("dohc-append-outside-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("atc_one", null, 1);
+    await store.save(saved);
+    const folder = runFolders(root)[depth]!;
+    await rename(folder, `${folder}-old`);
+    await symlink(outside, folder, process.platform === "win32" ? "junction" : "dir");
+    await expect(store.appendEffect(saved, { ordinal: 1, writes: [] })).rejects.toThrow();
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it.each([0, 1, 2, 3])("refuses a deleted directory at depth %s after the run opens", async (depth) => {
+    const root = await createTestScratch("dohc-append-deleted-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("atc_one", null, 1);
+    await store.save(saved);
+    const folder = runFolders(root)[depth]!;
+    await rm(folder, { recursive: true });
+    await expect(store.appendEffect(saved, { ordinal: 1, writes: [] })).rejects.toThrow();
+    await expect(readdir(folder)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses a moved run folder without recreating it", async () => {
+    const root = await createTestScratch("dohc-append-moved-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("atc_one", null, 1);
+    await store.save(saved);
+    const folder = runFolders(root)[3]!;
+    const progress = (await readdir(folder)).find((name) => name.endsWith(".progress.jsonl"))!;
+    const before = await readFile(join(folder, progress), "utf8");
+    await rename(folder, `${folder}-old`);
+    await expect(store.appendEffect(saved, { ordinal: 1, writes: [] })).rejects.toThrow();
+    expect(await readFile(join(`${folder}-old`, progress), "utf8")).toBe(before);
+    await expect(readdir(folder)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("guards the location of a run loaded for recovery", async () => {
+    const root = await createTestScratch("dohc-append-recovery-");
+    const saved = run("atc_one", null, 1);
+    await createAutomationRunStore(root, testMetadataDir).save(saved);
+    const restarted = createAutomationRunStore(root, testMetadataDir);
+    const loaded = (await restarted.runsOf(AUTOMATION, saved.claimId)).runs[0]!;
+    const folder = runFolders(root)[3]!;
+    await rename(folder, `${folder}-old`);
+    await mkdir(folder);
+    await expect(restarted.appendEffect(loaded, { ordinal: 1, writes: [] })).rejects.toThrow();
+    expect(await readdir(folder)).toEqual([]);
+  });
+
+  it("refuses a workspace alias switched to another workspace", async () => {
+    const parent = await createTestScratch("dohc-append-workspaces-");
+    const first = join(parent, "first"), second = join(parent, "second"), alias = join(parent, "alias");
+    await mkdir(first);
+    await mkdir(second);
+    await symlink(first, alias, process.platform === "win32" ? "junction" : "dir");
+    const store = createAutomationRunStore(alias, testMetadataDir);
+    const saved = run("atc_one", null, 1);
+    await store.save(saved);
+    await rm(alias);
+    await symlink(second, alias, process.platform === "win32" ? "junction" : "dir");
+    await expect(store.appendEffect(saved, { ordinal: 1, writes: [] })).rejects.toThrow();
+    expect(await readdir(second)).toEqual([]);
+  });
+
   it("preserves timing on appended progress lines across restart and whole saves", async () => {
     const root = await createTestScratch("dohc-automation-timing-");
     const store = createAutomationRunStore(root, testMetadataDir);
