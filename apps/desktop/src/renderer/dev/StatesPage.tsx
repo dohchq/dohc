@@ -320,16 +320,8 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The row keeps the height of the control it replaced, half a pixel
-          taller than this one, so every part below stays where its baseline
-          was taken: a part's capture depends on its exact position. Layout
-          snaps to Chromium's 1/64 px unit, and 50.834 lands on the old row's.
-          The pin goes when #1588 lands with whole-pixel section heights. */}
       <Section part="segmented" title="Segmented control">
-        <Specimen
-          label="rest, hover on first, focus-visible on checked, one option disabled, group disabled"
-          className="h-[50.834px]"
-        >
+        <Specimen label="rest, hover on first, focus-visible on checked, one option disabled, group disabled">
           <SegmentedControl label="Theme" value="dark" options={themeOptions} onChange={noop} />
           <span data-force-state="hover" data-force-target="[role=radio]">
             <SegmentedControl label="Theme" value="dark" options={themeOptions} onChange={noop} />
