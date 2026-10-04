@@ -32,7 +32,7 @@ test("site changes select renderer compatibility without native preparation or d
   assert.deepEqual(plan.affected, ["@dohc/site"]);
   assert.deepEqual(plan.packages, ["@dohc/desktop", "@dohc/site"]);
   assert.deepEqual(plan.testFiles, {"@dohc/desktop": [
-    "src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx",
+    "src/renderer/tokens.test.ts", "src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx",
   ]});
   for (const file of plan.testFiles["@dohc/desktop"]) assert.ok(existsSync(join(root, "apps/desktop", file)), file);
   assert.equal(plan.desktopScripts, false);
