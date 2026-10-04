@@ -81,7 +81,7 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     workspaces: [{ root: workspace, workspaceId: "workspace", maxRegistrations: 8 }], settlement: { maxApplicationsPerSettlement: 8 },
     restore: {maxBytes: 1000000, maxEvents: 100, aggregateBytes: 20000000, workingReserveBytes: 1000000, maxOperations: 1, validation: validationPolicy},
     sync: { policy: { maxClientVectorBytes: 100000, maxHostVectorBytes: 100000, maxOutputBytes: 1000000, maxReadBytes: 4000000 }, workingReserveBytes: 4000000 },
-    ingress: { aggregateBytes: 400000000, applicationWorkingReserveBytes: 1000000, maxUploads: 4, uploadDeadlineMs: 30000 },
+    ingress: { aggregateBytes: 512 * 1024 * 1024, applicationWorkingReserveBytes: 8 * 1024 * 1024, maxUploads: 4, uploadDeadlineMs: 30000 },
     client: { aggregateBytes: 200000000, maxUploads: 4, connectTimeoutMs: 30000, requestDeadlineMs: 30000 } }));
   const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(16), validate = createLiveMarkdownJournalValidator(validationPolicy);
   const frameChanges = sharedChanges;

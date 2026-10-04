@@ -25,7 +25,7 @@ export const CASE_TIMEOUT_MS = 300_000;
 // refuse. Pass the candidate's limits to measure a package that raises them.
 export const DEFAULT_LIMITS = { findCap: 50, writeCap: 200 };
 // A refusal names the limit it hit; any other failure fails the case.
-export const LIMIT_REFUSAL = /matched more than \d+ records|would change more than \d+ fields|more data than dohc can save/;
+export const LIMIT_REFUSAL = /matched more than \d+ records|change more than \d+ fields|more data than dohc can save/;
 
 const FIELDS = [['Name', 'text'], ['Case', 'text'], ['N', 'number'], ['A', 'number'], ['B', 'number'], ['C', 'number'], ['D', 'number'],
   ['Stage', 'text'], ['Seen', 'checkbox'], ['F1', 'checkbox'], ['F2', 'checkbox'], ['F3', 'checkbox'], ['F4', 'checkbox'], ['F5', 'checkbox'],
@@ -262,16 +262,41 @@ export function verifyCase(spec, outcome, actual) {
   return { ok: best.problems.length === 0, visibility: best.visibility, problems: best.problems.slice(0, 10), problemCount: best.problems.length };
 }
 
-/** The outcome a press's settle text shows: done, skipped, ended, refused by a limit, or failed. */
-export function classifyOutcome(observed) {
+/** A failed press is refused when its Notice body names a limit. */
+export function classifyOutcome(observed, body) {
   if (observed.outcome !== 'failed') return observed.outcome;
-  return LIMIT_REFUSAL.test(observed.text ?? '') ? 'refused' : 'failed';
+  return LIMIT_REFUSAL.test(body ?? '') ? 'refused' : 'failed';
 }
 
-/** The words the renderer shows when a press's run settles, as useAutomationButtons writes them. */
+/** Main's cached Notice list, through the same preload bridge the Notices panel uses. */
+export async function readAutomationNotices(page) {
+  return page.evaluate(async () => (await window.dohcDesktop.listNotices({})).notices);
+}
+
+/** A new failure Notice for this press's workspace and Collection, never an older same-title Notice. */
+export function noticeForPress(notices, previousNotices, workspaceId, automation) {
+  const previousIds = new Set(previousNotices.map(notice => notice.noticeId));
+  return notices.find(notice => !previousIds.has(notice.noticeId) && notice.kind === 'automation-failed'
+    && notice.workspaceId === workspaceId && notice.target?.path === `${automation.collectionPath}/automations.yaml`
+    && notice.target?.automation?.endsWith(`#${automation.name}`)) ?? null;
+}
+
+/** The latest run saved after this press, or null when the press saved no new run. */
+export function runForPress(runs, previousRuns) {
+  const previousClaims = new Set(previousRuns.map(run => run.claimId));
+  return runs.findLast(run => !previousClaims.has(run.claimId)) ?? null;
+}
+
+/** Settle words from useAutomationButtons and main's automationFailedNotice builder. */
 export function outcomeTexts(field, label) {
   return { done: [`Ran ${field} on ${label}`], skipped: [`${field} made no changes to ${label}`], ended: [`${field} finished on ${label}`],
-    failed: [`${field} did not finish.`, `${field} did not start.`] };
+    failed: [`Automation "${field}" failed`, `Automation "${field}" did not finish`, `Automation "${field}" switched off`, `${field} did not start.`] };
+}
+
+/** A previous case's toast must go before another press can show the same title. */
+export async function dismissToasts(page) {
+  const dismiss = page.locator('[data-testid="notice-toasts"] button[aria-label^="Dismiss workspace"], [data-testid="sent-notice-toast"] button[aria-label="Close"]');
+  while (await dismiss.count()) await dismiss.first().click();
 }
 
 /**

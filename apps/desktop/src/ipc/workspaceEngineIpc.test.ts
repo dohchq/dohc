@@ -36,8 +36,12 @@ const refused: SyncStatusResult = { ...healthy, historyCaptureFailed: true, engi
 const openPayload = { workspaceId: "workspace", sessionId: "renderer-session", path: "notes/a.md" };
 const descriptor = { id: "image", mimeType: "image/png", created: 1, ref: "assets/image.png", sha256: "a".repeat(64) };
 
-async function harness() {
-  const workspace: RegistryEntry = { workspaceId: "workspace", rootPath: "C:/alias", kind: "personal", mode: "local-first" };
+type SharedHistoryStore = Pick<ReturnType<ReturnType<typeof createReceivedShareEngineAccess>["storeFor"]>, "listHistoryPage" | "getMoment">;
+
+/** `sharedStore` makes the renderer's workspace a received share view backed by that store. */
+async function harness(sharedStore?: SharedHistoryStore) {
+  const workspace: RegistryEntry = { workspaceId: "workspace", rootPath: "C:/alias", kind: "personal", mode: "local-first",
+    ...(sharedStore ? { shareView: {} as NonNullable<RegistryEntry["shareView"]> } : {}) };
   // Open and writable, but not the workspace this renderer shows.
   const other: RegistryEntry = { workspaceId: "other", rootPath: "C:/other", kind: "personal", mode: "local-first" };
   const sender = new Sender(7);
@@ -70,10 +74,15 @@ async function harness() {
     withPhysicalOperation: authority.withOperation.bind(authority),
   });
   const sessions = new EngineWorkspaceSessions({ currentClient: () => { throw new Error("daemon boundary"); } });
+  const storeWorkspaces: unknown[] = [];
   const receivedShareEngine = createReceivedShareEngineAccess({
     sessions: () => sessions,
     relayClient: () => { throw new Error("unused relay"); },
-    createStores: () => { throw new Error("unused stores"); },
+    createStores: (engineWorkspace) => {
+      if (!sharedStore) throw new Error("unused stores");
+      storeWorkspaces.push(engineWorkspace);
+      return { store: sharedStore } as never;
+    },
   });
   const provider = {
     doc: new Y.Doc(), initialUpdate: new Uint8Array(), path: "notes/a.md", contentKind: "richdoc",
@@ -196,6 +205,7 @@ async function harness() {
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
+    storeWorkspaces,
     sent,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
@@ -530,6 +540,39 @@ describe("workspace engine IPC registrations", () => {
     await h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 7, beforeMomentOrder: 19 });
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({ limit: 7, beforeMomentOrder: 19 });
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ moment: null });
+  });
+
+  it("reads a shared view's imported history from its registered share mount without a capture", async () => {
+    const summary = { id: "shared", versionId: "main", path: "notes/a.md", recordedAtMs: 1, operation: "write" as const,
+      metadata: { origin: "local-file" }, momentOrder: 1, authors: [{ kind: "agent" as const, agentId: "trip-agent-hosted", onBehalfOf: "owner-person" }] };
+    const listHistoryPage = vi.fn(async () => ({ activeVersion: { id: "main" },
+      textMomentPage: { moments: [summary], nextBeforeMomentOrder: null, latestMomentOrder: 1 },
+      protectedMoments: [], protectedTruncated: false }));
+    const getMoment = vi.fn(async ({ momentId }: { workspaceId: string; momentId: string }) => momentId !== "shared" ? null : {
+      ...summary, workspaceId: "workspace", objectId: "object",
+      payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 4, text: "body" } },
+    });
+    const h = await harness({ listHistoryPage, getMoment } as unknown as SharedHistoryStore);
+    h.requireEngineCapture.mockRejectedValue(new Error("dohc could not start Engine history for this workspace."));
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 5 })).resolves.toMatchObject({
+      moments: [{ id: "shared", agentAuthorName: "trip-agent-hosted" }], protectedTruncated: false,
+    });
+    expect(listHistoryPage).toHaveBeenCalledWith({ workspaceId: "workspace", limit: 5 });
+    // The store opens the renderer's own attachment as a share mount; the payload names only the workspace.
+    expect(h.storeWorkspaces).toEqual([expect.objectContaining({ workspaceId: "workspace", shareMount: true, attachmentId: h.physical.attachmentId })]);
+    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "shared" })).resolves.toMatchObject({
+      moment: { id: "shared", agentAuthorName: "trip-agent-hosted", afterText: "body" },
+    });
+    // A guessed ID outside the imported share has no row in its store.
+    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "hidden-moment" })).resolves.toEqual({ moment: null });
+    // Restore still needs a capture, which a shared view never has.
+    await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "shared" })).rejects.toThrow("Engine history");
+    expect(h.requireEngineCapture).toHaveBeenCalledOnce();
+    expect(h.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+    // A renderer showing another workspace cannot read this share's history.
+    await h.renderers.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, "document-1");
+    await expect(h.invoke(CHANNELS.listEngineMoments)).rejects.toThrow();
+    expect(listHistoryPage).toHaveBeenCalledOnce();
   });
 
   it("propagates missing capture admission before all history work", async () => {

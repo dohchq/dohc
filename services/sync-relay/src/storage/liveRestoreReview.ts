@@ -1,7 +1,7 @@
 import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
 import type {LiveDocumentKey, LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
-import {decodeNativeRestoreProposal, type NativeRestoreProposalReceipt} from "../liveRestoreProposal";
+import {decodeNativeRestoreProposal, nativeSourceAgentDeclaration, type NativeRestoreProposalReceipt} from "../liveRestoreProposal";
 import {readAcceptedHistoryDeliveryMetadata, readAcceptedHistoryInterval, RestoreHistoryBudget} from "./liveAcceptedHistory";
 import {authorityInteger} from "./liveDocumentAuthority";
 import {documentParams} from "./liveUpdateJournal";
@@ -78,8 +78,10 @@ export function readRestoreReviewHistory(storage: StorageContext, input: {
       eventCount: receipt.acceptedHistory.eventCount, deliveryId: source.deliveryId,
     }, budget);
     if (accepted) {
+      // The relay accepted the source's own declaration, absent when it named none.
       require(accepted.accepted.receipt.updateDigest === source.updateDigest && accepted.accepted.authority.principalKind === "owner" &&
-        isDeepStrictEqual(accepted.accepted.binding, source.binding));
+        isDeepStrictEqual(accepted.accepted.binding, source.binding) &&
+        isDeepStrictEqual(nativeSourceAgentDeclaration(source), accepted.accepted.agentDeclaration));
       if (source.acceptedReceipt) require(isDeepStrictEqual(source.acceptedReceipt, accepted.accepted.receipt));
     } else require(source.acceptedReceipt === null);
     const {acceptedReceipt: _receipt, ...native} = source;

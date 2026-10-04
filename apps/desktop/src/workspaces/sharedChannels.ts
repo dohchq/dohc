@@ -1,5 +1,6 @@
 import {
   RelayApiVersionError,
+  type RelayApiUpdate,
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   type PullSharedChannelResult,
@@ -44,9 +45,13 @@ export function relayApiFetch(baseFetch: typeof fetch = fetch): typeof fetch {
     if (response.status !== 400) return response;
     const body: unknown = await response.clone().json().catch(() => null);
     const code = typeof body === "object" && body !== null && "code" in body ? body.code : undefined;
-    if (code === "api_version_too_old") throw new RelayApiVersionError("app");
-    if (code === "api_version_too_new") throw new RelayApiVersionError("server");
-    return response;
+    const update: RelayApiUpdate | undefined = code === "api_version_too_old" ? "app"
+      : code === "api_version_too_new" ? "server"
+      : undefined;
+    if (update === undefined) return response;
+    // The refusal replaces the response, so nobody else can release its body.
+    await response.body?.cancel().catch(() => undefined);
+    throw new RelayApiVersionError(update);
   };
 }
 

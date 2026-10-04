@@ -4,9 +4,9 @@ import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInp
 import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
 import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, aggregateByKind } from './packaged-surfaces.mjs';
-import { automationCases, automationFixtureDigest, automationOf, automationsYaml, CASE_TIMEOUT_MS, classifyOutcome, cpuByKind, DATASET_FOLDER, DATASET_NAME,
+import { automationCases, automationFixtureDigest, automationOf, automationsYaml, CASE_TIMEOUT_MS, classifyOutcome, cpuByKind, DATASET_FOLDER, DATASET_NAME, dismissToasts,
   datasetListRequest, datasetRowValues, datasetSetupRequest, DOCUMENT_FOLDER, documentAutomationFiles, journalBytes, observeAutomationRun,
-  outcomeTexts, peakByKind, readDocumentCase, readRunJournal, TRIGGER, verifyCase, waitForQuiet } from './packaged-collection-automations.mjs';
+  noticeForPress, outcomeTexts, peakByKind, readAutomationNotices, readDocumentCase, readRunJournal, runForPress, TRIGGER, verifyCase, waitForQuiet } from './packaged-collection-automations.mjs';
 import { spawn, execFile, execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile, stat, readdir } from 'node:fs/promises';
 import { join, resolve, dirname, relative } from 'node:path';
@@ -619,11 +619,6 @@ async function tableHolds(page, expected, timeoutMs = 180000) {
   await scroll('top');
   return performance.now() - started;
 }
-// A toast the last case left would hide a new toast with the same words, so it goes first.
-async function dismissToasts(page) {
-  const dismiss = page.locator('[data-testid="notice-toasts"] button[aria-label^="Dismiss workspace"]');
-  while (await dismiss.count()) await dismiss.first().click();
-}
 // Installs the observer, then presses with trusted input. Returns the pending observation in an object,
 // so awaiting the press does not also await the run.
 async function press(page, name, texts) {
@@ -661,6 +656,8 @@ async function automationCase(instance, runDir, kind, spec, surface) {
   if (!(await page.getByRole('button', { name, exact: true }).isVisible())) await surface.open();
   await buttonReady(page, name);
   await dismissToasts(page);
+  const previousRuns = await readRunJournal(root, automation);
+  const previousNotices = await readAutomationNotices(page);
   const quiet = await waitForQuiet({ sample: () => snapshot(pid), appPid: pid, signal: cancellation.signal });
   const before = quiet.snapshot;
   const { settled } = await press(page, name, outcomeTexts(spec.name, surface.label));
@@ -674,22 +671,24 @@ async function automationCase(instance, runDir, kind, spec, surface) {
   const after = await closing;
   const typingResult = typed ? await typed : null;
   const runs = await readRunJournal(root, automation);
-  const outcome = classifyOutcome(observed);
+  const run = runForPress(runs, previousRuns);
+  const notice = observed.outcome === 'failed'
+    ? noticeForPress(await readAutomationNotices(page), previousNotices, workspace.workspaceId, automation) : null;
+  const outcome = classifyOutcome(observed, notice?.body);
   const verification = kind === 'document'
-    ? await verifyDocuments(root, spec, outcome, runs.flatMap(run => run.createdPaths))
+    ? await verifyDocuments(root, spec, outcome, run?.createdPaths ?? [])
     : verifyCase(spec, outcome, (await datasetCli(instance, runDir, `list-${spec.name}`, datasetListRequest(surface.setup, workspace.workspaceId, spec.name), 120000)).rows.map(datasetRowValues));
   const triggerEpochMs = observed.installedEpochMs + observed.triggerMs - observed.installedMs;
-  const run = runs.at(-1) ?? null;
   // Keystroke N is the Nth trusted input event, which the renderer stamped when it arrived.
   const samplesDuringRun = typingResult?.inputs.filter(input => input.timestamp >= observed.triggerMs && input.timestamp <= observed.matchedMs).length ?? null;
   // A contention case that settled before the first keystroke arrived measured no contention.
   const overlapped = !spec.contention || spec.expected !== 'done' || samplesDuringRun > 0;
-  return { kind, name: spec.name, fixtureSha256: spec.fixtureSha256, expected: spec.expected, outcome, reason: observed.text, pass: outcome === spec.expected && verification.ok && overlapped,
+  return { kind, name: spec.name, fixtureSha256: spec.fixtureSha256, expected: spec.expected, outcome, reason: notice?.body ?? observed.text, pass: outcome === spec.expected && verification.ok && overlapped,
     matches: spec.matches, plannedAssignments: spec.assignments, visibility: verification.visibility, verification, triggerTrusted: observed.triggerTrusted,
     triggerToSettledPaintedMs: observed.paintedMs - observed.triggerMs, triggerToSettledMatchedMs: observed.matchedMs - observed.triggerMs,
     startMs: run ? run.startedAtMs - triggerEpochMs : null, runMs: Number.isFinite(run?.finishedAtMs) ? run.finishedAtMs - run.startedAtMs : null,
     findMs: run?.findMs ?? null, planMs: run?.planMs ?? null, writeMs: run?.writeMs ?? null, writes: run?.writes ?? null,
-    journal: { runs, headerPeakBytesSampled: during.headerPeakBytes },
+    journal: { runs: run ? [run] : [], headerPeakBytesSampled: during.headerPeakBytes },
     elapsedMs: after.completedAtMs - before.completedAtMs, cpuMs: cpuByKind(before, after, pid),
     peakBytes: peakByKind([before, ...during.snapshots, after], pid),
     longTasks: observed.longTasks.filter(task => task.startTime + task.duration >= observed.triggerMs && task.startTime <= observed.paintedMs),

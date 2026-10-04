@@ -44,13 +44,41 @@ const KBD = "rounded border border-line bg-bg px-1 font-mono text-[10px] text-su
 // padding; the menus get the same room from their taller boxes.
 const SHADOW_ROOM = "p-10";
 
+// A part's pixels depend on where in a pixel it starts, and Chromium lays
+// out in 1/64 px, so a section whose content ends on a fraction would move
+// every section below it off the pixel grid and change their captures. Each
+// section takes the next whole pixel above its content's height; with whole
+// gaps and padding around them, every part then starts on one. The content
+// is measured, not the section: the section's own height is what is set,
+// so measuring it would never let it shrink and would resize inside its own
+// observer's callback.
+function useWholePixelHeight() {
+  const section = useRef<HTMLElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const measured = content.current;
+    const sized = section.current;
+    if (!measured || !sized) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const size = entry?.borderBoxSize[0];
+      if (size) sized.style.height = `${Math.ceil(size.blockSize)}px`;
+    });
+    observer.observe(measured, { box: "border-box" });
+    return () => observer.disconnect();
+  }, []);
+  return { section, content };
+}
+
 function Section(props: { part: string; title: string; children: ReactNode }) {
+  const { section, content } = useWholePixelHeight();
   return (
-    <section data-part={props.part} className="flex flex-col gap-3">
-      <SectionLabel as="h3" className="m-0">
-        {props.title}
-      </SectionLabel>
-      <div className="flex flex-wrap items-start gap-x-6 gap-y-4">{props.children}</div>
+    <section ref={section} data-part={props.part}>
+      <div ref={content} className="flex flex-col gap-3">
+        <SectionLabel as="h3" className="m-0">
+          {props.title}
+        </SectionLabel>
+        <div className="flex flex-wrap items-start gap-x-6 gap-y-4">{props.children}</div>
+      </div>
     </section>
   );
 }
@@ -316,10 +344,10 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="chips" title="Chips">
         <Specimen label="pill: neutral, success, warning, danger, agent">
           <Pill>12</Pill>
-          <Pill className="text-success">Synced</Pill>
-          <Pill className="text-warning">Waiting</Pill>
-          <Pill className="text-danger">2 conflicts</Pill>
-          <Pill className="text-agent">Agent</Pill>
+          <Pill tone="success">Synced</Pill>
+          <Pill tone="warning">Waiting</Pill>
+          <Pill tone="danger">2 conflicts</Pill>
+          <Pill tone="agent">Agent</Pill>
         </Specimen>
         <Specimen label="kbd">
           <kbd className={KBD}>Ctrl</kbd>

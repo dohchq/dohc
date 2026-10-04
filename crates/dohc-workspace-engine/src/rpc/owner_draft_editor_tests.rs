@@ -123,7 +123,9 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
     drop(blob);
     let update = doc.richdoc_append_paragraph("durable pending edit");
     let sid = opened["sessionId"].as_str().unwrap();
-    let record = json!({"sessionId":sid,"updateBase64":base64::engine::general_purpose::STANDARD.encode(&update)});
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&update);
+    let attribution = json!({"actorKind":"agent","onBehalfOf":"local-person","depth":0});
+    let record = json!({"sessionId":sid,"updateBase64":encoded,"actorOriginId":"trip-agent","attribution":attribution});
     let result = service
         .ydoc_record_update(
             &RequestContext::unbounded(),
@@ -147,6 +149,40 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
             .await
             .unwrap()
     );
+    // The append key names the agent the edit declared, so a retry that
+    // names another agent, or none, is a different edit.
+    for changed in [
+        json!({"sessionId":sid,"updateBase64":encoded,"actorOriginId":"other-agent","attribution":attribution}),
+        json!({"sessionId":sid,"updateBase64":encoded}),
+    ] {
+        let error = service
+            .ydoc_record_update(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                Some("edit-1".into()),
+                changed,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.message, "owner-outbox-append-key-mismatch");
+    }
+    // A person's edit declares no agent.
+    let typed = doc.richdoc_append_paragraph("typed pending edit");
+    let typed = json!({
+        "sessionId":sid,
+        "updateBase64":base64::engine::general_purpose::STANDARD.encode(&typed),
+        "actorOriginId":"local-person",
+        "attribution":{"actorKind":"human","onBehalfOf":"local-person"}
+    });
+    service
+        .ydoc_record_update(
+            &RequestContext::unbounded(),
+            Some(handle.clone()),
+            Some("edit-2".into()),
+            typed,
+        )
+        .await
+        .unwrap();
     let error = service
         .ydoc_settle(
             &RequestContext::unbounded(),
@@ -251,6 +287,27 @@ async fn observed_editor_reopens_pending_work_without_publishing_it() {
     let store = EngineStore::open(&db, 40).unwrap();
     assert_eq!(store.table_row_count("moments").unwrap(), before);
     assert_eq!(store.table_row_count("replication_log").unwrap(), 0);
+    let declarations = store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT append_key,agent_declaration_json FROM owner_ydoc_outbox_entries ORDER BY sequence",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(String, Option<String>)>>>()
+        })
+        .unwrap();
+    assert_eq!(
+        declarations,
+        vec![
+            (
+                "edit-1".to_owned(),
+                Some(
+                    r#"{"agentId":"trip-agent","onBehalfOf":"local-person","depth":0}"#.to_owned()
+                ),
+            ),
+            ("edit-2".to_owned(), None),
+        ]
+    );
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("owner.md")).unwrap(),
         text

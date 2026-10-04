@@ -14,7 +14,7 @@ fn configuration(root: &Path) -> Value {
         "version": 1, "relayNamespace": "configured-test-relay",
         "host": {"hostId":"host", "hostEpoch":1, "instanceId":"instance", "connectionId":"connection"},
         "workspaces": [{"root":root, "workspaceId":"workspace", "maxRegistrations":4}],
-        "ingress": {"aggregateBytes":400_000_000, "applicationWorkingReserveBytes":1_000_000, "maxUploads":2, "uploadDeadlineMs":30_000}
+        "ingress": {"aggregateBytes":512*1024*1024, "applicationWorkingReserveBytes":8*1024*1024, "maxUploads":2, "uploadDeadlineMs":30_000}
     })
 }
 

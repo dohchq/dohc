@@ -374,6 +374,7 @@ fn retained_activation_reopens_after_the_seed_application_and_outbox_ack() {
                     principal_id: "owner".into(),
                 },
                 received_at_ms: 5,
+                agent_declaration: None,
             },
             first_seen: vec![],
         },

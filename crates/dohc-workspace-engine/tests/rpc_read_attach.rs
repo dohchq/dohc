@@ -202,6 +202,197 @@ async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
         .expect("owner write")
         .result;
     assert!(written["moment"]["momentId"].is_string());
+
+    let history = common::call(
+        &transport,
+        &cli,
+        5,
+        "history.page",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert_eq!(history["activeVersion"]["id"], "main");
+    assert_eq!(
+        history["textMomentPage"]["moments"][0]["momentId"],
+        written["moment"]["momentId"]
+    );
+    let detail = common::call(
+        &transport,
+        &cli,
+        6,
+        "moments.get",
+        json!({ "momentId": written["moment"]["momentId"] }),
+    )
+    .await;
+    assert_eq!(detail["afterText"], "the owner still writes");
+
+    for (index, method) in [
+        "capture.flush",
+        "capture.reconcile",
+        "versionedText.rollback",
+        "versions.ensureMain",
+        "versions.setActive",
+        "sync.pull",
+        "secrets.write",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let error = common::call_error(&transport, &cli, 7 + index as u64, method, json!({})).await;
+        assert_eq!(error.code, ErrorCode::InvalidParams, "{method}");
+        assert_eq!(
+            error.message, "method is unavailable on a read-only workspace handle",
+            "{method}"
+        );
+    }
+    call(&transport, &cli, 14, "workspace.close").await;
+    call(&transport, &desktop, 15, "workspace.close").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_history_hydrates_large_moment_text_within_its_workspace() {
+    use dohc_engine_domain::{NoFaults, VersionedTextStore, WriteText};
+    use dohc_engine_protocol::transport::EngineService as ProtocolEngineService;
+    use dohc_engine_storage::EngineStore;
+    use dohc_workspace_engine::root_binding::write_root_binding;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let workspace_id = "ws-read-only-history-blob";
+    let other_workspace = "ws-read-only-history-blob-other";
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    std::fs::create_dir_all(db_path.parent().expect("engine dir")).expect("engine dir");
+    let text = "x".repeat(128 * 1024 + 1);
+    let sha256 = dohc_engine_storage::hex_sha256(text.as_bytes());
+    let other_text = "referenced only by another workspace";
+    let other_sha256 = dohc_engine_storage::hex_sha256(other_text.as_bytes());
+    {
+        let mut store = EngineStore::open(&db_path, 1).expect("store");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
+        let mut versioned = VersionedTextStore::new(&mut store);
+        for workspace in [workspace_id, other_workspace] {
+            versioned
+                .ensure_main_version(workspace, "main", 1, &NoFaults)
+                .expect("main");
+        }
+        for (index, (workspace, moment_id, body)) in [
+            (workspace_id, "large-text-moment", text.as_str()),
+            (workspace_id, "current-text-moment", "small now"),
+            (other_workspace, "other-text-moment", other_text),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            versioned
+                .write_text(
+                    &WriteText {
+                        workspace_id: workspace.to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: format!("{workspace}-text-object"),
+                        path: "large.md".to_owned(),
+                        text: body.to_owned(),
+                        moment_id: moment_id.to_owned(),
+                        metadata_origin: "api".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: index as i64 + 2,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .expect("seed text moment");
+        }
+    }
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let read_only = open(
+        &transport,
+        &scratch,
+        1,
+        workspace_id,
+        json!({ "skipStartupMaintenance": true }),
+    )
+    .await
+    .expect("read-only open");
+    let history = common::call(
+        &transport,
+        &read_only,
+        2,
+        "history.page",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    let moment = history["textMomentPage"]["moments"]
+        .as_array()
+        .expect("history moments")
+        .iter()
+        .find(|moment| moment["momentId"] == "large-text-moment")
+        .expect("historical large text moment");
+    assert_eq!(moment["afterText"], Value::Null);
+    assert_eq!(moment["afterBlobSha256"], sha256);
+    let detail = common::call(
+        &transport,
+        &read_only,
+        3,
+        "moments.get",
+        json!({ "momentId": moment["momentId"] }),
+    )
+    .await;
+    assert_eq!(detail["afterText"], Value::Null);
+    assert_eq!(detail["afterBlobSha256"], sha256);
+    let hydrated = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            4,
+            "versionedText.readBlob",
+            Some(read_only.clone()),
+            json!({ "workspaceId": workspace_id, "sha256": detail["afterBlobSha256"] }),
+        ),
+    )
+    .await
+    .expect("read-only historical blob hydration");
+    assert_eq!(hydrated.response.result["bytesBase64"], Value::Null);
+    let egress = hydrated.blob_egress.expect("over-cap text egress");
+    assert_eq!(egress.sha256, sha256);
+    assert_eq!(egress.bytes, text.as_bytes());
+
+    let foreign_blob = common::call_error(
+        &transport,
+        &read_only,
+        5,
+        "versionedText.readBlob",
+        json!({ "workspaceId": workspace_id, "sha256": other_sha256 }),
+    )
+    .await;
+    assert_eq!(foreign_blob.code, ErrorCode::InvalidParams);
+    assert_eq!(foreign_blob.message, "file-not-found");
+    let foreign_workspace = common::call_error(
+        &transport,
+        &read_only,
+        6,
+        "versionedText.readBlob",
+        json!({ "workspaceId": other_workspace, "sha256": other_sha256 }),
+    )
+    .await;
+    assert_eq!(foreign_workspace.code, ErrorCode::InvalidParams);
+    assert_eq!(foreign_workspace.message, "invalid-workspace");
+    let mutation = common::call_error(
+        &transport,
+        &read_only,
+        7,
+        "versionedText.rollback",
+        json!({}),
+    )
+    .await;
+    assert_eq!(mutation.code, ErrorCode::InvalidParams);
+    assert_eq!(
+        mutation.message,
+        "method is unavailable on a read-only workspace handle"
+    );
+    call(&transport, &read_only, 8, "workspace.close").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

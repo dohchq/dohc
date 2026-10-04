@@ -2,6 +2,7 @@ import {expect, it} from "vitest";
 import {parseNamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import {parseNamedLiveConfig} from "./namedLiveConfig";
 import {parseNamedLiveBrowserHttpLimits} from "./namedLiveBrowserHttp";
+import {parseLiveRestoreConfig} from "./liveRestorePreparation";
 import {parseNativeLiveSyncConfig} from "./liveSyncConfig";
 import {parseServiceActivationConfig} from "./serviceActivationDriver";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
@@ -20,6 +21,8 @@ it("uses mutually compatible browser, relay, native and owner limits", () => {
   expect(parseNativeLiveSyncConfig(profile.service.sync, profile.service.ingress.aggregateBytes)).toEqual(profile.service.sync);
   expect(parseServiceActivationConfig({...profile.service.activation, targets: [{workspaceId: "workspace", shareId: "share", path: "doc.md"}]})).toMatchObject({maxCaptureBytes: profile.service.activation.maxCaptureBytes});
   expect(profile.service.activation.maxCaptureBytes).toBeLessThanOrEqual(profile.nativeIngress.sync.policy.maxOutputBytes);
+  // The supported server offers the owner's stop-access restore.
+  expect(parseLiveRestoreConfig(profile.service.restore)).toMatchObject({maxBytes: profile.service.restore.maxBytes, maxEvents: profile.service.restore.maxEvents});
 });
 
 it("returns independent capacity profiles so one caller cannot change another", () => {

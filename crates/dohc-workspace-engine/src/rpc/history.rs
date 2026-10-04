@@ -341,30 +341,32 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
 
-        let mut flush = self
-            .capture_flush_once(ctx, &open, "history.page capture flush")
-            .await?;
-        for _ in 0..HISTORY_PAGE_FLUSH_RETRIES {
-            if flush.settled {
-                break;
-            }
-            let cancellation = OperationCancellation::new(ctx);
-            tokio::select! {
-                biased;
-                () = cancellation.token.cancelled() => {
-                    return Err(cancellation.interruption("history.page capture flush retry"));
-                }
-                () = tokio::time::sleep(HISTORY_PAGE_FLUSH_RETRY_DELAY) => {}
-            }
-            flush = self
+        if open.capture_enabled {
+            let mut flush = self
                 .capture_flush_once(ctx, &open, "history.page capture flush")
                 .await?;
-        }
-        if !flush.settled {
-            return Err(WireError::new(
-                ErrorCode::Overloaded,
-                "History is still updating. Try again.",
-            ));
+            for _ in 0..HISTORY_PAGE_FLUSH_RETRIES {
+                if flush.settled {
+                    break;
+                }
+                let cancellation = OperationCancellation::new(ctx);
+                tokio::select! {
+                    biased;
+                    () = cancellation.token.cancelled() => {
+                        return Err(cancellation.interruption("history.page capture flush retry"));
+                    }
+                    () = tokio::time::sleep(HISTORY_PAGE_FLUSH_RETRY_DELAY) => {}
+                }
+                flush = self
+                    .capture_flush_once(ctx, &open, "history.page capture flush")
+                    .await?;
+            }
+            if !flush.settled {
+                return Err(WireError::new(
+                    ErrorCode::Overloaded,
+                    "History is still updating. Try again.",
+                ));
+            }
         }
 
         let cancellation = OperationCancellation::new(ctx);

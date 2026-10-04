@@ -10,7 +10,8 @@ const productionInputs = { "@dohc/site": ["@dohc/desktop"] };
 const testInputs = {
   "@dohc/desktop": ["@dohc/site"],
   "@dohc/workspace-auth": ["@dohc/workspace-postgres"],
-  "@dohc/ydoc-projection": ["@dohc/sync-relay", "@dohc/workspace-engine-client", "@dohc/share-web", "@dohc/desktop"],
+  "@dohc/ydoc-projection": ["@dohc/sync-relay", "@dohc/workspace-engine-client", "@dohc/share-web", "@dohc/desktop",
+    "@dohc/service-http", "@dohc/workspace-auth"],
   "@dohc/share-web": ["@dohc/desktop", "@dohc/mcp", "@dohc/cli", "@dohc/workspace-postgres", "@dohc/workspace-engine-client"],
   "@dohc/sync-relay": ["@dohc/share-web", "@dohc/desktop"],
   "@dohc/workspace-api": ["@dohc/workspace-postgres"],
@@ -20,11 +21,11 @@ const testInputs = {
 const desktopProofInputs = {
   "@dohc/workspace-api": ["e2e/helpers/selfHostOnboarding.ts"],
   "@dohc/workspace-postgres": ["e2e/helpers/selfHostOnboarding.ts"],
-  "@dohc/share-web": ["e2e/helpers/sharedDatasetBrowser.ts"],
+  "@dohc/share-web": ["e2e/helpers/selfHostOnboarding.ts", "e2e/helpers/sharedDatasetBrowser.ts"],
 };
 // Keep a helper wrapper from hiding a new unit-test dependency on these inputs.
 const desktopProofConsumers = {
-  "apps/desktop/e2e/helpers/selfHostOnboarding": ["apps/desktop/e2e/self-host-onboarding.spec.ts"],
+  "apps/desktop/e2e/helpers/selfHostOnboarding": ["apps/desktop/e2e/self-host-onboarding.spec.ts", "apps/desktop/e2e/shared-continuity.spec.ts"],
   "apps/desktop/e2e/helpers/sharedDatasetBrowser": [
     "apps/desktop/e2e/apps.spec.ts", "apps/desktop/e2e/collection-link-lane.spec.ts",
     "apps/desktop/e2e/dataset-completion.spec.ts", "apps/desktop/e2e/dataset-shared-form.spec.ts",

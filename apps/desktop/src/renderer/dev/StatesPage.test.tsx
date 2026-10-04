@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ObserverStub } from "../DesktopWorkspaceShell.testSupport";
 import { StatesPage } from "./StatesPage";
 import { STATES_PAGE_HASH, statesPageRequested } from "./statesRoute";
 
@@ -16,6 +17,8 @@ describe("states page", () => {
 
   it("renders both themes side by side and holds the document light while open", () => {
     vi.stubGlobal("dohcDesktop", {});
+    // jsdom has no ResizeObserver; the page measures its sections.
+    vi.stubGlobal("ResizeObserver", ObserverStub);
     try {
     document.documentElement.dataset.theme = "dark";
     const { unmount } = render(<StatesPage />);

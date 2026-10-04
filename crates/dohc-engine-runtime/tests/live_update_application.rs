@@ -95,6 +95,7 @@ fn event(delivery: &str, cursor: i64, object: &str, bytes: Vec<u8>) -> AdmittedL
                     principal_id: "person".into(),
                 },
                 received_at_ms: 2,
+                agent_declaration: None,
             },
             first_seen: vec![],
         },

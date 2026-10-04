@@ -140,6 +140,139 @@ async fn moments(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_history_reads_no_capture_mounts_and_their_read_only_handles() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_root_binding(scratch.path(), TOKEN).expect("root binding");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace_id = "no-capture-imported-history";
+    let params = json!({"rootDir":scratch.path().to_string_lossy(),"workspaceId":workspace_id,"captureMode":"none"});
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(1, "workspace.open", None, params.clone()),
+        )
+        .await
+        .unwrap();
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).unwrap();
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({"workspaceId":workspace_id}),
+    )
+    .await;
+    let author =
+        json!({"kind":"agent","agentId":"trip-agent-hosted","onBehalfOf":"opaque-relay-owner"});
+    let written = call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.write",
+        json!({
+            "versionId":"main","path":"notes/plan.md","text":"Agent edited while hosted.",
+            "origin":"sync","author":author,"momentId":"imported-agent-moment",
+        }),
+    )
+    .await;
+    assert_eq!(written["moment"]["authors"], json!([author]));
+    let check = |page: Value| {
+        assert_eq!(page["activeVersion"]["id"], "main");
+        let rows = page["textMomentPage"]["moments"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["momentId"], "imported-agent-moment");
+        assert_eq!(rows[0]["authors"], json!([author]));
+        assert_eq!(page["protectedMoments"], json!([]));
+        page
+    };
+    let first = check(
+        call(
+            &transport,
+            &handle,
+            4,
+            "history.page",
+            json!({"workspaceId":workspace_id}),
+        )
+        .await,
+    );
+    let attached = transport.call(RequestContext::unbounded(), request(5, "workspace.open", None, json!({
+        "rootDir":scratch.path().to_string_lossy(),"workspaceId":workspace_id,"skipStartupMaintenance":true,
+    }))).await.unwrap();
+    let attached_handle: WorkspaceHandle =
+        serde_json::from_value(attached.result["workspace"].clone()).unwrap();
+    assert_eq!(
+        check(
+            call(
+                &transport,
+                &attached_handle,
+                6,
+                "history.page",
+                json!({"workspaceId":workspace_id})
+            )
+            .await
+        ),
+        first
+    );
+    let detail = call(
+        &transport,
+        &attached_handle,
+        7,
+        "moments.get",
+        json!({"momentId":"imported-agent-moment"}),
+    )
+    .await;
+    assert_eq!(detail["authors"], json!([author]));
+    assert_eq!(detail["afterText"], "Agent edited while hosted.");
+    call(
+        &transport,
+        &attached_handle,
+        8,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+    call(&transport, &handle, 9, "workspace.close", json!({})).await;
+
+    // A standalone maintenance-free read intentionally creates no capture driver either.
+    let read_only = transport.call(RequestContext::unbounded(), request(10, "workspace.open", None, json!({
+        "rootDir":scratch.path().to_string_lossy(),"workspaceId":workspace_id,"skipStartupMaintenance":true,
+    }))).await.unwrap();
+    let read_only_handle: WorkspaceHandle =
+        serde_json::from_value(read_only.result["workspace"].clone()).unwrap();
+    assert_eq!(
+        check(
+            call(
+                &transport,
+                &read_only_handle,
+                11,
+                "history.page",
+                json!({"workspaceId":workspace_id})
+            )
+            .await
+        ),
+        first
+    );
+    let reopened_detail = call(
+        &transport,
+        &read_only_handle,
+        12,
+        "moments.get",
+        json!({"momentId":"imported-agent-moment"}),
+    )
+    .await;
+    assert_eq!(reopened_detail, detail);
+    call(
+        &transport,
+        &read_only_handle,
+        13,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_response_shape_contains_object_snapshot_moment_and_deduped() {
     let (_scratch, transport, handle) = fixture("write-shape").await;
     let result = write(&transport, &handle, 2, "shape.md", "shape", "shape-1").await;
