@@ -3,8 +3,12 @@ import type {AdmittedLiveUpdateMetadata, LiveDocumentKey} from "@dohc/live-sessi
 
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
+/**
+ * The exact JSON the relay and the native engine hash. An absent agent
+ * declaration has no member, so an undeclared event keeps its bytes.
+ */
 export function canonicalAcceptedMetadata(metadata: AdmittedLiveUpdateMetadata): AdmittedLiveUpdateMetadata {
-  const {receipt: r, binding: b, authority: a, receivedAtMs} = metadata.accepted;
+  const {receipt: r, binding: b, authority: a, receivedAtMs, agentDeclaration: d} = metadata.accepted;
   return {accepted: {
     receipt: {deliveryId: r.deliveryId, updateDigest: r.updateDigest, journalCursor: r.journalCursor, acceptingHostEpoch: r.acceptingHostEpoch},
     binding: {workspaceId: b.workspaceId, mainVersionId: b.mainVersionId, objectId: b.objectId, lineageClaimId: b.lineageClaimId,
@@ -13,6 +17,7 @@ export function canonicalAcceptedMetadata(metadata: AdmittedLiveUpdateMetadata):
       ? {grantGeneration: null, grantId: null, principalId: a.principalId, principalKind: "owner"}
       : {grantGeneration: a.grantGeneration, grantId: a.grantId, principalId: a.principalId, principalKind: a.principalKind},
     receivedAtMs,
+    ...(d ? {agentDeclaration: {agentId: d.agentId, onBehalfOf: d.onBehalfOf, depth: d.depth}} : {}),
   }, firstSeen: metadata.firstSeen.map(r => ({clientId: r.clientId, startClock: r.startClock, endClock: r.endClock}))};
 }
 

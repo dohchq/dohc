@@ -17,10 +17,71 @@ pub enum PublicationProof {
     BudgetExhausted,
 }
 
+/// Proves references within one read transaction. The borrowed transaction
+/// pins one snapshot, so the next reference to the same document can reuse the
+/// accepted state the last one read.
+pub struct PublicationReader<'a> {
+    conn: &'a Connection,
+    last: Option<AcceptedRead>,
+}
+
+struct AcceptedRead {
+    key: DocKey,
+    binding: LiveObjectBinding,
+    namespace: String,
+    doc: Ydoc,
+    charged: usize,
+}
+
+impl<'a> PublicationReader<'a> {
+    pub fn new(tx: &'a rusqlite::Transaction<'_>) -> Self {
+        Self {
+            conn: tx,
+            last: None,
+        }
+    }
+
+    /// [`contains_in`] within this reader's snapshot.
+    pub fn contains(
+        &mut self,
+        key: &DocKey,
+        path: &str,
+        lineage: Option<&str>,
+        kind: PublicationContentKind,
+        digest: &str,
+        remaining: &mut usize,
+    ) -> Result<PublicationProof, OwnerOutboxError> {
+        prove(
+            self.conn,
+            &mut self.last,
+            key,
+            path,
+            lineage,
+            kind,
+            digest,
+            remaining,
+        )
+    }
+}
+
 /// Unbound means this exact native object has never been owner-bound. NotContained keeps
 /// its immutable origin coordinate pending. Imported audit history is not read.
 pub fn contains_in(
     conn: &Connection,
+    key: &DocKey,
+    path: &str,
+    lineage: Option<&str>,
+    kind: PublicationContentKind,
+    digest: &str,
+    remaining: &mut usize,
+) -> Result<PublicationProof, OwnerOutboxError> {
+    prove(conn, &mut None, key, path, lineage, kind, digest, remaining)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prove(
+    conn: &Connection,
+    last: &mut Option<AcceptedRead>,
     key: &DocKey,
     path: &str,
     lineage: Option<&str>,
@@ -35,43 +96,37 @@ pub fn contains_in(
     }
     let mut budget_exhausted = false;
     let proof = (|| -> Result<bool, OwnerOutboxError> {
-        let (binding, namespace, accepted) = if let Some(draft) =
-            super::draft::descriptor_for_key_in(conn, key)?
-        {
-            let observed = super::accepted::current(conn, &draft.binding)?;
-            // An active restore fence refuses; a resumed one publishes only its own
-            // generation. The native reader below checks this as part of its current state.
-            crate::live_update_application::require_restore_registration_in(
-                conn,
-                key,
-                &observed.relay_database_namespace,
-                &observed.binding,
-                remaining,
-            )
-            .map_err(|error| {
-                budget_exhausted = matches!(
-                    error,
-                    crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded
-                );
-                OwnerOutboxError::Frozen
-            })?;
-            let checkpoint = read_blob(
-                conn,
-                &observed.checkpoint_digest,
-                remaining,
-                &mut budget_exhausted,
-            )?;
-            let doc = Ydoc::wire();
-            doc.apply(&checkpoint).map_err(collab)?;
-            (observed.binding, observed.relay_database_namespace, doc)
-        } else {
-            crate::live_update_application::read_native_accepted_in(conn, key, remaining)
-                    .map_err(|error| {
-                        budget_exhausted = matches!(error, crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded);
-                        OwnerOutboxError::Frozen
-                    })?
-                    .ok_or(OwnerOutboxError::Frozen)?
+        let read = match last.take() {
+            Some(read) if read.key == *key => {
+                // Charge what the first read charged, so the configured budget
+                // refuses exactly where reading the same snapshot again would.
+                if read.charged > *remaining {
+                    budget_exhausted = true;
+                    return Err(OwnerOutboxError::Frozen);
+                }
+                *remaining -= read.charged;
+                read
+            }
+            other => {
+                drop(other);
+                let before = *remaining;
+                let (binding, namespace, doc) =
+                    accepted_in(conn, key, remaining, &mut budget_exhausted)?;
+                AcceptedRead {
+                    key: key.clone(),
+                    binding,
+                    namespace,
+                    doc,
+                    charged: before - *remaining,
+                }
+            }
         };
+        let AcceptedRead {
+            binding,
+            namespace,
+            doc: accepted,
+            ..
+        } = &*last.insert(read);
         if binding.current_path != path
             || lineage.is_some_and(|id| id != binding.lineage_claim_id)
             || accepted.has_pending_dependencies()
@@ -81,14 +136,14 @@ pub fn contains_in(
         match kind {
             PublicationContentKind::Ydoc => {
                 let update = read_blob(conn, digest, remaining, &mut budget_exhausted)?;
-                let before = bounded(&accepted)?;
+                let before = bounded(accepted)?;
                 accepted.apply(&update).map_err(collab)?;
-                Ok(!accepted.has_pending_dependencies() && bounded(&accepted)? == before)
+                Ok(!accepted.has_pending_dependencies() && bounded(accepted)? == before)
             }
             PublicationContentKind::Projection => {
                 // Native bootstrap/adoption sources and audited settlements retain
                 // exact projection digests even after accepted state advances.
-                let proved:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM live_device_bootstraps WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND projected_markdown_digest=?6 AND binding_json=?7) OR EXISTS(SELECT 1 FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND source_digest=?6 AND binding_json=?7) OR EXISTS(SELECT 1 FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND markdown_digest=?6 AND binding_json=?7)",params![namespace,key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id,digest,binding_json(&binding)?],|r|r.get(0)).map_err(read_sql)?;
+                let proved:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM live_device_bootstraps WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND projected_markdown_digest=?6 AND binding_json=?7) OR EXISTS(SELECT 1 FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND source_digest=?6 AND binding_json=?7) OR EXISTS(SELECT 1 FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 AND markdown_digest=?6 AND binding_json=?7)",params![namespace,key.workspace_id,key.version_id,key.object_id,binding.lineage_claim_id,digest,binding_json(binding)?],|r|r.get(0)).map_err(read_sql)?;
                 if proved {
                     return Ok(true);
                 }
@@ -101,7 +156,7 @@ pub fn contains_in(
                 // A resumed restore's settlement replaced exactly one accepted head of the
                 // generation it fenced. Its verified resume evidence proves that head only.
                 match crate::live_update_application::read_restore_predecessor_in(
-                    conn, key, &namespace, &binding, remaining,
+                    conn, key, namespace, binding, remaining,
                 ) {
                     Ok(Some(replaced)) if replaced == digest => return Ok(true),
                     Err(crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded) => {
@@ -121,9 +176,9 @@ pub fn contains_in(
                         &mut budget_exhausted,
                     )?)
                     .map_err(collab)?;
-                let before = bounded(&accepted)?;
+                let before = bounded(accepted)?;
                 accepted.apply(&bounded(&original)?).map_err(collab)?;
-                if accepted.has_pending_dependencies() || bounded(&accepted)? != before {
+                if accepted.has_pending_dependencies() || bounded(accepted)? != before {
                     return Ok(false);
                 }
                 Ok(hex_sha256(
@@ -138,13 +193,64 @@ pub fn contains_in(
     })();
     // Failure to prove containment never uploads the bytes. Durable corruption
     // remains recoverable at the original queued coordinate.
-    Ok(if budget_exhausted {
+    let proof = if budget_exhausted {
         PublicationProof::BudgetExhausted
     } else if proof.unwrap_or(false) {
         PublicationProof::Contained
     } else {
         PublicationProof::NotContained
-    })
+    };
+    // A refused proof may have applied unaccepted bytes to the reused state.
+    if proof != PublicationProof::Contained {
+        *last = None;
+    }
+    Ok(proof)
+}
+
+/// The owner draft's accepted checkpoint, or the native accepted history.
+fn accepted_in(
+    conn: &Connection,
+    key: &DocKey,
+    remaining: &mut usize,
+    budget_exhausted: &mut bool,
+) -> Result<(LiveObjectBinding, String, Ydoc), OwnerOutboxError> {
+    let exhausted = |error: crate::live_update_application::ApplicationError| {
+        matches!(
+            error,
+            crate::live_update_application::ApplicationError::ConfiguredByteBudgetExceeded
+        )
+    };
+    let Some(draft) = super::draft::descriptor_for_key_in(conn, key)? else {
+        return crate::live_update_application::read_native_accepted_in(conn, key, remaining)
+            .map_err(|error| {
+                *budget_exhausted = exhausted(error);
+                OwnerOutboxError::Frozen
+            })?
+            .ok_or(OwnerOutboxError::Frozen);
+    };
+    let observed = super::accepted::current(conn, &draft.binding)?;
+    // An active restore fence refuses; a resumed one publishes only its own
+    // generation. The native reader checks this as part of its current state.
+    crate::live_update_application::require_restore_registration_in(
+        conn,
+        key,
+        &observed.relay_database_namespace,
+        &observed.binding,
+        remaining,
+    )
+    .map_err(|error| {
+        *budget_exhausted = exhausted(error);
+        OwnerOutboxError::Frozen
+    })?;
+    let checkpoint = read_blob(
+        conn,
+        &observed.checkpoint_digest,
+        remaining,
+        budget_exhausted,
+    )?;
+    let doc = Ydoc::wire();
+    doc.apply(&checkpoint).map_err(collab)?;
+    Ok((observed.binding, observed.relay_database_namespace, doc))
 }
 
 fn read_blob(

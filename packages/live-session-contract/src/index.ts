@@ -33,6 +33,7 @@ export {
   parseAdmittedLiveUpdate,
   parseAdmittedLiveUpdateMetadata,
   parseLiveDocumentKey,
+  parseAgentDeclaration,
   parseLiveUpdateAcceptResult,
   parseLiveUpdateDigest,
   parseLiveUpdateHostApplicationAck,
@@ -48,6 +49,7 @@ export {
   parseServerDerivedLiveUpdateAuthority,
   type AdmittedLiveUpdate,
   type AdmittedLiveUpdateMetadata,
+  type AgentDeclaration,
   type LiveDocumentKey,
   type LiveUpdateAcceptResult,
   type LiveUpdateHostApplicationAck,
@@ -79,6 +81,7 @@ export {
 export {
   LIVE_FRAME_HEADER_BYTES,
   LIVE_FRAME_MINIMUM_MAX_BYTES,
+  LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES,
   LiveFrameError,
   encodeLiveFrame,
   decodeLiveFrame,

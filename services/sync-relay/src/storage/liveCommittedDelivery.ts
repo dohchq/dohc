@@ -66,7 +66,7 @@ import {
 import { bindLiveDeliveryHostNamespace, consumeLiveDeliveryReservation } from "./liveDeliveryReservations";
 import { nativeRestoreFence, requireStopRestoreCut, requireStopRestoreOwnerOrigin, readStopRestoreInTransaction, type StopRestoreLookup, type StopRestoreOperation, type StopRestoreApplied } from "./liveRestoreOperation";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "../liveRestoreFence";
-import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, type RestoreProofBudget} from "../liveRestoreProposal";
+import {parseNativeRestoreProposalReceipt, decodeNativeRestoreProposal, nativeSourceAgentDeclaration, type RestoreProofBudget} from "../liveRestoreProposal";
 import {validateLiveRestoreProposal, type OrderedLiveUpdateCutPolicy} from "@dohc/ydoc-projection/restore-proof";
 import {readRestoreReviewHistory} from "./liveRestoreReview";
 import {assertWorkspaceQuota} from "./workspaces";
@@ -327,12 +327,18 @@ export class LiveCommittedDeliveryStore {
     capture.assertCurrent();
     return saved;
   }
-  ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number;adoptionId:string} {
+  /**
+   * `sequence` is the greatest native sequence delivery proved. `adoptionSequence`
+   * is the native head the host adopted at, as its adoption ACK confirmed.
+   */
+  ownerDeliveryProgress(capture: OwnerDeliveryCapture): {terminal: LiveUpdateReceipt | null;sequence: number;adoptionId:string;adoptionSequence: number} {
     const {host,document} = this.#ownerDelivery(capture), row = this.#ownerRow(host,document); integrity(row);
     const terminal = JSON.parse(String(row.tip_receipt_json)), parsed = terminal === null ? null : parseLiveUpdateReceipt(terminal);
     integrity((parsed?.journalCursor ?? 0) === row.tip_cursor);
     integrity(authorityInteger(row.tip_application_sequence) <= authorityInteger(row.tip_sequence));
-    return {terminal: parsed,sequence: authorityInteger(row.tip_sequence),adoptionId:parseLiveUpdateIdentifier(JSON.parse(String(row.origin_json)).adoptionId)};
+    const origin = JSON.parse(String(row.origin_json));
+    return {terminal: parsed,sequence: authorityInteger(row.tip_sequence),adoptionId:parseLiveUpdateIdentifier(origin.adoptionId),
+      adoptionSequence: authorityInteger(origin.expectedLocalSequence)};
   }
   nextOwnerApplication(capture: OwnerDeliveryCapture): AdmittedLiveUpdate | undefined {
     const {document,highWater} = this.#ownerDelivery(capture), progress = this.ownerDeliveryProgress(capture);
@@ -1155,7 +1161,7 @@ export class LiveCommittedDeliveryStore {
     integrity(receipt.point.journalCursor === selected.point.journalCursor && receipt.point.receiptDigest === selected.point.receiptDigest);
     const ownerOrigin = receipt.fence.operation.origin.kind === "owner" ? this.captureStopRestoreOwnerOrigin(request, historyBudget) : null;
     for (const source of receipt.nativeSources) {
-      if (source.source.origin.kind === "adoptionSeed") integrity(ownerOrigin && source.source.nativeSequence === ownerOrigin.expectedLocalSequence);
+      if ("adoptionId" in source.source && source.source.origin.kind === "adoptionSeed") integrity(ownerOrigin && source.source.nativeSequence === ownerOrigin.expectedLocalSequence);
     }
     const verifySources = () => {
       const operation=readStopRestoreInTransaction(this.#storage,lookup);integrity(operation);
@@ -1167,7 +1173,8 @@ export class LiveCommittedDeliveryStore {
         const metadata=ownedSourceBytes?revalidateAcceptedHistoryDelivery(this.#storage,lookup,sourceBudget,ownedSourceBytes[index]!):readAcceptedHistoryDelivery(this.#storage,lookup,sourceBudget);
         if (!metadata) {integrity(source.acceptedReceipt === null); continue;}
         integrity(isDeepStrictEqual(source.acceptedReceipt, metadata.accepted.receipt) && metadata.accepted.authority.principalKind === "owner" &&
-          metadata.accepted.receipt.updateDigest === source.updateDigest);
+          metadata.accepted.receipt.updateDigest === source.updateDigest &&
+          isDeepStrictEqual(nativeSourceAgentDeclaration(source), metadata.accepted.agentDeclaration));
       }
       integrity(sameReceipt(accepted.proof.terminal, operation.terminal));
       let origin: unknown;

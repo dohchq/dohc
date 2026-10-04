@@ -1,6 +1,7 @@
 use super::*;
 use crate::Ydoc;
 use dohc_engine_storage::put_binary_blob;
+mod native_state;
 
 pub(super) const CHECKPOINT_EVENTS: i64 = 4095;
 const CHECKPOINT_BYTES: i64 = 20_971_520;
@@ -56,10 +57,13 @@ fn next_digest(
     count: i64,
     metadata: &AdmittedLiveUpdateMetadata,
 ) -> Result<String, ApplicationError> {
-    Ok(hex_sha256(
-        &serde_json::to_vec(&("accepted-event-v1", previous, count, metadata))
-            .map_err(|_| ApplicationError::Corrupt)?,
-    ))
+    let mut writer = native_state::HashWriter::default();
+    serde_json::to_writer(
+        &mut writer,
+        &("accepted-event-v1", previous, count, metadata),
+    )
+    .map_err(|_| ApplicationError::Corrupt)?;
+    Ok(writer.finish())
 }
 
 /// Checkpoint insertion stamps its own write without a shared read budget.
@@ -206,12 +210,46 @@ fn insert_checkpoint(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum CheckpointRead {
+    Proof { verify_cadence: bool },
+    NativeState { verify_cadence: bool },
+    NativeAppend,
+}
+impl CheckpointRead {
+    fn verify_cadence(self) -> bool {
+        match self {
+            Self::Proof { verify_cadence } | Self::NativeState { verify_cadence } => verify_cadence,
+            Self::NativeAppend => false,
+        }
+    }
+    fn native(self) -> bool {
+        matches!(self, Self::NativeState { .. } | Self::NativeAppend)
+    }
+}
+
 fn checkpoint(
     conn: &Connection,
     held: &Registration,
     through: i64,
     budget: &mut restore_content::Budget,
     verify_cadence: bool,
+) -> Result<NativeAcceptedCheckpoint, ApplicationError> {
+    checkpoint_in(
+        conn,
+        held,
+        through,
+        budget,
+        CheckpointRead::Proof { verify_cadence },
+    )
+}
+
+fn checkpoint_in(
+    conn: &Connection,
+    held: &Registration,
+    through: i64,
+    budget: &mut restore_content::Budget,
+    mode: CheckpointRead,
 ) -> Result<NativeAcceptedCheckpoint, ApplicationError> {
     let p = parameters(held);
     let sql = format!(
@@ -224,6 +262,13 @@ fn checkpoint(
         .optional()
         .map_err(read_sql)?
         .ok_or(ApplicationError::Conflict)?;
+    if mode.native()
+        && (length < 0 || length as u64 > NativeHistoryReconstruction::HEADER_BYTES as u64)
+    {
+        return Err(ApplicationError::Corrupt);
+    }
+    integer(count, 0, SAFE).map_err(|_| ApplicationError::Corrupt)?;
+    integer(cursor, 0, SAFE).map_err(|_| ApplicationError::Corrupt)?;
     budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
     let sql = format!(
         "SELECT terminal_json,binding_json,state_sha256,evidence_digest,origin_stamp,restore_operation_id,restore_stamp FROM live_accepted_checkpoints WHERE {DOCUMENT} AND event_count=?6"
@@ -257,7 +302,18 @@ fn checkpoint(
             ))
         })
         .map_err(read_sql)?;
-    if stamp != origin_stamp_in(conn, held, budget)? {
+    let actual_stamp = if mode.native() {
+        origin_stamp_in(
+            conn,
+            held,
+            &mut restore_content::Budget {
+                remaining: NativeHistoryReconstruction::HEADER_BYTES,
+            },
+        )?
+    } else {
+        origin_stamp_in(conn, held, budget)?
+    };
+    if stamp != actual_stamp {
         return Err(ApplicationError::Corrupt);
     }
     let terminal: Option<LiveUpdateReceipt> =
@@ -288,14 +344,33 @@ fn checkpoint(
         return Err(ApplicationError::Corrupt);
     };
     if let Some(id) = &restore_operation_id {
-        if Some(restore_stamp(conn, held, id, budget)?) != saved_restore_stamp {
+        identifier(id, 512)?;
+        digest(
+            saved_restore_stamp
+                .as_deref()
+                .ok_or(ApplicationError::Corrupt)?,
+        )?;
+        if matches!(mode, CheckpointRead::Proof { .. })
+            && Some(restore_stamp(conn, held, id, budget)?) != saved_restore_stamp
+        {
             return Err(ApplicationError::Corrupt);
         };
-        let bound:bool=conn.query_row("SELECT application_delivery_id=?3 AND new_generation=?4 AND json_extract(application_json,'$.admitted.accepted.binding')=?5 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id,terminal.as_ref().ok_or(ApplicationError::Corrupt)?.delivery_id,binding.restore_fence_generation,serde_json::to_string(&binding).map_err(|_|ApplicationError::Corrupt)?],|r|r.get(0)).map_err(read_sql)?;
+        let bound = if matches!(mode, CheckpointRead::NativeAppend) {
+            // Historical restore JSON and content are checked by state replay.
+            // Append still binds this checkpoint to the committed fence row.
+            conn.query_row("SELECT application_delivery_id=?3 AND new_generation=?4 AND workspace_id=?5 AND main_version_id=?6 AND object_id=?7 AND lineage_claim_id=?8 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id,terminal.as_ref().ok_or(ApplicationError::Corrupt)?.delivery_id,binding.restore_fence_generation,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id],|r|r.get::<_,bool>(0)).map_err(read_sql)?
+        } else {
+            conn.query_row("SELECT application_delivery_id=?3 AND new_generation=?4 AND json_extract(application_json,'$.admitted.accepted.binding')=?5 FROM live_restore_fences WHERE relay_database_namespace=?1 AND operation_id=?2",params![held.namespace,id,terminal.as_ref().ok_or(ApplicationError::Corrupt)?.delivery_id,binding.restore_fence_generation,serde_json::to_string(&binding).map_err(|_|ApplicationError::Corrupt)?],|r|r.get::<_,bool>(0)).map_err(read_sql)?
+        };
         if !bound {
             return Err(ApplicationError::Corrupt);
         };
-        if verify_cadence {
+        if matches!(
+            mode,
+            CheckpointRead::Proof {
+                verify_cadence: true
+            }
+        ) {
             verify_restore_state(conn, held, id, &state_digest, budget)?;
         }
     } else if saved_restore_stamp.is_some() {
@@ -312,26 +387,56 @@ fn checkpoint(
                 |r| r.get(0),
             )
             .map_err(read_sql)?;
-        budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
-        let sql = format!(
+        let (metadata, expected) = if mode.native() {
+            let metadata = native_state::metadata(conn, held, count)?;
+            let expected = conn.query_row(
+                &format!("SELECT evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6"),
+                params![p[0],p[1],p[2],p[3],p[4],count], |r| r.get::<_,String>(0),
+            ).map_err(read_sql)?;
+            (metadata, expected)
+        } else {
+            budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+            let sql = format!(
             "SELECT metadata_json,evidence_digest FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6 AND journal_cursor=?7"
         );
-        let (json, expected): (String, String) = conn
-            .query_row(
-                &sql,
-                params![p[0], p[1], p[2], p[3], p[4], count, cursor],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+            let (json, expected): (String, String) = conn
+                .query_row(
+                    &sql,
+                    params![p[0], p[1], p[2], p[3], p[4], count, cursor],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(read_sql)?;
+            let metadata: AdmittedLiveUpdateMetadata =
+                serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+            (
+                native_state::NativeMetadata {
+                    accepted: metadata.accepted,
+                    evidence_digest: expected.clone(),
+                },
+                expected,
             )
-            .map_err(read_sql)?;
-        let metadata: AdmittedLiveUpdateMetadata =
-            serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+        };
         if Some(&metadata.accepted.receipt) != terminal.as_ref()
             || metadata.accepted.binding != binding
             || expected != evidence_digest
         {
             return Err(ApplicationError::Corrupt);
         }
-        if verify_cadence {
+        if let Some(id) = &restore_operation_id {
+            if matches!(mode, CheckpointRead::NativeState { .. }) {
+                native_state::restore_association(
+                    conn,
+                    held,
+                    id,
+                    &metadata.accepted,
+                    None,
+                    Some(&state_digest),
+                )?;
+                native_state::restore_metadata(conn, held, id, count, &evidence_digest)?;
+            }
+        }
+        drop(metadata);
+        if mode.verify_cadence() {
             // Check cadence from the preceding checkpoint using lengths only.
             let sql = format!(
                 "SELECT event_count FROM live_accepted_checkpoints WHERE {DOCUMENT} AND event_count<?6 ORDER BY event_count DESC LIMIT 1"
@@ -425,9 +530,12 @@ pub(super) fn append(
         held,
         event,
         &mut restore_content::Budget {
-            remaining: working_reserve_bytes,
+            remaining: usize::MAX,
         },
         None,
+        Some(NativeHistoryReconstruction {
+            working_reserve_bytes,
+        }),
     )
 }
 
@@ -439,7 +547,7 @@ pub(super) fn append_restore(
     operation: &str,
     budget: &mut restore_content::Budget,
 ) -> Result<(), ApplicationError> {
-    append_inner(tx, held, event, budget, Some((operation, doc)))
+    append_inner(tx, held, event, budget, Some((operation, doc)), None)
 }
 
 fn append_inner(
@@ -448,6 +556,7 @@ fn append_inner(
     event: &AdmittedLiveUpdate,
     budget: &mut restore_content::Budget,
     restored: Option<(&str, &Ydoc)>,
+    reconstruction: Option<NativeHistoryReconstruction>,
 ) -> Result<(), ApplicationError> {
     let p = parameters(held);
     let sql = format!("SELECT EXISTS(SELECT 1 FROM live_accepted_checkpoints WHERE {DOCUMENT})");
@@ -462,45 +571,44 @@ fn append_inner(
         }
         return Ok(());
     }
-    let c = checkpoint(tx, held, SAFE, budget, false)?;
+    let c = if reconstruction.is_some() {
+        checkpoint_in(tx, held, SAFE, budget, CheckpointRead::NativeAppend)?
+    } else {
+        checkpoint(tx, held, SAFE, budget, false)?
+    };
     let sql = format!(
-        "SELECT length(CAST(metadata_json AS BLOB)) FROM live_accepted_updates WHERE {DOCUMENT} ORDER BY event_count DESC LIMIT 1"
+        "SELECT event_count,journal_cursor,evidence_digest,suffix_count,suffix_bytes FROM live_accepted_updates WHERE {DOCUMENT} ORDER BY event_count DESC LIMIT 1"
     );
-    if let Some(length) = tx
-        .query_row(&sql, p, |r| r.get::<_, i64>(0))
-        .optional()
-        .map_err(read_sql)?
-    {
-        budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
-    }
-    let sql = format!(
-        "SELECT event_count,journal_cursor,metadata_json,evidence_digest,suffix_count,suffix_bytes FROM live_accepted_updates WHERE {DOCUMENT} ORDER BY event_count DESC LIMIT 1"
-    );
-    let prior: Option<(i64, i64, String, String, i64, i64)> = tx
+    let prior: Option<(i64, i64, String, i64, i64)> = tx
         .query_row(&sql, p, |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })
         .optional()
         .map_err(read_sql)?;
     let (count, cursor, previous, binding, prior_events, prior_bytes) = match prior {
-        Some((count, cursor, json, digest, events, bytes)) => {
-            let metadata: AdmittedLiveUpdateMetadata =
-                serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
-            (
-                count,
-                cursor,
-                digest,
-                metadata.accepted.binding,
-                events,
-                bytes,
-            )
+        Some((count, cursor, digest, events, bytes)) => {
+            // State-only metadata reads never charge discarded records cumulatively.
+            // Restore append retains its external proof budget semantics.
+            let binding = if reconstruction.is_some() {
+                native_state::metadata(tx, held, count)?.accepted.binding
+            } else {
+                let sql = format!("SELECT length(CAST(metadata_json AS BLOB)),metadata_json FROM live_accepted_updates WHERE {DOCUMENT} AND event_count=?6");
+                let length: i64 = tx
+                    .query_row(&sql, params![p[0], p[1], p[2], p[3], p[4], count], |r| {
+                        r.get(0)
+                    })
+                    .map_err(read_sql)?;
+                budget.charge(usize::try_from(length).map_err(|_| ApplicationError::Corrupt)?)?;
+                let json: String = tx
+                    .query_row(&sql, params![p[0], p[1], p[2], p[3], p[4], count], |r| {
+                        r.get(1)
+                    })
+                    .map_err(read_sql)?;
+                let metadata: AdmittedLiveUpdateMetadata =
+                    serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+                metadata.accepted.binding
+            };
+            (count, cursor, digest, binding, events, bytes)
         }
         None => (0, 0, c.evidence_digest.clone(), c.binding.clone(), 0, 0),
     };
@@ -508,7 +616,19 @@ fn append_inner(
     if event.metadata.accepted.receipt.journal_cursor <= cursor || count == SAFE {
         return Err(ApplicationError::Conflict);
     }
-    require_transition(tx, held, &binding, &event.metadata)?;
+    if reconstruction.is_some() {
+        native_state::transition(
+            tx,
+            held,
+            &binding,
+            &event.metadata.accepted,
+            &next_digest(&previous, count + 1, &event.metadata)?,
+            &previous,
+            count + 1,
+        )?;
+    } else {
+        require_transition(tx, held, &binding, &event.metadata)?;
+    }
     let (events, bytes) = if count == c.event_count {
         (1, event.update_bytes.len() as i64)
     } else {
@@ -537,7 +657,7 @@ fn append_inner(
             count,
             event.metadata.accepted.receipt.journal_cursor,
             event.metadata.accepted.receipt.delivery_id,
-            serde_json::to_string(&event.metadata).map_err(|_| ApplicationError::Corrupt)?,
+            native_state::json(&event.metadata)?,
             update,
             events,
             bytes,
@@ -546,24 +666,26 @@ fn append_inner(
     )
     .map_err(write_sql)?;
     if restored.is_some() || events == CHECKPOINT_EVENTS || bytes >= CHECKPOINT_BYTES {
-        let history = if restored.is_none() {
-            Some(read_inner(
-                tx,
-                held,
-                event.metadata.accepted.receipt.journal_cursor,
-                budget,
-                CHECKPOINT_EVENTS as usize,
-                false,
-            )?)
-        } else {
-            None
-        };
+        let history = reconstruction
+            .map(|policy| {
+                read_state(
+                    tx,
+                    held,
+                    event.metadata.accepted.receipt.journal_cursor,
+                    policy,
+                )
+            })
+            .transpose()?;
         let doc = restored
             .map(|(_, doc)| doc)
-            .or_else(|| history.as_ref().map(|h| &h.doc))
+            .or(history.as_ref())
             .ok_or(ApplicationError::Corrupt)?;
         let state = doc
-            .encode_full_state_bounded(budget.remaining.min(CHECKPOINT_BYTES as usize))
+            .encode_full_state_bounded(if reconstruction.is_some() {
+                CHECKPOINT_BYTES as usize
+            } else {
+                budget.remaining.min(CHECKPOINT_BYTES as usize)
+            })
             .ok_or_else(|| {
                 if budget.remaining < CHECKPOINT_BYTES as usize {
                     ApplicationError::ConfiguredByteBudgetExceeded
@@ -571,7 +693,9 @@ fn append_inner(
                     invalid("accepted checkpoint exceeds update limit")
                 }
             })?;
-        budget.charge(state.len())?;
+        if reconstruction.is_none() {
+            budget.charge(state.len())?;
+        }
         doc.validate_public_baseline(&state)?;
         insert_checkpoint(
             tx,
@@ -613,6 +737,57 @@ fn require_transition(
         return Err(ApplicationError::Conflict);
     }
     Ok(())
+}
+
+/// Resume routing needs the committed checkpoint association, not a second Ydoc.
+/// The admitted state reader separately validates its origin and public content.
+pub(super) fn validate_resume_checkpoint(
+    conn: &Connection,
+    held: &Registration,
+    operation: &str,
+    receipt: &LiveUpdateReceipt,
+) -> Result<(), ApplicationError> {
+    let p = parameters(held);
+    let length: i64 = conn.query_row(
+        &format!("SELECT length(CAST(terminal_json AS BLOB))+length(CAST(binding_json AS BLOB))+length(CAST(state_sha256 AS BLOB))+length(CAST(evidence_digest AS BLOB)) FROM live_accepted_checkpoints WHERE {DOCUMENT} AND journal_cursor=?6 AND restore_operation_id=?7"),
+        params![p[0],p[1],p[2],p[3],p[4],receipt.journal_cursor,operation], |r|r.get(0),
+    ).map_err(read_sql)?;
+    if !(1..=NativeHistoryReconstruction::HEADER_BYTES as i64).contains(&length) {
+        return Err(ApplicationError::Corrupt);
+    }
+    let (count,terminal,binding,state,evidence):(i64,String,String,String,String)=conn.query_row(
+        &format!("SELECT event_count,terminal_json,binding_json,state_sha256,evidence_digest FROM live_accepted_checkpoints WHERE {DOCUMENT} AND journal_cursor=?6 AND restore_operation_id=?7"),
+        params![p[0],p[1],p[2],p[3],p[4],receipt.journal_cursor,operation], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+    ).map_err(read_sql)?;
+    integer(count, 1, SAFE).map_err(|_| ApplicationError::Corrupt)?;
+    digest(&state)?;
+    digest(&evidence)?;
+    let terminal: LiveUpdateReceipt =
+        serde_json::from_str(&terminal).map_err(|_| ApplicationError::Corrupt)?;
+    let binding: LiveObjectBinding =
+        serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
+    if terminal != *receipt || binding != held.binding {
+        return Err(ApplicationError::Corrupt);
+    };
+    let metadata = native_state::metadata(conn, held, count)?;
+    if metadata.accepted.receipt != terminal
+        || metadata.accepted.binding != binding
+        || metadata.evidence_digest != evidence
+    {
+        return Err(ApplicationError::Corrupt);
+    }
+    native_state::restore_association(conn, held, operation, &metadata.accepted, None, None)?;
+    native_state::restore_metadata(conn, held, operation, count, &evidence)?;
+    native_state::validate_blob_hash(conn, &state)
+}
+
+pub(super) fn read_state(
+    conn: &Connection,
+    held: &Registration,
+    through: i64,
+    policy: NativeHistoryReconstruction,
+) -> Result<Ydoc, ApplicationError> {
+    native_state::read(conn, held, through, policy)
 }
 
 pub(super) fn read(
@@ -830,4 +1005,121 @@ fn verify_restore_state(
         return Err(ApplicationError::Corrupt);
     };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The relay computes these digests from the same shared rows. Native
+    /// history must reproduce each document's initial digest, the event's
+    /// canonical metadata bytes, and its accepted-event digest, with and
+    /// without a Unicode agent declaration.
+    #[test]
+    fn shared_accepted_history_digests_match_the_relay() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../../packages/live-session-contract/vectors/live-update-admission-vectors.json"
+        ))
+        .unwrap();
+        let rows = vectors["acceptedHistoryDigests"].as_array().unwrap();
+        let mut declared = 0;
+        for row in rows {
+            let case = &row["case"];
+            let metadata = parse_admitted_metadata(row["metadata"].clone()).unwrap();
+            let binding = metadata.accepted.binding.clone();
+            let document = &row["document"];
+            assert_eq!(document["workspaceId"], binding.workspace_id, "{case}");
+            assert_eq!(document["mainVersionId"], binding.main_version_id, "{case}");
+            assert_eq!(document["objectId"], binding.object_id, "{case}");
+            assert_eq!(
+                document["lineageClaimId"], binding.lineage_claim_id,
+                "{case}"
+            );
+            let held = Registration {
+                workspace_id: binding.workspace_id.clone(),
+                namespace: row["namespace"].as_str().unwrap().into(),
+                coordinate: ApplicationHostCoordinate {
+                    host_id: "host".into(),
+                    host_epoch: 1,
+                    instance_id: "instance".into(),
+                    connection_id: "connection".into(),
+                },
+                binding,
+                live: true,
+            };
+            let initial = initial_digest(&held).unwrap();
+            assert_eq!(initial, row["initialDigest"].as_str().unwrap(), "{case}");
+            assert_eq!(
+                serde_json::to_string(&metadata).unwrap(),
+                row["canonicalJson"].as_str().unwrap(),
+                "{case}"
+            );
+            let count = row["eventCount"].as_i64().unwrap();
+            assert_eq!(
+                next_digest(&initial, count, &metadata).unwrap(),
+                row["eventDigest"].as_str().unwrap(),
+                "{case}"
+            );
+            if metadata.accepted.agent_declaration.is_some() {
+                declared += 1;
+            }
+        }
+        assert!(
+            declared > 0 && declared < rows.len(),
+            "absent and declared rows"
+        );
+    }
+
+    const ACCEPTED: &str = r#"{"receipt":{"deliveryId":"delivery-1","updateDigest":"1111111111111111111111111111111111111111111111111111111111111111","journalCursor":7,"acceptingHostEpoch":1},"binding":{"workspaceId":"workspace-1","mainVersionId":"main","objectId":"object-1","lineageClaimId":"2222222222222222222222222222222222222222222222222222222222222222","currentPath":"notes/a.md","selectorPaths":["notes/a.md"],"restoreFenceGeneration":0},"authority":{"grantGeneration":null,"grantId":null,"principalId":"owner-1","principalKind":"owner"},"receivedAtMs":10"#;
+    pub(super) const ACCEPTED_COMPLETE: &str = r#"{"receipt":{"deliveryId":"delivery-1","updateDigest":"1111111111111111111111111111111111111111111111111111111111111111","journalCursor":7,"acceptingHostEpoch":1},"binding":{"workspaceId":"workspace-1","mainVersionId":"main","objectId":"object-1","lineageClaimId":"2222222222222222222222222222222222222222222222222222222222222222","currentPath":"notes/a.md","selectorPaths":["notes/a.md"],"restoreFenceGeneration":0},"authority":{"grantGeneration":null,"grantId":null,"principalId":"owner-1","principalKind":"owner"},"receivedAtMs":10}"#;
+
+    /// The relay hashes the same bytes. An undeclared event has no
+    /// agentDeclaration member, so its evidence digest is unchanged; a
+    /// declaration follows receivedAtMs as agentId, onBehalfOf, then depth.
+    #[test]
+    fn accepted_event_evidence_omits_an_absent_declaration_and_orders_a_present_one() {
+        let previous = "0".repeat(64);
+        let absent = format!(r#"{{"accepted":{ACCEPTED}}},"firstSeen":[]}}"#);
+        let declared = format!(
+            r#"{{"accepted":{ACCEPTED},"agentDeclaration":{{"agentId":"旅行-agent ✈","onBehalfOf":"ówner-1","depth":2}}}},"firstSeen":[]}}"#
+        );
+        let mut digests = Vec::new();
+        for (json, declaration) in [
+            (&absent, None),
+            (
+                &declared,
+                Some(AgentDeclaration {
+                    agent_id: "旅行-agent ✈".into(),
+                    on_behalf_of: Some("ówner-1".into()),
+                    depth: 2,
+                }),
+            ),
+        ] {
+            let metadata: AdmittedLiveUpdateMetadata = serde_json::from_str(json).unwrap();
+            assert_eq!(metadata.accepted.agent_declaration, declaration);
+            assert_eq!(&serde_json::to_string(&metadata).unwrap(), json);
+            let digest = next_digest(&previous, 1, &metadata).unwrap();
+            assert_eq!(
+                digest,
+                hex_sha256(format!(r#"["accepted-event-v1","{previous}",1,{json}]"#).as_bytes())
+            );
+            digests.push(digest);
+        }
+        assert_ne!(digests[0], digests[1]);
+        for refused in [
+            format!(r#"{{"accepted":{ACCEPTED},"agentDeclaration":null}},"firstSeen":[]}}"#),
+            format!(
+                r#"{{"accepted":{ACCEPTED},"agentDeclaration":{{"agentId":"a","depth":0}}}},"firstSeen":[]}}"#
+            ),
+            format!(
+                r#"{{"accepted":{ACCEPTED},"agentDeclaration":{{"agentId":"a","onBehalfOf":null,"depth":0,"run":null}}}},"firstSeen":[]}}"#
+            ),
+            format!(r#"{{"accepted":{ACCEPTED},"agentNote":"a"}},"firstSeen":[]}}"#),
+        ] {
+            assert!(
+                serde_json::from_str::<AdmittedLiveUpdateMetadata>(&refused).is_err(),
+                "{refused}"
+            );
+        }
+    }
 }

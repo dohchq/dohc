@@ -5,7 +5,7 @@ import {createDeviceLiveDelivery} from "./deviceLiveDelivery.js";
 const state = vi.hoisted(() => ({
   event: undefined as undefined | ((event: {name: string; payload: unknown}) => void),
   dispose: vi.fn(), drain: vi.fn(), settle: vi.fn(), restore: vi.fn(), madeOwner: false,
-  registration: undefined as unknown,
+  registration: undefined as unknown, seedApplied: vi.fn(),
 }));
 vi.mock("@dohc/workspace-engine-client/daemon", async importOriginal => ({
   ...await importOriginal<typeof import("@dohc/workspace-engine-client/daemon")>(),
@@ -23,6 +23,7 @@ vi.mock("./ownerCommittedDelivery.js", () => ({OwnerCommittedDelivery: class {
   constructor() {state.madeOwner = true;}
   captureRegistration() {return state.registration;}
   captureDocumentRegistration() {return state.registration;}
+  adoptionSeedApplied(...args: unknown[]) {return state.seedApplied(...args);}
   documentForRestore() {return {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64)};}
   drain(...args: unknown[]) {return state.drain(...args);}
   settle(...args: unknown[]) {return state.settle(...args);}
@@ -42,6 +43,7 @@ beforeEach(() => {
   vi.clearAllMocks(); state.madeOwner = false;
   state.drain.mockReset().mockResolvedValue({kind: "done", terminalReceipt: null, continueDrain: false});
   state.settle.mockReset().mockResolvedValue({materialized: true});
+  state.seedApplied.mockReset().mockReturnValue(true);
 });
 async function fixture() {
   const lifetime = new AbortController(), notify = vi.fn(), stop = vi.fn();
@@ -75,6 +77,37 @@ it("autonomously drains durable owner notices and wakes an already-open frame su
     expect(f.stop).not.toHaveBeenCalled();
   } finally {f.delivery.close();}
   expect(state.dispose).toHaveBeenCalledTimes(1);
+});
+
+it("starts no frame stream before the adoption's seed applies, then starts one while later work is still pending", async () => {
+  const f = await fixture();
+  const pending = {kind: "pending", reason: "Owner delivery pass reached its work budget.", continueDrain: false};
+  try {
+    // The adoption's seed is still queued: validation asked to retry.
+    state.drain.mockResolvedValueOnce(pending);
+    state.seedApplied.mockReturnValueOnce(false);
+    await expect(f.delivery.captureNative(binding)).rejects.toThrow("The host has not applied the owner's adopted document yet.");
+    // The seed applied; later private work and the remote budget still leave the pass pending.
+    state.drain.mockResolvedValueOnce(pending);
+    const captured = await f.delivery.captureNative(binding);
+    expect(captured).toMatchObject({registrationId: 9, binding, workspace: "handle"});
+    expect(state.drain).toHaveBeenCalledTimes(2);
+    expect(state.seedApplied.mock.calls).toEqual([[document], [document]]);
+    expect(f.stop).not.toHaveBeenCalled();
+  } finally {f.delivery.close();}
+});
+
+it("asks for seed readiness only after the pass and recheck, and keeps their errors first", async () => {
+  const f = await fixture();
+  try {
+    state.drain.mockRejectedValueOnce(new Error("native unavailable"));
+    await expect(f.delivery.captureNative(binding)).rejects.toThrow("native unavailable");
+    expect(state.seedApplied).not.toHaveBeenCalled();
+    const caller = new AbortController();
+    state.drain.mockImplementationOnce(async () => {caller.abort(new Error("caller left")); throw caller.signal.reason;});
+    await expect(f.delivery.captureNative(binding, caller.signal)).rejects.toThrow("caller left");
+    expect(state.seedApplied).not.toHaveBeenCalled();
+  } finally {f.delivery.close();}
 });
 
 it("waits for the owner pass before a named drain or settlement acquires the same document", async () => {

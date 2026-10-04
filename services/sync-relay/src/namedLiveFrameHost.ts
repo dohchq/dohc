@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { EngineClient, NativeAppliedPosition } from "@dohc/workspace-engine-client/daemon";
 import { parseRedeemedLiveTicket, type RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
-import { parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseServerDerivedLiveUpdateAuthority, type ServerDerivedLiveUpdateAuthority, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import { parseAgentDeclaration, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseServerDerivedLiveUpdateAuthority, type ServerDerivedLiveUpdateAuthority, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { CurrentLiveBindingRequest, LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
@@ -203,6 +203,9 @@ function captureLiveFrameHost(options: {
       try {
         const deliveryId = parseLiveUpdateIdentifier(input.deliveryId), updateDigest = parseLiveUpdateDigest(input.updateDigest);
         const updateBytes = input.updateBytes;
+        // A recipient or link holder declares no agent through the owner's provenance.
+        const declared = input.agentDeclaration === undefined ? undefined : parseAgentDeclaration(input.agentDeclaration);
+        if (declared && actor.kind !== "owner") return { result: "refused", reason: "authority-refused" };
         if (updateBytes.length < 1 || updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "capacity-refused" };
         if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest) return { result: "refused", reason: "invalid-update" };
         const read = storage.readLiveUpdateJournalCut({ document });
@@ -216,7 +219,8 @@ function captureLiveFrameHost(options: {
         check(signal);
         if (validation.kind === "retry") return {result: "retry", reason: validation.reason};
         const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
-          metadata: { deliveryId, updateDigest, binding }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
+          metadata: { deliveryId, updateDigest, binding, ...(declared ? { agentDeclaration: declared } : {}) },
+          cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
         if (committed.result.kind === "refused") return { result: "refused", reason: committed.result.reason };
         if (committed.result.kind === "retry") return { result: "retry", reason: committed.result.reason };
         // An ambiguous drain can still have committed the application. Read the exact durable ACK.

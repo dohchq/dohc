@@ -1125,6 +1125,10 @@ impl EngineService {
                 append_key,
                 update,
                 now_ms: now_ms()?,
+                agent_declaration: dohc_engine_domain::AgentDeclaration::from_change(
+                    params.actor_origin_id.as_deref(),
+                    params.attribution.as_ref(),
+                ),
             };
             let actor = open.actor.clone();
             let workspace = open.workspace_id.clone();
@@ -2355,7 +2359,7 @@ mod tests {
         }
         for (bytes, age) in [(9, 100_000), (10, 99_999), (10, 100_000), (20, 200_000)] {
             let config = serde_json::from_value(json!({
-                "ingress":{"aggregateBytes":400_000_000,"applicationWorkingReserveBytes":1_000_000,"maxUploads":2,"uploadDeadlineMs":30_000},
+                "ingress":{"aggregateBytes":512*1024*1024,"applicationWorkingReserveBytes":8*1024*1024,"maxUploads":2,"uploadDeadlineMs":30_000},
                 "maxRegistrations":8,"maxAdoptionBytes":1_000_000,"maxAdoptionEvents":100,"maxApplicationsPerSettlement":100,
                 "ownerOutbox":{"maxPendingBytes":bytes,"maxPendingAgeMs":age}
             })).unwrap();

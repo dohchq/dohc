@@ -18,7 +18,8 @@ function reviewFixture() {
     content: {frozenMarkdown: "Current text", restoredMarkdown: "Earlier text", frozenMarkdownDigest: digest, restoredMarkdownDigest: digest,
       frozenMarkdownByteLength: 12, restoredMarkdownByteLength: 12},
     acceptedEvents: [1, 2, 3].map(cursor => ({metadata: {accepted: {binding, receipt: receipt(cursor),
-      authority: {principalKind: "owner", principalId: "owner", grantId: null, grantGeneration: null}, receivedAtMs: cursor}, firstSeen: []}, restoreOperationId: null})),
+      authority: {principalKind: "owner", principalId: "owner", grantId: null, grantGeneration: null}, receivedAtMs: cursor,
+      ...(cursor === 3 ? {agentDeclaration: {agentId: "trip-agent-hosted", onBehalfOf: "local-person", depth: 0}} : {})}, firstSeen: []}, restoreOperationId: null})),
     priorRestoreCuts: [{operationId: "earlier", proposalDigest: digest, restoreJournalCursor: 3, selectedEventCount: 0,
       acceptedEventCount: 2, selectedTerminal: null, frozenTerminal: receipt(2)}],
     nativeSources: [{source: {deliveryId: "event-3", updateDigest: digest}, acceptedReceipt: receipt(3), acceptedRelation: "after-selected",
@@ -71,6 +72,19 @@ it("requires separate stop and content confirmations and names every affected re
   expect(f.call).toHaveBeenCalledWith({workspaceId: "workspace", action: "confirm", operationId: "restore", proposalDigest});
   expect(f.restored).toHaveBeenCalledTimes(1); expect(f.release).toHaveBeenCalledTimes(1);
 });
+it("marks the agent the owner's change declared beside the authenticated owner", async () => {
+  const f = fixture(); render(<OwnerRestoreDialog {...f.props} />); await openStop();
+  fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});
+  const badges = screen.getAllByTestId("owner-restore-change-agent-badge");
+  expect(badges).toHaveLength(1);
+  const row = badges[0]!.closest("li")!;
+  expect(row.textContent).toContain("Owner");
+  expect(row.textContent).toContain("trip-agent-hosted");
+  expect(badges[0]!.getAttribute("aria-label")).toBe("agent");
+  // The declared person stays out of the row; the server's owner is the authority it names.
+  expect(row.textContent?.split("Change details")[0]).not.toContain("local-person");
+});
+
 it("allows declining content replacement after access stops", async () => {
   const f = fixture(); render(<OwnerRestoreDialog {...f.props} />); await openStop();
   fireEvent.click(screen.getByRole("button", {name: "Stop access"})); await screen.findByRole("button", {name: "Restore file"});

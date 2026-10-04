@@ -3,7 +3,7 @@ import {parseDesktopOwnerDeliveryConfig, startDesktopOwnerDelivery} from "./desk
 import type {OwnerYDocDrainResult} from "./ownerYDocOutbox";
 const binding = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
   currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 1};
-const frames = {receive: {maxFrameBytes: 1024, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
+const frames = {receive: {maxFrameBytes: 2048, maxStateVectorBytes: 1024, maxUpdateBytes: 4096, maxSyncBytes: 4096},
   maxQueuedBytes: 4096, maxQueuedFrames: 32, maxControlBytes: 4096, maxControlFrames: 8, maxAssemblyBytes: 4096};
 const config = {version: 1, nativeConfigPath: "C:/test/native-owner.json", nativeClient: {aggregateBytes: 100_000_000, maxUploads: 2}, relayUrl: "https://relay.example.test", frames, attemptTimeoutMs: 10_000, retryDelayMs: 2500,
   documents: [{binding, relayDatabaseNamespace: "namespace", shareId: "share"}]};
@@ -16,6 +16,14 @@ it("accepts only explicit owner document targets and unchanged frame budgets", (
   for (const changed of [{...config, version: 2}, {...config, documents: []}, {...config, bearer: "forbidden"},
     {...config, documents: [config.documents[0], config.documents[0]]}, {...config, retryDelayMs: 0},
     {...config, relayUrl: "https://user:password@relay.example.test"}]) expect(() => parseDesktopOwnerDeliveryConfig(changed)).toThrow();
+});
+
+it("requires frame and control budgets that carry the largest declared submission", () => {
+  for (const ownerFrames of [{...frames, receive: {...frames.receive, maxFrameBytes: 1610}}, {...frames, maxControlBytes: 1610}]) {
+    expect(() => parseDesktopOwnerDeliveryConfig({...config, frames: ownerFrames})).toThrow("largest declared submission");
+  }
+  const minimum = {...frames, receive: {...frames.receive, maxFrameBytes: 1611}, maxControlBytes: 1611};
+  expect(parseDesktopOwnerDeliveryConfig({...config, frames: minimum}).frames).toEqual(minimum);
 });
 
 it("holds one pass, rotates targets and waits the configured retry interval", async () => {

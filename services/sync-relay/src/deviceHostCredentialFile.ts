@@ -1,9 +1,9 @@
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { BigIntStats } from "node:fs";
 import { chmod, link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createDeviceHostCredential, parseDeviceHostCredential, type DeviceHostCredential } from "./deviceHostCredential.js";
+import { openWindowsCredentialAcl, type WindowsCredentialAcl } from "./windowsCredentialAcl.js";
 import type { HostEpoch } from "@dohc/live-session-contract/host-control";
 
 export class DeviceHostCredentialFileUnavailable extends Error {
@@ -38,19 +38,18 @@ foreach ($rule in $acl.Access) {
       $rule.AccessControlType -ne 'Allow' -or $rule.FileSystemRights -ne 'FullControl') { throw 'Unexpected access rule' }
 }`;
 
-async function privatePath(path: string, directory: boolean, create = false): Promise<BigIntStats> {
+function openCredentialAcl(): WindowsCredentialAcl | undefined {
+  return process.platform === "win32" ? openWindowsCredentialAcl(windowsAccess) : undefined;
+}
+
+async function privatePath(acl: WindowsCredentialAcl | undefined, path: string, directory: boolean, { create = false, final = false } = {}): Promise<BigIntStats> {
   const stat = await lstat(path, { bigint: true });
   const actualPath = resolve(await realpath(path)), requestedPath = resolve(path);
   const samePath = process.platform === "win32" ? actualPath.toLowerCase() === requestedPath.toLowerCase() : actualPath === requestedPath;
   if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile()) ||
     !samePath) throw new Error("Invalid credential path.");
-  if (process.platform === "win32") {
-    execFileSync(join(process.env.SystemRoot ?? "C:/Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", windowsAccess], {
-        windowsHide: true, stdio: "pipe", timeout: 10_000,
-        env: { ...process.env, DOHC_HOST_CREDENTIAL_PATH: path, DOHC_HOST_CREDENTIAL_CREATE: create ? "1" : "0",
-          DOHC_HOST_CREDENTIAL_DIRECTORY: directory ? "1" : "0" },
-      });
+  if (acl) {
+    await acl.check(path, directory, create, final);
   } else if (stat.uid !== BigInt(process.getuid?.() ?? -1) || (stat.mode & 0o777n) !== (directory ? 0o700n : 0o600n)) {
     throw new Error("Credential path must be accessible only to its owner.");
   }
@@ -70,18 +69,23 @@ async function syncCredentialDirectory(directory: string): Promise<void> {
 // Persist the secret before provisioning. A crash can then retry with the same file.
 export async function prepareDeviceHostCredentialFile(directory: string, hostId: string, hostEpoch: HostEpoch): Promise<DeviceHostCredential> {
   requireDeviceHostCredentialFileSupport();
+  const acl = openCredentialAcl();
+  try { return await prepareCredential(acl, directory, hostId, hostEpoch); } finally { if (acl) await acl.close(); }
+}
+
+async function prepareCredential(acl: WindowsCredentialAcl | undefined, directory: string, hostId: string, hostEpoch: HostEpoch): Promise<DeviceHostCredential> {
   let created = false;
   try { await mkdir(directory, { mode: 0o700 }); created = true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
   if (created && process.platform !== "win32") await chmod(directory, 0o700);
-  await privatePath(directory, true, created);
+  await privatePath(acl, directory, true, { create: created });
   const path = join(directory, "device-host-credential.json");
   const existing = await lstat(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
     throw error;
   });
   if (existing !== null) {
-    const identity = await privatePath(path, false);
+    const identity = await privatePath(acl, path, false, { final: true });
     const handle = await open(path, "r+");
     let credential: DeviceHostCredential;
     try {
@@ -102,10 +106,10 @@ export async function prepareDeviceHostCredentialFile(directory: string, hostId:
   try {
     identity = await handle.stat({ bigint: true });
     if (process.platform !== "win32") await handle.chmod(0o600);
-    if (!sameFile(await privatePath(temporary, false), identity)) throw new Error("Credential file changed.");
+    if (!sameFile(await privatePath(acl, temporary, false), identity)) throw new Error("Credential file changed.");
     await handle.writeFile(JSON.stringify(credential) + "\n");
     await handle.sync();
-    if (!sameFile(await privatePath(temporary, false), identity)) throw new Error("Credential file changed.");
+    if (!sameFile(await privatePath(acl, temporary, false, { final: true }), identity)) throw new Error("Credential file changed.");
     await link(temporary, path);
     await handle.sync();
   } finally {
@@ -122,9 +126,14 @@ export async function prepareDeviceHostCredentialFile(directory: string, hostId:
 
 export async function readDeviceHostCredentialFile(directory: string): Promise<DeviceHostCredential> {
   requireDeviceHostCredentialFileSupport();
-  await privatePath(directory, true);
+  const acl = openCredentialAcl();
+  try { return await readCredential(acl, directory); } finally { if (acl) await acl.close(); }
+}
+
+async function readCredential(acl: WindowsCredentialAcl | undefined, directory: string): Promise<DeviceHostCredential> {
+  await privatePath(acl, directory, true);
   const path = join(directory, "device-host-credential.json");
-  const identity = await privatePath(path, false);
+  const identity = await privatePath(acl, path, false, { final: true });
   const handle = await open(path, "r");
   try {
     const opened = await handle.stat({ bigint: true });

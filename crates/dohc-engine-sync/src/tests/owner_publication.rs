@@ -622,3 +622,58 @@ fn current_checkpoint_echo_requires_exact_binding_and_retained_blob_integrity() 
     assert!(refused.pending.is_some());
     assert!(!refused.budget_exhausted);
 }
+
+#[test]
+fn reused_accepted_state_charges_a_fresh_read_and_drops_refused_bytes() {
+    use dohc_engine_collab::owner_outbox::publication::{
+        PublicationContentKind, PublicationProof, PublicationReader, contains_in,
+    };
+    let (_dir, mut store, observed, checkpoint) = fixture();
+    let doc = Ydoc::wire();
+    doc.apply(&checkpoint).unwrap();
+    let private = candidate(
+        &mut store,
+        &observed,
+        &doc.richdoc_append_paragraph("private edit"),
+        1,
+    );
+    let key = DocKey::new("ws", "main", "owner").unwrap();
+    let lineage = Some(observed.binding.lineage_claim_id.as_str());
+    let ydoc = PublicationContentKind::Ydoc;
+    store
+        .read_with(|conn| {
+            let tx = conn.unchecked_transaction().map_err(SyncError::persist)?;
+            let mut reader = PublicationReader::new(&tx);
+            let mut read = |digest: &str| {
+                let mut remaining = 1_000_000;
+                let proof = reader
+                    .contains(&key, "owner.md", lineage, ydoc, digest, &mut remaining)
+                    .unwrap();
+                (proof, 1_000_000 - remaining)
+            };
+            let first = read(&observed.checkpoint_digest);
+            assert_eq!(first.0, PublicationProof::Contained);
+            let reused = read(&observed.checkpoint_digest);
+            let mut remaining = 1_000_000;
+            let fresh = contains_in(
+                &tx,
+                &key,
+                "owner.md",
+                lineage,
+                ydoc,
+                &observed.checkpoint_digest,
+                &mut remaining,
+            )
+            .unwrap();
+            assert_eq!([reused, (fresh, 1_000_000 - remaining)], [first, first]);
+            // A refused proof applies the private bytes to the state it read.
+            let digest = private.payload["updateBlobSha256"].as_str().unwrap();
+            for _ in 0..2 {
+                assert_eq!(read(digest).0, PublicationProof::NotContained);
+            }
+            // The next proof reads afresh and charges what the first one did.
+            assert_eq!(read(&observed.checkpoint_digest), first);
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+}

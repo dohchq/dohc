@@ -10,14 +10,18 @@ import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, type BrowserContext, type Page } from "@playwright/test";
+import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-update-admission";
 import {
   ACCOUNT_TEST_SECRET,
   startAccountServer,
 } from "../../../../services/workspace-api/e2e/harness";
 import { mailLinks } from "../../../../services/workspace-api/e2e/smtpCapture";
 import { mintLocalhostCa, type LocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
+import { parseStoredShareSelectorJson } from "../../../../services/sync-relay/src/shareFilter";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
 import type { LaunchedDesktopApp } from "./desktopApp";
+import { readLiveAuditRecord, type LiveAuditRecord } from "./engineDb";
 
 const relayRoot = fileURLToPath(new URL("../../../../services/sync-relay/", import.meta.url));
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
@@ -61,6 +65,11 @@ export async function startSelfHostOnboardingStack(directory: string, options: {
       // edit, the restore point that keeps everything the account did not write.
       acceptedCursorBefore: (workspaceId: string, path: string, principalId: string) =>
         acceptedCursorBefore(directory, workspaceId, path, principalId),
+      // Where one declared agent's accepted changes stand: the relay journal,
+      // the service host's accepted history and its durable audit. Read-only.
+      hostedAgentEvidence: (workspaceId: string, path: string, agentId: string) =>
+        hostedAgentEvidence(directory, workspaceId, path, agentId),
+      ownerLiveBinding: (workspaceId: string, path: string) => ownerLiveBinding(directory, workspaceId, path),
       async close() {
         const results = await Promise.allSettled([proxy.close(), relay!.close(), account.close()]);
         const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
@@ -154,6 +163,96 @@ function acceptedCursorBefore(directory: string, workspaceId: string, path: stri
     assert.ok(Number.isSafeInteger(cursor) && cursor >= 1, "An accepted change precedes the account's first live edit.");
     return cursor;
   } finally { db.close(); }
+}
+
+/** The current binding of the fixture's retained owner enrollment, read in one relay snapshot. */
+function ownerLiveBinding(directory: string, workspaceId: string, path: string) {
+  const db = new DatabaseSync(join(directory, "relay-data", "relay.sqlite"), { readOnly: true });
+  try {
+    const rows = db.prepare(
+      `SELECT d.workspace_id, d.main_version_id, d.object_id, d.lineage_claim_id,
+         d.current_path, d.restore_fence_generation, s.selector_json, a.relay_database_namespace
+       FROM sync_relay_service_host_enrollments e
+       JOIN sync_relay_workspaces w ON w.workspace_id=e.workspace_id
+       JOIN sync_relay_shares s ON s.share_id=e.share_id
+       JOIN sync_relay_live_documents d
+         ON d.workspace_id=e.workspace_id AND d.main_version_id='main'
+         AND d.object_id=e.object_id AND d.current_path=e.path
+       JOIN sync_relay_service_activations a
+         ON a.workspace_id=d.workspace_id AND a.main_version_id=d.main_version_id
+         AND a.object_id=d.object_id AND a.lineage_claim_id=d.lineage_claim_id
+       WHERE e.workspace_id=? AND e.path=? AND e.enabled=1 AND e.retired=0
+         AND e.owner_user_id=w.owner_user_id
+         AND e.replication_epoch=w.replication_epoch AND e.stream_identity=w.stream_identity
+         AND s.workspace_id=e.workspace_id AND s.granter_user_id=e.owner_user_id
+         AND a.owner_user_id=e.owner_user_id AND a.share_id=e.share_id
+         AND a.completion_json IS NOT NULL
+         AND d.lineage_state='current' AND d.admission_state='open'
+         AND EXISTS (
+           SELECT 1 FROM sync_relay_object_moments m
+           WHERE m.workspace_id=d.workspace_id AND m.version_id='main'
+             AND m.object_id=d.object_id AND m.path=d.current_path AND m.content_kind='text'
+             AND m.relay_seq=(SELECT MAX(latest.relay_seq) FROM sync_relay_object_moments latest
+               WHERE latest.workspace_id=m.workspace_id AND latest.object_id=m.object_id
+                 AND latest.version_id=m.version_id)
+         )
+       LIMIT 2`,
+    ).all(workspaceId, path);
+    assert.ok(rows.length <= 1, "The fixture has more than one current owner enrollment for its document.");
+    const row = rows[0];
+    if (!row) return null;
+    assert.equal(typeof row.selector_json, "string", "The owner share selector must be JSON text.");
+    const selector = parseStoredShareSelectorJson(row.selector_json as string);
+    assert.deepEqual(selector, { paths: [path], versionId: null }, "The fixture owner share selects only this main file.");
+    const binding = parseLiveObjectBinding({
+      workspaceId: row.workspace_id, mainVersionId: row.main_version_id,
+      objectId: row.object_id, lineageClaimId: row.lineage_claim_id,
+      currentPath: row.current_path, selectorPaths: selector!.paths,
+      restoreFenceGeneration: row.restore_fence_generation,
+    });
+    const relayDatabaseNamespace = parseLiveUpdateIdentifier(row.relay_database_namespace, "relayDatabaseNamespace");
+    return { binding, relayDatabaseNamespace };
+  } finally { db.close(); }
+}
+
+// The relay's accepted changes that declared this agent, and the service
+// host's copies. Accepted history can fold into a checkpoint, so its rows are
+// reported as found; the durable audit record is what must remain.
+function hostedAgentEvidence(directory: string, workspaceId: string, path: string, agentId: string) {
+  const read = <T>(file: string, query: (db: InstanceType<typeof DatabaseSync>) => T) => {
+    const db = new DatabaseSync(file, { readOnly: true });
+    try { return query(db); } finally { db.close(); }
+  };
+  const relay = read(join(directory, "relay-data", "relay.sqlite"), (db) => db.prepare(
+    `SELECT j.journal_cursor AS cursor, j.delivery_id AS deliveryId, j.update_digest AS updateDigest,
+       j.principal_kind AS principalKind, j.principal_id AS principalId, j.restore_fence_generation AS fence,
+       j.accepted_event_count AS eventCount, j.accepted_evidence_digest AS evidenceDigest, d.agent_id AS agentId, d.on_behalf_of AS onBehalfOf, d.depth AS depth
+     FROM sync_relay_live_update_journal j JOIN sync_relay_live_update_agent_declarations d ON d.journal_cursor=j.journal_cursor
+     WHERE j.workspace_id=? AND j.current_path=? AND d.agent_id=? ORDER BY j.journal_cursor LIMIT 16`,
+  ).all(workspaceId, path, agentId).map((row) => ({
+    journalCursor: Number(row.cursor), deliveryId: String(row.deliveryId), updateDigest: String(row.updateDigest),
+    principalKind: String(row.principalKind), principalId: String(row.principalId), restoreFenceGeneration: Number(row.fence),
+    eventCount: Number(row.eventCount), evidenceDigest: String(row.evidenceDigest),
+    agentDeclaration: { agentId: String(row.agentId), onBehalfOf: row.onBehalfOf === null ? null : String(row.onBehalfOf), depth: Number(row.depth) },
+  })));
+  // Every accepted change of the document by authenticated kind, and how many declared any agent. Counts only.
+  const journal = read(join(directory, "relay-data", "relay.sqlite"), (db) => db.prepare(
+    `SELECT j.principal_kind AS kind, COUNT(*) AS accepted, COUNT(d.journal_cursor) AS declared
+     FROM sync_relay_live_update_journal j LEFT JOIN sync_relay_live_update_agent_declarations d ON d.journal_cursor=j.journal_cursor
+     WHERE j.workspace_id=? AND j.current_path=? GROUP BY j.principal_kind ORDER BY j.principal_kind`,
+  ).all(workspaceId, path).map((row) => ({ kind: String(row.kind), accepted: Number(row.accepted), declared: Number(row.declared) })));
+  const hostRoot = join(directory, "relay-deployment", "live-host");
+  const host = readdirSync(hostRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory() && entry.name !== "automations")
+    .flatMap((entry) => read(join(hostRoot, entry.name, ".dohc", "engine", "engine.db"), (db) => relay.map((change) => ({
+      deliveryId: change.deliveryId,
+      accepted: db.prepare(`SELECT journal_cursor AS cursor, event_count AS eventCount, evidence_digest AS evidenceDigest,
+          json_extract(metadata_json,'$.accepted') AS accepted FROM live_accepted_updates
+          WHERE delivery_id=? AND json_extract(metadata_json,'$.accepted.binding.workspaceId')=?`)
+        .all(change.deliveryId, workspaceId).map((row) => ({ journalCursor: Number(row.cursor), eventCount: Number(row.eventCount),
+          evidenceDigest: String(row.evidenceDigest), accepted: JSON.parse(String(row.accepted)) as LiveAuditRecord["accepted"] })),
+      audit: readLiveAuditRecord(db, change.deliveryId),
+    }))));
+  return { relay, host, journal };
 }
 
 function settlementEvidence(directory: string) {

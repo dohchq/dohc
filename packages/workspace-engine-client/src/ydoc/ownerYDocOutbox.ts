@@ -2,11 +2,14 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
-import { parseLiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
-import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
+import { parseAgentDeclaration, parseLiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
+import type { AgentDeclaration, LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 import type { DaemonRequesterClient } from "../live/daemonLiveAdapter";
 import { WorkspaceDaemonRequester } from "../live/daemonLiveAdapter";
 import type { JsonValue, WorkspaceHandle } from "../protocol";
+import { decodeOwnerYDocOutboxAppendResult, type OwnerYDocOutboxAppendResult } from "./ydocWireContract";
+
+export type { OwnerYDocOutboxAppendResult } from "./ydocWireContract";
 
 export { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 export type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
@@ -31,16 +34,6 @@ export interface OwnerYDocOutboxAppendInput {
   readonly limits: OwnerYDocOutboxLimits;
 }
 
-export interface OwnerYDocOutboxAppendResult {
-  readonly outboxId: string;
-  readonly sequence: number;
-  readonly deliveryId: string;
-  readonly updateDigest: string;
-  readonly pendingBytes: number;
-  readonly oldestEntryAtMs: number;
-  readonly state: OwnerYDocOutboxState;
-}
-
 type OwnerYDocOutboxState = "active" | "sealed" | "quarantined";
 
 export interface OwnerYDocOutboxEntry {
@@ -51,6 +44,8 @@ export interface OwnerYDocOutboxEntry {
   readonly update: Uint8Array;
   readonly byteLength: number;
   readonly createdAtMs: number;
+  /** The agent the queued edit declared; absent when it declared none. Never authority. */
+  readonly agentDeclaration?: AgentDeclaration;
 }
 
 export interface OwnerYDocOutboxPending {
@@ -217,7 +212,7 @@ export class OwnerYDocOutbox {
     if (typeof input.appendKey !== "string" || input.appendKey.length === 0) {
       throw new TypeError("appendKey must be a non-empty string.");
     }
-    const raw = record(
+    return decodeOwnerYDocOutboxAppendResult(
       await this.requester.request(
         OWNER_YDOC_OUTBOX_METHOD.append,
         {
@@ -229,17 +224,7 @@ export class OwnerYDocOutbox {
         } as unknown as JsonValue,
         { workspace: this.workspace },
       ),
-      "owner outbox append result",
     );
-    return {
-      outboxId: stringField(raw, "outboxId"),
-      sequence: wireInteger(raw, "sequence", 1),
-      deliveryId: stringField(raw, "deliveryId"),
-      updateDigest: stringField(raw, "updateDigest"),
-      pendingBytes: wireInteger(raw, "pendingBytes"),
-      oldestEntryAtMs: wireInteger(raw, "oldestEntryAtMs"),
-      state: state(raw.state),
-    };
   }
 
   async readPending(outboxId: string): Promise<OwnerYDocOutboxPending> {
@@ -375,6 +360,9 @@ export class OwnerYDocOutbox {
         deliveryId: stringField(entry, "deliveryId"),
         updateDigest, update, byteLength,
         createdAtMs: wireInteger(entry, "createdAtMs"),
+        ...(Object.hasOwn(entry, "agentDeclaration")
+          ? { agentDeclaration: parseAgentDeclaration(entry.agentDeclaration) }
+          : {}),
       });
       remaining -= byteLength;
       lastSequence = sequence;
