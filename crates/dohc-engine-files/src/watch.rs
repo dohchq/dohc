@@ -219,6 +219,17 @@ pub struct NativeWatcher {
     worker: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone)]
+pub struct WatchMonitor(Arc<WatchState>);
+impl WatchMonitor {
+    pub fn is_unavailable(&self) -> bool {
+        self.0.unavailable.load(Ordering::Acquire)
+    }
+    pub fn disruption_count(&self) -> u64 {
+        self.0.disruptions.load(Ordering::Acquire)
+    }
+}
+
 impl NativeWatcher {
     /// Attach the recursive OS watch, wait until it is ready, then serialize an
     /// initial full reconcile through the files actor. The returned plan still
@@ -239,6 +250,60 @@ impl NativeWatcher {
         token: CancellationToken,
         startup_deadline: Duration,
     ) -> Result<WatchStart, FilesError> {
+        Self::attach(root, handle, token, startup_deadline).await
+    }
+
+    pub async fn start_metadata(
+        root: PathBuf,
+        dirty: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<NativeWatcher, FilesError> {
+        let (message_tx, message_rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
+        let stop_tx = message_tx.clone();
+        let state = Arc::new(WatchState::default());
+        let thread_state = Arc::clone(&state);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let worker = std::thread::Builder::new()
+            .name("dohc-native-watcher".to_owned())
+            .spawn(move || {
+                watcher_thread(root, dirty, message_rx, message_tx, thread_state, ready_tx)
+            })
+            .map_err(|_| FilesError::WatcherUnavailable {
+                reason: "could not spawn watcher thread",
+            })?;
+        let watcher = Self {
+            stop_tx,
+            state,
+            worker: Some(worker),
+        };
+        // The metadata owner runs on a dedicated thread and retains the native
+        // join handle even on startup failure. Its Drop must release the root.
+        match tokio::time::timeout(WATCH_STARTUP_DEADLINE, ready_rx).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => return Err(error),
+            Ok(Err(_)) => {
+                return Err(FilesError::WatcherUnavailable {
+                    reason: "watcher thread ended during startup",
+                });
+            }
+            Err(_) => {
+                return Err(FilesError::WatcherUnavailable {
+                    reason: "native watcher startup timed out",
+                });
+            }
+        }
+        Ok(watcher)
+    }
+
+    pub fn monitor(&self) -> WatchMonitor {
+        WatchMonitor(Arc::clone(&self.state))
+    }
+
+    async fn attach(
+        root: PathBuf,
+        handle: FilesHandle,
+        token: CancellationToken,
+        startup_deadline: Duration,
+    ) -> Result<WatchStart, FilesError> {
         let (message_tx, message_rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
         let stop_tx = message_tx.clone();
         let state = Arc::new(WatchState::default());
@@ -250,7 +315,7 @@ impl NativeWatcher {
             .spawn(move || {
                 watcher_thread(
                     root,
-                    thread_handle,
+                    Arc::new(move || thread_handle.notify_overflow()),
                     message_rx,
                     message_tx,
                     thread_state,
@@ -281,7 +346,8 @@ impl NativeWatcher {
             let _ = watcher.stop();
             return Err(err);
         }
-        let initial_reconcile = match handle.reconcile_if_dirty(token).await {
+        let initial = handle.reconcile_if_dirty(token).await;
+        let initial_reconcile = match initial {
             Ok(run) => run,
             Err(err) => {
                 let _ = watcher.stop();
@@ -300,6 +366,7 @@ impl NativeWatcher {
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
+        self.state.unavailable.store(true, Ordering::Release);
         let _ = self.stop_tx.send(ThreadMessage::Stop);
         worker.join().map_err(|_| FilesError::WatcherUnavailable {
             reason: "watcher thread panicked",
@@ -396,14 +463,14 @@ async fn await_ready_with_deadline(
 
 fn watcher_thread(
     root: PathBuf,
-    handle: FilesHandle,
+    dirty: Arc<dyn Fn() + Send + Sync>,
     rx: Receiver<ThreadMessage>,
     callback_tx: SyncSender<ThreadMessage>,
     state: Arc<WatchState>,
     ready: tokio::sync::oneshot::Sender<Result<(), FilesError>>,
 ) {
     let config = notify::Config::default().with_follow_symlinks(false);
-    let callback_handle = handle.clone();
+    let callback_dirty = dirty.clone();
     let callback_state = Arc::clone(&state);
     let unavailable = &state.unavailable;
     // Sticky, NON-DROPPABLE backend-error signal. The bounded `callback_tx`
@@ -419,7 +486,7 @@ fn watcher_thread(
             if event.is_err() {
                 callback_state.disruptions.fetch_add(1, Ordering::AcqRel);
                 callback_backend_error.store(true, Ordering::Release);
-                callback_handle.notify_overflow();
+                callback_dirty();
             }
             // A full queue already contains abundant evidence of a change, so
             // further callbacks coalesce without allocating unbounded memory.
@@ -471,7 +538,7 @@ fn watcher_thread(
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => {
                     if let Some(reason) = debounce.timeout(Instant::now()) {
-                        handle.notify_overflow();
+                        dirty();
                         state.record_flush(reason);
                     }
                     None
@@ -487,7 +554,7 @@ fn watcher_thread(
                 Err(RecvTimeoutError::Timeout) => {
                     if !unavailable.load(Ordering::Acquire) && !watched_root.still_bound(&root) {
                         state.disruptions.fetch_add(1, Ordering::AcqRel);
-                        handle.notify_overflow();
+                        dirty();
                         // Rebind to the new directory object (so we don't
                         // reattach every poll forever), then reattach -- same
                         // bind-before-attach ordering as startup, and it also
@@ -507,7 +574,7 @@ fn watcher_thread(
                 if debounce.event(Instant::now()) {
                     // A ready queued event must not postpone the hard bound:
                     // publish the whole burst even when the queue never drains.
-                    handle.notify_overflow();
+                    dirty();
                     state.record_flush(FlushReason::HardDeadline);
                 }
             }
@@ -515,7 +582,7 @@ fn watcher_thread(
                 // Final-flush parity: pending evidence is published before the
                 // thread exits; join guarantees it cannot publish afterward.
                 if debounce.flush() {
-                    handle.notify_overflow();
+                    dirty();
                 }
                 break;
             }

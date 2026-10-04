@@ -1,6 +1,7 @@
 use super::*;
 use crate::capture_sink::bound_sink_params;
 use dohc_engine_collab::{ContentKind, DocKey, Ydoc};
+use dohc_engine_files::NativeWatcher;
 use dohc_engine_files::{CaptureApplyResult, CaptureSink, CapturedIngest};
 use dohc_engine_runtime::WorkspaceSupervisor;
 use dohc_engine_testkit::ScratchDir;

@@ -23,3 +23,5 @@ pub(super) mod workspace;
 pub(super) mod ydoc;
 
 mod owner_activation;
+
+pub(super) mod files;

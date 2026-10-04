@@ -61,6 +61,7 @@ pub(crate) struct OpenWorkspace {
     pub(super) relay: Option<RelayConfiguration>,
     /// The binding's capture policy, retained when its driver stops and inherited by read-only attachments.
     pub(super) capture_enabled: bool,
+    pub(crate) observation: Arc<crate::file_observation::FileObservation>,
     /// The autonomous capture driver (files actor + watcher + reconcile
     /// loop), spawned only after the root binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
@@ -125,6 +126,7 @@ impl OpenWorkspace {
             handle_kind: WorkspaceHandleKind::ReadOnlyAttach { owner },
             relay: self.relay.clone(),
             capture_enabled: self.capture_enabled,
+            observation: Arc::clone(&self.observation),
             capture: Arc::clone(&self.capture),
             reconciles_collections: self.reconciles_collections,
             projects_collections: self.projects_collections,
@@ -149,6 +151,7 @@ impl OpenWorkspace {
     /// fence that already owns the apply gate can still finish against the
     /// driver; teardown takes the handle only after acquiring that gate.
     fn request_capture_shutdown(&self) {
+        self.observation.request_shutdown();
         if let Some(projection) = lock(&self.collection_projection).as_ref() {
             projection.request_shutdown();
         }
@@ -163,7 +166,8 @@ impl OpenWorkspace {
     /// Take and cancel the background tasks without an await point, so an
     /// aborted RPC future cannot leave them running. Return
     /// the join handles for callers that must await the full drain.
-    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 3] {
+    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 4] {
+        self.observation.request_shutdown();
         let projection = lock(&self.collection_projection)
             .take()
             .and_then(crate::collection_projection::CollectionProjectionWorker::begin_shutdown);
@@ -173,7 +177,12 @@ impl OpenWorkspace {
         let recovery = lock(&self.automation_recovery)
             .take()
             .and_then(automation_recovery::AutomationRecovery::begin_shutdown);
-        [capture, recovery, projection]
+        [
+            capture,
+            recovery,
+            projection,
+            self.observation.begin_shutdown(),
+        ]
     }
 
     /// Cancel and await capture and automation recovery (idempotent).
@@ -203,6 +212,9 @@ impl Drop for EngineService {
             return;
         }
 
+        for (_, workspace) in &open {
+            workspace.observation.close_synchronously();
+        }
         let sessions = Arc::clone(&self.sessions);
         let self_writes = self.self_writes.clone();
         let supervisor = self.supervisor;
@@ -268,6 +280,7 @@ impl EngineServiceCleanup {
     fn close_synchronously(self) {
         for (handle, workspace) in self.open {
             lock(&self.sessions).retain(|_, session| session.workspace != handle);
+            workspace.observation.close_synchronously();
             let _ = workspace.begin_capture_shutdown();
             let _ = self.supervisor.close(&workspace.db_path);
             self.self_writes
@@ -284,29 +297,39 @@ impl EngineServiceCleanup {
 struct OpenGuard {
     supervisor: &'static WorkspaceSupervisor,
     db_path: Option<PathBuf>,
+    observation: Option<Arc<crate::file_observation::FileObservation>>,
     _open_serial: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl OpenGuard {
     fn disarm(mut self) {
         self.db_path = None;
+        self.observation = None;
     }
 }
 
 impl Drop for OpenGuard {
     fn drop(&mut self) {
-        let Some(db_path) = self.db_path.take() else {
+        let observation = self.observation.take();
+        if let Some(observation) = &observation {
+            observation.request_shutdown();
+        }
+        let db_path = self.db_path.take();
+        if db_path.is_none() && observation.is_none() {
             return;
-        };
+        }
         let supervisor = self.supervisor;
-        let Ok(Some(closing)) = supervisor.begin_close(&db_path) else {
-            return;
-        };
+        let closing = db_path.and_then(|path| supervisor.begin_close(&path).ok().flatten());
         // Detached + blocking: never run the actor join on a runtime worker
         // (the cancellation-safety contract). begin_close installed the
         // Closing marker synchronously, so an immediate reopen waits here.
         tokio::task::spawn_blocking(move || {
-            let _ = closing.finish();
+            if let Some(observation) = observation {
+                observation.close_synchronously();
+            }
+            if let Some(closing) = closing {
+                let _ = closing.finish();
+            }
         });
     }
 }
@@ -752,6 +775,7 @@ impl EngineService {
             // also retains open serialization until cleanup installs Closing.
             let open_guard = OpenGuard {
                 supervisor,
+                observation: None,
                 db_path: opened
                     .as_ref()
                     .ok()
@@ -892,6 +916,25 @@ impl EngineService {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
         let capture_apply_gate = Arc::new(tokio::sync::Mutex::new(()));
+        let mut open_guard = open_guard;
+        let observation = crate::file_observation::FileObservation::new(
+            self.events.clone(),
+            params.workspace_id.clone(),
+        );
+        open_guard.observation = Some(Arc::clone(&observation));
+        let observation_root = root.clone();
+        #[cfg(test)]
+        let observation_root = self
+            .capture_apply_probe
+            .as_ref()
+            .and_then(|probe| probe.observation_root.clone())
+            .unwrap_or(observation_root);
+        observation.start(observation_root).map_err(|_| {
+            WireError::new(
+                ErrorCode::WorkspaceUnavailable,
+                "file-observation-unavailable",
+            )
+        })?;
         let capture = if requested_mode == WorkspaceOpenMode::ReadOnly {
             None
         } else {
@@ -926,6 +969,7 @@ impl EngineService {
             let capture = capture_enabled.then(|| {
                 capture_driver::CaptureDriver::spawn(capture_driver::CaptureDriverSpawnParams {
                     root: root.clone(),
+                    observation: Arc::clone(&observation),
                     actor: actor.clone(),
                     workspace_id: params.workspace_id.clone(),
                     leases: self.leases.scoped(&root),
@@ -1040,6 +1084,7 @@ impl EngineService {
                     .map(|configuration| configuration.configuration()),
                 capture_enabled: requested_mode == WorkspaceOpenMode::Full && capture_enabled,
                 capture: Arc::new(Mutex::new(capture)),
+                observation,
                 reconciles_collections: params.reconcile_collections,
                 projects_collections: params.project_collections,
                 collection_projection: Arc::new(Mutex::new(collection_projection)),
@@ -1648,13 +1693,13 @@ mod tests {
             );
 
             // The synchronous cleanup fallback has no Tokio runtime. Taking
-            // both tasks must cancel them there without spawning a join task.
+            // background tasks must cancel through their captured runtime handle.
             let tasks = std::thread::spawn(move || open.begin_capture_shutdown())
                 .join()
                 .expect("background cancellation needs no runtime");
             assert_eq!(
                 tasks.iter().flatten().count(),
-                usize::from(capture_enabled) + usize::from(seed_claim && !read_only),
+                usize::from(capture_enabled) + usize::from(seed_claim && !read_only) + 1,
             );
             for task in tasks.into_iter().flatten() {
                 task.await
@@ -1728,6 +1773,45 @@ mod tests {
                 .await
                 .expect("close workspace after drain");
         }
+    }
+
+    #[tokio::test]
+    async fn workspace_opens_degraded_when_observation_cannot_start() {
+        let scratch = ScratchDir::new().unwrap();
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let mut service = EngineService::with_supervisor(supervisor);
+        // Exercise real watcher startup and read_dir failures without host ACLs.
+        let unreadable_root = scratch.path().join("not-a-directory");
+        std::fs::write(&unreadable_root, "observation cannot walk this root").unwrap();
+        service.capture_apply_probe = Some(
+            capture_driver::CaptureApplyProbe::with_observation_root(unreadable_root),
+        );
+        let mut ctx = RequestContext::unbounded();
+        let deadline = Duration::from_secs(60);
+        ctx.deadline = Some(std::time::Instant::now() + deadline);
+        let opened = tokio::time::timeout(
+            deadline,
+            service.workspace_open(
+                &ctx,
+                json!({"rootDir": scratch.path(), "workspaceId": "unavailable-observation"}),
+            ),
+        )
+        .await
+        .expect("observation must never stall workspace.open")
+        .unwrap();
+        let handle = serde_json::from_value(opened["workspace"].clone()).unwrap();
+        let workspace = service.open(Some(&handle)).unwrap();
+        let status = lock(&workspace.capture)
+            .as_ref()
+            .unwrap()
+            .status()
+            .snapshot();
+        assert!(status.degraded && !status.running && !status.terminal);
+        assert!(!workspace.observation.changes_since(None).ready);
+        assert!(workspace.capture_apply_gate.try_lock().is_ok());
+        service.workspace_close(Some(handle)).await.unwrap();
+        assert_eq!(supervisor.actor_count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
