@@ -3066,6 +3066,14 @@ pub(crate) fn run_migrations(
 }
 
 pub(crate) fn refuse_declared_v1_evidence(conn: &Connection) -> Result<(), StorageError> {
+    let has_ledger: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='engine_migrations')", [], |row| row.get(0),
+    ).map_err(StorageError::migration)?;
+    if has_ledger && conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM engine_migrations WHERE id='v2-live-admitted-metadata-receipts' AND completed_at IS NOT NULL)", [], |row| row.get::<_, bool>(0),
+    ).map_err(StorageError::migration)? {
+        return Ok(());
+    }
     let has_columns: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM pragma_table_info('live_device_update_applications') WHERE name='declared_agent_id')", [], |row| row.get(0),
     ).map_err(StorageError::migration)?;
@@ -3078,7 +3086,41 @@ pub(crate) fn refuse_declared_v1_evidence(conn: &Connection) -> Result<(), Stora
     let declared_history = has_history && conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM live_accepted_updates WHERE json_type(metadata_json, '$.accepted.agentDeclaration') IS NOT NULL)", [], |row| row.get::<_, bool>(0),
     ).map_err(StorageError::migration)?;
-    if declared_application || declared_history {
+    let has_chunks: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='live_audit_record_chunks')", [], |row| row.get(0),
+    ).map_err(StorageError::migration)?;
+    let mut declared_audit = false;
+    if has_chunks {
+        let mut statement = conn.prepare("SELECT substr(b.bytes,1,270336) FROM live_audit_record_chunks c JOIN binary_blobs b ON b.sha256=c.chunk_sha256 WHERE c.ordinal=0")
+            .map_err(StorageError::migration)?;
+        let prefixes = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .map_err(StorageError::migration)?;
+        for prefix in prefixes {
+            let prefix = prefix.map_err(StorageError::migration)?;
+            let marker = b",\"metadata\":{\"accepted\":";
+            let Some(start) = prefix
+                .windows(marker.len())
+                .position(|bytes| bytes == marker)
+            else {
+                continue;
+            };
+            let accepted = &prefix[start + marker.len()..];
+            let Some(end) = accepted
+                .windows(b",\"firstSeen\":".len())
+                .position(|bytes| bytes == b",\"firstSeen\":")
+            else {
+                continue;
+            };
+            declared_audit |= accepted[..end]
+                .windows(b",\"agentDeclaration\":".len())
+                .any(|bytes| bytes == b",\"agentDeclaration\":");
+            if declared_audit {
+                break;
+            }
+        }
+    }
+    if declared_application || declared_history || declared_audit {
         return Err(StorageError::MigrationFailed { source: Some(
             "Migration 29 cannot open a store with declared v1 accepted evidence. Its data is unchanged. For a development reset, delete <workspace>/.dohc/engine.".into(),
         ) });
@@ -3521,6 +3563,82 @@ mod tests {
                 .unwrap(),
             original
         );
+    }
+
+    #[test]
+    fn migration_29_refuses_replicated_or_conflicting_declared_v1_evidence() {
+        for conflict in [false, true] {
+            let dir = tempdir();
+            let path = dir.join("engine.db");
+            let mut conn = open_bare(&path);
+            let ctx = MigrationContext::current(1_000);
+            let before = migration_index("v2-live-admitted-metadata-receipts");
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+            let (metadata, evidence) = migration_29_history_fixture(&conn);
+            let declaration = ",\"agentDeclaration\":{\"agentId\":\"trip-agent\",\"onBehalfOf\":null,\"depth\":0}";
+            let head = metadata.strip_suffix("},\"firstSeen\":[]}").unwrap();
+            let record = format!(
+                "{{\"kind\":\"application\",\"metadata\":{head}{declaration}}},\"firstSeen\":[]}}}}"
+            );
+            serde_json::from_str::<serde_json::Value>(&record).unwrap();
+            let chunk = crate::blob::put_binary_blob(&conn, record.as_bytes()).unwrap();
+            let update: String = conn
+                .query_row(
+                    "SELECT update_sha256 FROM live_accepted_updates",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            conn.execute(
+                "INSERT INTO live_audit_record_manifests VALUES (?1,'{}',?2)",
+                rusqlite::params![chunk, update],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO live_audit_record_chunks VALUES (?1,0,?1)",
+                [&chunk],
+            )
+            .unwrap();
+            if conflict {
+                conn.execute(
+                    "INSERT INTO live_audit_event_conflicts VALUES ('workspace','peer',0,?1)",
+                    [&chunk],
+                )
+                .unwrap();
+            } else {
+                conn.execute("INSERT INTO live_audit_events VALUES ('relay','workspace','main','object','lineage',1,?1,?2,1,'delivery',1,NULL,NULL)", rusqlite::params![chunk,evidence]).unwrap();
+            }
+            conn.execute("DELETE FROM live_device_update_applications", [])
+                .unwrap();
+            conn.execute("DELETE FROM live_accepted_updates", [])
+                .unwrap();
+            let err = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap_err();
+            assert!(
+                std::error::Error::source(&err)
+                    .unwrap()
+                    .to_string()
+                    .contains("declared v1 accepted evidence")
+            );
+            assert_eq!(
+                crate::blob::get_binary_blob(&conn, &chunk)
+                    .unwrap()
+                    .unwrap(),
+                record.as_bytes()
+            );
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM engine_migrations WHERE ordinal=29",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+                0
+            );
+            drop(conn);
+            let image = std::fs::read(&path).unwrap();
+            assert!(crate::EngineStore::open(&path, 2_000).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), image);
+        }
     }
 
     #[test]
