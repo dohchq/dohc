@@ -11,7 +11,7 @@ import { Client, Pool } from "pg";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
+import { createLiveValidationExecutor } from "../../sync-relay/src/liveValidation.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import { createEngineClient } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
 import { serveFetchHandler } from "@dohc/service-http";
@@ -94,7 +94,7 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
     sync: { policy: { maxClientVectorBytes: 100000, maxHostVectorBytes: 100000, maxOutputBytes: 1000000, maxReadBytes: 4000000 }, workingReserveBytes: 4000000 },
     ingress: { aggregateBytes: 512 * 1024 * 1024, applicationWorkingReserveBytes: 8 * 1024 * 1024, maxUploads: 4, uploadDeadlineMs: 30000 },
     client: { aggregateBytes: 200000000, maxUploads: 4, connectTimeoutMs: 30000, requestDeadlineMs: 30000 } }));
-  const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(16), validate = createLiveMarkdownJournalValidator(validationPolicy);
+  const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(16);
   let released!: () => void;
   const noListeners = new Promise<void>(resolve => { released = resolve; });
   const frameChanges = { ...sharedChanges, subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
@@ -110,6 +110,9 @@ it("edits through real Chromium invitations, BetterAuth and the native daemon ov
   let hostile: Awaited<ReturnType<typeof prepareHostileRestoreProof>> | undefined;
   let quarantine: Awaited<ReturnType<typeof createNamedBrowserQuarantineProof>> | undefined;
   try {
+    const validationExecutor = createLiveValidationExecutor();
+    closes.push(() => validationExecutor.close());
+    const validate = validationExecutor.validator(validationPolicy);
     const authHttp = serveFetchHandler({ handler: request => auth.handler(request), maxBodyBytes: () => 8192,
       oversized: () => new Response(null, { status: 404 }), failure: () => new Response(null, { status: 500 }) });
     authHttp.listen(0, "127.0.0.1"); await once(authHttp, "listening");

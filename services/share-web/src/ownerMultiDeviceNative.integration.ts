@@ -9,7 +9,7 @@ import { Client, Pool } from "pg";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
+import { createLiveValidationExecutor } from "../../sync-relay/src/liveValidation.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import { createEngineClient, EngineRequestError } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
 import { serveFetchHandler } from "@dohc/service-http";
@@ -83,13 +83,16 @@ it("preserves and delivers owner drafts across two real native replicas and auth
     sync: { policy: { maxClientVectorBytes: 100000, maxHostVectorBytes: 100000, maxOutputBytes: 1000000, maxReadBytes: 4000000 }, workingReserveBytes: 4000000 },
     ingress: { aggregateBytes: 512 * 1024 * 1024, applicationWorkingReserveBytes: 8 * 1024 * 1024, maxUploads: 4, uploadDeadlineMs: 30000 },
     client: { aggregateBytes: 200000000, maxUploads: 4, connectTimeoutMs: 30000, requestDeadlineMs: 30000 } }));
-  const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(16), validate = createLiveMarkdownJournalValidator(validationPolicy);
+  const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(16);
   const frameChanges = sharedChanges;
   let active: Awaited<ReturnType<typeof startServiceLiveHost>> | undefined;
   const closes: (() => Promise<void>)[] = [], upgrades: Promise<void>[] = [];
   const ownerClients = new Set<Awaited<ReturnType<typeof createEngineClient>>>();
   const results: Record<string, unknown> = {};
   try {
+    const validationExecutor = createLiveValidationExecutor();
+    closes.push(() => validationExecutor.close());
+    const validate = validationExecutor.validator(validationPolicy);
     const { storage } = deployment;
     expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: ownerUser.id, createdAtMs: 1 })).toBe("created");
     expect(storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard: storage.captureStanding() }).ok).toBe(true);

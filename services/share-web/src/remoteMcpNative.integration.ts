@@ -8,7 +8,7 @@ import {Client, StreamableHTTPClientTransport} from "@modelcontextprotocol/clien
 import {expect, it} from "vitest";
 import * as Y from "yjs";
 import {markdownToYDoc} from "@dohc/ydoc-projection";
-import {createLiveMarkdownJournalValidator} from "@dohc/ydoc-projection/live-journal-validation";
+import {createLiveValidationExecutor} from "../../sync-relay/src/liveValidation.js";
 import {createLiveMarkdownRegistrationValidator} from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import {createEngineClient} from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
 import {serveFetchHandler} from "@dohc/service-http";
@@ -64,6 +64,9 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
   let active: Awaited<ReturnType<typeof startServiceLiveHost>> | undefined;
   let acknowledgement: unknown;
   try {
+    const validationExecutor = createLiveValidationExecutor();
+    closes.push(() => validationExecutor.close());
+    const validate = validationExecutor.validator(validationPolicy);
     const {storage} = deployment;
     expect(storage.claimWorkspace({workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1})).toBe("created");
     expect(storage.provisionLiveHostControl({mode: "service", hostId: "service", updatedAtMs: 1, guard: storage.captureStanding()}).ok).toBe(true);
@@ -97,7 +100,7 @@ it("uses shared links over MCP with native durable edits, View restrictions, rev
     const tickets = createLiveTickets({storage, audience, key: ticketKey, hostReports: createLiveHostReports({storage, captureNative})});
     routes = createNamedLiveRoutes({kind: "link", storage, hosts, publicOrigin: audience, exchangeKey, frames, limits: routeLimits,
       bounds: {maxClientVectorBytes: 100000, maxSyncOutputBytes: 1000000, maxAppliedUpdateBytes: 1000000, maxSubmissionBytes: 1000000, maxAdmissionBytes: 4000000},
-      validate: createLiveMarkdownJournalValidator(validationPolicy), sessions: createLinkLiveBrowserResolver({storage, linkKey}), tickets, captureNative});
+      validate, sessions: createLinkLiveBrowserResolver({storage, linkKey}), tickets, captureNative});
     linkHttp = createLinkLiveHttp({storage, linkKey, hosts, publicOrigin: audience, exchangeKey, limits: routeLimits});
     closes.push(async () => routes.close());
     relayHttp.on("upgrade", (request, socket, head) => {upgrades.push(routes.handleUpgrade(request, socket, head));});
