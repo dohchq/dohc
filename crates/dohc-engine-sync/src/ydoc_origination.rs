@@ -64,11 +64,12 @@ pub(crate) fn current_sharing_declines_in_tx(
     let mut statement = tx
         .prepare(
             "SELECT d.object_id,d.version_id,s.path,d.sharing_declined_json,
-                d.head_update_seq=0 AND d.head_snapshot_seq=0
+                d.head_update_seq=0 AND d.head_snapshot_seq=0,s.blob_sha256
          FROM ydoc_docs d JOIN snapshots s USING(workspace_id,version_id,object_id)
          WHERE d.workspace_id=?1 AND d.lineage_claim_status='unclaimed'
            AND d.sharing_declined_json IS NOT NULL AND s.content_kind='text'
-           AND s.blob_sha256=json_extract(d.sharing_declined_json,'$.head_sha256')
+           AND (d.file_export_lane!=0
+             OR s.blob_sha256=json_extract(d.sharing_declined_json,'$.head_sha256'))
          ORDER BY d.version_id,d.object_id",
         )
         .map_err(SyncError::corrupt)?;
@@ -80,12 +81,13 @@ pub(crate) fn current_sharing_declines_in_tx(
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, bool>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })
         .map_err(SyncError::corrupt)?;
     let mut declines = Vec::new();
     for row in rows {
-        let (object_id, version_id, path, json, lineage_pruned) =
+        let (object_id, version_id, path, json, lineage_pruned, head_sha256) =
             row.map_err(SyncError::corrupt)?;
         // Resolve and admit today's path before disclosing a stored fact.
         if dohc_engine_domain::validate_plaintext_storable_path(&path).is_err() {
@@ -105,7 +107,7 @@ pub(crate) fn current_sharing_declines_in_tx(
             version_id,
             path,
             lineage_pruned,
-            head_blob_sha256: Some(stored.head_sha256),
+            head_blob_sha256: Some(head_sha256),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: stored.limit_bytes,
             observed_bytes: stored.observed_bytes,

@@ -2746,6 +2746,22 @@ END;
 const V2_YDOC_FILE_EXPORT_LANE_DDL: &str = "
 ALTER TABLE ydoc_docs ADD COLUMN file_export_lane INTEGER NOT NULL DEFAULT 0 CHECK (file_export_lane IN (0,1,2));
 UPDATE ydoc_docs SET file_export_lane=1 WHERE lineage_claim_status='unclaimed' AND sharing_declined_json IS NOT NULL;
+DROP TRIGGER ydoc_sharing_declined_head;
+CREATE TRIGGER ydoc_sharing_declined_head AFTER UPDATE ON snapshots
+WHEN NEW.blob_sha256 IS NOT OLD.blob_sha256
+    OR (NEW.latest_moment_id IS NOT OLD.latest_moment_id AND NEW.metadata_origin='restore')
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id
+        AND file_export_lane=0 AND sharing_declined_json IS NOT NULL;
+END;
+DROP TRIGGER ydoc_sharing_declined_restore;
+CREATE TRIGGER ydoc_sharing_declined_restore AFTER INSERT ON live_restore_fences
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id
+        AND file_export_lane=0 AND sharing_declined_json IS NOT NULL;
+END;
 CREATE TRIGGER ydoc_file_export_claimed AFTER UPDATE OF lineage_claim_status ON ydoc_docs
 WHEN NEW.lineage_claim_status != 'unclaimed' AND NEW.file_export_lane != 0
 BEGIN
@@ -4694,6 +4710,23 @@ mod tests {
         conn.execute("UPDATE snapshots SET latest_moment_id='b'", [])
             .unwrap();
         assert_eq!(flag(&conn), 1);
+        let next_sha = "b".repeat(64);
+        conn.execute("INSERT INTO blobs VALUES (?1,1,'b')", [&next_sha])
+            .unwrap();
+        conn.execute(
+            "UPDATE snapshots SET blob_sha256=?1,metadata_origin='restore'",
+            [&next_sha],
+        )
+        .unwrap();
+        assert_eq!(flag(&conn), 1);
+        assert!(
+            conn.query_row(
+                "SELECT sharing_declined_json IS NOT NULL FROM ydoc_docs",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
         let claim = crate::hex_sha256(b"");
         conn.execute("INSERT INTO binary_blobs VALUES (?1,0,X'')", [&claim])
             .unwrap();

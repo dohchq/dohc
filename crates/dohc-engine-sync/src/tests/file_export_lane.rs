@@ -324,6 +324,142 @@ fn lane_removed_export_is_never_the_next_public_preimage() {
     );
 }
 
+fn import_peer_edit(source: &mut EngineStore, peer: &mut EngineStore) {
+    seed_replication_version(peer, "main", "main");
+    adopt_join_identity(peer, "ws", "recipient", "epoch-1", "stream-1", 1, &NoFaults).unwrap();
+    hydrate(source, peer);
+    apply(peer, &exports(source)[0]);
+    write(
+        peer,
+        "doc",
+        "peer-edit",
+        "doc.md",
+        "peer version",
+        "api",
+        20,
+    );
+    peer.write_with(&NoFaults, |tx| {
+        journal_moment_append_in_tx(tx, "ws", "peer-edit")
+    })
+    .unwrap();
+    hydrate(peer, source);
+    apply(source, &exports(peer)[0]);
+}
+
+#[test]
+fn lane_export_after_an_applied_peer_edit_uses_its_preimage_without_conflict() {
+    let (_scratch, _, mut source) = owner();
+    write(&mut source, "doc", "a", "doc.md", "A", "ydoc", 10);
+    lane(&mut source, "doc");
+    drain(&mut source);
+    let (_peer_scratch, _, mut peer) = open_store();
+    import_peer_edit(&mut source, &mut peer);
+    // A later log row can name an older local moment. Order by the moment,
+    // rather than arrival or recovery's insertion order.
+    let first = exports(&source)[0].payload.to_string();
+    source.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','another-peer',0,'moment.append',?1,30,1)", [&first]).map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    write(
+        &mut source,
+        "doc",
+        "c",
+        "doc.md",
+        "owner version",
+        "ydoc",
+        40,
+    );
+    drain(&mut source);
+    let selected = exports(&source);
+    assert_eq!(selected.len(), 2);
+    assert_eq!(selected[1].payload["beforeLatestMomentId"], "peer-edit");
+    hydrate(&source, &mut peer);
+    apply(&mut peer, &selected[1]);
+    assert_eq!(count(&peer, "conflicts"), 0);
+    assert_eq!(count(&peer, "moments"), 3);
+}
+
+#[test]
+fn lane_reseed_from_an_applied_import_claims_without_echoing_the_head() {
+    let (_scratch, _, mut source) = owner();
+    write(&mut source, "doc", "a", "doc.md", "A", "ydoc", 10);
+    lane(&mut source, "doc");
+    drain(&mut source);
+    let (_peer_scratch, _, mut peer) = open_store();
+    import_peer_edit(&mut source, &mut peer);
+    let key = DocKey::new("ws", "main", "doc").unwrap();
+    fresh_seed(&mut source, &key, "peer version");
+    source
+        .write_with(&NoFaults, |tx| {
+            assert!(matches!(
+                originate_ydoc_base_in_tx(tx, &key, "doc.md", None, None, 50)?,
+                BaseOrigination::Originated { .. }
+            ));
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    assert_eq!(
+        exports(&source).len(),
+        1,
+        "an applied import is already exported"
+    );
+    assert!(
+        !dohc_engine_collab::read_marker(&source, &key)
+            .unwrap()
+            .unwrap()
+            .file_export_lane
+            .is_enabled()
+    );
+    let ops = list_replication_ops(&source, "ws", "local", -1, 20).unwrap();
+    assert_eq!(
+        ops.iter().filter(|op| op.op_kind == "ydoc.update").count(),
+        1
+    );
+}
+
+#[test]
+fn ordinary_trimmed_lineage_backfills_after_a_published_ydoc_moment() {
+    let (_scratch, _, mut source) = owner();
+    write(&mut source, "doc", "a", "doc.md", "A", "ydoc", 10);
+    source
+        .write_with(&NoFaults, |tx| journal_moment_append_in_tx(tx, "ws", "a"))
+        .unwrap();
+    lane(&mut source, "doc");
+    source
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET file_export_lane=0", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    write(&mut source, "doc", "b", "doc.md", "B", "ydoc", 20);
+    source
+        .write_with(&NoFaults, |tx| {
+            crate::enrolment::backfill_enrolment_window_in_tx(tx, "ws", &NoLiveLeases, 30)
+        })
+        .unwrap();
+    assert_eq!(exports(&source).len(), 2);
+}
+
+#[test]
+fn lane_refused_import_is_never_a_public_preimage() {
+    let (_scratch, _, mut source) = owner();
+    write(&mut source, "doc", "a", "doc.md", "A", "ydoc", 10);
+    lane(&mut source, "doc");
+    drain(&mut source);
+    write(&mut source, "doc", "b", "doc.md", "B", "ydoc", 20);
+    source.write_with(&NoFaults, |tx| {
+        let (payload, _) = crate::outbound::moment_append_payload_in_tx(tx, "ws", "b")?;
+        tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','refused-peer',0,'moment.append',?1,20,1)", [payload.to_string()]).map_err(SyncError::persist)?;
+        tx.execute("INSERT INTO replication_pending_refusals(workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) VALUES ('ws','refused-peer',0,'moment.append','invalid-input','refused')", []).map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    write(&mut source, "doc", "c", "doc.md", "C", "ydoc", 30);
+    drain(&mut source);
+    assert_eq!(exports(&source)[1].payload["beforeLatestMomentId"], "a");
+}
+
 #[test]
 fn lane_journal_transaction_survives_crash_and_offline_restart() {
     for point in [
@@ -1109,7 +1245,16 @@ fn lane_open_recipient_retains_pending_pull_across_restart_and_local_edits_survi
 #[test]
 fn lane_export_lookup_uses_the_existing_object_index() {
     let (_scratch, _, source) = owner();
-    let plan:Vec<String>=source.read_with(|c|c.prepare("EXPLAIN QUERY PLAN SELECT payload_json FROM replication_log WHERE workspace_id=?1 AND op_kind='moment.append' AND imported=0 AND json_extract(payload_json,'$.versionId')=+?2 AND json_extract(payload_json,'$.objectId')=+?3 ORDER BY rowid DESC LIMIT 1")?.query_map(params!["ws","main","doc"],|r|r.get(3))?.collect::<Result<_,_>>()).unwrap();
+    let plan: Vec<String> = source
+        .read_with(|c| {
+            c.prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                crate::enrolment::LAST_FILE_EXPORT_SQL
+            ))?
+            .query_map(params!["ws", "main", "doc"], |r| r.get(3))?
+            .collect::<Result<_, _>>()
+        })
+        .unwrap();
     assert!(
         plan.iter()
             .any(|line| line.contains("replication_log_moment_object")
@@ -1118,8 +1263,8 @@ fn lane_export_lookup_uses_the_existing_object_index() {
     );
 }
 #[test]
-fn lane_drain_and_promotion_keep_import_deferred_and_owner_binding_exclusions() {
-    for blocker in ["import", "deferred", "owner", "audit"] {
+fn lane_drain_and_promotion_keep_deferred_and_owner_binding_exclusions() {
+    for blocker in ["deferred", "owner", "audit"] {
         let (_scratch, _, mut source) = owner();
         write(&mut source, "doc", "a", "doc.md", "A", "ydoc", 10);
         lane(&mut source, "doc");
@@ -1128,7 +1273,6 @@ fn lane_drain_and_promotion_keep_import_deferred_and_owner_binding_exclusions() 
         let binary = source.put_binary_blob(b"binding").unwrap();
         source.write_with(&NoFaults,|tx| {
             match blocker {
-                "import"=>{let (payload,_) = crate::outbound::moment_append_payload_in_tx(tx,"ws","a")?;tx.execute("INSERT INTO replication_log(workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) VALUES ('ws','peer',0,'moment.append',?1,20,1)",[payload.to_string()]).map_err(SyncError::persist)?;}
                 "deferred"=>{tx.execute("INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) VALUES ('ws','main','doc','peer',0,20)",[]).map_err(SyncError::persist)?;}
                 "owner"=>{tx.execute("INSERT INTO ydoc_owner_bindings VALUES ('ws','main','doc',?1,'{}','relay',1,0,0,?1,1024,1000)",[&binary]).map_err(SyncError::persist)?;}
                 "audit"=>{tx.execute("INSERT INTO live_device_application_bindings VALUES ('relay','ws','main','doc','claim','doc.md','[]',0,'host',1,'instance','connection',1)",[]).map_err(SyncError::persist)?;}

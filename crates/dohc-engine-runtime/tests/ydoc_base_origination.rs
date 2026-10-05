@@ -3959,8 +3959,8 @@ async fn oversized_declined_editor_settlements_export_only_latest_after_enrolmen
     assert_eq!(claim_status, "unclaimed");
     assert_eq!(head_seq, 0);
     assert!(
-        refusal.is_none(),
-        "settlement clears the old head-specific Notice fact without retrying origination"
+        refusal.is_some(),
+        "settlement preserves the lane's decline without retrying origination"
     );
     for settled in &settlements {
         let (origin, sha): (String, String) = store
@@ -3984,7 +3984,9 @@ async fn oversized_declined_editor_settlements_export_only_latest_after_enrolmen
                 dohc_engine_storage::TxnOutcome::Committed(declines) => declines,
                 other => panic!("{other:?}"),
             };
-        assert!(declines.is_empty());
+        assert_eq!(declines.len(), 1);
+        assert_eq!(declines[0].object_id, object);
+        assert_eq!(declines[0].head_blob_sha256, expected_head);
         dohc_engine_sync::RelaySyncClient::new(AcceptPushTransport)
             .push_workspace(&mut store, WS, &NoFaults, &NoLiveLeases, now, 0)
             .expect("push the latest selected editor version");

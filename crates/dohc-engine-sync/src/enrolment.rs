@@ -202,7 +202,6 @@ fn backfill_moments_and_conflict_bundles(
     workspace_id: &str,
 ) -> Result<(), SyncError> {
     let bundles = crate::conflict_outbox::pending_conflict_bundle_cuts_in_tx(tx, workspace_id)?;
-    let mut file_budget = FileExportBudget::default();
     let mut after_moment_order = -1;
     for bundle in bundles {
         backfill_moments_between(
@@ -210,8 +209,6 @@ fn backfill_moments_and_conflict_bundles(
             workspace_id,
             after_moment_order,
             Some(bundle.pre_effect_moment_order),
-            false,
-            &mut file_budget,
         )?;
         crate::conflict_outbox::journal_pending_conflict_bundle_in_tx(
             tx,
@@ -220,19 +217,39 @@ fn backfill_moments_and_conflict_bundles(
         )?;
         after_moment_order = bundle.pre_effect_moment_order;
     }
-    backfill_moments_between(
-        tx,
-        workspace_id,
-        after_moment_order,
-        None,
-        false,
-        &mut file_budget,
-    )
+    backfill_moments_between(tx, workspace_id, after_moment_order, None)
 }
 
 // Unary + removes the correlated keys' TEXT affinity, allowing SQLite to
 // use all columns of the JSON expression indexes.
-const COVERED_HEADS_SQL: &str = "SELECT s.latest_moment_id,s.version_id,s.object_id,s.blob_sha256,d.content_kind, \
+macro_rules! head_export_exclusions_sql {
+    () => {
+        "                     AND NOT EXISTS (SELECT 1 FROM live_device_application_bindings b \
+                       WHERE b.workspace_id=s.workspace_id AND b.main_version_id=s.version_id \
+                         AND b.object_id=s.object_id) \
+                     AND NOT EXISTS (SELECT 1 FROM ydoc_owner_bindings b \
+                       WHERE b.workspace_id=s.workspace_id AND b.main_version_id=s.version_id \
+                         AND b.object_id=s.object_id) \
+                     AND NOT EXISTS (SELECT 1 FROM conflicts c \
+                       WHERE c.workspace_id=s.workspace_id AND c.status='open' \
+                         AND (c.target_version_id=s.version_id OR c.source_version_id=s.version_id) \
+                         AND (c.path=s.path OR s.object_id IN \
+                           (c.base_object_id,c.current_object_id,c.incoming_object_id))) \
+                     AND COALESCE((SELECT j.status='conflict' AND j.content_sha256=s.blob_sha256 \
+                       FROM materialization_jobs j \
+                       WHERE j.workspace_id IN (?1,'') AND j.target_path=s.path \
+                       ORDER BY j.created_at_ms DESC,j.rowid DESC LIMIT 1),0)=0 \
+                     AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
+                       WHERE p.workspace_id=?1 AND p.moment_id=s.latest_moment_id) \
+                     AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates u \
+                       WHERE u.workspace_id=s.workspace_id AND u.version_id=s.version_id \
+                         AND u.object_id=s.object_id) \
+"
+    };
+}
+
+const COVERED_HEADS_SQL: &str = concat!(
+    "SELECT s.latest_moment_id,s.version_id,s.object_id,s.blob_sha256,d.content_kind, \
                      d.head_update_seq,d.head_snapshot_seq FROM snapshots s JOIN ydoc_docs d \
                      ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id \
                        AND d.object_id=s.object_id \
@@ -260,27 +277,12 @@ const COVERED_HEADS_SQL: &str = "SELECT s.latest_moment_id,s.version_id,s.object
                        AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots b \
                          WHERE b.workspace_id=d.workspace_id AND b.version_id=d.version_id \
                            AND b.object_id=d.object_id AND b.up_to_seq NOT IN (0,1)))) \
-                     AND NOT EXISTS (SELECT 1 FROM live_device_application_bindings b \
-                       WHERE b.workspace_id=d.workspace_id AND b.main_version_id=d.version_id \
-                         AND b.object_id=d.object_id) \
-                     AND NOT EXISTS (SELECT 1 FROM ydoc_owner_bindings b \
-                       WHERE b.workspace_id=d.workspace_id AND b.main_version_id=d.version_id \
-                         AND b.object_id=d.object_id) \
-                     AND NOT EXISTS (SELECT 1 FROM conflicts c \
-                       WHERE c.workspace_id=d.workspace_id AND c.status='open' \
-                         AND (c.target_version_id=d.version_id OR c.source_version_id=d.version_id) \
-                         AND (c.path=s.path OR d.object_id IN \
-                           (c.base_object_id,c.current_object_id,c.incoming_object_id))) \
-                     AND COALESCE((SELECT j.status='conflict' AND j.content_sha256=s.blob_sha256 \
-                       FROM materialization_jobs j \
-                       WHERE j.workspace_id IN (?1,'') AND j.target_path=s.path \
-                       ORDER BY j.created_at_ms DESC,j.rowid DESC LIMIT 1),0)=0 \
-                     AND NOT EXISTS (SELECT 1 FROM replication_log r \
+",
+    head_export_exclusions_sql!(),
+    "                     AND NOT EXISTS (SELECT 1 FROM replication_log r \
                        WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
                          AND json_extract(r.payload_json,'$.versionId')=+s.version_id \
                          AND json_extract(r.payload_json,'$.objectId')=+s.object_id) \
-                     AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
-                       WHERE p.workspace_id=?1 AND p.moment_id=s.latest_moment_id) \
                      AND NOT EXISTS (SELECT 1 FROM replication_log r \
                        WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
                          AND json_extract(r.payload_json,'$.momentId')=+s.latest_moment_id \
@@ -288,10 +290,8 @@ const COVERED_HEADS_SQL: &str = "SELECT s.latest_moment_id,s.version_id,s.object
                            SELECT 1 FROM replication_pending_refusals p \
                            WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
                              AND p.origin_seq=r.origin_seq))) \
-                     AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates u \
-                       WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id \
-                         AND u.object_id=d.object_id) \
-                     ORDER BY h.moment_order";
+                     ORDER BY h.moment_order"
+);
 
 /// Export an object's first file artifact only after this origin has journaled
 /// its base. Durable coverage and the strict peer projection must both agree
@@ -380,8 +380,6 @@ fn backfill_moments_between(
     workspace_id: &str,
     after_moment_order: i64,
     through_moment_order: Option<i64>,
-    only_file_lanes: bool,
-    file_budget: &mut FileExportBudget,
 ) -> Result<(), SyncError> {
     // `metadata_origin` alone cannot tell a locally-authored moment from an
     // imported one: `moment_apply.rs`'s `INSERT INTO moments` stores the
@@ -396,9 +394,7 @@ fn backfill_moments_between(
     // still exists while first-position backfill runs. Exclude only a matching
     // coordinate with no refusal. Retained CRDT state supersedes file history,
     // so covered heads have their own strict projection proof.
-    let moment_ids: Vec<String> = if only_file_lanes {
-        Vec::new()
-    } else {
+    let moment_ids: Vec<String> = {
         let mut statement = tx
             .prepare(
                 "SELECT m.moment_id FROM moments m \
@@ -408,10 +404,7 @@ fn backfill_moments_between(
                      WHERE p.workspace_id=m.workspace_id AND p.version_id=m.version_id \
                        AND p.object_id=m.object_id AND p.lineage_claim_status='unclaimed' \
                        AND p.head_update_seq=0 AND p.head_snapshot_seq=0 AND p.file_export_lane=0 \
-                       AND EXISTS(SELECT 1 FROM snapshots s WHERE s.workspace_id=p.workspace_id AND s.version_id=p.version_id AND s.object_id=p.object_id) \
-                       AND NOT EXISTS(SELECT 1 FROM replication_log r JOIN moments published ON published.workspace_id=r.workspace_id AND published.moment_id=json_extract(r.payload_json,'$.momentId') \
-                         WHERE r.workspace_id=p.workspace_id AND r.op_kind='moment.append' AND r.imported=0 \
-                           AND json_extract(r.payload_json,'$.versionId')=+p.version_id AND json_extract(r.payload_json,'$.objectId')=+p.object_id AND published.metadata_origin='ydoc'))) \
+                       AND EXISTS(SELECT 1 FROM snapshots s WHERE s.workspace_id=p.workspace_id AND s.version_id=p.version_id AND s.object_id=p.object_id))) \
                      AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
                        WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
                          AND d.object_id=m.object_id \
@@ -443,44 +436,8 @@ fn backfill_moments_between(
             .collect::<Result<Vec<_>, _>>()
             .map_err(SyncError::corrupt)?
     };
-    if !only_file_lanes {
-        for moment_id in moment_ids {
-            journal_moment_append_in_tx(tx, workspace_id, &moment_id)?;
-        }
-    }
-    if !only_file_lanes {
-        return Ok(());
-    }
-    let candidates: Vec<(String, String, String)> = {
-        let mut statement = tx.prepare(
-            "SELECT m.moment_id,m.version_id,m.object_id
-             FROM moments m JOIN snapshots s USING(workspace_id,version_id,object_id)
-             JOIN ydoc_docs d USING(workspace_id,version_id,object_id)
-             WHERE m.workspace_id=?1 AND d.file_export_lane!=0 AND d.lineage_claim_status='unclaimed'
-               AND s.latest_moment_id=m.moment_id AND s.content_kind='text'
-               AND m.payload_after_blob_sha256=s.blob_sha256 AND m.payload_after_path=s.path
-               AND m.moment_order>?2 AND (?3 IS NULL OR m.moment_order<=?3)
-               AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND (r.imported=0 OR NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)))
-             ORDER BY m.moment_order"
-        ).map_err(SyncError::corrupt)?;
-        statement
-            .query_map(
-                params![workspace_id, after_moment_order, through_moment_order],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .map_err(SyncError::corrupt)?
-            .collect::<Result<_, _>>()
-            .map_err(SyncError::corrupt)?
-    };
-    for (moment_id, version_id, object_id) in candidates {
-        let key = DocKey {
-            workspace_id: workspace_id.to_owned(),
-            version_id,
-            object_id,
-        };
-        if file_version_is_publishable_in_tx(tx, &key, &moment_id)? {
-            journal_file_version_in_tx(tx, &key, &moment_id, file_budget)?;
-        }
+    for moment_id in moment_ids {
+        journal_moment_append_in_tx(tx, workspace_id, &moment_id)?;
     }
     Ok(())
 }
@@ -491,18 +448,11 @@ pub(crate) fn file_version_is_publishable_in_tx(
     moment_id: &str,
 ) -> Result<bool, SyncError> {
     tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM moments m JOIN snapshots s USING(workspace_id,version_id,object_id)
-           WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.moment_id=?4
-             AND s.latest_moment_id=m.moment_id AND s.content_kind='text'
-             AND m.payload_after_blob_sha256=s.blob_sha256 AND m.payload_after_path=s.path
-               AND NOT EXISTS(SELECT 1 FROM live_device_application_bindings b WHERE b.workspace_id=m.workspace_id AND b.main_version_id=m.version_id AND b.object_id=m.object_id)
-               AND NOT EXISTS(SELECT 1 FROM ydoc_owner_bindings b WHERE b.workspace_id=m.workspace_id AND b.main_version_id=m.version_id AND b.object_id=m.object_id)
-               AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.workspace_id=m.workspace_id AND c.status='open' AND (c.target_version_id=m.version_id OR c.source_version_id=m.version_id) AND (c.path=s.path OR m.object_id IN (c.base_object_id,c.current_object_id,c.incoming_object_id)))
-               AND COALESCE((SELECT j.status='conflict' AND j.content_sha256=s.blob_sha256 FROM materialization_jobs j WHERE j.workspace_id IN (?1,'') AND j.target_path=s.path ORDER BY j.created_at_ms DESC,j.rowid DESC LIMIT 1),0)=0
-               AND NOT EXISTS(SELECT 1 FROM replication_pending_conflict_moments p WHERE p.workspace_id=m.workspace_id AND p.moment_id=m.moment_id)
-               AND NOT EXISTS(SELECT 1 FROM ydoc_deferred_updates u WHERE u.workspace_id=m.workspace_id AND u.version_id=m.version_id AND u.object_id=m.object_id)
-
-             AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND r.imported=1 AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)))",
+        concat!("SELECT EXISTS(SELECT 1 FROM moments h JOIN snapshots s USING(workspace_id,version_id,object_id)
+           WHERE h.workspace_id=?1 AND h.version_id=?2 AND h.object_id=?3 AND h.moment_id=?4
+             AND s.latest_moment_id=h.moment_id AND s.content_kind='text'
+             AND h.payload_after_blob_sha256=s.blob_sha256 AND h.payload_after_path=s.path ",
+             head_export_exclusions_sql!(), ")"),
         params![key.workspace_id,key.version_id,key.object_id,moment_id],|r|r.get(0)
     ).map_err(SyncError::corrupt)
 }
@@ -522,15 +472,49 @@ pub(crate) fn backfill_file_versions_in_tx(
             |r| r.get(0),
         )
         .map_err(SyncError::corrupt)?;
-    backfill_moments_between(
-        tx,
-        workspace_id,
-        -1,
-        Some(cut),
-        true,
-        &mut FileExportBudget::default(),
-    )
+    let mut file_budget = FileExportBudget::default();
+    let candidates: Vec<(String, String, String)> = {
+        let mut statement = tx.prepare(
+            "SELECT m.moment_id,m.version_id,m.object_id
+             FROM moments m JOIN snapshots s USING(workspace_id,version_id,object_id)
+             JOIN ydoc_docs d USING(workspace_id,version_id,object_id)
+             WHERE m.workspace_id=?1 AND d.file_export_lane!=0 AND d.lineage_claim_status='unclaimed'
+               AND s.latest_moment_id=m.moment_id AND s.content_kind='text'
+               AND m.payload_after_blob_sha256=s.blob_sha256 AND m.payload_after_path=s.path
+               AND m.moment_order<=?2
+               AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND (r.imported=0 OR NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)))
+             ORDER BY m.moment_order"
+        ).map_err(SyncError::corrupt)?;
+        statement
+            .query_map(params![workspace_id, cut], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<_, _>>()
+            .map_err(SyncError::corrupt)?
+    };
+    for (moment_id, version_id, object_id) in candidates {
+        let key = DocKey {
+            workspace_id: workspace_id.to_owned(),
+            version_id,
+            object_id,
+        };
+        if file_version_is_publishable_in_tx(tx, &key, &moment_id)? {
+            journal_file_version_in_tx(tx, &key, &moment_id, &mut file_budget)?;
+        }
+    }
+    Ok(())
 }
+
+pub(crate) const LAST_FILE_EXPORT_SQL: &str = "SELECT r.payload_json FROM replication_log r
+         JOIN moments m ON m.workspace_id=r.workspace_id
+           AND m.moment_id=json_extract(r.payload_json,'$.momentId')
+         WHERE r.workspace_id=?1 AND r.op_kind='moment.append'
+           AND json_extract(r.payload_json,'$.versionId')=+?2
+           AND json_extract(r.payload_json,'$.objectId')=+?3
+           AND (r.imported=0 OR NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
+             WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq))
+         ORDER BY m.moment_order DESC,r.rowid DESC LIMIT 1";
 
 #[derive(Default)]
 pub(crate) struct FileExportBudget {
@@ -543,10 +527,14 @@ pub(crate) fn journal_file_version_in_tx(
     moment_id: &str,
     budget: &mut FileExportBudget,
 ) -> Result<bool, SyncError> {
-    let last: Option<String> = tx.query_row(
-        "SELECT payload_json FROM replication_log WHERE workspace_id=?1 AND op_kind='moment.append' AND imported=0 AND json_extract(payload_json,'$.versionId')=+?2 AND json_extract(payload_json,'$.objectId')=+?3 ORDER BY rowid DESC LIMIT 1",
-        params![key.workspace_id,key.version_id,key.object_id], |r|r.get(0),
-    ).optional().map_err(SyncError::corrupt)?;
+    let last: Option<String> = tx
+        .query_row(
+            LAST_FILE_EXPORT_SQL,
+            params![key.workspace_id, key.version_id, key.object_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
     let (current, _) =
         crate::outbound::moment_append_payload_in_tx(tx, &key.workspace_id, moment_id)?;
     let before = if let Some(last) = last {
