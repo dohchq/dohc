@@ -701,7 +701,7 @@ export const FileInspector = memo(function FileInspector(
     );
   }
 
-  switch (fileKind.opens.view) {
+  switch (kind) {
     case "markdown":
       // MarkdownView renders the ViewHeader itself: the edit toggle and save
       // state live IN the document header (one bar, not two).
@@ -811,6 +811,7 @@ export const FileInspector = memo(function FileInspector(
       );
     case "json":
     case "text":
+    case "code":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader

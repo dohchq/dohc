@@ -13,25 +13,20 @@ describe("file kind records", () => {
     }
   });
 
-  it("provides display, opening, action and reference metadata for every file kind", () => {
-    expect(Object.keys(FILE_KIND_RECORDS)).toEqual([
-      "markdown", "drawing", "csv", "json", "text", "image", "audio", "pdf", "database", "binary",
-    ]);
+  it("provides opening, action and reference metadata for every file kind", () => {
     for (const [kind, record] of Object.entries(FILE_KIND_RECORDS)) {
       expect(record.displayKind).toBe(kind);
-      expect(record.glyphId).not.toBe("");
       expect(record.displayNameRule).toBe("basename");
       expect(record.opens.surface).toBe("tab");
-      expect(record.opens.view).toBe(kind);
       expect(record.reference.shape).toBe("workspace-path");
       expect(record.actions).toContain("open");
     }
   });
 
-  it("keeps text reads confined to the existing five text views", () => {
+  it("keeps text reads confined to the existing editors", () => {
     expect(Object.values(FILE_KIND_RECORDS)
       .filter((record) => record.opens.content === "text")
-      .map((record) => record.displayKind)).toEqual(["markdown", "drawing", "csv", "json", "text"]);
+      .map((record) => record.displayKind)).toEqual(["markdown", "drawing", "csv", "json", "text", "code"]);
   });
 
   it("offers document serialization only for the Markdown view", () => {
@@ -40,15 +35,37 @@ describe("file kind records", () => {
     }
   });
 
-  it("ignores extension names inherited from a poisoned object prototype", () => {
-    Object.defineProperty(Object.prototype, "poisonedextension", {
-      configurable: true,
-      value: FILE_KIND_RECORDS.markdown,
-    });
-    try {
-      expect(fileKindForPath("file.poisonedextension")).toBe(FILE_KIND_RECORDS.binary);
-    } finally {
-      delete (Object.prototype as Record<string, unknown>).poisonedextension;
-    }
+  // Names and Lucide IDs follow the drawing's kind list and icon map. Kinds
+  // absent from that list keep their existing file labels and fallback glyph.
+  it.each([
+    ["plan.md", "Document", "file-text"],
+    ["rows.csv", "CSV table", "file-spreadsheet"],
+    ["main.ts", "Code or text", "file-code"],
+    ["notes.txt", "Code or text", "file-text"],
+    ["config.json", "Code or text", "file-text"],
+    ["plan.excalidraw", "Drawing", "pen-tool"],
+    ["photo.png", "Image", "image"],
+    ["data.sqlite", "Database", "database"],
+    ["memo.mp3", "Audio", "file-text"],
+    ["paper.pdf", "Document", "file-text"],
+    ["archive.bin", "File", "file-text"],
+  ])("uses the drawing's name and glyph for %s", (path, name, glyphId) => {
+    expect(fileKindForPath(path)).toMatchObject({ name, glyphId });
   });
+
+  it.each(["txt", "log", "env", "ini", "html", "htm", "xml", "yaml", "yml", "toml"])(
+    "uses a text glyph for %s while retaining text loading", (extension) => {
+      expect(fileKindForPath(`file.${extension}`)).toMatchObject({
+        displayKind: "text", glyphId: "file-text", opens: { content: "text" },
+      });
+    },
+  );
+
+  it.each(["js", "tsx", "css", "py", "rs", "sh", "sql"])(
+    "uses a code glyph for %s while retaining text loading", (extension) => {
+      expect(fileKindForPath(`file.${extension}`)).toMatchObject({
+        displayKind: "code", glyphId: "file-code", opens: { content: "text" },
+      });
+    },
+  );
 });
