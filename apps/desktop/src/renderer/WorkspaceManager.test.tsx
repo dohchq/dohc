@@ -474,12 +474,14 @@ describe("workspace manager with registered workspaces", () => {
       top: 570, bottom: 594, left: 280, right: 304, width: 24, height: 24, x: 280, y: 570, toJSON: () => ({}),
     });
     vi.stubGlobal("innerHeight", 600);
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(64);
     await user.click(trigger);
     const menu = screen.getByRole("menu", { name: "More for team" });
     // Viewport-fixed, so the scrolling list's overflow cannot clip it; a
-    // row near the bottom opens its menu upward.
+    // row near the bottom opens its menu upward, 4px over the trigger.
     expect(menu.className).toContain("fixed");
-    expect(Number.parseFloat(menu.style.top)).toBeLessThan(570);
+    expect(menu.style.top).toBe("");
+    expect(menu.style.bottom).toBe(`${600 - 570 + 4}px`);
     expect(Number.parseFloat(menu.style.left)).toBe(304 - 176);
   });
 
