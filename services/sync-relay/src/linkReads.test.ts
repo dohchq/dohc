@@ -3742,6 +3742,42 @@ describe("relay capability reads", () => {
     ).toBe(`404:${LINK_REFUSAL_BODY}`);
   });
 
+  it("propagates a retirement delete through the link log and withdraws its history", async () => {
+    const storage = await newStorage();
+    const h = handler(storage);
+    const seeded = await seed(h);
+    const replacement = "# replacement\n";
+    const replacementSha = await putBlob(h, replacement);
+    await appendMoments(h, [moment(3, "docs/shared.md", replacement, 1_300, {
+      objectId: "object-shared", beforePath: "docs/shared.md", beforeContent: "# shared\n",
+    })]);
+    const initial = await json(await h(linkRequest(seeded.capability, "/sync/link/log?since=0&limit=100")));
+    const imported: FileAccumulator = new Map();
+    foldLogOps(imported, initial.ops as RelayOp[]);
+    expect(filesFromAccumulator(imported).map(file => file.path)).toEqual(["docs/shared.md"]);
+    for (const sha of [seeded.sharedSha, replacementSha]) {
+      expect((await h(linkRequest(seeded.capability, "/sync/link/blobs/" + sha))).status).toBe(200);
+    }
+
+    // CaptureDriver policy narrowing retires the old head with a delete moment.
+    await appendMoments(h, [moment(4, "docs/shared.md", replacement, 1_400, {
+      objectId: "object-shared", operation: "delete", beforePath: "docs/shared.md", beforeContent: replacement,
+      payload: { metadata: { origin: "local-file", summary: "Stopped tracking by policy" } },
+    })]);
+    const delta = await json(await h(linkRequest(seeded.capability, "/sync/link/log?since=" + String(initial.nextCursor) + "&limit=100")));
+    expect(delta.ops).toEqual([expect.objectContaining({ opKind: "moment.append", payload: expect.objectContaining({
+      operation: "delete", path: "docs/shared.md", payloadBeforePath: "docs/shared.md",
+    }) })]);
+    foldLogOps(imported, delta.ops as RelayOp[]);
+    expect(filesFromAccumulator(imported)).toEqual([]);
+    const current = await json(await h(linkRequest(seeded.capability, "/sync/link/current")));
+    expect(current.files).toEqual([]);
+    for (const sha of [seeded.sharedSha, replacementSha]) {
+      expect(await denialBytes(await h(linkRequest(seeded.capability, "/sync/link/blobs/" + sha))))
+        .toBe("404:" + LINK_REFUSAL_BODY);
+    }
+  });
+
   it("withdraws every revision of a file when it is deleted", async () => {
     const storage = await newStorage();
     const h = handler(storage);

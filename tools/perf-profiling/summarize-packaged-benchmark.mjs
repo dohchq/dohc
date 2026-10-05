@@ -29,7 +29,7 @@ export async function summarize(data, readLog = async () => '') {
   const summary = {
     label: data.label, status: data.status, packageCommit: data.packageCommit, asarSha256: data.asarSha256,
     engineCommit: data.engineCommit, engineSha256: data.engineSha256,
-    diagnostic: Boolean(data.settings?.profileMain || data.settings?.profileRenderer),
+    diagnostic: Boolean(data.settings?.profileMain || data.settings?.profileRenderer || data.settings?.heapSnapshotMinutes?.length),
     startupEvidence, settings: data.settings,
     freshEditableObservedMs: stats(data.runs.flatMap(r => r.freshStartup ? [r.freshStartup.editablePaintObservedMs] : [])),
     restartEditableObservedMs: stats(data.runs.flatMap(r => r.restartStartup ? [r.restartStartup.editablePaintObservedMs] : [])),
@@ -162,6 +162,7 @@ function surfaceSummaries(runs) {
       rowsRendered: unique(collections.map(c => c.rowsRendered)), loadedRecords: unique(collections.map(c => c.loadedRecords)),
     } : null,
     soak: soaks.length ? soaks.map(soak => ({
+      heapSnapshots: soak.heapSnapshots ?? [], heapSnapshotPauseMs: soak.heapSnapshotPauseMs ?? 0,
       minutes: soak.minutes, searchQuery: soak.searchQuery ?? null, cycles: soak.cycles.length, elapsedMs: soak.elapsedMs, cycleDurationMs: stats(soak.cycles.map(c => c.durationMs)),
       kinds: Object.fromEntries(unique(soak.samples.flatMap(s => Object.keys(s.kinds))).map(kind => [kind, {
         processCounts: unique(soak.samples.map(s => s.kinds[kind]?.count ?? 0)),

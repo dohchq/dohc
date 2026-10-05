@@ -1,3 +1,4 @@
+import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { readBoundedJson } from "@dohc/service-http";
 import { isAppBackendRuntimeError } from "@dohc/app-backend-runtime";
 import { JournalError } from "@dohc/app-backend-runtime/journal";
@@ -148,9 +149,9 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
         if (route.action === "history") return host.history(auth, { ...scope, limit: page.limit, beforeRevision: query.has("beforeRevision") ? positive(Number(query.get("beforeRevision"))) : undefined });
         const raw = await json(request, signal, route.action === "upload" ? APP_BACKEND_UPLOAD_REQUEST_BYTES : route.action === "activate" || route.action === "prepare-migration" ? 1024 * 1024 : 128 * 1024);
         if (route.action === "approve-migration" || route.action === "discard-migration" || route.action === "migration-preview-page") {
-          const body = record(raw, ["candidateId", ...(route.action === "approve-migration" ? ["checkpointSha256"] : [])], route.action === "migration-preview-page" ? ["after", "limit"] : []);
+          const body = record(raw, ["candidateId", ...(route.action === "approve-migration" ? ["checkpointSha256"] : [])], route.action === "migration-preview-page" ? ["after", "limit"] : route.action === "approve-migration" ? ["approvalAgent"] : []);
           const candidate = { ...scope, candidateId: datasetId(text(body.candidateId)), signal };
-          if (route.action === "approve-migration") return host.approveMigration(auth, { ...candidate, checkpointSha256: digest(body.checkpointSha256) });
+          if (route.action === "approve-migration") return host.approveMigration(auth, { ...candidate, checkpointSha256: digest(body.checkpointSha256), ...(body.approvalAgent === undefined ? {} : {approvalAgent:approvalAgent(body.approvalAgent)}) });
           if (route.action === "discard-migration") { await host.discardMigration(auth, candidate); return { discarded: true }; }
           return host.migrationPreviewPage(auth, { ...candidate, after: body.after === undefined ? undefined : text(body.after, 1024), limit: body.limit === undefined ? undefined : positive(body.limit) });
         }
@@ -190,11 +191,11 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
           return host.ownerReadFile(auth, {...scope, revision: positive(body.revision), revisionSha256: digest(body.revisionSha256), fileId: text(body.fileId, 128)}, signal);
         }
         if (route.action === "activate" || route.action === "prepare-migration") {
-          const body = record(raw, ["revision", "schemaSql", "operationSource", ...(route.action === "prepare-migration" ? ["expected", "migrationSql"] : [])], ["capacityBytes"]);
+          const body = record(raw, ["revision", "schemaSql", "operationSource", ...(route.action === "prepare-migration" ? ["expected", "migrationSql"] : [])], ["capacityBytes", ...(route.action === "activate" ? ["approvalAgent"] : [])]);
           let revision; try {revision = parseDatasetRevision(body.revision);} catch {throw badRequest("Invalid dataset revision.");}
           if (revision.datasetId !== scope.datasetId) throw badRequest("Dataset identity does not match this route.");
           const input = {...scope, revision, schemaSql: text(body.schemaSql, 256 * 1024), operationSource: text(body.operationSource, 256 * 1024), signal};
-          if (route.action === "activate") return host.activate(auth, {...input, ...(body.capacityBytes === undefined ? {} : {capacityBytes: positive(body.capacityBytes)})});
+          if (route.action === "activate") return host.activate(auth, {...input, ...(body.approvalAgent === undefined ? {} : {approvalAgent:approvalAgent(body.approvalAgent)}), ...(body.capacityBytes === undefined ? {} : {capacityBytes: positive(body.capacityBytes)})});
           if (body.capacityBytes !== undefined) throw badRequest("Dataset migrations cannot change capacity through this route.");
           const expected = record(body.expected, ["workspaceId", "datasetId", "hostEpoch", "approvedRevisionHash", "revision", "digest"]);
           if (expected.workspaceId !== scope.workspaceId || expected.datasetId !== scope.datasetId || !Number.isSafeInteger(expected.revision) || Number(expected.revision) < 0) throw badRequest("Invalid dataset cursor.");
@@ -239,6 +240,10 @@ export function createDatasetRoutes(host: RelayDatasetHost, storage: SyncRelaySt
       });
     } finally {release();}
   };
+}
+
+function approvalAgent(value:unknown) {
+  try {return parseApprovalAgent(value);} catch {throw badRequest("Invalid approval agent.");}
 }
 
 export function createDatasetAppRoutes(host: RelayDatasetHost, storage: SyncRelayStorage,

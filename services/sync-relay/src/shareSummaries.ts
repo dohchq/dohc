@@ -230,6 +230,7 @@ export function createShareSummaries(
       revokedAtMs: grant.revokedAtMs,
       lastUsedAtMs: row.lastUsedAtMs,
       urlIssuedAtMs: row.urlIssuedAtMs,
+      ...(share.creationProvenance ? {creationProvenance: share.creationProvenance} : {}),
       automationsGeneration: row.automationsGeneration,
       dependents: await Promise.all(row.dependents.map(dependentGrantSummary)),
     };

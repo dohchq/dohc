@@ -1,4 +1,5 @@
 import { SectionLabel } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { DohcMark } from "@dohc/brand";
 import { ArrowDown, ArrowUp, Database, Search, Share2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -290,15 +291,17 @@ export function DatabaseStudioView(props: {
         data-testid="file-inspector"
       >
         <Header path={path} onShare={onShare} />
-        <div
-          data-testid="view-database"
-          className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
-        >
-          <DohcMark size={28} className="text-line" />
-          <p className="text-sm text-muted">
-            {error ? "Couldn't read this database." : "Loading database…"}
-          </p>
-        </div>
+        {error ? (
+          <div
+            data-testid="view-database"
+            className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
+          >
+            <DohcMark size={28} className="text-line" />
+            <p className="text-sm text-muted">Couldn't read this database.</p>
+          </div>
+        ) : (
+          <SkeletonRows layout="panel" testId="view-database" label="Loading database…" />
+        )}
       </div>
     );
   }

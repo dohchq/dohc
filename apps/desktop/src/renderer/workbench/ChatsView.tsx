@@ -40,6 +40,7 @@ import {
   type ShareListing,
 } from "./chatShareLanes";
 import { SectionLabel } from "../ui/controls";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
@@ -3556,11 +3557,7 @@ export function ChatsView(props: {
 
   if (overview.status === "loading" || (overview.status === "ready" && variant === "page" && !props.initialNav &&
     parseChatTabPath(props.editorTabPath ?? null)?.kind === "dm" && !dmRestoreReady)) {
-    return (
-      <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
-        Loading Chats...
-      </div>
-    );
+    return <SkeletonRows inSlot layout="panel" label="Loading Chats..." />;
   }
 
   if (overview.status === "unavailable") {
@@ -3614,9 +3611,7 @@ export function ChatsView(props: {
             ) : null}
           </>}
           footer={<>
-            {personalFeedLoading ? (
-              <p className="py-5 text-center text-[11px] text-subtle">Loading…</p>
-            ) : null}
+            {personalFeedLoading ? <SkeletonRows label="Loading…" className="py-5" /> : null}
             {personalFeedNextCursor && !personalFeedLoading ? (
               <button
                 type="button"
@@ -4573,7 +4568,7 @@ export function ChatsView(props: {
             ) : null}
           </>}
           empty={threadsLoading ? (
-              <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
+              <SkeletonRows label="Loading..." className="pt-4" />
             ) : (
               <div
                 data-testid="chats-channel-empty"
