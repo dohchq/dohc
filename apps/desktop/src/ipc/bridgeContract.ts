@@ -2841,6 +2841,7 @@ export type SaveKeptCopyResult = z.infer<typeof SaveKeptCopyResult>;
 
 // A window works only on the versions of the workspace open in it.
 const versionGuard = {
+  scope: "workspace",
   guard: "active-workspace",
   inactiveMessage:
     "Versions stopped because this window changed workspaces. Open the workspace and try again.",
@@ -2848,50 +2849,62 @@ const versionGuard = {
 
 export const workspaceVersionOperations = {
   listWorkspaceVersions: {
+    capabilityId: "version.list",
     channel: "desktop:list-workspace-versions",
     payload: WorkspaceIdPayload, result: ListWorkspaceVersionsResult, ...versionGuard,
   },
   createWorkspaceVersion: {
+    capabilityId: "version.create",
     channel: "desktop:create-workspace-version",
     payload: CreateWorkspaceVersionPayload, result: ListWorkspaceVersionsResult, ...versionGuard,
   },
   switchWorkspaceVersion: {
+    capabilityId: "version.switch",
     channel: "desktop:switch-workspace-version",
     payload: SwitchWorkspaceVersionPayload, result: SwitchWorkspaceVersionResult, ...versionGuard,
   },
   compareWorkspaceVersions: {
+    capabilityId: "version.compare",
     channel: "desktop:compare-workspace-versions",
     payload: CompareWorkspaceVersionsPayload, result: CompareWorkspaceVersionsResult, ...versionGuard,
   },
   mergeWorkspaceVersion: {
+    capabilityId: "version.merge",
     channel: "desktop:merge-workspace-version",
     payload: MergeWorkspaceVersionPayload, result: MergeWorkspaceVersionResult, ...versionGuard,
   },
   listWorkspaceVersionConflicts: {
+    capabilityId: "version.conflicts.list",
     channel: "desktop:list-workspace-version-conflicts",
     payload: ListWorkspaceVersionConflictsPayload, result: ListWorkspaceVersionConflictsResult, ...versionGuard,
   },
   resolveWorkspaceVersionConflict: {
+    capabilityId: "version.conflict.resolve",
     channel: "desktop:resolve-workspace-version-conflict",
     payload: ResolveWorkspaceVersionConflictPayload, result: ResolveWorkspaceVersionConflictResult, ...versionGuard,
   },
   listKeptCopies: {
+    capabilityId: "file.kept.list",
     channel: "desktop:list-kept-copies",
     payload: WorkspaceIdPayload, result: ListKeptCopiesResult, ...versionGuard,
   },
   saveKeptCopy: {
+    capabilityId: "file.kept.save",
     channel: "desktop:save-kept-copy",
     payload: SaveKeptCopyPayload, result: SaveKeptCopyResult, ...versionGuard,
   },
   tryInWorkspaceVersion: {
+    capabilityId: "version.try",
     channel: "desktop:try-in-workspace-version",
     payload: TryInWorkspaceVersionPayload, result: TryInWorkspaceVersionResult, ...versionGuard,
   },
   getTryInVersionState: {
+    capabilityId: "version.try.read",
     channel: "desktop:get-try-in-version-state",
     payload: WorkspaceIdPayload, result: TryInVersionStateResult, ...versionGuard,
   },
   dismissTryInVersionReview: {
+    capabilityId: "version.try.dismiss",
     channel: "desktop:dismiss-try-in-version-review",
     payload: WorkspaceIdPayload, ...versionGuard,
   },
@@ -5624,10 +5637,16 @@ export type CancelWorkspaceSearchPayload = z.infer<
 // that operation itself instead of taking the active-workspace guard.
 export const workspaceSearchOperations = {
   searchWorkspace: {
+    capabilityId: "search.start",
+    scope: "workspace",
+    handlerCheck: {"check":"workspaceSearchHandlers.withWorkspaceOperation","reason":"The streaming operation outlives the initial reply."},
     channel: "desktop:search-workspace",
     payload: WorkspaceSearchPayload, result: WorkspaceSearchStartResult, guard: "trusted-sender",
   },
   cancelWorkspaceSearch: {
+    capabilityId: "search.cancel",
+    scope: "workspace",
+    handlerCheck: {"check":"workspaceSearchHandlers.authorizeCancel + owner.cancel","reason":"Cancellation is bound to the sender and its search id."},
     channel: "desktop:cancel-workspace-search",
     payload: CancelWorkspaceSearchPayload, guard: "trusted-sender",
   },
@@ -5666,16 +5685,22 @@ export const CrashReportChangedEvent = z.undefined();
 
 export const crashReportOperations = {
   readCrashReport: {
+    capabilityId: "crash.read",
+    scope: "device",
     channel: "desktop:read-crash-report",
     payload: z.object({}), result: ReadCrashReportResult, guard: "trusted-sender",
   },
   dismissCrashReport: {
+    capabilityId: "crash.dismiss",
+    scope: "device",
     channel: "desktop:dismiss-crash-report",
     payload: z.object({ through: z.number().int().positive() }), guard: "trusted-sender",
   },
   // Opens main's dialog. Sent is true only when the person confirmed there
   // and the server took the report.
   sendCrashReport: {
+    capabilityId: "crash.send",
+    scope: "device",
     channel: "desktop:send-crash-report",
     payload: z.object({}), result: z.object({ sent: z.boolean() }), guard: "trusted-sender",
   },
@@ -5828,11 +5853,15 @@ export const ChatDispatchNoticesEvent = z.object({
 export type ChatDispatchNoticesEvent = z.infer<typeof ChatDispatchNoticesEvent>;
 export const chatDispatchNoticeOperations = {
   registerChatDispatchNotices: {
+    capabilityId: "chat.dispatch.notices.read",
+    scope: "workspace",
     channel: "desktop:register-chat-dispatch-notices",
     payload: WorkspaceIdPayload, result: ChatDispatchNoticesEvent,
     guard: "active-workspace", inactiveMessage: "Open this workspace to read its dispatch notices.",
   },
   dismissChatDispatchNotice: {
+    capabilityId: "chat.dispatch.notice.dismiss",
+    scope: "workspace",
     channel: "desktop:dismiss-chat-dispatch-notice",
     payload: WorkspaceIdPayload.extend({ id: z.string().min(1) }),
     guard: "active-workspace", inactiveMessage: "Open this workspace to dismiss its dispatch notice.",
@@ -5841,11 +5870,17 @@ export const chatDispatchNoticeOperations = {
 
 export const scheduleHostOperations = {
   readScheduleHost: {
+    capabilityId: "automation.host.read",
+    scope: "workspace",
+    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
     channel: "desktop:read-schedule-host",
     payload: ScheduleHostWorkspace, result: ScheduleHostResult, guard: "trusted-sender",
   },
   // Starts a handover to another of the owner's computers.
   chooseScheduleHost: {
+    capabilityId: "automation.host.choose",
+    scope: "workspace",
+    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
     channel: "desktop:choose-schedule-host",
     payload: ScheduleHostWorkspace.extend({
       installId: z.string().min(1).max(256),
@@ -5855,6 +5890,9 @@ export const scheduleHostOperations = {
   },
   // Ends a handover without the old computer. A run can repeat if it is still on.
   takeOverScheduleHost: {
+    capabilityId: "automation.host.takeover",
+    scope: "workspace",
+    handlerCheck: {"check":"main.scheduleHostState","reason":"Host selection and credential generation have their own lifetime."},
     channel: "desktop:take-over-schedule-host",
     payload: ScheduleHostWorkspace.extend({ generation: z.number().int().nonnegative() }),
     result: ScheduleHostResult, guard: "trusted-sender",
@@ -5863,18 +5901,26 @@ export const scheduleHostOperations = {
 
 export const noticeOperations = {
   listNotices: {
+    capabilityId: "notice.list",
+    scope: "device",
     channel: "desktop:list-notices",
     payload: z.object({}), result: ListNoticesResult, guard: "trusted-sender",
   },
   markNotices: {
+    capabilityId: "notice.mark",
+    scope: "device",
     channel: "desktop:mark-notices",
     payload: MarkNoticesPayload, guard: "trusted-sender",
   },
   runSkippedScheduleNow: {
+    capabilityId: "automation.schedule.run",
+    scope: "device",
     channel: "desktop:run-skipped-schedule-now",
     payload: RunSkippedScheduleNowPayload, result: RunSkippedScheduleNowResult, guard: "trusted-sender",
   },
   retryAutomationNotice: {
+    capabilityId: "automation.notice.retry",
+    scope: "device",
     channel: "desktop:retry-automation-notice",
     payload: RetryAutomationNoticePayload, result: RetryAutomationNoticeResult, guard: "trusted-sender",
   },

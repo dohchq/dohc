@@ -1,3 +1,4 @@
+import { MCP_TOOL_CAPABILITIES } from "./tools";
 // The dohc MCP server. The DESKTOP runs this; the user's AI tool (Claude Code,
 // Codex) is the client, launching it as a stdio child via its own config:
 //   { mcpServers: { dohc: { command, args: ["--workspace", root, "--home", home] } } }
@@ -115,29 +116,34 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const registerAutomation = registerWrite;
 
   register("dohc_list_automations", {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_list_automations },
     description: "Read automation definitions and on/off file state in a Collection, including shares. Shared run history and host runtime are unavailable.",
     inputSchema: { collectionPath: z.string().min(1).max(4096) },
   }, async args => text(await listAutomations(ctx, args)));
   if (ctx.shareAccess === "edit") register("dohc_switch_automation", {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_switch_automation },
     description: "Change only one automation's enabled value. Read definitions first and provide their contentHash. Reformat confirms losing comments and hand formatting. After an unknown desktop save, read definitions and sync state before retrying; a stale base remains a conflict. A pending save is waiting to sync; acceptance records history, not host execution.",
     inputSchema: { collectionPath: z.string().min(1).max(4096), automation: z.string().min(1).max(64), enabled: z.boolean(),
       expectedContentHash: z.string().regex(/^[a-f0-9]{64}$/u), reformat: z.boolean().optional(), submitId: requestIdSchema },
   }, async args => text(await switchAutomation(ctx, args)));
 
   registerWrite("dohc_dataset", {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_dataset },
     description: "Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.",
     inputSchema: {request: DatasetRequest},
   }, async ({request}) => text(await dataset(ctx, request)));
 
   server.registerTool(
     "dohc_list_workspaces",
-    { description: "List the local dohc workspaces in the desktop registry.", inputSchema: {} },
+    {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_list_workspaces }, description: "List the local dohc workspaces in the desktop registry.", inputSchema: {} },
     async () => text(await listWorkspaces(ctx)),
   );
 
   server.registerTool(
     "dohc_workspace_status",
-    { description: "Report whether this workspace is local-only or cloud-synced.", inputSchema: {} },
+    {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_workspace_status }, description: "Report whether this workspace is local-only or cloud-synced.", inputSchema: {} },
     async () => text(await workspaceStatus(ctx)),
   );
 
@@ -148,6 +154,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_list_changes",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_list_changes },
       description:
         "List workspace history, newest first: workspace-engine moments (the recorder for this workspace). Each entry carries path/operation/versionId. Pass path, relative to the MCP server folder, to list only that file's changes across its renames.",
       inputSchema: {
@@ -163,6 +170,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_list_kept_copies",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_list_kept_copies },
       description:
         "List retained copies with a known workspace path, including copies adopted from staging during startup. Each entry names the file (`path`) that has a second copy, hidden until dohc_save_kept_copy moves it beside the file. `more` is true when the workspace kept more than this list holds.\n\nKnown copies deleted during replacement do not appear. Adopted staging files without an original path remain in `.dohc/engine/displaced`. Notices offers a recovery-folder action for these files; `watcher.status.keptFiles` also lists them.",
       inputSchema: {},
@@ -173,6 +181,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_save_kept_copy",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_save_kept_copy },
       description:
         "Move one kept copy from dohc_list_kept_copies to a visible file beside its file, such as `notes (kept copy).md`. The original file does not change. `status` is `saved` with the copy's `path`: read both, keep what you need, and delete the copy when you are done. `gone` means nothing is kept under that id any more. `no-valid-name` means no name beside the file fits dohc's path limits, so the copy stays kept: rename the file or its folder to something shorter and try again.",
       inputSchema: { id: z.number().int() },
@@ -183,6 +192,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_read_change",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_read_change },
       description:
         "Read one history entry by id: a workspace-engine moment with its full before/after payload.",
       inputSchema: {
@@ -195,6 +205,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_list_files",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_list_files },
       description: "List visible files and folders in the workspace. Hidden dohc internals are omitted.",
       inputSchema: {
         path: z.string().max(4096).optional(),
@@ -207,6 +218,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_read_file",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_read_file },
       description: "Read any visible workspace file as UTF-8 text or base64, returning size and sha256 for safe follow-up writes.",
       inputSchema: {
         path: z.string().min(1).max(4096),
@@ -221,6 +233,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_search_files",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_search_files },
       description:
         "Search visible workspace file paths and text contents. Hidden dohc internals, .git, node_modules, symlinks, oversized files, and binary files are skipped.",
       inputSchema: {
@@ -239,6 +252,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_read_document",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_read_document },
       description:
         "Read a Markdown document as it is now, including edits an open editor has not saved to the file yet. Read it before dohc_edit_document: edits match this text.",
       inputSchema: {
@@ -258,6 +272,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_edit_document",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_edit_document },
       description:
         "Edit a Markdown document through dohc. A person editing it at the same time keeps their text and sees yours arrive. While someone may be typing in it, in an open editor or on a device it syncs to, an edit may change text inside blocks and add blocks, but not remove a block or change its kind. `find` is Markdown that occurs exactly once in the text dohc_read_document returns; it becomes `replacement`. Omit `find` to add `replacement` at the end. The edit changes the body, not the frontmatter. It returns when the edit is saved. A `warning` means someone may be changing the document at the same moment, and their change to the same blocks can still remove your text; read the document to check. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the edit returns its first result instead of applying twice, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can apply the edit again. Use a new key for each new edit, including one that redoes text a failed edit reported missing. If the call fails without a reason, read the document before you retry.",
       inputSchema: {
@@ -273,6 +288,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_create_document",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_create_document },
       description:
         "Create a Markdown document at a path that does not exist yet. `markdown` is its body text, without frontmatter. dohc writes it the way a person types into a new file, so later changes go through dohc_edit_document.",
       inputSchema: {
@@ -286,6 +302,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_write_file",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_write_file },
       description:
         "Write an ordinary workspace file. Markdown documents are created with dohc_create_document and changed with dohc_edit_document, and Excalidraw scenes change in dohc; this tool refuses both. Requires dohc open. History records the write under your agent name. Refuses secret or excluded paths and content over 10 MiB.",
       inputSchema: {
@@ -302,6 +319,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_create_directory",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_create_directory },
       description:
         "Create a visible workspace directory. Files later written inside it are captured as engine moments by the desktop watcher.",
       inputSchema: {
@@ -315,6 +333,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_move_path",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_move_path },
       description:
         "Move or rename a visible workspace file or folder. Requires dohc open. History records the move under your agent name. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. Files over 5 MiB binary or 10 MiB text move without a History row. Text with invalid UTF-8 also moves without a row when History cannot keep it as binary. `withoutHistory` lists their destination paths. With overwrite, `replaced` separately reports the old destination's trash location and files without History copies. A failed move puts everything back it can. `deleted` lists files History records as deleted after rollback. They stay in the workspace's .dohc/trash, and Restore in History brings them back.",
       inputSchema: {
@@ -330,6 +349,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_delete_path",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_delete_path },
       description:
         "Delete a visible workspace file or folder. Requires dohc open. History records the delete under your agent name, and Restore there brings the file back. Files over 5 MiB binary or 10 MiB text delete without a History row. Text with invalid UTF-8 also deletes without a row when History cannot keep it as binary. `withoutHistory` lists their paths. Restore these files from the trash. The file or folder goes through the workspace's .dohc/trash to the system trash, or stays in .dohc/trash when the system refuses; `trashed` says which. Refuses links, and secret, excluded, or reserved paths, including any inside a folder. If History refuses a file in a folder, `deleted` lists the files already deleted, and the rest go back to their place.",
       inputSchema: {
@@ -343,6 +363,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_detect_apps",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_detect_apps },
       description:
         "Detect app folders in the workspace: web content a browser can open, found from index.html, package.json, dohc.json, and common web configs.",
       inputSchema: {
@@ -356,6 +377,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_create_app",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_create_app },
       description:
         "Scaffold an app folder with index.html, package.json, a pinned serve devDependency, and an optional dohc.json. Requires dohc open. History records each file under your agent name. A partial failure lists the files already written.",
       inputSchema: {
@@ -370,6 +392,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_test_app",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_test_app },
       description:
         "Run bounded static validation for an app folder: detector diagnostics and entry presence.",
       inputSchema: {
@@ -382,6 +405,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_import_data",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_import_data },
       description: "Import a CSV/JSON/JSONL/Markdown source into a new visible .sqlite database. Requires dohc open and records the write under your agent name.",
       inputSchema: {
         sourcePath: z.string().min(1).max(4096),
@@ -395,6 +419,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_query_database",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_query_database },
       description: "Run a single read-only SELECT against a visible workspace database (bounded rows).",
       inputSchema: {
         databasePath: z.string().min(1).max(4096),
@@ -407,6 +432,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_list_file_chats",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_list_file_chats },
       description:
         "List the dohc Chats linked to a workspace file. Chats follow the file's stable dohc identity across renames. Requires the workspace engine.",
       inputSchema: {
@@ -419,6 +445,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_read_chat",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_read_chat },
       description:
         "Read one dohc Chat thread: its messages (with author kind and display name), dispatch pause state and latest run outcome, and a read-only text projection.",
       inputSchema: {
@@ -431,6 +458,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_list_groups",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_list_groups },
       description:
         "List the workspace's Chats groups (including the default #general) with each group's chats and their ids. It also returns direct messages and the agent lane, told apart by `kind`. Requires the workspace engine.",
       inputSchema: {},
@@ -449,6 +477,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_start_group_chat",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_start_group_chat },
       description:
         "Start a new chat in a group as the agent. `group` accepts a group name, #slug, or id. No title needed; the chat displays its first message. `attachments` name tracked files relative to the MCP server folder; `needsDecision` asks for a decision and `options` turns it into a poll; `runId` links the message to a local agent run. Returns engine ids usable with dohc_read_chat.",
       inputSchema: {
@@ -463,6 +492,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_start_file_chat",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_start_file_chat },
       description:
         "Comment on a workspace file as the agent. This starts a chat linked to the file, as a person does from the file's Chats panel: `title` names the chat there and `body` is its first message. dohc_list_file_chats returns it, and dohc_reply_to_chat continues it. `requestId` is a random key you choose, such as a UUID. Sent again with the same key, after a timeout for example, the comment returns its first result instead of starting a second chat, while it runs and until 1,024 later keyed requests to this workspace have finished. dohc then refuses the key until 16,384 more have finished; after that, or after dohc restarts, the key can start another chat. `runId` behaves as in dohc_start_group_chat.",
       inputSchema: {
@@ -479,6 +509,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_reply_to_chat",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_reply_to_chat },
       description:
         "Reply in a dohc Chat thread as the agent. `to` replies under one message; `resolve` closes that open decision with this reply and `choose` names the option picked. Message ids come from dohc_read_chat. `attachments`, `needsDecision`, `options`, and `runId` behave as in dohc_start_group_chat.",
       inputSchema: {
@@ -495,6 +526,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_query_collection",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_query_collection },
       description:
         "Query a collection folder's indexed records: filter, sort, group, and page. Requires the workspace engine and the dohc app.",
       inputSchema: {
@@ -527,6 +559,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   server.registerTool(
     "dohc_read_record",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_read_record },
       description:
         "Read one collection record by id: current field values plus per-field history with author attribution. Requires the workspace engine and the dohc app.",
       inputSchema: {
@@ -542,6 +575,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_set_record_fields",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_set_record_fields },
       description:
         "Set fields on a collection record as the agent, e.g. fields: {\"status\": \"done\"}. The change lands in the record's live frontmatter, open desktop views update, and record history attributes it to the agent.",
       inputSchema: {
@@ -555,6 +589,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerWrite(
     "dohc_create_record",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_create_record },
       description:
         "Create a Markdown record in a collection folder as the agent, optionally seeding fields, and return its record id. The kept map reports current values of seed fields preserved after someone edited them. On partial creation, retry with partial.retry.recordId and the same inputs to finish the existing record. Other taken names are refused.",
       inputSchema: {
@@ -575,6 +610,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerAutomation(
     "dohc_list_automation_runs",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_list_automation_runs },
       description:
         "List an automation's runs on this computer, 20 at a time, newest first: each run's id, state, what started it, how many changes it made, and why it failed. Name the automation by its Collection's folder and its id in automations.yaml. When older runs remain, `next` is not null; pass it as `page` to list them. Each computer keeps the runs of the automations it ran for 30 days after they end.",
       inputSchema: { ...automationInput, page: z.string().min(1).max(512).optional() },
@@ -585,6 +621,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerAutomation(
     "dohc_read_automation_run",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_read_automation_run },
       description:
         "Read one automation run: what started it, what each step changed, why it failed, which step failed, and whether Try again resumes there or starts over. Steps count from 1 in the order automations.yaml lists them, including the steps inside if and otherwise. A step that changed nothing is not listed.",
       inputSchema: { ...automationInput, run: z.string().min(1).max(256) },
@@ -595,6 +632,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   registerAutomation(
     "dohc_retry_automation_run",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_retry_automation_run },
       description:
         "Try a failed automation run again, as Try again does in dohc. It resumes after the last step that finished. If the automation changed since the run failed, it refuses unless startOver is true, which runs it from the first step and can repeat changes the run already made. Only the computer that ran it can try a run again; anywhere else the refusal names that computer.",
       inputSchema: { ...automationInput, run: z.string().min(1).max(256), startOver: z.boolean().optional() },
@@ -605,6 +643,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   register(
     "dohc_press_button",
     {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_press_button },
       description:
         "Press a Button field on one record, as a person clicks it in dohc, and get the id of the run it started; follow it with dohc_read_automation_run. Name the record by its id, or a dataset record by its primary key as JSON. A press that would run actions dohc cannot undo is refused with each action's name; press again with those names in confirm to run them. Send the same requestId again, after a timeout for example, to get the same press instead of a second one. The press is recorded as the agent's, for the person; from an agent run that an automation started, it counts in that chain of automations, which stops after 4 steps.",
       inputSchema: {
@@ -620,6 +659,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   register("dohc_inspect_buttons", {
+      _meta: { "dohc/capabilityIds": MCP_TOOL_CAPABILITIES.dohc_inspect_buttons },
     description: "Inspect a Collection's Button fields, their current access, and any actions that need confirmation. Shared Collection buttons are checked on the owner's host.",
     inputSchema: { collectionPath: z.string().min(1).max(4096), table: z.string().min(1).max(256).optional() },
   }, async args => text(await inspectButtons(ctx, args)));

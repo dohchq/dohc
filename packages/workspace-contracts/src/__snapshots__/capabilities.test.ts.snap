@@ -1,0 +1,3 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`capability ids > never reuses retired ids and keeps the retirement record 1`] = `[]`;
