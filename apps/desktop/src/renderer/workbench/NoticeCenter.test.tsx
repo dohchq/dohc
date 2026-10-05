@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -10,6 +10,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import { NoticeCenter, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
+import { Overlay } from "../Overlay";
 
 // Captures the renderer-side update listener exactly as the preload would
 // install it — the auto-updater itself never runs in dev/test (gated on
@@ -528,8 +529,9 @@ describe("notice center", () => {
   });
 
   // A toast sits above an open dialog. When the toast that holds focus goes
-  // away, focus goes to the dialog, not to the Notices button behind it.
-  it("hands focus to an open dialog when the focused toast goes away", async () => {
+  // away, focus goes back to the control F6 left from in the dialog, not to
+  // the Notices button behind it.
+  it("hands focus back to where F6 left the dialog when the focused toast goes away", async () => {
     const error = {
       id: "shell-error-1",
       message: "Could not refresh history. The engine did not answer.",
@@ -543,23 +545,43 @@ describe("notice center", () => {
       onRetryWorkspaceError: vi.fn(),
       onHideWorkspaceError: vi.fn(),
     });
-    const { rerender } = render(
+    const view = (seen: boolean) => (
       <>
-        {noticeElement(props(false))}
-        <div data-dohc-modal="true"><div tabIndex={-1} data-testid="dialog-panel" /></div>
-      </>,
+        {noticeElement(props(seen))}
+        <Overlay onClose={() => undefined}>
+          <button type="button">Close</button>
+          <button type="button">Restore file</button>
+        </Overlay>
+      </>
+    );
+    const { rerender } = render(view(false));
+    const restore = screen.getByRole("button", { name: "Restore file" });
+    restore.focus();
+    fireEvent.keyDown(restore, { key: "F6" });
+    expect(document.activeElement).toBe(
+      within(screen.getByTestId("notice-toasts")).getByRole("button", { name: "Try again" }),
+    );
+
+    rerender(view(true));
+    await waitFor(() => expect(document.activeElement).toBe(restore));
+  });
+
+  // The corner host sits in a fixed wrapper, which is a stacking context of
+  // its own. Its toasts render at the body so they can rise above dialogs.
+  it("renders a corner host's toasts at the body, outside its wrapper", () => {
+    render(
+      <div data-testid="corner-wrapper" className="fixed z-30">
+        {noticeElement({
+          host: "corner",
+          workspaceErrors: [{ id: "e", message: "dohc could not reach this server.", details: "", atMs: 1, canRetry: true, seen: false }],
+          onRetryWorkspaceError: vi.fn(),
+        })}
+      </div>,
     );
     const stack = screen.getByTestId("notice-toasts");
-    expect(stack.hasAttribute("data-dohc-toasts")).toBe(true);
-    within(stack).getByRole("button", { name: "Try again" }).focus();
-
-    rerender(
-      <>
-        {noticeElement(props(true))}
-        <div data-dohc-modal="true"><div tabIndex={-1} data-testid="dialog-panel" /></div>
-      </>,
-    );
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("dialog-panel")));
+    expect(stack.parentElement).toBe(document.body);
+    expect(screen.getByTestId("corner-wrapper").contains(stack)).toBe(false);
+    expect(within(screen.getByTestId("corner-wrapper")).getByTestId("notice-center-toggle")).toBeTruthy();
   });
 
   // A workspace error arrives as a toast in the corner and stays as a row in

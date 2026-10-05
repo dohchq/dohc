@@ -142,6 +142,32 @@ describe("PageIdentity", () => {
       expect(document.activeElement).toBe(screen.getByLabelText("Use 📄"));
     });
 
+    // A toast sits above the picker. F6 reaches it and comes back to the
+    // emoji it left; Escape in the toast comes back without closing.
+    it("moves between the picker and a toast above it on F6", async () => {
+      const user = userEvent.setup();
+      render(
+        <>
+          <ControlledPageIdentity initialBody={"# Body\n"} stem="note" />
+          <div data-dohc-toasts>
+            <button type="button">Try again</button>
+          </div>
+        </>,
+      );
+      await user.click(screen.getByTestId("page-icon-add"));
+      const emoji = screen.getByLabelText("Use 📄");
+      expect(document.activeElement).toBe(emoji);
+
+      await user.keyboard("{F6}");
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Try again" }));
+      await user.keyboard("{Escape}");
+      expect(screen.getByTestId("page-icon-picker")).toBeTruthy();
+      expect(document.activeElement).toBe(emoji);
+      await user.keyboard("{F6}");
+      await user.keyboard("{F6}");
+      expect(document.activeElement).toBe(emoji);
+    });
+
     it("returns focus to the trigger button when Escape closes the picker", async () => {
       const user = userEvent.setup();
       render(<ControlledPageIdentity initialBody={"# Body\n"} stem="note" />);

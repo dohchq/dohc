@@ -4,4 +4,5 @@
 @source "../../../src/renderer/OwnerRestoreDialog.tsx";
 @source "../../../src/renderer/ui/controls.tsx";
 @source "../../../src/renderer/workbench/NoticeCenter.tsx";
+@source "../../../src/renderer/shell/connectionNotices.tsx";
 @source "../../../src/renderer/shell/copyDetails.tsx";

@@ -17,10 +17,13 @@ type PanelProps = Omit<HTMLAttributes<HTMLDivElement>, "children" | "onClick" | 
 // The backdrop and panel alone, without the keyboard and stack behavior.
 // Overlay adds that; the states page renders this to show the scrim.
 //
-// Toasts sit above the dialog. A standard dialog scrolls with room below it
-// for them (NoticeCenter sets --dohc-toast-room), so its last actions can
-// scroll clear of an open toast. The room adds scroll extent only, so the
-// dialog does not move when a toast arrives.
+// Toasts sit above the dialog, so the dialog keeps its actions clear of them.
+// NoticeCenter sets --dohc-toast-room to how far the toasts reach up from the
+// window's bottom edge. A standard dialog leaves that room below itself: its
+// top spacer gives up to 5rem of its 6rem so a short window still shows the
+// actions above the toasts, and a dialog taller than the window scrolls, with
+// a focused control scrolled clear of the toasts. The panel never shrinks.
+// A warning dialog centers in the space above the toasts.
 export function OverlayFrame(props: {
   appearance?: "standard" | "warning";
   panelRef: RefObject<HTMLDivElement | null>;
@@ -32,16 +35,17 @@ export function OverlayFrame(props: {
     <div
       data-dohc-modal="true"
       className={props.appearance === "warning"
-        ? "fixed inset-0 z-50 grid place-items-center bg-scrim"
-        : "fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-scrim px-4 pt-24 pb-[calc(var(--dohc-toast-room,0px)+1rem)]"}
+        ? "fixed inset-0 z-50 grid place-items-center bg-scrim pb-[var(--dohc-toast-room,0px)]"
+        : "fixed inset-0 z-30 flex flex-col items-center overflow-auto bg-scrim px-4 pb-[calc(var(--dohc-toast-room,0px)+1rem)] scroll-pb-[var(--dohc-toast-room,0px)]"}
       onClick={props.onBackdropClick}
     >
+      {props.appearance === "warning" ? null : <div aria-hidden className="min-h-4 shrink grow-0 basis-24" />}
       <div
         {...props.panelProps}
         ref={props.panelRef}
         tabIndex={-1}
         data-focus-surface="dialog"
-        className={props.panelProps?.className ?? "dohc-pop-in"}
+        className={`${props.panelProps?.className ?? "dohc-pop-in"} shrink-0`}
         onClick={(event) => event.stopPropagation()}
       >
         {props.children}

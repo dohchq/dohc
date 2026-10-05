@@ -17,7 +17,7 @@ describe("Overlay", () => {
     );
 
     const panel = document.querySelector<HTMLElement>(
-      '[data-dohc-modal="true"] > div',
+      '[data-dohc-modal="true"] > [data-focus-surface="dialog"]',
     );
     expect(document.activeElement).toBe(panel);
   });

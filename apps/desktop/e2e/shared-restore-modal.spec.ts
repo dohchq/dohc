@@ -117,14 +117,74 @@ test.describe("shared restore review with a notice toast", () => {
       })).toBe(true);
       await page.screenshot({ path: test.info().outputPath(`toast-over-review-${setup.theme}.png`) });
       // An ordinary click: Playwright refuses when another element receives it.
-      await toast.getByRole("button", { name: "Try again" }).click({ timeout: 2_000 });
+      await toast.getByRole("button", { name: "Try again" }).click();
       await expect(page.getByLabel("Toast retries")).toHaveText("1");
       await expect(dialog).toBeVisible();
       // Closing it leaves the trap whole: the next Tab lands in the review.
-      await toast.getByRole("button", { name: "Dismiss workspace error" }).click({ timeout: 2_000 });
+      await toast.getByRole("button", { name: "Dismiss workspace error" }).click();
       await expect(toast).toHaveCount(0);
       await page.keyboard.press("Tab");
       await expect(dialog.locator(":focus")).toHaveCount(1);
+    });
+  }
+
+  // At the smallest window, with a toast showing and the review at rest, the
+  // review's actions sit above the toast: a pointer at their centres and a
+  // keyboard focus both reach them without scrolling.
+  for (const setup of cases.filter((candidate) => candidate.viewport === "minimum")) {
+    test(`the review's actions clear the toast at rest at the minimum size in ${setup.theme}`, async ({ page }) => {
+      const { dialog, restore } = await openReview(page, setup, false);
+      const close = dialog.getByRole("button", { name: "Close", exact: true });
+      const atCentre = (button: typeof restore) => button.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+      });
+      expect(await atCentre(restore)).toBe(true);
+      expect(await atCentre(close)).toBe(true);
+      await page.screenshot({ path: test.info().outputPath(`review-at-rest-minimum-${setup.theme}.png`) });
+
+      // Keyboard focus lands on Restore file where it can be seen.
+      await page.keyboard.press("Shift+Tab");
+      await expect(restore).toBeFocused();
+      expect(await atCentre(restore)).toBe(true);
+
+      const centre = async (button: typeof restore) => {
+        const box = await button.boundingBox();
+        if (!box) throw new Error("the button has no box");
+        return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      };
+      const closeAt = await centre(close);
+      await page.mouse.click(closeAt.x, closeAt.y);
+      await expect(dialog).toHaveCount(0);
+
+      const reopened = await openReview(page, setup, false);
+      const restoreAt = await centre(reopened.restore);
+      await page.mouse.click(restoreAt.x, restoreAt.y);
+      await expect(page.getByRole("dialog", { name: "File restored" })).toBeVisible();
+    });
+  }
+
+  // A window without the shell keeps its notices in a fixed corner wrapper.
+  // Its toasts still rise above a warning dialog, such as the one that asks
+  // before dohc closes, and take clicks there.
+  for (const theme of ["light", "dark"] as const) {
+    test(`a corner toast is on top of a warning dialog and takes a click in ${theme}`, async ({ page }) => {
+      await page.setViewportSize(viewports.minimum);
+      await page.emulateMedia({ colorScheme: theme });
+      await page.goto(`${server.resolvedUrls!.local[0]}?host=corner`);
+      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      const toast = page.getByTestId("workspace-shell-error");
+      await expect(toast).toBeVisible();
+      await page.getByRole("button", { name: "Open warning" }).press("Enter");
+      await expect(page.getByRole("dialog", { name: "Close dohc?" })).toBeVisible();
+      expect(await toast.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+      })).toBe(true);
+      await page.screenshot({ path: test.info().outputPath(`corner-toast-over-warning-${theme}.png`) });
+      await toast.getByRole("button", { name: "Try again" }).click();
+      await expect(page.getByLabel("Toast retries")).toHaveText("1");
+      await expect(page.getByRole("dialog", { name: "Close dohc?" })).toBeVisible();
     });
   }
 

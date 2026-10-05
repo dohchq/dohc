@@ -80,6 +80,14 @@ export function hasBlockingModal() {
 
 // The panel of the dialog on top, if one is open.
 export function topModalPanel(): HTMLElement | null {
-  const panels = document.querySelectorAll<HTMLElement>("[data-dohc-modal='true'] > div");
+  const panels = document.querySelectorAll<HTMLElement>("[data-dohc-modal='true'] > [data-focus-surface='dialog']");
   return panels[panels.length - 1] ?? null;
+}
+
+// Where focus goes back to in the dialog on top: the control F6 left from,
+// if it is still there, or else the dialog's panel.
+export function modalReturnTarget(): HTMLElement | null {
+  const panel = topModalPanel();
+  const back = panel ? leftAt.get(panel) : undefined;
+  return back?.isConnected && panel?.contains(back) ? back : panel;
 }
