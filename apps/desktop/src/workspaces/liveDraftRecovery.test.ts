@@ -5,6 +5,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { foldScene, insertElementRevision, setAppStateProperty } from "@dohc/excalidraw-scene";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
+import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
+import { createPhysicalWorkspaceRemoval } from "./physicalWorkspaceRemoval";
 import { preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./liveDraftRecovery";
 
 vi.mock("node:fs/promises", async importOriginal => {
@@ -189,4 +191,47 @@ it("removes leftover temporary drafts without interrupting another workspace's p
   expect(names).toHaveLength(1);
   expect(names[0]).toMatch(/\.json$/);
   expect(JSON.parse(await readFile(join(directory, names[0]!), "utf8"))).toMatchObject({workspaceId: "kept"});
+});
+
+it.each([false, true])("keeps recovery records until registry removal succeeds: refusal=%s", async refused => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-forget-confirmed-")); directories.push(directory);
+  const initial = {workspaceId: "workspace", rootPath: "original-root"};
+  let registered: typeof initial | null = initial;
+  const owner = createWorkspaceAuthorityOwner({
+    findWorkspace: () => registered,
+    canonicalizeRoot: path => path,
+    createState: () => ({}),
+  });
+  const binding = owner.currentBinding(initial.workspaceId);
+  await preserveLiveDraft(directory, initial.workspaceId, {
+    path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0]),
+  });
+  const names = await readdir(directory);
+  const original = await readFile(join(directory, names[0]!));
+  const removeDrafts = vi.fn((workspaceId: string) => removeWorkspaceLiveDrafts(directory, workspaceId));
+  const removeWorkspace = vi.fn(() => { registered = null; });
+  const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
+    retireBinding: (target, retirement) => owner.retireBinding(target, retirement),
+    findWorkspace: () => registered,
+    removeWorkspace,
+    removeDrafts,
+  });
+  const removing = removePhysicalWorkspace(binding, () => {
+    if (refused) registered = {...initial, rootPath: "replacement-root"};
+  });
+  if (refused) {
+    await expect(removing).rejects.toThrow("The workspace registry binding changed before removal completed.");
+    expect(registered).toEqual({...initial, rootPath: "replacement-root"});
+    expect(await readdir(directory)).toEqual(names);
+    expect(await readFile(join(directory, names[0]!))).toEqual(original);
+    expect(removeWorkspace).not.toHaveBeenCalled();
+    expect(removeDrafts).not.toHaveBeenCalled();
+  } else {
+    await removing;
+    expect(registered).toBeNull();
+    expect(removeWorkspace).toHaveBeenCalledOnce();
+    expect(removeDrafts).toHaveBeenCalledExactlyOnceWith(initial.workspaceId);
+    expect(removeWorkspace.mock.invocationCallOrder[0]).toBeLessThan(removeDrafts.mock.invocationCallOrder[0]!);
+    expect(await readdir(directory)).toEqual([]);
+  }
 });

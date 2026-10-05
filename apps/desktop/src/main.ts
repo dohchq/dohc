@@ -6,6 +6,7 @@ import { describeAutomationDataset } from "./workspaces/automationDatasetDescrip
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
+import { createPhysicalWorkspaceRemoval } from "./workspaces/physicalWorkspaceRemoval";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
   createDesktopWorkspaceCallbacks,
@@ -1768,26 +1769,12 @@ async function forgetWorkspace(workspaceId: string): Promise<void> {
   notifyRenderer();
 }
 
-function removePhysicalWorkspace(
-  binding: DesktopWorkspaceAuthorityBinding,
-  beforeRegistryRemoval: () => void | Promise<void> = () => undefined,
-): Promise<void> {
-  return workspaceAuthorities.retireBinding(binding, {
-    finalize: async () => {
-      await beforeRegistryRemoval();
-      await removeWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), binding.workspaceId);
-    },
-    removeBinding: () => {
-      const current = findWorkspace(binding.workspaceId);
-      if (!current || current.rootPath !== binding.registeredRootPath) {
-        throw new Error(
-          "The workspace registry binding changed before removal completed.",
-        );
-      }
-      removeWorkspace(binding.workspaceId);
-    },
-  });
-}
+const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
+  retireBinding: (binding, retirement) => workspaceAuthorities.retireBinding(binding, retirement),
+  findWorkspace,
+  removeWorkspace,
+  removeDrafts: workspaceId => removeWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId),
+});
 
 const createJoinedWorkspace = createJoinedWorkspaceRunner({
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
