@@ -1411,7 +1411,10 @@ export function createCaptureLiveStores(
         attempt += 1
       ) {
         captureWaitSignal?.throwIfAborted();
-        await delay(FLUSH_SETTLE_POLL_MS, undefined, { signal: captureWaitSignal });
+        await delay(FLUSH_SETTLE_POLL_MS, undefined, { signal: captureWaitSignal }).catch(error => {
+          captureWaitSignal?.throwIfAborted();
+          throw error;
+        });
         captureWaitSignal?.throwIfAborted();
         outcome = await waitForCapture(() => runRead(async adapter => await adapter.flushCapture()));
       }

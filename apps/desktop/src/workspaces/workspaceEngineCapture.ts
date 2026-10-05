@@ -5733,7 +5733,6 @@ export function createWorkspaceEngineCapture(
 
     settleAndCloseAllLiveSessions() {
       ydocOpenAbort.abort();
-      captureWaitAbort.abort();
       return enqueueResult("close live sessions for workspace close", () =>
         settleAndCloseLiveYDocSessions(
           () => true,
