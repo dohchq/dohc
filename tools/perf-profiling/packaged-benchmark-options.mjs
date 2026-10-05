@@ -4,12 +4,13 @@ import { DEFAULT_LIMITS } from './packaged-collection-automations.mjs';
 
 export const SCENARIOS = ['full', 'startup', 'switches', 'small-switch', 'small-tab', 'go-to', 'command-palette', 'search', 'chat-history', 'collection', 'soak'];
 export const SWITCHING_SCENARIOS = ['full', 'switches', 'small-switch', 'small-tab', 'soak'];
-export const usage = `node tools/perf-profiling/packaged-benchmark.mjs --binary <dohc.exe> --package-commit <40-digit SHA> --output <new directory> --label <baseline|candidate> [--runs <count>] [--idle-seconds 60] [--keystrokes 30] [--switches 10] [--files 2] [--scenario ${SCENARIOS.join('|')}] [--soak-minutes 10] [--chat-messages 200] [--records 500] [--find-cap 50] [--write-cap 200] [--profile-renderer true|false] [--profile-main true|false] [--engine-commit <40-digit SHA>]
-Runs default to 5 for collection and 3 for other scenarios.`;
+export const usage = `node tools/perf-profiling/packaged-benchmark.mjs --binary <dohc.exe> --package-commit <40-digit SHA> --output <new directory> --label <baseline|candidate> [--runs <count>] [--idle-seconds 60] [--keystrokes 30] [--switches 10] [--files 2] [--scenario ${SCENARIOS.join('|')}] [--soak-minutes 10] [--heap-snapshot-minutes 10,60] [--chat-messages 200] [--records 500] [--find-cap 50] [--write-cap 200] [--profile-renderer true|false] [--profile-main true|false] [--engine-commit <40-digit SHA>]
+Runs default to 5 for collection and 3 for other scenarios.
+Heap snapshot minutes are distinct positive integers within the soak duration. Capture is opt-in and diagnostic.`;
 
 export function parseOptions(argv) {
   if (argv.length === 1 && argv[0] === '--help') return { help: true };
-  const names = new Set(['binary', 'package-dir', 'package-commit', 'engine-commit', 'output', 'label', 'runs', 'idle-seconds', 'keystrokes', 'switches', 'files', 'scenario', 'soak-minutes', 'chat-messages', 'records', 'find-cap', 'write-cap', 'profile-renderer', 'profile-main']);
+  const names = new Set(['binary', 'package-dir', 'package-commit', 'engine-commit', 'output', 'label', 'runs', 'idle-seconds', 'keystrokes', 'switches', 'files', 'scenario', 'soak-minutes', 'heap-snapshot-minutes', 'chat-messages', 'records', 'find-cap', 'write-cap', 'profile-renderer', 'profile-main']);
   const args = new Map();
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i].slice(2), value = argv[i + 1];
@@ -40,7 +41,7 @@ export function parseOptions(argv) {
     packageCommit: args.get('package-commit'), engineCommit: args.get('engine-commit') ?? args.get('package-commit'),
     runCount: integer('runs', scenario === 'collection' ? 5 : 3), idleSeconds: integer('idle-seconds', 60), keystrokes: integer('keystrokes', 30),
     switches: integer('switches', 10), fixtureFiles: integer('files', 2, 2),
-    scenario,
+    scenario, heapSnapshotMinutes: [],
     soakMinutes: integer('soak-minutes', 10), chatMessages: integer('chat-messages', 200, 2), records: integer('records', 500),
     findCap: integer('find-cap', DEFAULT_LIMITS.findCap), writeCap: integer('write-cap', DEFAULT_LIMITS.writeCap),
     profileRenderer: choice('profile-renderer', ['true', 'false'], 'false') === 'true',
@@ -48,6 +49,16 @@ export function parseOptions(argv) {
   };
   for (const [key, requiredScenario] of [['soak-minutes', 'soak'], ['chat-messages', 'chat-history'], ['records', 'collection'], ['find-cap', 'collection'], ['write-cap', 'collection']]) {
     if (args.has(key) && options.scenario !== requiredScenario) throw Error(`--${key} requires --scenario ${requiredScenario}`);
+  }
+  if (args.has('heap-snapshot-minutes')) {
+    if (scenario !== 'soak') throw Error('--heap-snapshot-minutes requires --scenario soak');
+    const value = args.get('heap-snapshot-minutes');
+    const minutes = value.split(',').map(Number);
+    if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(value) || new Set(minutes).size !== minutes.length ||
+        minutes.some(minute => !Number.isSafeInteger(minute) || minute > options.soakMinutes || minute * 60000 > 2147483647)) {
+      throw Error('--heap-snapshot-minutes must be distinct positive integer minutes within --soak-minutes and the timer limit');
+    }
+    options.heapSnapshotMinutes = minutes.sort((a, b) => a - b);
   }
   // go-to types fixture-004242 and search submits "fixture 4242."; both need that fixture file to exist.
   if (['go-to', 'search'].includes(options.scenario) && options.fixtureFiles < 4243) throw Error(`--scenario ${options.scenario} needs --files of at least 4243 so fixture-004242 exists`);
