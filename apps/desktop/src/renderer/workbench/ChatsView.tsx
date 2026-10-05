@@ -3557,7 +3557,7 @@ export function ChatsView(props: {
 
   if (overview.status === "loading" || (overview.status === "ready" && variant === "page" && !props.initialNav &&
     parseChatTabPath(props.editorTabPath ?? null)?.kind === "dm" && !dmRestoreReady)) {
-    return <SkeletonRows layout="panel" label="Loading Chats..." />;
+    return <SkeletonRows inSlot layout="panel" label="Loading Chats..." />;
   }
 
   if (overview.status === "unavailable") {

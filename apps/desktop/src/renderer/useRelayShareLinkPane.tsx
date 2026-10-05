@@ -1794,7 +1794,7 @@ export function useRelayShareLinkPane(props: {
               links on screen and says so. */}
           {linksLoading ? (
             visibleLinkGroups.length ? (
-              <p className="m-0 text-xs text-muted">Loading links…</p>
+              <p role="status" className="m-0 text-xs text-muted">Loading links…</p>
             ) : (
               <SkeletonRows rows={2} label="Loading links…" />
             )
@@ -1977,7 +1977,7 @@ export function useRelayShareLinkPane(props: {
 
                         {ownerDiscussion.loading ? (
                           ownerDiscussion.loaded ? (
-                            <p className="m-0 text-xs text-muted">Loading comments…</p>
+                            <p role="status" className="m-0 text-xs text-muted">Loading comments…</p>
                           ) : (
                             <SkeletonRows rows={2} label="Loading comments…" />
                           )

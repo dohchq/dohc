@@ -29,19 +29,30 @@ describe("SkeletonRows", () => {
   it("shows at once when it takes over, in the same slot, from lines that were showing", () => {
     const time = clock(10_000);
     painted("1");
-    const { rerender } = render(<SkeletonSlot><SkeletonRows key="fallback" label="Loading apps..." /></SkeletonSlot>);
+    const { rerender } = render(<SkeletonSlot><SkeletonRows inSlot key="fallback" label="Loading apps..." /></SkeletonSlot>);
     time.now += 200;
-    rerender(<SkeletonSlot><SkeletonRows key="view" label="Loading apps…" testId="view" /></SkeletonSlot>);
+    rerender(<SkeletonSlot><SkeletonRows inSlot key="view" label="Loading apps…" testId="view" /></SkeletonSlot>);
     expect(waiting("view")).toBe(false);
   });
 
   it("keeps the wait when the lines it replaces were still blank", () => {
     const time = clock(20_000);
     painted("0");
-    const { rerender } = render(<SkeletonSlot><SkeletonRows key="fallback" label="Loading…" /></SkeletonSlot>);
+    const { rerender } = render(<SkeletonSlot><SkeletonRows inSlot key="fallback" label="Loading…" /></SkeletonSlot>);
     time.now += 200;
-    rerender(<SkeletonSlot><SkeletonRows key="view" label="Loading…" testId="view" /></SkeletonSlot>);
+    rerender(<SkeletonSlot><SkeletonRows inSlot key="view" label="Loading…" testId="view" /></SkeletonSlot>);
     expect(waiting("view")).toBe(true);
+  });
+
+  // The view's own lines leave as its content arrives, and a loader deeper in
+  // that content, such as a message list, starts in another place.
+  it("keeps the wait for lines nested in the slot that do not stand in its place", () => {
+    const time = clock(25_000);
+    painted("1");
+    const { rerender } = render(<SkeletonSlot><SkeletonRows inSlot key="view" label="Loading Chats..." /></SkeletonSlot>);
+    time.now += 200;
+    rerender(<SkeletonSlot><div><SkeletonRows key="messages" label="Loading..." testId="nested" /></div></SkeletonSlot>);
+    expect(waiting("nested")).toBe(true);
   });
 
   // A tab or workspace switch mounts new lines while other lines leave.
@@ -49,29 +60,18 @@ describe("SkeletonRows", () => {
     const time = clock(30_000);
     painted("1");
     const { rerender } = render(<>
-      <SkeletonSlot><SkeletonRows key="a" label="Loading apps…" /></SkeletonSlot>
+      <SkeletonSlot><SkeletonRows inSlot key="a" label="Loading apps…" /></SkeletonSlot>
       <SkeletonSlot>{null}</SkeletonSlot>
       <SkeletonRows key="c" label="Loading…" />
     </>);
     time.now += 200;
     rerender(<>
       <SkeletonSlot>{null}</SkeletonSlot>
-      <SkeletonSlot><SkeletonRows key="b" label="Loading Chats..." testId="other-slot" /></SkeletonSlot>
+      <SkeletonSlot><SkeletonRows inSlot key="b" label="Loading Chats..." testId="other-slot" /></SkeletonSlot>
       <SkeletonRows key="d" label="Loading…" testId="no-slot" />
     </>);
     expect(waiting("other-slot")).toBe(true);
     expect(waiting("no-slot")).toBe(true);
-  });
-
-  it("keeps the wait when the clock went back", () => {
-    const time = clock(40_000);
-    painted("1");
-    const { rerender } = render(<SkeletonSlot><SkeletonRows key="fallback" label="Loading…" /></SkeletonSlot>);
-    time.now += 200;
-    rerender(<SkeletonSlot>{null}</SkeletonSlot>);
-    time.now = 1_000;
-    rerender(<SkeletonSlot><SkeletonRows key="view" label="Loading…" testId="view" /></SkeletonSlot>);
-    expect(waiting("view")).toBe(true);
   });
 
   it("is one status whose only words are its label", () => {

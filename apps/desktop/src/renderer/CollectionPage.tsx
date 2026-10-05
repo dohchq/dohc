@@ -514,7 +514,7 @@ export function CollectionPage({
     (state.status === "loading" || state.status === "idle") &&
     state.collection === null;
   if (details === null || neverLoaded) {
-    return <SkeletonRows layout="panel" label="Loading collection..." />;
+    return <SkeletonRows inSlot layout="panel" label="Loading collection..." />;
   }
 
   const schema = details.schema;

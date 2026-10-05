@@ -1402,10 +1402,9 @@ describe("RelayShareDialog", () => {
     await vi.waitFor(() => {
       expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
     });
-    expect(
-      screen.getByText("Loading links…").tagName,
-      "a refresh draws placeholder lines above the links already on screen",
-    ).toBe("P");
+    const words = screen.getByText("Loading links…");
+    expect(words.tagName, "a refresh draws placeholder lines above the links already on screen").toBe("P");
+    expect(words.getAttribute("role"), "a refresh says nothing to a screen reader").toBe("status");
     expect(screen.getByTestId("share-link-row-grant-link-1")).toBeTruthy();
     await act(async () => {
       again.resolve({ links: [row] });
@@ -2890,6 +2889,45 @@ describe("RelayShareDialog", () => {
       paths: ["docs/plan.md"],
     });
     expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+  });
+
+  it("stands lines in for comments not yet read, and says a reread aloud with words", async () => {
+    bridgeMock.listRelayShareLinks.mockResolvedValue({
+      links: [readableLink("link-a", { shareId: "share-a" })],
+    });
+    const first = controllable<DiscussionPage>();
+    const again = controllable<DiscussionPage>();
+    bridgeMock.listRelayShareDiscussion
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(again.promise);
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const group = await screen.findByTestId("share-link-group-share-a");
+    const comments = within(group).getByRole("button", { name: "Comments" });
+
+    await user.click(comments);
+    const opening = within(group).getByText("Loading comments…").closest("[role=status]");
+    expect(opening?.classList.contains("dohc-reveal-if-slow")).toBe(true);
+    await act(async () => {
+      first.resolve(discussionPage());
+    });
+    await within(group).findByText("No comments yet.");
+
+    await user.click(comments);
+    await user.click(comments);
+    const words = within(group).getByText("Loading comments…");
+    expect(words.tagName, "a reread draws placeholder lines where comments were shown").toBe("P");
+    expect(words.getAttribute("role"), "a reread says nothing to a screen reader").toBe("status");
+    await act(async () => {
+      again.resolve(discussionPage());
+    });
   });
 
   it("keeps one collapsed Comments section per eligible real share", async () => {

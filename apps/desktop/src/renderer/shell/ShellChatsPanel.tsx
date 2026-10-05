@@ -127,7 +127,7 @@ export function ShellChatsPanel(props: {
           // main answers its per-file chat from the share scope, and
           // its only tab is the file tab.
           !captureDecided ? (
-            <SkeletonRows layout="panel" label="Loading Chats..." />
+            <SkeletonRows inSlot layout="panel" label="Loading Chats..." />
           ) : (
             <div
               data-testid="chats-panel-off"
@@ -137,7 +137,7 @@ export function ShellChatsPanel(props: {
             </div>
           )
         ) : chatsPanelActiveTab === "file" ? (
-          <Suspense fallback={<SkeletonRows layout="panel" label="Loading Chats..." />}>
+          <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats..." />}>
             <LazyLinkedChatsPanel
               workspaceId={workspaceId}
               filePath={activeDocumentPath}
@@ -151,7 +151,7 @@ export function ShellChatsPanel(props: {
             />
           </Suspense>
         ) : (
-          <Suspense fallback={<SkeletonRows layout="panel" label="Loading Chats..." />}>
+          <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats..." />}>
             <LazyChatsView key={workspaceId} {...chatsNavigatorProps} />
           </Suspense>
         )}

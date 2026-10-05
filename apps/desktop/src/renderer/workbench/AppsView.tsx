@@ -120,7 +120,7 @@ export function AppsView(props: {
       </div>
 
       {state.status === "loading" ? (
-        <SkeletonRows layout="panel" label="Loading apps…" />
+        <SkeletonRows inSlot layout="panel" label="Loading apps…" />
       ) : state.status === "error" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
           <AlertTriangle size={18} aria-hidden className="text-warning" />

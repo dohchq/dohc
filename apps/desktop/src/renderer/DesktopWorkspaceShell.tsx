@@ -5020,7 +5020,7 @@ export function DesktopWorkspaceShell(props: {
               // Each loading state of the tab puts its lines at the top, so
               // each one takes over from the last without blinking.
               <SkeletonSlot>{captureAvailable ? (
-                <Suspense fallback={<SkeletonRows layout="panel" label="Loading Chats..." />}>
+                <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats..." />}>
                   <LazyChatsView
                     key={`${workspaceId}:${tabPath}:${chatEditors.get(tabPath).generation}:${chatEditors.get(tabPath).revision}`}
                     {...chatsViewProps}
@@ -5052,7 +5052,7 @@ export function DesktopWorkspaceShell(props: {
                 </div>
               ) : !captureDecided ? (
                 // Main has not decided yet — a load state, not a claim.
-                <SkeletonRows layout="panel" label="Loading Chats..." />
+                <SkeletonRows inSlot layout="panel" label="Loading Chats..." />
               ) : (
                 // Main decided, and the answer was no capture: the engine flag
                 // is off, the settings file is unreadable, or the capture
@@ -5089,7 +5089,10 @@ export function DesktopWorkspaceShell(props: {
                 />
               )
             ) : groupDataCollection ? (
-              <Suspense fallback={<SkeletonRows layout="panel" label="Loading collection..." />}>
+              // The view opens its Collection at the same place its fallback
+              // stands, so those lines take over without blinking.
+              <SkeletonSlot>
+              <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading collection..." />}>
                 <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
                   datasetPath={groupDataCollection.datasetPath} tableId={groupDataCollection.tableId}
                   onOpenFile={(path) => openFile(path)}
@@ -5103,10 +5106,11 @@ export function DesktopWorkspaceShell(props: {
                     openVirtualTab(siteTabPath(appRoot));
                   }} />
               </Suspense>
+              </SkeletonSlot>
             ) : isCollectionTabPath(tabPath) ? (
               groupCollectionPath ? (
                 <SkeletonSlot>
-                <Suspense fallback={<SkeletonRows layout="panel" label="Loading collection..." />}>
+                <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading collection..." />}>
                   <LazyCollectionPage
                     key={`${tabPath}:${collectionLineage}`}
                     workspaceId={workspaceId}

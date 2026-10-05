@@ -27,7 +27,7 @@ function AppsViewLoading() {
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
         <Globe2 size={13} aria-hidden className="text-subtle" />
       </div>
-      <SkeletonRows layout="panel" label="Loading apps..." />
+      <SkeletonRows inSlot layout="panel" label="Loading apps..." />
     </div>
   );
 }

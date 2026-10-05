@@ -403,7 +403,7 @@ export function LinkedChatsPanel(props: {
   }
 
   if (threadsState.status === "loading") {
-    return <SkeletonRows layout="panel" label="Loading Chats..." />;
+    return <SkeletonRows inSlot layout="panel" label="Loading Chats..." />;
   }
 
   if (threadsState.status === "unavailable") {
