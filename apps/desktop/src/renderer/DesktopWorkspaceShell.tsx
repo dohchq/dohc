@@ -4505,7 +4505,7 @@ export function DesktopWorkspaceShell(props: {
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
     <CustomizeContext.Provider value={customizeContext}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
-    <ShellErrorReporter.Provider value={reportShellError}>
+    <ShellErrorReporter.Provider value={reportShellFailure}>
     <div
       data-testid="workspace-shell"
       ref={focusRoot}

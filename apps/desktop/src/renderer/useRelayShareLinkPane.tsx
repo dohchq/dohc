@@ -20,7 +20,11 @@ import { bridge } from "./bridge";
 import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
 import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
-import { CopyField } from "./ui/CopyButton";
+import { CopyField, type CopySecret } from "./ui/CopyButton";
+
+// Share links are shown once, so a link whose copy is gone is reset, not
+// copied again.
+const SHARE_LINK_SECRET: CopySecret = { what: "the share link", again: "Reset the link in Share to get a new one." };
 import { SegmentedControl } from "./ui/SegmentedControl";
 
 type LinkAccess = "view" | "comment" | "edit";
@@ -1665,7 +1669,7 @@ export function useRelayShareLinkPane(props: {
             </p>
             <CopyField
               getText={() => minted.url}
-              sensitive={{ again: "Copy the link again from Share on this selection. If Share no longer shows it, reset the link there." }}
+              sensitive={SHARE_LINK_SECRET}
             >
               <code data-testid="share-link-url" title={minted.url}>{minted.url}</code>
             </CopyField>

@@ -6,7 +6,7 @@ import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { CopyField } from "./ui/CopyButton";
-import { COPY_INVITATION_AGAIN, COPY_SHARE_CODE_AGAIN } from "./shareCopyAgain";
+import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "./shareCopySecrets";
 import { useRequestSequence } from "./useRequestSequence";
 
 const ACCESS_OPTIONS: ReadonlyArray<{
@@ -180,7 +180,7 @@ export function EmailShareForm(props: {
                 Send this browser invitation to {created.recipientEmail}. The recipient must sign in with the invited account.
               </p>
               <CopyField label="Copy browser invitation" copiedLabel="Browser invitation copied"
-                sensitive={{ again: COPY_INVITATION_AGAIN }} copyTestId="share-browser-invitation-copy"
+                sensitive={BROWSER_INVITATION_SECRET} copyTestId="share-browser-invitation-copy"
                 getText={() => created.browserInvitationUrl ?? null}>
                 <code data-testid="share-browser-invitation" data-grant-id={created.grantId} title={created.browserInvitationUrl}>
                   {created.browserInvitationUrl}
@@ -196,7 +196,7 @@ export function EmailShareForm(props: {
             <span className="font-medium text-ink">{created.recipientEmail}</span> —
             they paste it in dohc under “Open a share”.
           </p>
-          <CopyField copyTestId="share-code-copy" getText={() => created.shareCode} sensitive={{ again: COPY_SHARE_CODE_AGAIN }}>
+          <CopyField copyTestId="share-code-copy" getText={() => created.shareCode} sensitive={SHARE_CODE_SECRET}>
             <code data-testid="share-code" title={created.shareCode}>{created.shareCode}</code>
           </CopyField>
           <p className="m-0 text-[11px] leading-relaxed text-subtle">

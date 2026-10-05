@@ -6,7 +6,7 @@ import {
   type WorkspaceErrorNotice,
 } from "../workbench/NoticeCenter";
 import { errorDetails } from "./copyDetails";
-import { ShellErrorReporter, useShellError, type ReportShellError } from "./useShellError";
+import { ShellErrorReporter, useShellError, type ReportShellFailure } from "./useShellError";
 
 // What a connection attempt hands the surface that owns its notices. The
 // owner raises the toast and the Notices row; the panel shows nothing inline.
@@ -93,6 +93,7 @@ export function useConnectionNotices() {
   return {
     reporter,
     reportError: reportShellError,
+    reportFailure: reportShellFailure,
     showSuccess: showSuccessNotice,
     notices,
     retryNotice: retryShellError,
@@ -111,11 +112,11 @@ const NOOP = () => undefined;
 export function StandaloneNotices(props: { children: ReactNode }) {
   const own = useConnectionNotices();
   return (
-    <ShellErrorReporter.Provider value={own.reportError}>
+    <ShellErrorReporter.Provider value={own.reportFailure}>
       {props.children}
       <ConnectionNotices
         notices={own.notices}
-        reportError={own.reportError}
+        reportFailure={own.reportFailure}
         onRetry={own.retryNotice}
         onHide={own.hideNotice}
         onDismiss={own.dismissNotice}
@@ -132,7 +133,7 @@ export function StandaloneNotices(props: { children: ReactNode }) {
 export function ConnectionNotices(props: {
   notices: readonly WorkspaceErrorNotice[];
   // Where a copy from one of these notices reports its own failure.
-  reportError: ReportShellError;
+  reportFailure: ReportShellFailure;
   onRetry: (id: string) => void;
   onHide: (id: string) => void;
   onDismiss: (id: string) => void;
@@ -146,7 +147,7 @@ export function ConnectionNotices(props: {
       data-testid="connection-notices"
       className="fixed bottom-2 right-3 z-30"
     >
-      <ShellErrorReporter.Provider value={props.reportError}>
+      <ShellErrorReporter.Provider value={props.reportFailure}>
       <NoticeCenter
         workspaceId={NO_WORKSPACE}
         host="corner"

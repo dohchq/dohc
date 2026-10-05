@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { COPY_FAILURE, CopyButton } from "../ui/CopyButton";
 import { ConnectionNotices, StandaloneNotices } from "./connectionNotices";
-import type { ReportShellError } from "./useShellError";
+import type { ReportShellFailure } from "./useShellError";
 
 beforeEach(() => {
   vi.stubGlobal("dohcDesktop", {
@@ -35,11 +35,11 @@ it("reports a copy refused from a notice to the owner it was given", async () =>
   const user = userEvent.setup();
   const refusal = new Error("Document is not focused.");
   vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(refusal);
-  const reportError = vi.fn<ReportShellError>();
+  const reportFailure = vi.fn<ReportShellFailure>();
   render(
     <ConnectionNotices
       notices={[notice]}
-      reportError={reportError}
+      reportFailure={reportFailure}
       onRetry={() => undefined}
       onHide={() => undefined}
       onDismiss={() => undefined}
@@ -47,7 +47,11 @@ it("reports a copy refused from a notice to the owner it was given", async () =>
   );
 
   await user.click(within(screen.getByTestId("workspace-shell-error")).getByRole("button", { name: "Copy error details" }));
-  expect(reportError).toHaveBeenCalledWith(COPY_FAILURE, refusal, expect.any(Function));
+  expect(reportFailure).toHaveBeenCalledWith({
+    message: `${COPY_FAILURE} Document is not focused.`,
+    cause: refusal,
+    retry: expect.any(Function),
+  });
 });
 
 // A screen with no notice owner above it, such as the one dohc shows when it

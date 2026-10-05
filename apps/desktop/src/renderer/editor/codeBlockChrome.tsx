@@ -3,7 +3,7 @@ import { stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection, type EditorState } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
-import type { ReportShellError } from "../shell/useShellError";
+import type { ReportShellFailure } from "../shell/useShellError";
 import {
   COPY_TILE_CLASS,
   COPY_TILE_STATE_CLASS,
@@ -12,7 +12,7 @@ import {
   type CopyFeedback,
 } from "../ui/CopyButton";
 
-type ErrorReporter = () => ReportShellError | null;
+type ErrorReporter = () => ReportShellFailure | null;
 
 // The copy tile's three icons as lucide draws them (Copy, Check,
 // TriangleAlert), for a toolbar ProseMirror owns and React does not render.

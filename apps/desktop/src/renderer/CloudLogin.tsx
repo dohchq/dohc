@@ -13,7 +13,9 @@ import {
   type ConnectionNoticeHost,
 } from "./shell/connectionNotices";
 import { Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
-import { CopyField } from "./ui/CopyButton";
+import { CopyField, type CopySecret } from "./ui/CopyButton";
+
+const SYNC_CODE_SECRET: CopySecret = { what: "the sync code", again: "Copy it again from Settings." };
 
 const SETUP_GUIDE_URL =
   "https://github.com/dohc-ai/dohc/blob/main/docs/how-to/self-host.md";
@@ -684,7 +686,7 @@ export function CloudLogin(props: {
                           <CopyField
                             copyTestId="cloud-copy-sync-code"
                             getText={() => syncCode}
-                            sensitive={{ again: "Copy the code again from Sync and sharing in Settings." }}
+                            sensitive={SYNC_CODE_SECRET}
                           >
                             <code data-testid="cloud-sync-code" title={syncCode}>{syncCode}</code>
                           </CopyField>
@@ -804,7 +806,7 @@ export function CloudLogin(props: {
       {panel}
       <ConnectionNotices
         notices={ownNotices.notices}
-        reportError={ownNotices.reportError}
+        reportFailure={ownNotices.reportFailure}
         onRetry={ownNotices.retryNotice}
         onHide={ownNotices.hideNotice}
         onDismiss={ownNotices.dismissNotice}

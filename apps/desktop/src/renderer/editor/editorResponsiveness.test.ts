@@ -11,8 +11,8 @@ import { detectCompleteEmojiShortcode, detectEmojiAutocomplete } from "./emojiTr
 import { makeTriggerPlugin } from "./triggerPlugin";
 import { makeBlockControlsPlugin } from "./blockControls";
 import { makeCodeBlockChromePlugin } from "./codeBlockChrome";
-import type { ReportShellError } from "../shell/useShellError";
-import { COPY_FAILURE, COPY_FEEDBACK_MS, COPY_WORDS } from "../ui/CopyButton";
+import type { ReportShellFailure } from "../shell/useShellError";
+import { COPY_FEEDBACK_MS, COPY_WORDS } from "../ui/CopyButton";
 import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeSlashCommandPlugin, CLOSED_SLASH_COMMAND_STATE } from "./slashCommands";
 import { makeHeadingFlashPlugin } from "./OutlinePanel";
@@ -420,7 +420,7 @@ describe("editor chrome reuse", () => {
     const refusal = new Error("Document is not focused.");
     const writeText = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(refusal).mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
-    const report = vi.fn<ReportShellError>();
+    const report = vi.fn<ReportShellFailure>();
     const view = mount(doc(paragraph("lead"), codeBlock("const a = 1;", "javascript")), [makeCodeBlockChromePlugin(() => report)]);
     const button = view.dom.querySelector<HTMLButtonElement>(".dohc-code-copy-btn")!;
     const status = view.dom.querySelector(".dohc-code-block-toolbar [role='status']")!;
@@ -438,8 +438,12 @@ describe("editor chrome reuse", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(button.title).toBe(COPY_WORDS.failed);
     expect(button.getAttribute("aria-label")).toBe("copy code");
-    expect(report).toHaveBeenCalledWith(COPY_FAILURE, refusal, expect.any(Function));
-    report.mock.calls[0]![2]!();
+    expect(report).toHaveBeenCalledWith({
+      message: "dohc could not copy to the clipboard. Document is not focused.",
+      cause: refusal,
+      retry: expect.any(Function),
+    });
+    report.mock.calls[0]![0].retry!();
     await vi.advanceTimersByTimeAsync(0);
     expect(writeText).toHaveBeenLastCalledWith("const a = 1;");
     expect(button.title).toBe(COPY_WORDS.copied);

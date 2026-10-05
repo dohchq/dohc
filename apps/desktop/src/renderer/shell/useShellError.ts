@@ -69,10 +69,15 @@ export interface ShellError {
 }
 
 // The error hook a notice owner hands to a shared part that reports its own
-// failure, such as a copy the clipboard refused: the same toast and Notices
-// row as `reportShellError`. Outside an owner, the part says it in place only.
-export type ReportShellError = (fallback: string, error: unknown, retry: (() => void) | null) => void;
-export const ShellErrorReporter = createContext<ReportShellError | null>(null);
+// failure, such as a copy the clipboard refused: `reportShellFailure`, for a
+// failure the part has already worded. Outside an owner, the part says it in
+// place only.
+export type ReportShellFailure = (failure: {
+  message: string;
+  cause?: unknown;
+  retry?: (() => void) | null;
+}) => void;
+export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
 
 export function useShellError(workspaceId: string) {
   const [shellErrors, setShellErrors] = useState<readonly ShellError[]>([]);

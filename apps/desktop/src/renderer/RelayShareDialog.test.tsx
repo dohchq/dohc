@@ -8,8 +8,7 @@ import {
   type RelayShareGrantedRow,
 } from "../ipc/bridgeContract";
 import { RelayShareDialog, type RelayShareTarget } from "./RelayShareDialog";
-import { ShellErrorReporter, type ReportShellError } from "./shell/useShellError";
-import { COPY_FAILURE } from "./ui/CopyButton";
+import { ShellErrorReporter, type ReportShellFailure } from "./shell/useShellError";
 
 const SHARE_CODE = "dohc-share:share-1:http://relay.test";
 const LINK_URL = "https://relay.test/share/link-secret";
@@ -1336,7 +1335,7 @@ describe("RelayShareDialog", () => {
     const row = readableLink("grant-link-1", { shareId: "share-link-1", dependents: [] });
     bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [row] });
     bridgeMock.rotateRelayShareLink.mockResolvedValueOnce({ outcome: "rotated", url: LINK_URL_B });
-    const report = vi.fn<ReportShellError>();
+    const report = vi.fn<ReportShellFailure>();
     const user = userEvent.setup();
     writeText.mockRejectedValueOnce(new Error("Document is not focused."));
     render(
@@ -1349,8 +1348,14 @@ describe("RelayShareDialog", () => {
     await user.click(screen.getByRole("button", { name: "Create link" }));
     expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL);
     await user.click(screen.getByRole("button", { name: "Copy" }));
-    await vi.waitFor(() => expect(report).toHaveBeenCalledWith(COPY_FAILURE, expect.anything(), expect.any(Function)));
-    const retry = report.mock.calls[0]![2]!;
+    await vi.waitFor(() =>
+      expect(report).toHaveBeenCalledWith({
+        message: "dohc could not copy the share link. Document is not focused.",
+        cause: expect.anything(),
+        retry: expect.any(Function),
+      }),
+    );
+    const retry = report.mock.calls[0]![0].retry!;
 
     const linkRow = screen.getByTestId("share-link-row-grant-link-1");
     await user.click(within(linkRow).getByRole("button", { name: "Reset link" }));
@@ -1360,11 +1365,11 @@ describe("RelayShareDialog", () => {
     writeText.mockClear();
     await act(async () => retry());
     expect(writeText).not.toHaveBeenCalled();
-    expect(report).toHaveBeenLastCalledWith(
-      expect.stringMatching(/^dohc could not copy to the clipboard\. .*reset the link/u),
-      expect.anything(),
-      null,
-    );
+    expect(report).toHaveBeenLastCalledWith({
+      message: "dohc could not copy the share link. Document is not focused. Reset the link in Share to get a new one.",
+      cause: expect.anything(),
+      retry: null,
+    });
   });
 
   it("resets with the sorted current dependent ids, replaces the URL, and refreshes", async () => {

@@ -1,6 +1,7 @@
 import { Check, Copy, TriangleAlert } from "lucide-react";
 import { useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { ShellErrorReporter, type ReportShellError } from "../shell/useShellError";
+import { withErrorWords } from "../../ipc/errorWords";
+import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 
 // The one copy control. It says what happened in place, says it again to a
 // screen reader, and hands a failure to the shell's error hook, so the toast
@@ -41,23 +42,64 @@ function write(text: string): Promise<void> {
   }
 }
 
+// What a secret copy is called in its failure, and where a person copies it
+// again once Try again cannot: "the share link", "Reset the link in Share to
+// get a new one."
+export type CopySecret = { what: string; again: string };
+
+// A failure's words: what happened, why if the error says, then, for a secret
+// whose control is gone, where to copy it again.
+function failureWords(secret: CopySecret | undefined, error: unknown, gone: boolean): string {
+  const said = withErrorWords(secret ? `dohc could not copy ${secret.what}.` : COPY_FAILURE, error);
+  return secret && gone ? `${said} ${secret.again}` : said;
+}
+
+// The Try again a notice keeps. It is built here, outside createCopy, so it
+// holds only what it names: the control's copy, which `dispose` clears; the
+// words; and, for text that is not secret, the text that failed. Nothing it
+// holds reaches the text source once the control is gone.
+//
+// While the control is on screen, Try again copies afresh: a control shows
+// one value for its life (CopyField is keyed by its text), so a link its
+// surface has reset since is never the one copied. Once the control is gone,
+// as when the failure's toast replaced the toast it sat in, Try again copies
+// the text that failed. A secret keeps no such text: its notice says where to
+// copy it again instead, with no Try again.
+function retryAfter(
+  control: { copy: (() => Promise<void>) | null },
+  report: ReportShellFailure,
+  secret: CopySecret | undefined,
+  error: unknown,
+  text: string | null,
+): () => void {
+  return () => {
+    if (control.copy) {
+      void control.copy();
+      return;
+    }
+    if (text === null) {
+      report({ message: failureWords(secret, error, true), cause: error, retry: null });
+      return;
+    }
+    write(text).catch((next: unknown) =>
+      report({ message: failureWords(secret, next, true), cause: next, retry: retryAfter(control, report, secret, next, text) }),
+    );
+  };
+}
+
 // One control's copy. `show` hears each answer, then null once the answer
 // has shown for COPY_FEEDBACK_MS. `dispose` when the control goes away.
-//
-// `copyAgain` marks the text secret, such as a share link or a code, and
-// says where a person copies it again. A secret is never kept to retry
-// with, and the control lets go of its text source when it goes away, so a
-// Notices row holds no way back to a credential its surface has retired.
+// `secret` marks text such as a share link or a code: no copy of it is kept
+// to retry with, and the control lets go of its text source when it goes.
 export function createCopy(options: {
   getText: () => string | null | Promise<string | null>;
-  report: () => ReportShellError | null;
+  report: () => ReportShellFailure | null;
   show: (feedback: CopyFeedback | null) => void;
-  copyAgain?: (() => string | undefined) | undefined;
+  secret?: (() => CopySecret | undefined) | undefined;
 }): { copy: () => Promise<void>; dispose: () => void } {
-  // Taken apart so no closure below keeps `options`, and with it the text
-  // source, once `dispose` drops `read`.
-  const { report: reporter, show, copyAgain } = options;
+  const { report: reporter, show, secret: secretOf } = options;
   let read: typeof options.getText | null = options.getText;
+  const control: { copy: (() => Promise<void>) | null } = { copy: null };
   let attempts = 0;
   let live = true;
   let reset: ReturnType<typeof setTimeout> | null = null;
@@ -71,37 +113,20 @@ export function createCopy(options: {
     }, COPY_FEEDBACK_MS);
   }
 
-  // Try again copies afresh while the control is on screen. A control shows
-  // one value for its life (CopyField is keyed by its text), so a link its
-  // surface has reset since is never the one copied. Once the control is
-  // gone, as when the failure's toast replaced the toast it sat in, Try
-  // again copies the text that failed. A secret has no such text: its
-  // notice says where to copy it again instead.
-  function retry(error: unknown, text: string | null, report: ReportShellError): () => void {
-    return () => {
-      if (live) {
-        void copy();
-        return;
-      }
-      const again = copyAgain?.();
-      if (text === null || again !== undefined) {
-        report(again === undefined ? COPY_FAILURE : `${COPY_FAILURE} ${again}`, error, null);
-        return;
-      }
-      write(text).catch((next: unknown) => report(COPY_FAILURE, next, retry(next, text, report)));
-    };
-  }
-
   function fail(error: unknown, text: string | null) {
     if (live) answer("failed");
     const report = reporter();
     if (!report) return;
-    const again = copyAgain?.();
-    if (again !== undefined && !live) {
-      report(`${COPY_FAILURE} ${again}`, error, null);
+    const secret = secretOf?.();
+    if (secret && !live) {
+      report({ message: failureWords(secret, error, true), cause: error, retry: null });
       return;
     }
-    report(COPY_FAILURE, error, retry(error, again === undefined ? text : null, report));
+    report({
+      message: failureWords(secret, error, false),
+      cause: error,
+      retry: retryAfter(control, report, secret, error, secret ? null : text),
+    });
   }
 
   async function copy() {
@@ -128,12 +153,14 @@ export function createCopy(options: {
     }
     if (current()) answer("copied");
   }
+  control.copy = copy;
 
   return {
     copy,
     dispose() {
       live = false;
       read = null;
+      control.copy = null;
       if (reset !== null) clearTimeout(reset);
     },
   };
@@ -151,8 +178,9 @@ export function CopyButton(props: {
   // The tile alone; what it says is the tooltip.
   iconOnly?: boolean;
   // Marks the text secret, such as a share link, a share code or a sync
-  // code. `again` says where to copy it again once Try again cannot.
-  sensitive?: { again: string } | undefined;
+  // code: what it is called, and where to copy it again once Try again
+  // cannot.
+  sensitive?: CopySecret | undefined;
   testId?: string | undefined;
   disabled?: boolean;
 }) {
@@ -161,25 +189,27 @@ export function CopyButton(props: {
   const words: Record<CopyFeedback, string> = { ...COPY_WORDS, ...(props.copiedLabel ? { copied: props.copiedLabel } : {}) };
   const [feedback, setFeedback] = useState<CopyFeedback | null>(null);
   const [announcement, setAnnouncement] = useState("");
-  // Separate refs, so only the copy's text source reaches the text, and the
-  // copy drops it when the button goes away.
-  const getText = useRef(props.getText);
+  const getText = useRef<typeof props.getText | null>(props.getText);
   getText.current = props.getText;
   const reportTo = useRef(report);
   reportTo.current = report;
   const spoken = useRef(words);
   spoken.current = words;
-  const again = useRef(props.sensitive?.again);
-  again.current = props.sensitive?.again;
+  const secret = useRef(props.sensitive);
+  secret.current = props.sensitive;
   const action = useRef<ReturnType<typeof createCopy> | null>(null);
+  const mountedGetText = props.getText;
   // In the commit that puts the button on screen, so a click that comes
   // before React's passive effects run still counts.
   useLayoutEffect(() => {
+    // Set again here: StrictMode runs the cleanup below and this effect
+    // again without a render between them.
+    getText.current = mountedGetText;
     let announce: ReturnType<typeof setTimeout> | null = null;
     const copy = createCopy({
-      getText: () => getText.current(),
+      getText: () => getText.current?.() ?? null,
       report: () => reportTo.current,
-      copyAgain: () => again.current,
+      secret: () => secret.current,
       show: (next) => {
         setFeedback(next);
         // Cleared now and set in a later task, so a second answer inside
@@ -192,6 +222,8 @@ export function CopyButton(props: {
     action.current = copy;
     return () => {
       copy.dispose();
+      // The text source goes with the button.
+      getText.current = null;
       if (announce !== null) clearTimeout(announce);
     };
   }, []);
@@ -230,7 +262,7 @@ export function CopyField(props: {
   getText: () => string | null;
   label?: string | undefined;
   copiedLabel?: string | undefined;
-  sensitive?: { again: string } | undefined;
+  sensitive?: CopySecret | undefined;
   copyTestId?: string | undefined;
 }) {
   return (

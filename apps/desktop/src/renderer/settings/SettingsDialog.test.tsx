@@ -19,8 +19,7 @@ import { SettingsDialog } from "./SettingsDialog";
 import { applyLookSettings } from "../theme";
 import { CUSTOMIZE_TARGETS } from "./customize";
 import { deferred } from "../../testing/deferred";
-import { ShellErrorReporter, type ReportShellError } from "../shell/useShellError";
-import { COPY_FAILURE } from "../ui/CopyButton";
+import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 
 const config = {
   command: "dohc-mcp",
@@ -952,7 +951,7 @@ describe("SettingsDialog", () => {
     stubClipboard();
     const denied = new Error("Clipboard denied");
     writeText.mockRejectedValueOnce(denied);
-    const report = vi.fn<ReportShellError>();
+    const report = vi.fn<ReportShellFailure>();
     render(
       <ShellErrorReporter.Provider value={report}>
         <SettingsDialog
@@ -966,7 +965,11 @@ describe("SettingsDialog", () => {
     await screen.findByTestId("mcp-config-snippet");
     await user.click(screen.getByText("Copy"));
     expect(await screen.findByRole("button", { name: "Couldn't copy" })).toBeTruthy();
-    expect(report).toHaveBeenCalledWith(COPY_FAILURE, denied, expect.any(Function));
+    expect(report).toHaveBeenCalledWith({
+      message: "dohc could not copy to the clipboard. Clipboard denied",
+      cause: denied,
+      retry: expect.any(Function),
+    });
     expect(screen.queryByText("Copied")).toBeNull();
   });
 
