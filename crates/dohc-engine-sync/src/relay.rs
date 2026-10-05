@@ -654,9 +654,9 @@ impl WorkspacePushProgress {
         store: &mut EngineStore,
         workspace_id: &str,
         faults: &dyn FaultInjector,
-    ) -> Result<bool, RelayError> {
+    ) -> Result<(), RelayError> {
         if self.file_versions_selected {
-            return Ok(true);
+            return Ok(());
         }
         match store
             .write_with(faults, |tx| {
@@ -670,9 +670,9 @@ impl WorkspacePushProgress {
         {
             TxnOutcome::Committed(selected) => {
                 self.file_versions_selected = selected;
-                Ok(true)
+                Ok(())
             }
-            TxnOutcome::Crashed { .. } => Ok(false),
+            TxnOutcome::Crashed { .. } => Err(local(SyncError::FaultCrash)),
         }
     }
 }
@@ -1117,9 +1117,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             now_ms,
         )
         .map_err(local)?;
-        if !progress.select_file_versions(store, workspace_id, faults)? {
-            return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
-        }
+        progress.select_file_versions(store, workspace_id, faults)?;
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
         let mut owner_admission_pending = Vec::new();
@@ -1167,9 +1165,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .map_err(local)?,
             );
             enrollment_prepared = true;
-            if !progress.select_file_versions(store, workspace_id, faults)? {
-                return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
-            }
+            progress.select_file_versions(store, workspace_id, faults)?;
             // Re-read so the probe's backfill enters the push loop.
             origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         }
@@ -1265,9 +1261,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             .map_err(local)?,
                         );
                         enrollment_prepared = true;
-                        if !progress.select_file_versions(store, workspace_id, faults)? {
-                            return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
-                        }
+                        progress.select_file_versions(store, workspace_id, faults)?;
                         for added in list_workspace_origins(store, workspace_id).map_err(local)? {
                             if seen_origins.insert(added.clone()) {
                                 origins.push_back(added);
