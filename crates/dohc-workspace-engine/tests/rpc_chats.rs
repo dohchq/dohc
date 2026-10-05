@@ -5051,6 +5051,17 @@ async fn local_chat_actor_key_survives_restart_and_never_enters_replication() {
         )
         .expect("ingest");
     }
+    assert!(
+        store
+            .read_with(|conn| {
+                conn.execute(
+                    "UPDATE chat_messages SET author_actor_key='broken' WHERE message_id='opening'",
+                    [],
+                )
+            })
+            .is_err(),
+        "local chat actor keys must contain valid JSON"
+    );
     let received_keys: Vec<Option<String>> = store
         .read_with(|conn| {
             let mut query = conn.prepare(
@@ -5087,4 +5098,83 @@ async fn local_chat_actor_key_survives_restart_and_never_enters_replication() {
         assert!(row.get("authorActorKey").is_none());
     }
     call(&transport, &reopened, &mut id, "workspace.close", json!({})).await;
+}
+
+async fn oversized_local_chat_actor_key_is_rejected(method: &str) {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "actor-key-bound").await;
+    let mut id = 1;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel", "name": "General", "kind": "channel", "nowMs": 10,
+        }),
+    )
+    .await;
+    let prefix = r#"{"kind":"installation","installationId":""#;
+    let suffix = r#""}"#;
+    let bounded_key = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(16 * 1024 - prefix.len() - suffix.len())
+    );
+    let opening = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel", "threadId": "thread", "messageId": "opening",
+            "authorKind": "human", "authorDisplayName": "Alice", "body": "Hello",
+            "authorActorKey": bounded_key, "nowMs": 20,
+        }),
+    )
+    .await;
+    assert_eq!(opening["message"]["authorActorKey"], bounded_key);
+    for padding in ["x".repeat(16 * 1024), "é".repeat(8 * 1024)] {
+        let mut params = json!({
+            "threadId": "thread", "messageId": "oversized",
+            "authorKind": "human", "authorDisplayName": "Alice", "body": "Hello",
+            "authorActorKey": format!("{prefix}{padding}{suffix}"), "nowMs": 30,
+        });
+        if method == "chats.threads.start" {
+            params["channelId"] = json!("channel");
+            params["threadId"] = json!("oversized-thread");
+        }
+        let error = call_error(&transport, &handle, &mut id, method, params).await;
+        assert_eq!(error.code, ErrorCode::InvalidParams, "{error:?}");
+        assert_eq!(error.message, "chat actor key exceeds 16384 bytes");
+    }
+    let listed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.list",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(listed["messages"].as_array().unwrap().len(), 1);
+    let threads = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel" }),
+    )
+    .await;
+    assert_eq!(threads["threads"].as_array().unwrap().len(), 1);
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_chat_actor_key_thread_start_has_a_byte_bound() {
+    oversized_local_chat_actor_key_is_rejected("chats.threads.start").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_chat_actor_key_message_send_has_a_byte_bound() {
+    oversized_local_chat_actor_key_is_rejected("chats.messages.send").await;
 }

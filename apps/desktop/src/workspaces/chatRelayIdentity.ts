@@ -1,5 +1,5 @@
 import { createActorIssuer, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
-import type { ActorIssuer, ActorKey } from "@dohc/workspace-contracts/actor-identity";
+import type { ActorIssuer, ActorRef } from "@dohc/workspace-contracts/actor-identity";
 import type { ChatMessage } from "@dohc/workspace-contracts/engine";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type {
@@ -172,44 +172,46 @@ export function assertSharedChannelMessageIdentity(input: {
 }
 
 // Only the native own-store column contains keys this device serialized.
-// Parsing a key restores grouping, never origin or assurance.
-export function readLocalChatActorKey(message: Pick<ChatMessage, "authorActorKey">): ActorKey | null {
-  return message.authorActorKey === undefined ? null : parseActorKey(message.authorActorKey);
+// Assurance comes from admitted origin and author kind, never the key alone.
+export function readLocalChatActor(message: Pick<ChatMessage, "authorActorKey" | "author" | "origin">): ActorRef | null {
+  const key = message.authorActorKey === undefined ? null : parseActorKey(message.authorActorKey);
+  if (key === null) return null;
+  const origin = message.origin ?? (message.author.kind === "human" ? "renderer"
+    : message.author.kind === "automation" ? "automation" : "unknown");
+  return {
+    key, displayName: message.author.displayName, origin,
+    assurance: key.kind === "unknown" ? "unknown"
+      : message.author.kind === "human" && origin === "renderer" ? "local" : "owner-asserted",
+  };
 }
 
 export async function resolveThreadActorIssuer(input: {
-  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "sharedChannels" | "shareView">;
+  readWorkspace(): Pick<RegistryEntry, "workspaceId" | "remote" | "sharedChannels" | "shareView"> | null;
   store: ChatRelayIdentityStore;
   threadId: string;
-  // The caller pins its registry attachment/session when those can be replaced.
+  // Fence caller attachment/session replacement as well as registry replacement.
   assertCurrent?: () => void;
 }): Promise<ActorIssuer | null> {
-  const { workspace, store, threadId } = input;
+  const { store, threadId } = input;
+  const workspace = input.readWorkspace();
+  if (workspace === null) return null;
   const workspaceId = workspace.workspaceId;
-  const snapshot = () => JSON.stringify({
-    workspaceId: workspace.workspaceId, remote: workspace.remote, shareView: workspace.shareView,
-    channels: workspace.sharedChannels,
-  });
-  const binding = snapshot();
   const changed = new Error("Chat issuer binding changed");
   const check = () => {
     input.assertCurrent?.();
-    if (snapshot() !== binding) throw changed;
+    if (input.readWorkspace() !== workspace) throw changed;
   };
-  const resolved: (string | null)[] = [];
   const guardedStore: ChatRelayIdentityStore = {
     async findThreadChannelId(target) {
       check();
       const result = await store.findThreadChannelId(target);
       check();
-      resolved.push(result);
       return result;
     },
     async getChannelWireId(target) {
       check();
       const result = await store.getChannelWireId(target);
       check();
-      resolved.push(result);
       return result;
     },
   };
@@ -217,19 +219,10 @@ export async function resolveThreadActorIssuer(input: {
     check();
     // A received file share has no admitted account issuer in its registry.
     if (workspace.shareView) return null;
-    const target = { threadId };
     const joined = await joinedSharedChannelForTarget({
-      workspaceId, sharedChannels: workspace.sharedChannels, store: guardedStore, target,
+      workspaceId, sharedChannels: workspace.sharedChannels, store: guardedStore, target: { threadId },
     });
     check();
-    const initialBinding = resolved.splice(0);
-    // Recheck the thread's channel/wire binding, independently of the registry.
-    const current = await joinedSharedChannelForTarget({
-      workspaceId, sharedChannels: workspace.sharedChannels, store: guardedStore, target,
-    });
-    check();
-    if (current !== joined || resolved.length !== initialBinding.length ||
-      resolved.some((value, index) => value !== initialBinding[index])) return null;
     const serverUrl = joined ? joined.serverUrl : workspace.remote?.serverUrl;
     if (!serverUrl) return null;
     try {

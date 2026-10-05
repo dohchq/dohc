@@ -50,7 +50,7 @@ function fixture(kind: ScopeKind = "local") {
   }
   const storeMethods = {
     createThread: vi.fn<DesktopLinkedChatStore["createThread"]>(async () => thread),
-    sendMessage: vi.fn<DesktopLinkedChatStore["sendMessage"]>(async ({ automation: _automation, ...input }) => ({ ...message, ...input, attachments: storedAttachments(input.attachments) })),
+    sendMessage: vi.fn<DesktopLinkedChatStore["sendMessage"]>(async ({ automation: _automation, authorActorKey, ...input }) => ({ ...message, ...input, ...(authorActorKey !== null ? { authorActorKey } : {}), attachments: storedAttachments(input.attachments) })),
     resolveChatDecision: vi.fn<DesktopLinkedChatStore["resolveChatDecision"]>(async input => ({ ...input, state: "resolved", atMs: 4 })),
     setReaction: vi.fn<DesktopLinkedChatStore["setReaction"]>(async input => ({ ...input, reactionId: "reaction", atMs: 4 })),
     listReactions: vi.fn<DesktopLinkedChatStore["listReactions"]>(async () => []),
@@ -63,9 +63,9 @@ function fixture(kind: ScopeKind = "local") {
     findThreadChannelId: vi.fn<DesktopLinkedChatStore["findThreadChannelId"]>(async () => "channel"),
     getChannelWireId: vi.fn<DesktopLinkedChatStore["getChannelWireId"]>(async () => "wire"),
     createChannel: vi.fn<DesktopLinkedChatStore["createChannel"]>(async input => ({ ...input, id: "channel", kind: "channel", slug: "general", type: input.type ?? "posts", purpose: input.purpose ?? "", ...(input.folderPath ? { folderPath: input.folderPath } : {}), createdAtMs: 1, updatedAtMs: 1 })),
-    startChannelThread: vi.fn<DesktopLinkedChatStore["startChannelThread"]>(async ({ automation: _automation, ...input }) => ({
+    startChannelThread: vi.fn<DesktopLinkedChatStore["startChannelThread"]>(async ({ automation: _automation, authorActorKey, ...input }) => ({
       thread: { id: thread.id, workspaceId: thread.workspaceId, title: thread.title, createdAtMs: 1, updatedAtMs: 2, channelId: input.channelId },
-      message: { ...message, ...input, attachments: storedAttachments(input.attachments) },
+      message: { ...message, ...input, ...(authorActorKey !== null ? { authorActorKey } : {}), attachments: storedAttachments(input.attachments) },
     })),
     listBookmarks: vi.fn<DesktopLinkedChatStore["listBookmarks"]>(async () => [bookmark]),
     ensureDefaultChannelFollows: vi.fn<DesktopLinkedChatStore["ensureDefaultChannelFollows"]>(async () => undefined),

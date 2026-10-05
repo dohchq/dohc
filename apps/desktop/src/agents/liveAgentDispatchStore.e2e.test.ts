@@ -38,6 +38,7 @@ describe("live agent dispatch store real daemon", () => {
             });
             const agentChannel = await chat.ensureAgentChannel({ workspaceId });
             const started = await chat.startChannelThread({
+              authorActorKey: null,
               workspaceId,
               channelId: agentChannel.channelId,
               title: "Real daemon dispatch",
@@ -45,6 +46,7 @@ describe("live agent dispatch store real daemon", () => {
               body: "Run the real daemon dispatch flow.",
             });
             const secondTrigger = await chat.sendMessage({
+              authorActorKey: null,
               workspaceId,
               threadId: started.thread.id,
               author: { kind: "human", displayName: "Sam" },

@@ -87,6 +87,7 @@ test("switching A->B while panels load never shows A's history or chats in B", a
         });
         for (let index = 0; index < CHAT_MESSAGES; index += 1) {
           await chats.sendMessage({
+            authorActorKey: null,
             workspaceId: WORKSPACE_A_ID,
             threadId: thread.id,
             author:

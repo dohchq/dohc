@@ -297,6 +297,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
     const ownerMessageId = messages[0]!.id;
     // The participant's reply.
     await memberStore.sendMessage({
+      authorActorKey: null,
       workspaceId: memberWs,
       threadId: threadId!,
       author: { kind: "human", displayName: "Morgan" },

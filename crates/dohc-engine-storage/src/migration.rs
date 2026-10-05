@@ -2910,7 +2910,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     Migration {
         ordinal: 34,
         id: "v2-local-chat-actor-key",
-        sql: "ALTER TABLE chat_messages ADD COLUMN author_actor_key TEXT;",
+        sql: "ALTER TABLE chat_messages ADD COLUMN author_actor_key TEXT CHECK (author_actor_key IS NULL OR json_valid(author_actor_key));",
         sets_user_version: None,
     },
 ];
@@ -3361,7 +3361,7 @@ mod tests {
             ),
             (
                 "v2-local-chat-actor-key",
-                "feab80511ba8fec927085d9776c2159531635ae901860d365c26e8283554ddaa",
+                "f84d0497555ff288db36304ed0c4b41b7f61d1d7f10396b9fd08a61da0fc7219",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

@@ -36,8 +36,8 @@ function fixture() {
     remote: { serverUrl: "https://cloud.test", ownerUserId: "user-1" },
   };
   const reactions: ChatReaction[] = [];
-  const message = ({ automation: _automation, ...input }: Parameters<ChatWriteStore["sendMessage"]>[0]): ChatMessage => ({
-    ...input, id: "message", createdAtMs: 2,
+  const message = ({ automation: _automation, authorActorKey, ...input }: Parameters<ChatWriteStore["sendMessage"]>[0]): ChatMessage => ({
+    ...input, ...(authorActorKey !== null ? { authorActorKey } : {}), id: "message", createdAtMs: 2,
     attachments: (input.attachments ?? []).map((attachment, index) => ({
       ...attachment, attachmentId: `attachment-${index}`, threadId: input.threadId,
       messageId: "message", targetKind: "file", createdAtMs: 2,
@@ -592,6 +592,7 @@ describe("ActorKey local admission", () => {
     test.setCredentials({ ...signedIn("user-1"), serverUrl: "not a URL" });
     const sent = await test.writeEach.send();
     expect(sent.authorActorKey).toBeUndefined();
+    expect(test.store.sendMessage.mock.calls[0]![0].authorActorKey).toBeNull();
     expect(sent.id).toBe("message");
   });
 

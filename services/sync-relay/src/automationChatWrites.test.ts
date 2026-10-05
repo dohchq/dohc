@@ -74,7 +74,7 @@ describe("an automation's messages on this server", () => {
     expect(writes).toEqual([{ method: "startChannelThread", input: {
       workspaceId: WORKSPACE, channelId: "channel-planning", lane: "posts", threadId: "thread-auto-1",
       messageId: "message-auto-1", idempotencyKey: "claim/hash/0/wake",
-      author: { kind: "automation", displayName: "Tell the group" }, authorOwnerDisplayName: "Ice", authorUserId: "owner",
+      author: { kind: "automation", displayName: "Tell the group" }, authorOwnerDisplayName: "Ice", authorUserId: "owner", authorActorKey: null,
       automation: { automationId: "collection:Tasks#tell", chainDepth: 2 }, body: "Packed.",
     } }]);
   });
@@ -84,7 +84,7 @@ describe("an automation's messages on this server", () => {
     const chat = replicaAutomationChat({ runStore, storage: { postAutomationWake: () => { throw new Error("unexpected wake"); } }, nowMs: () => 10_000, replica: replica(), store, ownerName: async () => "Ice" });
     await chat.write(new AbortController().signal, message({ kind: "direct-message", threadId: "thread-dm" }), savedRun());
     expect(writes).toEqual([{ method: "sendMessage", input: expect.objectContaining({
-      threadId: "thread-dm", idempotencyKey: "claim/hash/0/wake", authorUserId: "owner",
+      threadId: "thread-dm", idempotencyKey: "claim/hash/0/wake", authorUserId: "owner", authorActorKey: null,
       author: { kind: "automation", displayName: "Tell the group" },
     }) }]);
   });

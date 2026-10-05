@@ -85,6 +85,7 @@ export function replicaAutomationChat(input: {
         author: {kind: "automation" as const, displayName: message.automation.name},
         authorOwnerDisplayName,
         authorUserId: replica.ownerUserId,
+        authorActorKey: null,
         automation: {automationId: message.automation.automationId, chainDepth: message.automation.depth},
         body: message.body,
       };

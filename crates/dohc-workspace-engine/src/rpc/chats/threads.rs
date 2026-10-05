@@ -14,6 +14,7 @@ use crate::rpc::chats::messages::automation_json;
 use crate::rpc::chats::messages::message_json;
 use crate::rpc::chats::messages::parse_actor_kind;
 use crate::rpc::chats::messages::reaction_json;
+use crate::rpc::chats::messages::validate_actor_key;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
@@ -262,6 +263,7 @@ impl EngineService {
         request_id: Option<String>,
     ) -> Result<Value, WireError> {
         let params: ChatThreadStartParams = parse(params)?;
+        validate_actor_key(params.author_actor_key.as_deref())?;
         let lane = parse_thread_lane(params.lane.as_deref())?;
         reject_capture_origin(params.origin.as_deref())?;
         let author_kind = parse_actor_kind(&params.author_kind)?;

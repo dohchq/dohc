@@ -19,6 +19,7 @@ import {
 } from "../workspaces/dmRequests";
 import { credentialScopedOperation, requireCredentials } from "../workspaces/credentialScopedOperation";
 import { resolveWorkspaceRelayAuthorId, type ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
+import { deriveChatActorKey } from "../workspaces/chatWrites";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { relayApiFetch, relayFetchWithTimeout, RELAY_FETCH_TIMEOUT_MS } from "../workspaces/sharedChannels";
 import { ShareUnavailableError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
@@ -97,6 +98,7 @@ export function registerDirectMessagesIpcHandlers<
   endWorkspaceJoinedChannel(operation: Operation, shareId: string): void;
   chatScope: Pick<ReturnType<typeof createChatScopeCapability>, "resolveChatFileReferences">;
   localUserDisplayName(): string;
+  localInstallationId(): string;
   activity: {
     queueCloudSync(workspaceId: string): void;
     queueCloudPull(workspaceId: string): void;
@@ -110,7 +112,7 @@ export function registerDirectMessagesIpcHandlers<
     normalizeServerUrl, listWorkspaces, stateDir, peekedReceivedGrantKinds,
     syncRendererSharedChannelsForChatTarget, assertShareNotHeldElsewhere,
     reserveAndPullSharedChannelForWorkspace, endWorkspaceJoinedChannel,
-    localUserDisplayName, activity, chatDispatchService,
+    localUserDisplayName, localInstallationId, activity, chatDispatchService,
   } = dependencies;
   const { resolveChatFileReferences } = dependencies.chatScope;
 
@@ -647,12 +649,17 @@ export function registerDirectMessagesIpcHandlers<
               kind: "human" as const,
               displayName: localUserDisplayName(),
             };
+            const authorActorKey = deriveChatActorKey({
+              credentials, installationId: localInstallationId(), workspaceId: workspace.workspaceId,
+              writer: { via: "renderer" }, displayName: author.displayName,
+            });
             return running
               ? store.sendMessage({
                   workspaceId: workspace.workspaceId,
                   threadId: running.thread.id,
                   author,
                   authorUserId,
+                  authorActorKey,
                   body: input.body,
                   ...(attachments.length > 0 ? { attachments } : {}),
                 })
@@ -662,6 +669,7 @@ export function registerDirectMessagesIpcHandlers<
                     channelId,
                     author,
                     authorUserId,
+                    authorActorKey,
                     body: input.body,
                     ...(attachments.length > 0 ? { attachments } : {}),
                   })

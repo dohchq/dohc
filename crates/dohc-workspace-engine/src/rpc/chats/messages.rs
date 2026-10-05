@@ -10,6 +10,7 @@ use crate::rpc::chats::encode_chat_cursor;
 use crate::rpc::chats::threads::ChatLocalAttachmentParams;
 use crate::rpc::chats::threads::ChatThreadPageParams;
 use crate::rpc::chats::threads::thread_b2_json;
+use crate::rpc::request::MAX_METADATA_FIELD_BYTES;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
@@ -167,6 +168,16 @@ pub(super) fn parse_actor_kind(raw: &str) -> Result<ChatActorKind, WireError> {
             "unknown chat actor kind",
         )),
     }
+}
+
+pub(super) fn validate_actor_key(key: Option<&str>) -> Result<(), WireError> {
+    if key.is_some_and(|key| key.len() > MAX_METADATA_FIELD_BYTES) {
+        return Err(WireError::new(
+            ErrorCode::InvalidParams,
+            format!("chat actor key exceeds {MAX_METADATA_FIELD_BYTES} bytes"),
+        ));
+    }
+    Ok(())
 }
 
 /// A reaction author. Automations do not react.
@@ -531,6 +542,7 @@ impl EngineService {
         request_id: Option<String>,
     ) -> Result<Value, WireError> {
         let params: ChatMessageSendParams = parse(params)?;
+        validate_actor_key(params.author_actor_key.as_deref())?;
         reject_capture_origin(params.origin.as_deref())?;
         let author_kind = parse_actor_kind(&params.author_kind)?;
         let open = self.open(handle.as_ref())?;

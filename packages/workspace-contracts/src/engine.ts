@@ -1015,7 +1015,7 @@ export interface LinkedChatStore {
     authorOwnerDisplayName?: string;
     authorUserId?: string;
     // Local admission metadata, separate from the immutable replicated payload.
-    authorActorKey?: string;
+    authorActorKey: string | null;
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
@@ -1068,7 +1068,7 @@ export interface LinkedChatStore {
     authorOwnerDisplayName?: string;
     authorUserId?: string;
     // Local admission metadata, separate from the immutable replicated payload.
-    authorActorKey?: string;
+    authorActorKey: string | null;
     parentMessageId?: ChatMessageId;
     origin?: "cli";
     body: string;

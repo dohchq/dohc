@@ -6131,7 +6131,7 @@ function registerIpcHandlers(): void {
     remoteForWorkspace, relayShareJsonWithCredentials, normalizeServerUrl, listWorkspaces,
     stateDir, peekedReceivedGrantKinds, syncRendererSharedChannelsForChatTarget,
     assertShareNotHeldElsewhere, reserveAndPullSharedChannelForWorkspace,
-    endWorkspaceJoinedChannel, chatScope, localUserDisplayName, activity, chatDispatchService,
+    endWorkspaceJoinedChannel, chatScope, localUserDisplayName, localInstallationId, activity, chatDispatchService,
   });
 
   registerPresenceIpcHandlers<IpcMainInvokeEvent>({

@@ -940,6 +940,7 @@ describe("ChatsLiveAdapter", () => {
       { workspaceId: "workspace" },
     );
     const started = await adapter.startChannelThread({
+      authorActorKey: null,
       workspaceId: "workspace", channelId: "channel",
       author: { kind: "human", displayName: "Sam" }, body: "React here",
     });
@@ -980,6 +981,7 @@ describe("ChatsLiveAdapter", () => {
       name: "General",
     });
     const started = await adapter.startChannelThread({
+      authorActorKey: null,
       workspaceId: "workspace",
       channelId: "channel",
       author: { kind: "human", displayName: "Sam" },
@@ -1029,6 +1031,7 @@ describe("ChatsLiveAdapter", () => {
       name: "General",
     });
     const started = await adapter.startChannelThread({
+      authorActorKey: null,
       workspaceId: "workspace",
       channelId: "channel",
       author: { kind: "human", displayName: "Sam" },
@@ -1048,6 +1051,7 @@ describe("ChatsLiveAdapter", () => {
     expect(displayed.headCursor).toBeDefined();
 
     const arrivedLater = await adapter.sendMessage({
+      authorActorKey: null,
       workspaceId: "workspace",
       threadId: started.thread.id,
       author: { kind: "human", displayName: "Sam" },
@@ -1330,7 +1334,7 @@ describe("loopback poll validation", () => {
   ])("rejects %s options before writing a message", async (_name, options) => {
     const { adapter, loopback } = loopbackAdapter();
     loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Team" });
-    const started = await adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
+    const started = await adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, body: "Hello" });
     await expect(loopback.sendRequest({ id: 100, workspace: WORKSPACE, method: CHATS_METHOD.messageSend, params: {
       threadId: started.thread.id, messageId: "bad-poll", authorKind: "human", authorDisplayName: "Sam", body: "Choose", options,
     } })).rejects.toThrow("invalid-poll-options");
@@ -1360,6 +1364,7 @@ describe("automation authors", () => {
     );
     const author = { kind: "automation" as const, displayName: "Stamp the finish date" };
     const started = await recording.startChannelThread({
+      authorActorKey: null,
       workspaceId: "workspace", channelId: "channel", threadId: "thread-auto", messageId: "message-auto-1",
       idempotencyKey: "claim/step/post", automation: { automationId: "collection:object-tasks#stamp", chainDepth: 1 },
       author, authorOwnerDisplayName: "Ice", body: "Finished Book hotel",
@@ -1372,6 +1377,7 @@ describe("automation authors", () => {
     expect(started.message).toMatchObject({ id: "message-auto-1", author, authorOwnerDisplayName: "Ice",
       automation: { automationId: "collection:object-tasks#stamp" } });
     const reply = await recording.sendMessage({
+      authorActorKey: null,
       workspaceId: "workspace", threadId: "thread-auto", messageId: "message-auto-2", idempotencyKey: "claim/step2/post",
       automation: { automationId: "collection:object-tasks#stamp", chainDepth: 2 }, author, body: "Again",
     });
@@ -1380,7 +1386,7 @@ describe("automation authors", () => {
     expect((await adapter.listMessages({ workspaceId: "workspace", threadId: "thread-auto" })).map((message) => message.automation?.automationId))
       .toEqual(["collection:object-tasks#stamp", "collection:object-tasks#stamp"]);
     // Without ids, the adapter still mints them.
-    const minted = await adapter.sendMessage({ workspaceId: "workspace", threadId: "thread-auto", author: { kind: "human", displayName: "Ice" }, body: "Thanks" });
+    const minted = await adapter.sendMessage({ authorActorKey: null, workspaceId: "workspace", threadId: "thread-auto", author: { kind: "human", displayName: "Ice" }, body: "Thanks" });
     expect(minted.id).toMatch(/^message-/u);
     expect(minted.automation).toBeUndefined();
   });
@@ -1388,12 +1394,12 @@ describe("automation authors", () => {
   it("refuses an automation author without its automation, and an automation on anyone else", async () => {
     const { adapter, loopback } = loopbackAdapter();
     loopback.seedChannel({ workspace: WORKSPACE, channelId: "channel", name: "Trip" });
-    await expect(adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel",
+    await expect(adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel",
       author: { kind: "automation", displayName: "Stamp the finish date" }, body: "Done" })).rejects.toThrow("invalid-input");
-    await expect(adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel",
+    await expect(adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel",
       automation: { automationId: "collection:object-tasks#stamp", chainDepth: 1 },
       author: { kind: "human", displayName: "Ice" }, body: "Done" })).rejects.toThrow("invalid-input");
-    await expect(adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel",
+    await expect(adapter.startChannelThread({ authorActorKey: null, workspaceId: "workspace", channelId: "channel",
       automation: { automationId: "other:hello/triage", chainDepth: 1 },
       author: { kind: "automation", displayName: "Stamp the finish date" }, body: "Done" })).rejects.toThrow("invalid-input");
   });

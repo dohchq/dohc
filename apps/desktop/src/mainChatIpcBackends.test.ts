@@ -104,6 +104,7 @@ function registerChatFlowHandlers(
         }>(payload),
       run: async ({ store }, input) =>
         await store.startChannelThread({
+          authorActorKey: null,
           ...input,
           author: { kind: "human", displayName: "Sam" },
         }),
@@ -130,6 +131,7 @@ function registerChatFlowHandlers(
         }>(payload),
       run: async ({ store }, input) =>
         await store.sendMessage({
+          authorActorKey: null,
           ...input,
           author: { kind: "human", displayName: "Sam" },
         }),
