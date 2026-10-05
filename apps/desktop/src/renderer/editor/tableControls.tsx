@@ -69,9 +69,10 @@ import {
   TableMap,
   toggleHeaderRow,
 } from "@tiptap/pm/tables";
+import { Mapping, StepMap } from "@tiptap/pm/transform";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
-const tableControlsKey = new PluginKey("dohc-table-controls");
+const tableControlsKey = new PluginKey<TableControlsState>("dohc-table-controls");
 let nextTableControlsInstanceId = 0;
 
 // Grips sit 13px out with an 8px pill; 18px covers that chrome (and the
@@ -83,6 +84,11 @@ type TableCommand = (
   state: EditorState,
   dispatch?: (tr: Transaction) => void,
 ) => boolean;
+
+// Control widgets survive edits elsewhere in the document, so a captured
+// position goes stale. Each handler asks for its anchor cell's current
+// position, which is undefined once the widget has left the document.
+type CellPos = () => number | undefined;
 
 type GripMenuItem = {
   label: string;
@@ -105,7 +111,7 @@ type TableDropTarget = {
 type TableDragState = {
   band: TableBand;
   index: number;
-  cellPos: number;
+  cellPos: CellPos;
   tableElement: HTMLTableElement;
   sourceButton: HTMLButtonElement;
   scrollContainer: HTMLElement | null;
@@ -979,9 +985,13 @@ function finishTableDrop(
   drag.sourceButton.setAttribute("aria-grabbed", "false");
   suppressTableGripClickUntil.set(drag.sourceButton, Date.now() + 250);
 
-  if (target && target.destination !== drag.index) {
+  // A structural change, or one that reaches several cells, of the dragged
+  // table cancels the drag before this runs. If the table itself was
+  // removed, its handle has no position left.
+  const cellPos = drag.cellPos();
+  if (target && target.destination !== drag.index && cellPos !== undefined) {
     const sourceTable =
-      drag.band === "row" ? tableAtCellPos(view.state.doc, drag.cellPos) : null;
+      drag.band === "row" ? tableAtCellPos(view.state.doc, cellPos) : null;
     const rowHeights = sourceTable
       ? Array.from({ length: sourceTable.node.childCount }, (_, index) => {
           const height = sourceTable.node.child(index).attrs.height;
@@ -994,18 +1004,18 @@ function finishTableDrop(
     // selection even when its `pos` option identifies the table. Move the
     // selection only after pointer release, when rebuilding decorations can
     // no longer invalidate the active handle.
-    focusCell(view, drag.cellPos);
+    focusCell(view, cellPos);
     const command =
       drag.band === "column"
         ? moveTableColumn({
             from: drag.index,
             to: target.destination,
-            pos: drag.cellPos,
+            pos: cellPos,
           })
         : moveTableRow({
             from: drag.index,
             to: target.destination,
-            pos: drag.cellPos,
+            pos: cellPos,
           });
     const moved = runTableCommand(view, command);
     if (moved && sourceTable && rowHeights) {
@@ -1030,7 +1040,7 @@ function configureGripDrag(
   button: HTMLButtonElement,
   band: TableBand,
   index: number,
-  cellPos: number,
+  cellPos: CellPos,
 ): void {
   button.draggable = false;
   const hostWindow = ownerWindow(view.dom);
@@ -1227,10 +1237,15 @@ function configureRowResize(
   runtime: TableControlsRuntime,
   view: EditorView,
   button: HTMLButtonElement,
-  rowPos: number,
+  cellPos: CellPos,
   rowIndex: number,
 ): void {
   const hostWindow = ownerWindow(view.dom);
+  // The handle is anchored in the row's first cell.
+  const rowPos = () => {
+    const pos = cellPos();
+    return pos === undefined ? undefined : pos - 1;
+  };
 
   const detach = () => {
     hostWindow.removeEventListener("pointermove", onPointerMove, true);
@@ -1314,7 +1329,9 @@ function configureRowResize(
     if (view.editable === false || event.button !== 0) return;
     const rowElement = button.closest<HTMLTableRowElement>("tr");
     const tableElement = button.closest<HTMLTableElement>("table");
-    if (!rowElement || !tableElement) return;
+    // Any document change cancels the resize, so this position stays valid.
+    const startRowPos = rowPos();
+    if (!rowElement || !tableElement || startRowPos === undefined) return;
     stopEditorMouseEvent(event);
     runtime.cancelPointer?.();
     const measuredHeight = rowElement.getBoundingClientRect().height;
@@ -1323,7 +1340,7 @@ function configureRowResize(
       Math.round(measuredHeight || Number(rowElement.dataset.rowHeight) || MIN_ROW_HEIGHT),
     );
     runtime.activeRowResize = {
-      rowPos,
+      rowPos: startRowPos,
       rowIndex,
       rowElement,
       tableElement,
@@ -1362,19 +1379,22 @@ function configureRowResize(
     if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
     stopEditorMouseEvent(event);
     const rowElement = button.closest<HTMLTableRowElement>("tr");
-    if (!rowElement) return;
+    const pos = rowPos();
+    if (!rowElement || pos === undefined) return;
     const current = Math.max(
       MIN_ROW_HEIGHT,
       Math.round(rowElement.getBoundingClientRect().height || MIN_ROW_HEIGHT),
     );
     const direction = event.key === "ArrowDown" ? 1 : -1;
     const amount = event.shiftKey ? 10 : 2;
-    setTableRowHeight(view, rowPos, Math.max(MIN_ROW_HEIGHT, current + direction * amount));
+    setTableRowHeight(view, pos, Math.max(MIN_ROW_HEIGHT, current + direction * amount));
   });
 
   button.addEventListener("dblclick", (event) => {
     stopEditorMouseEvent(event);
-    setTableRowHeight(view, rowPos, null);
+    const pos = rowPos();
+    if (pos === undefined) return;
+    setTableRowHeight(view, pos, null);
     announceTableDrag(view, `Row ${rowIndex + 1} height reset to fit its content.`);
   });
 }
@@ -1382,7 +1402,7 @@ function configureRowResize(
 function buildRowResizeHandle(
   runtime: TableControlsRuntime,
   view: EditorView,
-  rowPos: number,
+  cellPos: CellPos,
   rowIndex: number,
 ): HTMLElement {
   const button = document.createElement("button");
@@ -1394,14 +1414,14 @@ function buildRowResizeHandle(
   button.setAttribute("aria-grabbed", "false");
   button.setAttribute("contenteditable", "false");
   button.disabled = view.editable === false;
-  configureRowResize(runtime, view, button, rowPos, rowIndex);
+  configureRowResize(runtime, view, button, cellPos, rowIndex);
   return button;
 }
 
 function buildColumnGrip(
   runtime: TableControlsRuntime,
   view: EditorView,
-  cellPos: number,
+  cellPos: CellPos,
   colIndex: number,
 ): HTMLElement {
   const button = document.createElement("button");
@@ -1419,9 +1439,11 @@ function buildColumnGrip(
   button.addEventListener("mousedown", stopPropagation);
   button.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
+    const pos = cellPos();
+    if (pos === undefined) return;
     if (Date.now() < (suppressTableGripClickUntil.get(button) ?? 0)) return;
-    selectColumn(view, cellPos);
-    openGripMenu(runtime, view, button, columnMenuItems(cellPos), "column");
+    selectColumn(view, pos);
+    openGripMenu(runtime, view, button, columnMenuItems(pos), "column");
   });
   return button;
 }
@@ -1429,7 +1451,7 @@ function buildColumnGrip(
 function buildRowGrip(
   runtime: TableControlsRuntime,
   view: EditorView,
-  cellPos: number,
+  cellPos: CellPos,
   rowIndex: number,
 ): HTMLElement {
   const button = document.createElement("button");
@@ -1447,9 +1469,11 @@ function buildRowGrip(
   button.addEventListener("mousedown", stopPropagation);
   button.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
+    const pos = cellPos();
+    if (pos === undefined) return;
     if (Date.now() < (suppressTableGripClickUntil.get(button) ?? 0)) return;
-    selectRow(view, cellPos);
-    openGripMenu(runtime, view, button, rowMenuItems(cellPos), "row");
+    selectRow(view, pos);
+    openGripMenu(runtime, view, button, rowMenuItems(pos), "row");
   });
   return button;
 }
@@ -1457,7 +1481,7 @@ function buildRowGrip(
 function buildTableMenuButton(
   runtime: TableControlsRuntime,
   view: EditorView,
-  cellPos: number,
+  cellPos: CellPos,
 ): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -1469,7 +1493,9 @@ function buildTableMenuButton(
   button.addEventListener("mousedown", stopEditorMouseEvent);
   button.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
-    focusCell(view, cellPos);
+    const pos = cellPos();
+    if (pos === undefined) return;
+    focusCell(view, pos);
     openGripMenu(runtime, view, button, tableMenuItems(), "table");
   });
   return button;
@@ -1483,7 +1509,7 @@ function buildTableMenuButton(
 // cell-anchored widget can only span its own cell via CSS, so
 // sizeAppendStrips stretches each strip to the full table edge with inline
 // offsets.
-function buildAppendColumnButton(view: EditorView, lastColCellPos: number): HTMLElement {
+function buildAppendColumnButton(view: EditorView, lastColCellPos: CellPos): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "dohc-table-append dohc-table-append--col";
@@ -1494,12 +1520,13 @@ function buildAppendColumnButton(view: EditorView, lastColCellPos: number): HTML
   button.addEventListener("mousedown", stopEditorMouseEvent);
   button.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
-    appendColumn(view, lastColCellPos);
+    const pos = lastColCellPos();
+    if (pos !== undefined) appendColumn(view, pos);
   });
   return button;
 }
 
-function buildAppendRowButton(view: EditorView, lastRowCellPos: number): HTMLElement {
+function buildAppendRowButton(view: EditorView, lastRowCellPos: CellPos): HTMLElement {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "dohc-table-append dohc-table-append--row";
@@ -1510,7 +1537,8 @@ function buildAppendRowButton(view: EditorView, lastRowCellPos: number): HTMLEle
   button.addEventListener("mousedown", stopEditorMouseEvent);
   button.addEventListener("click", (event) => {
     stopEditorMouseEvent(event);
-    appendRow(view, lastRowCellPos);
+    const pos = lastRowCellPos();
+    if (pos !== undefined) appendRow(view, pos);
   });
   return button;
 }
@@ -1519,17 +1547,111 @@ function isTableNode(node: { type: { name: string } }): boolean {
   return node.type.name === "table";
 }
 
+// Every control widget sits at the start of its anchor cell's content. Its
+// key names only what the control is, never a position: a rebuilt table then
+// keeps each control whose cell still holds the same kind and index, which
+// lets ProseMirror carry it into a cell recreated for an attribute change.
 function widgetDecoration(
-  pos: number,
-  toDOM: (view: EditorView) => HTMLElement,
+  cellPos: number,
   key: string,
+  toDOM: (view: EditorView, cellPos: CellPos) => HTMLElement,
 ): Decoration {
-  return Decoration.widget(pos, toDOM, {
-    side: -1,
-    key,
-    ignoreSelection: true,
-    stopEvent: () => true,
-  });
+  return Decoration.widget(
+    cellPos + 1,
+    (view, getPos) =>
+      toDOM(view, () => {
+        const pos = getPos();
+        return pos === undefined ? undefined : pos - 1;
+      }),
+    { side: -1, key: `dohc-table-${key}`, ignoreSelection: true, stopEvent: () => true },
+  );
+}
+
+function tableControlDecorations(
+  node: PMNode,
+  pos: number,
+  runtime: TableControlsRuntime,
+  rowResizeEnabled: boolean,
+): Decoration[] {
+  const map = TableMap.get(node);
+  const tableStart = pos + 1;
+  const decorations = [
+    Decoration.node(pos, pos + node.nodeSize, { class: "dohc-table-node" }),
+  ];
+
+  // Column grips: one per column, anchored inside that column's row-0
+  // cell. Dedup guards against pasted-in colspan cells (the editor never
+  // creates spans itself — no merge UI — but pasted HTML tables can).
+  let lastColCellPos = -1;
+  for (let col = 0; col < map.width; col += 1) {
+    const cellPos = tableStart + map.map[col];
+    if (cellPos === lastColCellPos) continue;
+    lastColCellPos = cellPos;
+    const colIndex = col;
+    decorations.push(
+      widgetDecoration(cellPos, `col-${colIndex}`, (view, current) =>
+        buildColumnGrip(runtime, view, current, colIndex),
+      ),
+    );
+  }
+
+  // Table menu affordance: anchored inside the top-left cell (the
+  // spreadsheet "select-all corner"), floated into the top-left margin.
+  decorations.push(
+    widgetDecoration(tableStart + map.map[0], "menu", (view, current) =>
+      buildTableMenuButton(runtime, view, current),
+    ),
+  );
+
+  // Append-column "+": anchored inside the top-right cell, hugging the
+  // table's right edge.
+  decorations.push(
+    widgetDecoration(
+      tableStart + map.map[map.width - 1],
+      "append-col",
+      buildAppendColumnButton,
+    ),
+  );
+
+  // Row grips: one per row, anchored inside that row's col-0 cell.
+  let lastRowCellPos = -1;
+  let rowPos = tableStart;
+  for (let row = 0; row < map.height; row += 1) {
+    const rowNode = node.child(row);
+    const cellPos = tableStart + map.map[row * map.width];
+    const rowIndex = row;
+    if (cellPos !== lastRowCellPos) {
+      lastRowCellPos = cellPos;
+      decorations.push(
+        widgetDecoration(cellPos, `row-${rowIndex}`, (view, current) =>
+          buildRowGrip(runtime, view, current, rowIndex),
+        ),
+      );
+    }
+    // The resize bar is anchored in the row's first physical cell rather
+    // than TableMap's first logical slot. A rowspan from the row above can
+    // own that logical slot, but each editable row still needs its own
+    // height control and row node position.
+    if (rowResizeEnabled && rowNode.childCount > 0) {
+      decorations.push(
+        widgetDecoration(rowPos + 1, `row-resize-${rowIndex}`, (view, current) =>
+          buildRowResizeHandle(runtime, view, current, rowIndex),
+        ),
+      );
+    }
+    rowPos += rowNode.nodeSize;
+  }
+
+  // Append-row "+": anchored inside the bottom-left cell, hugging the
+  // table's bottom edge.
+  decorations.push(
+    widgetDecoration(
+      tableStart + map.map[(map.height - 1) * map.width],
+      "append-row",
+      buildAppendRowButton,
+    ),
+  );
+  return decorations;
 }
 
 function buildTableControlDecorations(
@@ -1538,108 +1660,165 @@ function buildTableControlDecorations(
   rowResizeEnabled: boolean,
 ): DecorationSet {
   const decorations: Decoration[] = [];
-
   doc.descendants((node, pos) => {
     if (!isTableNode(node)) return;
-
-    const map = TableMap.get(node);
-    const tableStart = pos + 1;
-
-    decorations.push(
-      Decoration.node(pos, pos + node.nodeSize, { class: "dohc-table-node" }),
-    );
-
-    // Column grips: one per column, anchored inside that column's row-0
-    // cell. Dedup guards against pasted-in colspan cells (the editor never
-    // creates spans itself — no merge UI — but pasted HTML tables can).
-    let lastColCellPos = -1;
-    for (let col = 0; col < map.width; col += 1) {
-      const cellPos = tableStart + map.map[col];
-      if (cellPos === lastColCellPos) continue;
-      lastColCellPos = cellPos;
-      const colIndex = col;
-      decorations.push(
-        widgetDecoration(
-          cellPos + 1,
-          (view) => buildColumnGrip(runtime, view, cellPos, colIndex),
-          `dohc-table-col-${cellPos}`,
-        ),
-      );
-    }
-
-    // Table menu affordance: anchored inside the top-left cell (the
-    // spreadsheet "select-all corner"), floated into the top-left margin.
-    const topLeftCellPos = tableStart + map.map[0];
-    decorations.push(
-      widgetDecoration(
-        topLeftCellPos + 1,
-        (view) => buildTableMenuButton(runtime, view, topLeftCellPos),
-        `dohc-table-menu-${pos}`,
-      ),
-    );
-
-    // Append-column "+": anchored inside the top-right cell, hugging the
-    // table's right edge.
-    const topRightCellPos = tableStart + map.map[map.width - 1];
-    decorations.push(
-      widgetDecoration(
-        topRightCellPos + 1,
-        (view) => buildAppendColumnButton(view, topRightCellPos),
-        `dohc-table-append-col-${pos}`,
-      ),
-    );
-
-    // Row grips: one per row, anchored inside that row's col-0 cell.
-    let lastRowCellPos = -1;
-    let rowPos = tableStart;
-    for (let row = 0; row < map.height; row += 1) {
-      const rowNode = node.child(row);
-      const cellPos = tableStart + map.map[row * map.width];
-      const rowIndex = row;
-      if (cellPos !== lastRowCellPos) {
-        lastRowCellPos = cellPos;
-        decorations.push(
-          widgetDecoration(
-            cellPos + 1,
-            (view) => buildRowGrip(runtime, view, cellPos, rowIndex),
-            `dohc-table-row-${cellPos}`,
-          ),
-        );
-      }
-      // The resize bar is anchored in the row's first physical cell rather
-      // than TableMap's first logical slot. A rowspan from the row above can
-      // own that logical slot, but each editable row still needs its own
-      // height control and row node position.
-      if (rowResizeEnabled && rowNode.childCount > 0) {
-        const currentRowPos = rowPos;
-        const resizeCellPos = rowPos + 1;
-        decorations.push(
-          widgetDecoration(
-            resizeCellPos + 1,
-            (view) =>
-              buildRowResizeHandle(runtime, view, currentRowPos, rowIndex),
-            `dohc-table-row-resize-${currentRowPos}`,
-          ),
-        );
-      }
-      rowPos += rowNode.nodeSize;
-    }
-
-    // Append-row "+": anchored inside the bottom-left cell, hugging the
-    // table's bottom edge.
-    const bottomLeftCellPos = tableStart + map.map[(map.height - 1) * map.width];
-    decorations.push(
-      widgetDecoration(
-        bottomLeftCellPos + 1,
-        (view) => buildAppendRowButton(view, bottomLeftCellPos),
-        `dohc-table-append-row-${pos}`,
-      ),
-    );
-
+    decorations.push(...tableControlDecorations(node, pos, runtime, rowResizeEnabled));
     return false;
   });
-
   return DecorationSet.create(doc, decorations);
+}
+
+// One replaced range of a document change: [fromA, toA] in the old document
+// became [fromB, toB] in the new one. `structural` marks a range that added,
+// removed, or split a table part.
+type DocChange = {
+  fromA: number;
+  toA: number;
+  fromB: number;
+  toB: number;
+  structural: boolean;
+};
+
+// The ranges where two versions of some content differ, in document order.
+// Where the differing span covers block children and both sides keep the
+// same child count, each child pair is compared on its own. An unchanged
+// node between two edits then stays out of every range, whether the edits
+// came from one transaction or from a collaboration update that rebuilt
+// every node. Any other difference becomes one range.
+function diffContent(
+  a: Fragment,
+  b: Fragment,
+  posA: number,
+  posB: number,
+  out: Array<Omit<DocChange, "structural">>,
+): void {
+  const start = a.findDiffStart(b);
+  const end = a.findDiffEnd(b);
+  if (start === null || !end) return;
+  // Repeated text lets both scans claim the same characters. Move the end
+  // past the overlap, as ProseMirror's DOM change reader does.
+  const overlap = Math.max(0, start - Math.min(end.a, end.b));
+  const endA = end.a + overlap;
+  const endB = end.b + overlap;
+  const found = out.length;
+  if (a.childCount === b.childCount && a.firstChild?.isBlock) {
+    for (let i = 0, offA = 0, offB = 0; i < a.childCount && offA < endA; i += 1) {
+      const childA = a.child(i);
+      const childB = b.child(i);
+      if (offA + childA.nodeSize > start && childA !== childB) {
+        if (childA.sameMarkup(childB)) {
+          diffContent(childA.content, childB.content, posA + offA + 1, posB + offB + 1, out);
+        } else {
+          out.push({
+            fromA: posA + offA,
+            toA: posA + offA + childA.nodeSize,
+            fromB: posB + offB,
+            toB: posB + offB + childB.nodeSize,
+          });
+        }
+      }
+      offA += childA.nodeSize;
+      offB += childB.nodeSize;
+    }
+  }
+  if (out.length === found) {
+    out.push({ fromA: posA + start, toA: posA + endA, fromB: posB + start, toB: posB + endB });
+  }
+}
+
+function findDocChanges(before: PMNode, after: PMNode): DocChange[] {
+  if (before === after) return [];
+  const ranges: Array<Omit<DocChange, "structural">> = [];
+  diffContent(before.content, after.content, 0, 0, ranges);
+  return ranges.map((range) => ({
+    ...range,
+    structural:
+      changesTableStructure(before, range.fromA, range.toA) ||
+      changesTableStructure(after, range.fromB, range.toB),
+  }));
+}
+
+// An edit inside one cell leaves every table node around it in place. Any
+// table, row, or cell that the range does not strictly contain was added,
+// removed, or split, so its table's controls are stale.
+function changesTableStructure(doc: PMNode, from: number, to: number): boolean {
+  let changed = false;
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (node.type.spec.tableRole && (pos >= from || pos + node.nodeSize <= to)) {
+      changed = true;
+    }
+    return !changed;
+  });
+  return changed;
+}
+
+type ChangedTable = { node: PMNode; structural: boolean };
+
+// Controls hang off outermost tables only, as they always have, so these are
+// the tables whose controls or size the changes can affect. A change inside
+// a nested table counts for the table that holds it.
+function changedTables(doc: PMNode, changes: DocChange[]): Map<number, ChangedTable> {
+  const tables = new Map<number, ChangedTable>();
+  for (const change of changes) {
+    doc.nodesBetween(change.fromB, change.toB, (node, pos) => {
+      if (!isTableNode(node)) return true;
+      const structural = change.structural || tables.get(pos)?.structural === true;
+      tables.set(pos, { node, structural });
+      return false;
+    });
+  }
+  return tables;
+}
+
+function updateTableControlDecorations(
+  decorations: DecorationSet,
+  changes: DocChange[],
+  after: PMNode,
+  runtime: TableControlsRuntime,
+  rowResizeEnabled: boolean,
+): DecorationSet {
+  if (changes.length === 0) return decorations;
+  // Map through the diff rather than the transaction: a collaboration
+  // update replaces the whole document even when one cell changed.
+  const mapped = decorations.map(
+    new Mapping([
+      new StepMap(
+        changes.flatMap((change) => [
+          change.fromA,
+          change.toA - change.fromA,
+          change.toB - change.fromB,
+        ]),
+      ),
+    ]),
+    after,
+  );
+  const stale: Decoration[] = [];
+  const fresh: Decoration[] = [];
+  changedTables(after, changes).forEach(({ node, structural }, pos) => {
+    if (!structural) return;
+    stale.push(...mapped.find(pos + 1, pos + node.nodeSize - 1));
+    fresh.push(...tableControlDecorations(node, pos, runtime, rowResizeEnabled));
+  });
+  return mapped.remove(stale).add(after, fresh);
+}
+
+// The changes the view has not seen yet. Plugin state records the diff its
+// transaction produced; it applies only when the view moved across exactly
+// that transaction.
+type TableControlsState = {
+  decorations: DecorationSet;
+  before: PMNode | null;
+  after: PMNode;
+  changes: DocChange[];
+};
+
+function viewChanges(previous: EditorState, current: EditorState): DocChange[] {
+  if (previous.doc === current.doc) return [];
+  const recorded = tableControlsKey.getState(current);
+  if (recorded?.before === previous.doc && recorded.after === current.doc) {
+    return recorded.changes;
+  }
+  return findDocChanges(previous.doc, current.doc);
 }
 
 // Stretch the append strips of `table` to span its full right/bottom edge.
@@ -1684,6 +1863,44 @@ function sizeAllAppendStrips(view: EditorView): void {
   });
 }
 
+// Only a table that contains a change can change size or get fresh controls,
+// so typing elsewhere reads no table geometry.
+function changedTableElements(
+  view: EditorView,
+  changes: DocChange[],
+): Array<{ table: HTMLElement; pos: number; structural: boolean }> {
+  const elements: Array<{ table: HTMLElement; pos: number; structural: boolean }> = [];
+  changedTables(view.state.doc, changes).forEach(({ structural }, pos) => {
+    const dom = view.nodeDOM(pos) as HTMLElement | null;
+    const table = dom?.nodeName === "TABLE" ? dom : dom?.querySelector("table");
+    if (table) elements.push({ table, pos, structural });
+  });
+  return elements;
+}
+
+// True when the changes reach more than one cell of the table at `tablePos`.
+// Content moved between equal-shaped rows or columns diffs as text in
+// several cells, and its handles stay with their indexes, not their bands.
+function changesSeveralCells(doc: PMNode, tablePos: number, changes: DocChange[]): boolean {
+  const table = doc.nodeAt(tablePos);
+  if (!table) return false;
+  const tableEnd = tablePos + table.nodeSize;
+  let cell: number | null = null;
+  for (const change of changes) {
+    if (change.fromB <= tablePos || change.toB >= tableEnd) continue;
+    const $pos = doc.resolve(change.fromB);
+    let tableDepth = $pos.depth;
+    while (tableDepth > 0 && $pos.before(tableDepth) !== tablePos) tableDepth -= 1;
+    // A range directly in the table or a row is structural and cancels the
+    // drag already.
+    if (tableDepth === 0 || $pos.depth < tableDepth + 2) return true;
+    const cellPos = $pos.before(tableDepth + 2);
+    if (cell !== null && cell !== cellPos) return true;
+    cell = cellPos;
+  }
+  return false;
+}
+
 type HoveredTable = { table: HTMLElement; col: number; row: number };
 
 export function makeTableControlsPlugin(
@@ -1708,9 +1925,9 @@ export function makeTableControlsPlugin(
     hovered = null;
   };
 
-  // Re-assertable: decorations rebuild on every doc change, dropping the
-  // class from the freshly built grips, so the plugin view's update() calls
-  // this again for the still-hovered table.
+  // Re-assertable: a structural change rebuilds its table's grips, dropping
+  // the class from the fresh ones, so the plugin view's update() calls this
+  // again for the still-hovered table.
   const applyHover = (): void => {
     if (!hovered) return;
     hovered.table
@@ -1783,24 +2000,41 @@ export function makeTableControlsPlugin(
     return false;
   };
 
-  return new Plugin({
+  return new Plugin<TableControlsState>({
     key: tableControlsKey,
     state: {
       init(_, instance) {
-        return buildTableControlDecorations(
-          instance.doc,
-          runtime,
-          rowResizeEnabled,
-        );
+        return {
+          decorations: buildTableControlDecorations(
+            instance.doc,
+            runtime,
+            rowResizeEnabled,
+          ),
+          before: null,
+          after: instance.doc,
+          changes: [],
+        };
       },
-      apply(tr, old) {
-        if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
-        return buildTableControlDecorations(tr.doc, runtime, rowResizeEnabled);
+      apply(tr, old, oldState) {
+        if (!tr.docChanged) return old;
+        const changes = findDocChanges(oldState.doc, tr.doc);
+        return {
+          decorations: updateTableControlDecorations(
+            old.decorations,
+            changes,
+            tr.doc,
+            runtime,
+            rowResizeEnabled,
+          ),
+          before: oldState.doc,
+          after: tr.doc,
+          changes,
+        };
       },
     },
     props: {
       decorations(state) {
-        return tableControlsKey.getState(state) as DecorationSet | undefined;
+        return tableControlsKey.getState(state)?.decorations;
       },
       handleDOMEvents: {
         mousemove: onMouseMove,
@@ -1824,6 +2058,7 @@ export function makeTableControlsPlugin(
       if (typeof requestAnimationFrame === "function") {
         requestAnimationFrame(() => sizeAllAppendStrips(view));
       }
+      let editable = view.editable;
       return {
         // An open grip menu closes over a raw cell position (see
         // columnMenuItems). If the doc shifts while it's open — e.g. a remote
@@ -1832,17 +2067,41 @@ export function makeTableControlsPlugin(
         // detached overlay element, not a decoration, so it isn't rebuilt with
         // the grips; tear it down on any doc change instead.
         update(view, prevState) {
-          const docChanged = !view.state.doc.eq(prevState.doc);
+          const changes = viewChanges(prevState, view.state);
+          const docChanged = changes.length > 0;
           if (docChanged && runtime.activeRowResize) runtime.cancelPointer?.();
           if (runtime.closeMenu && docChanged) {
             runtime.closeMenu();
             runtime.closeMenu = null;
           }
-          // Doc changes rebuild the grip widgets (dropping `is-active`) and
-          // can change table boxes (added/removed rows): re-stretch every
-          // strip and restore the hovered handles without waiting for the
-          // next mousemove.
-          if (docChanged) sizeAllAppendStrips(view);
+          // Controls outlive document edits, so they cannot rely on a rebuild
+          // to pick up a change in editability.
+          if (view.editable !== editable) {
+            editable = view.editable;
+            view.dom
+              .querySelectorAll<HTMLButtonElement>(
+                ".dohc-table-grip, .dohc-table-row-resize, .dohc-table-menu-btn, .dohc-table-append",
+              )
+              .forEach((button) => {
+                button.disabled = !editable;
+              });
+          }
+          // A changed table can get fresh grips (dropping `is-active`) or a
+          // new box (added rows, wrapped text): re-stretch its strips and
+          // restore the hovered handles without waiting for the next
+          // mousemove. Handles stay with their indexes, so a change that may
+          // delete or move the dragged band would let the drop move another
+          // band. A structural change or one that reaches several cells of
+          // the dragged table ends its drag; an edit in one cell keeps it.
+          for (const { table, pos, structural } of changedTableElements(view, changes)) {
+            if (table.querySelector(".dohc-table-append")) sizeAppendStrips(table);
+            if (
+              runtime.activeDrag?.tableElement === table &&
+              (structural || changesSeveralCells(view.state.doc, pos, changes))
+            ) {
+              runtime.cancelPointer?.();
+            }
+          }
           if (hovered) {
             if (!hovered.table.isConnected) {
               hovered = null;

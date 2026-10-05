@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
-import { Editor, Extension } from "@tiptap/core";
+import { Editor, Extension, type JSONContent } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
+import { Slice } from "@tiptap/pm/model";
+import type { Transaction } from "@tiptap/pm/state";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   makeTableControlsPlugin,
@@ -56,7 +58,43 @@ function createTableEditor(rows = 2, cols = 2): Editor {
   return editor;
 }
 
+function labeledTable(prefix = "") {
+  return {
+    type: "table",
+    content: ["A", "B", "C"].map((rowLabel) => ({
+      type: "tableRow",
+      content: ["1", "2", "3"].map((columnLabel) => ({
+        type: rowLabel === "A" ? "tableHeader" : "tableCell",
+        content: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: `${prefix}${rowLabel}${columnLabel}` }],
+          },
+        ],
+      })),
+    })),
+  };
+}
+
 function createLabeledTableEditor(): Editor {
+  return new Editor({
+    extensions: [
+      StarterKit,
+      DohcTableRowHeight,
+      TableKit.configure({ table: { resizable: true } }),
+      testTableControls,
+    ],
+    content: { type: "doc", content: [labeledTable()] },
+  });
+}
+
+// Two 3x3 tables, x and y, between paragraphs. The closing paragraph keeps
+// the trailing-node plugin from adding one during the first edit.
+function createTwoTableEditor(): Editor {
+  const paragraph = (text: string) => ({
+    type: "paragraph",
+    content: [{ type: "text", text }],
+  });
   return new Editor({
     extensions: [
       StarterKit,
@@ -67,21 +105,11 @@ function createLabeledTableEditor(): Editor {
     content: {
       type: "doc",
       content: [
-        {
-          type: "table",
-          content: ["A", "B", "C"].map((rowLabel) => ({
-            type: "tableRow",
-            content: ["1", "2", "3"].map((columnLabel) => ({
-              type: rowLabel === "A" ? "tableHeader" : "tableCell",
-              content: [
-                {
-                  type: "paragraph",
-                  content: [{ type: "text", text: `${rowLabel}${columnLabel}` }],
-                },
-              ],
-            })),
-          })),
-        },
+        paragraph("Intro"),
+        labeledTable("x"),
+        paragraph("Between"),
+        labeledTable("y"),
+        paragraph("Outro"),
       ],
     },
   });
@@ -189,9 +217,9 @@ type JsonNode = {
   text?: string;
 };
 
-function tableNode(editor: Editor): JsonNode {
+function tableNode(editor: Editor, index = 0): JsonNode {
   const json = editor.getJSON() as unknown as { content?: JsonNode[] };
-  const table = json.content?.find((node) => node.type === "table");
+  const table = json.content?.filter((node) => node.type === "table")[index];
   if (!table) throw new Error("no table in doc");
   return table;
 }
@@ -203,8 +231,8 @@ function columnAligns(editor: Editor, colIndex: number): (string | null)[] {
   );
 }
 
-function tableTextGrid(editor: Editor): string[][] {
-  return (tableNode(editor).content ?? []).map((row) =>
+function tableTextGrid(editor: Editor, index = 0): string[][] {
+  return (tableNode(editor, index).content ?? []).map((row) =>
     (row.content ?? []).map((cell) =>
       (cell.content ?? [])
         .flatMap((paragraph) => paragraph.content ?? [])
@@ -1486,5 +1514,597 @@ describe("table Notion conveniences", () => {
     // behavior.
     expect(after).toBeDefined();
     expect(tableNode(editor).content).toHaveLength(2);
+  });
+});
+
+const CONTROL_SELECTOR =
+  ".dohc-table-grip, .dohc-table-row-resize, .dohc-table-menu-btn, .dohc-table-append";
+
+function controlsOf(root: ParentNode): HTMLButtonElement[] {
+  return Array.from(root.querySelectorAll<HTMLButtonElement>(CONTROL_SELECTOR));
+}
+
+function expectSameControls(actual: HTMLElement[], expected: HTMLElement[]): void {
+  expect(actual).toHaveLength(expected.length);
+  actual.forEach((control, index) => expect(control).toBe(expected[index]));
+}
+
+// Each table's box reads, in the order given.
+function countTableReads(tables: HTMLTableElement[]): number[] {
+  const reads = tables.map(() => 0);
+  tables.forEach((table, index) => {
+    Object.defineProperty(table, "getBoundingClientRect", {
+      configurable: true,
+      value: () => {
+        reads[index] = (reads[index] ?? 0) + 1;
+        return new DOMRect();
+      },
+    });
+  });
+  return reads;
+}
+
+// A 2x2 table whose second-row first cell holds a 2x2 table, between
+// paragraphs. The inner cells read i00 to i11.
+function createNestedTableEditor(): Editor {
+  const paragraph = (text: string): JSONContent => ({
+    type: "paragraph",
+    content: [{ type: "text", text }],
+  });
+  const table = (cell: (row: number, column: number) => JSONContent[]): JSONContent => ({
+    type: "table",
+    content: [0, 1].map((row) => ({
+      type: "tableRow",
+      content: [0, 1].map((column) => ({
+        type: "tableCell",
+        content: cell(row, column),
+      })),
+    })),
+  });
+  const inner = table((row, column) => [paragraph(`i${row}${column}`)]);
+  return new Editor({
+    extensions: [
+      StarterKit,
+      DohcTableRowHeight,
+      TableKit.configure({ table: { resizable: true } }),
+      testTableControls,
+    ],
+    content: {
+      type: "doc",
+      content: [
+        paragraph("Intro"),
+        table((row, column) =>
+          row === 1 && column === 0
+            ? [paragraph("o10"), inner]
+            : [paragraph(`o${row}${column}`)],
+        ),
+        paragraph("Outro"),
+      ],
+    },
+  });
+}
+
+function renderedTable(editor: Editor, index: number): HTMLTableElement {
+  const table = editor.view.dom.querySelectorAll("table")[index];
+  if (!table) throw new Error(`table ${index} missing`);
+  return table;
+}
+
+function textPos(editor: Editor, text: string): number {
+  let found: number | undefined;
+  editor.state.doc.descendants((node, pos) => {
+    if (found !== undefined) return false;
+    const index = node.text?.indexOf(text) ?? -1;
+    if (index >= 0) found = pos + index;
+    return true;
+  });
+  if (found === undefined) throw new Error(`text "${text}" missing`);
+  return found;
+}
+
+// @tiptap/y-tiptap 3.0.8 applies a remote update the way `_typeChanged`
+// does: it clears its Y.Doc-to-node mapping, rebuilds every node, then
+// replaces the whole document. Unchanged content is equal but no node is the
+// same object. It is not local history.
+function applyRemote(editor: Editor, change: (tr: Transaction) => void): void {
+  const remote = editor.state.tr;
+  change(remote);
+  const rebuilt = editor.schema.nodeFromJSON(remote.doc.toJSON());
+  editor.view.dispatch(
+    editor.state.tr
+      .replace(0, editor.state.doc.content.size, new Slice(rebuilt.content, 0, 0))
+      .setMeta("addToHistory", false),
+  );
+}
+
+// Rebuilds the document's first table with its cells rearranged by
+// `reorder`, which receives and returns the cells row by row.
+function reorderFirstTable(
+  tr: Transaction,
+  reorder: (rows: JSONContent[][]) => JSONContent[][],
+): void {
+  let tablePos = -1;
+  tr.doc.forEach((node, offset) => {
+    if (tablePos < 0 && node.type.name === "table") tablePos = offset;
+  });
+  const table = tr.doc.nodeAt(tablePos);
+  if (!table) throw new Error("no table in doc");
+  const json = table.toJSON() as JSONContent;
+  const rows = reorder((json.content ?? []).map((row) => row.content ?? []));
+  json.content = (json.content ?? []).map((row, index) => ({ ...row, content: rows[index] }));
+  tr.replaceWith(tablePos, tablePos + table.nodeSize, tr.doc.type.schema.nodeFromJSON(json));
+}
+
+// Presses `source` and moves the pointer over `target` without releasing.
+function startDrag(source: Element, target: Element): void {
+  elementFromPointResult = source;
+  dispatchPointer(source, "pointerdown");
+  elementFromPointResult = target;
+  dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+}
+
+const documentEdits: Array<[string, (editor: Editor) => void]> = [
+  ["text inserted above the table", (e) => e.view.dispatch(e.state.tr.insertText("More ", 1))],
+  ["text deleted above the table", (e) => e.view.dispatch(e.state.tr.delete(1, 3))],
+  [
+    "text inserted in its first cell",
+    (e) => e.view.dispatch(e.state.tr.insertText("new ", textPos(e, "xA1"))),
+  ],
+  [
+    "text deleted from its first cell",
+    (e) => {
+      const pos = textPos(e, "xA1");
+      e.view.dispatch(e.state.tr.delete(pos, pos + 1));
+    },
+  ],
+  [
+    "an undone cell edit",
+    (e) => {
+      e.view.dispatch(e.state.tr.insertText("draft ", textPos(e, "xB2")));
+      e.commands.undo();
+    },
+  ],
+  [
+    "a remote edit in its first cell",
+    (e) => applyRemote(e, (tr) => tr.insertText("remote ", textPos(e, "xA1"))),
+  ],
+  [
+    "a row inserted below its header",
+    (e) => {
+      e.commands.setTextSelection(textPos(e, "xA1"));
+      e.commands.addRowAfter();
+    },
+  ],
+];
+
+const controlActions: Array<{
+  name: string;
+  run: (table: HTMLTableElement) => void;
+  check: (editor: Editor, before: string[][]) => void;
+}> = [
+  {
+    name: "appends a column",
+    run: (table) => click(table.querySelector(".dohc-table-append--col")!),
+    check: (editor, before) =>
+      expect(tableTextGrid(editor)).toEqual(before.map((row) => [...row, ""])),
+  },
+  {
+    name: "appends a row",
+    run: (table) => click(table.querySelector(".dohc-table-append--row")!),
+    check: (editor, before) =>
+      expect(tableTextGrid(editor)).toEqual([...before, before[0]!.map(() => "")]),
+  },
+  {
+    name: "aligns the second column",
+    run: (table) => {
+      click(table.querySelectorAll(".dohc-table-grip--col")[1]!);
+      click(menuItemByLabel("Align right"));
+    },
+    check: (editor) => {
+      expect(new Set(columnAligns(editor, 1))).toEqual(new Set(["right"]));
+      expect(new Set(columnAligns(editor, 0))).toEqual(new Set([null]));
+    },
+  },
+  {
+    name: "duplicates the second column",
+    run: (table) => {
+      click(table.querySelectorAll(".dohc-table-grip--col")[1]!);
+      click(menuItemByLabel("Duplicate column"));
+    },
+    check: (editor, before) =>
+      expect(tableTextGrid(editor)).toEqual(
+        before.map((row) => [row[0]!, row[1]!, ...row.slice(1)]),
+      ),
+  },
+  {
+    name: "duplicates the second row",
+    run: (table) => {
+      click(table.querySelectorAll(".dohc-table-grip--row")[1]!);
+      click(menuItemByLabel("Duplicate row"));
+    },
+    check: (editor, before) =>
+      expect(tableTextGrid(editor)).toEqual([
+        ...before.slice(0, 2),
+        before[1]!,
+        ...before.slice(2),
+      ]),
+  },
+  {
+    name: "drags the first row below the third",
+    run: (table) => {
+      const grips = table.querySelectorAll(".dohc-table-grip--row");
+      drag(grips[0]!, grips[2]!);
+    },
+    check: (editor, before) =>
+      expect(tableTextGrid(editor)).toEqual([
+        before[1]!,
+        before[2]!,
+        before[0]!,
+        ...before.slice(3),
+      ]),
+  },
+  {
+    name: "resizes the second row from the keyboard",
+    run: (table) =>
+      table.querySelectorAll(".dohc-table-row-resize")[1]!.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+      ),
+    check: (editor, before) =>
+      expect(tableNode(editor).content?.map((row) => row.attrs?.height ?? null)).toEqual(
+        before.map((_, index) => (index === 1 ? 38 : null)),
+      ),
+  },
+  {
+    name: "toggles the header row",
+    run: (table) => {
+      click(table.querySelector(".dohc-table-menu-btn")!);
+      click(menuItemByLabel("Toggle header row"));
+    },
+    check: (editor) =>
+      expect(tableNode(editor).content?.[0]?.content?.map((cell) => cell.type)).toEqual([
+        "tableCell",
+        "tableCell",
+        "tableCell",
+      ]),
+  },
+];
+
+describe("table controls across document edits", () => {
+  let editor: Editor | undefined;
+
+  afterEach(() => {
+    elementFromPointResult = null;
+    document.body.querySelector(".dohc-table-menu")?.remove();
+    editor?.destroy();
+    editor = undefined;
+  });
+
+  describe.each(documentEdits)("after %s", (_, edit) => {
+    it.each(controlActions)("$name at the cell's current position", ({ run, check }) => {
+      editor = createTwoTableEditor();
+      edit(editor);
+      const before = tableTextGrid(editor);
+      const second = tableTextGrid(editor, 1);
+
+      run(renderedTable(editor, 0));
+
+      check(editor, before);
+      expect(tableTextGrid(editor, 1)).toEqual(second);
+    });
+  });
+
+  it("keeps every control and reads only the edited table's box while typing", () => {
+    editor = createTwoTableEditor();
+    const target = editor;
+    const tables = [renderedTable(target, 0), renderedTable(target, 1)];
+    const reads = countTableReads(tables);
+    const controls = tables.map(controlsOf);
+    const dispatch = (tr: Transaction) => target.view.dispatch(tr);
+
+    dispatch(target.state.tr.insertText("More ", 1));
+    dispatch(target.state.tr.delete(1, 3));
+    applyRemote(target, (tr) => tr.insertText("remote ", textPos(target, "Between")));
+    expect(reads).toEqual([0, 0]);
+
+    dispatch(target.state.tr.insertText("new ", textPos(target, "xA1")));
+    target.commands.undo();
+    dispatch(target.state.tr.delete(textPos(target, "xB2"), textPos(target, "xB2") + 1));
+    applyRemote(target, (tr) => tr.insertText("remote ", textPos(target, "xC3")));
+    expect(reads).toEqual([4, 0]);
+
+    tables.forEach((table, index) => expectSameControls(controlsOf(table), controls[index]!));
+    const columnStrip = (table: HTMLTableElement) =>
+      table.querySelector<HTMLElement>(".dohc-table-append--col")!.style.height;
+    expect(columnStrip(tables[0]!)).toBe("0px");
+    expect(columnStrip(tables[1]!)).toBe("");
+  });
+
+  it("rebuilds and sizes only the table whose structure changed", () => {
+    editor = createTwoTableEditor();
+    const [first, second] = [renderedTable(editor, 0), renderedTable(editor, 1)];
+    const firstControls = controlsOf(first);
+    const secondControls = controlsOf(second);
+    const oldAppendRow = second.querySelector(".dohc-table-append--row")!;
+
+    click(oldAppendRow);
+
+    expectSameControls(controlsOf(first), firstControls);
+    const rebuilt = controlsOf(second);
+    // The new row adds a grip and a resize handle and takes the append strip.
+    // Controls in unchanged cells stay.
+    expect(rebuilt).toHaveLength(secondControls.length + 2);
+    expect(rebuilt).not.toContain(oldAppendRow);
+    expect(rebuilt.filter((control) => secondControls.includes(control))).toHaveLength(
+      secondControls.length - 1,
+    );
+    expect(second.querySelector('[data-table-row="3"]')).not.toBeNull();
+    expect(first.querySelector<HTMLElement>(".dohc-table-append--col")!.style.height).toBe("");
+    expect(second.querySelector<HTMLElement>(".dohc-table-append--col")!.style.height).toBe(
+      "0px",
+    );
+  });
+
+  it("runs the second table's controls after edits in the first", () => {
+    editor = createTwoTableEditor();
+    editor.view.dispatch(editor.state.tr.insertText("More ", 1));
+    editor.view.dispatch(editor.state.tr.insertText("new ", textPos(editor, "xA1")));
+    const second = renderedTable(editor, 1);
+
+    click(second.querySelector(".dohc-table-append--col")!);
+    click(second.querySelectorAll(".dohc-table-grip--col")[1]!);
+    click(menuItemByLabel("Duplicate column"));
+    const rowGrips = second.querySelectorAll(".dohc-table-grip--row");
+    drag(rowGrips[0]!, rowGrips[2]!);
+
+    expect(tableTextGrid(editor, 1)).toEqual([
+      ["yB1", "yB2", "yB2", "yB3", ""],
+      ["yC1", "yC2", "yC2", "yC3", ""],
+      ["yA1", "yA2", "yA2", "yA3", ""],
+    ]);
+    expect(tableTextGrid(editor)[0]).toEqual(["new xA1", "xA2", "xA3"]);
+  });
+
+  it("duplicates a spanning column after text changes in an earlier cell", () => {
+    editor = createColspanTableEditor();
+    // The first edit also gets the trailing paragraph; the second is mapped.
+    editor.view.dispatch(editor.state.tr.insertText("more ", textPos(editor, "A")));
+    editor.view.dispatch(editor.state.tr.insertText("more ", textPos(editor, "A")));
+
+    click(editor.view.dom.querySelector('[data-table-column="1"]')!);
+    click(menuItemByLabel("Duplicate column"));
+
+    const header = tableNode(editor).content?.[0]?.content ?? [];
+    expect(header.map((cell) => cell.attrs?.colspan)).toEqual([1, 3, 1]);
+    expect(tableTextGrid(editor)[1]).toEqual(["A", "B", "B", "C", "D"]);
+  });
+
+  it("drops a row dragged while text changes above the table", () => {
+    editor = createTwoTableEditor();
+    const grips = renderedTable(editor, 0).querySelectorAll(".dohc-table-grip--row");
+    const source = grips[0]!;
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = grips[2]!;
+    dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+
+    editor.view.dispatch(editor.state.tr.insertText("More ", 1));
+    dispatchPointer(source, "pointerup", { clientX: 10, clientY: 10 });
+
+    expect(tableTextGrid(editor)).toEqual([
+      ["xB1", "xB2", "xB3"],
+      ["xC1", "xC2", "xC3"],
+      ["xA1", "xA2", "xA3"],
+    ]);
+  });
+
+  it("drops nothing when a row inserted mid-gesture moves the dragged row", () => {
+    editor = createTwoTableEditor();
+    const grips = renderedTable(editor, 0).querySelectorAll(".dohc-table-grip--row");
+    const source = grips[1]!;
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = grips[2]!;
+    dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+
+    editor.commands.setTextSelection(textPos(editor, "xB1"));
+    editor.commands.addRowBefore();
+    expect(renderedTable(editor, 0).contains(source)).toBe(false);
+    dispatchPointer(source, "pointerup", { clientX: 10, clientY: 10 });
+
+    expect(tableTextGrid(editor).map((row) => row[0])).toEqual(["xA1", "", "xB1", "xC1"]);
+    expect(editor.view.dom.querySelector(".is-dragging, .is-reordering")).toBeNull();
+    expect(document.body.querySelector(".dohc-table-drag-preview")).toBeNull();
+  });
+
+  it("drops nothing when a remote edit deletes the dragged row mid-gesture", () => {
+    editor = createTwoTableEditor();
+    const grips = renderedTable(editor, 0).querySelectorAll(".dohc-table-grip--row");
+    const source = grips[1]!;
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = grips[2]!;
+    dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+
+    // Row B's handle can survive under row C, which takes its index.
+    const $text = editor.state.doc.resolve(textPos(editor, "xB1"));
+    const rowDepth = $text.depth - 2;
+    applyRemote(editor, (tr) => tr.delete($text.before(rowDepth), $text.after(rowDepth)));
+    dispatchPointer(source, "pointerup", { clientX: 10, clientY: 10 });
+
+    expect(tableTextGrid(editor).map((row) => row[0])).toEqual(["xA1", "xC1"]);
+    expect(editor.view.dom.querySelector(".is-dragging, .is-reordering")).toBeNull();
+    expect(document.body.querySelector(".dohc-table-drag-preview")).toBeNull();
+  });
+
+  it("keeps a drag through a remote edit inside its table's cells", () => {
+    editor = createTwoTableEditor();
+    const grips = renderedTable(editor, 0).querySelectorAll(".dohc-table-grip--row");
+    const source = grips[0]!;
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = grips[2]!;
+    dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+
+    const target = editor;
+    applyRemote(target, (tr) => tr.insertText("new ", textPos(target, "xB2")));
+    dispatchPointer(source, "pointerup", { clientX: 10, clientY: 10 });
+
+    expect(tableTextGrid(editor)).toEqual([
+      ["xB1", "new xB2", "xB3"],
+      ["xC1", "xC2", "xC3"],
+      ["xA1", "xA2", "xA3"],
+    ]);
+  });
+
+  // Equal-shaped bands that trade places diff as text in several cells, and
+  // each handle stays at its index. The drag must not move the other band.
+  it("drops nothing when a remote update swaps the dragged row with another", () => {
+    editor = createTwoTableEditor();
+    const grips = renderedTable(editor, 0).querySelectorAll(".dohc-table-grip--row");
+    startDrag(grips[1]!, grips[2]!);
+
+    applyRemote(editor, (tr) => reorderFirstTable(tr, (rows) => [rows[0]!, rows[2]!, rows[1]!]));
+    dispatchPointer(grips[1]!, "pointerup", { clientX: 10, clientY: 10 });
+
+    expect(tableTextGrid(editor).map((row) => row[0])).toEqual(["xA1", "xC1", "xB1"]);
+    expect(editor.view.dom.querySelector(".is-dragging, .is-reordering")).toBeNull();
+    expect(document.body.querySelector(".dohc-table-drag-preview")).toBeNull();
+  });
+
+  it("drops nothing when a remote update swaps the dragged column with another", () => {
+    editor = createTwoTableEditor();
+    const grips = renderedTable(editor, 0).querySelectorAll(".dohc-table-grip--col");
+    startDrag(grips[0]!, grips[2]!);
+
+    applyRemote(editor, (tr) =>
+      reorderFirstTable(tr, (rows) => rows.map((cells) => [cells[1]!, cells[0]!, cells[2]!])),
+    );
+    dispatchPointer(grips[0]!, "pointerup", { clientX: 10, clientY: 10 });
+
+    expect(tableTextGrid(editor)[1]).toEqual(["xB2", "xB1", "xB3"]);
+    expect(editor.view.dom.querySelector(".is-dragging, .is-reordering")).toBeNull();
+  });
+
+  it("drops nothing when undo moves the dragged row back", () => {
+    editor = createTwoTableEditor();
+    const table = renderedTable(editor, 0);
+    const rowGrips = () => table.querySelectorAll(".dohc-table-grip--row");
+    drag(rowGrips()[1]!, rowGrips()[2]!);
+    expect(tableTextGrid(editor).map((row) => row[0])).toEqual(["xA1", "xC1", "xB1"]);
+
+    const source = rowGrips()[1]!;
+    startDrag(source, rowGrips()[2]!);
+    editor.commands.undo();
+    dispatchPointer(source, "pointerup", { clientX: 10, clientY: 10 });
+
+    expect(tableTextGrid(editor).map((row) => row[0])).toEqual(["xA1", "xB1", "xC1"]);
+    expect(editor.view.dom.querySelector(".is-dragging, .is-reordering")).toBeNull();
+  });
+
+  it("leaves a table between two edits untouched, locally and from collaborators", () => {
+    editor = createTwoTableEditor();
+    const target = editor;
+    const tables = [renderedTable(target, 0), renderedTable(target, 1)];
+    const controls = tables.map(controlsOf);
+    const reads = countTableReads(tables);
+
+    const local = target.state.tr.insertText("A ", textPos(target, "Intro"));
+    local.insertText("B ", local.mapping.map(textPos(target, "Between")));
+    target.view.dispatch(local);
+    applyRemote(target, (tr) => {
+      tr.insertText("C ", textPos(target, "Between"));
+      tr.insertText("D ", tr.mapping.map(textPos(target, "Outro")));
+    });
+    applyRemote(target, (tr) => {
+      tr.insertText("E ", textPos(target, "Intro"));
+      tr.insertText("F ", tr.mapping.map(textPos(target, "Outro")));
+    });
+
+    expect(reads).toEqual([0, 0]);
+    tables.forEach((table, index) => expectSameControls(controlsOf(table), controls[index]!));
+    click(tables[0]!.querySelector(".dohc-table-append--col")!);
+    click(tables[1]!.querySelectorAll(".dohc-table-grip--col")[1]!);
+    click(menuItemByLabel("Duplicate column"));
+    expect(tableTextGrid(target, 0)[0]).toEqual(["xA1", "xA2", "xA3", ""]);
+    expect(tableTextGrid(target, 1)[0]).toEqual(["yA1", "yA2", "yA2", "yA3"]);
+  });
+
+  // Nested tables have never had controls of their own. A change inside one
+  // updates and measures the table that holds it.
+  it("keeps the outer table's controls current through nested table edits", () => {
+    editor = createNestedTableEditor();
+    const target = editor;
+    const [outer, inner] = [renderedTable(target, 0), renderedTable(target, 1)];
+    expect(outer.contains(inner)).toBe(true);
+    expect(controlsOf(inner)).toHaveLength(0);
+    expect(outer.querySelectorAll(".dohc-table-grip--col")).toHaveLength(2);
+    expect(outer.querySelectorAll(".dohc-table-grip--row")).toHaveLength(2);
+    const controls = controlsOf(outer);
+    const reads = countTableReads([outer, inner]);
+
+    target.view.dispatch(target.state.tr.insertText("new ", textPos(target, "i00")));
+    applyRemote(target, (tr) => tr.insertText("remote ", textPos(target, "i11")));
+    expect(reads).toEqual([2, 0]);
+    expectSameControls(controlsOf(outer), controls);
+
+    target.commands.setTextSelection(textPos(target, "i11"));
+    target.commands.addRowAfter();
+    expect(reads).toEqual([3, 0]);
+    expectSameControls(controlsOf(outer), controls);
+    expect(controlsOf(inner)).toHaveLength(0);
+
+    outer.querySelectorAll(".dohc-table-row-resize")[1]!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+    );
+    click(outer.querySelector(".dohc-table-append--col")!);
+
+    const outerRows = tableNode(target).content ?? [];
+    expect(outerRows.map((row) => row.attrs?.height ?? null)).toEqual([null, 38]);
+    expect(outerRows.map((row) => row.content?.length)).toEqual([3, 3]);
+    const nested = outerRows[1]?.content?.[0]?.content?.[1];
+    expect(nested?.type).toBe("table");
+    expect(nested?.content).toHaveLength(3);
+  });
+
+  it("keeps every control through column alignment and row height changes", () => {
+    editor = createTwoTableEditor();
+    const table = renderedTable(editor, 0);
+    const controls = controlsOf(table);
+    const grip = table.querySelectorAll<HTMLElement>(".dohc-table-grip--col")[1]!;
+
+    click(grip);
+    click(menuItemByLabel("Align center"));
+    table.querySelectorAll(".dohc-table-row-resize")[0]!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }),
+    );
+
+    expectSameControls(controlsOf(table), controls);
+    click(grip);
+    click(menuItemByLabel("Duplicate column"));
+    expect(columnAligns(editor, 2)).toEqual(["center", "center", "center"]);
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBe(38);
+  });
+
+  it("closes an open grip menu when a remote edit arrives", () => {
+    editor = createTwoTableEditor();
+    click(renderedTable(editor, 0).querySelector(".dohc-table-grip--col")!);
+    expect(document.body.querySelector(".dohc-table-menu")).not.toBeNull();
+
+    applyRemote(editor, (tr) => tr.insertText("remote ", 1));
+
+    expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+  });
+
+  it("follows editability on the controls it keeps", () => {
+    editor = createTwoTableEditor();
+    const target = editor;
+    target.setEditable(false);
+    applyRemote(target, (tr) => tr.insertText("remote ", textPos(target, "xA1")));
+    expect(controlsOf(target.view.dom).every((control) => control.disabled)).toBe(true);
+
+    target.setEditable(true);
+    expect(controlsOf(target.view.dom).some((control) => control.disabled)).toBe(false);
+    click(renderedTable(target, 0).querySelector(".dohc-table-append--col")!);
+    expect(tableNode(target).content?.[0]?.content).toHaveLength(4);
   });
 });
