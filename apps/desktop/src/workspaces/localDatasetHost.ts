@@ -41,7 +41,7 @@ export interface LocalDatasetAutomationContext { readonly automationId: string; 
  * authority, attributed to the agent at its run's chain depth, 0 outside a
  * chain. Attribution never grants access.
  */
-export interface LocalDatasetAgent { readonly depth: number }
+export interface LocalDatasetAgent { readonly depth: number; readonly approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent }
 type AgentContext = { readonly agent: LocalDatasetAgent };
 type LocalContext = OwnerContext | LocalDatasetAppContext | LocalDatasetAutomationContext | AgentContext;
 type Resources = Pick<DatasetHostOptions<LocalContext>, "operationResources" | "accountCreation" | "accountMigration" | "accountCheckpointStage">;
@@ -413,12 +413,12 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
       discardMigration: migrations.discardMigration,
 
       discard(preparationId: string) { assertCurrent(); pending.delete(preparationId); },
-      approve(input: {preparationId: string; revisionSha256: string; signal?: AbortSignal}) {
+      approve(input: {preparationId: string; revisionSha256: string; approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null; signal?: AbortSignal}) {
         return tracked(async () => {
           const captured = pending.get(input.preparationId);
           if (!captured || captured.expires < Date.now() || captured.preparation.revision.revisionSha256 !== input.revisionSha256) throw new Error("This Collection approval expired or changed. Prepare it again.");
           const approved = await host.activate(owner, {workspaceId, revision: captured.preparation.revision, schemaSql: captured.schemaSql,
-            operationSource: captured.operationSource, capacityBytes: options.capacityBytes, signal: signal(input.signal)});
+            operationSource: captured.operationSource, approvalAgent:input.approvalAgent, capacityBytes: options.capacityBytes, signal: signal(input.signal)});
           pending.delete(input.preparationId); return changed(approved);
         });
       },

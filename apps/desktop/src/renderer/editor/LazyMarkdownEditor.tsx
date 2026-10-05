@@ -1,4 +1,5 @@
 import { forwardRef, useState, type ReactNode } from "react";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import type {
   MarkdownEditor,
@@ -59,12 +60,9 @@ export const LazyMarkdownEditor = forwardRef<
   // instead of importing again.
   if (load.status === "failed") throw load.error;
 
+  // The editor's own top padding, so its first line lands on the first bar.
   if (load.status === "loading") {
-    return (
-      <div className="flex h-full items-center justify-center text-xs text-subtle">
-        Loading editor...
-      </div>
-    );
+    return <SkeletonRows layout="document" label="Loading editor..." className="h-full pt-1.5" />;
   }
 
   return (

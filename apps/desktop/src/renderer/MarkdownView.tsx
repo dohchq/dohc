@@ -24,6 +24,7 @@ import {
 } from "./useAutosavedTextDraft";
 import { resolveWikilinkNavigation, resolveWorkspaceLinkNavigation } from "./wikilinkNavigation";
 import { CopyButton } from "./ui/CopyButton";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { FileText } from "lucide-react";
 import {
   Suspense,
@@ -170,11 +171,13 @@ function DeletedWhileEditingNotice(props: {
   );
 }
 
+// One line in the 28px the empty properties row takes, so the body below
+// does not move when the panel arrives.
 function PropertiesFallback() {
   return (
     <div className="dohc-page-properties">
-      <div className="dohc-page-properties__inner text-[11px] text-subtle">
-        Loading properties...
+      <div className="dohc-page-properties__inner">
+        <SkeletonRows rows={1} label="Loading properties..." className="h-7 justify-center" />
       </div>
     </div>
   );
@@ -1958,17 +1961,9 @@ export function MarkdownView(props: {
               <CopyButton testId="markdown-source-copy" getText={() => sourceMarkdown} />
             </div>
             {sourceMarkdown === null ? (
-              <div className="flex flex-1 items-center justify-center text-xs text-subtle">
-                Loading source...
-              </div>
+              <SkeletonRows layout="panel" label="Loading source..." />
             ) : (
-              <Suspense
-                fallback={
-                  <div className="flex flex-1 items-center justify-center text-xs text-subtle">
-                    Loading source...
-                  </div>
-                }
-              >
+              <Suspense fallback={<SkeletonRows layout="panel" label="Loading source..." />}>
                 <LazySourceCodeEditor
                   testId="markdown-source-view"
                   value={sourceMarkdown}
@@ -1983,7 +1978,11 @@ export function MarkdownView(props: {
             )}
           </div>
         ) : null}
-        {/* data-dohc-doc-pane: the whole pane is the editor's image drop zone,
+        {/* Every document pane keeps its scrollbar's room, so a short and a
+            long document share one column, and the loading lines line up
+            with both (FileInspector).
+
+            data-dohc-doc-pane: the whole pane is the editor's image drop zone,
             top-matter included — MarkdownEditor finds it with closest(). See
             the drop-zone comment in imagePaste.ts.
 
@@ -1997,7 +1996,7 @@ export function MarkdownView(props: {
           data-testid="view-markdown"
           data-dohc-doc-pane=""
           hidden={showSource}
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)]"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           {/* Title + inline properties are one top-matter zone (hovering it
               reveals the quiet "Add a property" affordance on empty docs). */}
@@ -2078,7 +2077,8 @@ export function MarkdownView(props: {
                 // control. This span is not disabled, so hovering the state
                 // always explains it.
                 title="You can edit this document when it finishes opening."
-                className="font-mono text-[11px] text-subtle"
+                // Shown only if opening is slow, like the loading lines.
+                className="dohc-reveal-if-slow font-mono text-[11px] text-subtle"
               >
                 Opening…
               </span>
@@ -2161,13 +2161,7 @@ export function MarkdownView(props: {
       ) : null}
       {documentNotices}
       {surfaceMode === "source" ? (
-        <Suspense
-          fallback={
-            <div className="flex min-h-0 flex-1 items-center justify-center text-xs text-subtle">
-              Loading editor...
-            </div>
-          }
-        >
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading editor..." />}>
           <LazySourceCodeEditor
             testId="markdown-editor"
             value={draft}
@@ -2195,7 +2189,7 @@ export function MarkdownView(props: {
           ref={localDocPaneRef}
           data-testid="view-markdown"
           data-dohc-doc-pane=""
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)]"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           <div className="dohc-page-topmatter">
             <PageIdentity
@@ -2250,13 +2244,7 @@ export function MarkdownView(props: {
         // rich document. Keep view-markdown: callers use it as the mounted
         // document surface regardless of which read representation owns it.
         <div data-testid="view-markdown" className="flex min-h-0 flex-1 flex-col">
-          <Suspense
-            fallback={
-              <div className="flex flex-1 items-center justify-center text-xs text-subtle">
-                Loading source...
-              </div>
-            }
-          >
+          <Suspense fallback={<SkeletonRows layout="panel" label="Loading source..." />}>
             <LazySourceCodeEditor
               testId="markdown-source-view"
               value={props.body}
@@ -2275,7 +2263,7 @@ export function MarkdownView(props: {
         <div
           ref={localDocPaneRef}
           data-testid="view-markdown"
-          className="min-h-0 flex-1 overflow-auto"
+          className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]"
         >
           <div className="dohc-page-topmatter">
             {/* Title, icon and properties autosave through the same disk write

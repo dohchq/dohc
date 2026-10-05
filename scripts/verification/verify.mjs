@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, matchesGlob, resolve } from "node:path";
@@ -12,6 +11,7 @@ import { testWorkspace } from "./js-tests.mjs";
 import { readWorkspacePackages, selectJavaScript } from "./selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
+import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 export function desktopProofCommand(args, { platform = process.platform, env = process.env } = {}) {
@@ -22,12 +22,11 @@ export function desktopProofCommand(args, { platform = process.platform, env = p
 }
 
 function createTreeReader() {
-  let headLogPath = null;
-  try { headLogPath = resolve(repoRoot, git(["rev-parse", "--git-path", "logs/HEAD"])); } catch {}
+  const headLogPath = resolve(repoRoot, git(["rev-parse", "--git-path", "logs/HEAD"]));
   // The checkout stays in place during a run; its log can still disappear.
   return () => readTreeState(
-    (command) => { try { return git(command.split(" ").slice(1)); } catch { return null; } },
-    () => headLogPath === null ? null : existsSync(headLogPath),
+    (command) => git(command.split(" ").slice(1)),
+    () => existsSync(headLogPath),
   );
 }
 function passedSpecTitles(suites = []) {
@@ -48,7 +47,7 @@ export function selectedGates(files, workflow) {
 }
 
 export function changedFiles(baseCommit, includeUncommitted = false, root = repoRoot) {
-  const paths = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).split("\0").filter(Boolean);
+  const paths = (args) => readGit(args, root).split("\0").filter(Boolean);
   return [...new Set([
     ...paths(["diff", "--no-renames", "--name-only", "-z", `${baseCommit}...HEAD`]),
     ...(includeUncommitted ? [
@@ -158,7 +157,7 @@ export async function verify(args) {
     return { baseCommit, files, workflow, requiredGates, gates, javascript };
   }
   if (mode === "plan") { const {baseCommit, files, gates, javascript} = selection(); console.log(JSON.stringify({base, baseCommit, files, gates, javascript}, null, 2)); return; }
-  const treeState = createTreeReader();
+  let treeState;
   const output = join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
   const report = { version: 1, mode, scope: job ?? "all", full, root: repoRoot, base, ...total, steps: [], timings: [], treeReadings: [], output, verdict: "RUNNING" };
@@ -170,9 +169,17 @@ export async function verify(args) {
     return timed(row, action, save);
   };
   let startSource = {};
+  function recordTree(name) {
+    try { report.treeReadings.push({ step: name, state: treeState() }); }
+    catch (error) {
+      report.treeReadings.push({ step: name, state: { head: null, dirty: null, reflog: null } });
+      report.provenance = classifyTreeProvenance(report.treeReadings);
+      throw error;
+    }
+  }
   async function checkTree(name) {
     await measure(`source-check:${name}`, async () => {
-      report.treeReadings.push({ step: name, state: treeState() });
+      recordTree(name);
       report.provenance = classifyTreeProvenance(report.treeReadings);
       if (report.provenance.status !== "PASS") throw new Error(report.provenance.reason);
       if (Object.entries(startSource).some(([kind, hash]) => sourceFingerprint(kind) !== hash)) throw new Error("Source changed during verification. The result cannot prove the starting checkout.");
@@ -200,10 +207,11 @@ export async function verify(args) {
     if (mode === "pr") process.env.CARGO_INCREMENTAL = "0";
     desktopEnvironment = {...process.env, DOHC_TEST_ENGINE_BINARY: stagedEnginePath};
     const {workflow, gates, javascript} = await measure("selection", () => {
+      treeState = createTreeReader();
       const selected = selection();
       Object.assign(report, {baseCommit: selected.baseCommit, files: selected.files, requiredGates: selected.requiredGates, gates: selected.gates,
         javascript: selected.javascript, commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== ""});
-      report.treeReadings.push({step: "start", state: treeState()});
+      recordTree("start");
       return selected;
     });
     if (mode === "pr" && report.dirty) throw new Error("Commit the worktree before running the PR gate.");

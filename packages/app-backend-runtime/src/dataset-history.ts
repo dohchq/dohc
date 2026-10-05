@@ -1,3 +1,4 @@
+import { parseApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { parseDatasetRevision, type DatasetRevision } from "@dohc/security-contract/dataset";
 import { verifyDatasetArtifacts } from "@dohc/security-contract/dataset-artifacts";
 import type { DatasetScope, JournalDb } from "./journal.js";
@@ -32,7 +33,8 @@ export function readDatasetHistory(db: JournalDb, scope: DatasetScope, approved:
     const bytes = undo ? Buffer.byteLength(JSON.stringify(undo)) : 0;
     if (entries.length && undoBytes + bytes > 64 * 1024) break;
     undoBytes += bytes;
-    entries.push({ revision: Number(row.revision), operation: String(row.operation),
+    const approval = row.previous_hash === null ? undefined : db.prepare("SELECT agent_json FROM dohc_dataset_approval_provenance WHERE workspace_id=? AND dataset_id=? AND revision=? AND approved_revision_hash=?").get(scope.workspaceId,scope.datasetId,Number(row.revision),String(row.approved_revision_hash));
+    entries.push({ ...(approval ? {approvalAgent:parseApprovalAgent(JSON.parse(String(approval.agent_json)))} : {}), revision: Number(row.revision), operation: String(row.operation),
       callerReference: row.caller_key === null ? null : String(row.caller_key),
       recordedAtMs: row.recorded_at_ms === null ? null : Number(row.recorded_at_ms),
       approvedRevisionHash: String(row.approved_revision_hash), changesetBytes: Number(row.changeset_bytes),
@@ -57,5 +59,6 @@ export function readDatasetHistoryRevision(db: JournalDb, scope: DatasetScope, r
   const { schemaSql, operationSource } = JSON.parse(String(row.artifacts_json));
   verifyDatasetArtifacts({ revision, schemaSql, operationSource });
   if (revision.datasetId !== scope.datasetId || revision.revisionSha256 !== revisionSha256) throw new Error("The saved Collection revision does not match this change.");
-  return { revision, schemaSql: String(schemaSql), operationSource: String(operationSource) };
+  const approval = db.prepare("SELECT agent_json FROM dohc_dataset_approval_provenance WHERE workspace_id=? AND dataset_id=? AND approved_revision_hash=? ORDER BY revision LIMIT 1").get(scope.workspaceId,scope.datasetId,revisionSha256);
+  return { revision, schemaSql: String(schemaSql), operationSource: String(operationSource), ...(approval ? {approvalAgent:parseApprovalAgent(JSON.parse(String(approval.agent_json)))} : {}) };
 }

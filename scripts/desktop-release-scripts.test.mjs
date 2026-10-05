@@ -579,6 +579,8 @@ test("desktop release stages the Rust engine built for the packaged architecture
   await writeFile(copiedScript, await readFile(sourceScript, "utf8"));
   await mkdir(join(root, "scripts/verification"), { recursive: true });
   await writeFile(join(root, "scripts/verification/process.mjs"), await readFile(join(process.cwd(), "scripts/verification/process.mjs"), "utf8"));
+  await mkdir(join(root, "tools/rust-engine-program"), { recursive: true });
+  await writeFile(join(root, "tools/rust-engine-program/git-read.mjs"), await readFile(join(process.cwd(), "tools/rust-engine-program/git-read.mjs"), "utf8"));
 
   const buildModule = await import(
     `${pathToFileURL(copiedScript).href}?test=${Date.now()}`

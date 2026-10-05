@@ -13,6 +13,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { basenameOf } from "../path";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { bridge } from "../bridge";
 import { formatChatTime } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
@@ -484,9 +485,7 @@ export const ThreadMessages = memo(function ThreadMessages(props: {
     setMessageNode,
   } = props;
   if (messagesLoading) {
-    return (
-      <p className="m-0 pt-4 text-center text-[11px] text-subtle">Loading...</p>
-    );
+    return <SkeletonRows label="Loading..." className="pt-4" />;
   }
   const openingMessage = messages[0] ?? null;
   if (openingMessage === null) {

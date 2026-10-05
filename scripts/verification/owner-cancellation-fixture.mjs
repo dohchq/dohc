@@ -21,6 +21,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
   put("scripts/verification/doctor.mjs", "export const doctor=()=>({checks:[]});");
   put("tools/rust-engine-program/tree-provenance.mjs", "export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
+  put("tools/rust-engine-program/git-read.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/git-read.mjs")));
   if (kind === "verify") put("scripts/verification/build.mjs", `
     import {existsSync} from 'node:fs';
     import {interruptDuringSync} from './process.mjs';
@@ -71,6 +72,9 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
     import {writeFileSync} from 'node:fs';
     const {interruptDuringSync}=await import('./scripts/verification/process.mjs');
     const original=cp.execFileSync;
+    const originalSpawn=cp.spawnSync;
+    cp.spawnSync=(command,...args)=>command==='git'
+      ? {status:0,stdout:'scripts/verification/verify.mjs\\0',stderr:''} : originalSpawn(command,...args);
     cp.execFileSync=(command,...args)=>{
       if(command==='git')return 'scripts/verification/verify.mjs\\0';
       if(command==='rustc'){interruptDuringSync();return Buffer.from('fixture rustc');}

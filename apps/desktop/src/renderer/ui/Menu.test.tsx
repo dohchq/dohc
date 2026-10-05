@@ -3,10 +3,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Menu, type MenuItem } from "./Menu";
+import { MENU_SEPARATOR, Menu, type MenuEntry, type MenuItem } from "./Menu";
 import { Overlay } from "../Overlay";
 
-function Harness(props: { items: readonly MenuItem[]; closeOnPick?: boolean; children?: ReactNode }) {
+function Harness(props: { items: readonly MenuEntry[]; closeOnPick?: boolean; children?: ReactNode }) {
   const [open, setOpen] = useState(false);
   return (
     <div>
@@ -224,5 +224,251 @@ describe("Menu", () => {
     await user.click(screen.getByTestId("row-menu"));
     expect(screen.getByRole("menuitemradio", { name: "Main", checked: true })).toBeTruthy();
     expect(screen.getByRole("menuitemradio", { name: "Draft", checked: false })).toBeTruthy();
+  });
+
+  it("separates groups with a line the keys step over, and marks the current and destructive rows", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        items={[
+          { id: "a", label: "a.md", onSelect: vi.fn(), current: true },
+          MENU_SEPARATOR,
+          { id: "forget", label: "Forget", onSelect: vi.fn(), danger: true },
+        ]}
+      />,
+    );
+    await user.click(screen.getByTestId("row-menu"));
+    expect(screen.getByRole("separator")).toBeTruthy();
+    const current = screen.getByRole("menuitem", { name: "a.md" });
+    expect(current.getAttribute("aria-current")).toBe("true");
+    const forget = screen.getByRole("menuitem", { name: "Forget" });
+    expect(forget.className).toContain("text-danger");
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(forget);
+    // The current row keeps the selected fill after focus leaves it.
+    expect(current.className.split(" ")).toContain("bg-selected");
+    expect(forget.className.split(" ")).not.toContain("bg-selected");
+  });
+
+  it("keeps the checked row's selected fill whatever has focus", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        items={[
+          { id: "main", label: "Main", onSelect: vi.fn(), checked: false },
+          { id: "draft", label: "Draft", onSelect: vi.fn(), checked: true },
+        ]}
+      />,
+    );
+    await user.click(screen.getByTestId("row-menu"));
+    expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Main" }));
+    expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain("bg-selected");
+    expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain("bg-selected");
+  });
+
+  // A browser paints :hover on a row that opens under a still pointer.
+  it("paints hover only after the pointer moves over the list", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={items} />);
+    screen.getByTestId("row-menu").focus();
+    await user.keyboard("{Enter}");
+    const second = screen.getByRole("menuitem", { name: "Duplicate" });
+    expect(second.className).not.toContain("hover:bg-hover");
+    fireEvent.mouseMove(screen.getByRole("menu"), { movementX: 0, movementY: 0 });
+    expect(second.className).not.toContain("hover:bg-hover");
+    fireEvent.mouseMove(screen.getByRole("menu"), { movementX: 2, movementY: 0 });
+    expect(second.className).toContain("hover:bg-hover");
+  });
+
+  // A browser sends a still pointer's events to a row that opens under it.
+  it("gives focus to the row under a moving pointer, not to one that opened under a still one", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={items} />);
+    await user.click(screen.getByTestId("row-menu"));
+    const first = screen.getByRole("menuitem", { name: "Rename" });
+    const second = screen.getByRole("menuitem", { name: "Duplicate" });
+    fireEvent.mouseMove(second, { movementX: 0, movementY: 0 });
+    expect(document.activeElement).toBe(first);
+    fireEvent.mouseMove(second, { movementX: 0, movementY: 3 });
+    expect(document.activeElement).toBe(second);
+  });
+
+  it("opens from the owner's trigger, named apart from its list", async () => {
+    const user = userEvent.setup();
+    function Owned() {
+      const [open, setOpen] = useState(false);
+      return (
+        <Menu
+          label="Tabs in editor group 1"
+          menuTestId="tabs-list"
+          open={open}
+          onOpenChange={setOpen}
+          items={items}
+          trigger={(trigger) => (
+            <button {...trigger} type="button" aria-label="All tabs in editor group 1">
+              v
+            </button>
+          )}
+        />
+      );
+    }
+    render(<Owned />);
+    const trigger = screen.getByRole("button", { name: "All tabs in editor group 1" });
+    expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
+    await user.click(trigger);
+    expect(screen.getByTestId("tabs-list")).toBe(screen.getByRole("menu", { name: "Tabs in editor group 1" }));
+    await user.click(trigger);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("opens over its trigger when the window has more room there, entering from the trigger's side", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={items} />);
+    const trigger = screen.getByTestId("row-menu");
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue(
+      { top: 570, bottom: 594, left: 280, right: 304, width: 24, height: 24, x: 280, y: 570, toJSON: () => ({}) },
+    );
+    vi.stubGlobal("innerHeight", 600);
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(92);
+    try {
+      await user.click(trigger);
+      const menu = screen.getByRole("menu");
+      expect(menu.style.bottom).toBe("34px");
+      expect(menu.style.top).toBe("");
+      expect(menu.style.maxHeight).toBe("562px");
+      expect(menu.style.getPropertyValue("--dohc-menu-from")).toBe("4px");
+      expect(menu.className).toContain("dohc-menu-in");
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+  });
+
+  describe("with a field in a row's place", () => {
+    function Naming(props: { onSubmit: (name: string) => void; busy?: boolean }) {
+      const [open, setOpen] = useState(false);
+      const [name, setName] = useState<string | null>(null);
+      const entries: MenuEntry[] = [
+        { id: "rename", label: "Rename", onSelect: vi.fn() },
+        name === null
+          ? { id: "new", label: "New version…", testId: "new", onSelect: () => setName("") }
+          : {
+              id: "new",
+              field: {
+                label: "New version name",
+                value: name,
+                onChange: setName,
+                onSubmit: () => props.onSubmit(name),
+                onCancel: () => setName(null),
+                busy: props.busy,
+                testId: "new-input",
+              },
+            },
+        { id: "remove", label: "Remove", onSelect: vi.fn() },
+      ];
+      return (
+        <Menu
+          label="Versions"
+          testId="row-menu"
+          open={open}
+          onOpenChange={(next) => {
+            setOpen(next);
+            if (!next) setName(null);
+          }}
+          closeOnPick={false}
+          items={entries}
+        />
+      );
+    }
+
+    it("takes typed letters, Space, Home and End, and keeps focus while the pointer crosses a row", async () => {
+      const user = userEvent.setup();
+      const submit = vi.fn();
+      render(<Naming onSubmit={submit} />);
+      await user.click(screen.getByTestId("row-menu"));
+      await user.click(screen.getByTestId("new"));
+      const input = screen.getByRole("textbox", { name: "New version name" });
+      expect(document.activeElement).toBe(input);
+
+      await user.keyboard("re draft");
+      fireEvent.mouseMove(screen.getByRole("menuitem", { name: "Remove" }), { movementX: 4, movementY: 2 });
+      await user.keyboard("{Home}x");
+      expect(document.activeElement).toBe(input);
+      expect((input as HTMLInputElement).value).toBe("xre draft");
+      await user.keyboard("{Enter}");
+      expect(submit).toHaveBeenCalledWith("xre draft");
+    });
+
+    it("moves to the rows around it with the arrows, and back", async () => {
+      const user = userEvent.setup();
+      render(<Naming onSubmit={vi.fn()} />);
+      await user.click(screen.getByTestId("row-menu"));
+      await user.click(screen.getByTestId("new"));
+      const input = screen.getByTestId("new-input");
+      await user.keyboard("{ArrowDown}");
+      expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Remove" }));
+      await user.keyboard("{ArrowUp}");
+      expect(document.activeElement).toBe(input);
+    });
+
+    it("ends the typing on Escape with focus on its row, and closes on the next", async () => {
+      const user = userEvent.setup();
+      render(<Naming onSubmit={vi.fn()} />);
+      const trigger = screen.getByTestId("row-menu");
+      await user.click(trigger);
+      await user.click(screen.getByTestId("new"));
+      await user.keyboard("draft{Escape}");
+      expect(screen.queryByTestId("new-input")).toBeNull();
+      expect(document.activeElement).toBe(screen.getByTestId("new"));
+
+      await user.keyboard("{Escape}");
+      expect(screen.queryByRole("menu")).toBeNull();
+      await waitFor(() => expect(document.activeElement).toBe(trigger));
+    });
+
+    it("holds the value and keeps focus while the owner acts on it", async () => {
+      const user = userEvent.setup();
+      const submit = vi.fn();
+      const { rerender } = render(<Naming onSubmit={submit} />);
+      await user.click(screen.getByTestId("row-menu"));
+      await user.click(screen.getByTestId("new"));
+      await user.keyboard("draft");
+      rerender(<Naming onSubmit={submit} busy />);
+      const input = screen.getByTestId("new-input") as HTMLInputElement;
+      await user.keyboard("s{Enter}");
+      expect(input.value).toBe("draft");
+      expect(submit).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(input);
+
+      // Escape holds too: a failure still has the typed name to show.
+      await user.keyboard("{Escape}");
+      expect(screen.getByTestId("new-input")).toBe(input);
+      expect(screen.queryByRole("menu")).not.toBeNull();
+      expect(document.activeElement).toBe(input);
+    });
+
+    // While an IME composes, Enter takes a candidate, Escape drops the
+    // composition, and the arrows move in the candidate list. Some browsers
+    // mark those keys only with keyCode 229.
+    it("leaves Enter, Escape and the arrows to an IME while it composes", async () => {
+      const user = userEvent.setup();
+      const submit = vi.fn();
+      render(<Naming onSubmit={submit} />);
+      await user.click(screen.getByTestId("row-menu"));
+      await user.click(screen.getByTestId("new"));
+      const input = screen.getByTestId("new-input");
+      for (const composition of [{ isComposing: true }, { keyCode: 229 }]) {
+        for (const key of ["Enter", "Escape", "ArrowDown", "ArrowUp"]) {
+          fireEvent.keyDown(input, { key, ...composition });
+          expect(submit).not.toHaveBeenCalled();
+          expect(screen.getByTestId("new-input")).toBe(input);
+          expect(screen.queryByRole("menu")).not.toBeNull();
+          expect(document.activeElement).toBe(input);
+        }
+      }
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(submit).toHaveBeenCalledOnce();
+    });
   });
 });
