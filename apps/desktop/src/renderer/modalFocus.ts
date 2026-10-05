@@ -10,8 +10,11 @@ function toastRegion(element: Element | null): HTMLElement | null {
   return element?.closest<HTMLElement>(TOASTS_SELECTOR) ?? null;
 }
 
-// Where F6 left each dialog, so F6 or Escape from a toast goes back there.
+// Where F6 left each dialog, so F6 or Escape from a toast goes back there,
+// and the dialog it left last, which need not be an Overlay: the page icon
+// picker is a bare dialog with its own trap.
 const leftAt = new WeakMap<HTMLElement, HTMLElement>();
+let leftLast: WeakRef<HTMLElement> | null = null;
 
 export function trapModalTabKey(
   event: KeyboardEvent,
@@ -58,6 +61,7 @@ export function switchModalRegion(event: KeyboardEvent, dialog: HTMLElement | nu
   if (!toast) return false;
   event.preventDefault();
   if (active instanceof HTMLElement && dialog.contains(active)) leftAt.set(dialog, active);
+  leftLast = new WeakRef(dialog);
   toast.focus();
   return true;
 }
@@ -84,10 +88,13 @@ export function topModalPanel(): HTMLElement | null {
   return panels[panels.length - 1] ?? null;
 }
 
-// Where focus goes back to in the dialog on top: the control F6 left from,
-// if it is still there, or else the dialog's panel.
+// Where focus goes back to from a toast: the control F6 left from, in the
+// dialog F6 left last while that dialog is open, or else the dialog itself.
+// With no such dialog, the panel of the Overlay on top.
 export function modalReturnTarget(): HTMLElement | null {
-  const panel = topModalPanel();
-  const back = panel ? leftAt.get(panel) : undefined;
-  return back?.isConnected && panel?.contains(back) ? back : panel;
+  const left = leftLast?.deref();
+  const dialog = left?.isConnected ? left : topModalPanel();
+  if (!dialog) return null;
+  const back = leftAt.get(dialog);
+  return back?.isConnected && dialog.contains(back) ? back : dialog;
 }
