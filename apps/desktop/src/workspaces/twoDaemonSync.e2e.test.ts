@@ -2,6 +2,7 @@ import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
 import { startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
 import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -363,6 +364,169 @@ async function expectTwoDaemonFileSync(input: {
     await relay.stop();
   }
 }
+
+it.skipIf(engine.missing)(
+  "delivers never-opened relation cleanup to a recipient and preserves it after restart",
+  async () => {
+    const workspaceId = "never-opened-relation-delivery";
+    const rootA = await createTestScratch("dohc-relation-owner-");
+    const rootB = await createTestScratch("dohc-relation-recipient-");
+    const relayRoot = await createTestScratch("dohc-relation-relay-");
+    const ca = await mintLocalhostCa(relayRoot);
+    const previousRoots = getCACertificates("default");
+    setDefaultCACertificates([...previousRoots, ca.ca]);
+    const trustEnv = {
+      NODE_EXTRA_CA_CERTS: ca.caPath,
+      DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
+      DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath,
+      DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0",
+    };
+    for (const [name, value] of Object.entries(trustEnv)) vi.stubEnv(name, value);
+    const proxy = await startServerProxy(ca);
+    let relayServer: Awaited<ReturnType<typeof spawnSyncRelay>> | undefined;
+    let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+    let capture: WorkspaceEngineCapture | undefined;
+    let recipient: LiveDaemonCapture | undefined;
+    const path = "tasks/source.md";
+    const sourceId = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const targetId = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const original = `---\nid: ${sourceId}\nrelated: ${targetId}\ntitle: Keep\n---\n\n# Body stays intact`;
+    const cleared = original.replace(`related: ${targetId}\n`, "");
+    try {
+      relayServer = await spawnSyncRelay({
+        dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain,
+        editLinks: { engineExecutable: engine.require(), publicOrigin: proxy.origin, trustEnv },
+        linkBoundary: { linkKey: "relation-link-key-".repeat(3), relayExchangeKey: "relation-exchange-key-".repeat(3),
+          publicViewerOrigin: proxy.origin },
+      });
+      proxy.routeRelayTo(relayServer.baseUrl);
+      const connection = { baseUrl: proxy.origin, token: `test:${workspaceId}` };
+      const profile = selfHostLiveProfile();
+      const nativeConfigPath = join(rootA, "owner-ingress.json");
+      await writeFile(nativeConfigPath, JSON.stringify(profile.nativeIngress));
+      const openOwner = () => openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, {
+        maxRestarts: 0, allowInsecureLoopbackForTests: false,
+        privateOwnerHost: { configPath: nativeConfigPath, client: profile.nativeClient },
+      });
+      owner = await openOwner();
+      let relay = owner.relay.bind({ ...owner.workspace, relay: connection });
+      await relay.claim();
+      await owner.chats.ensureGeneralChannel({ workspaceId });
+      await relay.push();
+      const adapterOf = (source: NonNullable<typeof owner>) => source.sessions.run(source.workspace,
+        async ({ client, workspace }) => new VersionedLiveAdapter(client, workspace, { workspaceId }));
+      let adapter = await adapterOf(owner);
+      await adapter.ensureMainVersion({ workspaceId });
+      for (const [filePath, text] of [
+        ["tasks/collection.yaml", "fields:\n  related:\n    type: relation\n    collection: tasks\n    many: false\n  title:\n    type: text\n"],
+        ["tasks/target.md", `---\nid: ${targetId}\n---\n\nTarget`],
+        [path, original],
+      ]) {
+        await adapter.writeTextFile({ workspaceId, versionId: "main", path: filePath!, text: text!,
+          publish: true, metadata: { origin: "api" } });
+      }
+      await expect.poll(async () => (await adapter.listPendingCollectionAdoptions()).adoptions.length,
+        { timeout: REAL_DAEMON_DEADLINE_MS }).toBe(2);
+      await owner.close();
+      owner = undefined;
+      // Restore artifact-only bindings, as when a seed-only lineage is pruned.
+      // No editor has opened either record and no Y.Doc bytes are fabricated.
+      const db = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH));
+      try {
+        expect(db.prepare("SELECT COUNT(*) AS count FROM ydoc_updates").get()).toEqual({ count: 0 });
+        expect(db.prepare("UPDATE collection_records SET adoption_state='adopted' WHERE workspace_id=?")
+          .run(workspaceId).changes).toBe(2);
+      } finally { db.close(); }
+      owner = await openOwner();
+      relay = owner.relay.bind({ ...owner.workspace, relay: connection });
+      await relay.push();
+      adapter = await adapterOf(owner);
+      await expect.poll(async () => {
+        await adapter.reconcileCapture();
+        const indexed = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
+        try {
+          return indexed.prepare("SELECT COUNT(*) AS count FROM collection_relation_edges WHERE source_record_id=? AND target_record_id=?")
+            .get(sourceId, targetId);
+        } finally { indexed.close(); }
+      }, { timeout: REAL_DAEMON_DEADLINE_MS }).toEqual({ count: 1 });
+      const share = await fetch(`${proxy.origin}/sync/${workspaceId}/shares`, {
+        method: "POST", headers: { authorization: `Bearer ${connection.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ recipientEmail: "relation-recipient@dohc.test", paths: [path], access: "edit" }),
+      });
+      expect(share.status).toBe(200);
+      const { shareId } = await share.json() as { shareId: string };
+      const neverOpened = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
+      try {
+        expect(neverOpened.prepare("SELECT COUNT(*) AS count FROM ydoc_updates").get()).toEqual({ count: 0 });
+      } finally { neverOpened.close(); }
+      recipient = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      await pullAndExpect(recipient, rootB, path, original);
+
+      const { holdId } = await adapter.holdCapture();
+      try {
+        await rm(join(rootA, "tasks/target.md"));
+        await adapter.deleteTextFile({ workspaceId, versionId: "main", path: "tasks/target.md",
+          metadata: { origin: "api" }, captureHoldId: holdId, onlyIfAbsentOnDisk: true });
+      } finally { await adapter.releaseCapture(holdId); }
+      await expect.poll(async () => {
+        await adapter.reconcileCapture();
+        return readFile(join(rootA, path), "utf8");
+      }, { timeout: REAL_DAEMON_DEADLINE_MS }).toBe(cleared);
+      expect((await relay.push()).sharingDeclined).toEqual([]);
+      const enrollment = await fetch(`${proxy.origin}/sync/${workspaceId}/live-host`, {
+        method: "POST", headers: { authorization: `Bearer ${connection.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ shareId }),
+      });
+      expect([200, 202]).toContain(enrollment.status);
+      let discoveryPayload: unknown;
+      await expect.poll(async () => {
+        const response = await fetch(`${proxy.origin}/sync/${workspaceId}/live-host`, {
+          headers: { authorization: `Bearer ${connection.token}` },
+        });
+        expect(response.status).toBe(200);
+        discoveryPayload = await response.json();
+        return readyOwnerDeliveryDocuments(discoveryPayload, workspaceId).map(document => document.binding.currentPath);
+      }, { timeout: 120_000 }).toEqual([path]).catch(error => {
+        throw new Error(JSON.stringify({ discoveryPayload, diagnostics: relayServer!.diagnostics() }), { cause: error });
+      });
+      expect(JSON.stringify(relayServer.diagnostics())).not.toContain("invalid-schema");
+      capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
+      await capture.runRelaySync(page => relay.pull(page));
+      await relay.push();
+      await recipient.capture.runRelaySync(page => recipient!.relay.pull(page));
+      const assertRecipient = async () => {
+        const headers = { authorization: "Bearer test:relation-recipient" };
+        const digest = createHash("sha256").update(cleared).digest("hex");
+        const log = await fetch(`${proxy.origin}/sync/shares/${shareId}/log?since=0&limit=500`, { headers });
+        expect(log.status).toBe(200);
+        expect(await log.json()).toMatchObject({ ops: expect.arrayContaining([
+          expect.objectContaining({ opKind: "moment.append", payload: expect.objectContaining({ payloadAfterBlobSha256: digest }) }),
+        ]) });
+        const blob = await fetch(`${proxy.origin}/sync/shares/${shareId}/blobs/${digest}`, { headers });
+        expect(blob.status).toBe(200);
+        expect(await blob.text()).toBe(cleared);
+        expect(await readFile(join(rootB, path), "utf8")).toBe(cleared);
+        expect(await recipient!.refusalNotices()).toEqual({ notices: [] });
+        expect(await recipient!.capture.countOpenConflicts()).toBe(0);
+      };
+      await assertRecipient();
+      await recipient.close();
+      recipient = await openLiveDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      await recipient.capture.runRelaySync(page => recipient!.relay.pull(page));
+      await assertRecipient();
+    } finally {
+      await recipient?.close();
+      try { await capture?.stop(); } finally {
+        await owner?.close();
+        await relayServer?.stop();
+        await proxy.close();
+        setDefaultCACertificates(previousRoots);
+        vi.unstubAllEnvs();
+      }
+    }
+  },
+  240_000,
+);
 
 it.skipIf(engine.missing).each([
   { name: "existing id", hasId: true, body: "# Keep this body\n" },
