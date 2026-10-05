@@ -1021,7 +1021,7 @@ it("measures benign 64-event recovery including a fully installed checkpoint",as
 });
 
 
-it.each([{nextCost:50,saved:[1,9,11]},{nextCost:20,saved:[1,9,10,11]},{nextCost:100,saved:[1,9]}])("spaces recovery checkpoints by the last cost with a $nextCost ms next checkpoint",async({nextCost,saved:expected})=>{
+it.each([{nextCost:50,replayMs:100,saved:[1,9,11]},{nextCost:20,replayMs:100,saved:[1,9,10,11]},{nextCost:100,replayMs:100,saved:[1,9,11]},{nextCost:100,replayMs:9,saved:[]}])("spaces recovery checkpoints with $replayMs ms batches and a $nextCost ms next checkpoint",async({nextCost,replayMs,saved:expected})=>{
   const f=await fixture();
   for(let index=1;index<=11;index++)await f.invoke({id:String(index),value:'saved'},{idempotencyKey:String(index)});
   await f.supervisor.close();
@@ -1032,7 +1032,7 @@ it.each([{nextCost:50,saved:[1,9,11]},{nextCost:20,saved:[1,9,10,11]},{nextCost:
   const launch=launcher((request,controls)=>{
     if(request.command.kind==='applyBatch')pending.add(request.id);
     controls.deliver();
-  },message=>{const reply=message as {id:number;ok?:boolean};if(reply.ok&&pending.delete(reply.id))elapsed+=100;});
+  },message=>{const reply=message as {id:number;ok?:boolean};if(reply.ok&&pending.delete(reply.id))elapsed+=replayMs;});
   const journal={...f.journal,
     events(input:Parameters<DatasetJournal['events']>[0]){return f.journal.events({...input,limit:1});},
     async sealMaterializationCheckpoint(input:Parameters<DatasetJournal['sealMaterializationCheckpoint']>[0]){
@@ -1049,8 +1049,8 @@ it.each([{nextCost:50,saved:[1,9,11]},{nextCost:20,saved:[1,9,10,11]},{nextCost:
   cleanups.push(()=>supervisor.close());
   const result=await supervisor.invoke({scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize});
   expect(result.revision).toBe(11);expect(result.result).toHaveLength(11);
-  // First cache at 100 ms; after a 200 ms checkpoint, wait 800 ms of replay.
-  // A cheaper next checkpoint lowers the interval, bounded by replayCacheMs;
-  // a costly next checkpoint leaves the cheap final tail uncached.
+  // After a 200 ms checkpoint, wait 800 ms of replay between saves.
+  // Cheaper checkpoints lower that interval, bounded by replayCacheMs.
+  // Save a costly replay's final tail; a 99 ms whole replay stays uncached.
   expect(saved).toEqual(expected);
 });

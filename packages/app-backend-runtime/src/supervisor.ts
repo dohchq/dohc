@@ -482,7 +482,8 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   async function reopenAndReplay(lane: Lane, input: DatasetAccess, target: DatasetCursor, reopen: { admitted: boolean }): Promise<Worker> {
     const worker = lane.worker ?? await openWorker(lane, input, reopen);
     if (worker.cursor.revision > target.revision) throw new Error("This Collection's saved records are newer than its history.");
-    let replayStart = performance.now(), checkpointIntervalMs = replayCacheMs;
+    const replayStarted = performance.now();
+    let replayStart = replayStarted, checkpointIntervalMs = replayCacheMs, replayedSinceCheckpoint = false;
     while (!sameCursor(worker.cursor, target)) {
       const page = options.journal.events({ scope: input.scope, after: worker.cursor, limit: 64, authorize: () => standing(input) });
       if (!page.events.length) throw new Error("This Collection's history is incomplete.");
@@ -492,14 +493,20 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       const applied=await worker.runtime.applyBatch(page.events.map(event=>({...event.cursor,previousDigest:event.previousDigest,changeset:event.changeset,changesetSha256:event.changesetSha256})),replayCacheMs);
       worker.cursor=page.events.find(event=>event.cursor.revision===applied.revision)!.cursor;
       standing(input);
+      replayedSinceCheckpoint = true;
       // Keep worker batches bounded while amortizing costly checkpoint copies
       // across completed batches. The journal certifies each saved prefix.
       if (performance.now() - replayStart >= checkpointIntervalMs) {
         const checkpointStart=performance.now();
         await maintainMaterialization(lane, true);
+        replayedSinceCheckpoint = false;
         replayStart=performance.now();
         checkpointIntervalMs=Math.max(replayCacheMs,4*(replayStart-checkpointStart));
       }
+    }
+    // Save a costly replay's final tail before this job can stop the worker.
+    if (replayedSinceCheckpoint && performance.now() - replayStarted >= replayCacheMs) {
+      await maintainMaterialization(lane, true);
     }
     return worker;
   }
