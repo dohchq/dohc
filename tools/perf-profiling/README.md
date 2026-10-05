@@ -32,7 +32,25 @@ The candidate fails when:
 
 Contention cases, which type during the run, report press-to-settled with verdict `reported` and do not gate on that duration. Their typing-during-run check still gates on p95. Undersampled automation durations show `insufficient-runs`; missing measurements still fail.
 
-Change the p95 margin with `--margin-percent` and the automation median margin with `--automation-margin-percent`. The defaults are 10 and 25. `--floor-ms` controls both floors, default 17. The comparison records all three values. The floor is one 60 Hz frame; these timings end at an animation-frame callback.
+`--margin-percent`, default 10, applies to timing p95, calibrated relative idle CPU, and relative private bytes. Each check permits the greater of that percentage increase or its unit's floor: `--floor-ms` (default 17), the explicit `--cpu-percentage-point-floor`, or `--memory-byte-floor` (default zero). `--automation-margin-percent`, default 25, controls automation median timing and shares `--floor-ms`. The comparison records these values. The timing floor is a comparison tolerance, not an absolute latency budget.
+
+Version 2 receipts compare host identity, harness and helper hashes, and fixture digests.
+Startup, workspace activation, tab activation, Collection open, and typing checks require their scenario's expected sample counts.
+Missing measurements on both sides fail these required checks.
+Startup p95 gates need at least five samples per side. Smaller runs report `insufficient-runs` and retain their empirical p95. A startup-only comparison with fewer than five runs fails; a shorter `full` run can still gate its other metrics.
+The comparator supports `full`, `startup`, `switches`, `small-switch`, `small-tab`, and `collection`.
+Go to, palette, search, chat-history, and soak receipts are not comparable because their gated metrics are not implemented.
+
+CPU comparisons use percent of one logical core. Memory comparisons use bytes.
+Idle CPU is reported unless `--cpu-percentage-point-floor` supplies a calibrated relative allowance.
+The full scenario measures idle once per package, in its first run. The comparator requires exactly one settled window per state and checks that window's CPU reading. Summaries retain both raw idle rows.
+Set the relative memory tolerance floor with `--memory-byte-floor`, default zero. `--margin-percent` supplies the percentage allowance.
+Set optional absolute resource budgets with `--idle-cpu-max` and `--memory-growth-max-bytes`.
+The CPU budget requires `full`. The memory budget requires `switches`, at least 100 complete switches per run, and valid process identities.
+An absolute budget that cannot be evaluated fails the comparison.
+The latter limits late private-byte median growth and slope projected over 20 switches, per process kind.
+`comparison.json` records these budgets in `absoluteChecks`, separately from relative regression checks.
+Without absolute budgets, a passing comparison does not establish release budget compliance.
 
 On this host, two three-run passes of the same main package failed 10 of 24 checks under the old p95 rule. Collection open and typing stayed within the margin. Finished-case medians agreed within 10% for 7 of 12 cases, but at-cap Finds varied 24 to 36%. Press-to-settled while typing varied 45 to 47%. With few runs, p95 is the slowest run, so one outlier decides the result. Use at least five runs per side for automations and alternate baseline and candidate runs.
 
@@ -43,11 +61,32 @@ Output directories cannot be reused. Failure logs and fixtures remain available 
 Cleanup closes the recorded app and helper; failed startup and shutdown also terminate their owned process trees.
 Ctrl-C and SIGTERM cancel pending launch or idle work, stop owned processes, and preserve the failed-run receipt.
 
-The Collection scenario defaults to five runs; other scenarios default to three. Set `--runs` to override the default.
-The default workload uses three fresh/restart cycles, 100-paragraph rich editing, 5,000-paragraph source editing,
+Collection, startup, and full scenarios default to five runs; other scenarios default to three. Set `--runs` to override the default.
+The default workload uses five fresh/restart cycles, 100-paragraph rich editing, 5,000-paragraph source editing,
 30 trusted keystrokes per document, ten switches, and 60 seconds each of visible and minimized idle.
 `--files 5000 --scenario switches` adds deterministic flat files; the two editor documents count toward each workspace's total.
 Fixture receipts contain file counts and content/name digests. Other scenarios are `startup`, `small-switch`, and `small-tab`.
+
+`small-tab --switches 20` measures 20 actual activations of already-open tabs per run.
+Both documents have 100 paragraphs. Prewarm file-tree opens are recorded separately.
+The tab observer is armed before the click. Tab timing starts at the trusted renderer pointerdown and ends after the bound visible editable document check and two animation frames.
+Automation click wall time and raw observation brackets are recorded separately. Workspace wall observations include automation delivery.
+The check requires the expected workspace, active editor group, selected tab, and document content.
+Readiness is checked on DOM mutation and animation frames. `small-switch` combines the initial destination activation and the warm return, with an explicit combined label.
+These endpoints do not establish compositor presentation latency or 120 Hz operation.
+
+`switches --switches 100 --runs 1` records 100 warm workspace activations and 101 memory snapshots.
+The two precondition activations do not count toward the measured switches.
+Memory snapshots run after each latency endpoint and retain PID plus creation-time identity.
+The summary compares the final two 20-switch windows and reports the final 40-switch slope.
+Fewer than 100 switches do not measure these late windows. Main, engine, renderer, or GPU replacement anywhere in the run invalidates the affected kind.
+Utility, crashpad, and other processes use the final 40-switch identity window: their transient warmup work can end before the measured tail.
+Working set remains reported separately because OS trimming affects it.
+These windows describe growth during this run; they do not prove leak freedom.
+
+Visible and minimized idle each start after three quiet intervals of at least one second.
+All app processes must use less than 5% of one logical core in each interval.
+The receipt retains quiet evidence. A timeout fails the workload instead of producing an idle sample.
 
 The palette, search, Collection, and soak scenarios launch once per run. `chat-history` launches twice: once to seed,
 then a restart to measure. Each palette, search, chat, and Collection timing starts when the renderer receives the
@@ -137,7 +176,7 @@ Only the controlled loopback `DOHC_UPDATE_URL` is added.
 `--profile-main true --scenario startup` requests V8 startup logs and requires an output path without whitespace.
 Main profiling must produce a log matching the recorded main PID.
 CPU-profiled runs and `--heap-snapshot-minutes` runs are marked diagnostic in summaries.
-The comparison command refuses diagnostic runs. Use separate uninstrumented soaks for the memory budgets.
+The comparison command refuses diagnostic runs. Use a separate uninstrumented switches run for memory-growth budgets.
 
 Run `node --test tools/perf-profiling/packaged-benchmark.test.mjs` for CLI, lifecycle, fixture, and summary checks. The fixture contract check imports the automation executor, so build `@dohc/app-backend-runtime` first, as the JS gate does.
 These tests also run through the canonical root test command. They do not launch the GUI workload.

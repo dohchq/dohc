@@ -407,10 +407,10 @@ export function peakByKind(snapshots, appPid) {
 }
 
 /** The share of one logical core that main and the engine used between two snapshots. */
-export function busyShare(before, after, appPid) {
+export function busyShare(before, after, appPid, kinds = ['main', 'engine']) {
   const elapsed = after.completedAtMs - before.completedAtMs;
   const cpu = cpuByKind(before, after, appPid);
-  return elapsed > 0 ? ((cpu.main ?? 0) + (cpu.engine ?? 0)) / elapsed : Infinity;
+  return elapsed > 0 ? (kinds ?? Object.keys(cpu)).reduce((total, kind) => total + (cpu[kind] ?? 0), 0) / elapsed : Infinity;
 }
 
 /**
@@ -418,20 +418,22 @@ export function busyShare(before, after, appPid) {
  * intervals of at least `intervalMs`, so a case starts after earlier indexing and settlement. Returns
  * the last snapshot, which the case then measures from.
  */
-export async function waitForQuiet({ sample, appPid, share = 0.05, intervals = 3, intervalMs = 1000, timeoutMs = 120_000, signal }) {
+export async function waitForQuiet({ sample, appPid, share = 0.05, intervals = 3, intervalMs = 1000, timeoutMs = 120_000, signal, kinds = ['main', 'engine'] }) {
   const started = performance.now();
   let previous = await sample(), quiet = 0, last = null;
+  const evidence = [];
   while (quiet < intervals) {
-    if (performance.now() - started > timeoutMs) throw Error(`The app did not settle within ${timeoutMs}ms: main and engine used ${Math.round((last ?? 1) * 100)}% of a core`);
+    if (performance.now() - started > timeoutMs) throw Error(`The app did not settle within ${timeoutMs}ms: ${kinds === null ? 'all app processes' : kinds.join(' and ')} used ${Math.round((last ?? 1) * 100)}% of a core`);
     signal?.throwIfAborted();
     const next = await sample();
     const elapsed = next.completedAtMs - previous.completedAtMs;
     if (elapsed < intervalMs) { await delay(intervalMs - elapsed, undefined, { signal }); continue; }
-    last = busyShare(previous, next, appPid);
+    last = busyShare(previous, next, appPid, kinds);
+    evidence.push({ elapsedMs: elapsed, busyShare: last });
     quiet = last < share ? quiet + 1 : 0;
     previous = next;
   }
-  return { snapshot: previous, waitedMs: performance.now() - started, busyShare: last };
+  return { snapshot: previous, waitedMs: performance.now() - started, busyShare: last, kinds, share, intervals, intervalMs, evidence };
 }
 
 // Serialized into the renderer: keep it self-contained, with no module-scope references.

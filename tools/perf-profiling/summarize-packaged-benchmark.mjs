@@ -1,6 +1,16 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { summarizeSwitchMemory } from './packaged-memory.mjs';
+export const HARNESS_HASH_KEYS = ['harnessSha256', 'samplerSha256', 'windowControllerSha256', 'windowClientSha256',
+  'lifecycleSha256', 'startupReadinessSha256', 'optionsSha256', 'surfacesSha256', 'memorySha256',
+  'automationsModuleSha256', 'closeImplementationSha256', 'summarizerSha256'];
+export function harnessHashKeys(scenario) {
+  return [...HARNESS_HASH_KEYS,
+    ...(['chat-history', 'collection'].includes(scenario) ? ['cliSha256', 'processRunnerSha256'] : []),
+    ...(scenario === 'chat-history' ? ['seedScriptSha256'] : []),
+    ...(scenario === 'collection' ? ['datasetCliSha256'] : [])];
+}
 const percentile = (values, fraction) => {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -28,13 +38,23 @@ export async function summarize(data, readLog = async () => '') {
   }
   const summary = {
     label: data.label, status: data.status, packageCommit: data.packageCommit, asarSha256: data.asarSha256,
+    measurementVersion: data.measurementVersion, host: data.host, platform: data.platform, node: data.node,
+    harnessHashes: Object.fromEntries(harnessHashKeys(data.settings?.scenario).map(key => [key, data[key]])),
+    fixtureHashes: data.runs.map(run => run.fixtureHashes?.map(fixture => ({ workspaceId: fixture.workspaceId, digest: fixture.digest }))),
+    runs: data.runs.length,
     engineCommit: data.engineCommit, engineSha256: data.engineSha256,
     diagnostic: Boolean(data.settings?.profileMain || data.settings?.profileRenderer || data.settings?.heapSnapshotMinutes?.length),
     startupEvidence, settings: data.settings,
     freshEditableObservedMs: stats(data.runs.flatMap(r => r.freshStartup ? [r.freshStartup.editablePaintObservedMs] : [])),
     restartEditableObservedMs: stats(data.runs.flatMap(r => r.restartStartup ? [r.restartStartup.editablePaintObservedMs] : [])),
     startupWindowControlObservedMs: stats(data.runs.flatMap(r => [r.freshStartup, r.restartStartup].filter(Boolean).map(s => s.windowControlObservedMs).filter(Number.isFinite))),
-    warmSwitchEditableObservedMs: stats(data.runs.flatMap(r => (r.switches ?? []).map(s => s.editablePaintObservedMs))),
+    warmSwitchEditableObservedMs: stats(['full', 'switches'].includes(data.settings?.scenario) ? data.runs.flatMap(r => (r.switches ?? []).map(s => s.editablePaintObservedMs)) : []),
+    initialAndReturnSwitchEditableObservedMs: stats(data.settings?.scenario === 'small-switch' ? data.runs.flatMap(r => (r.switches ?? []).map(s => s.editablePaintObservedMs)) : []),
+    warmTabEditableObservedMs: stats(data.runs.flatMap(r => (r.tabs ?? []).map(tab => tab.pointerdownToEditableTwoRafObservedMs))),
+    tabAutomationClickToReadinessReturnedMs: stats(data.runs.flatMap(r => (r.tabs ?? []).map(tab => tab.automationClickToReadinessReturnedMs))),
+    warmTabsByPath: Object.fromEntries(['small.md', 'large.md'].map(path => [path,
+      stats(data.runs.flatMap(run => (run.tabs ?? []).filter(tab => tab.path === path).map(tab => tab.pointerdownToEditableTwoRafObservedMs)))])),
+    switchMemory: data.runs.filter(run => run.switchMemory).map(run => ({ run: run.index, ...summarizeSwitchMemory(run.switchMemory, data.settings?.switches) })),
     nativeSwitchPhasesMs: {}, switchLongTasks: {}, typing: {}, idle: [], limits: data.limits,
   };
   const switchRows = data.runs.flatMap(r => r.switches ?? []);
@@ -60,7 +80,9 @@ export async function summarize(data, readLog = async () => '') {
     };
   }
   for (const idle of data.runs.flatMap(r => r.idle ?? [])) {
-    summary.idle.push({ state: idle.state, windowState: idle.windowState, domVisibility: idle.domVisibility, elapsedMs: idle.elapsedMs, cpuPercentOneLogicalCore: idle.cpuPercentOneLogicalCore,
+    summary.idle.push({ state: idle.state, windowState: idle.windowState, domVisibility: idle.domVisibility, quiet: idle.quiet,
+      elapsedMs: idle.elapsedMs, cpuPercentOneLogicalCore: idle.cpuPercentOneLogicalCore,
+      transferBytesPerSecond: Object.fromEntries(['readBytes', 'writeBytes', 'otherBytes'].map(key => [key, idle.elapsedMs > 0 && Number.isFinite(idle.deltas?.[key]) ? idle.deltas[key] * 1000 / idle.elapsedMs : null])),
       privateBytes: stats(idle.totals.map(t => t.privateBytes)), processCounts: [...new Set(idle.totals.map(t => t.processCount))],
       deltas: idle.deltas, contextSwitches: idle.contextSwitches, hardwareWakeups: idle.hardwareWakeups });
   }

@@ -4,7 +4,8 @@ import { runSoakCycles } from './packaged-soak.mjs';
 import { startRendererHeapSnapshots } from './renderer-heap-snapshots.mjs';
 import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
-import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
+import { activateTab, observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
+import { memorySample, recordSwitches } from './packaged-memory.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, aggregateByKind } from './packaged-surfaces.mjs';
 import { automationCases, automationFixtureDigest, automationOf, automationsYaml, CASE_TIMEOUT_MS, classifyOutcome, cpuByKind, DATASET_FOLDER, DATASET_NAME, dismissToasts,
   datasetListRequest, datasetRowValues, datasetSetupRequest, DOCUMENT_FOLDER, documentAutomationFiles, journalBytes, observeAutomationRun,
@@ -18,6 +19,7 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
+import { hostname, arch, release, cpus, totalmem } from 'node:os';
 
 const options = parseOptions(process.argv.slice(2));
 if (options.help) {
@@ -32,6 +34,8 @@ const json = (path, value) => writeFile(path, JSON.stringify(value, null, 2));
 const settings = { runCount, idleSeconds, keystrokes, switches, scenario, profileRenderer, profileMain, fixtureFiles, soakMinutes, heapSnapshotMinutes, chatMessages, records,
   ...(scenario === 'collection' ? { findCap, writeCap } : {}) };
 const receipt = { label, binary, packageCommit: options.packageCommit, engineCommit: options.engineCommit,
+  measurementVersion: 2, host: { hostname: hostname(), arch: arch(), release: release(), cpuModel: cpus()[0]?.model,
+    logicalProcessors: cpus().length, totalMemoryBytes: totalmem() },
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version, settings, runs: [], status: 'setup' };
 const feedRequests = [];
 let feed, active, windowController, helperStartup, workload;
@@ -79,12 +83,14 @@ Object.assign(receipt, {
   heapSnapshotsSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'renderer-heap-snapshots.mjs')),
   optionsSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-benchmark-options.mjs')),
   surfacesSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-surfaces.mjs')),
+  memorySha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-memory.mjs')),
+  automationsModuleSha256: await sha256(automationsModule),
   closeImplementationSha256: await sha256(fileURLToPath(new URL('../../scripts/verification/close-electron.mjs', import.meta.url))),
   summarizerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'summarize-packaged-benchmark.mjs')),
   ...(scenario === 'chat-history' || scenario === 'collection' ? { cli, cliHashedPaths, cliSha256: await sha256Tree(cli, cliHashedPaths),
     processRunner, processRunnerPaths, processRunnerSha256: await sha256Tree(processRunner, processRunnerPaths) } : {}),
   ...(scenario === 'chat-history' ? { cliLauncher, seedScript, seedScriptSha256: await sha256(seedScript) } : {}),
-  ...(scenario === 'collection' ? { automationsModule, automationsModuleSha256: await sha256(automationsModule), datasetCliScript, datasetCliSha256: await sha256(datasetCliScript) } : {}),
+  ...(scenario === 'collection' ? { automationsModule, datasetCliScript, datasetCliSha256: await sha256(datasetCliScript) } : {}),
   harnessCheckout: root, harnessCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
   startedAt: new Date().toISOString(), platform: process.platform, node: process.version, settings, runs: [],
   limits: [
@@ -114,6 +120,9 @@ Object.assign(receipt, {
     'Automation CPU is per process kind between the snapshot that ended the quiet wait and one started when the run settled; PowerShell start-up adds about half a second to that window. The formula evaluator runs on a worker thread in main, so its CPU is part of main CPU. Peak memory and header bytes are sampled about once a second, so a short peak can be missed.',
     'Contention cases press the button, then run the typing workload in small.md; samplesDuringRun counts trusted input events between the press and the settle text, and a case expected to finish fails when none arrived. Their CPU ends when the run settles, not when typing ends. Document values are read from the settled Markdown; dataset values through the approved list operation.',
     'Renderer heap snapshots are optional diagnostics. The harness finishes the mixed cycle before streaming a due snapshot, with no browser step running. V8 pauses the renderer and can alter GC/memory. Each receipt records the boundary cycle and pause duration. Capture runs cannot serve as uninstrumented performance comparisons. Snapshot timestamps are elapsed from soak start, and completion includes file-stream close.',
+    'small-tab arms before clicking an already-open tab. Its primary renderer timing starts at trusted pointerdown and ends after the bound visible editable document check plus two animation frames. Playwright wall time and raw observation brackets are separate.',
+    'The switches scenario samples memory after each completed switch, outside its latency endpoint. Late private-byte windows and slopes describe bounded-run growth, including allocator and garbage-collector timing; they are not a leak proof. Main, engine, renderer and GPU replacement anywhere in the run invalidates their late windows. Transient process kinds use the final 40-switch identity window.',
+    'Idle starts after all app process kinds use under 5% of one logical core for three consecutive intervals of at least one second. Quiet-wait evidence and sampling overhead remain recorded.',
     'soak samples working set and private bytes per process kind after each mixed cycle. Growth includes allocator and garbage-collector timing; it is not a leak proof.',
   ],
 });
@@ -141,15 +150,6 @@ async function waitUntil(read, timeout = 60000) {
 }
 async function painted(page) {
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-}
-async function ready(page) {
-  const state = await page.waitForFunction(() => {
-    if (document.body.innerText.includes('dohc could not open this document for editing.')) return 'editing-refused';
-    if (document.querySelector('[data-testid="workspace-shell"][data-ready="true"]') && document.querySelector('.tiptap[contenteditable="true"]')) return 'ready';
-    return false;
-  }, null, { timeout: 30000, polling: 50 });
-  if (await state.jsonValue() === 'editing-refused') throw Error('Actual packaged app refused document editing: dohc could not open this document for editing.');
-  await painted(page);
 }
 async function fixture(runDir) {
   const profile = join(runDir, 'profile');
@@ -364,9 +364,8 @@ async function switchTo(page, index) {
   await page.locator(`[data-testid="workspace-switcher-option"][data-workspace-id="perf4-package-${index}"]`).getByRole('button').click();
   await page.waitForFunction(index => document.querySelector('[data-testid="workspace-switcher"]')?.textContent?.trim() === `workspace-${index}`, index);
   const selectedObservedMs = performance.now() - started;
-  await ready(page);
-  await page.waitForFunction(index => document.querySelector('.tiptap[contenteditable="true"]')?.textContent?.includes(`Workspace ${index}`), index);
-  await painted(page);
+  const rendererReadiness = await page.evaluate(observeStartupReadiness,
+    { workspaceName: `workspace-${index}`, path: 'small.md', content: `Workspace ${index} small` });
   const editablePaintObservedMs = performance.now() - started;
   // Native renderer marks remain available in release builds without the test bridge.
   await page.waitForFunction(prior => {
@@ -392,7 +391,7 @@ async function switchTo(page, index) {
     await json(cpuProfilePath, profile);
     await profiler.detach();
   }
-  return { to: index, selectedObservedMs, editablePaintObservedMs, allPhasesObservedMs: performance.now() - started, ...details, cpuProfilePath };
+  return { to: index, selectedObservedMs, editablePaintObservedMs, rendererReadiness, allPhasesObservedMs: performance.now() - started, ...details, cpuProfilePath };
 }
 async function snapshot(pid) {
   const { stdout } = await exec('pwsh.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', join(dirname(fileURLToPath(import.meta.url)), 'packaged-process-snapshot.ps1'), '-AppProcessId', String(pid)], { windowsHide: true, signal: cancellation.signal, timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
@@ -408,7 +407,9 @@ async function idle(instance, state) {
   const windowState = await setWindowState(instance, state);
   if (state === 'visible') await instance.page.bringToFront();
   const domVisibility = await instance.page.evaluate(() => document.visibilityState);
-  const samples = [await snapshot(instance.child.pid)];
+  const quiet = await waitForQuiet({ sample: () => snapshot(instance.child.pid), appPid: instance.child.pid,
+    kinds: null, signal: cancellation.signal });
+  const samples = [quiet.snapshot];
   const started = performance.now();
   while (performance.now() - started < idleSeconds * 1000) {
     await delay(Math.min(5000, Math.max(1, idleSeconds * 1000 - (performance.now() - started))), undefined, { signal: cancellation.signal });
@@ -430,7 +431,8 @@ async function idle(instance, state) {
   const totals = samples.map(s => ({ privateBytes: s.processes.reduce((n, p) => n + p.privateBytes, 0), workingSetBytes: s.processes.reduce((n, p) => n + p.workingSetBytes, 0), processCount: s.processes.length }));
   await setWindowState(instance, 'visible');
   await instance.page.bringToFront();
-  return { state, windowState, domVisibility, elapsedMs, deltas, cpuPercentOneLogicalCore: 100 * deltas.cpuMs / elapsedMs, contextSwitches: null, hardwareWakeups: null, totals, samples, intervals };
+  const quietEvidence = Object.fromEntries(Object.entries(quiet).filter(([key]) => key !== 'snapshot'));
+  return { state, windowState, domVisibility, quiet: quietEvidence, elapsedMs, deltas, cpuPercentOneLogicalCore: 100 * deltas.cpuMs / elapsedMs, contextSwitches: null, hardwareWakeups: null, totals, samples, intervals };
 }
 
 // Installs a self-contained renderer observer before the harness sends the input that it
@@ -796,6 +798,7 @@ async function soak(instance, data, runDir) {
     receipt.runs.push(data);
     await mkdir(runDir, { recursive: true });
     const f = await fixture(runDir);
+    data.fixtureHashes = f.fixtureHashes;
     const fresh = await launch(runDir, f, 'fresh');
     data.freshStartup = fresh.startup;
     await json(join(output, 'result.json'), receipt);
@@ -810,11 +813,9 @@ async function soak(instance, data, runDir) {
     }
     if (scenario === 'switches') {
       data.switchPrecondition = [await switchTo(fresh.page, 1), await switchTo(fresh.page, 0)];
-      data.switches = [];
-      for (let n = 0; n < switches; n++) {
-        data.switches.push(await switchTo(fresh.page, n % 2 === 0 ? 1 : 0));
-        await json(join(output, 'result.json'), receipt);
-      }
+      await recordSwitches({ count: switches, activate: destination => switchTo(fresh.page, destination),
+        sample: async switchIndex => memorySample(await snapshot(fresh.child.pid), fresh.child.pid, switchIndex),
+        result: data, checkpoint: () => json(join(output, 'result.json'), receipt), signal: cancellation.signal });
       await shutdown(runDir, fresh);
       await json(join(output, 'result.json'), receipt);
       continue;
@@ -824,9 +825,17 @@ async function soak(instance, data, runDir) {
       await waitUntil(async () => (await readFile(join(f.workspaces[0].rootPath, 'small.md'), 'utf8')).includes('x'.repeat(keystrokes)), 10000);
       await json(join(output, 'result.json'), receipt);
       if (scenario === 'small-tab') {
-        await openDoc(fresh.page, 'large.md');
-        await openDoc(fresh.page, 'small.md');
-        await ready(fresh.page);
+        data.tabPrecondition = [await openDoc(fresh.page, 'large.md'), await openDoc(fresh.page, 'small.md')];
+        data.tabs = [];
+        for (let n = 0; n < switches; n++) {
+          const path = n % 2 === 0 ? 'large.md' : 'small.md';
+          data.tabs.push(await activateTab(fresh.page, { workspaceName: 'workspace-0', path,
+            content: `Workspace 0 ${path === 'small.md' ? 'small' : 'large'}` }));
+          await json(join(output, 'result.json'), receipt);
+        }
+        await shutdown(runDir, fresh);
+        await json(join(output, 'result.json'), receipt);
+        continue;
       }
       data.switches = [];
       for (const destination of [1, 0]) {
@@ -892,9 +901,8 @@ async function soak(instance, data, runDir) {
       data.switches.push(await switchTo(fresh.page, n % 2 === 0 ? 1 : 0));
       await json(join(output, 'result.json'), receipt);
     }
-    // Idle only once per package, after foreground work has settled for a fixed workload pause.
+    // Idle only once per package; each window state gets its own measured quiet wait.
     if (index === 0) {
-      await delay(10000, undefined, { signal: cancellation.signal });
       console.log(JSON.stringify({ label, phase: 'visible-idle-start', seconds: idleSeconds }));
       data.idle = [await idle(fresh, 'visible')];
       await json(join(output, 'result.json'), receipt);
