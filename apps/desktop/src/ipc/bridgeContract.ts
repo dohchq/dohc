@@ -44,7 +44,7 @@ import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
-import { MAX_SCHEMA_COLLECTION_ITEMS } from "@dohc/workspace-contracts/collection-values";
+import { isNormalizedRelativePath, MAX_SCHEMA_COLLECTION_ITEMS } from "@dohc/workspace-contracts/collection-values";
 import type {
   CollectionGetResult as CollectionGetResultContract,
   CollectionListResult as CollectionListResultContract,
@@ -4838,6 +4838,12 @@ export const StopAndRestorePayload = z.object({
   target: StopAndRestoreTarget,
 }).strict();
 export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
+export const KeptAutomationFieldShape = z.object({
+  id: z.string().regex(/^[a-f0-9]{32}$/),
+  path: PATH_STRING.refine(isNormalizedRelativePath).nullable(),
+  field: z.string(),
+  recordId: z.union([z.string(), z.number()]).nullable(),
+}).strict();
 export const StopAndRestoreResult = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("restored"),
@@ -4860,7 +4866,7 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
     sendsMessages: z.boolean(),
     // Fields those runs wrote that kept a later value, and fields on records
     // no longer in their Collection.
-    fieldsKept: z.number().int().nonnegative(),
+    keptFields: z.array(KeptAutomationFieldShape),
     fieldsMissing: z.number().int().nonnegative(),
     // The step a failure stopped, with why; what the fields above count happened.
     // At files, this try undid no run.

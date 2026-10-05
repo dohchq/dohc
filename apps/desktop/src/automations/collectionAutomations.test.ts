@@ -2462,6 +2462,71 @@ describe("Collection automations", () => {
     expect(w.fieldsOf(task).Note).toBe("old");
   });
 
+  it("counts an unreadable claim as left when stopping and restoring", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const file = await w.executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]!.valid) throw new Error("expected Stamp to read");
+    const unreadable = w.makeExecutor({ store: {
+      ...w.baseStore,
+      runsOf: async () => ({ runs: [], unreadable: true }),
+    } });
+    await unreadable.open();
+    await expect(unreadable.undoRunsOf([
+      { collectionPath: "Tasks", id: "stamp", definitionHash: file.automations[0]!.definitionHash },
+    ], async () => undefined)).resolves.toEqual({ undone: 0, left: 1, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
+    await unreadable.dispose();
+  });
+
+  it("keeps the newest claim's path when two claims kept the same field", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const older = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(older);
+    const newer = w.claim("collection:Tasks#stamp", task);
+    w.executor.notifyClaimed();
+    await w.settledClaim(newer);
+    for (const [claim, path] of [[older, "Tasks/old.md"], [newer, "Tasks/new.md"]] as const) {
+      const { runs } = await w.baseStore.runsOf("collection:Tasks#stamp", claim.claimId);
+      for (const run of runs) await w.baseStore.updateState(run, {
+        undo: "started", undoKept: [{ recordId: task.id, field: "Note", fieldName: "Note", path, datasetRecordId: null }],
+      });
+    }
+    const file = await w.executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]!.valid) throw new Error("expected Stamp to read");
+    // A retry waits for each interrupted Undo, but still reports its saved kept fields.
+    await expect(w.executor.undoRunsOf([
+      { collectionPath: "Tasks", id: "stamp", definitionHash: file.automations[0]!.definitionHash },
+    ], async () => undefined, true)).resolves.toMatchObject({
+      keptFields: [{ id: expect.stringMatching(/^[a-f0-9]{32}$/), path: "Tasks/new.md", field: "Note", recordId: null }], errorMessage: null,
+    });
+  });
+
+  it("locates a renamed record's kept field and keeps one descriptor across a retry", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const file = await w.executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]!.valid) throw new Error("expected Stamp to read");
+    const definitions = [{ collectionPath: "Tasks", id: "stamp", definitionHash: file.automations[0]!.definitionHash }];
+    task.path = "Tasks/renamed.md";
+    task.doc.getMap("frontmatter").set("Note", "theirs");
+    const first = await w.executor.undoRunsOf(definitions, async () => undefined);
+    expect(first.keptFields).toEqual([{ id: expect.stringMatching(/^[a-f0-9]{32}$/), path: task.path, field: "Note", recordId: null }]);
+    expect(first.errorMessage).toBeNull();
+    task.path = "Tasks/renamed-again.md";
+    const retry = await w.executor.undoRunsOf(definitions, async () => undefined, true);
+    expect(retry.keptFields).toEqual([{ ...first.keptFields[0], path: task.path }]);
+    expect(retry.errorMessage).toBeNull();
+    expect(w.fieldsOf(task).Note).toBe("theirs");
+  });
+
   it("puts back a field Undo kept once the run written after it is undone", async () => {
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
     const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });

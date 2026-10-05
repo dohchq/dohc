@@ -5716,6 +5716,10 @@ export function DesktopWorkspaceShell(props: {
             stopAndRestore.close();
             openFile(path);
           }}
+          onOpenCollection={(path) => {
+            stopAndRestore.close();
+            openCollectionTab(path);
+          }}
           onError={(fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)}
           onSettled={clearIdentity}
         />

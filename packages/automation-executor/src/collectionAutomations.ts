@@ -64,7 +64,7 @@ import {
   type ReachShare,
   type ReachStep,
 } from "./automationReach";
-import type { AutomationRunStore, ClaimStanding, DatasetUndoCall, ExpiringClaim, ReportedFailure, RunWrite, StoredCircuitBreaker, StoredRun, StoredSubscription } from "./automationRunStore";
+import type { AutomationRunStore, ClaimStanding, DatasetUndoCall, ExpiringClaim, ReportedFailure, RunWrite, StoredCircuitBreaker, StoredRun, StoredSubscription, UndoKeptField } from "./automationRunStore";
 import {
   runCollectionAutomation,
   runsForClaim,
@@ -752,6 +752,14 @@ export type CollectionAutomationRetry =
   | { status: "definition-changed"; repeatsMessages: boolean }
   | { status: "switched-off"; target: AutomationControlsTarget }
   | { status: "refused"; reason: string };
+
+/** A field kept at a later value, at its document or dataset Collection path. */
+export interface KeptAutomationField {
+  id: string;
+  path: string | null;
+  field: string;
+  recordId: string | number | null;
+}
 
 export type CollectionAutomationUndo =
   | ({ status: "undone" } & CollectionAutomationUndone)
@@ -3252,7 +3260,7 @@ export class CollectionAutomations {
   private async undoKeptFields(
     runs: readonly StoredRun[],
     trash: (path: string) => Promise<void>,
-  ): Promise<{ undone: CollectionAutomationUndone; keptFields: Array<{ recordId: string; field: string }> }> {
+  ): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[] }> {
     const only = documentUndoKept(runs);
     const documentKeys = new Set(only.map(({ recordId, field }) => JSON.stringify([recordId, field])));
     const datasetKept = [...new Map(runs.flatMap((run) => run.undoKept).filter((kept) => !documentKeys.has(JSON.stringify([kept.recordId, kept.field])))
@@ -3320,8 +3328,8 @@ export class CollectionAutomations {
    * refused, such as one still running. Fields a run kept because they
    * changed since are tried again; with `again`, only those are, so a pass
    * after the runs written on top of them were undone restores them.
-   * `reverted` and `missing` count fields. `keptFields` names, by hash,
-   * every field those runs still keep after the pass, so a field kept on
+   * `reverted` and `missing` count fields. `keptFields` locates each field
+   * still kept after the pass, with its identity, so a field kept on
    * two computers counts once.
    * `otherKept` counts changes Undo cannot reverse. A failure returns partial counts.
    */
@@ -3329,23 +3337,23 @@ export class CollectionAutomations {
     definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
     trash: (path: string) => Promise<void>,
     again = false,
-  ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: string[]; otherKept: number; errorMessage: string | null }> {
+  ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; errorMessage: string | null }> {
     const hashes = new Map<string, Set<string>>();
     for (const { collectionPath, id, definitionHash: hash } of definitions) {
       const automationId = await this.automationIdAt(collectionPath, id);
       if (automationId !== null) hashes.set(automationId, (hashes.get(automationId) ?? new Set()).add(hash));
     }
     const result = { undone: 0, left: 0, reverted: 0, missing: 0, otherKept: 0 };
-    const keptFields = new Set<string>();
+    const keptFields = new Map<string, KeptAutomationField>();
     try {
       await this.undoEachRun(hashes, trash, result, again, keptFields);
     } catch (error) {
-      return { ...result, keptFields: [...keptFields], errorMessage: error instanceof Error ? error.message : String(error) };
+      return { ...result, keptFields: [...keptFields.values()], errorMessage: error instanceof Error ? error.message : String(error) };
     } finally {
       // Once for the whole pass, however many claims it undid.
       if (hashes.size > 0) this.options.onRunsChanged();
     }
-    return { ...result, keptFields: [...keptFields], errorMessage: null };
+    return { ...result, keptFields: [...keptFields.values()], errorMessage: null };
   }
 
   private async undoEachRun(
@@ -3353,7 +3361,7 @@ export class CollectionAutomations {
     trash: (path: string) => Promise<void>,
     result: { undone: number; left: number; reverted: number; missing: number; otherKept: number },
     again: boolean,
-    keptFields: Set<string>,
+    keptFields: Map<string, KeptAutomationField>,
   ): Promise<void> {
     // Every claim of these automations, newest first across them all, so a
     // field two automations wrote in turn goes back in the reverse order.
@@ -3370,7 +3378,12 @@ export class CollectionAutomations {
     // is undone over one that stopped part way.
     try {
       for (const { automationId, wanted, claim } of claims) {
-        const runs = (await this.options.store.runsOf(automationId, claim.claimId)).runs
+        const stored = await this.options.store.runsOf(automationId, claim.claimId);
+        if (stored.unreadable) {
+          result.left += 1;
+          continue;
+        }
+        const runs = stored.runs
           .filter((run) => wanted.has(run.definitionHash));
         const pending = runs.some((run) => run.undo !== "done");
         const kept = documentUndoKept(runs).length > 0;
@@ -3396,8 +3409,9 @@ export class CollectionAutomations {
       for (const { automationId, wanted, claim } of claims) {
         for (const run of (await this.options.store.runsOf(automationId, claim.claimId)).runs) {
           if (!wanted.has(run.definitionHash)) continue;
-          for (const { recordId, field } of run.undoKept) {
-            keptFields.add(createHash("sha256").update(JSON.stringify([recordId, field])).digest("hex").slice(0, 32));
+          for (const { recordId, field, path, fieldName, datasetRecordId } of run.undoKept) {
+            const id = createHash("sha256").update(JSON.stringify([recordId, field])).digest("hex").slice(0, 32);
+            if (!keptFields.has(id)) keptFields.set(id, { id, path, field: fieldName, recordId: datasetRecordId });
           }
         }
       }

@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
+import type { KeptAutomationField } from "@dohc/automation-executor/collection-automations";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { sendsMessages } from "@dohc/automation-executor/collection-automation-run";
 
@@ -73,7 +74,7 @@ export interface StopAndRestoreDependencies {
 export interface UndoneRuns {
   undone: number;
   left: number;
-  kept: number;
+  keptFields: KeptAutomationField[];
   missing: number;
   otherKept: number;
   errorMessage: string | null;
@@ -101,7 +102,7 @@ export type StopAndRestoreOutcome =
       /** An automation they wrote posts, messages, notifies, or wakes an agent, which no Undo takes back. */
       sendsMessages: boolean;
       /** Fields the runs wrote that kept a later value. */
-      fieldsKept: number;
+      keptFields: KeptAutomationField[];
       /** Fields the runs wrote on records no longer in their Collection. */
       fieldsMissing: number;
       /**
@@ -255,11 +256,11 @@ export async function restoreDirectWrites(
   restorable.sort((left, right) => restoreOrder(left.entry) - restoreOrder(right.entry));
   const restored: RestoreReceipt[] = [];
   const outcome = () => ({ status: "restored" as const, restored, review: [...review.values()].sort((left, right) => left.path.localeCompare(right.path)) });
-  let runs = { undone: 0, left: 0, kept: 0, missing: 0, otherKept: 0 };
+  let runs: Omit<UndoneRuns, "errorMessage"> = { undone: 0, left: 0, keptFields: [], missing: 0, otherKept: 0 };
   let step: "files" | "runs" = "files";
   const done = (message: string | null) => ({
-    ...outcome(), runsUndone: runs.undone, runsLeft: runs.left, runChangesKept: runs.kept + runs.missing + runs.otherKept,
-    fieldsKept: runs.kept, fieldsMissing: runs.missing,
+    ...outcome(), runsUndone: runs.undone, runsLeft: runs.left, runChangesKept: runs.keptFields.length + runs.missing + runs.otherKept,
+    keptFields: runs.keptFields, fieldsMissing: runs.missing,
     wroteAutomations: definitions.length > 0 || protectedAutomations, sendsMessages: messages,
     unfinished: message === null ? null : { step, message },
   });

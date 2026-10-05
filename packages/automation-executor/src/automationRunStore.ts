@@ -19,6 +19,9 @@ import { StoredReachVerdictSchema, type StoredReachVerdict } from "./reachVerdic
 // over the old one, so a crash leaves the old record or the new one. An
 // appended line is flushed before the next effect starts.
 
+/** A kept field's identity and display name, at its document or dataset Collection path. */
+export type UndoKeptField = { recordId: string; field: string; path: string | null; fieldName: string; datasetRecordId: string | number | null };
+
 // The executor refuses a step that would make a run's saved steps, with every
 // effect recorded as planned, larger than this, before the step writes.
 export const RUN_PLAN_BUDGET_BYTES = 4 * 1024 * 1024;
@@ -264,15 +267,15 @@ const UndoCallSchema = z.union([
     idempotencyKey: z.string(),
   }),
 ]);
-// Version 8 requires the fields kept by Undo. It plans and saves each step
-// in the progress file beside the run's state, names each Collection by its
+// Version 9 locates fields kept by Undo, including dataset records. It plans
+// and saves each step beside the run's state, names each Collection by its
 // id, records when the run ended, qualifies formula-visible fields by
 // dataset and table, and keeps the deletes an Undo may use on each record
 // it added and the calls a dataset Undo saved. A run in any other format
 // cannot be read, and the claim fails instead of starting over or reading
 // bare field ids as current reach.
 const StoredRunSchema = z.object({
-  version: z.literal(8),
+  version: z.literal(9),
   claimId: z.string().min(1),
   automationId: z.string().min(1),
   definitionHash: z.string().min(1),
@@ -291,7 +294,7 @@ const StoredRunSchema = z.object({
   rules: DatasetRulesSchema.nullable(),
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
-  undoKept: z.array(z.object({ recordId: z.string(), field: z.string() })),
+  undoKept: z.array(z.object({ recordId: z.string(), field: z.string(), path: z.string().nullable(), fieldName: z.string(), datasetRecordId: DatasetRecordIdSchema.nullable() })),
   settled: z.boolean(),
   outcome: z.union([
     z.object({ state: z.literal("done") }),
@@ -357,7 +360,7 @@ export interface StoredStep {
 
 /** One run of one claim under one definition of its automation. */
 export interface StoredRun {
-  version: 8;
+  version: 9;
   claimId: string;
   /** The engine automation id, "collection:<collection id>#<id>". */
   automationId: string;
@@ -423,7 +426,7 @@ export interface StoredRun {
    * wrote. Another run may have written them after this one, so Undo and
    * Stop and restore try them again.
    */
-  undoKept: Array<{ recordId: string; field: string }>;
+  undoKept: UndoKeptField[];
   /** The engine accepted this run's claim as done, so nothing will resume it. */
   settled: boolean;
   /**

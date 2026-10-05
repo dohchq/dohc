@@ -1,5 +1,6 @@
 import { jsonResponse, readBoundedJson, type TokenBucketLimiter } from "@dohc/service-http";
 import type {
+  KeptAutomationField,
   CollectionAutomationHold,
   CollectionAutomationRetry,
   CollectionAutomationRun,
@@ -65,7 +66,7 @@ export interface ServerRuns {
     scope: OwnerScope,
     definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
     again: boolean,
-  ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: string[]; otherKept: number; errorMessage: string | null }>;
+  ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; errorMessage: string | null }>;
   holds(scope: OwnerScope): CollectionAutomationHold[];
   allow(scope: OwnerScope, input: { automationId: string; definitionHash: string; step: string; seq: number; recipient?: string }): Promise<"confirmed" | "changed">;
 }
