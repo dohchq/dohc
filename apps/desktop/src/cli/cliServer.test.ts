@@ -729,16 +729,21 @@ describe("CLI socket server", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("requires owner-local authority for publication and refuses automation approval", async () => {
+  it("requires owner-local authority and refuses all automation publication actions", async () => {
     context.appPublication=vi.fn(async()=>({kind:"cancelled" as const}));
     const request={action:"createLink" as const,workspaceId:WORKSPACE_ID,appRoot:"app",access:"view" as const,operationId:"00000000-0000-4000-8000-000000000101",agentLabel:"Builder"};
-    for (const actor of ["human","agent"] as const) await invoke("appPublication",{cwd:workspaceRoot,actor,request});
+    await invoke("appPublication",{cwd:workspaceRoot,actor:"human",request});
+    expect(context.appPublication).toHaveBeenLastCalledWith(request,null);
+    await invoke("appPublication",{cwd:workspaceRoot,actor:"agent",request});
     expect(context.appPublication).toHaveBeenLastCalledWith(expect.objectContaining({agentLabel:"Builder"}),{kind:"agent",label:"Builder",labelSource:"agent-declared"});
     await expect(invoke("appPublication",{cwd:workspaceRoot,actor:"agent",request:{...request,workspaceId:"other"}})).rejects.toThrow("owning workspace");
     context.readOnly=true;
     await expect(invoke("appPublication",{cwd:workspaceRoot,actor:"agent",request})).rejects.toThrow("owning workspace");
     context.readOnly=false;agentRunDepth=1;
-    await expect(invoke("appPublication",{cwd:workspaceRoot,actor:"agent",request})).rejects.toThrow("Automations cannot approve");
+    for (const actor of ["human", "agent"] as const) {
+      await expect(invoke("appPublication",{cwd:workspaceRoot,actor,request})).rejects.toThrow("Automations cannot use app publication");
+      await expect(invoke("appPublication",{cwd:workspaceRoot,actor,request:{action:"cancel",workspaceId:WORKSPACE_ID,approvalId:request.operationId}})).rejects.toThrow("Automations cannot use app publication");
+    }
     expect(context.appPublication).toHaveBeenCalledTimes(2);
   });
 
@@ -746,11 +751,16 @@ describe("CLI socket server", () => {
     context.dataset=vi.fn(async()=>({kind:"refused" as const,code:"expired",message:"expired"}));
     const request={...(action === "approveMigration" ? {action,approvalDigest:"b".repeat(64)} : {action}),workspaceId:WORKSPACE_ID,preparationId:"00000000-0000-4000-8000-000000000101",revisionSha256:"a".repeat(64),agentLabel:"Builder"};
     await invoke("dataset",{cwd:workspaceRoot,actor:"human",request});
+    expect(context.dataset).toHaveBeenLastCalledWith(request,null);
+    await invoke("dataset",{cwd:workspaceRoot,actor:"agent",request});
     expect(context.dataset).toHaveBeenLastCalledWith(request,{depth:0,approvalAgent:{kind:"agent",label:"Builder",labelSource:"agent-declared"}});
     await expect(invoke("dataset",{cwd:workspaceRoot,actor:"agent",request:{...request,workspaceId:"other"}})).rejects.toThrow("owning workspace");
     context.readOnly=true;
     await expect(invoke("dataset",{cwd:workspaceRoot,actor:"agent",request})).rejects.toThrow("owning workspace");
-    expect(context.dataset).toHaveBeenCalledOnce();
+    expect(context.dataset).toHaveBeenCalledTimes(2);
+    context.readOnly=false; agentRunDepth=2;
+    await invoke("dataset",{cwd:workspaceRoot,actor:"human",request});
+    expect(context.dataset).toHaveBeenLastCalledWith(request,{depth:2,approvalAgent:{kind:"agent",label:"Builder",labelSource:"agent-declared"}});
   });
 
   it("routes dataset actions through the same owner workspace attachment for humans and agents", async () => {

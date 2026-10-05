@@ -4269,7 +4269,7 @@ const chatWrites = createChatWrites({
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
 });
 
-let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent) => Promise<OwnerAppPublicationResult>) | undefined;
+let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
   dataset: (input, agent) => {

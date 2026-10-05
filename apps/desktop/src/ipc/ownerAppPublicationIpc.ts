@@ -40,9 +40,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
     callerKey: string; scope: string; signal: AbortSignal; generation: number; candidateDigest: string; createdAt: number; clear(): void;
     access: "view" | "comment" | "edit";
     reactivation?: { publicationId: string; authorityRevision: number } }>();
-  const createdLinks = new Map<string, {url: string; grantGeneration: number; callerKey: string; scope: string; signal: AbortSignal; generation: number; createdAt: number; operationId: string; workspaceId: string; clear(): void}>();
   const preparing = new Map<string, symbol>();
-  let creatingLinks = 0;
   const bearerWarning = (access: string) => `This URL is a bearer credential at ${access} access, usable by anyone who holds it.`;
   const clearExpired = () => {
     for (const entry of pending.values()) if (entry.signal.aborted || Date.now() - entry.createdAt > 10 * 60_000) entry.clear();
@@ -83,33 +81,23 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         return grant;
       };
       clearExpired();
-      for (const link of createdLinks.values()) if (link.signal.aborted || Date.now() - link.createdAt > 10 * 60_000) link.clear();
       if (input.action === "createLink") {
         if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw new Error("Choose an app in your workspace.");
         const paths = input.paths ?? [input.appRoot];
         if (paths.some(path => !isShareablePath(path) || isSharedWithMePath(path))) throw new Error("Choose shareable paths in your workspace.");
-        if (createdLinks.size + creatingLinks >= 8 && ![...createdLinks.values()].some(link => link.operationId === input.operationId && link.workspaceId === input.workspaceId)) throw new Error("Too many app links await publication. Finish another publication first.");
-        creatingLinks++;
-        try {
-          const raw = await session.run(() => dependencies.relayJson(remote.credentials,
-            `/sync/${encodeURIComponent(input.workspaceId)}/shares/links`, {method:"POST",signal:operation.signal,
-              body:JSON.stringify({paths,access:input.access,operationId:input.operationId,agent})}));
-          operation.signal.throwIfAborted();
-          const row = z.object({ok:z.literal(true),workspaceId:z.string(),shareId:z.string().min(1),grantId:z.string().min(1),access:z.enum(["view","comment","edit"]),
-            selector:z.object({paths:z.array(z.string()),versionId:z.null()}),generation:z.number().int().positive().optional(),url:z.string().url().max(4096).optional(),urlUnavailable:z.literal(true).optional()}).parse(raw);
-          if (row.workspaceId !== input.workspaceId || row.access !== input.access || JSON.stringify([...row.selector.paths].sort()) !== JSON.stringify([...new Set(paths)].sort())) throw new Error("The app link selection changed.");
-          const facts = {shareId:row.shareId,grantId:row.grantId,selector:row.selector,access:row.access,bearerWarning:bearerWarning(row.access)};
-          if (!row.url) {
-            if (!row.urlUnavailable) throw new Error("The app link result is unavailable.");
-            return OwnerAppPublicationResult.parse({kind:"urlUnavailable",...facts});
-          }
-          if (!row.generation) throw new Error("The app link generation is unavailable.");
-          const clear = () => { createdLinks.delete(row.grantId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };
-          const expiry = setTimeout(clear, 10 * 60_000); expiry.unref();
-          createdLinks.set(row.grantId,{url:row.url,grantGeneration:row.generation,callerKey,scope:operation.scope ?? callerKey,signal:operation.signal,generation:remote.credentialGeneration,createdAt:Date.now(),operationId:input.operationId,workspaceId:input.workspaceId,clear});
-          operation.signal.addEventListener("abort",clear,{once:true});
-          return OwnerAppPublicationResult.parse({kind:"linkCreated",...facts,url:row.url});
-        } finally { creatingLinks--; }
+        const raw = await session.run(() => dependencies.relayJson(remote.credentials,
+          `/sync/${encodeURIComponent(input.workspaceId)}/shares/links`, {method:"POST",signal:operation.signal,
+            body:JSON.stringify({paths,access:input.access,operationId:input.operationId,agent})}));
+        operation.signal.throwIfAborted();
+        const row = z.object({ok:z.literal(true),workspaceId:z.string(),shareId:z.string().min(1),grantId:z.string().min(1),access:z.enum(["view","comment","edit"]),
+          selector:z.object({paths:z.array(z.string()),versionId:z.null()}),url:z.string().url().max(4096).optional(),urlUnavailable:z.literal(true).optional()}).parse(raw);
+        if (row.workspaceId !== input.workspaceId || row.access !== input.access || JSON.stringify([...row.selector.paths].sort()) !== JSON.stringify([...new Set(paths)].sort())) throw new Error("The app link selection changed.");
+        const facts = {shareId:row.shareId,grantId:row.grantId,selector:row.selector,access:row.access,bearerWarning:bearerWarning(row.access)};
+        if (!row.url) {
+          if (!row.urlUnavailable) throw new Error("The app link result is unavailable.");
+          return OwnerAppPublicationResult.parse({kind:"urlUnavailable",...facts});
+        }
+        return OwnerAppPublicationResult.parse({kind:"linkCreated",...facts,url:row.url});
       }
       const remember = async (prepared: Prepared, selection: Extract<OwnerAppPublicationRequest, { action: "prepare" }>, reactivation?: { publicationId: string; authorityRevision: number }, access: "view" | "comment" | "edit" = "view", selector?: {paths:string[];versionId:string|null}) => {
         session.assertCurrent(); operation.signal.throwIfAborted();
@@ -214,13 +202,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         const finishPublication = async (publicationId: unknown, authorityRevision: unknown) => {
           const address = (authorityRevision: number) => {
             const appQuery = `?app=${String(publicationId)}`;
-            const link = createdLinks.get(entry.input.grantId);
-            link?.clear();
-            if (link && link.callerKey === callerKey && link.scope === (operation.scope ?? callerKey) && link.signal === operation.signal && link.generation === remote.credentialGeneration && link.grantGeneration === prepared.generation) {
-              const url = new URL(link.url); url.searchParams.set("app",String(publicationId));
-              return OwnerAppPublicationResult.parse({...published,authorityRevision,appQuery,url:url.href,access:entry.access,bearerWarning:bearerWarning(entry.access)});
-            }
-            return OwnerAppPublicationResult.parse({...published,authorityRevision,appQuery,urlUnavailable:{grantId:entry.input.grantId},access:entry.access,bearerWarning:bearerWarning(entry.access)});
+            return OwnerAppPublicationResult.parse({...published,authorityRevision,appQuery,access:entry.access,bearerWarning:bearerWarning(entry.access)});
           };
           const published = OwnerAppPublicationResult.parse({ kind: "published", publicationId, authorityRevision });
           if (published.kind !== "published") throw new Error("Invalid publication result.");

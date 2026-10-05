@@ -58,3 +58,10 @@ it("creates only an explicitly scoped retryable link, defaulting to View", () =>
   expect(OwnerAppPublicationRequest.safeParse({action:"rotateLink",workspaceId:"w"}).success).toBe(false);
   expect(OwnerAppPublicationRequest.safeParse({action:"createLink",workspaceId:"w",appRoot:"app"}).success).toBe(false);
 });
+
+it("refuses bearer material in publication results", () => {
+  const published={kind:"published",publicationId:"a".repeat(64),authorityRevision:1,appQuery:"?app="+"a".repeat(64)};
+  expect(OwnerAppPublicationResult.parse(published)).toEqual(published);
+  expect(OwnerAppPublicationResult.safeParse({...published,url:"https://relay.example/s/#secret"}).success).toBe(false);
+  expect(OwnerAppPublicationResult.safeParse({...published,urlUnavailable:{grantId:"g"}}).success).toBe(false);
+});

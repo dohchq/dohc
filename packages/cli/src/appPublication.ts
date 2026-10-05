@@ -23,7 +23,7 @@ const OwnerAppDatasetCapability = z.unknown().transform((value, context) => {
   catch { context.addIssue({ code: "custom", message: "Invalid dataset capability." }); return z.NEVER; }
 });
 const localPublication = { publicationId: hash, authorityRevision: z.number().int().positive(), appRoot: z.string().min(1).max(1024), sourceRevision: hash, active: z.boolean() };
-const publication = { approvalProvenance: z.object({ agent: PublicationAgent.nullable(), selector: z.unknown(), access, candidateDigest: hash, sourceRevision: hash, capabilities: z.array(OwnerAppCapability).max(1) }).strict().optional(), publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean(), linkCurrent: z.boolean(), collectionCapability: z.union([OwnerAppCollectionCapability, z.literal("unavailable")]).nullable(), datasetCapability: z.union([OwnerAppDatasetCapability, z.literal("unavailable")]).nullable() };
+const publication = { approvalProvenance: z.object({ agent: PublicationAgent.nullable(), selector: z.unknown(), access, committedCandidateDigest: hash, sourceRevision: hash, capabilities: z.array(OwnerAppCapability).max(1) }).strict().optional(), publicationId: hash, authorityRevision: z.number().int().positive(), shareId: id, grantId: id, active: z.boolean(), linkCurrent: z.boolean(), collectionCapability: z.union([OwnerAppCollectionCapability, z.literal("unavailable")]).nullable(), datasetCapability: z.union([OwnerAppDatasetCapability, z.literal("unavailable")]).nullable() };
 const OwnerAppPublicationListRow = z.discriminatedUnion("manifestUnavailable", [
   z.object({ ...publication, manifestUnavailable: z.literal(false), appRoot: z.string().min(1).max(1024), sourceRevision: hash }).strict(),
   z.object({ ...publication, manifestUnavailable: z.literal(true) }).strict(),
@@ -54,7 +54,7 @@ export const OwnerAppPublicationResult = z.discriminatedUnion("kind", [
     sourcePaths: z.array(z.string().min(1).max(1024)).min(1).max(512), capabilities: z.array(OwnerAppCapability).max(1), externalNetwork: z.literal(true), local: z.literal(true).optional(),
   }).strict(),
   z.object({ kind: z.literal("cancelled") }).strict(),
-  z.object({ kind: z.literal("published"), publicationId: z.string().regex(/^[a-f0-9]{64}$/), authorityRevision: z.number().int().positive(), local: z.literal(true).optional(), appQuery: z.string().max(256).optional(), url: z.string().url().max(4096).optional(), urlUnavailable: z.object({ grantId: id }).strict().optional(), access: access.optional(), bearerWarning: z.string().max(512).optional() }).strict(),
+  z.object({ kind: z.literal("published"), publicationId: z.string().regex(/^[a-f0-9]{64}$/), authorityRevision: z.number().int().positive(), local: z.literal(true).optional(), appQuery: z.string().max(256).optional(), access: access.optional(), bearerWarning: z.string().max(512).optional() }).strict(),
   z.object({ kind: z.literal("withdrawn"), publicationId: hash, authorityRevision: z.number().int().positive() }).strict(),
   z.object({ kind: z.literal("collectionRevoked"), publicationId: hash, authorityRevision: z.number().int().positive() }).strict(),
 ]);

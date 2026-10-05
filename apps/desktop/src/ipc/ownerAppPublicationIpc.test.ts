@@ -383,23 +383,25 @@ it("checks relay-returned revisions directly on every publication preparation", 
 });
 
 
-it("creates a scoped link and returns its credential with the immutable app selection once", async () => {
+it("returns the scoped link credential only from creation and app suffixes from publication", async () => {
   const h = harness(), original = h.relay.getMockImplementation()!;
   h.relay.mockImplementation(async (...args) => args[1].endsWith("/shares/links") && args[2]?.method === "POST"
     ? {ok:true,workspaceId:"w",shareId:"s",grantId:"g",selector:h.grant.selector,access:"view",generation:h.grant.generation,url:"https://relay.example/s/#secret"}
     : original(...args));
   const link = await h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(101)});
-  expect(link).toMatchObject({kind:"linkCreated",access:"view",selector:{paths:["app"],versionId:null},bearerWarning:expect.stringContaining("anyone who holds it")});
+  expect(link).toMatchObject({kind:"linkCreated",url:"https://relay.example/s/#secret",access:"view",selector:{paths:["app"],versionId:null},bearerWarning:expect.stringContaining("anyone who holds it")});
   expect(JSON.parse(String(h.relay.mock.calls[0]![2]!.body))).toMatchObject({paths:["app"],access:"view",operationId:id(101)});
   const result = await h.approve(await h.prepare());
-  expect(result).toMatchObject({kind:"published",url:"https://relay.example/s/?app="+"a".repeat(64)+"#secret",access:"view"});
+  expect(result).toMatchObject({kind:"published",appQuery:"?app="+"a".repeat(64),access:"view"});
+  expect(result).not.toHaveProperty("url");
+  expect(result).not.toHaveProperty("urlUnavailable");
   expect(JSON.stringify(h.relay.mock.calls)).not.toContain("#secret");
-  expect(await h.approve(await h.prepare())).toMatchObject({appQuery:"?app="+"a".repeat(64),urlUnavailable:{grantId:"g"}});
+  expect(await h.approve(await h.prepare())).toMatchObject({appQuery:"?app="+"a".repeat(64)});
 });
 
 it("keeps an existing credential entirely caller-held and reports its app suffix", async () => {
   const h = harness(), result = await h.approve(await h.prepare());
-  expect(result).toMatchObject({kind:"published",appQuery:"?app="+"a".repeat(64),urlUnavailable:{grantId:"g"},access:"view"});
+  expect(result).toMatchObject({kind:"published",appQuery:"?app="+"a".repeat(64),access:"view"});
   expect(result).not.toHaveProperty("url");
   await expect(h.invoke({...prepareInput, url:"https://relay.example/s/#existing"})).rejects.toThrow();
 });
@@ -433,23 +435,6 @@ it("never returns a newly created credential after its grant rotates",async()=>{
   await h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(101)});
   h.grant.generation++;
   const result=await h.approve(await h.prepare());
-  expect(result).toMatchObject({kind:"published",urlUnavailable:{grantId:"g"}});
+  expect(result).toMatchObject({kind:"published"});
   expect(result).not.toHaveProperty("url");
-});
-
-it("allows an idempotent retry at the retained-link limit and releases expired secrets", async () => {
-  vi.useFakeTimers();
-  try {
-    const h=harness();
-    h.relay.mockImplementation(async(_credentials,_path,init)=>{
-      const {operationId}=JSON.parse(String(init!.body)),n=Number(operationId.slice(-12));
-      return {ok:true,workspaceId:"w",shareId:`s${n}`,grantId:`g${n}`,selector:h.grant.selector,access:"view",...(n===101&&h.relay.mock.calls.length>8?{urlUnavailable:true}:{generation:1,url:`https://relay.example/s${n}/#secret`})};
-    });
-    for(let n=101;n<109;n++) await h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(n)});
-    await expect(h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(109)})).rejects.toThrow("Too many app links");
-    expect(await h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(101)})).toMatchObject({kind:"urlUnavailable",grantId:"g101"});
-    vi.advanceTimersByTime(10*60_000);
-    expect(await h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(109)})).toMatchObject({kind:"linkCreated"});
-    h.controller.abort();
-  } finally {vi.useRealTimers();}
 });

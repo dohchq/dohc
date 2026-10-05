@@ -517,8 +517,9 @@ it("reports changed link generations, retains withdrawal, and permits fresh publ
 it("records the approving agent with exact immutable source and exposure facts across restart", () => {
   const f=fixture(), input=request(), agent={kind:"agent" as const,label:"Builder",labelSource:"agent-declared" as const};
   const published=f.storage.publishAppPublication({...input,agent});
-  const expected={agent,selector:{paths:["app","shared"],versionId:null},access:"view",sourceRevision:input.candidate.sourceRevision,candidateDigest:digest(JSON.stringify(input.candidate)),capabilities:input.candidate.capabilities};
+  const expected={agent,selector:{paths:["app","shared"],versionId:null},access:"view",sourceRevision:input.candidate.sourceRevision,committedCandidateDigest:digest(JSON.stringify(input.candidate)),capabilities:input.candidate.capabilities};
   expect(published.approvalProvenance).toEqual(expected);
+  expect(published.approvalProvenance).not.toHaveProperty("candidateDigest");
   f.restart();
   expect(f.storage.readAppPublication({...owner,publicationId:published.publicationId,limits}).approvalProvenance).toEqual(expected);
   expect(f.storage.publishAppPublication({...input,agent:{...agent,label:"Retry"}}).approvalProvenance).toEqual(expected);

@@ -21,7 +21,7 @@ export interface PublishAppPublicationInput extends PublicationOwner {
   limits: AppPublicationLimits;
   nowMs: number;
 }
-export interface AppPublicationApproval { agent: ApprovalAgent | null; selector: unknown; access: "view" | "comment" | "edit"; candidateDigest: string; sourceRevision: string; capabilities: AppPublicationCandidate["capabilities"] }
+export interface AppPublicationApproval { agent: ApprovalAgent | null; selector: unknown; access: "view" | "comment" | "edit"; committedCandidateDigest: string; sourceRevision: string; capabilities: AppPublicationCandidate["capabilities"] }
 export interface AppPublicationRow {
   approvalProvenance?: AppPublicationApproval;
   publicationId: string; candidate: AppPublicationCandidate; owner: PublicationOwner;
@@ -209,7 +209,7 @@ export function withdrawAppPublication(storage: StorageContext, input: WithdrawA
 
 function recordApproval(storage: StorageContext, publicationId: string, authorityRevision: number, owner: PublicationOwner, candidate: AppPublicationCandidate, agent?: ApprovalAgent | null): AppPublicationApproval {
   const grant = storage.getShareGrant(owner.grantId)!;
-  const facts: AppPublicationApproval = {agent:parseApprovalAgent(agent),selector:JSON.parse(storage.getShare(owner.shareId)!.selectorJson),access:grant.access as AppPublicationApproval["access"],candidateDigest:sha(JSON.stringify(candidate)),sourceRevision:candidate.sourceRevision,capabilities:candidate.capabilities};
+  const facts: AppPublicationApproval = {agent:parseApprovalAgent(agent),selector:JSON.parse(storage.getShare(owner.shareId)!.selectorJson),access:grant.access as AppPublicationApproval["access"],committedCandidateDigest:sha(JSON.stringify(candidate)),sourceRevision:candidate.sourceRevision,capabilities:candidate.capabilities};
   storage.db.prepare("INSERT INTO sync_relay_app_publication_approvals(publication_id,authority_revision,facts_json) VALUES(?,?,?)").run(publicationId,authorityRevision,JSON.stringify(facts));
   return facts;
 }
