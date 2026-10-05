@@ -55,6 +55,7 @@ export function createWorkspaceEngineIpc<
   localPersonId(): string;
   /** This computer's person as History names them. */
   localPersonName(): string;
+  automationPersonName(workspaceId: string, userId: string): string | null;
   /** The person a request is made by, read from main's own account when it arrives. */
   localPerson(): Promise<LocalPersonAuthor>;
   /** An automation author as History shows it, in one workspace. */
@@ -206,6 +207,7 @@ export function createWorkspaceEngineIpc<
           result.record.path = source.prefix + result.record.path;
           const { workspaceId } = operation.workspace;
           const authors: RecordHistoryAuthors = {
+            person: userId => dependencies.automationPersonName(workspaceId, userId),
             agent: (onBehalfOf) => onBehalfOf === localPersonId() ? localAgentDisplayName() : "Agent",
             automationName: (automationId) => automationAuthor(workspaceId, automationId)?.name ?? null,
             runAvailable: (automationId, claimId) => runLocator.available(workspaceId, automationId, claimId),

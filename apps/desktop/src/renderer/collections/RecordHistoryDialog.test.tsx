@@ -78,6 +78,12 @@ describe("RecordHistoryDialog", () => {
     expect(onOpenRun).toHaveBeenCalledWith(STAMP, "claim-1", "Stamp the finish date");
   });
 
+  it("names the person whose Button press ran the automation", async () => {
+    stub(async () => ({ entries: [entry(1, { kind: "automation", automationId: STAMP, name: "Stamp", person: "ana@example.com", run: null })], nextBeforeHistoryId: null }));
+    render(dialog());
+    expect((await screen.findByTestId("record-history-automation")).textContent).toContain("for ana@example.com");
+  });
+
   it("keeps the author of a run nobody shows this person, and invents no run for an older change", async () => {
     stub(async () => ({
       entries: [

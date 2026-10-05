@@ -111,7 +111,7 @@ export type ServerExecutor = Pick<
   | "releaseGroupSubscriptions" | "reachHandover" | "relayedClaim" | "pressRelayed" | "automationName"
   | "schedules" | "scheduleMarks" | "claimSchedule" | "failuresChanged" | "datasetsChanged" | "pressDataset" | "holds"
   | "runs" | "listedRun" | "retry" | "undo" | "undoRunsOf" | "confirmReach"
-  | "inspectRelayed"
+  | "inspectRelayedBatch"
 >;
 
 export interface AutomationServerOptions {
@@ -789,7 +789,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       host: hostSeam(ws, self),
       transport: async () => (ws.closed ? null : pressTransport(ws)),
       heldClaim: (press) => self().executor.relayedClaim({ automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, pressId: press.hostPressId }),
-      inspect: async id => await self().executor.inspectRelayed(id),
+      inspect: async (ids, signal) => await self().executor.inspectRelayedBatch(ids, signal),
       press: async (input, watch) => {
         // A formula's `person` shows the name of whoever pressed.
         await nameOf(ws, input.pressedBy).catch(() => null);

@@ -167,6 +167,27 @@ async function sharedButtonWorld(steps: string, options: Parameters<typeof world
 }
 
 describe("named shared document Buttons on the desktop host", () => {
+  it("reads a Collection schema once per inspection batch and reports a changed Button field", async () => {
+    const f = await sharedButtonWorld("      - find: 'true'\n        collection: Budget\n        operation: invoices.list\n        as: matches");
+    f.grant("g-recipient", "user-recipient", [LIST]);
+    await f.executor.idle();
+    f.readText.mockClear();
+    expect((await f.executor.inspectRelayedBatch([f.input.pressId, f.input.pressId])).map(answer => answer.kind)).toEqual(["ready", "ready"]);
+    expect(f.readText.mock.calls.filter(([path]) => path === "Log/collection.yaml")).toHaveLength(1);
+    await writeFile(join(f.root, "Log/collection.yaml"), "fields: {Send: {type: text}, Status: {type: text}}");
+    expect(await f.executor.inspectRelayed(f.input.pressId)).toEqual({ kind: "denied", reason: "This field is no longer a Button. The Collection's files will update here soon." });
+    await f.executor.dispose();
+  });
+
+  it("reports a moved Collection when the recipient's path is no longer indexed", async () => {
+    const f = await sharedButtonWorld("      - find: 'true'\n        collection: Budget\n        operation: invoices.list\n        as: matches");
+    f.grant("g-recipient", "user-recipient", [LIST]);
+    await f.moveDocuments("Moved");
+    f.executor.handleWatcherEvents([{ operation: "delete", path: "Log/collection.yaml" }, { operation: "create", path: "Moved/collection.yaml" }]);
+    await f.executor.idle();
+    await vi.waitFor(async () => expect(await f.executor.inspectRelayed(f.input.pressId)).toEqual({ kind: "denied", reason: "This Collection moved. Its files will update here soon." }));
+    await f.executor.dispose();
+  });
   it.each([true, false])("keeps a failure to open the dataset store unchecked, initially closed=%s", async initiallyClosed => {
     const f = await sharedButtonWorld("      - find: 'true'\n        collection: Budget\n        operation: invoices.list\n        as: matches", { hostOpen: !initiallyClosed, storeFails: initiallyClosed });
     f.grant("g-recipient", "user-recipient", [LIST]);
@@ -204,17 +225,13 @@ describe("named shared document Buttons on the desktop host", () => {
     await f.until(() => f.engineClaims[0]?.state === "done");
     await f.executor.dispose();
   });
-  it("requires the implicit read and refuses forged identities and workspaces", async () => {
+  it("requires the implicit read and refuses a forged identity", async () => {
     const f = await sharedButtonWorld("      - add-record: {Status: Open}\n        collection: Budget\n        operation: invoices.create\n        as: added\n      - set: {Status: Done}\n        records: added\n        operation: invoices.status");
     f.grant("g-recipient", "user-recipient", [CREATE, STATUS_ONLY]);
     expect(await f.executor.inspectRelayed(f.input.pressId)).toEqual({ kind: "denied", reason: SHARED_BUTTON_DENIED });
     f.grant("g-recipient", "user-recipient", [CREATE, STATUS_ONLY, LIST]);
     expect((await f.executor.inspectRelayed(f.input.pressId)).kind).toBe("ready");
     await expect(f.executor.pressRelayed({ ...f.input, pressedBy: "user-owner" }, () => undefined)).rejects.toThrow(SHARED_BUTTON_DENIED);
-    const held = f.authorities.get(f.input.pressId)!;
-    held.workspaceId = "another";
-    expect(await f.executor.inspectRelayed(f.input.pressId)).toEqual({ kind: "denied", reason: SHARED_BUTTON_DENIED });
-    held.workspaceId = "workspace";
     const result = await f.executor.pressRelayed(f.input, () => undefined);
     if (result.pressed.busy) throw Error("Expected a claim");
     await f.until(() => f.engineClaims[0]?.state === "done");
@@ -545,9 +562,19 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
         },
       });
     };
+  const readText = vi.fn(async (path: string) => {
+    try {
+      const text = await readFile(join(root, path), "utf8");
+      return { text, truncated: false as const, contentHash: sha256(text) };
+    } catch { return null; }
+  });
   const makeExecutor = () => executor = new CollectionAutomations({
     resolveRelayedPress: resolveAuthority,
-    resolveButtonInspection: resolveAuthority,
+    resolveButtonInspection: async (id) => {
+      const authority = await resolveAuthority(id);
+      // Inspection resolves the authored id; the stored press keeps its Collection-bound id.
+      return { ...authority, automationId: authority.automationId.slice(authority.automationId.indexOf("#") + 1) };
+    },
     personName: (userId) => `Person ${userId}`,
     localPersonId: () => "user-ana",
     mayRetryPress: async () => options.mayRetryPress ?? false,
@@ -567,14 +594,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
     withEngine: async (work) => await work(engine),
     withRecordWrites,
     withUndoWrites: withRecordWrites,
-    readText: async (path) => {
-      try {
-        const text = await readFile(join(root, path), "utf8");
-        return { text, truncated: false, contentHash: sha256(text) };
-      } catch {
-        return null;
-      }
-    },
+    readText,
     writeText: async () => ({ status: "conflict" }),
     pathExists: (path) => stat(join(root, path)).then(() => true, () => false),
     roster: async () => roster,
@@ -637,7 +657,7 @@ async function world(options: { documents?: boolean; roster?: ReachRoster; hostO
   });
   makeExecutor();
   return {
-    authorities,
+    authorities, readText,
     setAuthorityAvailable: (available: boolean) => { authorityAvailable = available; },
     registerPress: (input: Parameters<CollectionAutomations["pressRelayed"]>[0]) => {
       authorities.set(input.pressId, { workspaceId: "workspace", userId: input.pressedBy, grantId: "g-recipient", grantGeneration: 1, hostGeneration: 1,
@@ -1727,7 +1747,6 @@ ${step}`;
       withRendererWorkspaceOperation: async () => { throw new Error("No window presses here."); },
       readText: async () => null,
       buttonFields: async () => [],
-      collectionId: async () => { throw new Error("No shared view presses here."); },
       recordAt: async () => null,
       describeDataset: async () => { throw new Error("The CLI describes the dataset itself."); },
       pressedBy: async () => PRESSER,

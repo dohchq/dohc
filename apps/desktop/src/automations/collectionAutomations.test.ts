@@ -105,7 +105,11 @@ async function world(options: {
   const collections = new Map((options.collections ?? ["Tasks"]).map((path) => [path, path.replaceAll("/", "-")]));
   for (const collection of collections.keys()) {
     await mkdir(join(root, collection), { recursive: true });
-    await writeFile(join(root, collection, "collection.yaml"), SCHEMA);
+    const file = parseAutomationsFile(`version: 1\nautomations:\n${options.automations[collection] ?? ""}`);
+    const buttonFields = file.status === "read" ? new Set(file.entries.flatMap(entry =>
+      entry.status === "valid" && entry.automation.when.kind === "button" ? [entry.automation.when.field] : [])) : new Set<string>();
+    const schema = `fields:\n${[...new Set([...FIELDS, ...buttonFields])].map(field => `  ${field}:\n    type: ${buttonFields.has(field) ? "button" : "text"}\n`).join("")}`;
+    await writeFile(join(root, collection, "collection.yaml"), schema);
   }
   const summaryOf = (path: string) => ({ path, objectId: collections.get(path) ?? "object-gone", status: "valid" as const, reasons: [] });
   const writeAutomations = async (collection: string, body: string) =>

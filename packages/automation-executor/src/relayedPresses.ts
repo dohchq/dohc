@@ -92,7 +92,7 @@ export interface RelayedPressHostOptions {
     input: { automationId: string; collectionPath: string; definitionHash: string; recordId: string; pressId: string; pressedBy: string; confirmed: readonly string[] },
     watch: (claimId: string) => void,
   ): Promise<{ pressed: CollectionAutomationPress; field: string | null }>;
-  inspect(inspectionId: string): Promise<RelayButtonInspection>;
+  inspect(inspectionIds: readonly string[], signal: AbortSignal): Promise<RelayButtonInspection[]>;
   notifyFailure(failure: RelayedPressFailure): Promise<void>;
   onError(context: string, error: unknown): void;
   /** Waits before a retry; a test drives it. */
@@ -235,14 +235,17 @@ export function createRelayedPressHost(options: RelayedPressHostOptions) {
             }
             if (signal.aborted) return null;
             const presses = await relay.list(signal);
-            for (const request of relay.inspections()) {
-              const generation = host.generation();
-              if (signal.aborted || generation === null || !host.stillRuns()) break;
+            const requests = relay.inspections();
+            const generation = host.generation();
+            if (signal.aborted || generation === null || !host.stillRuns()) return null;
+            const results = requests.length === 0 ? [] : await options.inspect(requests.map(request => request.inspectionId), signal);
+            for (const [index, result] of results.entries()) {
+              if (host.generation() !== generation || !host.stillRuns()) break;
               try {
-                const result = await options.inspect(request.inspectionId);
-                await relay.answerInspection(generation, request.inspectionId, result);
+                await relay.answerInspection(generation, requests[index]!.inspectionId, result);
               } catch (error) { options.onError("answer a shared Button inspection", error); }
             }
+            if (signal.aborted) return null;
             return { relay, presses };
           },
           catch: (error) => error,

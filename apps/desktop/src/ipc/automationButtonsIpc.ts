@@ -3,7 +3,7 @@ import type { AutomationPressActor } from "@dohc/workspace-engine-client";
 import type { DatasetDescription } from "@dohc/security-contract/dataset";
 import type { RelayButtonInspection, RelayButtonTarget } from "@dohc/workspace-contracts/relay";
 import { SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
-import { collectionAutomationId, definitionHash } from "@dohc/automation-executor/automation-plan";
+import { definitionHash, parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { parseAutomationsFile, type AutomationsFileParseResult } from "@dohc/workspace-contracts/automations";
 import type { CollectionRecord } from "@dohc/workspace-contracts/collection";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
@@ -35,6 +35,12 @@ import { CHANNELS } from "./channels";
 // Button fields (item 8). Main decides who may press a button and which
 // automation it runs; a window only shows the answer. A press acts for the
 // person main is signed in as, never for a person a window names.
+
+/** A changed sign-in invalidates answers and makes open shared tables ask again. */
+export function refreshSharedButtonInspections(clear: () => void, sharedWorkspaceIds: readonly string[], notify: (workspaceId: string) => void): void {
+  clear();
+  for (const workspaceId of sharedWorkspaceIds) notify(workspaceId);
+}
 
 interface PressWindow {
   isDestroyed(): boolean;
@@ -166,8 +172,6 @@ export function registerAutomationButtonsIpc<
   readText(rootPath: string, relativePath: string): Promise<TextFile | null>;
   /** The Button fields the engine's schema for this Collection names, in schema order. */
   buttonFields(operation: Operation, collectionPath: string): Promise<string[]>;
-  /** A Collection's id as this workspace's engine lists it: the object id of its collection.yaml. */
-  collectionId(operation: Operation, collectionPath: string): Promise<string>;
   /** The record a file is, in the nearest document Collection that holds it, or null. */
   recordAt(operation: Operation, path: string): Promise<{ collectionPath: string; record: CollectionRecord } | null>;
   /** The dataset as the host describes it to this window's person. */
@@ -181,7 +185,7 @@ export function registerAutomationButtonsIpc<
   relayPress(operation: Operation, input: { pressId: string; automationId: string; collectionPath: string; definitionHash: string; recordId: string; confirmed: readonly string[] }): Promise<void>;
   relayInspect(operation: Operation, input: readonly RelayButtonTarget[]): Promise<RelayButtonInspection[]>;
   inspectionAccount(): Promise<string | null>;
-  inspectionChanged(operation: Operation): void;
+  inspectionChanged(workspaceId: string, attachmentId: symbol | undefined): void;
   pressWindows: PressWindows<Sender>;
 }): {
   pressNamed(input: NamedPress, caller: PressCaller<Operation>): Promise<NamedPressResult>;
@@ -213,14 +217,15 @@ export function registerAutomationButtonsIpc<
    */
   async function sharedButtons(operation: Operation, collectionPath: string, fields: readonly string[], mode: "now" | "cached" | "fresh" = "now"): Promise<SharedButton[]> {
     const file = await sharedAutomations(operation, collectionPath);
-    const collectionId = await dependencies.collectionId(operation, collectionPath);
     const buttons: SharedButton[] = fields.map(field => {
       const resolved = resolveButton(file, field, table => table === null, nameOf(collectionPath));
       if (resolved.kind === "state") return { state: resolved.state };
-      return { target: { automationId: collectionAutomationId(collectionId, resolved.automation.id), definitionHash: definitionHash(resolved.automation), collectionPath }, state: { kind: "checking", reason: BUTTON_CHECKING } };
+      return { target: { automationId: resolved.automation.id, definitionHash: definitionHash(resolved.automation), collectionPath }, state: { kind: "checking", reason: BUTTON_CHECKING } };
     });
     const targets = buttons.flatMap(button => button.target ? [button.target] : []);
     if (targets.length === 0) return buttons;
+    const account = await dependencies.inspectionAccount();
+    if (account === null) return buttons.map(() => ({ state: { kind: "disabled", reason: "Sign in with Edit access to use this button." } }));
     const refresh = async () => {
       const answers = await dependencies.relayInspect(operation, targets).catch(() => targets.map((): RelayButtonInspection => ({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED })));
       let index = 0;
@@ -232,12 +237,11 @@ export function registerAutomationButtonsIpc<
         const unknown = { target, state: { kind: "unchecked" as const, reason: SHARED_BUTTON_UNCHECKED } };
         if (!answer) return unknown;
         if (answer.kind !== "ready") return { state: { kind: answer.kind === "denied" ? "disabled" as const : "unchecked" as const, reason: answer.reason } };
-        if (answer.automationId !== target.automationId || answer.definitionHash !== target.definitionHash) return unknown;
-        return { target, state: { kind: "ready" as const, automationId: target.automationId, ...(answer.irreversible.length ? { irreversible: answer.irreversible } : {}) } };
+        if (parseCollectionAutomationId(answer.automationId)?.id !== target.automationId || answer.definitionHash !== target.definitionHash) return unknown;
+        return { target: { ...target, automationId: answer.automationId }, state: { kind: "ready" as const, automationId: answer.automationId, ...(answer.irreversible.length ? { irreversible: answer.irreversible } : {}) } };
       });
     };
     if (mode === "now") return refresh();
-    const account = await dependencies.inspectionAccount();
     const key = JSON.stringify([account, operation.workspace.workspaceId, operation.workspace.rootPath, operation.workspace.shareView, collectionPath, fields, file, targets]);
     const cached = inspections.get(key);
     const scope = operation.workspace.attachmentId ?? operation.workspace;
@@ -250,6 +254,7 @@ export function registerAutomationButtonsIpc<
     }
     const lastButtons = recent ? cached.buttons : buttons;
     const entry = { at: recent ? cached.at : 0, pending: true, scope, buttons: lastButtons };
+    const { workspaceId, attachmentId } = operation.workspace;
     inspections.delete(key);
     inspections.set(key, entry);
     // Bound old Collections and definitions retained by the listing cache.
@@ -260,7 +265,7 @@ export function registerAutomationButtonsIpc<
       entry.buttons = answer;
       entry.at = Date.now();
       entry.pending = false;
-      if (changed) dependencies.inspectionChanged(operation);
+      if (changed) dependencies.inspectionChanged(workspaceId, attachmentId);
     });
     return lastButtons;
   }

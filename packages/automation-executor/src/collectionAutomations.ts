@@ -81,7 +81,7 @@ import {
   LOST_COLLECTION_ERROR,
 } from "./collectionAutomationRun";
 import { automationInventory, canPressInventory, irreversibleActionsOf, type AutomationInventory } from "./automationInventory";
-import { describeButtonPresser, SHARED_BUTTON_DENIED, SHARED_BUTTON_UNCHECKED, type DatasetOperationCeiling } from "./buttonPresser";
+import { describeButtonPresser, SHARED_BUTTON_DENIED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_MOVED, SHARED_BUTTON_UNCHECKED, type DatasetOperationCeiling } from "./buttonPresser";
 import type { RelayButtonAuthority, RelayButtonInspection } from "@dohc/workspace-contracts/relay";
 import { AutomationRunWait } from "./automationRunWait";
 import { automationUndoReach, undoAutomationRuns } from "./automationUndo";
@@ -2962,7 +2962,7 @@ export class CollectionAutomations {
 
   /**
    * A press from a shared view that the relay carried here: `automationId`
-   * names the automation the recipient saw, `collectionPath` is where the
+   * names the Button the host inspected, `collectionPath` is where the
    * relay checked they can edit it, and `pressedBy` is the user the relay
    * verified. It runs as a press on this computer, checked the same way,
    * unless the button now runs another automation or its Collection moved.
@@ -3018,18 +3018,48 @@ export class CollectionAutomations {
 
   /** A host-only request id binds inspection to relay-authenticated identity and the current host fence. */
   async inspectRelayed(inspectionId: string): Promise<RelayButtonInspection> {
+    return (await this.inspectRelayedBatch([inspectionId]))[0]!;
+  }
+
+  /** One schema read per Collection in the host's received inspection batch. */
+  async inspectRelayedBatch(inspectionIds: readonly string[], signal?: AbortSignal): Promise<RelayButtonInspection[]> {
+    const schemas = new Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>();
+    const results: RelayButtonInspection[] = [];
+    for (const inspectionId of inspectionIds) {
+      if (signal?.aborted) break;
+      results.push(await this.inspectRelayedWithSchema(inspectionId, schemas));
+    }
+    return results;
+  }
+
+  private async inspectRelayedWithSchema(inspectionId: string, schemas: Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>): Promise<RelayButtonInspection> {
     try {
       if (!this.options.resolveButtonInspection) throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
       await this.ready();
-      return await this.inspectAuthority(await this.options.resolveButtonInspection(inspectionId));
+      const authority = await this.options.resolveButtonInspection(inspectionId);
+      if (this.collectionIdOf(authority.collectionPath) === null) {
+        return { kind: "denied", reason: SHARED_BUTTON_MOVED };
+      }
+      return await this.inspectAuthority({ ...authority, automationId: this.automationIdIn(authority.collectionPath, authority.automationId) }, schemas);
     } catch (error) { return buttonInspectionFailure(error); }
   }
 
-  private async inspectAuthority(authority: RelayButtonAuthority): Promise<RelayButtonInspection> {
+  private async inspectAuthority(authority: RelayButtonAuthority, schemas = new Map<string, Promise<ReturnType<typeof parseCollectionSchema> | null>>()): Promise<RelayButtonInspection> {
     try {
       const id = this.locate(authority.automationId), automation = this.definitionFor(authority.automationId);
       if (!id || !automation || !automation.enabled || automation.when.kind !== "button" || automation.when.table !== null ||
         id.collectionPath !== authority.collectionPath || definitionHash(automation) !== authority.definitionHash) return { kind: "denied", reason: SHARED_BUTTON_DENIED };
+      let schemaRead = schemas.get(id.collectionPath);
+      if (!schemaRead) {
+        schemaRead = this.options.readText(`${id.collectionPath}/${COLLECTION_SCHEMA_FILENAME}`).then(read =>
+          !read || read.truncated ? null : parseCollectionSchema(read.text));
+        schemas.set(id.collectionPath, schemaRead);
+      }
+      const schema = await schemaRead;
+      const buttonField = automation.when.field;
+      if (!schema?.schema.fields.some(field => field.name === buttonField && field.type === "button")) {
+        return { kind: "denied", reason: SHARED_BUTTON_FIELD_CHANGED };
+      }
       const roster = await this.options.roster();
       if (roster.kind === "unknown") throw new AutomationRunWait(SHARED_BUTTON_UNCHECKED);
       let inventory: AutomationInventory;

@@ -6,6 +6,7 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
+import { GetCollectionRecordHistoryResult } from "./bridgeContract";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
@@ -188,6 +189,7 @@ async function harness(sharedStore?: SharedHistoryStore) {
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
     namedAuthorLabels: () => () => "Someone you shared with",
+    automationPersonName: (_workspaceId, userId) => userId === "person-local" ? null : userId,
     retryOwnerLiveDelivery, retryCloudSync,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
@@ -419,6 +421,7 @@ describe("workspace engine IPC registrations", () => {
         entry(5, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
         entry(4, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "user-ana", depth: 0 }),
         entry(3, { actorKind: "human" }),
+        entry(2, { ...automation, onBehalfOf: "user-ana" }),
       ],
       nextBeforeHistoryId: 3,
     });
@@ -437,8 +440,10 @@ describe("workspace engine IPC registrations", () => {
         // Another person's agent, as the file timeline names it.
         { historyId: 4, author: { kind: "agent", name: "Agent" } },
         { historyId: 3, author: null },
+        { historyId: 2, author: { kind: "automation", name: stamp, person: "user-ana", run: null } },
       ],
     });
+    expect(GetCollectionRecordHistoryResult.parse(page).entries[0]?.author).not.toHaveProperty("person");
     expect(h.automationRunOnThisComputer.mock.calls).toEqual([
       ["workspace", stamp, "claim-here"],
       ["workspace", stamp, "claim-gone"],

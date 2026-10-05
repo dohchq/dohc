@@ -1,7 +1,9 @@
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import { serveFetchHandler } from "@dohc/service-http";
 import { afterEach, expect, it, vi } from "vitest";
 import { describeDatasetRevision } from "@dohc/security-contract/dataset-artifacts";
 import { generateDatasetOperations } from "@dohc/security-contract/dataset-operations";
@@ -12,12 +14,20 @@ import { createAutomationRunStore } from "@dohc/automation-executor/automation-r
 import { fixture as baseFixture, limits } from "./datasetTestFixture";
 import { createRelayDatasetHost } from "./datasetHost";
 import type { AppBackendAuth } from "./appBackendAuthority";
-import { createSyncRelayHandler } from "./server";
+import { createSyncRelayHandler, streamsRequestBody } from "./server";
+import { ServiceOrdinaryReplication } from "./serviceOrdinaryReplication";
+import { replicaRecordEditContext, replicaRecordEngine } from "./automationRecordEdits";
+import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { UnauthorizedError } from "@dohc/workspace-auth/session";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { AutomationRunWait, SHARED_BUTTON_DENIED, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
-import type { AutomationClaim } from "@dohc/workspace-engine-client";
+import { VersionedLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
+import { createEngineClient } from "@dohc/workspace-engine-client/daemon";
+import { requireEngineBinaryOrSkip } from "../../../apps/desktop/src/testing/engineBinary";
+
+const nativeEngine = requireEngineBinaryOrSkip();
+type CollectionRecordWriteFactory = (signal: AbortSignal) => ReturnType<typeof collectionRecordWrites>;
 
 const owner = { kind: "named" as const, workspaceId: "w", userId: "owner" };
 const id = (n: number) => "00000000-0000-4000-8000-" + String(n).padStart(12, "0");
@@ -131,7 +141,7 @@ it("rechecks dataset rules at the claim transaction after a press waited", async
   expect(f.ledger.claims(automationId).claims).toEqual([]);
 });
 
-async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = false, serverCopy?: string, sharedSteps?: string, extraFiles: Record<string, string> = {}) {
+async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = false, serverCopy?: string, sharedSteps?: string, extraFiles: Record<string, string> = {}, native = false) {
   const evaluator = createAutomationFormulaEvaluator();
   const metadata = join(f.directory, serverCopy ?? "metadata"); await mkdir(metadata, { recursive: true });
   const trigger = button ? "button: Rename" : "record-added";
@@ -146,7 +156,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
     texts.set("Log/collection.yaml", "fields: {Send: {type: button}, Status: {type: text}}");
     texts.set("Log/automations.yaml", `version: 1\nautomations:\n  - id: send\n    name: Send\n    when: {button: Send}\n    do:\n${sharedSteps}\n`);
   }
-  const engine = { listCollections: async () => ({ collections: sharedSteps ? [{ path: "Log", objectId: "Log", status: "valid", reasons: [] }] : [] }),
+  const simulatedEngine = { workspaceId: "w", listCollections: async () => ({ collections: sharedSteps ? [{ path: "Log", objectId: "Log", status: "valid", reasons: [] }] : [] }),
     getCollectionRecord: async () => ({ collection: { path: "Log", status: "valid", reasons: [] }, record: { id: "source", path: "Log/source.md", conflicted: false, values: [] }, history: [], nextBeforeHistoryId: null }),
     pressAutomation: async ({ pressId, automationId, recordId, pressedBy }: { pressId: string; automationId: string; recordId: string; pressedBy: string }) => {
       let claim = claims.find(value => "key" in value.trigger && value.trigger.key === `press:${pressId}`);
@@ -168,11 +178,63 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
     getAutomationClaim: async (input: { claimId: string } | { automationId: string; key: string }) => ({ claim: claims.find(value => "claimId" in input ? value.claimId === input.claimId : value.automationId === input.automationId && "key" in value.trigger && value.trigger.key === input.key) ?? null }),
     listAutomationClaims: async () => ({ claims, next: null }), readAutomationGroupSkips: async () => ({ aheadAtMs: null, lateAtMs: null }),
   } as unknown as CollectionAutomationEngine;
+  let engine: CollectionAutomationEngine = simulatedEngine;
+  let recordWrites: CollectionRecordWriteFactory | null = null;
+  let recipientEngine: VersionedLiveAdapter | null = null;
+  let nativeReader: ((path: string) => Promise<{ text: string; truncated: false; contentHash: string } | null>) | null = null;
+  if (native) {
+    const handler = createSyncRelayHandler({ storage: f.storage, datasetHost: f.host, nowMs: () => 10,
+      resolveActor(request, workspaceId) {
+        const match = /^Bearer (owner|editor)$/.exec(request.headers.get("authorization") ?? "");
+        if (!match) throw new UnauthorizedError();
+        return { workspaceId, userId: match[1]! };
+      } });
+    const http = serveFetchHandler({ handler, streamBody: streamsRequestBody, maxBodyBytes: () => 21 * 1024 * 1024,
+      oversized: () => new Response(null, { status: 413 }), failure: () => new Response(null, { status: 500 }) });
+    await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
+    cleanups.push(async () => { http.closeAllConnections(); await new Promise<void>(resolve => http.close(() => resolve())); });
+    const relayUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+    const root = join(f.directory, "workspace");
+    await mkdir(root, { recursive: true });
+    const client = await createEngineClient({ command: nativeEngine.require(), authToken: randomBytes(32).toString("base64url"),
+      protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: 30_000 });
+    cleanups.push(async () => { client.close(); await client.waitForExit(); });
+    const adapter = await VersionedLiveAdapter.openWorkspace(client, { rootDir: root, workspaceId: "w", captureMode: "none", reconcileCollections: true,
+      relay: { baseUrl: relayUrl, bearerToken: "owner", allowInsecureLoopbackForTests: true } });
+    const main = await adapter.request("versions.ensureMain", {});
+    for (const [path, text] of [...texts, ["Log/source.md", "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\nStatus: Open\n---\n"]]) {
+      await adapter.request("versionedText.write", { versionId: main.id, path, text, origin: "api", publish: true, createOnly: true });
+    }
+    const replica = { workspaceId: "w", workspace: adapter.workspace, client, signal: f.lifetime.signal };
+    recordWrites = signal => collectionRecordWrites(replicaRecordEditContext(replica, replicaRecordEngine(replica), signal));
+    const replication = new ServiceOrdinaryReplication({ ...replica, nextRequestId: (() => { let id = 1000; return () => ++id; })(), deadlineMs: 30_000, assertCurrent: () => undefined },
+      { relay: { baseUrl: "https://relay.example.test", bearerToken: "owner" }, identity: { kind: "claim" }, maxPagesPerPull: 8 });
+    for (let more = true; more;) more = (await replication.push()).hasMore;
+    const recipientRoot = join(f.directory, "recipient"); await mkdir(recipientRoot, { recursive: true });
+    const recipientClient = await createEngineClient({ command: nativeEngine.require(), authToken: randomBytes(32).toString("base64url"),
+      protocolVersion: 2, capabilities: ["blobs"], connectTimeoutMs: 30_000 });
+    cleanups.push(async () => { recipientClient.close(); await recipientClient.waitForExit(); });
+    recipientEngine = await VersionedLiveAdapter.openWorkspace(recipientClient, { rootDir: recipientRoot, workspaceId: "recipient", captureMode: "none", projectCollections: true,
+      relay: { baseUrl: relayUrl, bearerToken: "editor", allowInsecureLoopbackForTests: true } });
+    let requestId = 0;
+    for (let more = true; more;) {
+      const pulled = (await recipientClient.sendRequest({ id: ++requestId, method: "share.view.pull", workspace: recipientEngine.workspace, deadlineMs: 30_000,
+        params: { workspaceId: "recipient", shareId: "people-share", grantedSelector: { paths: ["Log"], versionId: null, access: "edit" } } })).result as { hasMore: boolean; pendingCursor: import("@dohc/workspace-engine-client").JsonValue };
+      await recipientClient.sendRequest({ id: ++requestId, method: "sync.commitCursor", workspace: recipientEngine.workspace, deadlineMs: 30_000,
+        params: { workspaceId: "recipient", pendingCursor: pulled.pendingCursor } });
+      more = pulled.hasMore;
+    }
+    nativeReader = async path => {
+      const read = await adapter.readTextFile({ workspaceId: "w", versionId: main.id, path });
+      return typeof read?.text === "string" ? { text: read.text, truncated: false, contentHash: createHash("sha256").update(read.text).digest("hex") } : null;
+    };
+    engine = adapter;
+  }
   const errors: unknown[] = [];
   const waiting: string[] = [];
   const roster = () => ({ kind: "owner" as const, ownerUserId: "owner", grants: f.storage.getShareGrant(editor.grantId)?.status === "active" ? [{
     grantId: editor.grantId, recipientUserId: editor.userId, recipientEmail: null,
-    files: { paths: ["People"], versionId: null, access: "edit" as const }, channel: null,
+    files: { paths: native ? (JSON.parse(f.storage.getShare("people-share")!.selectorJson) as { paths: string[] }).paths : ["People"], versionId: null, access: "edit" as const }, channel: null,
   }] : [] });
   const store = createAutomationRunStore(f.directory, async () => metadata);
   let executor!: CollectionAutomations;
@@ -182,9 +244,12 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
       return { ...current(), current };
     },
     resolveButtonInspection: async inspectionId => f.storage.resolveButtonInspection({ workspaceId: "w", ownerUserId: "owner", installId: "host", generation: 1, inspectionId }),
-    withEngine: async work => work(engine), withRecordWrites: async () => { throw Error("Unexpected document write"); },
+    withEngine: async work => work(engine), withRecordWrites: async (signal, work) => {
+      if (!recordWrites) throw Error("Unexpected document write");
+      return work(recordWrites(signal));
+    },
     withUndoWrites: async () => { throw Error("Unexpected document Undo"); },
-    readText: async path => texts.has(path) ? { text: texts.get(path)!, truncated: false, contentHash: createHash("sha256").update(texts.get(path)!).digest("hex") } : null,
+    readText: async path => nativeReader ? nativeReader(path) : texts.has(path) ? { text: texts.get(path)!, truncated: false, contentHash: createHash("sha256").update(texts.get(path)!).digest("hex") } : null,
     writeText: async () => ({ status: "conflict" }), pathExists: async path => texts.has(path),
     roster: async () => roster(), cachedRoster: async () => roster(), personName: userId => userId,
     evaluator: evaluator.forWorkspace("w"), store,
@@ -201,7 +266,7 @@ async function executorFor(f: Awaited<ReturnType<typeof fixture>>, button = fals
   const stop = f.host.observeAutomationClaims(() => executor.notifyClaimed());
   cleanups.push(async () => { stop(); await executor.dispose(); await evaluator.close(); });
   await executor.open();
-  return { executor, makeExecutor, errors, store, claims, texts, waiting };
+  return { executor, makeExecutor, errors, store, claims, texts, waiting, engine, recipientEngine };
 }
 
 async function acceptedShared(f: Awaited<ReturnType<typeof fixture>>, steps: string, confirmed: string[] = [], extraFiles: Record<string, string> = {}) {
@@ -220,7 +285,7 @@ async function acceptedShared(f: Awaited<ReturnType<typeof fixture>>, steps: str
   register(confirmed);
   const inspect = async () => {
     const release = f.storage.parkButtonInspectionHost({ workspaceId: "w", ownerUserId: "owner", installId: "host" });
-    const answer = f.storage.inspectAutomationButton({ target: { automationId: press.automationId, collectionPath: "Log", definitionHash: press.definitionHash },
+    const answer = f.storage.inspectAutomationButton({ target: { automationId: "send", collectionPath: "Log", definitionHash: press.definitionHash },
       source: { workspaceId: "w", shareId: "people-share", grantId: editor.grantId, grantGeneration: 1, userId: "editor" }, id: "query", signal: f.lifetime.signal, wake: () => {} });
     release();
     const result = await run.executor.inspectRelayed("query");
@@ -229,6 +294,89 @@ async function acceptedShared(f: Awaited<ReturnType<typeof fixture>>, steps: str
   };
   return { ...run, press, inspect };
 }
+
+it.skipIf(nativeEngine.missing).each([true, false])("runs a relay-authenticated document Button through native claims with dataset create access: %s", async allowed => {
+  const f = await fixture();
+  f.addEditor("edit", ["Log"]);
+  f.host.setDataGrant(owner, { ...scope, grantId: editor.grantId, grant: { operationIds: allowed ? [READ, CREATE] : [READ], discover: true,
+    revision: 1, revisionSha256: revision.revisionSha256 } });
+  const run = await executorFor(f, false, undefined, "      - add-record: {ID: added, Name: '=person.name'}\n        collection: People\n        operation: create\n      - set: {Status: Done}", {
+    "OtherLog/collection.yaml": "fields: {Send: {type: button}, Status: {type: text}}",
+    "OtherLog/automations.yaml": "version: 1\nautomations:\n  - id: send\n    name: Send\n    when: {button: Send}\n    do: [{set: {Status: Done}}]\n",
+  }, true);
+  const projected = await run.recipientEngine!.queryCollectionRecords({ collectionPath: "Log" });
+  expect(projected.records).toMatchObject([{ id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa" }]);
+  const receivedCollection = await run.recipientEngine!.getCollection({ collectionPath: "Log" });
+  const receivedFile = await run.recipientEngine!.readTextFile({ workspaceId: "recipient", versionId: (await run.recipientEngine!.getActiveVersion({ workspaceId: "recipient" }))!.id, path: "Log/automations.yaml" });
+  const parsed = parseAutomationsFile(receivedFile!.text!);
+  const entry = parsed.status === "read" ? parsed.entries[0] : null;
+  if (entry?.status !== "valid") throw Error("Invalid fixture");
+  f.storage.checkInAutomationComputer({ workspaceId: "w", ownerUserId: "owner", installId: "host", label: "Host", claim: true, server: null, nowMs: 10 });
+  let nextId = 0;
+  const handler = createSyncRelayHandler({ storage: f.storage, datasetHost: f.host, nowMs: () => 10, newId: () => `native-${++nextId}`,
+    resolveActor(request, workspaceId) {
+      const match = /^Bearer (owner|editor)$/.exec(request.headers.get("authorization") ?? "");
+      if (!match) throw new UnauthorizedError();
+      return { workspaceId, userId: match[1]! };
+    } });
+  const post = (input: object, query = "") => handler(new Request(`https://relay/sync/shares/people-share/automation-presses${query}`, {
+    method: "POST", headers: { authorization: "Bearer editor", "content-type": "application/json" }, body: JSON.stringify(input) }));
+  const target = { automationId: "send", collectionPath: "Log", definitionHash: definitionHash(entry.automation) };
+  const release = f.storage.parkButtonInspectionHost({ workspaceId: "w", ownerUserId: "owner", installId: "host" });
+  const answer = post({ targets: [target] }, "?inspect=true");
+  await expect.poll(() => f.storage.listButtonInspections({ workspaceId: "w", ownerUserId: "owner", installId: "host" }).length, { timeout: 30_000 }).toBe(1);
+  release();
+  const inspectionId = f.storage.listButtonInspections({ workspaceId: "w", ownerUserId: "owner", installId: "host" })[0]!.inspectionId;
+  const inspected = await run.executor.inspectRelayed(inspectionId);
+  f.storage.answerButtonInspection({ workspaceId: "w", ownerUserId: "owner", installId: "host", generation: 1, inspectionId }, inspected);
+  expect((await answer).status).toBe(200);
+  expect(inspected.kind).toBe(allowed ? "ready" : "denied");
+  const collection = (await run.engine.listCollections()).collections.find(collection => collection.path === "Log")!;
+  expect(receivedCollection.objectId).not.toBe(collection.objectId);
+  const press = { ...target, automationId: inspected.kind === "ready" ? inspected.automationId : `collection:${collection.objectId}#send`, recordId: projected.records[0]!.id, pressId: "native-press", confirmed: [] };
+  expect((await post({ ...press, pressedBy: "owner" })).status).toBe(400);
+  expect((await post(press)).status).toBe(200);
+  const relayed = f.storage.listAutomationPresses({ workspaceId: "w", ownerUserId: "owner", installId: "host", nowMs: 10 })[0]!;
+  expect(relayed.pressedBy).toBe("editor");
+  f.storage.acceptAutomationPresses({ workspaceId: "w", ownerUserId: "owner", installId: "host", generation: 1, hostPressIds: [relayed.hostPressId], nowMs: 10 });
+  if (allowed) {
+    expect(inspected).toMatchObject({ automationId: press.automationId });
+    const result = await run.executor.pressRelayed({ ...relayed, pressId: relayed.hostPressId }, () => {});
+    if (result.pressed.busy) throw Error("Expected a claim");
+    const claimId = result.pressed.claimId;
+    await expect.poll(async () => (await run.engine.getAutomationClaim({ claimId })).claim?.state, { timeout: 30_000 }).toBe("done");
+    expect((await run.engine.getAutomationClaim({ claimId })).claim?.change.onBehalfOf).toBe("editor");
+    const record = await run.engine.getCollectionRecord({ collectionPath: "Log", recordId: press.recordId, historyLimit: 10 });
+    expect(record.history).toContainEqual(expect.objectContaining({ authorOriginId: press.automationId, onBehalfOf: "editor", actorKind: "automation" }));
+    const other = (await run.engine.listCollections()).collections.find(collection => collection.path === "OtherLog")!;
+    for (const [forged, reason] of [
+      [{ recordId: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb" }, "This record is no longer in Log."],
+      [{ automationId: "collection:forged#send" }, "This button no longer runs an automation in its Collection."],
+      // A real owner Collection id sent with the granted Log path reaches the host's path check.
+      [{ automationId: `collection:${other.objectId}#send` }, "This Collection moved after the button was pressed. Press it again."],
+    ] as const) {
+      const forgedPress = { ...press, ...forged, pressId: `forged-${++nextId}` };
+      expect((await post(forgedPress)).status).toBe(200);
+      const stored = f.storage.listAutomationPresses({ workspaceId: "w", ownerUserId: "owner", installId: "host", nowMs: 10 }).find(value => value.hostPressId !== relayed.hostPressId && value.recordId === forgedPress.recordId && value.automationId === forgedPress.automationId)!;
+      f.storage.acceptAutomationPresses({ workspaceId: "w", ownerUserId: "owner", installId: "host", generation: 1, hostPressIds: [stored.hostPressId], nowMs: 10 });
+      await expect(run.executor.pressRelayed({ ...stored, pressId: stored.hostPressId }, () => {})).rejects.toThrow(reason);
+    }
+    if (!(run.engine instanceof VersionedLiveAdapter)) throw Error("Expected the native owner adapter");
+    await run.engine.writeTextFile({ workspaceId: "w", versionId: (await run.engine.getActiveVersion({ workspaceId: "w" }))!.id,
+      path: "Log/collection.yaml", text: "fields: {Send: {type: text}, Status: {type: text}}", publish: true, metadata: { origin: "api" } });
+    const changed = { ...press, pressId: "removed-button" };
+    expect((await post(changed)).status).toBe(200);
+    const stored = f.storage.listAutomationPresses({ workspaceId: "w", ownerUserId: "owner", installId: "host", nowMs: 10 }).find(value => value.state === "pending" && value.recordId === press.recordId && value.automationId === press.automationId)!;
+    f.storage.acceptAutomationPresses({ workspaceId: "w", ownerUserId: "owner", installId: "host", generation: 1, hostPressIds: [stored.hostPressId], nowMs: 10 });
+    await expect(run.executor.pressRelayed({ ...stored, pressId: stored.hostPressId }, () => {})).rejects.toThrow("This field is no longer a Button.");
+  } else {
+    await expect(run.executor.pressRelayed({ ...relayed, pressId: relayed.hostPressId }, () => {})).rejects.toThrow(SHARED_BUTTON_DENIED);
+    expect((await run.engine.listAutomationClaims({ automationId: press.automationId })).claims).toEqual([]);
+  }
+  expect((await f.host.invoke(owner, { ...scope, ...rules, operationId: READ, input: {}, idempotencyKey: "native-result" })).result)
+    .toMatchObject({ rows: allowed ? [{ id: "added", values: { [NAME]: "editor" } }] : [] });
+  expect(run.errors).toEqual([]);
+}, 90_000);
 
 it.each([
   ["Find", "      - find: 'true'\n        collection: People\n        operation: read\n        as: matches"],

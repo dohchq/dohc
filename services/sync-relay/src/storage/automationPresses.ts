@@ -78,8 +78,8 @@ export function initializeAutomationPressSchema(db: SqliteDb): void {
   }
 }
 
-// A Collection automation's id: "collection:<collection id>#<automation id>".
-// The Collection id is an object id or a dataset id, never a path.
+// The recipient supplies the Button id. The owner's host resolves it against
+// its own index and checks that Collection against the relay-checked path.
 const COLLECTION_AUTOMATION_ID = /^collection:[A-Za-z0-9_-]+#.+$/su;
 
 // The one expiry rule: a press created before this is gone, whatever its state.

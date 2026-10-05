@@ -32,6 +32,12 @@ it("keeps malformed relay inspection and authority responses unchecked", async (
     .toEqual([{ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED }]);
   await expect(routes.authority(WORKSPACE, "host", 1, "stored-press")).rejects.toBeInstanceOf(AutomationRunWait);
 });
+it("keeps the host's public denial reason on the recipient", async () => {
+  const inspection = { kind: "denied" as const, reason: "This Collection moved. Its files will update here soon." };
+  const routes = automationPressRelay({ baseUrl: "https://relay.test", token: "recipient-session",
+    fetch: async () => Response.json({ inspections: [inspection] }) });
+  expect(await routes.inspect("share", [{ automationId: "send", collectionPath: "Source", definitionHash: HASH }])).toEqual([inspection]);
+});
 const press = (id: string, state: "pending" | "accepted" = "pending"): RelayAutomationPress => ({
   hostPressId: id, definitionHash: HASH, state, automationId: "collection:Invoices#paid", collectionPath: "Invoices", recordId: "rec-12", pressedBy: "user-ana", createdAtMs: 1, confirmed: [],
 });
@@ -131,7 +137,7 @@ function hostWith(relay: ReturnType<typeof fakeRelay>, host = fakeHost(), option
       relay.changed();
       return { pressed, field: "Mark paid" };
     },
-    inspect: async () => ({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED }),
+    inspect: async ids => ids.map(() => ({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED })),
     notifyFailure: async (failure) => { failures.push(failure); relay.changed(); },
     onError: () => undefined,
     delay: async () => undefined,

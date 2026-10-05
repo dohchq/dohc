@@ -7,12 +7,13 @@ import { BUTTON_CHECKING } from "@dohc/automation-executor/automation-buttons";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { RelayButtonInspection, RelayButtonTarget } from "@dohc/workspace-contracts/relay";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
-import { createPressWindows, registerAutomationButtonsIpc, type NamedPress, type PressCaller } from "./automationButtonsIpc";
+import { createPressWindows, refreshSharedButtonInspections, registerAutomationButtonsIpc, type NamedPress, type PressCaller } from "./automationButtonsIpc";
 import { CHANNELS } from "./channels";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const PRESS_ID = "4f2d3c1a-9b8e-4c7d-a6f5-0e1d2c3b4a59";
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const ownerButtonId = (target: RelayButtonTarget) => `collection:${target.collectionPath.replaceAll("/", "-")}#${target.automationId}`;
 
 class FakeWindow {
   readonly sent: Array<{ channel: string; payload: unknown }> = [];
@@ -80,7 +81,7 @@ function fixture(options: {
   const buttonFields = vi.fn(async () => options.fields ?? ["Mark paid"]);
   const relayPress = vi.fn(async (_operation: unknown, _input: { pressId: string; automationId: string; recordId: string }) => undefined);
   const relayInspect = vi.fn(async (_operation: unknown, targets: readonly RelayButtonTarget[]): Promise<RelayButtonInspection[]> =>
-    options.inspect ? options.inspect(targets) : targets.map(target => options.inspection ?? { kind: "ready", ...target, irreversible: [] }));
+    options.inspect ? options.inspect(targets) : targets.map(target => options.inspection ?? { kind: "ready", ...target, automationId: ownerButtonId(target), irreversible: [] }));
   const invoice: CollectionRecord = { id: "rec_invoice12", path: "Invoices/12.md", conflicted: false, values: [] };
   const recordAt = vi.fn(async (_operation: unknown, path: string) => (path === "Invoices/12.md" ? { collectionPath: "Invoices", record: invoice } : null));
   const describeDataset = vi.fn(async (_sender: FakeWindow, _workspaceId: string, datasetId: string): Promise<DatasetDescription> => {
@@ -111,10 +112,18 @@ function fixture(options: {
   const presses = registerAutomationButtonsIpc<FakeWindow, { sender: FakeWindow }, Operation>({
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: () => undefined,
-    withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) => await work(operation()),
+    withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) => {
+      const held = operation();
+      let released = false;
+      const scoped = { state: held.state, get workspace() {
+        if (released) throw new Error("This workspace authority lease was released.");
+        return held.workspace;
+      } };
+      try { return await work(scoped); }
+      finally { released = true; }
+    },
     readText,
     buttonFields,
-    collectionId: async (_operation, collectionPath) => collectionPath.replaceAll("/", "-"),
     relayPress,
     relayInspect,
     inspectionAccount: async () => account,
@@ -148,7 +157,11 @@ function fixture(options: {
     account = next;
     if (clear) presses.clearInspections();
   };
-  return { call, press, callDataset, pressDataset, named, waits, executor, buttonFields, readText, relayPress, relayInspect, describeDataset, window, pressWindows, invoice, changeAccount };
+  const credentialsChanged = (next: string | null) => {
+    account = next;
+    refreshSharedButtonInspections(presses.clearInspections, [WORKSPACE_ID], workspaceId => window.send(CHANNELS.collectionAutomationsChanged, { workspaceId }));
+  };
+  return { call, press, callDataset, pressDataset, named, waits, executor, buttonFields, readText, relayPress, relayInspect, describeDataset, window, pressWindows, invoice, changeAccount, credentialsChanged };
 }
 
 async function expectCallerDescriptions(
@@ -171,13 +184,28 @@ const editShare = (paths: string[], access = "edit") => ({
 });
 
 describe("dataset operations from shared document buttons", () => {
+  it("rechecks a signed-out Button after the credential notification without a manual list", async () => {
+    const f = fixture({ shareView: editShare(["Invoices"]), files: { "Invoices/automations.yaml": PAID_FILE } });
+    f.changeAccount(null);
+    let shown = await f.call(CHANNELS.listAutomationButtons, {});
+    expect(shown).toMatchObject({ buttons: [{ state: { kind: "disabled", reason: "Sign in with Edit access to use this button." } }] });
+    // The open table re-lists only on this event, as CollectionPage does.
+    vi.spyOn(f.window, "send").mockImplementation((channel, payload) => {
+      f.window.sent.push({ channel, payload });
+      if (channel === CHANNELS.collectionAutomationsChanged) void Promise.resolve(f.call(CHANNELS.listAutomationButtons, {})).then(result => { shown = result; });
+    });
+    f.credentialsChanged("user-main");
+    await vi.waitFor(() => expect(shown).toMatchObject({ buttons: [{ state: { kind: "ready" } }] }));
+    expect(f.relayInspect).toHaveBeenCalledOnce();
+    expect(f.window.sent[0]).toEqual({ channel: CHANNELS.collectionAutomationsChanged, payload: { workspaceId: WORKSPACE_ID } });
+  });
   it("expires the last answer while its refresh is still pending", async () => {
     const answers: Array<(value: RelayButtonInspection[]) => void> = [];
     const inspect = vi.fn((_targets: readonly RelayButtonTarget[]) =>
       new Promise<RelayButtonInspection[]>(resolve => { answers.push(resolve); }));
     const f = fixture({ shareView: editShare(["Invoices"]), files: { "Invoices/automations.yaml": PAID_FILE }, inspect });
     await f.call(CHANNELS.listAutomationButtons, {});
-    answers[0]!(inspect.mock.calls[0]![0].map(target => ({ kind: "ready", ...target, irreversible: [] })));
+    answers[0]!(inspect.mock.calls[0]![0].map(target => ({ kind: "ready", ...target, automationId: ownerButtonId(target), irreversible: [] })));
     await vi.waitFor(() => expect(f.window.sent).toHaveLength(1));
     const checkedAt = Date.now();
     const now = vi.spyOn(Date, "now").mockReturnValue(checkedAt + 6_000);
@@ -186,14 +214,14 @@ describe("dataset operations from shared document buttons", () => {
       now.mockReturnValue(checkedAt + 120_000);
       await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "checking" } }] });
       expect(inspect).toHaveBeenCalledTimes(2);
-      answers[1]!(inspect.mock.calls[1]![0].map(target => ({ kind: "ready", ...target, irreversible: [] })));
+      answers[1]!(inspect.mock.calls[1]![0].map(target => ({ kind: "ready", ...target, automationId: ownerButtonId(target), irreversible: [] })));
       await vi.waitFor(() => expect(f.window.sent).toHaveLength(2));
       await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "ready" } }] });
     } finally { now.mockRestore(); }
   });
   it("shows checking when an expired answer starts a refresh", async () => {
     const inspect = vi.fn(async (targets: readonly RelayButtonTarget[]): Promise<RelayButtonInspection[]> =>
-      targets.map(target => ({ kind: "ready", ...target, irreversible: [] })));
+      targets.map(target => ({ kind: "ready", ...target, automationId: ownerButtonId(target), irreversible: [] })));
     const f = fixture({ shareView: editShare(["Invoices"]), files: { "Invoices/automations.yaml": PAID_FILE }, inspect });
     await f.call(CHANNELS.listAutomationButtons, {});
     await vi.waitFor(() => expect(f.window.sent).toHaveLength(1));
@@ -206,7 +234,7 @@ describe("dataset operations from shared document buttons", () => {
   });
   it.each([false, true])("isolates answers by account with explicit clearing %s", async clear => {
     const inspect = vi.fn(async (targets: readonly RelayButtonTarget[]): Promise<RelayButtonInspection[]> =>
-      targets.map(target => ({ kind: "ready", ...target, irreversible: [] })));
+      targets.map(target => ({ kind: "ready", ...target, automationId: ownerButtonId(target), irreversible: [] })));
     const f = fixture({ shareView: editShare(["Invoices"]), files: { "Invoices/automations.yaml": PAID_FILE }, inspect });
     await f.call(CHANNELS.listAutomationButtons, {});
     await vi.waitFor(() => expect(f.window.sent).toHaveLength(1));
@@ -216,10 +244,10 @@ describe("dataset operations from shared document buttons", () => {
     expect(inspect).toHaveBeenCalledTimes(2);
     if (clear) {
       f.changeAccount(null);
-      await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "checking" } }] });
+      await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "disabled", reason: "Sign in with Edit access to use this button." } }] });
       f.changeAccount("user-main");
       await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "checking" } }] });
-      expect(inspect).toHaveBeenCalledTimes(4);
+      expect(inspect).toHaveBeenCalledTimes(3);
     } else {
       f.changeAccount("user-main", false);
       await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "ready" } }] });
@@ -235,11 +263,11 @@ describe("dataset operations from shared document buttons", () => {
     f.changeAccount(null);
     f.changeAccount("user-main");
     await f.call(CHANNELS.listAutomationButtons, {});
-    answers[0]!(inspect.mock.calls[0]![0].map(target => ({ kind: "ready", ...target, irreversible: [] })));
+    answers[0]!(inspect.mock.calls[0]![0].map(target => ({ kind: "ready", ...target, automationId: ownerButtonId(target), irreversible: [] })));
     await new Promise<void>(resolve => setImmediate(resolve));
     await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "checking" } }] });
     expect(f.window.sent).toHaveLength(0);
-    answers[1]!(inspect.mock.calls[1]![0].map(target => ({ kind: "ready", ...target, irreversible: [] })));
+    answers[1]!(inspect.mock.calls[1]![0].map(target => ({ kind: "ready", ...target, automationId: ownerButtonId(target), irreversible: [] })));
     await vi.waitFor(() => expect(f.window.sent).toHaveLength(1));
   });
   it("lists checking at once, inspects one Collection batch, and notifies when its answer arrives", async () => {
@@ -256,7 +284,7 @@ describe("dataset operations from shared document buttons", () => {
       await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "checking" } }, { state: { kind: "checking" } }] });
       expect(inspect).toHaveBeenCalledTimes(1);
     } finally { now.mockRestore(); }
-    answer(targets.map(target => ({ kind: "ready", ...target, irreversible: [] })));
+    answer(targets.map(target => ({ kind: "ready", ...target, automationId: ownerButtonId(target), irreversible: [] })));
     await vi.waitFor(() => expect(f.window.sent).toEqual([{ channel: CHANNELS.collectionAutomationsChanged, payload: { workspaceId: WORKSPACE_ID } }]));
     await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "ready" } }, { state: { kind: "ready" } }] });
     expect(inspect).toHaveBeenCalledTimes(1);
@@ -267,7 +295,7 @@ describe("dataset operations from shared document buttons", () => {
       new Promise<RelayButtonInspection[]>(resolve => { answers.push(resolve); }));
     const f = fixture({ shareView: editShare(["Invoices"]), files: { "Invoices/automations.yaml": PAID_FILE }, inspect });
     await f.call(CHANNELS.listAutomationButtons, {});
-    answers[0]!(inspect.mock.calls[0]![0].map(target => ({ kind: "ready", ...target, irreversible: [] })));
+    answers[0]!(inspect.mock.calls[0]![0].map(target => ({ kind: "ready", ...target, automationId: ownerButtonId(target), irreversible: [] })));
     await vi.waitFor(() => expect(f.window.sent).toHaveLength(1));
     const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6_000);
     try {
@@ -275,7 +303,7 @@ describe("dataset operations from shared document buttons", () => {
         await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "ready" } }] });
       }
       expect(inspect).toHaveBeenCalledTimes(2);
-      answers[1]!(inspect.mock.calls[1]![0].map(target => ({ kind: "ready", ...target, irreversible: [] })));
+      answers[1]!(inspect.mock.calls[1]![0].map(target => ({ kind: "ready", ...target, automationId: ownerButtonId(target), irreversible: [] })));
       await vi.waitFor(async () => {
         now.mockReturnValue(Date.now() + 6_000);
         await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "ready" } }] });
@@ -301,7 +329,7 @@ describe("dataset operations from shared document buttons", () => {
     expect(inspect).toHaveBeenCalledTimes(2);
     await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "checking" } }] });
     expect(inspect).toHaveBeenCalledTimes(2);
-    answers[1]!(inspect.mock.calls[1]![0].map(target => ({ kind: "ready", ...target, irreversible: [] })));
+    answers[1]!(inspect.mock.calls[1]![0].map(target => ({ kind: "ready", ...target, automationId: ownerButtonId(target), irreversible: [] })));
     await vi.waitFor(() => expect(f.window.sent).toHaveLength(2));
     await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "ready" } }] });
   });
@@ -312,11 +340,13 @@ describe("dataset operations from shared document buttons", () => {
     await vi.waitFor(() => expect(f.window.sent).toHaveLength(1));
     await expect(f.call(CHANNELS.listAutomationButtons, {})).resolves.toMatchObject({ buttons: [{ state: { kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED } }] });
   });
-  it("reuses a named press's inspection", async () => {
-    const inspect = vi.fn(async (targets: readonly RelayButtonTarget[]) => targets.map(target => ({ kind: "ready" as const, ...target, irreversible: [] })));
+  it("presses with the owner's Button identity returned by inspection", async () => {
+    const inspect = vi.fn(async (targets: readonly RelayButtonTarget[]) => targets.map(target => ({ kind: "ready" as const, ...target, automationId: `collection:owner-invoices#${target.automationId}`, irreversible: [] })));
     const f = fixture({ shareView: editShare(["Invoices"]), files: { "Invoices/automations.yaml": PAID_FILE }, inspect });
     await expect(f.named({}, { kind: "agent", originId: "mcp", depth: 0 })).resolves.toEqual({ busy: false, relayed: true });
     expect(inspect).toHaveBeenCalledTimes(1);
+    expect(inspect).toHaveBeenCalledWith([expect.objectContaining({ automationId: "paid", collectionPath: "Invoices" })]);
+    expect(f.relayPress).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ automationId: "collection:owner-invoices#paid" }));
     expect(f.relayPress).toHaveBeenCalledTimes(1);
   });
   it("uses authorized host inspection for named pressers and the same confirmation path for CLI agents", async () => {

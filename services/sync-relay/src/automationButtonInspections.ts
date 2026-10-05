@@ -4,6 +4,7 @@ import type { StorageContext } from "./storage/context";
 import { buttonAuthority, isRunningHost, type HostScope } from "./storage/automationPresses";
 import { notFound, relayError, RelayError } from "./errors";
 import { notifyRelayWrite } from "./relayWriteChanges";
+import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
 
 const brokers = new WeakMap<StorageContext, Map<string, Map<string, Pending>>>();
 const polls = new WeakMap<StorageContext, Map<string, { scope: HostScope; at: number }>>();
@@ -89,7 +90,7 @@ export function answerButtonInspection(storage: StorageContext, scope: HostScope
       ? { kind: "denied", reason: SHARED_BUTTON_DENIED } : { kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED });
     throw error;
   }
-  if (result.kind === "ready" && (result.automationId !== held.request.automationId || result.definitionHash !== held.request.definitionHash)) {
+  if (result.kind === "ready" && (parseCollectionAutomationId(result.automationId)?.id !== held.request.automationId || result.definitionHash !== held.request.definitionHash)) {
     held.resolve({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED });
     throw notFound();
   }
