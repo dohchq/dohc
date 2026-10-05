@@ -14,6 +14,7 @@ import {
   parseAdmittedLiveUpdate,
   parseAdmittedLiveUpdateMetadata,
   parseCanonicalAdmittedLiveUpdateMetadata,
+  parseLiveCheckpointCoverage,
   parseAgentDeclaration,
   parseLiveDocumentKey,
   parseLiveUpdateAcceptResult,
@@ -658,6 +659,15 @@ describe("canonical admitted metadata", () => {
           deletionRanges: field === "deletionRanges" ? ranges : []}]}))
         .toThrow("Invalid live application range.");
     }
+  });
+
+  it.each(["structRanges", "deletionRanges"])("refuses retained non-canonical checkpoint %s", field => {
+    for (const ranges of invalid) {
+      expect(() => parseLiveCheckpointCoverage([{author: human, structRanges: field === "structRanges" ? ranges : valid,
+        deletionRanges: field === "deletionRanges" ? ranges : []}])).toThrow("Invalid live application range.");
+    }
+    expect(parseLiveCheckpointCoverage([{author: human, structRanges: valid, deletionRanges: valid}]))
+      .toEqual([{author: human, structRanges: valid, deletionRanges: valid}]);
   });
 
   it("preserves canonical ranges and owns every copy", () => {

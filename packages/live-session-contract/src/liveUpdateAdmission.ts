@@ -100,8 +100,9 @@ export interface LiveCheckpointAuthorCoverage {
   readonly structRanges: readonly LiveUpdateStructRange[];
   readonly deletionRanges: readonly LiveUpdateStructRange[];
 }
+/** Retained coverage must already be canonical; a damaged row is refused, not repaired. */
 export function parseLiveCheckpointCoverage(value: unknown): readonly LiveCheckpointAuthorCoverage[] {
-  return checkpointCoverage(value, parseLiveUpdateStructRanges);
+  return checkpointCoverage(value, canonicalRanges);
 }
 function checkpointCoverage(value: unknown, parseRanges: typeof parseLiveUpdateStructRanges): readonly LiveCheckpointAuthorCoverage[] {
   if (!Array.isArray(value) || value.length > 1024) throw new TypeError("Invalid checkpoint coverage.");
