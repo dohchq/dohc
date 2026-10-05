@@ -54,6 +54,9 @@ _Avoid_: private step, owner step
 
 ### Chat
 
+**ActorKey**:
+A key for grouping displayed authors and presence from admitted authorship facts. It grants no authority. Dataset principalKey is separate.
+
 **Group**:
 A named space with members where people and agents post, chat, or both.
 _Avoid_: channel, room, space. An editor group is the split pane, not a Group.
