@@ -2,7 +2,7 @@
 import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { TableKit } from "@tiptap/extension-table";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   makeTableControlsPlugin,
   resolveTableDropDestination,
@@ -875,6 +875,44 @@ describe("table controls grips", () => {
     expect(document.activeElement).toBe(grip);
   });
 
+  it("returns focus to the grip when the window loses focus with its menu open", () => {
+    editor = createTableEditor(2, 2);
+    document.body.appendChild(editor.view.dom);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    expect(document.activeElement).toBe(document.body.querySelector(".dohc-table-menu"));
+    window.dispatchEvent(new Event("blur"));
+    expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+    expect(document.activeElement).toBe(grip);
+  });
+
+  // jsdom has no layout: a 100px list over 28px rows.
+  it("keeps the active row inside the grip menu's view as the keys move it", () => {
+    const geometry = [
+      vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+        const index = Number(/-item-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
+        return Number.isNaN(index) ? 0 : 4 + index * 28;
+      }),
+      vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28),
+      vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(100),
+    ];
+    try {
+    editor = createTableEditor(2, 3);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    const menu = document.body.querySelector(".dohc-table-menu") as HTMLElement;
+    const items = [...menu.querySelectorAll<HTMLElement>("[role='menuitem']")];
+    const inView = (row: HTMLElement) =>
+      row.offsetTop >= menu.scrollTop && row.offsetTop + row.offsetHeight <= menu.scrollTop + menu.clientHeight;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "End" }));
+    expect(inView(items.at(-1)!)).toBe(true);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Home" }));
+    expect(inView(items[0]!)).toBe(true);
+    } finally {
+      for (const spy of geometry) spy.mockRestore();
+    }
+  });
+
   it("closes the grip menu on Tab from the grip, and when focus leaves it", () => {
     editor = createTableEditor(2, 2);
     document.body.appendChild(editor.view.dom);
@@ -907,7 +945,7 @@ describe("table controls grips", () => {
     expect(menu.getAttribute("aria-activedescendant")).toBe(remove.id);
     expect(remove.hasAttribute("data-active")).toBe(true);
     expect(items[0]?.hasAttribute("data-active")).toBe(false);
-    expect(remove.getAttribute("aria-keyshortcuts")).toBe("Delete Backspace");
+    expect(remove.getAttribute("aria-keyshortcuts")).toBe("Delete");
     expect(remove.lastElementChild?.textContent).toBe("Del");
     expect(remove.lastElementChild?.getAttribute("aria-hidden")).toBe("true");
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" }));

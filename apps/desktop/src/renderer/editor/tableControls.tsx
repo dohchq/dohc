@@ -8,8 +8,10 @@ import {
   MENU_ROW_TONE,
   MENU_SEPARATOR_LINE,
   MENU_SHORTCUT,
+  deleteShortcut,
   menuEnterFrom,
   moveInMenu,
+  revealMenuRow,
 } from "../ui/Menu";
 import { listenForDismiss } from "../ui/useDismiss";
 // Table row/column/header controls — Notion-style handles + menus layered on
@@ -572,12 +574,14 @@ export function buildTableMenu(
     label.textContent = row.label;
     button.appendChild(label);
     if (row.destructive) {
-      // Delete and Backspace run the destructive row from anywhere in the menu.
-      button.setAttribute("aria-keyshortcuts", "Delete Backspace");
+      // Delete and Backspace run the destructive row from anywhere in the
+      // menu; the chip shows the one this keyboard labels.
+      const { label: keyLabel, keys } = deleteShortcut();
+      button.setAttribute("aria-keyshortcuts", keys);
       const shortcut = ownerDocument.createElement("span");
       shortcut.setAttribute("aria-hidden", "true");
       shortcut.className = MENU_SHORTCUT;
-      shortcut.textContent = "Del";
+      shortcut.textContent = keyLabel;
       button.appendChild(shortcut);
     }
     menu.appendChild(button);
@@ -622,6 +626,7 @@ function openGripMenu(
     buttons.forEach((button, index) => button.toggleAttribute("data-active", index === selected));
     const activeButton = buttons[selected];
     if (activeButton) menu.setAttribute("aria-activedescendant", activeButton.id);
+    revealMenuRow(menu, activeButton);
   };
 
   // Focus goes back to the grip first, as the Menu part does, and the
@@ -735,9 +740,18 @@ function openGripMenu(
   menu.style.removeProperty("visibility");
   menu.classList.add(MENU_ENTER);
   menu.focus({ preventScroll: true });
-  // Escape is answered above, with focus back on the grip; a press, focus
-  // leaving and the window blurring only close.
-  stopDismiss = listenForDismiss({ menu, trigger: () => anchor, onClose: close });
+  // Escape is answered above, with focus back on the grip. The window
+  // blurring leaves focus nowhere, so it goes back to the grip too, ready for
+  // the person's return. A press or focus moving elsewhere puts it where
+  // they chose.
+  stopDismiss = listenForDismiss({
+    menu,
+    trigger: () => anchor,
+    onClose: (reason) => {
+      close();
+      if (reason === "blur") anchor.focus({ preventScroll: true });
+    },
+  });
   runtime.closeMenu = close;
   runtime.menuAnchor = anchor;
 }

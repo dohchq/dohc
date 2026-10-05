@@ -93,6 +93,32 @@ export const MENU_ICON = "grid size-3.5 shrink-0 place-items-center";
 export const MENU_LABEL = "min-w-0 flex-1 truncate";
 /** A row's shortcut, after its label. Hidden from the row's name; the row says it with aria-keyshortcuts. */
 export const MENU_SHORTCUT = "shrink-0 rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
+
+/**
+ * The key that runs a menu's destructive row, labelled as the keyboard in
+ * front of the person labels it: ⌫ on macOS, where that key is Backspace,
+ * and Del elsewhere. `keys` is the row's aria-keyshortcuts.
+ */
+export function deleteShortcut(platform = window.dohcDesktop?.platform): { label: string; keys: string } {
+  return platform === "darwin" ? { label: "⌫", keys: "Backspace" } : { label: "Del", keys: "Delete" };
+}
+
+/**
+ * Scrolls a menu's list just enough to show a row, as block "nearest" would,
+ * keeping the list's own padding around it. Only the list scrolls:
+ * scrollIntoView would also scroll the editor's pane or the window. `start`
+ * is the element whose top must show too, such as the row's section label.
+ * For a list whose focus stays on its frame; a row that takes focus is
+ * revealed by the browser.
+ */
+export function revealMenuRow(list: HTMLElement, row: HTMLElement | null | undefined, start: HTMLElement | null = row ?? null): void {
+  if (!row || !start) return;
+  const style = list.ownerDocument.defaultView?.getComputedStyle(list);
+  const top = start.offsetTop - (Number.parseFloat(style?.paddingTop ?? "") || 0);
+  const bottom = row.offsetTop + row.offsetHeight + (Number.parseFloat(style?.paddingBottom ?? "") || 0);
+  if (top < list.scrollTop) list.scrollTop = Math.max(0, top);
+  else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+}
 export const MENU_SEPARATOR_LINE = "mx-1.5 my-1 h-px bg-line";
 export const MENU_SECTION = "dohc-section-label px-2 pb-1 pt-1.5";
 /** The entrance: 130ms, rising 4px from the trigger's side, a 60ms fade under reduced motion. */

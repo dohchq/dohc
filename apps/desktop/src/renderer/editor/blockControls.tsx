@@ -1,6 +1,6 @@
 import { mapWidgetOwners } from "./widgetOwnership";
 import { isEditableEditor, stopEditorMouseEvent } from "./pmHelpers";
-import { useEffect, useId, useRef, useState, type RefObject } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
 import { serializeRichdocBody } from "@dohc/ydoc-projection";
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
@@ -32,8 +32,10 @@ import {
   MENU_ROW_TONE,
   MENU_SECTION,
   MENU_SHORTCUT,
+  deleteShortcut,
   menuEnterFrom,
   moveInMenu,
+  revealMenuRow,
 } from "../ui/Menu";
 import { useDismiss } from "../ui/useDismiss";
 import {
@@ -658,9 +660,20 @@ export function BlockMenu({
     return () => handle?.setAttribute("aria-expanded", "false");
   }, [open, pos]);
 
+  const rowId = (index: number) => `${id}-row-${index}`;
+  // The list is taller than its cap, so the active row is scrolled into it
+  // whenever it changes. The first row of a section brings its label along.
+  useLayoutEffect(() => {
+    const list = menuRef.current;
+    if (!open || !list) return;
+    const activeRow = list.ownerDocument.getElementById(rowId(active));
+    const firstOfSection = active === 0 || active === TURN_INTO_COUNT;
+    revealMenuRow(list, activeRow, firstOfSection ? activeRow?.parentElement : activeRow);
+  }, [open, active]);
+
   if (!state.open) return null;
 
-  const rowId = (index: number) => `${id}-row-${index}`;
+  const shortcut = deleteShortcut();
   const labels = BLOCK_MENU_ENTRIES.map((entry) => entry.label);
   // Focus goes back to the handle first, as the Menu part does, and the
   // action then moves it into the document when it edits one.
@@ -679,7 +692,7 @@ export function BlockMenu({
         role="menuitem"
         tabIndex={-1}
         data-active={index === active || undefined}
-        aria-keyshortcuts={danger ? "Delete Backspace" : undefined}
+        aria-keyshortcuts={danger ? shortcut.keys : undefined}
         onMouseMove={(event) => {
           // Only a pointer that moves picks the active row, so a menu that
           // opens under a still pointer keeps its first row.
@@ -694,7 +707,7 @@ export function BlockMenu({
         <span className={MENU_LABEL}>{entry.label}</span>
         {danger ? (
           <span aria-hidden className={MENU_SHORTCUT}>
-            Del
+            {shortcut.label}
           </span>
         ) : null}
       </button>

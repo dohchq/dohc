@@ -216,11 +216,52 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
     expect(document.activeElement).toBe(handle);
   });
 
+  // The list is taller than its cap. jsdom has no layout: a 320px list over
+  // 28px rows, with the Actions label 22px tall before the ninth row.
+  it("keeps the active row inside the list's view as the keys move it past either end", () => {
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+      const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
+      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
+      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
+      return 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(320);
+    const { menu, rows } = openMenu();
+    const inView = (row: HTMLElement) =>
+      row.offsetTop >= menu.scrollTop && row.offsetTop + row.offsetHeight <= menu.scrollTop + menu.clientHeight;
+    const remove = rows.at(-1)!;
+    expect(inView(remove)).toBe(false);
+
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(inView(remove)).toBe(true);
+    fireEvent.keyDown(menu, { key: "Home" });
+    expect(inView(rows[0]!)).toBe(true);
+    // The first row brings its section label along.
+    expect(rows[0]!.parentElement!.offsetTop).toBeGreaterThanOrEqual(menu.scrollTop);
+    fireEvent.keyDown(menu, { key: "ArrowUp" });
+    expect(inView(remove)).toBe(true);
+  });
+
+  it("returns focus to the handle when the window loses focus", async () => {
+    const handle = document.createElement("button");
+    document.body.append(handle);
+    handle.focus();
+    const open = { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle } as const;
+    const onClose = vi.fn();
+    const { rerender } = render(createElement(BlockMenu, { state: open, onSelect: vi.fn(), onClose }));
+    expect(document.activeElement).toBe(screen.getByRole("menu"));
+    fireEvent.blur(window);
+    expect(onClose).toHaveBeenCalledOnce();
+    rerender(createElement(BlockMenu, { state: CLOSED_BLOCK_MENU_STATE, onSelect: vi.fn(), onClose }));
+    await waitFor(() => expect(document.activeElement).toBe(handle));
+  });
+
   it("shows Del beside the destructive row without adding it to the row's name", () => {
     const { rows } = openMenu();
     const remove = screen.getByRole("menuitem", { name: "Delete" });
     expect(remove).toBe(rows.at(-1));
-    expect(remove.getAttribute("aria-keyshortcuts")).toBe("Delete Backspace");
+    expect(remove.getAttribute("aria-keyshortcuts")).toBe("Delete");
     expect(within(remove).getByText("Del").getAttribute("aria-hidden")).toBe("true");
     expect(remove.className).toContain("text-danger");
   });
