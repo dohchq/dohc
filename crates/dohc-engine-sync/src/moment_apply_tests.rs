@@ -259,6 +259,71 @@ fn a_peer_keeps_the_depth_an_agent_moment_names() {
     );
 }
 
+/// A second owner device imports a settled live moment through ordinary sync.
+/// Its History keeps the name the snapshot declared for the agent, after a
+/// restart too. A name outside the snapshot's bounds applies as none.
+#[test]
+fn an_owner_device_keeps_a_declared_agent_name_through_import_and_restart() {
+    let agent = json!({
+        "kind": "agent",
+        "agentId": "trip-agent-hosted",
+        "onBehalfOf": "owner",
+        "depth": 1,
+    });
+    let longest = "n".repeat(dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES);
+    let over = format!("{longest}n");
+    for (name, kept) in [
+        (json!("Trip helper"), true),
+        (json!(longest), true),
+        (json!(over), false),
+        (json!(""), false),
+        (json!("Trip\nhelper"), false),
+        (Value::Null, false),
+        (json!(42), false),
+    ] {
+        let (scratch, mut device) = test_store();
+        let mut declared = agent.clone();
+        declared["agentName"] = name.clone();
+        let mut payload = absent_text_payload("settled", "object", "trip.md", "content");
+        payload["authors"] = json!([declared]);
+        hydrate_texts(&mut device, &["content"]);
+        assert_eq!(
+            apply_moment_envelope(
+                &mut device,
+                &envelope("owner-a", 0, "ws", payload),
+                &NoFaults
+            )
+            .expect("owner device import"),
+            ApplyOutcome::new(ApplyDisposition::Applied(0)),
+            "name {name}",
+        );
+        let expected = json!([if kept { declared } else { agent.clone() }]);
+        let history_authors = |store: &mut EngineStore| {
+            let page = VersionedTextStore::new(store)
+                .list_moments(&ListMomentsQuery {
+                    workspace_id: "ws".to_owned(),
+                    version_id: Some("main".to_owned()),
+                    object_id: Some("object".to_owned()),
+                    limit: 10,
+                    before_moment_order: None,
+                })
+                .expect("History");
+            let moment = page.moments.first().expect("imported moment");
+            serde_json::from_str::<Value>(moment.author_json.as_deref().expect("authors"))
+                .expect("author JSON")
+        };
+        assert_eq!(history_authors(&mut device), expected, "name {name}");
+        drop(device);
+        let path = engine_db_path(&scratch).expect("db path");
+        let mut restarted = EngineStore::open(&path, 1_000).expect("reopen store");
+        assert_eq!(
+            history_authors(&mut restarted),
+            expected,
+            "restarted {name}"
+        );
+    }
+}
+
 #[test]
 fn a_peer_applies_pre_upgrade_control_character_authors() {
     let authors = json!([

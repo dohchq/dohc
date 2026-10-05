@@ -21,6 +21,7 @@ import type {
 import type { WorkspaceEngineMomentDetail } from "../workspaces/workspaceEngineCapture";
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
+import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 
 const names: EngineMomentAuthorNames = {
   agent: (author) => author.onBehalfOf === "local" ? "You" : author.onBehalfOf,
@@ -224,6 +225,32 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     // An id outside the Collection namespace keeps the moment's origin label.
     detail.moment.authors = [{kind: "automation", automationId: "other:tools/stamp", onBehalfOf: "local", depth: 1}];
     expect(engineMomentDetailForIpc(detail, names)).not.toHaveProperty("automationAuthor");
+  });
+  // An invalid automations.yaml entry keeps its raw name, and a Collection's
+  // name has the same bound. History names both, alone or beside an agent.
+  it("names an automation at its longest name and Collection, alone or with another author", async () => {
+    const parsed = parseAutomationsFile(`version: 1\nautomations:\n  - id: stamp\n    name: ${"n".repeat(4096)}\n`);
+    const entry = parsed.status === "read" ? parsed.entries[0] : undefined;
+    if (entry?.status !== "invalid" || entry.name === null) throw new Error("Expected an invalid entry with its name");
+    const automation = {name: entry.name, collection: "c".repeat(4096)};
+    const label = `${automation.name} in ${automation.collection}`;
+    const automator = {kind: "automation", automationId: "collection:Tasks#stamp", depth: 1} as const;
+    const agent = {kind: "agent", agentId: "writer", agentName: "Writer"} as const;
+    for (const [authors, expected] of [
+      [[automator], {automationAuthor: automation}],
+      [[automator, agent], {authorLabels: [label, "Writer"]}],
+    ] as const) {
+      const detail = detailWith({before: null, after: textSide("new")});
+      if (detail.protected) throw new Error("Expected a plaintext moment");
+      detail.moment.authors = [...authors];
+      const page = await listEngineMomentsForIpc(async () => ({
+        moments: [{...detail.moment, momentOrder: 1, protected: false}],
+        nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      }), {...names, automation: () => automation});
+      if (!("moments" in page)) throw new Error("Expected ready history");
+      expect(page.moments[0]).toMatchObject(expected);
+    }
+    expect(EngineMomentRecord.shape.authorLabels.safeParse([`${label}x`, "Writer"]).success).toBe(false);
   });
   it("names a person the owner shared with as main reads them from the roster", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});

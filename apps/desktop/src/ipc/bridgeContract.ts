@@ -1469,6 +1469,10 @@ const SHARED_AUTHOR_ID = z.string().min(1).refine(
   "Shared author identifiers are at most 512 UTF-8 bytes.",
 );
 
+// A Collection automation's name or its Collection's, as History reads it.
+const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
+const AUTOMATION_AUTHOR_TEXT = z.string().min(1).max(AUTOMATION_AUTHOR_TEXT_MAX);
+
 const EngineMomentAuthor = z.union([
   z.object({
     kind: z.literal("agent"),
@@ -1540,7 +1544,7 @@ export const EngineMomentRecord = z.object({
   // Present when a Collection automation authored the moment: its name as
   // this computer's automations.yaml has it, and the Collection it belongs to.
   // `collection` is left out once this computer no longer has the automation's Collection.
-  automationAuthor: z.object({ name: z.string().min(1).max(4096), collection: z.string().min(1).max(4096).optional() }).strict().optional(),
+  automationAuthor: z.object({ name: AUTOMATION_AUTHOR_TEXT, collection: AUTOMATION_AUTHOR_TEXT.optional() }).strict().optional(),
   // Present when a person the owner shared with wrote the moment directly
   // (ADR 0013): main names them from the owner's share roster. The user id
   // picks them for Stop and restore.
@@ -1559,7 +1563,8 @@ export const EngineMomentRecord = z.object({
   }).strict().optional(),
   // Present when more than one author wrote the moment: how each reads, in
   // the order of `authors`. The singleton author fields stay absent then.
-  authorLabels: z.array(z.string().min(1).max(4096)).min(2).optional(),
+  // The longest reads as an automation's name in its Collection.
+  authorLabels: z.array(z.string().min(1).max(2 * AUTOMATION_AUTHOR_TEXT_MAX + " in ".length)).min(2).optional(),
   summary: z.string().max(500).optional(),
   correlationId: z.string().max(200).optional(),
   // Workspace-global recording order: the pagination cursor and a monotonic

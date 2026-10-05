@@ -87,6 +87,15 @@ enum MomentAuthor {
     Agent {
         #[serde(rename = "agentId")]
         agent_id: String,
+        /// The name a live author snapshot declared for its agent. One outside
+        /// the snapshot's bounds applies as none.
+        #[serde(
+            rename = "agentName",
+            default,
+            deserialize_with = "agent_snapshot_name",
+            skip_serializing_if = "Option::is_none"
+        )]
+        agent_name: Option<String>,
         #[serde(
             rename = "onBehalfOf",
             default,
@@ -167,6 +176,21 @@ fn agent_author_depth<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<u32>, D::Error> {
     serde_json::Value::deserialize(deserializer)
         .map(|value| dohc_engine_domain::agent_author_depth(Some(&value)))
+}
+
+fn agent_snapshot_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(|value| match value {
+        serde_json::Value::String(name)
+            if !name.is_empty()
+                && name.len() <= dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES
+                && !name.bytes().any(|b| b.is_ascii_control()) =>
+        {
+            Some(name)
+        }
+        _ => None,
+    })
 }
 
 fn optional_author_principal<'de, D: serde::Deserializer<'de>>(
