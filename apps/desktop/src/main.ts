@@ -217,6 +217,7 @@ import {
 import {
   recipientShareNeedsRecheck,
   readReceivedShareListing,
+  reconcileRecipientSharesAfterLookup,
 } from "./workspaces/recipientShareReconciliation";
 import { createShareRosters, rosterAuthorLabel, rosterPersonLabel } from "./automations/shareRoster";
 import { listRosterGrants, readStoredRoster } from "@dohc/automation-executor/roster-listing";
@@ -1300,22 +1301,30 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
   return relayShareJsonWithCredentials(credentials, path, init);
 }
 
-// Every authenticated `/sync/shares` listing this app reads is applied to the
-// received-share records of every registered workspace it speaks for: an
-// ended record whose share is active again resumes, and the owner's confirmed
-// removals are recorded. See recipientShareReconciliation.ts.
-function reconcileReceivedShares(listing: unknown): void {
+// Live account listings record removals; an exact-share read confirms resumptions.
+async function reconcileReceivedShares(listing: unknown): Promise<void> {
   const parsed = readReceivedShareListing(listing);
   const credentials = cachedCredentials;
+  const generation = credentialCacheGeneration;
   if (!parsed || !credentials?.relayUrl) return;
   for (const entry of listWorkspaces()) {
-    let changed = false;
     try {
-      changed = reconcileWorkspaceRecipientShares(entry.workspaceId, parsed, credentials);
+      const changed = await reconcileRecipientSharesAfterLookup({
+        listing: parsed,
+        credentials,
+        currentEntry: () => findWorkspace(entry.workspaceId),
+        updateEntry: (reconcile) => reconcileWorkspaceRecipientShares(entry.workspaceId, reconcile),
+        isCurrent: () => generation === credentialCacheGeneration,
+        lookupShare: (shareId) => relayShareJsonWithCredentials<unknown>(
+          credentials, `/sync/shares/${encodeURIComponent(shareId)}`,
+        ),
+        onLookupError: (shareId, error) =>
+          console.warn(`[desktop] received share lookup for ${shareId}:`, error),
+      });
+      if (changed) notifyRenderer({ workspaceId: entry.workspaceId });
     } catch (error) {
       console.warn(`[desktop] received share reconciliation for ${entry.workspaceId}:`, error);
     }
-    if (changed) notifyRenderer({ workspaceId: entry.workspaceId });
   }
 }
 
@@ -1338,7 +1347,7 @@ async function recheckRemovedShares(workspaceId: string): Promise<void> {
         currentGeneration: () => credentialCacheGeneration,
         run: () => relayShareJsonWithCredentials<unknown>(credentials, "/sync/shares"),
       });
-      reconcileReceivedShares(listing);
+      await reconcileReceivedShares(listing);
     } catch (error) {
       console.warn(`[desktop] share removal recheck for ${workspaceId}:`, error);
     }

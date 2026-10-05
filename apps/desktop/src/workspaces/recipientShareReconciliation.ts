@@ -1,3 +1,5 @@
+import { isChatShareAccessValue } from "@dohc/security-contract/share-grant";
+import { recordedShareSelector } from "./shareViewRecords";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import { joinedChannelMatchesCredentials } from "./chatRelayIdentity";
 import type {
@@ -117,8 +119,11 @@ export function reconcileRecipientShares(
   entry: Readonly<RegistryEntry>,
   listing: ReceivedShareListing,
   credentials: CloudCredentials,
+  confirmedActive: ReadonlySet<string>,
 ): RegistryEntry | null {
-  const active = (shareId: string) => listing.received.has(shareId);
+  const listedRemovals = new Set(listing.removed.map(row => row.shareId));
+  const active = (shareId: string) => listing.received.has(shareId) &&
+    confirmedActive.has(shareId) && !listedRemovals.has(shareId);
   // Share ids this listing speaks for: records pinned to its relay and
   // account. Records pinned elsewhere keep their state, ended or not.
   const spokenFor = new Set<string>();
@@ -164,7 +169,6 @@ export function reconcileRecipientShares(
   });
 
   const existing = confirmedRemovals(entry);
-  const listedRemovals = new Set(listing.removed.map(row => row.shareId));
   const nextRemovals = [
     ...existing.filter(
       (removal) => !spokenFor.has(removal.shareId)
@@ -197,4 +201,75 @@ export function recipientShareNeedsRecheck(entry: Readonly<RegistryEntry>): bool
   return shareView(entry)?.ended === true ||
     mounts(entry).some(mount => mount.ended === true) ||
     channels(entry).some(channel => channel.ended === true && channel.left !== true);
+}
+
+// Only a usable exact-share read can confirm that the recipient still has access.
+export function exactReceivedShareIsActive(body: unknown, shareId: string): boolean {
+  if (!isRecord(body) || body.ok !== true || body.shareId !== shareId ||
+      body.damaged !== undefined || !isRecord(body.selector)) return false;
+  const selector = body.selector;
+  if (selector.kind === "chat" || selector.kind === "group") {
+    return typeof selector.channelWireId === "string" && selector.channelWireId.length > 0 &&
+      isChatShareAccessValue(body.access);
+  }
+  return selector.kind === undefined &&
+    recordedShareSelector({ ...selector, access: body.access }) !== null;
+}
+
+function resumeCandidates(
+  entry: Readonly<RegistryEntry>,
+  listing: ReceivedShareListing,
+  credentials: CloudCredentials,
+): Set<string> {
+  const candidates = new Set<string>();
+  const removed = new Set(confirmedRemovals(entry).map(row => row.shareId));
+  const add = (shareId: string, ended: boolean) => {
+    if ((ended || removed.has(shareId)) && listing.received.has(shareId) &&
+        !listing.removed.some(row => row.shareId === shareId)) candidates.add(shareId);
+  };
+  const view = shareView(entry);
+  if (view && shareViewMatches(view, credentials)) add(view.shareId, view.ended === true);
+  for (const mount of mounts(entry)) {
+    if (mountMatches(mount, credentials)) add(mount.shareId, mount.ended === true);
+  }
+  for (const channel of channels(entry)) {
+    if (channel.left !== true && joinedChannelMatchesCredentials(channel, credentials)) {
+      add(channel.shareId, channel.ended === true);
+    }
+  }
+  return candidates;
+}
+
+export async function reconcileRecipientSharesAfterLookup(input: {
+  listing: ReceivedShareListing;
+  credentials: CloudCredentials;
+  currentEntry(): Readonly<RegistryEntry> | null;
+  updateEntry(reconcile: (entry: Readonly<RegistryEntry>) => RegistryEntry | null): boolean;
+  isCurrent(): boolean;
+  lookupShare(shareId: string): Promise<unknown>;
+  onLookupError?(shareId: string, error: unknown): void;
+}): Promise<boolean> {
+  if (!input.isCurrent() || !input.currentEntry()) return false;
+  // Record removals immediately. The inventory alone cannot clear any end marker.
+  let changed = input.updateEntry(entry =>
+    reconcileRecipientShares(entry, input.listing, input.credentials, new Set()));
+  const snapshot = input.currentEntry();
+  if (!snapshot) return changed;
+  const confirmedActive = new Set<string>();
+  for (const shareId of resumeCandidates(snapshot, input.listing, input.credentials)) {
+    if (!input.isCurrent() || input.currentEntry() !== snapshot) return changed;
+    try {
+      const body = await input.lookupShare(shareId);
+      if (exactReceivedShareIsActive(body, shareId)) confirmedActive.add(shareId);
+    } catch (error) {
+      input.onLookupError?.(shareId, error);
+    }
+  }
+  if (!input.isCurrent() || confirmedActive.size === 0 || input.currentEntry() !== snapshot) return changed;
+  // Registry writes replace the cached entry, including repeated end observations.
+  // Compare inside its synchronous update so no newer observation is overwritten.
+  changed = input.updateEntry(entry => entry === snapshot
+    ? reconcileRecipientShares(entry, input.listing, input.credentials, confirmedActive)
+    : null) || changed;
+  return changed;
 }
