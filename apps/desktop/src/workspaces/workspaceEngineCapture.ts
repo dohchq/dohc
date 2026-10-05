@@ -1670,6 +1670,7 @@ export function createWorkspaceEngineCapture(
   let observationDrainUnavailable = false;
   let observationResync: Promise<void> = Promise.resolve();
   let stopped = false;
+  const ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
@@ -3938,7 +3939,7 @@ export function createWorkspaceEngineCapture(
         options.rustEngineSessions.withRetryBudget(
           YDOC_OPEN_RETRY_DEADLINE_MS,
           openYDocSessionTask,
-          captureWaitAbort.signal,
+          ydocOpenAbort.signal,
         ),
       );
 
@@ -5726,10 +5727,12 @@ export function createWorkspaceEngineCapture(
     },
 
     beginShutdown() {
+      ydocOpenAbort.abort();
       captureWaitAbort.abort();
     },
 
     settleAndCloseAllLiveSessions() {
+      ydocOpenAbort.abort();
       captureWaitAbort.abort();
       return enqueueResult("close live sessions for workspace close", () =>
         settleAndCloseLiveYDocSessions(
@@ -7282,6 +7285,7 @@ export function createWorkspaceEngineCapture(
       // Everything already enqueued (including the watcher's final settled
       // batch) still runs; only new work is refused.
       stopped = true;
+      ydocOpenAbort.abort();
       if (daemonCaptureHealthTimer !== null) {
         clearTimeout(daemonCaptureHealthTimer);
         daemonCaptureHealthTimer = null;
