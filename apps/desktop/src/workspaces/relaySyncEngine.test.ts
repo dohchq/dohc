@@ -493,17 +493,36 @@ describe("relaySyncEngine", () => {
     expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
   });
 
+  it("merges push and pull declines by object after a rename", async () => {
+    const decline = { objectId: "same-object", versionId: "main", lineagePruned: true, headBlobSha256: null,
+      path: "before.md", constraint: "MAX_YDOC_UPDATE_BYTES", limitBytes: 20, observedBytes: 21 };
+    pushMock.mockResolvedValueOnce({ pushed: 0, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [decline] });
+    const result = pullResult();
+    result.sharingDeclined = [{ ...decline, path: "after.md" }];
+    pullMock.mockResolvedValueOnce(result);
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    expect(sync.snapshot().sharingDeclined).toEqual(result.sharingDeclined);
+    await sync.stop();
+  });
+
   it("keeps every sharing decline in the workspace snapshot", async () => {
     const result = pullResult();
     result.sharingDeclined = [
       {
         path: "notes/first.md",
+        objectId: "notes/first.md",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 21,
       },
       {
         path: "notes/second.md",
+        objectId: "notes/second.md",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 21,

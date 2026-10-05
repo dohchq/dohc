@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ProtocolShapeError } from "../wireSchema";
 import { decodeOrdinarySyncResult } from "./ordinarySyncWireContract";
 
-const decline = { path: "work.md", constraint: "MAX_YDOC_UPDATE_BYTES", limitBytes: 20, observedBytes: 21 };
+const decline = { path: "work.md", objectId: "work.md", versionId: "main", lineagePruned: false, headBlobSha256: null, constraint: "MAX_YDOC_UPDATE_BYTES", limitBytes: 20, observedBytes: 21 };
 const admission = { workspaceId: "workspace", originId: "owner", originSeq: 2, versionId: "main", objectId: "object", path: "work.md" };
 const change = { versionId: "main", path: "work.md", operation: "write", contentKind: "text" };
 const refusal = { workspaceId: "workspace", originId: "peer", originSeq: 1, opKind: "text.write", code: "invalid-input", reason: "Cannot apply this operation." };
@@ -33,7 +33,8 @@ describe("ordinary native sync contract", () => {
     { changedPaths: [{ ...change, versionId: undefined }] }, { changedPaths: [{ ...change, operation: "move" }] },
     { changedPaths: [{ ...change, contentKind: "unknown" }] }, { changedPaths: null },
     { refusals: [{ ...refusal, workspaceId: undefined }] }, { refusals: [{ ...refusal, reason: null }] },
-    { sharingDeclined: [{ ...decline, path: "" }] }, { sharingDeclined: [{ ...decline, limitBytes: -1 }] },
+    { sharingDeclined: [{ ...decline, objectId: "" }] }, { sharingDeclined: [{ ...decline, versionId: "" }] },
+    { sharingDeclined: [{ ...decline, lineagePruned: "true" }] }, { sharingDeclined: [{ ...decline, path: "" }] }, { sharingDeclined: [{ ...decline, limitBytes: -1 }] },
     { sharingDeclined: [{ ...decline, observedBytes: Number.MAX_SAFE_INTEGER + 1 }] },
   ])("rejects an unusable pull result: %j", patch => {
     expect(() => decodeOrdinarySyncResult("sync.pull", { ...pull, ...patch })).toThrow(ProtocolShapeError);

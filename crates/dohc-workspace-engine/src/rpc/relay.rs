@@ -326,8 +326,15 @@ pub(super) fn sharing_declined_json(
 ) -> Vec<Value> {
     declines
         .into_iter()
+        .map(|declined| (declined.object_id.clone(), declined))
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_values()
         .map(|declined| {
             json!({
+                "objectId": declined.object_id,
+                "versionId": declined.version_id,
+                "lineagePruned": declined.lineage_pruned,
+                "headBlobSha256": declined.head_blob_sha256,
                 "path": declined.path,
                 "constraint": declined.constraint,
                 "limitBytes": declined.limit_bytes,
@@ -1639,6 +1646,10 @@ mod tests {
             changed_paths: Vec::new(),
             refusals: Vec::new(),
             sharing_declined: vec![dohc_engine_sync::SharingDeclined {
+                object_id: "notes/oversized.md".to_owned(),
+                version_id: "main".to_owned(),
+                lineage_pruned: false,
+                head_blob_sha256: None,
                 path: "notes/oversized.md".to_owned(),
                 constraint: "MAX_YDOC_UPDATE_BYTES",
                 limit_bytes: 20,
@@ -1655,6 +1666,10 @@ mod tests {
         assert_eq!(
             value["sharingDeclined"],
             json!([{
+                "objectId": "notes/oversized.md",
+                "versionId": "main",
+                "lineagePruned": false,
+                "headBlobSha256": null,
                 "path": "notes/oversized.md",
                 "constraint": "MAX_YDOC_UPDATE_BYTES",
                 "limitBytes": 20,

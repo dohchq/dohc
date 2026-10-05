@@ -1361,6 +1361,10 @@ const SYNC_STATUS_BASE_FIELDS = {
     .array(
       z.object({
         path: PATH_STRING,
+        objectId: z.string().min(1),
+        versionId: z.string().min(1),
+        lineagePruned: z.boolean(),
+        headBlobSha256: z.string().min(1).nullable(),
         constraint: z.string().min(1).max(200),
         limitBytes: z.number().int().nonnegative(),
         observedBytes: z.number().int().nonnegative(),

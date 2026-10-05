@@ -4877,7 +4877,12 @@ fn push_sharing_declined_once(
     declines: &mut Vec<crate::SharingDeclined>,
     declined: crate::SharingDeclined,
 ) {
-    if !declines.contains(&declined) {
+    if let Some(existing) = declines
+        .iter_mut()
+        .find(|item| item.object_id == declined.object_id)
+    {
+        *existing = declined;
+    } else {
         declines.push(declined);
     }
 }
@@ -4986,6 +4991,10 @@ mod sharing_decline_tests {
 
     fn decline(path: &str) -> crate::SharingDeclined {
         crate::SharingDeclined {
+            object_id: path.to_owned(),
+            version_id: "main".to_owned(),
+            lineage_pruned: false,
+            head_blob_sha256: None,
             path: path.to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: 20,
@@ -4994,7 +5003,21 @@ mod sharing_decline_tests {
     }
 
     #[test]
-    fn equal_sized_declines_for_distinct_paths_do_not_collapse() {
+    fn merged_declines_follow_an_object_across_a_rename() {
+        let original = decline("notes/original.md");
+        let renamed = crate::SharingDeclined {
+            path: "notes/renamed.md".to_owned(),
+            lineage_pruned: true,
+            ..original.clone()
+        };
+        let mut declines = Vec::new();
+        push_sharing_declined_once(&mut declines, original);
+        push_sharing_declined_once(&mut declines, renamed.clone());
+        assert_eq!(declines, [renamed]);
+    }
+
+    #[test]
+    fn equal_sized_declines_for_distinct_objects_do_not_collapse() {
         let mut declines = Vec::new();
 
         push_sharing_declined_once(&mut declines, decline("notes/first.md"));

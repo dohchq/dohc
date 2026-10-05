@@ -2711,6 +2711,38 @@ ALTER TABLE live_device_update_applications ADD COLUMN declared_depth INTEGER
         AND (declared_depth IS NULL OR declared_depth BETWEEN 0 AND 64));
 ";
 
+const V2_YDOC_SHARING_DECLINED_DDL: &str = "
+ALTER TABLE ydoc_docs ADD COLUMN sharing_declined_json TEXT
+    CHECK (sharing_declined_json IS NULL OR
+        (length(sharing_declined_json) <= 1024 AND json_valid(sharing_declined_json)));
+CREATE TRIGGER ydoc_sharing_declined_claimed AFTER UPDATE OF lineage_claim_status ON ydoc_docs
+WHEN NEW.lineage_claim_status != 'unclaimed' AND NEW.sharing_declined_json IS NOT NULL
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER ydoc_sharing_declined_head AFTER UPDATE ON snapshots
+WHEN NEW.blob_sha256 IS NOT OLD.blob_sha256
+    OR (NEW.latest_moment_id IS NOT OLD.latest_moment_id AND NEW.metadata_origin='restore')
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id
+        AND sharing_declined_json IS NOT NULL;
+END;
+CREATE TRIGGER ydoc_sharing_declined_deleted AFTER DELETE ON snapshots
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id
+        AND sharing_declined_json IS NOT NULL;
+END;
+CREATE TRIGGER ydoc_sharing_declined_restore AFTER INSERT ON live_restore_fences
+BEGIN
+    UPDATE ydoc_docs SET sharing_declined_json=NULL
+    WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id
+        AND sharing_declined_json IS NOT NULL;
+END;
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2894,6 +2926,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 29,
         id: "v2-live-admitted-metadata-receipts",
         sql: "ALTER TABLE live_device_update_applications DROP COLUMN declared_on_behalf_of; ALTER TABLE live_device_update_applications DROP COLUMN declared_depth; ALTER TABLE live_device_update_applications DROP COLUMN declared_agent_id; ALTER TABLE live_device_update_applications ADD COLUMN admitted_metadata_json TEXT CHECK (admitted_metadata_json IS NULL OR json_valid(admitted_metadata_json)); ALTER TABLE live_audit_events ADD COLUMN canonical_version INTEGER NOT NULL DEFAULT 1 CHECK (canonical_version IN (1,2));",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 30,
+        id: "v2-ydoc-sharing-declined",
+        sql: V2_YDOC_SHARING_DECLINED_DDL,
         sets_user_version: None,
     },
 ];
@@ -4582,6 +4620,94 @@ mod tests {
                 FaultAction::Continue
             }
         }
+    }
+
+    #[test]
+    fn sharing_decline_migration_clears_head_claim_delete_and_restore() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1_000);
+        let previous = &BASELINE_MIGRATIONS[..BASELINE_MIGRATIONS.len() - 1];
+        run_migrations(&mut conn, previous, &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0);").unwrap();
+        for value in ['a', 'b'] {
+            conn.execute(
+                "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,1,?2)",
+                rusqlite::params![value.to_string().repeat(64), value.to_string()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO binary_blobs(sha256,byte_length,bytes) VALUES (?1,0,X'')",
+            ["c".repeat(64)],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO ydoc_docs (workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms) VALUES ('ws','main','doc','plaintext','local-only',0,0,'unclaimed',0)", []).unwrap();
+        conn.execute("INSERT INTO snapshots (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','notes/a.md',?1,0,'moment','api')", ["a".repeat(64)]).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let refusal = format!(
+            r#"{{"head_sha256":"{}","constraint":"MAX_YDOC_UPDATE_BYTES","limit_bytes":20,"observed_bytes":21}}"#,
+            "a".repeat(64)
+        );
+        let current = |conn: &Connection| {
+            conn.query_row("SELECT sharing_declined_json FROM ydoc_docs", [], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(current(&conn), None);
+        conn.execute("UPDATE ydoc_docs SET sharing_declined_json=?1", [&refusal])
+            .unwrap();
+        // Rename keeps the identity and its refusal.
+        conn.execute(
+            "UPDATE snapshots SET path='notes/renamed.md',latest_moment_id='renamed'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(current(&conn), Some(refusal.clone()));
+        // Invalidation shares the head transaction's commit boundary.
+        let tx = conn.transaction().unwrap();
+        tx.execute("UPDATE snapshots SET blob_sha256=?1", ["b".repeat(64)])
+            .unwrap();
+        assert_eq!(current(&tx), None);
+        tx.rollback().unwrap();
+        assert_eq!(current(&conn), Some(refusal.clone()));
+        conn.execute("UPDATE snapshots SET blob_sha256=?1", ["b".repeat(64)])
+            .unwrap();
+        assert_eq!(current(&conn), None);
+        conn.execute("UPDATE ydoc_docs SET sharing_declined_json=?1", [&refusal])
+            .unwrap();
+        // A same-byte restore must clear it too.
+        conn.execute(
+            "UPDATE snapshots SET metadata_origin='restore',latest_moment_id='restored'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(current(&conn), None);
+        conn.execute("UPDATE ydoc_docs SET sharing_declined_json=?1", [&refusal])
+            .unwrap();
+        conn.execute("INSERT INTO live_restore_fences(workspace_id,main_version_id,object_id,relay_database_namespace,operation_id,input_json,receipt_json) VALUES ('ws','main','doc','relay','restore','{}','{}')", []).unwrap();
+        assert_eq!(current(&conn), None);
+        conn.execute("UPDATE ydoc_docs SET sharing_declined_json=?1", [&refusal])
+            .unwrap();
+        // Both local success and a pull installing a peer claim take this update.
+        conn.execute("UPDATE ydoc_docs SET regime='replicated',lineage_claim_status='exact',lineage_claim_id=?1", ["c".repeat(64)]).unwrap();
+        assert_eq!(current(&conn), None);
+        conn.execute("UPDATE ydoc_docs SET sharing_declined_json=?1", [&refusal])
+            .unwrap();
+        conn.execute("DELETE FROM snapshots", []).unwrap();
+        assert_eq!(current(&conn), None);
+        conn.execute("UPDATE ydoc_docs SET sharing_declined_json=?1", [&refusal])
+            .unwrap();
+        // Archive drops the marker, which owns the refusal.
+        conn.execute("DELETE FROM ydoc_docs", []).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM ydoc_docs", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     fn open_bare(path: &std::path::Path) -> Connection {

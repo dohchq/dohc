@@ -3556,3 +3556,189 @@ async fn opening_a_document_with_a_deferred_different_seed_requires_conflict_rev
     );
     supervisor.close(&a).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversized_close_decline_survives_prune_and_restart() {
+    const WS: &str = "ws-close-decline";
+    const PATH: &str = "notes/close-decline.md";
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).unwrap().actor;
+    let object = capture_seed(&handle, WS, PATH, 100).await;
+    std::fs::create_dir_all(scratch.path().join("notes")).unwrap();
+    std::fs::write(scratch.path().join(PATH), "seed\n").unwrap();
+    let key = DocKey::new(WS, "main", &object).unwrap();
+    supervisor.close(&db).unwrap();
+    seed_unclaimed_oversized_lineage(&db, &key, PATH);
+    // Close-time origination runs with the local-only regime, then prunes.
+    let mut store = EngineStore::open(&db, 200).unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET regime='local-only'", [])
+                .unwrap();
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    let head_sha: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND object_id=?2",
+                rusqlite::params![WS, object],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    drop(store);
+    let handle = supervisor.open(&db, 201).unwrap().actor;
+    handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            None,
+            Some(head_sha),
+            "close-decline-settle".into(),
+            Arc::new(()),
+            250,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    enable_sync(&db, WS);
+    let mut store = EngineStore::open(&db, 260).unwrap();
+    store.write_with(&NoFaults, |tx| {
+        tx.execute_batch("CREATE TEMP TABLE refusal_writes (n INTEGER); CREATE TEMP TRIGGER count_refusal_writes AFTER UPDATE OF sharing_declined_json ON ydoc_docs BEGIN INSERT INTO refusal_writes VALUES(1); END;").unwrap();
+        for now in [270, 280] {
+            assert!(matches!(dohc_engine_sync::originate_ydoc_base_in_tx(tx, &key, PATH, None, None, now).unwrap(), dohc_engine_sync::BaseOrigination::Declined(_)));
+        }
+        assert_eq!(tx.query_row("SELECT COUNT(*) FROM refusal_writes", [], |r| r.get::<_,i64>(0)).unwrap(), 1, "unchanged refusals do not write the column twice");
+        Ok::<_, StorageError>(())
+    }).unwrap();
+    drop(store);
+    handle
+        .ydoc_close_session(
+            key.clone(),
+            300,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    supervisor.close(&db).unwrap();
+    let mut store = EngineStore::open(&db, 400).unwrap();
+    assert_eq!(read_lineage_rows(&store, &key), (0, 0));
+    let cursor = RelayCursor {
+        cursor: 0,
+        replication_epoch: "epoch-local".into(),
+        stream_identity: "stream-local".into(),
+        bootstrap_complete: true,
+        settlement_report_id: None,
+    };
+    for now in [500, 600] {
+        let declines = match commit_relay_cursor(
+            &mut store,
+            WS,
+            &cursor,
+            &NoFaults,
+            &AlwaysLive,
+            now,
+        )
+        .unwrap()
+        {
+            dohc_engine_storage::TxnOutcome::Committed(value) => value,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            declines.len(),
+            1,
+            "close refusal must remain visible on quiet passes and under a lease"
+        );
+        assert_eq!(declines[0].path, PATH);
+        assert_eq!(declines[0].object_id, object);
+        assert!(declines[0].lineage_pruned);
+        assert!(declines[0].head_blob_sha256.is_some());
+    }
+    let pass = |store: &mut EngineStore| match commit_relay_cursor(
+        store,
+        WS,
+        &cursor,
+        &NoFaults,
+        &AlwaysLive,
+        700,
+    )
+    .unwrap()
+    {
+        dohc_engine_storage::TxnOutcome::Committed(value) => value,
+        other => panic!("{other:?}"),
+    };
+    VersionedTextStore::new(&mut store)
+        .rename_text_file(
+            &RenameTextFile {
+                workspace_id: WS.into(),
+                version_id: "main".into(),
+                from_path: PATH.into(),
+                to_path: "notes/renamed.md".into(),
+                moment_id: "rename-decline".into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 650,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    assert_eq!(pass(&mut store)[0].path, "notes/renamed.md");
+    // A stale or forbidden path cannot disclose even a valid stored refusal.
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE snapshots SET path='.dohc/private.md' WHERE object_id=?1",
+                [&object],
+            )
+            .unwrap();
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    assert!(pass(&mut store).is_empty());
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE snapshots SET path='notes/renamed.md' WHERE object_id=?1",
+                [&object],
+            )
+            .unwrap();
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    assert_eq!(pass(&mut store).len(), 1);
+    // Reopening from the settled Markdown reseeds a small state and claims it.
+    drop(store);
+    let handle = supervisor.open(&db, 800).unwrap().actor;
+    let (reopened_key, _, seed) = open_with_seed(&handle, WS, "notes/renamed.md").await;
+    assert_eq!(reopened_key, key);
+    assert!(seed.len() < dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES);
+    assert!(
+        record_editor_update(&handle, &key, "notes/renamed.md", seed, None, true)
+            .await
+            .is_some()
+    );
+    supervisor.close(&db).unwrap();
+    let mut store = EngineStore::open(&db, 900).unwrap();
+    assert!(pass(&mut store).is_empty());
+    let refusal: Option<String> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT sharing_declined_json FROM ydoc_docs WHERE object_id=?1",
+                [&object],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(refusal, None);
+}

@@ -4680,6 +4680,10 @@ mod merge_drained_tests {
             ..refusal.clone()
         };
         let declined = crate::SharingDeclined {
+            object_id: "notes/drained.md".to_owned(),
+            version_id: "main".to_owned(),
+            lineage_pruned: false,
+            head_blob_sha256: None,
             path: "notes/drained.md".to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: 20,
@@ -4700,6 +4704,10 @@ mod merge_drained_tests {
         assert_eq!(ids(merged), ["committed"]);
 
         let own_decline = crate::SharingDeclined {
+            object_id: "notes/primary.md".to_owned(),
+            version_id: "main".to_owned(),
+            lineage_pruned: false,
+            head_blob_sha256: None,
             path: "notes/primary.md".to_owned(),
             ..declined.clone()
         };

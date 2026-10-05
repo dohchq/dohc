@@ -450,6 +450,9 @@ describe("EngineRelayClient", () => {
         sharingDeclined: [
           {
             path: pulls === 1 ? "notes/first.md" : "notes/second.md",
+            objectId: pulls === 1 ? "notes/first.md" : "notes/second.md",
+            versionId: "main",
+            lineagePruned: false, headBlobSha256: null,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 20,
             observedBytes: 20 + pulls,
@@ -467,12 +470,18 @@ describe("EngineRelayClient", () => {
     ).toEqual([
       {
         path: "notes/first.md",
+        objectId: "notes/first.md",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 21,
       },
       {
         path: "notes/second.md",
+        objectId: "notes/second.md",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 22,
@@ -602,6 +611,9 @@ describe("EngineRelayClient", () => {
         sharingDeclined: [
           {
             path: "notes/oversized.md",
+            objectId: "notes/oversized.md",
+            versionId: "main",
+            lineagePruned: false, headBlobSha256: null,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 20,
             observedBytes: 21,
@@ -617,6 +629,9 @@ describe("EngineRelayClient", () => {
       sharingDeclined: [
         {
           path: "notes/oversized.md",
+          objectId: "notes/oversized.md",
+          versionId: "main",
+          lineagePruned: false, headBlobSha256: null,
           constraint: "MAX_YDOC_UPDATE_BYTES",
           limitBytes: 20,
           observedBytes: 21,
@@ -634,6 +649,10 @@ describe("EngineRelayClient", () => {
         pushed: 0, ownerAdmissionPending: [], hasMore: false,
         sharingDeclined: [
           {
+            objectId: "missing-path",
+            versionId: "main",
+            lineagePruned: false,
+            headBlobSha256: null,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 20,
             observedBytes: 21,
@@ -672,6 +691,9 @@ describe("EngineRelayClient", () => {
           sharingDeclined: [
             {
               path: "notes/commit.md",
+              objectId: "notes/commit.md",
+              versionId: "main",
+              lineagePruned: false, headBlobSha256: null,
               constraint: "MAX_YDOC_UPDATE_BYTES",
               limitBytes: 20,
               observedBytes: 22,
@@ -688,6 +710,9 @@ describe("EngineRelayClient", () => {
     expect(pull.sharingDeclined).toEqual([
       {
         path: "notes/commit.md",
+        objectId: "notes/commit.md",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 22,
