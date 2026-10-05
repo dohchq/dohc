@@ -43,7 +43,6 @@ pub struct SetBatchBinding {
     pub lineage_claim_id: Option<String>,
     pub restore_generation: Option<i64>,
     pub schema_sha256: String,
-    pub head_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

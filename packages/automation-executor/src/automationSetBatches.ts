@@ -14,13 +14,13 @@ export interface AutomationSetBatches {
 const json = z.custom<JsonValue>(value => value !== undefined);
 export const StoredSetBatchSchema = z.object({
   part: z.number().int().nonnegative(), count: z.number().int().positive(),
-  digest: z.string(), abandoned: z.boolean().optional(),
+  digest: z.string(), abandoned: z.boolean().optional(), borrowed: z.boolean().optional(),
   plan: z.object({
     key: z.object({ claimId: z.string(), keySeed: z.string(), step: z.number().int().nonnegative(), batch: z.string() }),
     versionId: z.string(),
     records: z.array(z.object({ collectionId: z.string(), recordId: z.string(),
       fields: z.array(z.object({ field: z.string(), before: json, after: json })),
-      binding: z.object({ objectId: z.string(), lineageClaimId: z.string().nullable(), restoreGeneration: z.number().int().nullable(), schemaSha256: z.string(), headSha256: z.string() }).nullable(),
+      binding: z.object({ objectId: z.string(), lineageClaimId: z.string().nullable(), restoreGeneration: z.number().int().nullable(), schemaSha256: z.string() }).nullable(),
     })),
   }),
 });
@@ -55,9 +55,21 @@ export async function reconcileSetBatches(run: StoredRun, lookup: AutomationSetB
   for (const step of recovered.steps) {
     for (const batch of step.batches ?? []) {
       if (batch.abandoned) continue;
-      const result = await lookup({ key: batch.plan.key, digest: batch.digest });
+      let result: SetBatchLookup;
+      try { result = await lookup({ key: batch.plan.key, digest: batch.digest }); }
+      catch (error) {
+        if (!(error instanceof Error) || !error.message.includes("automation-set-batch-key-reused")) throw error;
+        batch.abandoned = true;
+        batch.borrowed = true;
+        continue;
+      }
       if (result.state === "retired") throw new Error("This automation run has left run history.");
-      const writes = batchWrites(batch, result.state === "committed" ? result.receipt : null, step);
+      if (result.state !== "committed") {
+        batch.abandoned = true;
+        batch.borrowed = true;
+        continue;
+      }
+      const writes = batchWrites(batch, result.receipt, step);
       for (const [part, own] of writes.entries()) {
         const index = offset + batch.part + part;
         recovered.applied[index] = { ...recovered.applied[index], ordinal: step.ordinal, writes: own, writeCount: 1 };

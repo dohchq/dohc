@@ -40,14 +40,14 @@ fn binding(
     version_id: &str,
     record: &SetBatchRecord,
 ) -> Result<Option<(SetBatchBinding, String)>, RuntimeError> {
-    let row: Option<(String, String, String, String)> = conn.query_row(
-        "SELECT r.object_id,r.file_path,s.blob_sha256,h.blob_sha256 FROM collections c \
+    let row: Option<(String, String, String)> = conn.query_row(
+        "SELECT r.object_id,r.file_path,s.blob_sha256 FROM collections c \
         JOIN snapshots s ON s.workspace_id=c.workspace_id AND s.version_id=c.version_id AND s.path=c.schema_path \
         JOIN collection_records r ON r.workspace_id=c.workspace_id AND r.version_id=c.version_id AND r.collection_path=c.collection_path \
         JOIN snapshots h ON h.workspace_id=r.workspace_id AND h.version_id=r.version_id AND h.path=r.file_path AND h.object_id=r.object_id \
         WHERE c.workspace_id=?1 AND c.version_id=?2 AND s.object_id=?3 AND r.record_id=?4 AND r.adoption_state='adopted'",
-        params![workspace_id,version_id,record.collection_id,record.record_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(StorageError::corrupt_public)?;
-    row.map(|(object_id, path, schema_sha256, head_sha256)| {
+        params![workspace_id,version_id,record.collection_id,record.record_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional().map_err(StorageError::corrupt_public)?;
+    row.map(|(object_id, path, schema_sha256)| {
         let key = DocKey::new(workspace_id, version_id, &object_id)?;
         let lineage_claim_id = dohc_engine_collab::read_marker_in(conn, &key)?
             .and_then(|marker| marker.lineage_claim_id);
@@ -58,12 +58,64 @@ fn binding(
                 restore_generation:
                     dohc_engine_collab::live_update_application::restore_generation(conn, &key)?,
                 schema_sha256,
-                head_sha256,
             },
             path,
         ))
     })
     .transpose()
+}
+
+fn lineage_absent(conn: &Connection, key: &DocKey) -> Result<bool, RuntimeError> {
+    Ok(
+        dohc_engine_collab::read_marker_in(conn, key)?.is_none_or(|marker| {
+            marker.head_update_seq == 0
+                && marker.head_snapshot_seq == 0
+                && !marker.lineage_claim_status.has_claimed_base()
+        }),
+    )
+}
+
+fn place_batch_job(
+    store: &EngineStore,
+    root: &Path,
+    workspace_id: &str,
+    job_id: &str,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+) -> Result<(), RuntimeError> {
+    if super::materialization::materialize_expected_job(
+        store,
+        root,
+        workspace_id,
+        job_id,
+        self_writes,
+        now_ms,
+        &NoFaults,
+    ) {
+        return Ok(());
+    }
+    let job = store
+        .load_materialization_job(job_id)?
+        .ok_or_else(|| invalid("automation-set-batch-files-unplaced"))?;
+    // Opening the record can settle a newer head before the final wait.
+    let successor = store.read_with(|conn| {
+        conn.query_row("SELECT job_id FROM materialization_jobs WHERE workspace_id=?1 AND target_path=?2 AND target_generation>?3 AND job_id NOT LIKE 'version-switch-%' ORDER BY target_generation DESC LIMIT 1",
+            params![workspace_id, job.target_path, job.target_generation], |row| row.get::<_, String>(0)).optional().map_err(StorageError::corrupt_public)
+    })?;
+    if successor.is_some_and(|successor| {
+        super::materialization::materialize_expected_job(
+            store,
+            root,
+            workspace_id,
+            &successor,
+            self_writes,
+            now_ms,
+            &NoFaults,
+        )
+    }) {
+        return Ok(());
+    }
+    Err(invalid("automation-set-batch-files-unplaced"))
 }
 
 impl ActorHandle {
@@ -93,7 +145,9 @@ impl ActorHandle {
                         Some(guard) => {
                             let key =
                                 DocKey::new(&workspace_id, &plan.version_id, &guard.object_id)?;
-                            leases.is_held(&key)
+                            lineage_absent(conn, &key)?
+                                || leases.is_held(&key)
+                                || dohc_engine_sync::open_sync_conflict_for_object(conn, &workspace_id, &plan.version_id, &key.object_id)?.is_some()
                                 || conn.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)", params![key.workspace_id,key.version_id,key.object_id], |row| row.get::<_,bool>(0)).map_err(StorageError::corrupt_public)?
                                 || dohc_engine_collab::owner_outbox::has_adopted_owner_in(
                                     conn, &key,
@@ -149,6 +203,7 @@ impl ActorHandle {
             SetBatchReceipt,
             Vec<dohc_engine_domain::AutomationClaim>,
             Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+            f64,
         ),
         RuntimeError,
     > {
@@ -198,17 +253,14 @@ impl ActorHandle {
             let root = root.clone();
             let self_writes = self_writes.clone();
             self.run(move |store, _| {
-                if !super::materialization::materialize_expected_job(
+                place_batch_job(
                     store,
                     &root,
                     &workspace_id,
                     &job_id,
                     self_writes.as_ref(),
                     now_ms,
-                    &NoFaults,
-                ) {
-                    return Err(invalid("automation-set-batch-files-unplaced"));
-                }
+                )?;
                 Ok(())
             })
             .await?;
@@ -244,6 +296,7 @@ fn set_fields_batch_on_store(
         SetBatchReceipt,
         Vec<dohc_engine_domain::AutomationClaim>,
         Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+        f64,
     ),
     RuntimeError,
 > {
@@ -252,7 +305,7 @@ fn set_fields_batch_on_store(
         store.read_with(|conn| read_set_receipt_in_tx(conn, workspace_id, &plan.key, digest))?
     {
         return match found {
-            SetBatchLookup::Committed { receipt } => Ok((receipt, Vec::new(), Vec::new())),
+            SetBatchLookup::Committed { receipt } => Ok((receipt, Vec::new(), Vec::new(), 0.0)),
             SetBatchLookup::Abandoned => Err(invalid("automation-set-batch-abandoned")),
             SetBatchLookup::Retired => Err(invalid("automation-set-batch-retired")),
         };
@@ -273,11 +326,20 @@ fn set_fields_batch_on_store(
     let mut held = Vec::new();
     for record in &plan.records {
         if let Some(guard) = &record.binding {
-            held.push(leases.acquire(&DocKey::new(
-                workspace_id,
-                &plan.version_id,
-                &guard.object_id,
-            )?)?);
+            held.push(
+                leases
+                    .acquire(&DocKey::new(
+                        workspace_id,
+                        &plan.version_id,
+                        &guard.object_id,
+                    )?)
+                    .map_err(|error| match error {
+                        dohc_engine_collab::CollabError::LeaseHeld => {
+                            invalid("automation-set-batch-open")
+                        }
+                        other => other.into(),
+                    })?,
+            );
         }
     }
     // An earlier Set may have committed this head without placing its file yet.
@@ -330,24 +392,21 @@ fn set_fields_batch_on_store(
             };
             if record.binding.as_ref() != Some(&current_guard) { return Err(invalid("automation-set-batch-binding-stale")); }
             let key = DocKey::new(workspace_id, &plan.version_id, &current_guard.object_id)?;
+            if lineage_absent(tx, &key)? { return Err(invalid("automation-set-batch-open")); }
             dohc_engine_collab::owner_outbox::require_ordinary_settlement(tx, &key)?;
             dohc_engine_collab::live_update_application::require_restore_open(tx, &key)?;
             let deferred: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ydoc_deferred_updates WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3)", params![key.workspace_id,key.version_id,key.object_id], |row| row.get(0)).map_err(StorageError::corrupt_public)?;
-            if deferred { return Err(invalid("ydoc-remote-updates-pending")); }
+            if deferred { return Err(invalid("automation-set-batch-open")); }
             if dohc_engine_sync::open_sync_conflict_for_object(tx, workspace_id, &plan.version_id, &key.object_id)?.is_some() {
-                return Err(invalid("ydoc-conflict-open"));
+                return Err(invalid("automation-set-batch-open"));
             }
             if !dohc_engine_collab::author_coverage::reconcile_in(tx, &key, now_ms)? { return Err(invalid("automation-set-batch-files-unplaced")); }
             let head = select_snapshot_by_path_in_tx(tx, workspace_id, &plan.version_id, &path)?.snapshot.ok_or_else(|| invalid("automation-set-batch-binding-stale"))?;
-            if let Some((seed, mut appended)) = dohc_engine_collab::seed_closed_record_in_tx(tx, &key, &path, &head.text, &head.blob_sha256, now_ms)? {
-                journal_ydoc_append_in_tx(tx, &key, &path, ContentKind::Richdoc, &seed, None, None,
-                    Some(dohc_engine_collab::owner_base_source::OwnerSeedSource { moment_id: head.latest_moment_id.clone(), blob_sha256: head.blob_sha256.clone() }),
-                    false, now_ms, &mut appended, &dohc_engine_storage::hex_sha256(&seed))?;
-            }
             let doc = dohc_engine_collab::load_doc_in(tx, &key)?;
             if doc.has_pending_dependencies() { return Err(dohc_engine_collab::CollabError::MissingDependencies.into()); }
             state_bytes += doc.encode_full_state().len();
             if state_bytes > if plan.records.len() == 1 { dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES } else { MAX_SET_BATCH_STATE } { return Err(invalid("automation-set-batch-oversized")); }
+            let source = dohc_engine_sync::project_ydoc_with_store(tx, &key, &doc, ContentKind::Richdoc)?.content;
             let mut fields = Vec::new();
             let initial_vector = doc.encode_state_vector();
             let mut changed = false;
@@ -365,6 +424,7 @@ fn set_fields_batch_on_store(
                 }
             }
             if changed {
+                doc.preserve_markdown_body_source(&source)?;
                 let update = doc.diff(&initial_vector)?;
                 let mut appended = dohc_engine_collab::record_update_in_tx(tx, &key, &update, Some(&automation_id), Some(&attribution), now_ms)?;
                 let (_, new_claims) = journal_ydoc_append_in_tx(tx, &key, &path, ContentKind::Richdoc, &update,
@@ -377,9 +437,12 @@ fn set_fields_batch_on_store(
                             params![workspace_id,plan.version_id,record.record_id,field.as_str()], |row| row.get(0)).map_err(StorageError::corrupt_public)?;
                     }
                 }
-                let projection = doc.project(ContentKind::Richdoc)?;
+                let projection = dohc_engine_sync::project_ydoc_with_store(tx, &key, &doc, ContentKind::Richdoc)?;
                 let expected = Some(head.blob_sha256);
-                let preimage = ydoc_settle_disk_preimage(root, &path, expected.as_deref(), &dohc_engine_storage::hex_sha256(projection.content.as_bytes()))?;
+                let preimage = ydoc_settle_disk_preimage(root, &path, expected.as_deref(), &dohc_engine_storage::hex_sha256(projection.content.as_bytes())).map_err(|error| match error {
+                    RuntimeError::Domain(DomainError::ConflictStaleTarget) => invalid("automation-set-batch-open"),
+                    other => other,
+                })?;
                 let (write, _) = ydoc_settlement_in_tx(tx, root, &key, &path, ContentKind::Richdoc, projection.content,
                     &projection.source_state_vector_sha256, &expected, &preimage, false, &format!("set-batch/{}", plan.key.batch),
                     None, None, false, SettlementKind::Document, now_ms)?;
@@ -392,6 +455,7 @@ fn set_fields_batch_on_store(
         if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
         Ok::<_, RuntimeError>((receipt, claims, facts))
     });
+    let writer_ms = started.elapsed().as_secs_f64() * 1000.0;
     // This path never mutates cache entries speculatively. Remove only its own stale bases.
     for record in &plan.records {
         if let Some(guard) = &record.binding {
@@ -403,7 +467,7 @@ fn set_fields_batch_on_store(
         }
     }
     match outcome? {
-        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Committed((receipt, claims, facts)) => Ok((receipt, claims, facts, writer_ms)),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
 }
@@ -480,8 +544,35 @@ mod tests {
                 &mut store,
                 &format!("object-{index}"),
                 &path,
-                &format!("---\nid: {record_id}\nStatus: open\nCount: 1\n---\n\nBody {index}\n"),
+                &format!("---\nid: {record_id}\nStatus: open\nCount: 1\n---\n\n* item {index}\n"),
             );
+            let key = DocKey::new(WS, "main", &format!("object-{index}")).unwrap();
+            let text = std::fs::read_to_string(scratch.path().join(&path)).unwrap();
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, &text)
+                .unwrap();
+            dohc_engine_collab::record_local_update(
+                &mut store,
+                &mut WriterDocCache::new(),
+                &key,
+                &doc.encode_full_state(),
+                dohc_engine_collab::LocalAppend {
+                    marker: Some(dohc_engine_collab::MarkerCreation {
+                        path: Some(&path),
+                        content_kind: ContentKind::Richdoc,
+                        regime: dohc_engine_collab::Regime::LocalOnly,
+                    }),
+                    ensure_parent_row: true,
+                    require_empty_lineage: true,
+                    is_seed: true,
+                    seed_source_sha256: Some(&dohc_engine_storage::hex_sha256(text.as_bytes())),
+                    ..Default::default()
+                },
+                &NoFaults,
+                1,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
             records.push(SetBatchRecord {
                 collection_id: "schema".into(),
                 record_id,
@@ -546,7 +637,7 @@ mod tests {
             faults,
             &(),
         )
-        .map(|(receipt, _, _)| receipt)
+        .map(|(receipt, _, _, _)| receipt)
     }
     fn changes(store: &EngineStore) -> i64 {
         store
@@ -575,16 +666,168 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn missing_lineage_is_prepared_as_open_and_never_seeded_by_a_batch() {
+        let (scratch, mut store, mut plan) = fixture(1);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("DELETE FROM ydoc_docs WHERE workspace_id=?1", [WS])
+                    .map_err(StorageError::persist_public)
+            })
+            .unwrap();
+        plan.records[0].binding = None;
+        drop(store);
+        let db = engine_db_path(&scratch).unwrap();
+        let identity = crate::identity::EngineDbIdentity::resolve_or_create(&db).unwrap();
+        let mut actor = super::super::WorkspaceActor::spawn(db, identity, 1, 2, None).unwrap();
+        let (_, _, open) = actor
+            .handle()
+            .prepare_set_batch(WS.into(), plan, LeaseRegistry::new())
+            .await
+            .unwrap();
+        assert_eq!(open, vec![true]);
+        actor.close().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_record_opened_after_commit_still_places_before_the_run_finishes() {
+        let (scratch, mut store, plan) = fixture(1);
+        let receipt = submit(&mut store, scratch.path(), &plan, &NoFaults).unwrap();
+        drop(store);
+        let db = engine_db_path(&scratch).unwrap();
+        let supervisor = crate::WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 3).unwrap().actor;
+        let key = DocKey::new(WS, "main", "object-0").unwrap();
+        let leases = LeaseRegistry::new();
+        let _open_lease = leases.acquire(&key).unwrap();
+        let opened = actor
+            .ydoc_open_state(
+                WS.into(),
+                3,
+                false,
+                Some(key),
+                "main".into(),
+                "tasks/0.md".into(),
+                Some(ContentKind::Richdoc),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let doc = dohc_engine_collab::Ydoc::wire();
+        doc.apply(&opened.initial_update).unwrap();
+        assert_eq!(doc.frontmatter_json()["Status"], json!("done"));
+        actor
+            .wait_set_batches(
+                WS.into(),
+                scratch.path().to_owned(),
+                vec![(receipt.key, receipt.digest)],
+                Arc::new(()),
+                4,
+            )
+            .await
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(scratch.path().join("tasks/0.md"))
+                .unwrap()
+                .contains("Status: done")
+        );
+        supervisor.close(&db).unwrap();
+    }
+
     #[test]
-    fn stale_object_lineage_restore_head_and_attribution_are_refused() {
-        for changed_guard in 0..4 {
+    fn an_external_disk_edit_after_prepare_returns_open_without_committing() {
+        let (scratch, mut store, plan) = fixture(1);
+        std::fs::write(scratch.path().join("tasks/0.md"), "external bytes").unwrap();
+        assert!(
+            submit(&mut store, scratch.path(), &plan, &NoFaults)
+                .unwrap_err()
+                .to_string()
+                .contains("automation-set-batch-open")
+        );
+        assert_eq!(changes(&store), 0);
+        assert_eq!(
+            std::fs::read_to_string(scratch.path().join("tasks/0.md")).unwrap(),
+            "external bytes"
+        );
+    }
+
+    #[test]
+    fn frontmatter_sets_keep_noncanonical_body_bytes_and_history() {
+        let (scratch, mut store, plan) = fixture(1);
+        let before = std::fs::read_to_string(scratch.path().join("tasks/0.md")).unwrap();
+        let receipt = submit(&mut store, scratch.path(), &plan, &NoFaults).unwrap();
+        place(&mut store, scratch.path(), &receipt);
+        let after = std::fs::read_to_string(scratch.path().join("tasks/0.md")).unwrap();
+        let body = |text: &str| {
+            dohc_engine_domain::collections::markdown_frontmatter_json_with_body(text)
+                .unwrap()
+                .1
+                .to_owned()
+        };
+        assert_eq!(body(&before), body(&after));
+        assert!(body(&after).contains("* item"));
+        assert_eq!(changes(&store), 2);
+    }
+
+    #[test]
+    fn a_head_change_after_prepare_keeps_conflicting_fields_without_refusing_the_batch() {
+        let (scratch, mut store, plan) = fixture(1);
+        let mut other = plan.clone();
+        other.key.batch = "other".into();
+        other.records[0].fields[0].after = json!("other");
+        let earlier = submit(&mut store, scratch.path(), &other, &NoFaults).unwrap();
+        place(&mut store, scratch.path(), &earlier);
+        let receipt = submit(&mut store, scratch.path(), &plan, &NoFaults).unwrap();
+        assert!(matches!(
+            receipt.records[0].fields[0],
+            SetBatchFieldOutcome::Kept { .. }
+        ));
+    }
+
+    #[test]
+    fn superseded_batch_job_waits_for_the_newer_placed_content() {
+        let (scratch, mut store, plan) = fixture(1);
+        let receipt = submit(&mut store, scratch.path(), &plan, &NoFaults).unwrap();
+        let old = store
+            .load_materialization_job(&receipt.jobs[0])
+            .unwrap()
+            .unwrap();
+        store
+            .mark_materialization_cancelled(&old.job_id, 3)
+            .unwrap();
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_storage::enqueue_job(
+                    tx,
+                    &dohc_engine_storage::MaterializationJobSpec {
+                        job_id: "newer-open-settle".into(),
+                        workspace_id: WS.into(),
+                        target_path: old.target_path.clone(),
+                        content_sha256: old.content_sha256.clone(),
+                        preimage: old.preimage.clone(),
+                        target_generation: old.target_generation + 1,
+                        now_ms: 3,
+                    },
+                )
+            })
+            .unwrap();
+        place_batch_job(&store, scratch.path(), WS, &old.job_id, &(), 4).unwrap();
+        assert!(
+            std::fs::read_to_string(scratch.path().join("tasks/0.md"))
+                .unwrap()
+                .contains("Status: done")
+        );
+    }
+
+    #[test]
+    fn stale_object_lineage_restore_and_attribution_are_refused() {
+        for changed_guard in 0..3 {
             let (scratch, mut store, mut plan) = fixture(1);
             let guard = plan.records[0].binding.as_mut().unwrap();
             match changed_guard {
                 0 => guard.object_id = "other-object".into(),
                 1 => guard.lineage_claim_id = Some("other-lineage".into()),
-                2 => guard.restore_generation = Some(1),
-                _ => guard.head_sha256 = "stale-head".into(),
+                _ => guard.restore_generation = Some(1),
             }
             assert!(submit(&mut store, scratch.path(), &plan, &NoFaults).is_err());
             assert_eq!(changes(&store), 0);
@@ -792,12 +1035,12 @@ mod tests {
             )
             .unwrap()
         };
-        let (first, _, facts) = apply();
+        let (first, _, facts, _) = apply();
         assert_eq!(facts.len(), 4);
         assert!(facts.iter().all(
             |record| record.fields.len() == 2 && record.attribution.as_ref() == Some(&author())
         ));
-        let (replayed, claims, facts) = apply();
+        let (replayed, claims, facts, _) = apply();
         assert_eq!(first, replayed);
         assert!(claims.is_empty());
         assert!(facts.is_empty());
@@ -880,7 +1123,7 @@ mod tests {
             assert!(
                 text.contains("Status: done")
                     && text.contains("Count: 2")
-                    && text.contains(&format!("Body {index}"))
+                    && text.contains(&format!("* item {index}"))
             );
         }
     }
@@ -925,7 +1168,9 @@ mod tests {
                 &NoFaults,
                 &(),
             )
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .contains("automation-set-batch-open")
         );
         assert_eq!(changes(&store), 0);
         let mut oversized = plan.clone();

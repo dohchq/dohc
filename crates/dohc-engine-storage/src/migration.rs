@@ -2915,8 +2915,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
             step INTEGER NOT NULL CHECK(step >= 0), batch TEXT NOT NULL, digest TEXT NOT NULL, \
             receipt_json TEXT CHECK(receipt_json IS NULL OR json_valid(receipt_json)), \
             created_at_ms INTEGER NOT NULL, \
-            PRIMARY KEY(workspace_id,claim_id,key_seed,step,batch)) STRICT; \
-            CREATE INDEX automation_set_batch_receipts_retirement ON automation_set_batch_receipts(workspace_id,claim_id);",
+            PRIMARY KEY(workspace_id,claim_id,key_seed,step,batch)) STRICT;",
         sets_user_version: None,
     },
 ];

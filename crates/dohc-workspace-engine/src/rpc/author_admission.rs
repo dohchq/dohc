@@ -104,18 +104,32 @@ mod tests {
             ("SetBatchSubmission", "collections.setFieldsBatch"),
         ];
         let mut found = Vec::new();
-        for entry in std::fs::read_dir(rpc).unwrap() {
-            let path = entry.unwrap().path();
+        let mut pending = vec![rpc];
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                pending.extend(
+                    std::fs::read_dir(path)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path()),
+                );
+                continue;
+            }
             if path.extension().is_none_or(|extension| extension != "rs") {
                 continue;
             }
             let source = std::fs::read_to_string(path).unwrap();
             let mut name = None;
             for line in source.lines() {
-                if let Some(declaration) = line.trim().strip_prefix("struct ") {
-                    name = declaration.split_whitespace().next();
+                if let Some(declaration) = line
+                    .trim()
+                    .split_once("struct ")
+                    .map(|(_, declaration)| declaration)
+                {
+                    name = declaration
+                        .split(|c: char| c.is_whitespace() || c == '{' || c == '<')
+                        .next();
                 }
-                if line.starts_with("    attribution:") {
+                if line.split_whitespace().any(|token| token == "attribution:") {
                     let name = name.expect("attribution parameter belongs to a struct");
                     let (_, method) = listed
                         .iter()

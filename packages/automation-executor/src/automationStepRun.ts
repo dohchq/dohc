@@ -181,11 +181,13 @@ export async function runSteps(
   // A step that failed before anything was saved changed nothing: the claim
   // runs again from the start.
   if (outcome.kind !== "done" && !outcome.saved) return outcome.outcome;
-  if (backend.lookupBatch && run.steps.some(step => step.batches?.length)) {
-    run.applied = (await reconcileSetBatches(run, backend.lookupBatch)).applied;
+  if (outcome.kind !== "done" && backend.lookupBatch && run.steps.some(step => step.batches?.length)) {
+    const recovered = await reconcileSetBatches(run, backend.lookupBatch);
+    run.applied = recovered.applied;
+    run.steps = recovered.steps;
   }
+  if (run.steps.some(step => step.batches?.some(batch => !batch.abandoned))) await backend.waitBatches?.(run);
   if (outcome.kind === "done") {
-    if (run.steps.some(step => step.batches?.some(batch => !batch.abandoned))) await backend.waitBatches?.(run);
     run.outcome = { state: "done" };
   } else if (outcome.outcome.kind === "failed") {
     run.outcome = { state: "failed", error: outcome.outcome.error, run: input.claimRun, step: outcome.step };
@@ -359,7 +361,8 @@ async function walkSteps(
       if (effect.kind === "set" && backend.prepareBatch && backend.applyBatch) {
         let batch = step.batches?.find(batch => !batch.abandoned && batch.part === part);
         if (!batch) {
-          const parent = step.batches?.find(batch => batch.abandoned && batch.part <= part && part < batch.part + batch.count);
+          const parent = step.batches?.filter(batch => batch.abandoned && batch.part <= part && part < batch.part + batch.count)
+            .sort((a, b) => b.plan.key.batch.split("/").length - a.plan.key.batch.split("/").length)[0];
           let count = 0;
           let assignments = 0;
           const records = new Set<string>();
@@ -369,8 +372,8 @@ async function walkSteps(
             count += 1; assignments += candidate.fields.length; records.add(candidate.target.recordId);
           }
           if (parent) count = Math.min(count, Math.ceil(parent.count / 2), parent.part + parent.count - part);
-          const prepared = count === 0 || parent?.count === 1 ? null
-            : await backend.prepareBatch(run, step, part, count, parent ? `${parent.plan.key.batch}/${part - parent.part}` : undefined);
+          const prepared = count === 0 || parent?.borrowed || parent?.count === 1 ? null
+            : await backend.prepareBatch(run, step, part, count, parent ? `${parent.plan.key.batch}/${part - parent.part}/${step.batches!.length}` : undefined);
           if (prepared) {
             batch = prepared;
             step.batches = [...(step.batches ?? []), batch];
@@ -383,34 +386,33 @@ async function walkSteps(
           let receipt: SetBatchReceipt;
           try { receipt = await backend.applyBatch(batch, step); }
           catch (error) {
-            if (errorText(error).includes("automation-set-batch-open") && backend.lookupBatch) {
-              const fenced = await backend.lookupBatch({key: batch.plan.key, digest: batch.digest});
-              if (fenced.state === "committed") receipt = fenced.receipt;
-              else {
-                if (fenced.state === "retired") return failed("This automation run has left run history.");
-                batch.abandoned = true;
-                await store.save(run);
-                part -= 1;
-                continue;
+            if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
+            const refusal = ["open", "oversized", "abandoned", "key-reused"].find(reason =>
+              errorText(error).includes(`automation-set-batch-${reason}`));
+            if (refusal && backend.lookupBatch) {
+              let fenced: SetBatchLookup;
+              try { fenced = await backend.lookupBatch({ key: batch.plan.key, digest: batch.digest }); }
+              catch (lookupError) {
+                if (!errorText(lookupError).includes("automation-set-batch-key-reused")) throw lookupError;
+                fenced = { state: "abandoned" };
               }
-            } else if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
-            else if ((errorText(error).includes("automation-set-batch-oversized") || errorText(error).includes("automation-set-batch-abandoned")) && backend.lookupBatch) {
-              const fenced = await backend.lookupBatch({ key: batch.plan.key, digest: batch.digest });
               if (fenced.state === "committed") receipt = fenced.receipt;
               else {
                 if (fenced.state === "retired") return failed("This automation run has left run history.");
                 batch.abandoned = true;
+                batch.borrowed = refusal !== "oversized";
                 await store.save(run);
-                if (batch.count === 1) { part -= 1; continue; }
-                const split = Math.ceil(batch.count / 2);
-                const children: StoredSetBatch[] = [];
-                for (const [offset, count] of [[0, split], [split, batch.count - split]] as const) {
-                  const child = await backend.prepareBatch(run, step, batch.part + offset, count, `${batch.plan.key.batch}/${offset}`);
-                  if (!child) return { kind: "wait", reason: "held" };
-                  children.push(child);
+                if (refusal === "oversized" && batch.count > 1) {
+                  const split = Math.ceil(batch.count / 2);
+                  const children: StoredSetBatch[] = [];
+                  for (const [offset, count] of [[0, split], [split, batch.count - split]] as const) {
+                    const child = await backend.prepareBatch(run, step, batch.part + offset, count,
+                      `${batch.plan.key.batch}/${offset}/${step.batches!.length + children.length}`);
+                    if (child) children.push(child);
+                  }
+                  step.batches = [...(step.batches ?? []), ...children];
+                  await store.save(run);
                 }
-                step.batches = [...(step.batches ?? []), ...children];
-                await store.save(run);
                 part -= 1;
                 continue;
               }
@@ -420,8 +422,8 @@ async function walkSteps(
             }
           }
           const writeMs = Math.max(0, dependencies.nowMs() - writeStarted);
-          // Submission includes FULL commit and bounds the receipt's precommit timer.
-          batchSize = Math.max(1, Math.min(8, Math.floor(batch.count * 12 / Math.max(1, receipt.writerMs, writeMs))));
+          // The engine measures the writer slice through FULL commit. IPC and queueing are fixed batch costs.
+          batchSize = Math.max(1, Math.min(8, Math.floor(batch.count * 12 / Math.max(1, receipt.writerMs))));
           const writes = batchWrites(batch, receipt, step);
           const landed = writes.map(writes => ({ ordinal: step.ordinal, writes, writeMs: writeMs / batch!.count, writeCount: 1 }));
           if (!store.appendBatch) throw new Error("The run store cannot record Set batches.");

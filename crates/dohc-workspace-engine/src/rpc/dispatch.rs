@@ -1018,7 +1018,13 @@ impl EngineService {
         let Some(handle) = handle else {
             return Ok(());
         };
-        if method.starts_with("automations.")
+        if (method.starts_with("automations.")
+            || matches!(
+                method,
+                "collections.setFieldsBatch"
+                    | "collections.prepareSetBatch"
+                    | "collections.lookupSetBatch"
+            ))
             && lock(&self.handles)
                 .get(handle)
                 .is_some_and(|open| open.projects_collections())

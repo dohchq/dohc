@@ -1042,6 +1042,33 @@ struct SetBatchWait {
     receipts: Vec<SetBatchReference>,
 }
 
+type SetBatchCommit = (
+    dohc_engine_domain::automation_sets::SetBatchReceipt,
+    Vec<dohc_engine_domain::AutomationClaim>,
+    Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    f64,
+);
+
+fn spawn_set_batch(
+    workspace_id: String,
+    events: crate::EngineEvents,
+    operation: impl std::future::Future<
+        Output = Result<SetBatchCommit, dohc_engine_runtime::RuntimeError>,
+    > + Send
+    + 'static,
+) -> tokio::task::JoinHandle<Result<SetBatchCommit, dohc_engine_runtime::RuntimeError>> {
+    tokio::spawn(async move {
+        let result = operation.await;
+        if let Ok((_, claims, records, _)) = &result {
+            for facts in records {
+                crate::events::emit_record_events(&events, &workspace_id, facts);
+            }
+            crate::events::emit_automation_claimed(&events, &workspace_id, claims);
+        }
+        result
+    })
+}
+
 impl EngineService {
     pub(super) async fn collections_prepare_set_batch(
         &self,
@@ -1114,32 +1141,47 @@ impl EngineService {
         let submission: SetBatchSubmission = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let (receipt, claims, records) = Self::read_under_ctx(
-            &cancellation,
-            "collections.setFieldsBatch",
-            open.actor.set_fields_batch(
-                open.workspace_id.clone(),
-                open.root.clone(),
-                submission.plan,
-                submission.digest,
-                submission.attribution,
-                self.leases.scoped(&open.root),
-                cancellation.token.clone(),
-                crate::rpc::request::now_ms()?,
-                std::sync::Arc::new(self.self_writes.scoped(&open.root)),
-            ),
-        )
-        .await?;
-        for facts in &records {
-            crate::events::emit_record_events(&self.events, &open.workspace_id, facts);
+        let actor = open.actor.clone();
+        let workspace_id = open.workspace_id.clone();
+        let root = open.root.clone();
+        let leases = self.leases.scoped(&open.root);
+        let token = cancellation.token();
+        let now_ms = crate::rpc::request::now_ms()?;
+        let self_writes = std::sync::Arc::new(self.self_writes.scoped(&open.root));
+        let events = self.events.clone();
+        // Publication belongs to the committing task, even if the request disappears.
+        let task = spawn_set_batch(workspace_id.clone(), events, async move {
+            actor
+                .set_fields_batch(
+                    workspace_id,
+                    root,
+                    submission.plan,
+                    submission.digest,
+                    submission.attribution,
+                    leases,
+                    token,
+                    now_ms,
+                    self_writes,
+                )
+                .await
+        });
+        let (receipt, _, _, writer_ms) =
+            Self::read_under_ctx(&cancellation, "collections.setFieldsBatch", async move {
+                task.await
+                    .map_err(|_| dohc_engine_runtime::RuntimeError::OperationCrashed)?
+            })
+            .await?;
+        let mut response = collection_response_value(receipt)?;
+        // Unlike the persisted estimate, this includes receipt insertion and FULL commit.
+        if writer_ms > 0.0 {
+            response["writerMs"] = json!(writer_ms);
         }
-        crate::events::emit_automation_claimed(&self.events, &open.workspace_id, &claims);
         self.collection_response_with_blob(
             ctx,
             &cancellation,
             request_id,
             "collections.setFieldsBatch",
-            collection_response_value(receipt)?,
+            response,
         )
         .await
     }
@@ -1174,5 +1216,87 @@ impl EngineService {
         )
         .await?;
         Ok(json!({"settled":true}))
+    }
+}
+
+#[cfg(test)]
+mod set_batch_publication_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_after_receipt_commit_still_publishes_once() {
+        use dohc_engine_domain::automation_sets::{SetBatchReceipt, save_set_receipt_in_tx};
+        use dohc_engine_storage::{EngineStore, NoFaults};
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let mut store =
+            EngineStore::open(&dohc_engine_testkit::engine_db_path(&scratch).unwrap(), 1).unwrap();
+        let receipt: SetBatchReceipt = serde_json::from_value(json!({
+            "key": {"claimId":"claim", "keySeed":"seed", "step":0, "batch":"0"},
+            "digest":"digest", "versionId":"main", "attribution":{"actorKind":"automation","depth":1},
+            "records":[], "jobs":[], "committedAtMs":1, "writerMs":1
+        })).unwrap();
+        let replayed = receipt.clone();
+        let events = crate::EngineEvents::default();
+        let mut received = events.subscribe();
+        let (committed, committed_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        let task = spawn_set_batch("workspace".into(), events.clone(), async move {
+            store
+                .write_full_with(&NoFaults, |tx| {
+                    save_set_receipt_in_tx(tx, "workspace", &receipt)
+                })
+                .unwrap();
+            committed.send(()).unwrap();
+            release_rx.await.unwrap();
+            let facts = dohc_engine_domain::CollectionRecordApplyFacts {
+                shared_author: None,
+                live_cursor: None,
+                collection_path: "tasks".into(),
+                record_id: "record".into(),
+                created: false,
+                author_origin_id: None,
+                attribution: Some(receipt.attribution.clone()),
+                source: None,
+                recorded_at_ms: 1,
+                fields: vec![dohc_engine_domain::CollectionFieldChangeFact {
+                    field_name: "Status".into(),
+                    previous_json: Some("\"open\"".into()),
+                    next_json: Some("\"done\"".into()),
+                    history_id: 1,
+                }],
+            };
+            Ok((receipt, vec![], vec![facts], 1.0))
+        });
+        let ctx = RequestContext::unbounded();
+        let cancel = ctx.cancel.clone();
+        let request = tokio::spawn(async move {
+            let cancellation = OperationCancellation::new(&ctx);
+            EngineService::read_under_ctx(&cancellation, "collections.setFieldsBatch", async move {
+                task.await.unwrap()
+            })
+            .await
+        });
+        committed_rx.await.unwrap();
+        cancel.cancel();
+        assert_eq!(
+            request.await.unwrap().unwrap_err().code,
+            ErrorCode::Cancelled
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            received.recv().await.unwrap().name,
+            crate::RECORD_FIELD_CHANGED_EVENT
+        );
+        assert_eq!(
+            received.recv().await.unwrap().name,
+            crate::RECORD_UPDATED_EVENT
+        );
+        spawn_set_batch("workspace".into(), events, async move {
+            Ok((replayed, vec![], vec![], 0.0))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(received.try_recv().is_err());
     }
 }

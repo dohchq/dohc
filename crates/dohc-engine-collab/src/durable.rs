@@ -17,16 +17,16 @@
 
 use dohc_engine_domain::ChangeAttribution;
 use dohc_engine_storage::{
-    enqueue_job, put_binary_blob, put_binary_blob_with_sha, EngineStore, FaultInjector,
-    MaterializationJobSpec, Preimage, TxnOutcome,
+    EngineStore, FaultInjector, MaterializationJobSpec, Preimage, TxnOutcome, enqueue_job,
+    put_binary_blob, put_binary_blob_with_sha,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
+use crate::DocKey;
 use crate::doc_cache::{GateBaseProbe, GateBaseSource, ServedGateBase, WriterDocCache};
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_YDOC_UPDATE_BYTES};
 use crate::ydoc::{ContentKind, Projection, SuccessorBase, Ydoc};
-use crate::DocKey;
 
 /// Which durability regime a lineage lives under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2171,69 +2171,6 @@ pub fn record_update_in_tx(
     record_authorized_update_in_tx(tx, key, update, actor_origin_id, attribution, now_ms)
 }
 
-/// Import the captured artifact only when a closed local lineage has no state.
-/// The import establishes canonical state without inventing field edits.
-pub fn seed_closed_record_in_tx(
-    tx: &Transaction<'_>,
-    key: &DocKey,
-    path: &str,
-    markdown: &str,
-    source_sha256: &str,
-    now_ms: i64,
-) -> Result<Option<(Vec<u8>, AppendOutcome)>, CollabError> {
-    crate::owner_outbox::draft::require_ordinary_write(tx, key)?;
-    crate::live_update_application::require_restore_open(tx, key)?;
-    if let Some(marker) = read_marker_in(tx, key)? {
-        if marker.head_update_seq != 0 || marker.head_snapshot_seq != 0 {
-            return Ok(None);
-        }
-        if marker.regime != Regime::LocalOnly || marker.lineage_claim_id.is_some() {
-            return Err(CollabError::SeedOntoExistingLineage);
-        }
-    }
-    tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms,path) VALUES(?1,?2,?3,'richdoc','local-only',0,0,'unclaimed',?4,?5) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET content_kind='richdoc',path=excluded.path",
-        rusqlite::params![key.workspace_id,key.version_id,key.object_id,now_ms,path]).map_err(map_sql)?;
-    let base = Ydoc::wire();
-    let moment: String = tx.query_row("SELECT latest_moment_id FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND path=?4", rusqlite::params![key.workspace_id,key.version_id,key.object_id,path], |row| row.get(0)).map_err(map_sql)?;
-    let seeded = Ydoc::with_client_id(u64::from(crate::seed_client_id(
-        key,
-        ContentKind::Richdoc,
-        &moment,
-        source_sha256,
-    )));
-    seeded.rewrite_content_to_markdown(ContentKind::Richdoc, markdown)?;
-    let update = seeded.encode_full_state();
-    validate_update_bytes(&update)?;
-    let (_, seq, _) = append_and_index_update(
-        tx,
-        key,
-        ContentKind::Richdoc,
-        &base,
-        &update,
-        &crate::hex_sha256(&update),
-        false,
-        None,
-        None,
-        None,
-        now_ms,
-    )?;
-    tx.execute("UPDATE ydoc_updates SET is_seed=1 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND seq=?4",
-        rusqlite::params![key.workspace_id,key.version_id,key.object_id,seq]).map_err(map_sql)?;
-    tx.execute("UPDATE ydoc_docs SET seed_source_sha256=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-        rusqlite::params![key.workspace_id,key.version_id,key.object_id,source_sha256]).map_err(map_sql)?;
-    crate::author_coverage::advance_in(tx, key, false)?;
-    Ok(Some((
-        update,
-        AppendOutcome {
-            settlement_requested: false,
-            seq,
-            deduped: false,
-            emit_outbound: false,
-            record_facts: None,
-        },
-    )))
-}
-
 /// The receipt application owner has checked its full binding in this transaction.
 pub(crate) fn record_authorized_update_in_tx(
     tx: &Transaction<'_>,
@@ -3118,8 +3055,8 @@ mod successor_validation_tests {
 
     use super::*;
     use crate::{
-        encode_scene_asset_record, import_portable_scene, scene_asset_ref, SceneAsset,
-        SuccessorIdentity, SuccessorIdentityInput,
+        SceneAsset, SuccessorIdentity, SuccessorIdentityInput, encode_scene_asset_record,
+        import_portable_scene, scene_asset_ref,
     };
 
     #[test]

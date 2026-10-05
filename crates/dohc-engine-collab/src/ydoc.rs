@@ -31,7 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use yrs::encoding::write::Write as _;
 use yrs::types::text::{TextDiffChunk, YChange};
@@ -1376,6 +1376,22 @@ impl Ydoc {
         })
     }
 
+    /// Carry a previously validated body source through frontmatter-only edits.
+    pub fn preserve_markdown_body_source(&self, source: &str) -> Result<(), CollabError> {
+        let projection = self.project_richdoc()?;
+        let source_body = split_markdown_frontmatter(source).2;
+        let projected_body = split_markdown_frontmatter(&projection).2;
+        if source_body == projected_body {
+            return Ok(());
+        }
+        let end = projection.len() - projected_body.len();
+        let preserved = format!("{}{}", &projection[..end], source_body);
+        if !self.source_reproduces(&preserved, &projection, false) {
+            return Err(CollabError::FrontmatterEditRefused);
+        }
+        self.record_validated_markdown_source_reference(&preserved)
+    }
+
     /// Remove one target from a relation field. A single relation removes the
     /// key; a many relation keeps the sequence and removes matching entries.
     /// Returns `None` when there is no such link or edits cannot preserve
@@ -1941,8 +1957,7 @@ fn rendered_reference(name: &str) -> bool {
 /// renderer hides a comment and may load what an element points at, so a
 /// source may not spell either where its projection holds text. A `<` before
 /// any other name, as in `Vec<T>`, is text to the importer and stays so.
-const HTML_ELEMENTS: &str =
-    "a abbr address applet area article aside audio b base basefont bdi bdo big blink \
+const HTML_ELEMENTS: &str = "a abbr address applet area article aside audio b base basefont bdi bdo big blink \
      blockquote body br button canvas caption center cite code col colgroup data datalist dd \
      del details dfn dialog dir div dl dt em embed fieldset figcaption figure font footer \
      form frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe image img \
@@ -2640,8 +2655,7 @@ fn parse_table(lines: &[&str], row_heights: Vec<(usize, i64)>) -> Option<(MdBloc
 
 /// Block HTML that ends a table row in marked, besides `<script`, `<pre`,
 /// `<style`, `<textarea` and `<!--`.
-const TABLE_ENDING_HTML: &str =
-    "address article aside base basefont blockquote body caption center col colgroup dd \
+const TABLE_ENDING_HTML: &str = "address article aside base basefont blockquote body caption center col colgroup dd \
      details dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 \
      h3 h4 h5 h6 head header hr html iframe legend li link main menu menuitem meta nav \
      noframes ol optgroup option p param search section summary table tbody td tfoot th thead \
@@ -5056,11 +5070,7 @@ fn render_inline(
                             leading_whitespace.iter().enumerate()
                         {
                             let replacement = if index == 0 {
-                                if whitespace == b' ' {
-                                    "&#32;"
-                                } else {
-                                    "&#9;"
-                                }
+                                if whitespace == b' ' { "&#32;" } else { "&#9;" }
                             } else if whitespace == b' ' {
                                 " "
                             } else {
@@ -5609,8 +5619,8 @@ mod projection_tests {
     use std::sync::Arc;
 
     use crate::limits::MAX_PROJECTION_BYTES;
-    use yrs::types::xml::XmlIn;
     use yrs::types::Attrs;
+    use yrs::types::xml::XmlIn;
 
     #[test]
     fn fixed_client_retains_deleted_yjs_payload() {
@@ -7571,9 +7581,10 @@ fn main() {}
         );
         let txn = doc.doc.transact();
         assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_META_KEY));
-        assert!(meta
-            .keys(&txn)
-            .all(|key| !key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)));
+        assert!(
+            meta.keys(&txn)
+                .all(|key| !key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX))
+        );
     }
 
     /// A collaborator can write any frontmatter source. One too deep, too
@@ -7635,9 +7646,10 @@ fn main() {}
                 Err(CollabError::FrontmatterEditRefused)
             ));
             if source.len() > crate::limits::MAX_PUBLIC_MARKDOWN_BYTES {
-                assert!(doc
-                    .validate_public_baseline(&doc.encode_full_state())
-                    .is_err());
+                assert!(
+                    doc.validate_public_baseline(&doc.encode_full_state())
+                        .is_err()
+                );
             }
         }
     }
@@ -7846,9 +7858,10 @@ fn main() {}
             doc.rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
                 .unwrap();
             let before = doc.encode_full_state();
-            assert!(doc
-                .frontmatter_drop_relation_target("owner", "rec_a", yaml.contains('['))
-                .is_none());
+            assert!(
+                doc.frontmatter_drop_relation_target("owner", "rec_a", yaml.contains('['))
+                    .is_none()
+            );
             assert_eq!(doc.encode_full_state(), before);
             assert_eq!(doc.project_richdoc().unwrap(), markdown);
         }
@@ -7944,15 +7957,17 @@ fn main() {}
                     }
                     assert!(doc.frontmatter_edits_refused(), "{yaml}");
                     let before = doc.encode_full_state();
-                    assert!(doc
-                        .frontmatter_drop_relation_target(key, "rec_a", many)
-                        .is_none());
-                    assert!(doc
-                        .frontmatter_drop_relation_target_preserving_markdown_source(
+                    assert!(
+                        doc.frontmatter_drop_relation_target(key, "rec_a", many)
+                            .is_none()
+                    );
+                    assert!(
+                        doc.frontmatter_drop_relation_target_preserving_markdown_source(
                             key, "rec_a", many
                         )
                         .unwrap()
-                        .is_none());
+                        .is_none()
+                    );
                     assert_eq!(doc.encode_full_state(), before, "{yaml}");
                     let projected = doc.project_richdoc().unwrap();
                     assert_eq!(projected.as_bytes(), markdown.as_bytes());
@@ -8022,9 +8037,11 @@ fn main() {}
             let meta = doc.doc.get_or_insert_map(ROOT_META);
             let txn = doc.doc.transact();
             assert!(!meta.contains_key(&txn, FRONTMATTER_SOURCE_META_KEY));
-            assert!(!meta
-                .keys(&txn)
-                .any(|key| key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX)));
+            assert!(
+                !meta
+                    .keys(&txn)
+                    .any(|key| key.starts_with(FRONTMATTER_SOURCE_ITEM_META_PREFIX))
+            );
         }
     }
 

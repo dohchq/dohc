@@ -4,7 +4,7 @@ type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string
 import type { ChangeAttributionWire } from "../ydoc/ydocWireContract";
 
 export interface SetBatchKey { claimId: string; keySeed: string; step: number; batch: string }
-export interface SetBatchBinding { objectId: string; lineageClaimId: string | null; restoreGeneration: number | null; schemaSha256: string; headSha256: string }
+export interface SetBatchBinding { objectId: string; lineageClaimId: string | null; restoreGeneration: number | null; schemaSha256: string }
 export interface SetBatchPlan {
   key: SetBatchKey;
   versionId: string;
@@ -32,7 +32,7 @@ export const SetBatchPlanSchema = mutableStruct({
   key: SetBatchKeySchema, versionId: Schema.String,
   records: array(mutableStruct({ collectionId: Schema.String, recordId: Schema.String,
     fields: array(mutableStruct({ field: Schema.String, before: Schema.Unknown, after: Schema.Unknown })),
-    binding: Schema.NullOr(mutableStruct({ objectId: Schema.String, lineageClaimId: Schema.NullOr(Schema.String), restoreGeneration: Schema.NullOr(Schema.Int), schemaSha256: Schema.String, headSha256: Schema.String })),
+    binding: Schema.NullOr(mutableStruct({ objectId: Schema.String, lineageClaimId: Schema.NullOr(Schema.String), restoreGeneration: Schema.NullOr(Schema.Int), schemaSha256: Schema.String })),
   })),
 });
 export const PreparedSetBatchSchema = mutableStruct({ plan: SetBatchPlanSchema, digest: Schema.String, open: array(Schema.Boolean) });
