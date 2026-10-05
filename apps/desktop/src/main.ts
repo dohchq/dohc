@@ -5367,7 +5367,8 @@ function registerIpcHandlers(): void {
     roots: workspaceRootApproval,
     effectiveHome,
     workspaceSummaries,
-    prioritizePreferredWorkspace,
+    prioritizePreferredWorkspace: (workspaces, event) =>
+      prioritizePreferredWorkspace(workspaces, event.sender),
     createWorkspaceFolder,
     forgetWorkspace,
     showItemInFolder: (path) => shell.showItemInFolder(path),
@@ -6059,8 +6060,8 @@ function registerIpcHandlers(): void {
     assertTrustedSender,
     withPhysicalWorkspaceOperation,
     rendererWorkspaceSessions,
-    setPreferredWorkspaceId: (workspaceId) => {
-      desktopWindows.setPreferredWorkspaceId(workspaceId);
+    setPreferredWorkspaceId: (workspaceId, sender) => {
+      desktopWindows.setPreferredWorkspaceId(workspaceId, sender);
     },
     markWorkspaceOpened,
     syncStatusWithOwnedProjection,

@@ -59,11 +59,13 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     }
   }
 
-  let preferredWorkspaceId: string | null = null;
+  const preferredWorkspaceIds = new WeakMap<WebContents, string>();
 
   function prioritizePreferredWorkspace(
     workspaces: WorkspaceSummary[],
+    sender: WebContents,
   ): WorkspaceSummary[] {
+    const preferredWorkspaceId = preferredWorkspaceIds.get(sender);
     if (!preferredWorkspaceId) return workspaces;
     const index = workspaces.findIndex(
       (workspace) => workspace.workspaceId === preferredWorkspaceId,
@@ -101,8 +103,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
 
   function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
     workspaceWindows.track(window);
-    const participantId = window.webContents.id;
+    const contents = window.webContents;
+    const participantId = contents.id;
     window.on("closed", () => {
+      preferredWorkspaceIds.delete(contents);
       workspaceWindows.forget(window);
       dependencies.exitRounds?.remove(participantId);
     });
@@ -164,10 +168,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     window: BrowserWindow | undefined,
     workspace: WorkspaceSummary,
   ): Promise<BrowserWindow> {
-    preferredWorkspaceId = workspace.workspaceId;
     const target =
       window && workspaceWindows.allLive().includes(window) ? window : liveWorkspaceWindow();
     if (target) {
+      preferredWorkspaceIds.set(target.webContents, workspace.workspaceId);
       target.webContents.send(CHANNELS.workspaceActivated, workspace);
       focusShareHandoffWindow(target);
       return Promise.resolve(target);
@@ -318,22 +322,24 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     // the crashed renderer cannot clean up itself.
     const activeWorkspaceId =
       dependencies.rendererWorkspaceSessions.current(sender)?.workspaceId ??
-      preferredWorkspaceId;
+      preferredWorkspaceIds.get(sender);
     // retireForReload invalidates the lease before returning its promise. The
     // outgoing document cannot admit fresh work while these owners drain.
     const accepted = await dependencies.rendererWorkspaceSessions.retireForReload(
       sender,
       rendererDocumentId,
     );
-    if (accepted && activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
+    if (accepted && activeWorkspaceId && !sender.isDestroyed()) {
+      preferredWorkspaceIds.set(sender, activeWorkspaceId);
+    }
     return accepted;
   }
 
   async function prepareAfterRendererCrash(sender: WebContents): Promise<void> {
     const activeWorkspaceId =
       dependencies.rendererWorkspaceSessions.current(sender)?.workspaceId ??
-      preferredWorkspaceId;
-    if (activeWorkspaceId) preferredWorkspaceId = activeWorkspaceId;
+      preferredWorkspaceIds.get(sender);
+    if (activeWorkspaceId) preferredWorkspaceIds.set(sender, activeWorkspaceId);
     await dependencies.rendererWorkspaceSessions.retireAfterCrash(sender);
   }
 
@@ -360,14 +366,16 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     return window;
   }
 
-  function createWorkspaceWindow(): BrowserWindow {
-    return trackWorkspaceWindow(
+  function createWorkspaceWindow(workspaceId?: string): BrowserWindow {
+    const window = trackWorkspaceWindow(
       createMainWindow({
         beforeRendererReload: prepareAfterRendererCrash,
         afterRendererCrashLoop: dependencies.afterRendererCrashLoop,
         preloadArguments: dependencies.preloadArguments,
       }),
     );
+    if (workspaceId) preferredWorkspaceIds.set(window.webContents, workspaceId);
+    return window;
   }
 
   // Resolves once the renderer can receive activation; rejects when the
@@ -438,7 +446,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
       focusShareHandoffWindow(window);
       return window;
     });
-    const window = createWorkspaceWindow();
+    const window = createWorkspaceWindow(workspace.workspaceId);
     const entry = {
       window,
       opening: (async () => {
@@ -497,7 +505,9 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     showOrCreateManagerWindow,
     openWorkspaceInWindow,
     get applicationMenuCanInstallUpdate(): boolean | null { return applicationMenuCanInstallUpdate; },
-    setPreferredWorkspaceId(workspaceId: string): void { preferredWorkspaceId = workspaceId; },
+    setPreferredWorkspaceId(workspaceId: string, sender: WebContents): void {
+      preferredWorkspaceIds.set(sender, workspaceId);
+    },
     seedZoomLevel(zoomLevel: number): void { knownZoomLevel ??= zoomLevel; },
   };
 }
