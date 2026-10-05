@@ -57,6 +57,12 @@ _Avoid_: private step, owner step
 **ActorKey**:
 A key for grouping displayed authors and presence from admitted authorship facts. It grants no authority. Dataset principalKey is separate.
 
+**ActorIssuer**:
+The canonical server URL that distinguishes account identities from different servers. It grants no authority.
+
+**ActorHueInput**:
+A branded value used to choose an actor's color. Matching colors do not merge identities or grant authority.
+
 **Group**:
 A named space with members where people and agents post, chat, or both.
 _Avoid_: channel, room, space. An editor group is the split pane, not a Group.
