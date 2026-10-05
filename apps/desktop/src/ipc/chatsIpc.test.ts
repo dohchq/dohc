@@ -293,11 +293,13 @@ describe("registered chat writes", () => {
     const test = fixture();
     await test.invoke(CHANNELS.sendChatMessage, {
       workspaceId: "workspace", threadId: "thread", body: "Hello", authorUserId: "forged",
+      authorActorKey: '{"kind":"installation","installationId":"forged"}',
       author: { kind: "agent", displayName: "Forged" }, fileReferences: [{ path: "notes/a.md" }],
     });
     expect(test.storeMethods.sendMessage).toHaveBeenCalledWith({
       workspaceId: "workspace", threadId: "thread", body: "Hello",
       author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner",
+      authorActorKey: '{"kind":"account","issuer":"https://cloud.test","userId":"verified-owner"}',
       attachments: [{ objectId: "object", pathHint: "notes/a.md" }],
     });
     expect(test.projectChatBookmarks).toHaveBeenCalledWith("workspace");
@@ -369,7 +371,11 @@ describe("registered channels and personal chat projections", () => {
     expect(test.ensureGroupFolder).toHaveBeenCalledWith(test.workspace, "general");
     expect(test.ensureGroupFolder.mock.invocationCallOrder[0]).toBeLessThan(test.storeMethods.createChannel.mock.invocationCallOrder[0]!);
     await test.invoke(CHANNELS.startChannelThread, { workspaceId: "workspace", channelId: "channel", body: "First message" });
-    expect(test.storeMethods.startChannelThread).toHaveBeenCalledWith({ workspaceId: "workspace", channelId: "channel", body: "First message", author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner" });
+    expect(test.storeMethods.startChannelThread).toHaveBeenCalledWith({
+      workspaceId: "workspace", channelId: "channel", body: "First message",
+      author: { kind: "human", displayName: "Sam" }, authorUserId: "verified-owner",
+      authorActorKey: '{"kind":"account","issuer":"https://cloud.test","userId":"verified-owner"}',
+    });
     expect(test.projectChatBookmarks).toHaveBeenCalledWith("workspace");
   });
 
