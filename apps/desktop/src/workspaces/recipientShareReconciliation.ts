@@ -18,7 +18,7 @@ export interface ConfirmedShareRemoval {
 }
 
 export interface ReceivedShareListing {
-  // Share ids the relay lists as active for this account.
+  // Share ids the relay lists as active and undamaged for this account.
   received: ReadonlySet<string>;
   removed: readonly ConfirmedShareRemoval[];
 }
@@ -39,7 +39,8 @@ export function readReceivedShareListing(listing: unknown): ReceivedShareListing
   if (!Array.isArray(receivedRows) || !Array.isArray(removedRows)) return null;
   const received = new Set<string>();
   for (const row of receivedRows) {
-    if (isRecord(row) && typeof row.shareId === "string" && row.shareId.length > 0) {
+    if (isRecord(row) && row.damaged !== true &&
+        typeof row.shareId === "string" && row.shareId.length > 0) {
       received.add(row.shareId);
     }
   }

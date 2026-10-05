@@ -202,6 +202,26 @@ function hasEnded(current: RegistryEntry, kind: string) {
 }
 
 describe("reconcileRecipientSharesAfterLookup", () => {
+  it.each(["mount", "view", "channel"])("skips a damaged received listing for an ended %s until repaired", async kind => {
+    const before = endedEntry(kind);
+    const h = await lookupHarness(before);
+    h.lookupShare.mockRejectedValue(new Error("Share request failed (404)"));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const damaged = readReceivedShareListing({ received: [
+        { shareId: "share", damaged: true, selector: null, access: "unknown" },
+      ] })!;
+      expect(await h.run(damaged)).toBe(false);
+      expect(h.current()).toEqual(before);
+    }
+    expect(h.lookupShare).not.toHaveBeenCalled();
+
+    h.lookupShare.mockResolvedValue(exactShare("share"));
+    const repaired = readReceivedShareListing({ received: [exactShare("share")] })!;
+    expect(await h.run(repaired)).toBe(true);
+    expect(h.lookupShare).toHaveBeenCalledExactlyOnceWith("share");
+    expect(hasEnded(h.current(), kind)).toBeUndefined();
+  });
+
   it.each(["mount", "view", "channel"])("confirms an ended %s after the last removal and keeps its pinned scope", async kind => {
     const before = endedEntry(kind);
     const h = await lookupHarness(before);
