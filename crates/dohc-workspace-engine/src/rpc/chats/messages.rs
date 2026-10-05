@@ -47,6 +47,7 @@ struct ChatMessageSendParams {
     author_display_name: String,
     author_owner_display_name: Option<String>,
     author_user_id: Option<String>,
+    author_actor_key: Option<String>,
     parent_message_id: Option<String>,
     origin: Option<String>,
     body: String,
@@ -211,6 +212,9 @@ pub(super) fn message_json(message: &ChatMessage) -> Value {
     }
     if let Some(author_user_id) = &message.author_user_id {
         object.insert("authorUserId".to_owned(), json!(author_user_id));
+    }
+    if let Some(key) = &message.author_actor_key {
+        object.insert("authorActorKey".to_owned(), json!(key));
     }
     if let Some(parent_message_id) = &message.parent_message_id {
         object.insert("parentMessageId".to_owned(), json!(parent_message_id));
@@ -558,6 +562,7 @@ impl EngineService {
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
+                params.author_actor_key,
                 cancellation.token(),
             ),
         )

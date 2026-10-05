@@ -1,3 +1,6 @@
+import { createActorIssuer, parseActorKey } from "@dohc/workspace-contracts/actor-identity";
+import type { ActorIssuer, ActorKey } from "@dohc/workspace-contracts/actor-identity";
+import type { ChatMessage } from "@dohc/workspace-contracts/engine";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type {
   JoinedSharedChannel,
@@ -165,5 +168,77 @@ export function assertSharedChannelMessageIdentity(input: {
     input.authorUserId !== input.joinedChannel.recipientUserId
   ) {
     throw new Error("Sign in to the account that joined this.");
+  }
+}
+
+// Only the native own-store column contains keys this device serialized.
+// Parsing a key restores grouping, never origin or assurance.
+export function readLocalChatActorKey(message: Pick<ChatMessage, "authorActorKey">): ActorKey | null {
+  return message.authorActorKey === undefined ? null : parseActorKey(message.authorActorKey);
+}
+
+export async function resolveThreadActorIssuer(input: {
+  workspace: Pick<RegistryEntry, "workspaceId" | "remote" | "sharedChannels" | "shareView">;
+  store: ChatRelayIdentityStore;
+  threadId: string;
+  // The caller pins its registry attachment/session when those can be replaced.
+  assertCurrent?: () => void;
+}): Promise<ActorIssuer | null> {
+  const { workspace, store, threadId } = input;
+  const workspaceId = workspace.workspaceId;
+  const snapshot = () => JSON.stringify({
+    workspaceId: workspace.workspaceId, remote: workspace.remote, shareView: workspace.shareView,
+    channels: workspace.sharedChannels,
+  });
+  const binding = snapshot();
+  const changed = new Error("Chat issuer binding changed");
+  const check = () => {
+    input.assertCurrent?.();
+    if (snapshot() !== binding) throw changed;
+  };
+  const resolved: (string | null)[] = [];
+  const guardedStore: ChatRelayIdentityStore = {
+    async findThreadChannelId(target) {
+      check();
+      const result = await store.findThreadChannelId(target);
+      check();
+      resolved.push(result);
+      return result;
+    },
+    async getChannelWireId(target) {
+      check();
+      const result = await store.getChannelWireId(target);
+      check();
+      resolved.push(result);
+      return result;
+    },
+  };
+  try {
+    check();
+    // A received file share has no admitted account issuer in its registry.
+    if (workspace.shareView) return null;
+    const target = { threadId };
+    const joined = await joinedSharedChannelForTarget({
+      workspaceId, sharedChannels: workspace.sharedChannels, store: guardedStore, target,
+    });
+    check();
+    const initialBinding = resolved.splice(0);
+    // Recheck the thread's channel/wire binding, independently of the registry.
+    const current = await joinedSharedChannelForTarget({
+      workspaceId, sharedChannels: workspace.sharedChannels, store: guardedStore, target,
+    });
+    check();
+    if (current !== joined || resolved.length !== initialBinding.length ||
+      resolved.some((value, index) => value !== initialBinding[index])) return null;
+    const serverUrl = joined ? joined.serverUrl : workspace.remote?.serverUrl;
+    if (!serverUrl) return null;
+    try {
+      return createActorIssuer(serverUrl);
+    } catch {
+      return null;
+    }
+  } catch (error) {
+    if (error === changed) return null;
+    throw error;
   }
 }

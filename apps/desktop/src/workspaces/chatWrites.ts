@@ -1,5 +1,7 @@
 import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import type { ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
+import { createActorIssuer, deriveLocalActor, serializeActorKey } from "@dohc/workspace-contracts/actor-identity";
+import type { LocalActorIdentity } from "@dohc/workspace-contracts/actor-identity";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
@@ -48,6 +50,7 @@ interface Admission {
   channelWireId: string | null | undefined;
   generation: number;
   authorUserId: string | undefined;
+  actorIdentity: LocalActorIdentity | null;
 }
 
 const SESSION_CHANGED = "Your server session changed. Try again.";
@@ -155,7 +158,20 @@ export function createChatWrites(dependencies: {
     const channelWireId = hasJoinedChannels(place.workspaceId)
       ? await lookUpWireId(place, target)
       : undefined;
-    return { target, channelWireId, generation, authorUserId: check(place, channelWireId, generation) };
+    const authorUserId = check(place, channelWireId, generation);
+    const credentials = currentCredentials();
+    let actorIdentity: LocalActorIdentity | null = null;
+    try {
+      actorIdentity = {
+        installationId: localInstallationId(),
+        account: credentials === null ? null : {
+          issuer: createActorIssuer(credentials.serverUrl), userId: credentials.userId,
+        },
+      };
+    } catch {
+      // A damaged signed-in issuer supplies no installation evidence.
+    }
+    return { target, channelWireId, generation, authorUserId, actorIdentity };
   }
 
   // The final check and the store call run in one synchronous block, so no
@@ -222,7 +238,19 @@ export function createChatWrites(dependencies: {
     }
     const actor = await actorFor(input.writer);
     const attachments = await input.resolveAttachments();
+    const authorActorKey = admission.actorIdentity === null ? undefined : serializeActorKey(deriveLocalActor({
+      identity: admission.actorIdentity,
+      workspaceId: place.workspaceId,
+      author: input.writer.via === "automation"
+        ? { kind: "automation", automationId: input.writer.automationId }
+        : input.writer.via === "cli" && input.writer.actor === "agent"
+          ? { kind: "agent", claimedName: input.writer.agentName }
+          : { kind: "human" },
+      displayName: actor.author.displayName,
+      origin: input.writer.via,
+    }).key);
     return { admission, fields: {
+      ...(authorActorKey !== undefined ? { authorActorKey } : {}),
       ...actor,
       ...(input.messageId ? { messageId: input.messageId } : {}),
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),

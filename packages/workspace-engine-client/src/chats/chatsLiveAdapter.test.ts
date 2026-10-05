@@ -1321,7 +1321,6 @@ describe("ChatsLiveAdapter", () => {
   });
 });
 
-
 describe("loopback poll validation", () => {
   it.each([
     ["non-string", [7]], ["empty", ["  "]], ["duplicate", [" a ", "a"]],
@@ -1410,5 +1409,26 @@ describe("automation authors", () => {
       reactionId: "reaction", threadId: "thread", messageId: "message", emoji: "👍",
       author: { authorId: "ice", kind: "automation", displayName: "Stamp the finish date" }, state: "added", atMs: 1,
     })).toThrow(ProtocolShapeError);
+  });
+});
+
+describe("local chat actor key transport", () => {
+  it("passes admission keys through the native write door and preserves the own-store column on reads", async () => {
+    const key = '{"kind":"installation","installationId":"device"}';
+    const requests: Request[] = [];
+    const adapter = new ChatsLiveAdapter(mockDaemon(requests, (request) => {
+      if (request.method === CHATS_METHOD.threadStart) return { thread: { id: "thread", workspaceId: "workspace", title: "Thread", createdAtMs: 1, updatedAtMs: 2 }, message: { ...message, authorActorKey: key } };
+      if (request.method === CHATS_METHOD.messagesList) return { messages: [{ ...message, authorActorKey: key }, { ...message, id: "received" }], nextAfterMessageOrder: null };
+      return { ...message, authorActorKey: key };
+    }), WORKSPACE, { workspaceId: "workspace" });
+    const started = await adapter.startChannelThread({ workspaceId: "workspace", channelId: "channel", author: { kind: "human", displayName: "Sam" }, authorActorKey: key, body: "Hi" });
+    const sent = await adapter.sendMessage({ workspaceId: "workspace", threadId: "thread", author: { kind: "human", displayName: "Sam" }, authorActorKey: key, body: "Hi" });
+    expect(requests[0]!.params).toHaveProperty("authorActorKey", key);
+    expect(requests[1]!.params).toHaveProperty("authorActorKey", key);
+    expect(started.message.authorActorKey).toBe(key);
+    expect(sent.authorActorKey).toBe(key);
+    const rows = await adapter.listMessages({ workspaceId: "workspace", threadId: "thread" });
+    expect(rows[0]!.authorActorKey).toBe(key);
+    expect(rows[1]!.authorActorKey).toBeUndefined();
   });
 });

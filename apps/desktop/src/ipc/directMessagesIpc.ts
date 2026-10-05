@@ -91,7 +91,7 @@ export function registerDirectMessagesIpcHandlers<
   assertShareNotHeldElsewhere(shareId: string, workspaceId: string, channelWireId?: string): void;
   reserveAndPullSharedChannelForWorkspace(input: {
     operation: Operation; assertCurrent?: () => void; relay: SyncRelayConnection;
-    shareId: string; recipientUserId: string; relayUrl: string;
+    shareId: string; recipientUserId: string; relayUrl: string; serverUrl: string;
     preWrite?: (info: { channelWireId: string }) => void;
   }): Promise<JoinedSharedChannel>;
   endWorkspaceJoinedChannel(operation: Operation, shareId: string): void;
@@ -367,6 +367,7 @@ export function registerDirectMessagesIpcHandlers<
               shareId: input.shareId,
               recipientUserId: acceptCredentials.userId,
               relayUrl: acceptedRelayUrl,
+              serverUrl: acceptCredentials.serverUrl,
               preWrite: (info) => {
                 assertCurrentAcceptSession();
                 assertShareNotHeldElsewhere(

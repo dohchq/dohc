@@ -4962,3 +4962,129 @@ async fn an_automation_message_names_its_automation_over_rpc() {
     .await;
     assert_eq!(reaction.code, ErrorCode::InvalidParams, "{reaction:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_chat_actor_key_survives_restart_and_never_enters_replication() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "actor-key").await;
+    let mut id = 1;
+    let installation_key = r#"{"kind":"installation","installationId":"device-a"}"#;
+    let account_key = r#"{"kind":"account","issuer":"https://accounts.test","userId":"alice"}"#;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel", "name": "General", "kind": "channel", "nowMs": 10,
+        }),
+    )
+    .await;
+    let opening = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel", "threadId": "thread", "messageId": "opening",
+            "authorKind": "human", "authorDisplayName": "Alice", "authorActorKey": installation_key,
+            "body": "Offline", "nowMs": 20,
+        }),
+    )
+    .await;
+    assert_eq!(opening["message"]["authorActorKey"], installation_key);
+    let signed_in = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "thread", "messageId": "signed-in", "authorKind": "human",
+            "authorDisplayName": "Alice", "authorUserId": "alice", "authorActorKey": account_key,
+            "body": "Online", "nowMs": 21,
+        }),
+    )
+    .await;
+    assert_eq!(signed_in["authorActorKey"], account_key);
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = EngineStore::open(&db, 30).expect("reopen own store");
+    let payloads: Vec<String> = store
+        .read_with(|conn| {
+            let mut query = conn.prepare(
+                "SELECT payload_json FROM replication_log WHERE workspace_id='actor-key'",
+            )?;
+            query.query_map([], |row| row.get(0))?.collect()
+        })
+        .expect("payloads");
+    assert!(!payloads.is_empty());
+    for payload in payloads {
+        let value: Value = serde_json::from_str(&payload).expect("JSON payload");
+        assert!(value.get("authorActorKey").is_none());
+        assert!(value.get("author_actor_key").is_none());
+        assert!(!payload.contains("device-a"));
+        assert!(!payload.contains("https://accounts.test"));
+    }
+    for (seq, message_id, forged) in [(0, "received-keyless", false), (1, "received-forged", true)]
+    {
+        let mut payload = json!({
+            "threadId": "thread", "messageId": message_id, "authorKind": "agent",
+            "authorDisplayName": "Peer claim", "authorUserId": "peer", "body": "Received", "createdAtMs": 40 + seq,
+        });
+        if forged {
+            payload["authorActorKey"] = json!(installation_key);
+        }
+        apply_chat_envelope(
+            &mut store,
+            &ReplicationEnvelope {
+                workspace_id: "actor-key".to_owned(),
+                origin_id: "peer-device".to_owned(),
+                origin_seq: seq,
+                relay_seq: Some(seq),
+                op_kind: "chat.message.append".to_owned(),
+                payload,
+                recorded_at_ms: 40 + seq,
+            },
+            &NoFaults,
+        )
+        .expect("ingest");
+    }
+    let received_keys: Vec<Option<String>> = store
+        .read_with(|conn| {
+            let mut query = conn.prepare(
+                "SELECT author_actor_key FROM chat_messages WHERE message_id LIKE 'received-%'",
+            )?;
+            query.query_map([], |row| row.get(0))?.collect()
+        })
+        .expect("received keys");
+    assert_eq!(received_keys, vec![None, None]);
+    drop(store);
+
+    let reopened = open_workspace(&transport, &scratch, 100, "actor-key").await;
+    let listed = call(
+        &transport,
+        &reopened,
+        &mut id,
+        "chats.messages.list",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    let rows = listed["messages"].as_array().expect("messages");
+    assert_eq!(
+        rows.iter().find(|row| row["id"] == "opening").unwrap()["authorActorKey"],
+        installation_key
+    );
+    assert_eq!(
+        rows.iter().find(|row| row["id"] == "signed-in").unwrap()["authorActorKey"],
+        account_key
+    );
+    for row in rows
+        .iter()
+        .filter(|row| row["id"].as_str().unwrap().starts_with("received-"))
+    {
+        assert!(row.get("authorActorKey").is_none());
+    }
+    call(&transport, &reopened, &mut id, "workspace.close", json!({})).await;
+}

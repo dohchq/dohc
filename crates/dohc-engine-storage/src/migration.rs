@@ -2907,6 +2907,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
               ALTER TABLE ydoc_docs ADD COLUMN export_attempt_snapshot_seq INTEGER;",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 34,
+        id: "v2-local-chat-actor-key",
+        sql: "ALTER TABLE chat_messages ADD COLUMN author_actor_key TEXT;",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -3352,6 +3358,10 @@ mod tests {
             (
                 "v2-retained-head-export-attempts",
                 "ba1421193e0df1585620c17a25e4a1e085340eb5669438b0e23046351b7073df",
+            ),
+            (
+                "v2-local-chat-actor-key",
+                "feab80511ba8fec927085d9776c2159531635ae901860d365c26e8283554ddaa",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

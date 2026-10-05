@@ -46,6 +46,7 @@ struct ChatThreadStartParams {
     author_display_name: String,
     author_owner_display_name: Option<String>,
     author_user_id: Option<String>,
+    author_actor_key: Option<String>,
     origin: Option<String>,
     body: String,
     #[serde(default)]
@@ -295,6 +296,7 @@ impl EngineService {
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
+                params.author_actor_key,
                 cancellation.token(),
             ),
         )

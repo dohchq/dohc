@@ -1527,6 +1527,7 @@ async fn every_chat_write_announces_the_group_claims_it_committed() {
                 now_ms: 20,
                 request_id: None,
             },
+            None,
             CancellationToken::new(),
         )
         .await
