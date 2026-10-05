@@ -1865,10 +1865,8 @@ async function requestCli<Verb extends CliVerb>(
     },
   } as unknown as Extract<CliRequestWithoutToken, { verb: Verb }>;
   try {
-    const rawResult = ctx.request
-      ? await ctx.request(request)
-      : await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
-    return parseCliResult(verb, rawResult);
+    if (ctx.request) return parseCliResult(verb, await ctx.request(request));
+    return await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
