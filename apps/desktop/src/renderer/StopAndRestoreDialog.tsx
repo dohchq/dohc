@@ -275,20 +275,31 @@ export function StopAndRestoreDialog({
 
   const undo = (): Promise<void> => perform("dohc could not undo the restore.", "undo", async (token) => {
     const restored = receipts.get(workspaceId, chosen.target);
-    if (restored.length > 0) {
-      await bridge().undoStopAndRestore({ workspaceId, restoredMomentIds: restored.map((file) => file.restoredMomentId) });
-    }
-    receipts.set(workspaceId, chosen.target, []);
+    const result = restored.length > 0
+      ? await bridge().undoStopAndRestore({ workspaceId, restoredMomentIds: restored.map((file) => file.restoredMomentId) })
+      : { files: [] };
+    const completed = new Set(result.files.flatMap(file => file.kind === "restored" ? [file.momentId] : []));
+    receipts.set(workspaceId, chosen.target, restored.filter(file => !completed.has(file.restoredMomentId)));
     onRestored();
     // The row's Try again would restore the files again without asking.
     onSettled(identity);
     const last = receipts.shown(workspaceId, chosen.target);
     const runs = receipts.runs(workspaceId, chosen.target);
+    const putBack = [...(last?.undone ? last.result.restored : []), ...restored.filter(file => completed.has(file.restoredMomentId))];
+    const review = new Map(last?.result.review.map(file => [file.path, file]) ?? []);
+    const originals = new Map(restored.map(file => [file.restoredMomentId, file]));
+    for (const file of result.files) {
+      const original = originals.get(file.momentId);
+      if (!original) continue;
+      if (file.kind === "restored") review.delete(original.path);
+      else review.set(original.path, { path: original.path, reason: "restore-refused", detail: file.detail });
+    }
+    const reviewed = [...review.values()].sort((left, right) => left.path.localeCompare(right.path));
     const outcome = {
       result: last
-        ? { ...last.result, restored }
+        ? { ...last.result, restored: putBack, review: reviewed }
         : {
-            status: "restored" as const, restored, review: [], runsLeft: 0, runsUndone: runs.runsUndone, fieldsMissing: runs.fieldsMissing,
+            status: "restored" as const, restored: putBack, review: reviewed, runsLeft: 0, runsUndone: runs.runsUndone, fieldsMissing: runs.fieldsMissing,
             runChangesKept: runs.otherKept + runs.fieldsMissing,
             keptFields: [], wroteAutomations: false, sendsMessages: false, unfinished: null,
           },
@@ -333,7 +344,7 @@ export function StopAndRestoreDialog({
       {state.kind === "done" ? <Outcome words={words} result={state.result} undone={state.undone} onOpenFile={onOpenFile} onOpenCollection={onOpenCollection} /> : null}
       <div className="mt-4 flex justify-end gap-2">
         <SecondaryButton onClick={onClose}>{state.kind === "choose" ? "Cancel" : "Close"}</SecondaryButton>
-        {state.kind === "done" && !state.undone && state.result.restored.length > 0 ? (
+        {state.kind === "done" && receipts.get(workspaceId, chosen.target).length > 0 ? (
           <SecondaryButton data-testid="stop-and-restore-undo" onClick={() => void undo()}>Undo</SecondaryButton>
         ) : null}
         {state.kind === "choose" ? (

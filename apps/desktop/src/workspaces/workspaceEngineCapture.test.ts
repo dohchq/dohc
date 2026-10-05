@@ -1365,7 +1365,10 @@ describe("workspaceEngineCapture batch capture", () => {
     const pendingList = engine.flush();
     await entered.promise;
     const pendingRestore = engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER);
-    const refused = expect(pendingRestore).rejects.toThrow(state === "malformed" ? "files.toml" : "This history moment is no longer available.");
+    const refused = expect(pendingRestore).rejects.toMatchObject({ name: "RestorePolicyRefusalError",
+      reason: state === "malformed" ? "policy-unreadable" : "path-not-admitted",
+      message: expect.stringContaining(state === "malformed" ? "files.toml" : "This history moment is no longer available."),
+    });
     await write(root, ".dohc/files.toml", state === "malformed" ? "[[rules] invalid" : '[[rule]]\npath = "notes/**"\ntracked = false\n');
     release.resolve();
     await pendingList;

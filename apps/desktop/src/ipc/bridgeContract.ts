@@ -4894,6 +4894,16 @@ export const UndoStopAndRestorePayload = z.object({
   restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
 }).strict();
 export type UndoStopAndRestorePayload = z.infer<typeof UndoStopAndRestorePayload>;
+export const UndoStopAndRestoreResult = z.object({
+  // Outcomes identify the submitted restore moment, newest first.
+  files: z.array(z.discriminatedUnion("kind", [
+    z.object({ momentId: OPAQUE_ID, kind: z.literal("restored"),
+      receipt: z.object({ path: PATH_STRING, restoredMomentId: OPAQUE_ID }).strict(),
+    }).strict(),
+    z.object({ momentId: OPAQUE_ID, kind: z.literal("refused"), detail: z.string().max(2_000) }).strict(),
+  ])),
+}).strict();
+export type UndoStopAndRestoreResult = z.infer<typeof UndoStopAndRestoreResult>;
 
 // A current editor allows a step that became reachable only because an
 // editor left. `seq` names the hold the person saw.
@@ -6385,7 +6395,7 @@ export interface DohcDesktopBridge
   listAutomationPeople(payload: ListAutomationPeoplePayload): Promise<ListAutomationPeopleResult>;
   checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
   stopAndRestore(payload: StopAndRestorePayload): Promise<StopAndRestoreResult>;
-  undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<void>;
+  undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<UndoStopAndRestoreResult>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
   listServerAutomationHolds(payload: ListServerAutomationHoldsPayload): Promise<ListServerAutomationHoldsResult>;
