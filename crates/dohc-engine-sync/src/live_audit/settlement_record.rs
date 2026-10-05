@@ -369,18 +369,22 @@ fn adopted_source_before_in_tx(
            AND NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9)",
         params![record.relay_database_namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,
             serde_json::to_string(b).map_err(SyncError::corrupt)?,b.current_path,record.previous_cursor,record.terminal_cursor],
-        |row| Ok(crate::outbound::PortableBefore {
-            moment_id: row.get(0)?,
-            version_id: row.get(1)?,
-            object_id: row.get(2)?,
-            path: row.get(3)?,
-            blob_sha256: row.get(4)?,
-            byte_length: row.get(5)?,
-            recorded_at_ms: row.get(6)?,
-            metadata_origin: row.get(7)?,
-            metadata_summary: row.get(8)?,
-            metadata_correlation_id: row.get(9)?,
-        }),
+        |row| Ok(crate::outbound::PortableBefore::published(&serde_json::json!({
+            "operation": "write",
+            "momentId": row.get::<_, String>(0)?,
+            "versionId": row.get::<_, String>(1)?,
+            "objectId": row.get::<_, String>(2)?,
+            "payloadAfterPath": row.get::<_, String>(3)?,
+            "payloadAfterBlobSha256": row.get::<_, String>(4)?,
+            "payloadAfterContentKind": "text",
+            "payloadAfterByteLength": row.get::<_, i64>(5)?,
+            "recordedAtMs": row.get::<_, i64>(6)?,
+            "metadata": {
+                "origin": row.get::<_, String>(7)?,
+                "summary": row.get::<_, Option<String>>(8)?,
+                "correlationId": row.get::<_, Option<String>>(9)?,
+            },
+        }))),
     )
     .optional()
     .map_err(SyncError::corrupt)

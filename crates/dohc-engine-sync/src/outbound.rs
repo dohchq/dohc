@@ -127,16 +127,61 @@ struct MomentPayloadRow {
 /// Accepted text a published moment names as its before-image in place of
 /// the moment's local preimage. The local rollback tuple is unchanged.
 pub(crate) struct PortableBefore {
-    pub moment_id: String,
-    pub version_id: String,
-    pub object_id: String,
-    pub path: String,
-    pub blob_sha256: String,
-    pub byte_length: i64,
-    pub recorded_at_ms: i64,
-    pub metadata_origin: String,
-    pub metadata_summary: Option<String>,
-    pub metadata_correlation_id: Option<String>,
+    fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl PortableBefore {
+    pub(crate) fn bootstrap(payload: &serde_json::Value) -> Self {
+        let fields = payload
+            .as_object()
+            .expect("moment payload is an object")
+            .iter()
+            .filter(|(name, _)| name.starts_with("before") || name.starts_with("payloadBefore"))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        Self { fields }
+    }
+
+    pub(crate) fn published(payload: &serde_json::Value) -> Self {
+        let present = payload["operation"] != "delete";
+        let mut fields = serde_json::Map::new();
+        fields.insert(
+            "beforePresent".to_owned(),
+            serde_json::json!(if present { "present" } else { "null" }),
+        );
+        for (target, source) in [
+            ("payloadBeforePath", "payloadAfterPath"),
+            ("payloadBeforeContentKind", "payloadAfterContentKind"),
+            ("payloadBeforeBlobSha256", "payloadAfterBlobSha256"),
+            ("payloadBeforeByteLength", "payloadAfterByteLength"),
+            ("beforePath", "payloadAfterPath"),
+            ("beforeContentKind", "payloadAfterContentKind"),
+            ("beforeBlobSha256", "payloadAfterBlobSha256"),
+            ("beforeByteLength", "payloadAfterByteLength"),
+            ("beforeObjectId", "objectId"),
+            ("beforeVersionId", "versionId"),
+            ("beforeUpdatedAtMs", "recordedAtMs"),
+            ("beforeLatestMomentId", "momentId"),
+            ("beforeMetadata", "metadata"),
+        ] {
+            fields.insert(
+                target.to_owned(),
+                if present {
+                    payload[source].clone()
+                } else {
+                    serde_json::Value::Null
+                },
+            );
+        }
+        if let Some(origin) = fields
+            .get_mut("beforeMetadata")
+            .and_then(|v| v.get_mut("origin"))
+            && let Some(value) = origin.as_str()
+        {
+            *origin = serde_json::Value::String(replicated_moment_origin(value).to_owned());
+        }
+        Self { fields }
+    }
 }
 
 /// Project one committed domain moment into the relay-visible log.
@@ -162,6 +207,15 @@ pub(crate) fn journal_moment_append_from_in_tx(
     let (payload, recorded_at_ms) =
         moment_payload_in_tx(tx, workspace_id, moment_id, Some(before))?;
     journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
+}
+
+pub(crate) fn moment_append_payload_from_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    before: &PortableBefore,
+) -> Result<serde_json::Value, SyncError> {
+    moment_payload_in_tx(tx, workspace_id, moment_id, Some(before)).map(|(payload, _)| payload)
 }
 
 pub(crate) fn moment_append_payload_in_tx(
@@ -291,30 +345,10 @@ fn moment_payload_in_tx(
         "beforeMetadata": before_metadata,
     });
     if let Some(before) = portable_before {
-        let fields = serde_json::json!({
-            "payloadBeforePath": before.path,
-            "payloadBeforeContentKind": "text",
-            "payloadBeforeBlobSha256": before.blob_sha256,
-            "payloadBeforeByteLength": before.byte_length,
-            "beforePresent": "present",
-            "beforeObjectId": before.object_id,
-            "beforeVersionId": before.version_id,
-            "beforePath": before.path,
-            "beforeBlobSha256": before.blob_sha256,
-            "beforeContentKind": "text",
-            "beforeByteLength": before.byte_length,
-            "beforeUpdatedAtMs": before.recorded_at_ms,
-            "beforeLatestMomentId": before.moment_id,
-            "beforeMetadata": {
-                "origin": replicated_moment_origin(&before.metadata_origin),
-                "summary": before.metadata_summary,
-                "correlationId": before.metadata_correlation_id,
-            },
-        });
         let object = payload
             .as_object_mut()
             .expect("moment payload is an object");
-        for (field, value) in fields.as_object().expect("before group is an object") {
+        for (field, value) in &before.fields {
             object.insert(field.clone(), value.clone());
         }
     }

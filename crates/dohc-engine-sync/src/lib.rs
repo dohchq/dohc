@@ -123,8 +123,8 @@ pub use ydoc_apply::{
     validate_scene_asset_with_store, workspace_has_ydoc_state_in_tx,
 };
 pub use ydoc_origination::{
-    BaseOrigination, SharingDeclined, lineage_originated_here, originate_ydoc_base_in_tx,
-    ydoc_update_payload,
+    BaseOrigination, SharingDeclined, lineage_originated_here, originate_appended_ydoc_base_in_tx,
+    originate_ydoc_base_in_tx, ydoc_update_payload,
 };
 pub use ydoc_recovery::{YdocRecoveryMaterialization, repair_conflicted_ydoc_recoveries};
 

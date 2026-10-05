@@ -916,6 +916,7 @@ impl ActorHandle {
                 return Ok((None, None));
             };
             if marker.lineage_claim_status.has_claimed_base()
+                || marker.file_export_lane == dohc_engine_collab::FileExportLane::Declined
                 || (marker.head_update_seq == 0 && marker.head_snapshot_seq == 0)
                 || !store.read_with(|conn| {
                     dohc_engine_sync::workspace_replicates_with_relay(conn, &key.workspace_id)
@@ -1967,12 +1968,13 @@ pub(super) fn ydoc_record_update_on_store(
             // full state, so it already carries this append and every row the
             // lineage held before it — a delta beside it would be redundant.
             // Everything else journals its delta.
-            let base_originated = match dohc_engine_sync::originate_ydoc_base_in_tx(
+            let base_originated = match dohc_engine_sync::originate_appended_ydoc_base_in_tx(
                 tx,
                 &journal_key,
                 &journal_path,
                 actor_origin_id.as_deref(),
                 attribution.as_ref(),
+                seed_source.is_some(),
                 now_ms,
             )
             .map_err(|error| dohc_engine_collab::CollabError::Corrupt {

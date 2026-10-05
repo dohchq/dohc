@@ -2743,6 +2743,20 @@ BEGIN
 END;
 ";
 
+const V2_YDOC_FILE_EXPORT_LANE_DDL: &str = "
+ALTER TABLE ydoc_docs ADD COLUMN file_export_lane INTEGER NOT NULL DEFAULT 0 CHECK (file_export_lane IN (0,1,2));
+UPDATE ydoc_docs SET file_export_lane=1 WHERE lineage_claim_status='unclaimed' AND sharing_declined_json IS NOT NULL;
+CREATE TRIGGER ydoc_file_export_claimed AFTER UPDATE OF lineage_claim_status ON ydoc_docs
+WHEN NEW.lineage_claim_status != 'unclaimed' AND NEW.file_export_lane != 0
+BEGIN
+    UPDATE ydoc_docs SET file_export_lane=0 WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id;
+END;
+CREATE TRIGGER ydoc_file_export_deleted AFTER DELETE ON snapshots
+BEGIN
+    UPDATE ydoc_docs SET file_export_lane=0 WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+END;
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2943,6 +2957,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 31,
         id: "v2-ydoc-sharing-declined",
         sql: V2_YDOC_SHARING_DECLINED_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 33,
+        id: "v2-ydoc-file-export-lane",
+        sql: V2_YDOC_FILE_EXPORT_LANE_DDL,
         sets_user_version: None,
     },
 ];
@@ -4641,6 +4661,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn file_export_lane_migration_preserves_prune_and_head_changes_but_clears_claim_and_delete() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let ctx = MigrationContext::current(1000);
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..BASELINE_MIGRATIONS.len() - 1],
+            &ctx,
+            &NoFaults,
+        )
+        .unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0);").unwrap();
+        let sha = "a".repeat(64);
+        conn.execute("INSERT INTO blobs VALUES (?1,1,'a')", [&sha])
+            .unwrap();
+        conn.execute("INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','doc.md',?1,0,'a','ydoc')",[&sha]).unwrap();
+        conn.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,sharing_declined_json) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',0,?1)",[format!(r#"{{"head_sha256":"{sha}","constraint":"MAX_YDOC_UPDATE_BYTES","limit_bytes":20,"observed_bytes":21}}"#)]).unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let flag = |conn: &Connection| {
+            conn.query_row("SELECT file_export_lane FROM ydoc_docs", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(flag(&conn), 1);
+        conn.execute(
+            "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE snapshots SET latest_moment_id='b'", [])
+            .unwrap();
+        assert_eq!(flag(&conn), 1);
+        let claim = crate::hex_sha256(b"");
+        conn.execute("INSERT INTO binary_blobs VALUES (?1,0,X'')", [&claim])
+            .unwrap();
+        conn.execute("UPDATE ydoc_docs SET regime='replicated',lineage_claim_status='exact',lineage_claim_id=?1",[&claim]).unwrap();
+        assert_eq!(flag(&conn), 0);
+        conn.execute(
+            "UPDATE ydoc_docs SET regime='local-only',lineage_claim_status='unclaimed',lineage_claim_id=NULL,file_export_lane=1",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM snapshots", []).unwrap();
+        assert_eq!(flag(&conn), 0);
+        assert!(
+            conn.execute("UPDATE ydoc_docs SET file_export_lane=3", [])
+                .is_err()
+        );
+    }
     #[test]
     fn sharing_decline_migration_clears_head_claim_delete_and_restore() {
         let mut conn = Connection::open_in_memory().unwrap();

@@ -1059,6 +1059,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             now_ms,
         )
         .map_err(local)?;
+        match store
+            .write_with(faults, |tx| {
+                crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id)
+            })
+            .map_err(local)?
+        {
+            TxnOutcome::Committed(()) => {}
+            TxnOutcome::Crashed { .. } => return Ok(SyncPassOutcome::CrashedAfterRemoteCommit),
+        }
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
         let mut owner_admission_pending = Vec::new();
@@ -1106,6 +1115,15 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .map_err(local)?,
             );
             enrollment_prepared = true;
+            match store
+                .write_with(faults, |tx| {
+                    crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id)
+                })
+                .map_err(local)?
+            {
+                TxnOutcome::Committed(()) => {}
+                TxnOutcome::Crashed { .. } => return Ok(SyncPassOutcome::CrashedAfterRemoteCommit),
+            }
             // Re-read so the probe's backfill enters the push loop.
             origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         }
@@ -1201,6 +1219,17 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             .map_err(local)?,
                         );
                         enrollment_prepared = true;
+                        match store
+                            .write_with(faults, |tx| {
+                                crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id)
+                            })
+                            .map_err(local)?
+                        {
+                            TxnOutcome::Committed(()) => {}
+                            TxnOutcome::Crashed { .. } => {
+                                return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
+                            }
+                        }
                         for added in list_workspace_origins(store, workspace_id).map_err(local)? {
                             if seen_origins.insert(added.clone()) {
                                 origins.push_back(added);

@@ -170,7 +170,9 @@ pub fn originate_ydoc_base_in_tx(
     else {
         return Ok(BaseOrigination::NothingToDo);
     };
-    if marker.lineage_claim_status.has_claimed_base() {
+    if marker.lineage_claim_status.has_claimed_base()
+        || marker.file_export_lane == dohc_engine_collab::FileExportLane::Declined
+    {
         return Ok(BaseOrigination::NothingToDo);
     }
     // Check replication before the claim. A later refusal in the caller's
@@ -179,6 +181,27 @@ pub fn originate_ydoc_base_in_tx(
     if !can_originate_local_bases_in_tx(tx, &key.workspace_id)? {
         return Ok(BaseOrigination::NothingToDo);
     }
+    let catch_up: Option<String> = if marker.file_export_lane.is_enabled() {
+        let head: Option<String> = tx.query_row(
+            "SELECT s.latest_moment_id FROM snapshots s JOIN ydoc_docs d USING(workspace_id,version_id,object_id)
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.content_kind='text'
+               AND ((d.settled_update_seq=d.head_update_seq AND d.last_settled_sha=s.blob_sha256)
+                 OR (d.head_update_seq=1 AND d.head_snapshot_seq=0 AND d.seed_source_sha256=s.blob_sha256
+                   AND EXISTS(SELECT 1 FROM ydoc_updates u WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id AND u.object_id=d.object_id AND u.seq=1 AND u.is_seed=1)))",
+            params![key.workspace_id,key.version_id,key.object_id], |r|r.get(0),
+        ).optional().map_err(SyncError::corrupt)?;
+        if !head
+            .as_deref()
+            .map(|id| crate::enrolment::file_version_is_publishable_in_tx(tx, key, id))
+            .transpose()?
+            .unwrap_or(false)
+        {
+            return Ok(BaseOrigination::NothingToDo);
+        }
+        head
+    } else {
+        None
+    };
     let Some(encoded) =
         dohc_engine_collab::encode_origination_base_in_tx(tx, key).map_err(SyncError::corrupt)?
     else {
@@ -189,6 +212,8 @@ pub fn originate_ydoc_base_in_tx(
     // user can act on, and it is indistinguishable from the four benign ones
     // unless it says so.
     if encoded.base.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
+        tx.execute("UPDATE ydoc_docs SET file_export_lane=1 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![key.workspace_id,key.version_id,key.object_id]).map_err(SyncError::persist)?;
         let mut declined = SharingDeclined {
             object_id: key.object_id.clone(),
             version_id: key.version_id.clone(),
@@ -219,6 +244,16 @@ pub fn originate_ydoc_base_in_tx(
             ).map_err(SyncError::persist)?;
         }
         return Ok(BaseOrigination::Declined(declined));
+    }
+    if let Some(moment_id) = catch_up
+        && !crate::enrolment::journal_file_version_in_tx(
+            tx,
+            key,
+            &moment_id,
+            &mut crate::enrolment::FileExportBudget::default(),
+        )?
+    {
+        return Ok(BaseOrigination::NothingToDo);
     }
     match dohc_engine_collab::claim_base_in_tx(
         tx,
@@ -289,6 +324,27 @@ pub fn originate_ydoc_base_in_tx(
             )))
         }
     }
+}
+
+/// An established lane skips append origination until its next seed.
+#[allow(clippy::too_many_arguments)]
+pub fn originate_appended_ydoc_base_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    actor_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
+    fresh_seed: bool,
+    now_ms: i64,
+) -> Result<BaseOrigination, SyncError> {
+    if !fresh_seed
+        && dohc_engine_collab::read_marker_in(tx, key)
+            .map_err(SyncError::corrupt)?
+            .is_some_and(|marker| marker.file_export_lane.is_enabled())
+    {
+        return Ok(BaseOrigination::NothingToDo);
+    }
+    originate_ydoc_base_in_tx(tx, key, path, actor_origin_id, attribution, now_ms)
 }
 
 /// Build the one wire payload used by every locally journaled Y.Doc update.
