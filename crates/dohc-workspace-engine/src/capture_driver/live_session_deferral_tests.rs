@@ -432,6 +432,7 @@ async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() 
             CaptureProvenance::default(),
             EngineEvents::default(),
             CancellationToken::new(),
+            dohc_engine_files::NativeWorkCounters::default(),
         )
     };
     assert!(matches!(
