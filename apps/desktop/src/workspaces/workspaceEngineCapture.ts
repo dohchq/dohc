@@ -7282,7 +7282,6 @@ export function createWorkspaceEngineCapture(
       // Everything already enqueued (including the watcher's final settled
       // batch) still runs; only new work is refused.
       stopped = true;
-      captureWaitAbort.abort();
       if (daemonCaptureHealthTimer !== null) {
         clearTimeout(daemonCaptureHealthTimer);
         daemonCaptureHealthTimer = null;
@@ -7292,14 +7291,20 @@ export function createWorkspaceEngineCapture(
         if (store) {
           try {
             await drainPendingCollectionAdoptions(store);
+            // Normal stop captures the last disk edits. Explicit shutdown
+            // cancels convergence before session retirement and skips this wait.
+            if (!captureWaitAbort.signal.aborted) await store.flushCapture?.();
           } catch (error) {
             // A refused store was never opened, so nothing is pending in
             // it. Failing the stop here would block the move-aside rebuild,
             // which closes the capture first.
-            if (engineStoreRefusalOf(error) === null) throw error;
+            const cancelled = captureWaitAbort.signal.aborted &&
+              error === captureWaitAbort.signal.reason;
+            if (!cancelled && engineStoreRefusalOf(error) === null) throw error;
           }
         }
       } finally {
+        captureWaitAbort.abort();
         await releaseRetainedCollectionAdoptionProviders(new Set());
         // App quit may abandon a dead generation's retained release obligation:
         // the daemon process exits immediately afterward and releases every
