@@ -275,6 +275,25 @@ async function expectDeclaredMoment(page: Page, workspaceId: string, text: strin
   return moment;
 }
 
+/**
+ * The History label of each moment author that is this named recipient. A
+ * moment with one author labels it in `namedAuthor`; a moment with several
+ * labels each author at its own position in `authorLabels`.
+ */
+async function recipientCredit(page: Page, workspaceId: string, userId: string) {
+  return page.evaluate(async ({ workspaceId, path, userId }) => {
+    const history = await (window as unknown as { dohcDesktop: Api }).dohcDesktop.listEngineMoments({ workspaceId, limit: 100 });
+    if (!("moments" in history)) return { historyReady: false, labels: [] as (string | null)[], rows: [] };
+    const rows = history.moments.filter(moment => moment.path === path);
+    const labels = rows.flatMap(moment => (moment.authors ?? []).flatMap((author, index) =>
+      author.kind === "named" && author.userId === userId
+        ? [(moment.authors!.length === 1 ? moment.namedAuthor?.label : moment.authorLabels?.[index]) ?? null]
+        : []));
+    return { historyReady: true, labels,
+      rows: rows.map(({ id, momentOrder, authors, authorLabels, namedAuthor }) => ({ id, momentOrder, authors, authorLabels, namedAuthor })) };
+  }, { workspaceId, path: PATH, userId });
+}
+
 test("@shared-continuity a live document keeps its person's and agent's work through restart, a recipient continues it, the owner restores it, and the work continues with a new recipient", async ({ browser }, testInfo) => {
   test.setTimeout(900_000);
   const ownerTemp = await createTempWorkspace();
@@ -531,13 +550,16 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // authority for it, shown as their account email.
       const page = owner!.page;
       const recipientUserId = await accountId(recipientAccount.email);
-      await expect.poll(async () => {
-        const history = await page.evaluate(({ workspaceId }) =>
-          (window as unknown as { dohcDesktop: Api }).dohcDesktop.listEngineMoments({ workspaceId, limit: 100 }), { workspaceId: workspace.workspaceId });
-        return "moments" in history
-          ? history.moments.filter(moment => moment.path === PATH && moment.namedAuthor?.userId === recipientUserId).map(moment => moment.namedAuthor!.label)
-          : [];
-      }, { timeout: 60_000 }).toContainEqual(expect.stringContaining(recipientAccount.email));
+      let credit: Awaited<ReturnType<typeof recipientCredit>> | undefined;
+      try {
+        await expect.poll(async () => (credit = await recipientCredit(page, workspace.workspaceId, recipientUserId)).labels, { timeout: 60_000 })
+          .toContainEqual(expect.stringContaining(recipientAccount.email));
+      } finally {
+        await testInfo.attach("owner History recipient credit", { contentType: "application/json",
+          body: JSON.stringify({ recipientUserId, email: recipientAccount.email, credit }, null, 2) }).catch(() => undefined);
+      }
+      // The recipient's credit leaves the hosted agent's credit in place.
+      expect(await expectDeclaredMoment(page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot))).toEqual(provenance.hostedOwner);
       await openHistoryView(page);
       await expect(page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`, { hasText: recipientAccount.email }).first())
         .toBeVisible({ timeout: 60_000 });

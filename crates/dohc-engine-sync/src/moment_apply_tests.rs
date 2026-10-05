@@ -907,13 +907,15 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
     let old_id = format!("moment-ydoc-{}", "b".repeat(64));
     let latest_id = format!("moment-ydoc-{}", "c".repeat(64));
     let retain_audit = |store: &EngineStore, id: &str, text: &str, cursor: i64| {
-        // The audit parser is covered separately. Seed its committed output
-        // to isolate ordinary moment admission against native owner state.
+        // The audit parser is covered separately. Seed its committed output,
+        // with no accepted events to credit, to isolate ordinary moment
+        // admission against native owner state.
         let binding = serde_json::to_string(&observed.binding).unwrap();
         let record = format!(
-            "{{\"momentId\":{},\"relayDatabaseNamespace\":\"relay\",\"binding\":{},\"terminalCursor\":{cursor}}}",
+            "{{\"momentId\":{},\"relayDatabaseNamespace\":\"relay\",\"binding\":{},\"previousCursor\":{cursor},\"terminalCursor\":{cursor},\"acceptedEventCount\":0,\"acceptedIntervalDigest\":\"{}\"}}",
             serde_json::to_string(id).unwrap(),
-            binding
+            binding,
+            "0".repeat(64)
         );
         store.read_with(|conn| conn.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,'ws',?2,?3,?4)", params![id, hex_sha256(record.as_bytes()), record, text_sha(text)])).unwrap();
     };
@@ -1884,10 +1886,11 @@ fn retain_restore_audit(
     terminal_cursor: i64,
 ) {
     let record = format!(
-        "{{\"momentId\":{},\"relayDatabaseNamespace\":{},\"binding\":{},\"terminalCursor\":{terminal_cursor}}}",
+        "{{\"momentId\":{},\"relayDatabaseNamespace\":{},\"binding\":{},\"previousCursor\":{terminal_cursor},\"terminalCursor\":{terminal_cursor},\"acceptedEventCount\":0,\"acceptedIntervalDigest\":\"{}\"}}",
         serde_json::to_string(id).unwrap(),
         serde_json::to_string(namespace).unwrap(),
-        serde_json::to_string(binding).unwrap()
+        serde_json::to_string(binding).unwrap(),
+        "0".repeat(64)
     );
     store.read_with(|conn| conn.execute("INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,'ws',?2,?3,?4)", params![id, hex_sha256(record.as_bytes()), record, text_sha(text)])).unwrap();
 }

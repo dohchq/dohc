@@ -1379,3 +1379,291 @@ fn historical_event_export_reads_the_base_once_then_reuses_its_published_scope()
     assert_eq!(BASE_BLOB_BYTES_READ.with(|read| read.get()), f.bytes.len());
     assert_eq!(operations(&f.store), published);
 }
+
+fn accept_authored(
+    f: &mut Fixture,
+    cursor: i64,
+    authority: dohc_engine_collab::live_update_application::ServerDerivedLiveUpdateAuthority,
+    snapshot: Option<Vec<dohc_engine_collab::live_update_application::LiveAuthorEntry>>,
+) {
+    use dohc_engine_collab::live_update_application::{
+        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationError, ApplicationResult,
+        LiveUpdateReceipt, RelayAcceptedLiveUpdate, apply_committed,
+    };
+    let versioned = snapshot.is_some();
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: format!("delivery-{cursor}"),
+                    update_digest: hex_sha256(&f.bytes),
+                    journal_cursor: cursor,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority,
+                received_at_ms: 200 + cursor,
+            },
+            first_seen: Vec::new(),
+            canonical_version: versioned.then_some(2),
+            author_snapshot: snapshot,
+            first_seen_deletes: versioned.then(Vec::new),
+            checkpoint_coverage: None,
+        },
+        update_bytes: f.bytes.clone(),
+    };
+    assert!(matches!(
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |tx, namespace, binding, count| journal_live_event_in_tx(
+                tx, namespace, binding, count, 200
+            )
+            .map(|_| ())
+            .map_err(|error| ApplicationError::Storage(
+                dohc_engine_storage::StorageError::persist_public(error)
+            ))
+        )
+        .unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+}
+
+/// Settle through `terminal` as the host does, naming every author the
+/// interval admitted. Returns the settled moment's authors.
+fn settle_interval(f: &mut Fixture, terminal: i64, moment_id: &str) -> serde_json::Value {
+    use dohc_engine_collab::live_update_application::{LiveUpdateReceipt, with_settlement};
+    use dohc_engine_storage::TxnOutcome;
+    let receipt = LiveUpdateReceipt {
+        delivery_id: format!("delivery-{terminal}"),
+        update_digest: hex_sha256(&f.bytes),
+        journal_cursor: terminal,
+        accepting_host_epoch: 1,
+    };
+    with_settlement::<Box<dyn std::error::Error>, _>(
+        &mut f.store,
+        &f.handle,
+        Some(receipt),
+        8,
+        dohc_engine_collab::live_update_application::NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        |store, audit| {
+            let b = audit.binding();
+            let key = dohc_engine_collab::DocKey::new(
+                &b.workspace_id, &b.main_version_id, &b.object_id,
+            )?;
+            let doc = store.read_with(|conn| dohc_engine_collab::durable::load_doc_in(conn, &key))?;
+            let projected = doc.project(dohc_engine_collab::ContentKind::Richdoc)?.content;
+            let content = doc.preserved_markdown_source(&projected).unwrap_or(projected);
+            let vector = hex_sha256(&doc.encode_state_vector());
+            let result = store.write_with(&NoFaults, |tx| -> Result<(), Box<dyn std::error::Error>> {
+                let authors = dohc_engine_collab::author_coverage::interval_in(tx, &key, i64::MAX)?
+                    .moment_json();
+                let written = dohc_engine_domain::write_projected_text_in_tx(tx,
+                    dohc_engine_domain::ProjectedWriteText {
+                        workspace_id: &b.workspace_id,
+                        version_id: &b.main_version_id,
+                        object_id: &b.object_id,
+                        path: std::borrow::Cow::Borrowed(&b.current_path),
+                        text: std::borrow::Cow::Borrowed(&content),
+                        moment_id,
+                        metadata_origin: "ydoc",
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: authors.as_deref(),
+                        now_ms: 300,
+                        request_id: None,
+                    })?;
+                tx.execute(
+                    "UPDATE ydoc_docs SET last_settled_sha=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![b.workspace_id,b.main_version_id,b.object_id,written.snapshot.blob_sha256],
+                )?;
+                let id = audit.record_in_tx(tx, moment_id, &written.snapshot.blob_sha256, &vector, 300)?;
+                assert!(journal_live_settlement_in_tx(tx, "ws", &id, 300)?.is_some());
+                Ok(())
+            })?;
+            match result {
+                TxnOutcome::Committed(()) => Ok(()),
+                TxnOutcome::Crashed { .. } => panic!("unexpected settlement crash"),
+            }
+        },
+    )
+    .unwrap();
+    moment_authors(&f.store, moment_id).expect("the host credits its interval")
+}
+
+fn moment_authors(store: &EngineStore, moment_id: &str) -> Option<serde_json::Value> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_json FROM moments WHERE workspace_id='ws' AND moment_id=?1",
+                [moment_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+        })
+        .unwrap()
+        .map(|json| serde_json::from_str(&json).unwrap())
+}
+
+fn receiver_with_blobs(f: &Fixture) -> (ScratchDir, std::path::PathBuf, EngineStore) {
+    let (scratch, path, mut receiver) = open_store();
+    let binary: Vec<Vec<u8>> = f
+        .store
+        .read_with(|conn| {
+            conn.prepare("SELECT bytes FROM binary_blobs")?
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+    let text: Vec<(String, i64, String)> = f
+        .store
+        .read_with(|conn| {
+            conn.prepare("SELECT sha256,byte_length,text FROM blobs")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+    receiver
+        .write_with(&NoFaults, |tx| {
+            for bytes in &binary {
+                put_binary_blob(tx, bytes)?;
+            }
+            for (sha, length, body) in &text {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![sha, length, body],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    (scratch, path, receiver)
+}
+
+/// Apply each op in order and report which ones applied.
+fn import_all(receiver: &mut EngineStore, ops: &[ReplicationEnvelope]) -> Vec<(String, bool)> {
+    ops.iter()
+        .map(|op| {
+            let mut op = op.clone();
+            op.relay_seq = Some(op.origin_seq + 1);
+            let result = crate::apply_replication_envelope(
+                receiver,
+                &mut WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            let applied = matches!(result.primary, ApplyDisposition::Applied(_));
+            (op.op_kind, applied)
+        })
+        .collect()
+}
+
+#[test]
+fn imported_settlement_credits_every_relay_accepted_author_of_its_interval() {
+    use dohc_engine_collab::live_update_application::{
+        LiveAuthorEntry, ServerDerivedLiveUpdateAuthority,
+    };
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    // A named recipient whose client sent no recording context.
+    accept_authored(
+        &mut f,
+        1,
+        ServerDerivedLiveUpdateAuthority::Named {
+            principal_id: "recipient-user".into(),
+            grant_id: "grant".into(),
+            grant_generation: 1,
+        },
+        None,
+    );
+    // The owner and the agent working for them, in one admitted snapshot.
+    accept_authored(
+        &mut f,
+        2,
+        ServerDerivedLiveUpdateAuthority::Owner {
+            principal_id: "owner".into(),
+        },
+        Some(vec![
+            LiveAuthorEntry::Human {
+                human_id: "owner".into(),
+                human_name: "Owner".into(),
+            },
+            LiveAuthorEntry::Agent {
+                agent_id: "trip-agent".into(),
+                agent_name: Some("Trip agent".into()),
+                on_behalf_of: Some("owner".into()),
+                depth: Some(1),
+            },
+        ]),
+    );
+    let host = settle_interval(&mut f, 2, "moment-mixed");
+    let kinds = |authors: &serde_json::Value| {
+        let mut kinds: Vec<String> = authors
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|author| author["kind"].as_str().unwrap().to_owned())
+            .collect();
+        kinds.sort();
+        kinds
+    };
+    assert_eq!(kinds(&host), ["agent", "human", "named"]);
+    let ops = operations(&f.store);
+    let moment = ops
+        .iter()
+        .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == "moment-mixed")
+        .unwrap();
+    // The relay refuses a client-minted person, so only the agent travels.
+    assert_eq!(kinds(&moment.payload["authors"]), ["agent"]);
+
+    let (_scratch, path, mut receiver) = receiver_with_blobs(&f);
+    for (kind, applied) in import_all(&mut receiver, &ops) {
+        assert!(applied, "{kind}");
+    }
+    assert_eq!(
+        moment_authors(&receiver, "moment-mixed").as_ref(),
+        Some(&host)
+    );
+    // A replayed pull changes nothing.
+    import_all(&mut receiver, &ops);
+    assert_eq!(
+        moment_authors(&receiver, "moment-mixed").as_ref(),
+        Some(&host)
+    );
+    drop(receiver);
+    let receiver = EngineStore::open(&path, 400).unwrap();
+    assert_eq!(
+        moment_authors(&receiver, "moment-mixed").as_ref(),
+        Some(&host)
+    );
+
+    // A settlement that claims another interval is refused, so the moment
+    // keeps only the authors it carried.
+    let wire = moment.payload["authors"].clone();
+    let forged: Vec<_> = ops
+        .iter()
+        .map(|op| {
+            let mut op = op.clone();
+            if op.op_kind == settlement_record::SETTLEMENT_OP {
+                op.payload["record"]["previousCursor"] = json!(1);
+            }
+            op
+        })
+        .collect();
+    let (_scratch, _path, mut receiver) = receiver_with_blobs(&f);
+    let applied = import_all(&mut receiver, &forged);
+    assert!(
+        applied
+            .iter()
+            .any(|(kind, applied)| kind == settlement_record::SETTLEMENT_OP && !applied)
+    );
+    assert_eq!(moment_authors(&receiver, "moment-mixed"), Some(wire));
+}

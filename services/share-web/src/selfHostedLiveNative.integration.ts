@@ -361,16 +361,21 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
       {deliveryId: ack.deliveryId, updateDigest: ack.updateDigest})).toEqual(ack);
     const settled = await active!.settle(document);
     const expected = yDocToMarkdown(provider.doc); expect(readFileSync(join(workspace, "docs/a.md"), "utf8")).toBe(expected);
-    await vi.waitFor(() => {
+    const settledMomentId = await vi.waitFor(() => {
       const rows = relayRead.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='live.audit.settlement' ORDER BY relay_seq DESC").all("workspace");
-      expect(rows.some(row => {
-        const payload = JSON.parse(String(row.payload_json));
-        return payload.record?.binding?.workspaceId === document.workspaceId &&
-          payload.record?.binding?.mainVersionId === mainVersionId && payload.record?.binding?.objectId === objectId &&
-          payload.record?.binding?.lineageClaimId === lineageClaimId && payload.record?.terminalCursor === finalAck.journalCursor &&
-          payload.record?.markdownDigest === hash(Buffer.from(expected));
-      })).toBe(true);
+      const record = rows.map(row => JSON.parse(String(row.payload_json)).record).find(record =>
+        record?.binding?.workspaceId === document.workspaceId &&
+          record?.binding?.mainVersionId === mainVersionId && record?.binding?.objectId === objectId &&
+          record?.binding?.lineageClaimId === lineageClaimId && record?.terminalCursor === finalAck.journalCursor &&
+          record?.markdownDigest === hash(Buffer.from(expected)));
+      expect(record).toBeDefined();
+      return record.momentId as string;
     }, {timeout: 30000});
+    // The relay keeps the named recipient off the moment the host published.
+    const published = relayRead.prepare("SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append'").all("workspace")
+      .map(row => JSON.parse(String(row.payload_json))).find(payload => payload.momentId === settledMomentId);
+    expect(published).toBeDefined();
+    expect((published.authors ?? []).every((author: {kind: string}) => author.kind === "agent" || author.kind === "automation")).toBe(true);
     for (let page = 0; page < 8; page++) {
       const pulled = await rpc("sync.pull", {workspaceId: "workspace"}); expect(pulled.refusals ?? []).toEqual([]);
       if (pulled.pendingCursor) {
@@ -384,11 +389,35 @@ it("enrolls a self-hosted document, resumes native activation, and publishes own
     expect((await rpc("versionedText.read", {versionId: mainVersionId, path: "docs/a.md"})).text).toBe(expected);
     expect(readFileSync(join(ownerRoot, "docs/a.md"), "utf8")).toBe(expected);
     results.settledAndPublished = {settled, markdownDigest: hash(Buffer.from(expected)), ordinaryOwnerReadMatched: true};
+    // The owner's History credits the named recipient, who sent no recording
+    // context, from the imported settlement evidence, and keeps it across restart.
+    const ownerHistoryAuthors = async () => ((await rpc("moments.list", {versionId: mainVersionId})).moments as {momentId: string; authors?: unknown[] | null}[])
+      .find(moment => moment.momentId === settledMomentId)?.authors ?? null;
+    const ownerAuthors = await ownerHistoryAuthors();
+    results.ownerSettledAuthors = {settledMomentId, published: published.authors ?? null, owner: ownerAuthors};
+    writeFileSync(join(root, "owner-settled-authors.json"), JSON.stringify(results.ownerSettledAuthors, null, 2));
+    expect(ownerAuthors ?? []).toContainEqual({kind: "named", userId: namedUser.id, grantId: "grant", grantGeneration: expect.any(Number)});
+    owner!.close(); await owner!.waitForExit();
+    owner = await createEngineClient({command: executable, authToken: randomUUID(), protocolVersion: 2, capabilities: ["core", "blobs"], connectTimeoutMs: 30000,
+      onStderr: value => appendFileSync(join(root, "owner-stderr.log"), value),
+      privateLiveApplication: profile.nativeClient,
+      env: {...process.env, DOHC_ENGINE_LIVE_HOST_CONFIG: undefined, DOHC_ENGINE_OWNER_HOST_CONFIG: ownerConfigPath}});
+    handle = ((await owner.sendRequest({id: requestId++, method: "workspace.open", params: {rootDir: ownerRoot, workspaceId: "workspace", captureMode: "none",
+      relay: {baseUrl: relayUrl, bearerToken: bearer, allowInsecureLoopbackForTests: true}}, deadlineMs: 30000})).result as {workspace: string}).workspace;
+    expect(await ownerHistoryAuthors()).toEqual(ownerAuthors);
     provider.close(); provider.doc.destroy(); providers.length = 0;
     await supervisor!.close(); supervisor = undefined; active = undefined;
     const engine = new DatabaseSync(join(workspace, ".dohc/engine/engine.db"), {readOnly: true});
     try {results.persistedApplications = engine.prepare("SELECT delivery_id,update_digest FROM live_device_update_applications ORDER BY journal_cursor").all();
       expect(results.persistedApplications).toEqual(expect.arrayContaining([{delivery_id: ack.deliveryId, update_digest: ack.updateDigest}]));
+      // The owner holds exactly the authors the host credited.
+      const authorJson = (database: DatabaseSync) => (database.prepare("SELECT author_json FROM moments WHERE moment_id=?").get(settledMomentId) as {author_json: string | null} | undefined)?.author_json;
+      const ownerEngine = new DatabaseSync(join(ownerRoot, ".dohc/engine/engine.db"), {readOnly: true});
+      try {
+        const host = authorJson(engine), owned = authorJson(ownerEngine);
+        Object.assign(results.ownerSettledAuthors as object, {hostRaw: host, ownerRaw: owned});
+        expect(JSON.parse(owned ?? "null")).toEqual(JSON.parse(host ?? "null"));
+      } finally {ownerEngine.close();}
     } finally {engine.close();}
     expect(hash(readFileSync(executable))).toBe(expectedHash);
     writeFileSync(join(root, "result.json"), JSON.stringify({verdict: "PASS", executable, sha256: expectedHash,

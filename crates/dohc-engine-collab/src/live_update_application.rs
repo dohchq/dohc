@@ -207,7 +207,7 @@ impl ServerDerivedLiveUpdateAuthority {
     }
     /// The person the owner shared with, or the Edit share link, this
     /// authority names; none for the owner.
-    fn shared_author(&self) -> Option<dohc_engine_domain::SharedChangeAuthor> {
+    pub fn shared_author(&self) -> Option<dohc_engine_domain::SharedChangeAuthor> {
         match self {
             Self::Owner { .. } => None,
             Self::Named {
