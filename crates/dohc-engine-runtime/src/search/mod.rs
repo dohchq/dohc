@@ -312,10 +312,25 @@ fn preview_line_matches_after(
         let Some(byte_idx) = lowered.find(query) else {
             continue;
         };
-        // Convert the byte offset in the lowercased line to a char index. For
-        // ASCII/BMP this equals the JS UTF-16 offset.
-        let match_index = lowered[..byte_idx].chars().count();
-        let (preview, match_start, match_end) = preview_for_line(line, match_index, query_len);
+        let (match_index, match_len) = if line.is_ascii() {
+            (byte_idx, query_len)
+        } else {
+            // Every scalar emitted by lowercasing belongs to its original
+            // character, including expansions such as İ into i plus a dot.
+            let lowered_start = lowered[..byte_idx].chars().count();
+            let mut matched_origins = line
+                .chars()
+                .enumerate()
+                .flat_map(|(index, ch)| ch.to_lowercase().map(move |_| index))
+                .skip(lowered_start)
+                .take(query_len);
+            let match_index = matched_origins
+                .next()
+                .expect("a matched lowercase scalar has an original character");
+            let match_end_index = matched_origins.last().unwrap_or(match_index) + 1;
+            (match_index, match_end_index - match_index)
+        };
+        let (preview, match_start, match_end) = preview_for_line(line, match_index, match_len);
         out.push(PreviewMatch {
             line: index.saturating_add(1),
             preview,
@@ -868,13 +883,34 @@ mod tests {
         let mut line = "x".repeat(300);
         line.push_str("NEEDLE");
         line.push_str(&"y".repeat(50));
-        let hits = preview_line_matches(&line.to_lowercase(), "needle", 1);
+        let hits = preview_line_matches(&line, "needle", 1);
         assert_eq!(hits.len(), 1);
         assert!(hits[0].preview.chars().count() <= WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS);
         assert_eq!(
             &hits[0].preview[hits[0].match_start..hits[0].match_end],
-            "needle"
+            "NEEDLE"
         );
+    }
+
+    #[test]
+    fn preview_maps_lowercase_expansions_back_to_original_characters() {
+        for (text, query, expected) in [
+            ("İ needle", "needle", "needle"),
+            ("İx", "x", "x"),
+            ("İx", "İx", "İx"),
+            ("İ", "i", "İ"),
+            ("İ", "\u{0307}", "İ"),
+            ("ΟΣ needle", "needle", "needle"),
+            ("ΟΣ", "ος", "ΟΣ"),
+        ] {
+            let hits = preview_line_matches(text, &normalize_query(query), 1);
+            let hit = hits.first().expect("case-insensitive hit");
+            assert_eq!(
+                &hit.preview[hit.match_start..hit.match_end],
+                expected,
+                "text {text:?}, query {query:?}"
+            );
+        }
     }
 
     #[test]

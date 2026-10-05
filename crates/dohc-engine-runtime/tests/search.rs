@@ -15,9 +15,9 @@ use dohc_engine_domain::{
 use dohc_engine_runtime::search::{
     CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET, FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
     FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET, SHORT_QUERY_PAGE_ROW_BUDGET, SearchCandidate,
-    SearchPageDisposition, SearchSurface, ensure_search_index_for_version,
-    query_chat_messages_granular_bounded, query_search_index_keyset, search_workspace_page,
-    upsert_file_search_index,
+    SearchPageDisposition, SearchSurface, WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS,
+    ensure_search_index_for_version, query_chat_messages_granular_bounded,
+    query_search_index_keyset, search_workspace_page, upsert_file_search_index,
 };
 use dohc_engine_storage::{
     EngineStore, FaultPoint, NoFaults, Preimage, TxnOutcome, hex_sha256, put_binary_blob,
@@ -739,6 +739,103 @@ fn short_query_fallback_preserves_unicode_case_matching() {
         result.surface == SearchSurface::Chat
             && result.thread_id.as_deref() == Some("thread-unicode-short")
     }));
+}
+
+#[test]
+fn lowercase_expansion_highlights_survive_file_and_chat_page_continuations() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path();
+    let db = engine_db_path(&scratch).expect("db");
+    let mut store = open(&db, 1);
+    let text = format!(
+        "heading\nİ needle\nİx\n{}İ needle{}\n{}İx{}",
+        "😀".repeat(120),
+        "🚀".repeat(120),
+        "😀".repeat(120),
+        "🚀".repeat(120),
+    );
+    write_file(
+        &mut store,
+        "unicode-highlights",
+        "notes/highlights.md",
+        &text,
+        10,
+    );
+    start_thread(
+        &mut store,
+        "unicode-highlights-channel",
+        "unicode-highlights-thread",
+        &text,
+        20,
+    );
+    ensure_index(&mut store, root, 30);
+
+    for (query, matched) in [("needle", "needle"), ("x", "x"), ("İx", "İx")] {
+        let expected = store
+            .read_with(|conn| {
+                search_workspace_page(conn, root, WS, V, query, Some(100), 40, None, None)
+            })
+            .expect("all unicode matches");
+        assert!(!expected.has_more);
+        assert_eq!(expected.results.len(), 4, "query {query:?}");
+        for surface in [SearchSurface::File, SearchSurface::Chat] {
+            assert_eq!(
+                expected
+                    .results
+                    .iter()
+                    .filter(|hit| hit.result.surface == surface)
+                    .count(),
+                2
+            );
+        }
+        for hit in &expected.results {
+            let result = &hit.result;
+            assert_eq!(
+                &result.preview[result.match_start..result.match_end],
+                matched,
+                "query {query:?}, result {result:?}"
+            );
+            assert!(
+                result.preview.encode_utf16().count() <= WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS
+            );
+        }
+
+        for page_size in [1, 3] {
+            let mut actual = Vec::new();
+            let mut after = None;
+            loop {
+                let page = store
+                    .read_with(|conn| {
+                        search_workspace_page(
+                            conn,
+                            root,
+                            WS,
+                            V,
+                            query,
+                            Some(page_size),
+                            40,
+                            Some(expected.generation),
+                            after,
+                        )
+                    })
+                    .expect("continued unicode page");
+                assert_eq!(page.disposition, SearchPageDisposition::Results);
+                assert!(!page.results.is_empty());
+                actual.extend(page.results);
+                if !page.has_more {
+                    break;
+                }
+                let next = page.continuation.expect("continuation");
+                assert_ne!(after, Some(next), "cursor must advance");
+                after = Some(next);
+                assert!(actual.len() <= expected.results.len());
+            }
+            assert_eq!(
+                actual, expected.results,
+                "query {query:?}, page size {page_size}"
+            );
+        }
+    }
 }
 
 #[test]
