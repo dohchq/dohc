@@ -4,6 +4,7 @@ import { request as httpRequest } from "node:http";
 import { createServer } from "node:net";
 import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1123,12 +1124,18 @@ describe("sync relay startup guards", () => {
   it.each(["production", "staging", undefined])("refuses the projection development flag outside development/test: %s", async nodeEnv => {
     for (const flag of ["0", "1"]) {
       const root = await tempRoot("projection-production-opt-in");
+      const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
+      initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
       const {code, stderr} = await spawnRelayExpectExit({...productionEnv, NODE_ENV:nodeEnv,
-        SYNC_RELAY_DB_PATH:undefined, DOHC_RELAY_DEPLOYMENT_CONFIG:join(root,"must-not-open.json"),
-        DOHC_RELAY_ENGINE_EXECUTABLE:process.execPath, DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION:flag});
+        SYNC_RELAY_DB_PATH:undefined, DOHC_RELAY_DEPLOYMENT_CONFIG:configPath,
+        DOHC_RELAY_ENGINE_EXECUTABLE:process.execPath, DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION:flag}, {projectionHandshake:true});
       expect(code).toBe(1);
       expect(stderr).toContain("DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION is allowed only in development/test.");
-      await expect(access(join(root,"relay.sqlite"))).rejects.toMatchObject({code:"ENOENT"});
+      const database = new DatabaseSync(relayPath, {readOnly: true});
+      try {
+        expect(database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").all())
+          .toEqual([{name: "sync_relay_continuity"}]);
+      } finally { database.close(); }
     }
   });
 
@@ -1139,11 +1146,20 @@ describe("sync relay startup guards", () => {
     await expect(access(dbPath)).rejects.toMatchObject({code:"ENOENT"});
   });
 
-  it.each([undefined,"relative-engine",process.execPath])("refuses missing or incompatible production projection engine %s",async executable=>{
-    const root=await tempRoot("projection-startup");const configPath=join(root,"deployment.json"),relayPath=join(root,"relay","relay.sqlite");
-    initializeRelayDeployment({configPath,relayPath,continuityDirectory:join(root,"continuity")});
-    const {code,stderr}=await spawnRelayExpectExit({...productionEnv,SYNC_RELAY_DB_PATH:undefined,DOHC_RELAY_DEPLOYMENT_CONFIG:configPath,DOHC_RELAY_ENGINE_EXECUTABLE:executable});
-    expect(code).toBe(1);expect(stderr).toMatch(/Document sharing requires|Document projection could not start/);
+  it.each([
+    {executable: undefined, reason: "Document sharing requires DOHC_RELAY_ENGINE_EXECUTABLE outside development/test."},
+    {executable: "relative-engine", reason: process.platform === "linux"
+      ? "The projection engine must be an absolute executable file." : "Document projection requires Linux memory isolation"},
+    {executable: process.execPath, reason: process.platform === "linux"
+      ? "Projection engine did not pass startup probes:" : "Document projection requires Linux memory isolation"},
+  ])("refuses production projection startup for $executable: $reason", async ({executable, reason}) => {
+    const root = await tempRoot("projection-startup");
+    const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
+    initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
+    const {code, stderr} = await spawnRelayExpectExit({...productionEnv, SYNC_RELAY_DB_PATH:undefined,
+      DOHC_RELAY_DEPLOYMENT_CONFIG:configPath, DOHC_RELAY_ENGINE_EXECUTABLE:executable});
+    expect(code).toBe(1);
+    expect(stderr).toContain(reason);
   });
   it.skipIf(process.platform==="linux" || projectionEngine.missing)("refuses non-Linux projection startup without development opt-in",async()=>{
     const dbPath=join(await tempRoot("projection-platform"),"relay.sqlite");
