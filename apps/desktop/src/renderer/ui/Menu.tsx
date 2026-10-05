@@ -69,12 +69,12 @@ const GAP_PX = 4;
 
 type Place = { left: number; maxHeight: number; top?: number; bottom?: number; above: boolean };
 
-// The list-row ladder: hover 7%, the current or checked row 11% whatever has
-// focus, and the focused row the same fill with an inset ring. The ring
-// stands in for the global focus outline, so a focused row still reads
-// beside a current one.
+// The list-row ladder: hover 7%, and 11% for the current or checked row
+// whatever has focus. The focused row takes the same fill, and the global
+// :focus-visible outline marks it for the keyboard, so it still reads beside
+// a current one. The list's padding holds the outline and its offset.
 const ROW =
-  "flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] outline-none transition-colors duration-75 focus:bg-selected focus:ring-1 focus:ring-inset focus:ring-ink/30 aria-disabled:opacity-50";
+  "flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus:bg-selected aria-disabled:opacity-50";
 // Hover paints only after the pointer moves, so a menu opened from the
 // keyboard under a still pointer shows one active row.
 const ROW_TONE = {

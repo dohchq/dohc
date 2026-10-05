@@ -535,14 +535,14 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* Both menus are opened by the capture, one at a time, and their
           boxes are tall enough for the open menu and its shadow. A menu's
-          first row takes keyboard focus when it opens; forcing focus there
-          draws the same row the same way whether or not focus has since
-          moved on. */}
+          first row takes keyboard focus when it opens; forcing focus and
+          focus-visible there draws the row as a keyboard user sees it,
+          whether or not focus has since moved on. */}
       <Section part="menu" title="Menu">
         <Specimen label="rows: keyboard-active, hover, rest, disabled">
           <div
             className="flex h-56 w-56 items-start justify-end"
-            data-force-state="focus"
+            data-force-state="focus focus-visible"
             data-force-target="[role=menuitem]:nth-child(1)"
           >
             <div data-force-state="hover" data-force-target="[role=menuitem]:nth-child(2)">
@@ -555,7 +555,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="document-menu" title="Document menu">
         <div
           className="flex h-64 w-56 items-start justify-end"
-          data-force-state="focus"
+          data-force-state="focus focus-visible"
           data-force-target="[role=menuitem]:nth-child(1)"
         >
           <DocumentMenu workspaceId="states" suggestedName="states" getMarkdown={() => null} />
@@ -609,7 +609,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled">
           <div
             className="flex h-64 w-64 items-start justify-end"
-            data-force-state="focus"
+            data-force-state="focus focus-visible"
             data-force-target="[role=menuitemradio]:nth-child(1)"
           >
             <div data-force-state="hover" data-force-target="[role=menuitemradio]:nth-child(2)">
@@ -631,7 +631,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="current; long name: keyboard-active; rest">
           <div
             className="flex h-56 w-72 items-start justify-end"
-            data-force-state="focus"
+            data-force-state="focus focus-visible"
             data-force-target="[role=menuitem]:nth-child(2)"
           >
             <MenuSpecimen
@@ -648,7 +648,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="rest; destructive: keyboard-active">
           <div
             className="flex h-36 w-56 items-start justify-end"
-            data-force-state="focus"
+            data-force-state="focus focus-visible"
             data-force-target="[role=menuitem]:nth-child(2)"
           >
             <MenuSpecimen label="More for Research" items={dangerMenuItems} width={176} testId={`states-menu-danger-${theme}`} />
