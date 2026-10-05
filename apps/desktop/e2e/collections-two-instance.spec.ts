@@ -101,11 +101,6 @@ test("a drag's field write on one device moves the card on the other device's op
       join(sourceRoot, zephyrPath),
       recordMd(ZEPHYR_ID, "Zephyr", "Doing"),
     );
-    capture.captureBatch([
-      { path: schemaPath, operation: "update" },
-      { path: apolloPath, operation: "update" },
-      { path: zephyrPath, operation: "update" },
-    ]);
     await Promise.all([
       waitForPathMoments(capture, schemaPath, 1),
       waitForPathMoments(capture, apolloPath, 1),
@@ -175,7 +170,6 @@ test("a drag's field write on one device moves the card on the other device's op
     const draggedOnA = apolloOnA.replace("Status: Todo", "Status: Doing");
     expect(draggedOnA).not.toBe(apolloOnA);
     await writeFile(join(sourceRoot, apolloPath), draggedOnA);
-    capture.captureBatch([{ path: apolloPath, operation: "update" }]);
     await waitForPathMoments(capture, apolloPath, 2);
     expect((await deviceARelay.push()).pushed).toBeGreaterThan(0);
 

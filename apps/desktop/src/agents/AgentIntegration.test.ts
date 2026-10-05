@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { ActiveAgentRun } from "../workspaces/workspaceWatcher";
+import type { ActiveAgentRun } from "./activeAgentRun";
 import {
   AgentIntegrationState,
   createAgentIntegration as createPhysicalAgentIntegration,

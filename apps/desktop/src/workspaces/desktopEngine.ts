@@ -459,10 +459,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
         },
       });
       await rustEngineDaemon.start();
-      // The daemon owns capture: its capture.momentRecorded events are the only
-      // signal that a moment landed, so bridge them onto the renderer's
-      // workspace-activity ping or the history timeline goes permanently stale.
-      bridgeCaptureEventsToRenderer(rustEngineDaemon, notifyRenderer);
+      // Collection projection completion is a separate derived-state wake.
+      // Workspace activity owns capture and file observation delivery.
+      bridgeCaptureEventsToRenderer({ onEvent: listener => rustEngineDaemon!.onEvent(event => {
+        if (event.name === "collections.projected") listener(event);
+      }) }, scope => notifyRenderer(scope ? { ...scope, pathSetChanged: false } : undefined));
       // The first placement that falls back on a drive without atomic
       // renames announces it at once; the capture health poll is a backstop.
       bridgeNoAtomicPlacement(rustEngineDaemon, dependencies.noteNoAtomicPlacement);

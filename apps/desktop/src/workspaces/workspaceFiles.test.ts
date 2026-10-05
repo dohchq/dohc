@@ -25,6 +25,7 @@ import {
   createFolder,
   deletePath,
   extractFrontmatterIcon,
+  getWorkspaceListingMetadata,
   importDroppedPaths,
   listFiles,
   movePath,
@@ -38,6 +39,20 @@ let root: string;
 
 beforeEach(async () => {
   root = await createTestScratch("dohc-files-");
+});
+
+it("refreshes listing metadata without following replacement symlinks or reserved paths", async () => {
+  await writeFile(join(root, "note.md"), "---\nicon: local\n---\n");
+  expect(await getWorkspaceListingMetadata(root, "note.md")).toMatchObject({ icon: "local" });
+  const outside = await createTestScratch("dohc-files-outside-");
+  await writeFile(join(outside, "note.md"), "---\nicon: outside\n---\n");
+  await symlink(outside, join(root, "linked"), "junction");
+  await symlink(join(outside, "note.md"), join(root, "linked.md"), "file");
+  await mkdir(join(root, ".dohc"));
+  await writeFile(join(root, ".dohc", "note.md"), "---\nicon: reserved\n---\n");
+  for (const path of ["linked/note.md", "linked.md", ".dohc/note.md", "../note.md", "missing.md"]) {
+    expect(await getWorkspaceListingMetadata(root, path)).toBeUndefined();
+  }
 });
 
 // One probe instead of process.platform: whether this filesystem treats

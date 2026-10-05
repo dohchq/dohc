@@ -1273,7 +1273,7 @@ export class CollectionAutomations {
 
   /** The settled watcher batch: re-read the Collections whose automations or schema changed. */
   handleWatcherEvents(events: readonly WatcherEvent[]): void {
-    void this.rereadFoldersOf(events.flatMap((event) => [event.path, event.fromPath]))
+    void this.rereadFoldersOf(events.map((event) => event.path))
       .catch((error: unknown) => this.options.onError("reload Collection automations", error));
   }
 
@@ -1285,6 +1285,24 @@ export class CollectionAutomations {
   handlePulledPaths(paths: readonly string[]): void {
     void this.rereadFoldersOf(paths)
       .catch((error: unknown) => this.options.onError("reload Collection automations", error));
+  }
+
+  /** A lost observation cursor requires every definition to be read again. */
+  resyncFileObservation(): Promise<void> {
+    if (this.opened === null) return Promise.resolve();
+    this.targetRevision += 1;
+    return this.enqueue(async () => {
+      await this.loadIndex();
+      await this.noteSwitches();
+      this.noteEnabledSchedules(false);
+      await this.reconcile(false);
+      this.publishHolds();
+      this.wakeDatasetWaits();
+    }).then(() => {
+      this.options.onAutomationsChanged();
+      this.rosterChanged();
+      this.options.onSchedulesChanged?.();
+    }).catch((error: unknown) => this.options.onError("reload Collection automations", error));
   }
 
   private async rereadFoldersOf(paths: readonly (string | undefined)[]): Promise<void> {

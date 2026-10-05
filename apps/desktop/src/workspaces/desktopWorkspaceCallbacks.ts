@@ -17,7 +17,10 @@ export interface DesktopWorkspaceCallbacksDependencies<State> {
     "withAuthority"
   >;
   readonly chatDispatchService: Pick<ReturnType<typeof createChatDispatchService>, "scanWorkspace">;
-  collectionAutomationsOf(state: State): { handleWatcherEvents(events: readonly WatcherEvent[]): void };
+  collectionAutomationsOf(state: State): {
+    handleWatcherEvents(events: readonly WatcherEvent[]): void;
+    resyncFileObservation?(): Promise<void>;
+  };
 }
 
 export function createDesktopWorkspaceCallbacks<State>(
@@ -67,7 +70,7 @@ export function createDesktopWorkspaceCallbacks<State>(
   function createRelayOnChange(workspace: { workspaceId: string; rootPath: string; attachmentId?: symbol }) {
     return () => {
       withWorkspaceAttachment(workspace, () => {
-        notifyRenderer({ workspaceId: workspace.workspaceId });
+        notifyRenderer({ workspaceId: workspace.workspaceId, pathSetChanged: false });
         void withWorkspaceAttachmentAsync(workspace, () =>
           dependencies.chatDispatchService.scanWorkspace(workspace.workspaceId),
         ).catch((error) => {
@@ -83,5 +86,9 @@ export function createDesktopWorkspaceCallbacks<State>(
     });
   };
 
-  return { withWorkspaceAttachment, withWorkspaceAttachmentAsync, createRelayOnChange, onWatcherBatch };
+  const onObservationResync: NonNullable<WorkspaceActivityOptions["onObservationResync"]> = workspace =>
+    withWorkspaceAttachmentAsync(workspace, lease =>
+      dependencies.collectionAutomationsOf(lease.state).resyncFileObservation?.());
+
+  return { withWorkspaceAttachment, withWorkspaceAttachmentAsync, createRelayOnChange, onWatcherBatch, onObservationResync };
 }

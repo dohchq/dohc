@@ -18,7 +18,6 @@ import {
   WORKSPACE_SETTINGS_FILE,
   writeWorkspaceSettingsFile,
 } from "./workspaceSettingsFile";
-import { startWorkspaceWatch } from "./workspaceWatcher";
 
 import { createTestScratch } from "./testTemp";
 import { settingsFileNotice } from "../renderer/shell/useSettingsFileNotices";
@@ -516,51 +515,5 @@ describe("workspace settings file store", () => {
     expect(result.source).toBe("recovered");
     expect(result.settings.agents.mcpAutoStart).toBe(false);
     expect(result.warning).toContain("not a file dohc can read");
-  });
-});
-
-describe("workspace settings writes never reach history", () => {
-  it("the watcher enqueues the user file into the engine capture but nothing for settings.local.json", async () => {
-    const root = await createTestScratch("dohc-workspace-settings-");
-    const workspace: CreatedWorkspace = {
-      workspaceId: "ws-settings-test",
-      rootPath: root,
-      kind: "personal",
-      mode: defaultWorkspaceMode("personal"),
-    };
-
-    // The engine capture is the only recorder — assert
-    // against what the watcher enqueues into it, not a legacy store.
-    const capturedPaths: string[] = [];
-    let resolveFirst: (() => void) | null = null;
-    const firstRecord = new Promise<void>((resolve) => {
-      resolveFirst = resolve;
-    });
-    const handle = startWorkspaceWatch(workspace, {
-      settleMs: 60,
-      engineCapture: () => ({
-        captureBatch: (events) => {
-          capturedPaths.push(...events.map((event) => event.path));
-        },
-      }),
-      onRecorded: () => {
-        resolveFirst?.();
-      },
-    });
-    await handle.ready;
-
-    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
-    await writeFile(join(root, "notes.md"), "# Notes\n");
-    await firstRecord;
-
-    await writeWorkspaceSettingsFile(root, {
-      ...DEFAULT_WORKSPACE_SETTINGS,
-      privacy: { confirmExternalLinks: false },
-    });
-    await handle.stop();
-
-    expect(capturedPaths).toContain("notes.md");
-    expect(capturedPaths.some((path) => path.includes(".dohc"))).toBe(false);
-    expect(capturedPaths.some((path) => path.includes("settings.local"))).toBe(false);
   });
 });

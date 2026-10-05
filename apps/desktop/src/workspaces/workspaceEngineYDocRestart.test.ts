@@ -35,6 +35,8 @@ import {
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
 import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
+import { createWorkspaceActivity, settleYDocsAfterFileObservation, WorkspaceActivityState } from "./workspaceActivity";
+import { idleObservation } from "./workspaceActivity.testSupport";
 import {
   createEngineYDocSaveSeqState,
   noteLocalEdit,
@@ -5303,7 +5305,7 @@ it("an external delete observed before a debt registers cancels it at the door i
 
   // The watcher observes the external delete before this session's own
   // close ever registers a debt.
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   state.locked = true;
@@ -5351,9 +5353,9 @@ it("a recreated path's own session arms its debt normally instead of being cance
 
   // The path is deleted (no debt exists yet, so the tombstone is set),
   // then recreated — both before this test's own session ever opens.
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
-  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "update" }]);
   await capture.flush();
 
   // A new session — opened after both events — hits a genuine transient
@@ -5400,9 +5402,9 @@ it("a stale session's late debt still cancels at the door despite a later recrea
 
   // The path is deleted, then recreated, while the old session has not
   // closed yet (its own registration has not run).
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
-  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "update" }]);
   await capture.flush();
 
   // Now the old session's close hits a transient lock, registering late —
@@ -5454,7 +5456,7 @@ it("a late-registering debt's cancellation trace names dohc's own removal, not a
   capture.registerExpectedEngineEvents([
     { path: "note.md" },
   ]);
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   state.locked = true;
@@ -5488,7 +5490,7 @@ it("expires an expected removal and honors its cancellation", async () => {
 
   capture.registerExpectedEngineEvents([{ path: "note.md" }]);
   nowMs += EXPECTED_ENGINE_EVENT_EXPIRY_MS + 1;
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   state.locked = true;
@@ -5514,7 +5516,7 @@ it("a cancelled expected removal reads as an external delete again", async () =>
 
   const cancel = capture.registerExpectedEngineEvents([{ path: "note.md" }]);
   cancel();
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   state.locked = true;
@@ -5550,7 +5552,7 @@ it("a materialized settle retires a session's deletion fence, so post-recovery e
   // session predates the delete, so the discriminator alone would
   // classify it "old" for the rest of its life.
   const { session, mirror } = await openWithOneEdit(capture, "first edit");
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   // The same session settles for real — no lock, no failure — and its
@@ -5626,7 +5628,7 @@ it("a retry whose own opts already carry settle:false still consults the tombsto
 
   // The watcher observes the external delete while the ladder sleeps
   // between attempts, exactly as the sibling pin below.
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   // RED before the fix: the retry's own opts still carry `settle: false`
@@ -5641,6 +5643,55 @@ it("a retry whose own opts already carry settle:false still consults the tombsto
       message.includes("an external delete of note.md removed the path"),
     ),
   ).toBe(true);
+  await capture.stop();
+});
+
+it("delete then immediate quit drains suppression before retrying a failing close", async () => {
+  let clock = 1_000_000;
+  const { capture, state } = await lockedRebindCapture("dohc-file-feed-quit-", { now: () => ++clock });
+  const { session } = await openWithOneEdit(capture, "must stay deleted");
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
+  state.locked = false;
+  await capture.settleAndCloseAllLiveSessions();
+  expect(state.settledContents).toEqual([]);
+  await capture.stop();
+});
+
+it.each(["quit", "close"] as const)("a failed observation drain probes deletion before %s settles live sessions", async mode => {
+  let clock = 1_000_000;
+  const { capture, state, rootPath, workspaceId } = await lockedRebindCapture("dohc-file-feed-failed-drain-", { now: () => ++clock });
+  await writeFile(join(rootPath, "note.md"), "Original.");
+  const activityState = new WorkspaceActivityState();
+  const workspace = { workspaceId, rootPath, attachmentId: Symbol("failed-drain"), kind: "personal" as const, mode: "local-first" as const };
+  const activity = createWorkspaceActivity(() => {}, {
+    captureFor: () => ({ shareView: false, capture }),
+    observationFor: () => ({ ...idleObservation(workspace, {} as never), stop: async () => { throw new Error("drain unavailable"); } }),
+  });
+  await activity.open(workspace, activityState);
+  const { session } = await openWithOneEdit(capture, "must stay deleted");
+  state.locked = true;
+  await expect(session.close()).rejects.toThrow("file-locked");
+  await rm(join(rootPath, "note.md"));
+  state.locked = false;
+  if (mode === "quit") {
+    await settleYDocsAfterFileObservation([activity.drainObservations(activityState)],
+      () => capture.settleAndCloseAllLiveSessions());
+    await capture.stop();
+  } else {
+    await expect(activity.close(workspace, activityState)).rejects.toThrow("drain unavailable");
+  }
+  expect(state.settledContents).toEqual([]);
+  await expect(readFile(join(rootPath, "note.md"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("observation resync leaves a healthy session free to settle its edit", async () => {
+  const { capture, state } = await lockedRebindCapture("dohc-file-feed-healthy-resync-");
+  const { session } = await openWithOneEdit(capture, "healthy edit");
+  await capture.resyncFileObservation();
+  await session.close();
+  expect(state.settledContents).toEqual(["healthy edit"]);
   await capture.stop();
 });
 
@@ -5664,7 +5715,7 @@ it("a suppressed retry's dirty-session refusal discharges through evict instead 
   state.locked = true;
   await expect(session.close()).rejects.toThrow("file-locked");
 
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   // The lock clears, but the RELEASE itself now refuses hard: the daemon
@@ -5695,7 +5746,7 @@ it("a suppressed retry's dirty-session refusal discharges through evict instead 
 });
 
 it("a delete delivered while the capture chain is busy still suppresses a retry that fires before the chain drains", async () => {
-  // Codex P1-C on #746. `captureBatch` Queues `cleanupDetachedDebtForEvent`
+  // Codex P1-C on #746. `observeFileEvents` Queues `cleanupDetachedDebtForEvent`
   // — the only place that used to record the no-debt tombstone — onto the
   // capture chain, so it does not run until the chain is free. The
   // close-retry ladder's own timer runs off the chain, and every sibling
@@ -5742,7 +5793,7 @@ it("a delete delivered while the capture chain is busy still suppresses a retry 
 
   // The watcher delivers the delete while the chain is still stuck inside
   // the parked open — deliberately no `await capture.flush()` here.
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
 
   // RED before the fix: the enqueued cleanup that used to be the only
   // place recording the tombstone is still queued behind the parked open,
@@ -5803,7 +5854,7 @@ it("a delete landing past the tombstone's own TTL still suppresses an active ret
   // this virtual time. Only afterward does virtual time jump past the
   // tombstone's own TTL, well before the retry (still on a real ~1s
   // timer) ever fires.
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
   virtualNowMs += EXPECTED_ENGINE_EVENT_EXPIRY_MS + 1;
 
@@ -5890,7 +5941,7 @@ it("a delete landing after a settle's write but before its late onSettled callba
   // The delete lands inside the gap: after the write, before the stale
   // callback. No debt exists for this path, so this is the no-debt
   // tombstone the stale callback must not erase.
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   // The stale callback finally fires and reaches its own clear.
@@ -5926,9 +5977,9 @@ it("a recreated path's fresh close-retry ladder still settles normally despite a
     "dohc-ydoc-close-retry-recreate-",
   );
 
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
-  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "update" }]);
   await capture.flush();
 
   const { session } = await openWithOneEdit(capture, "a real pending edit");
@@ -5971,7 +6022,7 @@ it("a suppressed close-retry ladder stands down once, honestly, instead of resur
   // between attempts. No debt exists yet for this path — Ladder B never
   // registers one — so the no-debt tombstone is the only place this is
   // remembered.
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
   state.locked = false;
 
@@ -6013,7 +6064,7 @@ it("a suppressed retry's own transient release failure still stands down on the 
   state.locked = true;
   await expect(session.close()).rejects.toThrow("file-locked");
 
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
   state.locked = false;
   // The suppressed retry's own settle:false release meets a transient
@@ -6206,7 +6257,7 @@ it("a delete's watcher event landing during a suspended debt's window still supp
   // The external delete's watcher event lands inside the suspension
   // window — no debt is registered right now, so this is the exact
   // no-debt tombstone shape.
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   // The destructive op fails: restore and re-arm, not cancel.
@@ -7554,7 +7605,7 @@ it("a recovered debt with no retained release does not linger for a later delete
   await capture.flush();
 
   // An external program deletes the recovered path.
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   // RED before the fix: the entry lingered after recovery, so this
@@ -7772,7 +7823,7 @@ it("a watcher-captured external delete cancels a stood-down debt instead of leav
     .not.toHaveLength(0);
 
   // An external program deletes the path directly; the watcher observes it.
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   // RED before the fix: nothing cancelled the marker or traced its removal.
@@ -7808,7 +7859,7 @@ it("an engine-materialized delete of a stood-down path also cancels its debt", a
   // observable only if there is something for `deleteIfTracked` to
   // record — an untracked path's delete is a silent no-op either way.
   await writeFile(join(rootPath, "note.md"), "already tracked\n", "utf8");
-  capture.captureBatch([{ path: "note.md", operation: "update" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "update" }]);
   await capture.flush();
 
   const { session } = await openWithOneEdit(capture, "never written");
@@ -7835,7 +7886,7 @@ it("an engine-materialized delete of a stood-down path also cancels its debt", a
     { path: "note.md" },
   ]);
   await rm(join(rootPath, "note.md"));
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  capture.observeFileEvents([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
 
   // RED before the fix: cleanup was gated on isExternalDelete, so an
@@ -7921,56 +7972,6 @@ it("a stood-down debt on the rename's destination survives a move that fails bec
   await capture.stop();
 });
 
-it("a write-classified event over an already-absent stood-down path also cancels its debt", async () => {
-  // #681 round 3 (cert N4b): the "absent" branch — a write-classified
-  // watcher event that, once read, turns out to have no file — is a
-  // separate door from the explicit "delete" operation branch above it.
-  // Both call cancelSuspendedDebts with the same trace, but only the
-  // "delete" branch had a pin: severing this one's call left every
-  // existing restart test green.
-  const { capture, state } = await lockedRebindCapture(
-    "dohc-ydoc-absent-branch-delete-",
-  );
-  const { session } = await openWithOneEdit(capture, "never written");
-
-  state.locked = true;
-  state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
-
-  state.locked = false;
-  state.unmaterialized = true;
-  await expect
-    .poll(
-      () => state.errorMessages.filter((message) => message.includes("symlink")),
-      { timeout: 15_000 },
-    )
-    .not.toHaveLength(0);
-
-  // The symlink stand-down never materialized note.md, so no file exists
-  // at rootPath/note.md — an "update"-classified event resolves to
-  // disk.kind === "absent" once captureOnePath reads it: the write-
-  // classified door, not the explicit "delete" operation one.
-  capture.captureBatch([{ path: "note.md", operation: "update" }]);
-  await capture.flush();
-
-  // RED under a sever of just this branch's cancel call: nothing traces
-  // the removal, so this assertion is what catches it.
-  expect(
-    state.errorMessages.some((message) =>
-      message.includes("an external delete of note.md removed the path"),
-    ),
-  ).toBe(true);
-
-  // Pin the outcome, not only the trace: a change that keeps the log but
-  // leaves the entry in `detachedLockedDebts` would still pass the
-  // assertion above.
-  const finish = await capture.beginFileRename("note.md", "renamed.md");
-  expect(typeof finish).toBe("function");
-  await capture.stop();
-});
-
 it("a watcher-captured external delete of a policy-excluded path still cancels its stood-down debt", async () => {
   // #681 round 3, P2 (codex, real): the cleanup ran after
   // `captureOnePath`'s policy-tracking gate, so an excluded path's
@@ -8004,7 +8005,7 @@ it("a watcher-captured external delete of a policy-excluded path still cancels i
     .not.toHaveLength(0);
 
   // An external program deletes the excluded path directly.
-  capture.captureBatch([
+  capture.observeFileEvents([
     { path: "node_modules/pkg/index.js", operation: "delete" },
   ]);
   await capture.flush();
@@ -8020,65 +8021,6 @@ it("a watcher-captured external delete of a policy-excluded path still cancels i
 
   // RED before the fix: policyTracksPath("node_modules/...") is false, so
   // the cleanup never ran and this rejected instead of resolving.
-  const finish = await capture.beginFileRename(
-    "node_modules/pkg/index.js",
-    "node_modules/pkg/renamed.js",
-  );
-  expect(typeof finish).toBe("function");
-  await capture.stop();
-});
-
-it("a write-classified event over an already-absent, policy-excluded stood-down path also cancels its debt", async () => {
-  // #681 round 4, O4 (certifier, required): round 3's hoist moved the
-  // "delete" OPERATION branch's cleanup ahead of the policy gate, but the
-  // "absent" branch — reached only after `readDiskTextState`, which itself
-  // only ran after that same gate — stayed behind it. An excluded path
-  // whose removal arrives write-classified (the watcher's classification
-  // lagging disk, exactly like the tracked case above) could still never
-  // reach it: the racy stat-then-read door the round-3 hoist missed.
-  const { capture, state } = await lockedRebindCapture(
-    "dohc-ydoc-excluded-absent-branch-",
-  );
-  const { session } = await openWithOneEdit(
-    capture,
-    "never written",
-    "node_modules/pkg/index.js",
-  );
-
-  state.locked = true;
-  state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
-
-  state.locked = false;
-  state.unmaterialized = true;
-  await expect
-    .poll(
-      () => state.errorMessages.filter((message) => message.includes("symlink")),
-      { timeout: 15_000 },
-    )
-    .not.toHaveLength(0);
-
-  // No file exists at rootPath/node_modules/pkg/index.js (never
-  // materialized), so an "update"-classified event resolves to absent once
-  // read — the write-classified door, on an excluded path.
-  capture.captureBatch([
-    { path: "node_modules/pkg/index.js", operation: "update" },
-  ]);
-  await capture.flush();
-
-  // RED before the fix: the disk read (and the cleanup gated on it) ran
-  // only after the policy-tracking gate, so this excluded path's cleanup
-  // never fired.
-  expect(
-    state.errorMessages.some((message) =>
-      message.includes(
-        "an external delete of node_modules/pkg/index.js removed the path",
-      ),
-    ),
-  ).toBe(true);
-
   const finish = await capture.beginFileRename(
     "node_modules/pkg/index.js",
     "node_modules/pkg/renamed.js",

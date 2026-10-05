@@ -1653,6 +1653,33 @@ describe("record click-through", () => {
 });
 
 describe("pagination", () => {
+  it("retries a near-end page after observation refresh replaces a pending page", async () => {
+    const bridge = makeBridge([]);
+    const firstRecords = Array.from({ length: 100 }, (_, n) => record(`rec-${n}`, `Task ${n}`));
+    const cursor = { sortValues: [], recordPath: "tasks/99.md", recordId: "rec-99" };
+    const second = deferred<QueryCollectionRecordsResult>();
+    const result = (records: CollectionRecord[], nextCursor: typeof cursor | null): QueryCollectionRecordsResult => ({
+      collection: { path: "tasks", objectId: "object-test", status: "valid", reasons: [] }, records, groups: null, nextCursor,
+    });
+    let pages = 0;
+    bridge.queryCollectionRecords.mockImplementation(async params => {
+      if (!("cursor" in params)) return result(firstRecords, cursor);
+      if (++pages === 1) return second.promise;
+      return result([record("last", "Last record")], null);
+    });
+    const { container } = renderPage(bridge);
+    await waitFor(() => expect(screen.getByRole("grid").getAttribute("aria-rowcount")).toBe("101"));
+    const scroller = container.querySelector<HTMLElement>("[role=grid] .overflow-auto")!;
+    scroller.scrollTop = 2800;
+    fireEvent.scroll(scroller);
+    await waitFor(() => expect(pages).toBe(1));
+    bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/changed.md"], pathSetChanged: false });
+    await waitFor(() => expect(pages).toBe(2));
+    await act(async () => { second.resolve(result([record("stale", "Stale record")], null)); await second.promise; });
+    await waitFor(() => expect(screen.getByRole("grid").getAttribute("aria-rowcount")).toBe("102"));
+    expect(screen.queryByText("Stale record")).toBeNull();
+  });
+
   // Serves the engine's paged shape: each page but the last carries a
   // cursor, and a request with `cursor` serves the page after it.
   function servePages(

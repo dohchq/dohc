@@ -27,7 +27,6 @@ async function seedSharedWorkspace(workspaceId: string, first: Workspace, second
       const remote = source.relay.bind({ ...source.workspace, relay: { baseUrl: relay.baseUrl, token: "test:e2e-user" } });
       await remote.claim();
       await writeFile(join(seedRoot, "shared.md"), "# Shared\n\nStarting together.\n");
-      capture.captureBatch([{ path: "shared.md", operation: "update" }]);
       await waitForPathMoments(capture, "shared.md", 1);
       expect((await remote.push()).pushed).toBeGreaterThan(0);
     } finally {

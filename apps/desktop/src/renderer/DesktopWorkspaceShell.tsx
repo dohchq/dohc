@@ -3367,7 +3367,9 @@ export function DesktopWorkspaceShell(props: {
       (event: WorkspaceActivityEvent) => {
         const paths =
           event.workspaceId === workspaceId ? event.paths : undefined;
-        if (!paths?.length) {
+        if (event.workspaceId === workspaceId && event.pathSetChanged === false) {
+          if (filesRefreshMode !== "full") filesRefreshMode = "cached";
+        } else if (!paths?.length) {
           filesRefreshMode = "full";
         } else if (
           filesRefreshMode !== "full" &&
@@ -4507,12 +4509,8 @@ export function DesktopWorkspaceShell(props: {
       ref={focusRoot}
       tabIndex={-1}
       data-focus-surface="workspace"
-      // Flips to "true" only once openWorkspace has resolved — which in main
-      // awaits the file watcher's initial scan (workspaceActivity.open races
-      // handle.ready). The shell element itself mounts immediately, so a test
-      // that writes a file right after the shell appears would otherwise race
-      // chokidar's ignoreInitial scan and have the write silently swallowed.
-      // Waiting on this attribute is the deterministic "watcher is live" gate.
+      // Open waits for the engine's observation baseline. The shell mounts
+      // earlier, so external writers wait for this attribute before editing.
       data-ready={workspaceIsReady ? "true" : "false"}
       className="app-chrome relative flex h-screen flex-col bg-bg text-ink"
     >

@@ -19,6 +19,9 @@ import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
 import { generateDatasetSources } from "../workspaces/datasetGenerator";
 import { createLocalDatasetHost } from "../workspaces/localDatasetHost";
 import { sourceCaptureAdapter } from "../testing/sourceCaptureAdapter";
+import { createWorkspaceActivity, WorkspaceActivityState } from "../workspaces/workspaceActivity";
+import { observeWorkspaceFiles } from "../workspaces/workspaceFileObservation";
+import type { FileObservationFact } from "@dohc/workspace-engine-client/daemon";
 import { createAutomationFormulaEvaluator, type AutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
 import { definitionHash, localIsoTime, stepKey } from "@dohc/automation-executor/automation-plan";
 import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "@dohc/automation-executor/automation-reach";
@@ -692,22 +695,21 @@ async function world(options: {
      * keeps its collection.yaml's object id, and the watcher reports each
      * file it moved.
      */
-    renameCollection: async (from: string, to: string) => {
+    renameCollection: async (from: string, to: string, deliverWatcherEvents = true) => {
       await mkdir(dirname(join(root, to)), { recursive: true });
       await rename(join(root, from), join(root, to));
       const objectId = collections.get(from)!;
       collections.delete(from);
       collections.set(to, objectId);
-      const moved = [];
       for (const record of records.values()) {
         if (record.collection !== from) continue;
         record.collection = to;
         record.path = `${to}/${record.path.slice(from.length + 1)}`;
-        moved.push(record.path);
       }
-      executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].map((name) => ({
-        operation: "rename" as const, path: `${to}/${name}`, fromPath: `${from}/${name}`,
-      })));
+      if (deliverWatcherEvents) executor.handleWatcherEvents(["collection.yaml", "automations.yaml"].flatMap((name) => [
+        { operation: "delete" as const, path: `${from}/${name}` },
+        { operation: "update" as const, path: `${to}/${name}` },
+      ]));
     },
     /** Puts a new Collection with its own object id at a path. */
     addCollection: async (path: string, objectId: string) => {
@@ -792,6 +794,53 @@ describe("Collection automations", () => {
     await expect(w.executor.enabledForWake(TASKS)).rejects.toThrow("still opening");
     await w.executor.open();
     expect(await w.executor.enabledForWake(TASKS)).toBe(true);
+  });
+  it("reloads subscriptions at both folder-rename endpoints and after a lost cursor", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
+    await w.executor.open();
+    await w.until(() => w.subscriptions.has(TASKS));
+    expect([...w.subscriptions.values()]).toEqual(expect.arrayContaining([expect.objectContaining({ path: "Tasks" })]));
+    await w.renameCollection("Tasks", "Moved");
+    await expect.poll(() => [...w.subscriptions.values()].flatMap(subscription => "path" in subscription ? [subscription.path] : [])).toEqual(["Moved"]);
+    await writeFile(join(w.root, "Moved", "automations.yaml"), "[]");
+    await w.executor.resyncFileObservation();
+    expect([...w.subscriptions.values()]).toEqual([]);
+  });
+  it("delivers a renamed Collection's feed facts through onWatcherBatch into automation reload", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: BUMP } });
+    await w.executor.open();
+    await w.until(() => w.subscriptions.has(TASKS));
+    let facts: FileObservationFact[] = [];
+    let wake = () => {};
+    let revision = 0;
+    const onWatcherBatch = vi.fn((_workspace, events) => w.executor.handleWatcherEvents(events));
+    const activity = createWorkspaceActivity(() => {}, {
+      onWatcherBatch,
+      observationFor: (_workspace, callbacks) => observeWorkspaceFiles({ callbacks, onError: error => { throw error; },
+        subscribe: listener => { wake = listener; return () => {}; },
+        read: async () => {
+          const batch = facts; facts = [];
+          return { cursor: { generation: "rename", revision: ++revision }, ready: true, resync: false, facts: batch };
+        },
+      }),
+    });
+    const state = new WorkspaceActivityState();
+    const workspace = { workspaceId: "rename-feed", rootPath: w.root, attachmentId: Symbol("rename"), kind: "personal" as const, mode: "local-first" as const };
+    await activity.open(workspace, state);
+    try {
+      await w.renameCollection("Tasks", "Moved", false);
+      expect([...w.subscriptions.values()]).toEqual([expect.objectContaining({ path: "Tasks" })]);
+      facts = ["collection.yaml", "automations.yaml"].flatMap(name => [
+        { path: `Tasks/${name}`, kind: "disappeared" as const },
+        { path: `Moved/${name}`, kind: "appeared" as const },
+      ]);
+      wake();
+      await expect.poll(() => [...w.subscriptions.values()].map(subscription => "path" in subscription ? subscription.path : "")).toEqual(["Moved"]);
+      expect(onWatcherBatch).toHaveBeenCalledExactlyOnceWith(workspace, [
+        { path: "Tasks/collection.yaml", operation: "delete" }, { path: "Moved/collection.yaml", operation: "update" },
+        { path: "Tasks/automations.yaml", operation: "delete" }, { path: "Moved/automations.yaml", operation: "update" },
+      ]);
+    } finally { await activity.close(workspace, state); }
   });
   it("rechecks a parked wake against disabled and deleted definitions without waiting for the watcher", async () => {
     const w = await world({ automations: { Tasks: BUMP } });
@@ -5924,7 +5973,7 @@ describe("Collection automations that a Group message starts", () => {
       await w.addCollection("Copy", "object-copy");
       await w.writeAutomations("Copy", BUMP);
       w.executor.handleWatcherEvents(["Tasks", "Copy"].flatMap((folder) =>
-        ["collection.yaml", "automations.yaml"].map((name) => ({ operation: "create" as const, path: `${folder}/${name}` }))));
+        ["collection.yaml", "automations.yaml"].map((name) => ({ operation: "update" as const, path: `${folder}/${name}` }))));
       await w.until(() => w.subscriptions.has("collection:object-new-tasks#bump") && w.subscriptions.has("collection:object-copy#bump"));
       expect(await w.executor.automationsIn("Tasks")).toMatchObject({ automations: [{ automationId: "collection:object-new-tasks#bump" }] });
       expect((await w.executor.runs("collection:object-new-tasks#bump")).runs).toEqual([]);
@@ -5961,7 +6010,7 @@ describe("Collection automations that a Group message starts", () => {
       await w.renameCollection("Tasks", "Voyage");
       await movedTo(w, TASKS, "Voyage");
       await w.addCollection("Tasks", "object-new-tasks");
-      w.executor.handleWatcherEvents([{ operation: "create", path: "Tasks/collection.yaml" }]);
+      w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/collection.yaml" }]);
       await w.executor.automationsIn("Tasks");
       const claim = w.claim(TASKS, task);
       claim.collectionPath = "Tasks";
@@ -6008,7 +6057,7 @@ describe("Collection automations that a Group message starts", () => {
       moved.w.setRoster({ kind: "owner", ownerUserId: "user-owner", grants: [editor("ana@dohc.test", ["Tasks", "Log"])] });
       await moved.w.renameCollection("Log", "Private/Log");
       await moved.w.addCollection("Log", "object-new-log");
-      moved.w.executor.handleWatcherEvents([{ operation: "create", path: "Log/collection.yaml" }]);
+      moved.w.executor.handleWatcherEvents([{ operation: "update", path: "Log/collection.yaml" }]);
       await moved.w.executor.automationsIn("Private/Log");
       await moved.w.executor.automationsIn("Log");
       expect(await retried(moved.w, moved.claim)).toBe("ana@dohc.test cannot edit Log.");

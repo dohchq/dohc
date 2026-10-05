@@ -15,6 +15,38 @@ function cachedListing(path: string): ListWorkspaceFilesResult {
 }
 
 describe("WorkspaceFileListingCache", () => {
+  it("patches content identity without walking again, including pathless content wakes", async () => {
+    const metadata = vi.fn(async () => [{ path: "note.md", kind: "file" as const, icon: "new" }]);
+    const cache = new WorkspaceFileListingCache("win32", metadata);
+    const load = vi.fn(async () => ({ files: [{ path: "note.md", kind: "file" as const, contentIdentity: "old", icon: "old" }], folders: [] }));
+    const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load });
+    await read();
+    cache.observe("ws-a", ATTACHMENT_B, [{ path: "note.md", kind: "changed" }]);
+    expect(Reflect.get((await read()).files[0]!, "contentIdentity")).toBe("old");
+    cache.observe("ws-a", ATTACHMENT_A, [{ path: "note.md", kind: "changed" }]);
+    cache.invalidate({ workspaceId: "ws-a", pathSetChanged: false });
+    expect((await read()).files[0]).toMatchObject({ icon: "new", contentIdentity: expect.stringMatching(/^observation:/) });
+    expect(load).toHaveBeenCalledOnce();
+    cache.observe("ws-a", ATTACHMENT_A, [{ path: "added.md", kind: "appeared" }]);
+    await read();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not overwrite newer content metadata with an older worker response", async () => {
+    const first = deferred<readonly { path: string; kind: "file"; icon: string }[]>();
+    const metadata = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue([{ path: "note.md", kind: "file", icon: "newest" }]);
+    const cache = new WorkspaceFileListingCache("win32", metadata);
+    const read = () => cache.list({ workspaceId: "ws-a", attachmentId: ATTACHMENT_A, allowCached: true, load: async () => listing("note.md") });
+    await read();
+    cache.observe("ws-a", ATTACHMENT_A, [{ path: "note.md", kind: "changed" }]);
+    const refreshing = read();
+    await vi.waitFor(() => expect(metadata).toHaveBeenCalledOnce());
+    cache.observe("ws-a", ATTACHMENT_A, [{ path: "note.md", kind: "changed" }]);
+    first.resolve([{ path: "note.md", kind: "file", icon: "stale" }]);
+    expect((await refreshing).files[0]?.icon).toBeUndefined();
+    expect((await read()).files[0]?.icon).toBe("newest");
+  });
+
   it("reuses a complete listing only when the caller permits it", async () => {
     const cache = new WorkspaceFileListingCache();
     const firstLoad = vi.fn(async () => listing("old.md"));

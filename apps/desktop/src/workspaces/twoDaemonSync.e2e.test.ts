@@ -181,7 +181,7 @@ async function writeAndCapture(
   const absolute = join(rootPath, path);
   await mkdir(dirname(absolute), { recursive: true });
   await writeFile(absolute, contents);
-  daemon.capture.captureBatch([{ path, operation: "update" }]);
+  daemon.capture.observeFileEvents([{ path, operation: "update" }]);
   await waitForPathMoments(daemon.capture, path, before + 1);
 }
 

@@ -83,7 +83,7 @@ import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
 import {
   type ActiveAgentRun,
-} from "./workspaceWatcher";
+} from "../agents/activeAgentRun";
 import {
   historyPathAdmission,
   readWorkspaceEnginePolicy,
@@ -474,7 +474,9 @@ export interface WorkspaceEngineCapture {
   start(): void;
   // Enqueues a settled watcher batch for engine capture. Synchronous and
   // non-throwing: the watcher's record chain never waits on the engine.
-  captureBatch(events: readonly WatcherEvent[]): void;
+  observeFileEvents(events: readonly WatcherEvent[]): void;
+  resyncFileObservation(): Promise<void>;
+  observationDrainFailed(): void;
   // Updates the daemon capture owner's live authorship state. Starting a run
   // is ordered before the caller launches agent work; clearing first flushes
   // the daemon so every write observed during the run retains its author.
@@ -1661,6 +1663,8 @@ export function createWorkspaceEngineCapture(
   let store: CaptureVersionedTextStore | null = options.store ?? null;
   let secretStore: SecretFileStore | null = options.secretStore ?? null;
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
+  let observationDrainUnavailable = false;
+  let observationResync: Promise<void> = Promise.resolve();
   let stopped = false;
   const captureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1750,7 +1754,7 @@ export function createWorkspaceEngineCapture(
     close: (opts?: WorkspaceEngineYDocCloseOptions) => Promise<void>;
     // This session's own way to apply a delete directly (codex P1-C
     // follow-up on #746), read only while `status` is "failing-close":
-    // `captureBatch`'s synchronous delete pass calls it at
+    // `observeFileEvents`'s synchronous delete pass calls it at
     // watcher-delivery time instead of relying solely on the TTL-bounded
     // no-debt tombstone map. A close-retry ladder's own doubling delay
     // caps at the same 10s as that TTL, so a delete landing right after
@@ -3428,7 +3432,7 @@ export function createWorkspaceEngineCapture(
   // Whether an engine-originated removal of `path` is registered and unexpired.
   function peekExpectedEvent(path: string): boolean {
     const nowMs = now();
-    expectedEvents = expectedEvents.filter((event) => event.expiresAtMs > nowMs);
+    if (!observationDrainUnavailable) expectedEvents = expectedEvents.filter((event) => event.expiresAtMs > nowMs);
     return expectedEvents.some((event) => event.path === path);
   }
 
@@ -3549,7 +3553,7 @@ export function createWorkspaceEngineCapture(
   // whether to cancel, so the expected-event token is never spent here.
   async function cleanupDetachedDebtForEvent(event: WatcherEvent): Promise<void> {
     if (!detachedLockedDebts.has(event.path)) {
-      // `captureBatch`'s own synchronous pass, at watcher-delivery time,
+      // `observeFileEvents`'s own synchronous pass, at watcher-delivery time,
       // already recorded a delete's no-debt tombstone (codex P1-C on
       // #746) — nothing is left to do for a path with no debt by the time
       // this enqueued task runs.
@@ -3565,15 +3569,6 @@ export function createWorkspaceEngineCapture(
       );
       return;
     }
-    const peeked = await readDiskTextState(rootPath, event.path);
-    if (peeked.kind !== "absent") return;
-    const isExternalAbsence = !peekExpectedEvent(event.path);
-    cancelSuspendedDebts(
-      suspendDetachedDebts((path) => path === event.path),
-      isExternalAbsence
-        ? `an external delete of ${event.path}`
-        : `dohc's own removal of ${event.path}`,
-    );
   }
 
   // Applies engine-owned state to the workspace folder, registering each
@@ -4446,7 +4441,7 @@ export function createWorkspaceEngineCapture(
             ? `locked-write retry cancelled: dohc's own removal of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`
             : `locked-write retry cancelled: an external delete of ${input.path} removed the path while a pending write waited; the edits remain in the document lineage`;
 
-        // `captureBatch`'s direct-arm door (codex P1-C follow-up):
+        // `observeFileEvents`'s direct-arm door (codex P1-C follow-up):
         // called at watcher-delivery time, bypassing the TTL-bounded
         // no-debt tombstone map entirely, so nothing here can expire before
         // a later-stage retry arrives to ask. The same age discrimination
@@ -4481,6 +4476,7 @@ export function createWorkspaceEngineCapture(
         };
 
         const payDetachedLockedDebt = async (): Promise<void> => {
+          await observationResync;
           // Another edge may have paid, transferred, or cancelled this debt
           // after the timer's own check — a destructive vacate cancels
           // registry entries while a fired payment can already sit queued
@@ -4911,6 +4907,7 @@ export function createWorkspaceEngineCapture(
         const closeEntry = async (
           opts?: WorkspaceEngineYDocCloseOptions,
         ): Promise<void> => {
+          await observationResync;
           liveEntry.closing = true;
           // An admitted record write owns no daemon lease. Keep the real
           // owner alive until its writes and settlement finish.
@@ -4928,7 +4925,7 @@ export function createWorkspaceEngineCapture(
           // future caller inherits it, and a caller asking to settle an
           // orphan is asking for the one write that is never correct.
           const effective: WorkspaceEngineYDocCloseOptions | undefined =
-            liveEntry.orphaned
+            liveEntry.orphaned || (liveEntry.status === "failing-close" && suppressSettleForRemoval())
               ? { ...opts, settle: false, settleOnRefusal: false }
               : opts;
           try {
@@ -5356,7 +5353,7 @@ export function createWorkspaceEngineCapture(
       pollDaemonCaptureHealth();
     },
 
-    captureBatch(events) {
+    observeFileEvents(events) {
       if (events.length === 0) return;
       const batch = events.map((event) => ({ ...event }));
       // The no-debt tombstone, recorded here at
@@ -5402,6 +5399,33 @@ export function createWorkspaceEngineCapture(
         }
       });
     },
+
+    resyncFileObservation() {
+      // Only outstanding sessions need absence recovery. No directory walk or
+      // content read belongs here; ENOENT/ENOTDIR is the sole deletion proof.
+      const paths = new Set([...liveYDocSessions.keys(), ...detachedLockedDebts.keys()]);
+      const pending = (async () => {
+        for (const path of paths) {
+          let absent = false;
+          try { await lstat(join(rootPath, path)); }
+          catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            absent = code === "ENOENT" || code === "ENOTDIR";
+          }
+          if (!absent) continue;
+          const expected = peekExpectedEvent(path);
+          if (!detachedLockedDebts.has(path)) noteExternalDeleteWithNoDebt(path, expected);
+          const live = liveYDocSessions.get(path);
+          if (live?.status === "failing-close") live.armRemovalSuppression(expected, now());
+          cancelSuspendedDebts(suspendDetachedDebts(candidate => candidate === path),
+            expected ? `dohc's own removal of ${path}` : `an external delete of ${path}`);
+        }
+      })();
+      observationResync = pending;
+      return pending;
+    },
+
+    observationDrainFailed() { observationDrainUnavailable = true; },
 
     setActiveAgentRun(submitted) {
       // The run as submitted; a caller changing its object later changes nothing here.

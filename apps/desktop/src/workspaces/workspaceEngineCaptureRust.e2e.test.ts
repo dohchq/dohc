@@ -24,7 +24,8 @@ import {
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
-import { startWorkspaceWatch } from "./workspaceWatcher";
+import { startWorkspaceFileObservation } from "./workspaceFileObservation";
+import { EngineFileObservation } from "@dohc/workspace-engine-client/daemon";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 import {
   createRealDaemonLifecycle,
@@ -393,7 +394,7 @@ it.skipIf(engine.missing)(
       const mainText = `main\n${"m".repeat(64 * 1024)}`;
       const draftText = `draft\n${"d".repeat(64 * 1024)}`;
       await writeFile(join(root, "note.md"), mainText, "utf8");
-      capture.captureBatch([{ path: "note.md", operation: "update" }]);
+      capture.observeFileEvents([{ path: "note.md", operation: "update" }]);
       await capture.flush();
       expect(await capture.fileObjectIdForPath("note.md")).toBeTruthy();
 
@@ -405,7 +406,7 @@ it.skipIf(engine.missing)(
       };
       await capture.setActiveAgentRun(activeRun);
       await writeFile(join(root, "agent-note.md"), "written by agent\n", "utf8");
-      capture.captureBatch([{ path: "agent-note.md", operation: "update" }]);
+      capture.observeFileEvents([{ path: "agent-note.md", operation: "update" }]);
       const [agentMoment] = await waitForPathMoments(
         capture,
         "agent-note.md",
@@ -420,14 +421,14 @@ it.skipIf(engine.missing)(
       const wokenRun = { ...activeRun, agentRunId: "run-rust-capture-woken", depth: 3 };
       await capture.setActiveAgentRun(wokenRun);
       await writeFile(join(root, "woken-note.md"), "written by a woken agent\n", "utf8");
-      capture.captureBatch([{ path: "woken-note.md", operation: "update" }]);
+      capture.observeFileEvents([{ path: "woken-note.md", operation: "update" }]);
       const [wokenMoment] = await waitForPathMoments(capture, "woken-note.md", 1);
       await capture.setActiveAgentRun(null);
       expect(wokenMoment?.authors).toEqual([{ kind: "agent", ...wokenRun }]);
 
       const draft = await capture.createVersion("Draft");
       await writeFile(join(root, "note.md"), draftText, "utf8");
-      capture.captureBatch([{ path: "note.md", operation: "update" }]);
+      capture.observeFileEvents([{ path: "note.md", operation: "update" }]);
       await capture.flush();
 
       await capture.switchVersion("main");
@@ -1090,17 +1091,11 @@ it.skipIf(engine.missing)(
     });
     await lifecycle.start();
     const sessions = createRealDaemonWorkspaceSessions(lifecycle);
-    const capture = createWorkspaceEngineCapture({
-      workspaceId: "capture-rust-815",
-      rootPath: root,
-      rustEngineSessions: sessions,
-    });
-    const workspace: CreatedWorkspace = {
-      workspaceId: "capture-rust-815",
-      rootPath: root,
-      kind: "personal",
-      mode: defaultWorkspaceMode("personal"),
-    };
+    const workspace = {
+      workspaceId: "capture-rust-815", rootPath: root,
+      attachmentId: Symbol("capture-rust-815"), kind: "personal", mode: defaultWorkspaceMode("personal"),
+    } as const;
+    const capture = createAttachedWorkspaceEngineCapture({ ...workspace, rustEngineSessions: sessions });
     const readmePath = "notes/sample/README.md";
     // Both normalization victims at once: CRLF line endings and no trailing
     // newline. Any settle write would change these bytes.
@@ -1112,10 +1107,12 @@ it.skipIf(engine.missing)(
       await mkdir(join(root, "notes", "sample"), { recursive: true });
       await writeFile(join(root, readmePath), readme, "utf8");
       await waitForPathMoments(capture, readmePath, 1);
-      const watch = startWorkspaceWatch(workspace, {
-        settleMs: 60,
-        engineCapture: () => capture,
-        onSettledBatch: (events) => batches.push(events),
+      const watch = startWorkspaceFileObservation(workspace, sessions, lifecycle, {
+        facts(facts) {
+          const events: WatcherEvent[] = facts.map(fact => ({ path: fact.path, operation: fact.kind === "disappeared" ? "delete" : "update" }));
+          capture.observeFileEvents(events); batches.push(events);
+        },
+        resync: () => capture.resyncFileObservation(), captured() {}, pulled() {}, degraded() {},
       });
       await watch.ready;
       try {
@@ -1128,7 +1125,8 @@ it.skipIf(engine.missing)(
         await session.close();
         // A full settle window plus slack: any write the close made would
         // surface here.
-        await delay(750);
+        await sessions.run(workspace, async binding => { await new EngineFileObservation(binding.client, binding.workspace).drain(); });
+        await watch.pulledPaths([]);
         expect(readmeEvents()).toEqual([]);
         expect(await readFile(join(root, readmePath), "utf8")).toBe(readme);
         const after = await stat(join(root, readmePath));
@@ -1150,13 +1148,7 @@ it.skipIf(engine.missing)(
         body.insert(body.length, [paragraph]);
         await edited.applyLocalUpdate(Y.encodeStateAsUpdate(editor, vector));
         await edited.close();
-        for (
-          let attempt = 0;
-          attempt < 100 && readmeEvents().length === 0;
-          attempt += 1
-        ) {
-          await delay(50);
-        }
+        await expect.poll(() => readmeEvents().length, { timeout: 60_000 }).toBeGreaterThan(0);
         expect(readmeEvents().length).toBeGreaterThan(0);
         expect(await readFile(join(root, readmePath), "utf8")).toContain(
           "A real edit.",

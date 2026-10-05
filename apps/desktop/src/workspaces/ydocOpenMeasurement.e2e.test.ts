@@ -148,7 +148,7 @@ it.skipIf(engine.missing)(
       )}`;
       await writeFile(join(root, "big.md"), big, "utf8");
       await writeFile(join(root, "draft.md"), "draft\n\nseed paragraph\n", "utf8");
-      capture.captureBatch([
+      capture.observeFileEvents([
         { path: "big.md", operation: "update" },
         { path: "draft.md", operation: "update" },
       ]);
@@ -193,7 +193,7 @@ it.skipIf(engine.missing)(
       for (const item of bulk) {
         await writeFile(join(root, item.path), `${"x".repeat(32 * 1024)}\n`, "utf8");
       }
-      capture.captureBatch(bulk);
+      capture.observeFileEvents(bulk);
       const busy = measure("busy capture chain, 47 KiB document", "big.md");
       await Promise.all([busy, capture.flush()]);
 

@@ -352,7 +352,9 @@ export function CollectionPage({
 
   // The table pages on demand instead: TableView reports when the viewport
   // nears the end of the loaded rows.
-  const loadNextPage = useCallback(() => void store.loadMore(), [store]);
+  // A refresh can reject a near-end request while the same rows remain on
+  // screen. Retry when that query settles, even without another scroll.
+  const loadNextPage = useCallback(() => void store.loadMore(), [store, state.status, state.nextCursor]);
 
   // The global host finishes accepted edits after this page unmounts.
   const lineage = useCollectionWriteLineage(workspaceId);

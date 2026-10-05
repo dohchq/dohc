@@ -586,7 +586,7 @@ describe("desktop engine composed sessions and events", () => {
     } finally { held.resolve(); await closing; await f.close(); }
   });
 
-  it("routes automation events to the current workspace and capture events to the renderer", async () => {
+  it("routes automation events to the current workspace and Collection projections to the renderer", async () => {
     const f = fixture(); await f.addWorkspace("workspace");
     try {
       await f.engine.start();
@@ -603,9 +603,13 @@ describe("desktop engine composed sessions and events", () => {
       f.client.emit("automation.claimed", { workspaceId: "workspace", state: "pending" });
       expect(collection.notifyClaimed).toHaveBeenCalledOnce();
       vi.useFakeTimers();
+      vi.mocked(f.dependencies.notifyRenderer).mockClear();
       f.client.emit("capture.momentRecorded", { workspaceId: "workspace", paths: ["notes.md"], appliedCount: 1, notOwnedCount: 0 });
       await vi.advanceTimersByTimeAsync(100);
-      expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace", paths: ["notes.md"] });
+      expect(f.dependencies.notifyRenderer).not.toHaveBeenCalled();
+      f.client.emit("collections.projected", { workspaceId: "workspace", paths: ["Log/a.md"], projectedCount: 1 });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({ workspaceId: "workspace", paths: ["Log/a.md"], pathSetChanged: false });
     } finally { vi.useRealTimers(); await f.close(); }
   });
 });

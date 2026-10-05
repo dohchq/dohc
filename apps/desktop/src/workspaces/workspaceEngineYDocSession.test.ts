@@ -735,7 +735,7 @@ it("journals a live editor update through the Rust Y.Doc provider and suppresses
   );
   const writesBeforeWatcher = daemonWriteCount();
 
-  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  capture.observeFileEvents([{ path: PATH, operation: "update" }]);
   await capture.flush();
 
   expect(daemonWriteCount()).toBe(writesBeforeWatcher);
@@ -907,7 +907,7 @@ it("releases a verified local-only save without settling over an outside write",
   expect(vi.mocked(createReadStream)).not.toHaveBeenCalled();
   expect(await readFile(join(root, PATH), "utf8")).toBe(outside);
   const writesBeforeWatcher = daemonWriteCount();
-  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  capture.observeFileEvents([{ path: PATH, operation: "update" }]);
   await capture.flush();
   expect(daemonWriteCount()).toBeGreaterThan(writesBeforeWatcher);
   expect(await readFile(join(root, PATH), "utf8")).toBe(outside);
@@ -949,7 +949,7 @@ it("releases a verified synced document and reports changed-on-disk after a term
   settleRefusal = null;
   const writesBefore = daemonWriteCount();
   await writeFile(join(root, PATH), "# Solo\n\nAnother outside edit.\n", "utf8");
-  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  capture.observeFileEvents([{ path: PATH, operation: "update" }]);
   await capture.flush();
   expect(daemonWriteCount()).toBeGreaterThan(writesBefore);
   editor.destroy();
@@ -1030,7 +1030,7 @@ it("closes clean and reports changed-on-disk when the close settle meets a moved
   settleRefusal = null;
   const writesBeforeWatcher = daemonWriteCount();
   await writeFile(join(root, PATH), "# Solo\n\nWritten outside dohc.\n", "utf8");
-  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  capture.observeFileEvents([{ path: PATH, operation: "update" }]);
   await capture.flush();
   expect(daemonWriteCount()).toBeGreaterThan(writesBeforeWatcher);
 });
@@ -1354,7 +1354,7 @@ it("keeps a stale-target close loud when the release fails too", async () => {
   closeRefusal = null;
   const writesBeforeWatcher = daemonWriteCount();
   await writeFile(join(root, PATH), "# Solo\n\nWritten outside dohc.\n", "utf8");
-  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  capture.observeFileEvents([{ path: PATH, operation: "update" }]);
   await capture.flush();
   expect(daemonWriteCount()).toBe(writesBeforeWatcher);
 });
@@ -1607,7 +1607,7 @@ it("settles nothing when a document whose edits reached its file reopens", async
   await retainLineage("Typed and saved.", { settle: true });
   expect(await readFile(join(root, PATH), "utf8")).toContain("Typed and saved.");
   // Capture records the settled file, as the engine's own settle does.
-  capture.captureBatch([{ path: PATH, operation: "update" }]);
+  capture.observeFileEvents([{ path: PATH, operation: "update" }]);
   await capture.flush();
   const settlesBeforeOpen = methodCount("ydoc.settle");
   const {opened, states} = await openRecordingStates();
