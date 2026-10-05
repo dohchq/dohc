@@ -1,4 +1,5 @@
 import type {ShareLabels} from "@dohc/security-contract/share-labels";
+import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import type { ServiceActivationAccess } from "./serviceActivationAccess";
 import type { ServiceActivationStore } from "./serviceActivation";
 import type { LiveCommittedDeliveryStore } from "./liveCommittedDelivery";
@@ -115,6 +116,7 @@ export interface SyncRelayLogInput {
   opKind: string;
   payloadJson: string;
   recordedAtMs: number;
+  admittedAuthorSnapshot?: LiveAuthorSnapshot;
 }
 
 export interface SyncRelayLogRow extends SyncRelayLogInput {
@@ -545,7 +547,8 @@ export type LiveJournalValidation =
       readonly checkpointDigest: string;
       readonly checkpointRanges: readonly LiveUpdateStructRange[];
       readonly suffixDigests: readonly string[];
-      readonly candidate: { readonly updateDigest: string; readonly ranges: readonly LiveUpdateStructRange[] };
+      readonly candidate: { readonly updateDigest: string; readonly ranges: readonly LiveUpdateStructRange[];
+        readonly firstSeen: readonly LiveUpdateStructRange[]; readonly firstSeenDeletes: readonly LiveUpdateStructRange[] };
       readonly stateUpdate?: Uint8Array;
       readonly stateUpdateSha256: string;
       readonly stateUpdateByteLength: number;
@@ -554,6 +557,7 @@ export type LiveJournalValidation =
       readonly reason: "invalid-input" | "invalid-update" | "invalid-schema" | "projection-mutated" | "capacity-refused";
       readonly source: "call" | "admitted-cut" | "candidate" | "final" };
 export interface LiveUpdateJournalCommitInput {
+  readonly trustedAccount?: {readonly accountId: string; readonly name: string};
   readonly host: LiveHostConnectionCoordinate;
   readonly actor: CurrentLiveBindingRequest["actor"];
   readonly expectedAuthority: ServerDerivedLiveUpdateAuthority;

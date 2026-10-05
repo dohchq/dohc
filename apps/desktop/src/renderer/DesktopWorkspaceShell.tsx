@@ -798,6 +798,7 @@ export function DesktopWorkspaceShell(props: {
     dismissShellError,
     retryShellError,
     runShellErrorAction,
+    clearIdentity,
   } = useShellError(workspaceId);
   useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
   // Share removals from Chats, Settings and the share dialog: one notice
@@ -1417,28 +1418,38 @@ export function DesktopWorkspaceShell(props: {
   // it records nothing and restores nothing. Capability identity comes from
   // main's registry summary. This gates the versions surface and collections,
   // and restore, from the same fact.
-  const isShareView = Boolean(props.workspace.shareView);
+  const shareView = props.workspace.shareView ?? null;
+  const shareViewDamaged = !!shareView?.damaged;
+  // A registry update replaces this snapshot, including when access returns.
+  const [endedFor, setEndedFor] = useState<NonNullable<Workspace["shareView"]> | null>(null);
+  const shareViewEnded = !!shareView && (shareView.ended || endedFor === shareView);
+  const shareViewWritable =
+    !shareViewDamaged && !shareViewEnded && shareView?.access === "edit";
+  const shareViewWritableRef = useRef(shareViewWritable);
+  shareViewWritableRef.current = shareViewWritable;
   // History reads are separate. A shared view reads the history its share
   // imported, list and detail only, from its own store.
   const historyReadable = (status: SyncStatusResult | null) =>
-    isShareView ? !status?.engineStoreRefused : !statusSaysNoRecorder(status);
-  // An Edit share view reads and makes document Collections (ADR 0013).
-  const shareViewEditsCollections =
-    props.workspace.shareView?.access === "edit" &&
-    !props.workspace.shareView.damaged &&
-    !props.workspace.shareView.ended;
+    shareView ? !status?.engineStoreRefused : !statusSaysNoRecorder(status);
+  const shareViewReadsCollections = !!shareView && !shareViewDamaged;
   // Owner live documents require this workspace's server connection.
-  const liveDocumentsAvailable = !isShareView && workspaceSynced;
+  const liveDocumentsAvailable = !shareView && workspaceSynced;
   const { collectionFolders, refreshCollections, datasets, refreshDatasets, nextDataset, loadMoreDatasets, includeArchived, setIncludeArchived } = useCollectionFolders(
     workspaceId,
     workspaceIsReady,
-    isShareView,
-    shareViewEditsCollections,
+    !!shareView,
+    shareViewReadsCollections,
   );
   useEffect(() => {
     if (!workspaceIsReady) return;
-    void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error, () => { void refreshDatasets(); }));
-  }, [workspaceIsReady, refreshDatasets, reportShellError]);
+    const refresh = () => {
+      if (workspaceAdmission.superseded) return;
+      void refreshDatasets().catch(error => {
+        if (!workspaceAdmission.superseded) reportShellError("Could not read Collections.", error, refresh);
+      });
+    };
+    refresh();
+  }, [workspaceIsReady, workspaceAdmission, refreshDatasets, reportShellError]);
   // One issue counter for every engine read the shell orders: the history
   // page, the status lanes, the workspace open, the agent observation, and
   // the version callbacks. Bumped on unmount, so a slow response for one
@@ -1503,7 +1514,7 @@ export function DesktopWorkspaceShell(props: {
   const [chatsPanelTab, setChatsPanelTab] = useState<ChatsPanelTab>("all");
   // A shared view offers the "This file" tab only, so the panel
   // opens there whatever the runtime state carried in from another workspace.
-  const chatsPanelActiveTab: ChatsPanelTab = isShareView ? "file" : chatsPanelTab;
+  const chatsPanelActiveTab: ChatsPanelTab = shareView ? "file" : chatsPanelTab;
   const [searchChatTarget, setSearchChatTarget] = useState<{
     thread: ChatThreadRecord;
     focusMessageId?: string;
@@ -1608,7 +1619,7 @@ export function DesktopWorkspaceShell(props: {
           reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
       );
       // A shared view has no versions, so it has no try run to read.
-      if (!isShareView) tryStateLane.settle(
+      if (!shareView) tryStateLane.settle(
         token,
         bridge().getTryInVersionState({ workspaceId }),
         (trySession) => trySession.state,
@@ -1655,7 +1666,7 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [
     agentActiveLane,
-    isShareView,
+    !!shareView,
     markHistoryReady,
     readAgentStatusForHistory,
     refreshHistoryPage,
@@ -1695,7 +1706,7 @@ export function DesktopWorkspaceShell(props: {
   //
   const captureDecided = captureDecidedFor === workspaceId;
   const captureAvailable =
-    !isShareView && captureDecided && !statusSaysNoRecorder(syncStatus);
+    !shareView && captureDecided && !statusSaysNoRecorder(syncStatus);
   useEffect(() => {
     if (!workspaceIsReady) return;
     void refreshHistory().catch((error) =>
@@ -1748,7 +1759,7 @@ export function DesktopWorkspaceShell(props: {
         // version surface on screen. Not asking leaves the previous statement
         // standing — what the catch below already does. Same clauses as
         // `captureAvailable`, so the fetch cannot outlive the render gate.
-        !isShareView &&
+        !shareView &&
         captureDecidedRef.current === workspaceId &&
         !statusSaysNoRecorder(syncStatusLane.latest())
       ) {
@@ -1786,7 +1797,7 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [
-      isShareView,
+      !!shareView,
       observeEngineVersion,
       refreshFiles,
       refreshHistory,
@@ -2004,7 +2015,7 @@ export function DesktopWorkspaceShell(props: {
   );
   const refreshKeptCopies = useKeptCopyNotices({
     workspaceId,
-    workspaceIsReady: workspaceIsReady && !isShareView,
+    workspaceIsReady: workspaceIsReady && !shareView,
     show: showKeptCopies,
     showSaved: showKeptCopySaved,
     reportShellError,
@@ -2120,7 +2131,7 @@ export function DesktopWorkspaceShell(props: {
         .catch((): ResolveAutomationControlsResult => ({ status: "missing" }));
       if (workspaceIdRef.current !== owner || automationOpens.current !== request || signal?.aborted) return null;
       const shown = found.status === "found" &&
-        (isShareView ? shareViewEditsCollections : collectionFoldersRef.current.has(found.collectionPath));
+        (shareView ? shareViewWritable : collectionFoldersRef.current.has(found.collectionPath));
       if (!shown) {
         openFile(sharedFile);
         return null;
@@ -2132,7 +2143,7 @@ export function DesktopWorkspaceShell(props: {
       });
       return null;
     },
-    [isShareView, openAutomation, openCollectionTab, openFile, shareViewEditsCollections, workspaceId],
+    [!!shareView, openAutomation, openCollectionTab, openFile, shareViewWritable, workspaceId],
   );
   // Read once: the shell remounts for each workspace.
   const openOnReady = useRef(props.openOnReady);
@@ -2819,6 +2830,10 @@ export function DesktopWorkspaceShell(props: {
       pendingRecordPaths.current.add(reservedPath);
       const execute = async (recordId?: string): Promise<void> => {
         if (workspaceSelection.current !== selection) return;
+        if (shareView && !shareViewWritableRef.current) {
+          reportShellError("Your access to this share ended.", new Error("Your access to this share ended."));
+          return;
+        }
         try {
           const result = await bridge().createCollectionRecord({ workspaceId, collectionPath, name, recordId });
           if (workspaceSelection.current !== selection) return;
@@ -2837,7 +2852,7 @@ export function DesktopWorkspaceShell(props: {
       try { await execute(); }
       finally { pendingRecordPaths.current.delete(reservedPath); }
     },
-    [files, folders, openFile, refreshFiles, reportShellError, workspaceId],
+    [files, folders, openFile, refreshFiles, reportShellError, workspaceId, !!shareView],
   );
   const createUntitledDrawing = useCallback(async () => {
     try {
@@ -3332,16 +3347,19 @@ export function DesktopWorkspaceShell(props: {
       filesRefreshMode = "skip";
       if (mode !== "skip" || !hasCommittedListing()) {
         void refreshFiles(mode === "full" ? {} : { allowCached: true }).catch(
-          (error) =>
-            reportShellError("Could not refresh workspace files.", error),
+          (error) => {
+            if (!workspaceAdmission.superseded) reportShellError("Could not refresh workspace files.", error);
+          },
         );
       }
-      void refreshHistory().catch((error) =>
-        reportShellError("Could not refresh history.", error),
-      );
-      if (!isShareView || shareViewEditsCollections) void refreshCollections();
-      if (!isShareView) {
-        void refreshDatasets().catch(error => reportShellError("Could not read Collections.", error));
+      void refreshHistory().catch((error) => {
+        if (!workspaceAdmission.superseded) reportShellError("Could not refresh history.", error);
+      });
+      if (!shareView || shareViewReadsCollections) void refreshCollections();
+      if (!shareView) {
+        void refreshDatasets().catch(error => {
+          if (!workspaceAdmission.superseded) reportShellError("Could not read Collections.", error);
+        });
         void refreshKeptCopies();
       }
     });
@@ -3367,10 +3385,12 @@ export function DesktopWorkspaceShell(props: {
   }, [
     workspaceId,
     workspaceIsReady,
+    workspaceAdmission,
     refreshFiles,
     refreshHistory,
     reportShellError,
-    isShareView,
+    !!shareView,
+    shareViewReadsCollections,
     refreshCollections,
     refreshDatasets,
     refreshKeptCopies,
@@ -3491,7 +3511,7 @@ export function DesktopWorkspaceShell(props: {
       // Creating a collection writes collection.yaml and immediately opens
       // an engine-backed surface. Shared views therefore get neither the
       // application-menu action nor the palette entry.
-      ...(props.workspace.shareView && !shareViewEditsCollections
+      ...(props.workspace.shareView && !shareViewWritable
         ? []
         : [
             {
@@ -3646,6 +3666,7 @@ export function DesktopWorkspaceShell(props: {
       toggleSource,
       workspaceId,
       props.workspace.shareView,
+      shareViewWritable,
     ],
   );
 
@@ -3656,34 +3677,15 @@ export function DesktopWorkspaceShell(props: {
     });
   }, [commands]);
 
-  // Received workspaces refresh on open and on demand. Live, undamaged Edit grants
-  // allow document changes for submission; Chats remain read-only.
-  // The history placeholder uses the share's live state to offer Refresh.
-  const shareView = props.workspace.shareView ?? null;
-  // The stored grant could not be read. The marker still stands — a
-  // share view must never present as an ordinary workspace — but there is no
-  // grant to pull with, so the refresh is skipped rather than failed, and the
-  // banner says so instead of showing a level nobody can read.
-  const shareViewDamaged = !!shareView?.damaged;
+  // Received workspaces refresh on open and on demand; ended copies stay local.
   // The relay-derived generic chat fact selects the Comment banner's next
   // step. It does not grant a desktop write: every received share's Chats are
   // read-only in Phase 3 because the store cannot prove per-row delivery.
-  const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
   const shareViewHasIndependentChat =
     !shareViewDamaged &&
     !shareViewEnded &&
     shareView?.access === "comment" &&
     shareView?.genericChatWritable === true;
-  // Whether this share grants DOCUMENT writes, read the same way
-  // and for the same reason: positive recognition only, so `view`, an absent
-  // level, and a damaged grant all stay read-only. An ended share grants
-  // nothing either — its recipient can no longer send anything back, so an
-  // editable copy would be a dead end the banner has already closed.
-  //
-  // Edit does not write the granter's files. It writes the recipient's own
-  // copy, which the recipient then sends for the granter to accept.
-  const shareViewDocumentsWritable =
-    !shareViewDamaged && !shareViewEnded && shareView?.access === "edit";
   const shareGranterName = shareSenderLabel(shareView?.sharerName, shareView?.granterEmail);
   const shareBannerText = !shareView
     ? ""
@@ -3691,7 +3693,7 @@ export function DesktopWorkspaceShell(props: {
       ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
       : shareViewDamaged
         ? "dohc can't read what this share grants. Open the share again to restore it."
-        : shareViewDocumentsWritable
+        : shareViewWritable
           ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
           : shareViewHasIndependentChat
             ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
@@ -3721,9 +3723,10 @@ export function DesktopWorkspaceShell(props: {
   );
   const shareSkippedToken = useRef(0);
   const reloadShareSkipped = useCallback(async () => {
+    if (workspaceAdmission.superseded) return;
     const token = ++shareSkippedToken.current;
     const workspaces = await props.refreshWorkspaceRegistry();
-    if (token !== shareSkippedToken.current) return;
+    if (workspaceAdmission.superseded || token !== shareSkippedToken.current) return;
     const entry = workspaces.find(
       (candidate) => candidate.workspaceId === workspaceId,
     );
@@ -3732,7 +3735,7 @@ export function DesktopWorkspaceShell(props: {
     // without deleting the record, so this reads the marker rather than the
     // record's presence.
     setShareSkipped(hasUnacknowledgedShareSkips(skipped) ? skipped : null);
-  }, [props.refreshWorkspaceRegistry, workspaceId]);
+  }, [props.refreshWorkspaceRegistry, workspaceId, workspaceAdmission]);
   const {
     automationHolds, automationHoldsUnreadable, allowAutomationHold, resetAutomationHolds, revealAutomationHolds,
     automationStops, dismissAutomationStops,
@@ -3749,11 +3752,14 @@ export function DesktopWorkspaceShell(props: {
 
   const refreshShareView = useCallback(async (): Promise<ShareViewRefresh> => {
     if (!shareView) return "current";
-    if (shareViewDamaged) return "stale";
+    if (!workspaceIsReady || workspaceAdmission.superseded || shareViewDamaged) return "stale";
+    if (shareViewEnded) return "ended";
     const token = ++shareRefreshToken.current;
+    const isCurrent = () => !workspaceAdmission.superseded && token === shareRefreshToken.current;
     setShareRefreshing(true);
     const repaintAfterChange = async () => {
       await refreshFiles();
+      if (!isCurrent()) return;
       setVersionEpoch((epoch) => epoch + 1);
     };
     const bestEffortRepaint = async () => {
@@ -3768,10 +3774,10 @@ export function DesktopWorkspaceShell(props: {
     };
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
-      if (token !== shareRefreshToken.current) return "stale";
+      if (!isCurrent()) return "stale";
       if (!outcome.ok) {
         if (outcome.changedPaths > 0) await bestEffortRepaint();
-        if (token !== shareRefreshToken.current) return "stale";
+        if (!isCurrent()) return "stale";
         reportShellError(
           "Couldn't refresh the shared view.",
           new Error(`Couldn't refresh the shared view. ${outcome.errorMessage}`),
@@ -3786,20 +3792,23 @@ export function DesktopWorkspaceShell(props: {
       }
       if (outcome.status === "ended") {
         setShareExclusions({ workspaceId, paths: [] });
-        setShareViewEnded(true);
+        setEndedFor(shareView);
       } else {
         setShareExclusions({ workspaceId, paths: outcome.unjournalablePaths });
       }
       if (outcome.changedPaths > 0) {
         await repaintAfterChange();
       }
+      if (!isCurrent()) return "stale";
       return outcome.status === "ended" ? "ended" : "current";
     } catch (error) {
+      if (!isCurrent()) return "stale";
       // A store only a newer dohc opens stops the whole workspace, and the
       // stop state already says so. A toast would repeat it.
       const status = await bridge()
         .getSyncStatus({ workspaceId })
         .catch(() => null);
+      if (!isCurrent()) return "stale";
       if (
         status?.engineStoreRefused != null &&
         engineStoreRefusalRecovery(status.engineStoreRefused) === "update"
@@ -3815,11 +3824,13 @@ export function DesktopWorkspaceShell(props: {
       // only on the success path would keep that invisible until a lucky
       // refresh or a remount. Start this after the listing, but do not let a
       // slow registry read keep the Refresh control disabled.
-      if (token === shareRefreshToken.current) setShareRefreshing(false);
-      void reloadShareSkipped().catch(() => undefined);
+      if (isCurrent()) {
+        setShareRefreshing(false);
+        void reloadShareSkipped().catch(() => undefined);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shareView?.shareId, shareViewEnded, workspaceId, reloadShareSkipped]);
+  }, [shareView, shareViewEnded, shareViewDamaged, workspaceId, workspaceIsReady, workspaceAdmission, reloadShareSkipped]);
   refreshShareViewRef.current = refreshShareView;
   const refreshAfterLiveReadOnly = useCallback(() => void refreshShareViewRef.current(), []);
   useEffect(() => {
@@ -3876,10 +3887,16 @@ export function DesktopWorkspaceShell(props: {
     // Read for any share view, not only one that can still send: changes
     // already sent stay withdrawable after a downgrade, and a surface that
     // stopped reading them would hide the only way back.
-    if (!isShareView || !workspaceIsReady) return;
+    // Main refuses the read until it has opened the view in this window.
+    if (!shareView || !workspaceIsReady) return;
     void reloadMyShareChanges().catch(() => undefined);
-  }, [isShareView, workspaceIsReady, reloadMyShareChanges]);
+  }, [!!shareView, workspaceIsReady, reloadMyShareChanges]);
   const sendShareChanges = useCallback(async () => {
+    if (workspaceAdmission.superseded) return;
+    if (!shareViewWritableRef.current) {
+      reportShellError("Your access to this share ended.", new Error("Your access to this share ended."));
+      return;
+    }
     const token = myShareChangeToken.current;
     // The newest token this call owns. The reload below takes a fresh one, and
     // the cleanup has to compare against that — comparing against the token
@@ -3923,11 +3940,11 @@ export function DesktopWorkspaceShell(props: {
       if (owned === myShareChangeToken.current) setShareChangesSubmitting(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, reloadMyShareChanges]);
+  }, [workspaceId, workspaceAdmission, reloadMyShareChanges]);
   useShareDirectWrites({
     workspaceId,
-    // Main refuses a push from a window it has not opened the view in yet.
-    enabled: shareViewDocumentsWritable && workspaceIsReady,
+    enabled: shareViewWritable,
+    ready: workspaceIsReady,
     ownerName: shareGranterName,
     refreshShareView,
     sendShareChanges,
@@ -3987,7 +4004,7 @@ export function DesktopWorkspaceShell(props: {
   // A share view holds someone else's files, so it is never the granter who
   // decides about them.
   const pollsShareMounts = mountCount > 0;
-  const pollsShareProposals = !isShareView;
+  const pollsShareProposals = !shareView;
   useEffect(() => {
     if (!workspaceIsReady || (!pollsShareMounts && !pollsShareProposals)) return;
     const pull = () => {
@@ -4117,8 +4134,8 @@ export function DesktopWorkspaceShell(props: {
     historyRefreshFloor.current,
     engineHistory ? engineHistory.latestMomentOrder + 1 : 0,
   );
-  const historyRefreshCounter = isShareView ? 0 : historyRefreshFloor.current;
-  const graphKey = isShareView
+  const historyRefreshCounter = shareView ? 0 : historyRefreshFloor.current;
+  const graphKey = shareView
     ? graphRefreshKey
     : `${graphRefreshKey}\0${engineHistory?.latestMomentOrder ?? -1}`;
 
@@ -4153,10 +4170,10 @@ export function DesktopWorkspaceShell(props: {
         onOpenCollection={openCollectionTab}
         dataCollections={dataCollections}
         includeArchivedCollections={includeArchived}
-        onIncludeArchivedCollections={isShareView ? undefined : setIncludeArchived}
+        onIncludeArchivedCollections={shareView ? undefined : setIncludeArchived}
         onOpenDataCollection={openDataCollection}
         onMoreDataCollections={nextDataset ? onMoreDataCollections : undefined}
-        onRestoreCollection={!isShareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? onRestoreCollection : undefined}
+        onRestoreCollection={!shareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? onRestoreCollection : undefined}
         onBeginChanges={beginDraftOperation}
         onPathsChanged={onExplorerPathsChanged}
         onImportFiles={importFiles}
@@ -4634,7 +4651,7 @@ export function DesktopWorkspaceShell(props: {
           {/* Sending. Edit level only, and only while the share is live: an
               ended or damaged grant carries no way to send, so offering one
               would be an affordance the grant does not have. */}
-          {shareViewDocumentsWritable ? (
+          {shareViewWritable ? (
             <>
               {shareChangesEmpty ? (
                 <span
@@ -4686,7 +4703,7 @@ export function DesktopWorkspaceShell(props: {
             <button
               type="button"
               data-testid="shared-view-refresh"
-              disabled={shareRefreshing}
+              disabled={shareRefreshing || !workspaceIsReady}
               onClick={() => void refreshShareView()}
               className="flex shrink-0 items-center gap-1.5 rounded border border-line bg-panel px-2 py-0.5 text-[11px] text-muted hover:text-ink disabled:opacity-50"
             >
@@ -4740,7 +4757,7 @@ export function DesktopWorkspaceShell(props: {
               onHideWorkspaceError={hideWorkspaceError}
               onDismissWorkspaceError={dismissWorkspaceError}
               onRetryLiveDelivery={retryLiveDelivery}
-              {...(isShareView
+              {...(shareView
                 ? {}
                 : {
                     onOpenLiveDocuments: () => setLiveDocumentsWorkspaceId(workspaceId),
@@ -4923,7 +4940,7 @@ export function DesktopWorkspaceShell(props: {
               // page still mounted, called readEngineMoment and fell into its
               // own error state.
               // A shared view opens a moment its share imported, read-only.
-              !(isShareView ? captureDecided && historyReadable(syncStatus) : captureAvailable) ? (
+              !(shareView ? captureDecided && historyReadable(syncStatus) : captureAvailable) ? (
                 !captureDecided ? (
                   // Main has not decided yet. The tab must not mount the page
                   // and must not state a capability either: neither read the
@@ -4947,7 +4964,7 @@ export function DesktopWorkspaceShell(props: {
                 <EngineMomentDiffPage
                   workspaceId={workspaceId}
                   tabPath={tabPath ?? ""}
-                  readOnly={isShareView}
+                  readOnly={!!shareView}
                   onBeforeRestore={beginLineageOperation}
                   onOpenFile={openFile}
                   onPathResolved={rememberMomentDiffPath}
@@ -4964,7 +4981,7 @@ export function DesktopWorkspaceShell(props: {
               // listWorkspaceVersions and compareWorkspaceVersions, and said
               // "Could not compare with Main."
               !captureAvailable ? (
-                isShareView ? (
+                shareView ? (
                   // A persisted compare tab on a shared view. The page
                   // asks main for the versions, and a shared view has none —
                   // the same refusal the selector used to raise as a danger
@@ -5020,7 +5037,7 @@ export function DesktopWorkspaceShell(props: {
                     variant="page"
                   />
                 </Suspense>
-              ) : isShareView ? (
+              ) : shareView ? (
                 // A persisted Chats tab on a shared view. The
                 // neighbouring line blamed the Settings flag, and a share
                 // never touched it. #646 PR2 changed what is true here: a
@@ -5079,7 +5096,7 @@ export function DesktopWorkspaceShell(props: {
                   datasetPath={groupDataCollection.datasetPath} tableId={groupDataCollection.tableId}
                   onOpenFile={(path) => openFile(path)}
                   onOpenScheduleSettings={() => openSettings("advanced")}
-                  owner={!isShareView}
+                  owner={!shareView}
                   onLifecycleChanged={() => { void refreshDatasets().catch(error => reportShellError("Could not refresh Collections.", error)); }}
                   onError={collectionReports.onError}
                   onNotice={collectionReports.onNotice}
@@ -5095,6 +5112,7 @@ export function DesktopWorkspaceShell(props: {
                     key={`${tabPath}:${collectionLineage}`}
                     workspaceId={workspaceId}
                     collectionPath={groupCollectionPath}
+                    readOnly={(!!shareView && !shareViewWritable) || isMountedSharePath(groupCollectionPath)}
                     activeViewName={wb.collectionViews[groupCollectionPath] ?? null}
                     onActiveViewChange={(viewName) =>
                       mutateWb((state) =>
@@ -5163,7 +5181,7 @@ export function DesktopWorkspaceShell(props: {
                 // A document in an Edit share view that turns read-only may
                 // mean the owner ended access. The refresh asks the relay, and
                 // only the relay says so.
-                onLiveReadOnly={shareViewDocumentsWritable ? refreshAfterLiveReadOnly : undefined}
+                onLiveReadOnly={shareViewWritable ? refreshAfterLiveReadOnly : undefined}
                 surfaceKey={editorGroup.id}
                 onSurfaceReady={onRestoredFileSurfaceReady}
                 registerDraftFlush={editorCallbacks.registerDraftFlush}
@@ -5174,7 +5192,7 @@ export function DesktopWorkspaceShell(props: {
                 onButtonNotice={showSuccessNotice}
                 onOpenRecordHistory={recordHistory.open}
                 readOnly={
-                  (!!shareView && !shareViewDocumentsWritable) ||
+                  (!!shareView && !shareViewWritable) ||
                   isMountedSharePath(tabPath)
                 }
                 {...(shareView || isMountedSharePath(tabPath)
@@ -5238,7 +5256,7 @@ export function DesktopWorkspaceShell(props: {
             customize={customize}
             wb={wb}
             mutateWb={mutateWb}
-            isShareView={isShareView}
+            isShareView={!!shareView}
             chatsPanelActiveTab={chatsPanelActiveTab}
             setChatsPanelTab={setChatsPanelTab}
             captureAvailable={captureAvailable}
@@ -5613,7 +5631,7 @@ export function DesktopWorkspaceShell(props: {
           }}
         />
       ) : null}
-      {recoveryWorkspaceId === workspaceId && !isShareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? (
+      {recoveryWorkspaceId === workspaceId && !shareView && props.workspace.mode !== "cloud-only" && workspaceIsReady ? (
         <ConnectedCollectionRecoveryRestore workspaceId={workspaceId} onError={reportShellError}
           onClose={() => setRecoveryWorkspaceId(null)}
           onRestored={(datasetPath, tableId) => {
@@ -5628,10 +5646,10 @@ export function DesktopWorkspaceShell(props: {
             });
           }} />
       ) : null}
-      {newCollectionFolder !== null && (!isShareView || shareViewEditsCollections) ? (
+      {newCollectionFolder !== null && (!shareView || shareViewWritable) ? (
         <NewCollectionDialog
           workspaceId={props.workspace.workspaceId}
-          documentsOnly={isShareView}
+          documentsOnly={!!shareView}
           {...(newCollectionFolder !== ""
             ? { initialFolder: newCollectionFolder }
             : {})}
@@ -5704,7 +5722,12 @@ export function DesktopWorkspaceShell(props: {
             stopAndRestore.close();
             openFile(path);
           }}
-          onError={reportShellError}
+          onOpenCollection={(path) => {
+            stopAndRestore.close();
+            openCollectionTab(path);
+          }}
+          onError={(fallback, error, retry, identity) => reportShellError(fallback, error, retry, undefined, identity)}
+          onSettled={clearIdentity}
         />
       ) : null}
       {recordHistory.session ? (
@@ -5740,7 +5763,7 @@ export function DesktopWorkspaceShell(props: {
             onWorkspaceSettingsRead={onWorkspaceSettingsRead}
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
-            sharedView={isShareView}
+            sharedView={!!shareView}
             // Main's own decision, not the renderer's settings read:
             // only main knows whether a recorder exists for this session, and
             // a failed capture build leaves none.
@@ -5769,7 +5792,7 @@ export function DesktopWorkspaceShell(props: {
           />
         </Overlay>
       ) : null}
-      {liveDocumentsWorkspaceId === workspaceId && !isShareView ? (
+      {liveDocumentsWorkspaceId === workspaceId && !shareView ? (
         <LiveDocumentsDialog
           workspaceId={workspaceId}
           load={loadLiveDocuments}

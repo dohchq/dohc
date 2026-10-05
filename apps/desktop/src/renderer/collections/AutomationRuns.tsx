@@ -34,6 +34,8 @@ function sentence(text: string): string {
 /** What an Undo did, for its notice: "Undid 3 changes. 1 field changed since then." */
 export function undoSentence(undone: Undone, onServer = false): string {
   const parts: string[] = [];
+  if (undone.sharedReversals?.some(write => write.state === "pending")) parts.push("Reversal saved on this computer. The shared host has not accepted it yet.");
+  if (undone.sharedReversals?.some(write => write.state === "not-accepted")) parts.push("Reversal saved on this computer. The shared host did not accept it. Try Undo again.");
   if (undone.reverted > 0) parts.push(`Undid ${count(undone.reverted, "change", "changes")}.`);
   if (undone.removed > 0) parts.push(onServer
     ? `Deleted ${count(undone.removed, "added record", "added records")}. History can restore them.`
@@ -110,6 +112,15 @@ function writeText(write: RunWrite): string {
     case "dataset-skipped":
     case "skipped":
       return `${record} · ${sentence(write.reason)}`;
+  }
+}
+
+function settlementText(state: "pending" | "settled" | "not-accepted" | "absent" | undefined): string | null {
+  switch (state) {
+    case "pending": return "Awaiting the shared host";
+    case "settled": return "Accepted by the shared host";
+    case "not-accepted": return "Not accepted by the shared host";
+    default: return null;
   }
 }
 
@@ -204,6 +215,27 @@ function RunRow(props: {
           </time>
         </div>
       </div>
+      {run.sharedSettlementPending ? (
+        <p role="status" className="m-0 mt-1.5 flex items-start gap-1.5 pl-5 text-[12px] text-muted">
+          <CircleDashed aria-hidden size={13} className="mt-0.5 shrink-0" />
+          Saved on this computer. The shared host has not accepted this update yet.
+        </p>
+      ) : null}
+      {run.sharedSettlementNotAccepted ? (
+        <p role="status" className="m-0 mt-1.5 pl-5 text-[12px] text-muted">
+          Saved on this computer. The shared host did not accept this update. Check the shared file before editing again.
+        </p>
+      ) : null}
+      {run.undoSettlementPending ? (
+        <p role="status" className="m-0 mt-1.5 pl-5 text-[12px] text-muted">
+          Reversal saved on this computer. The shared host has not accepted it yet.
+        </p>
+      ) : null}
+      {run.undoSettlementNotAccepted ? (
+        <p role="status" className="m-0 mt-1.5 pl-5 text-[12px] text-muted">
+          Reversal saved on this computer. The shared host did not accept it. Try Undo again.
+        </p>
+      ) : null}
       {canRetry || canUndo || run.writes.length > 0 ? (
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5 pl-5">
           {canRetry ? <SecondaryButton size="compact" onClick={props.onRetry}>Try again</SecondaryButton> : null}
@@ -227,6 +259,12 @@ function RunRow(props: {
           {run.writes.map((write, index) => (
             <li key={index} className="break-words font-mono text-[11px] leading-snug text-muted">
               {writeText(write)}
+              {write.kind === "field" && settlementText(write.sharedFileUpdateState) ? ` · ${settlementText(write.sharedFileUpdateState)}` : null}
+            </li>
+          ))}
+          {run.reversals?.map(write => (
+            <li key={JSON.stringify([write.recordId, write.field])} className="break-words font-mono text-[11px] leading-snug text-muted">
+              Undo · {recordName(write.path)} · {write.field}{settlementText(write.state) ? ` · ${settlementText(write.state)}` : null}
             </li>
           ))}
         </ul>
@@ -291,7 +329,7 @@ export function AutomationRuns(props: {
       if (head.status === "unavailable") return setList("unavailable");
       // Rows further down that are still going change without a person here touching them.
       const shown = listRef.current;
-      const going = shown === null || shown === "unavailable" ? [] : shown.runs.filter((run) => run.state === "pending" || run.state === "running");
+      const going = shown === null || shown === "unavailable" ? [] : shown.runs.filter((run) => run.state === "pending" || run.state === "running" || run.sharedSettlementPending);
       const claims = new Set([...touched.current, ...going.map((run) => run.claimId)]);
       if (opened !== null && !openedGone.current) claims.add(opened);
       const read = new Map<string, Run | null>();
@@ -317,7 +355,7 @@ export function AutomationRuns(props: {
       const head = await bridge().listServerAutomationRuns({ workspaceId, automationId });
       if (!serverRequest.isCurrent(token)) return;
       const shown = serverListRef.current;
-      const going = shown?.runs.filter((run) => run.state === "pending" || run.state === "running") ?? [];
+      const going = shown?.runs.filter((run) => run.state === "pending" || run.state === "running" || run.sharedSettlementPending) ?? [];
       const claims = new Set([...serverTouched.current, ...going.map((run) => run.claimId)]);
       if (opened !== null && !serverOpenedGone.current) claims.add(opened);
       const read = new Map<string, Run | null>();
@@ -341,6 +379,17 @@ export function AutomationRuns(props: {
     void load();
     void loadServer();
   }, [load, loadServer, props.refreshKey]);
+  useEffect(() => bridge().onWorkspaceActivity((event) => {
+    if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
+    const local = listRef.current;
+    if (local !== null && local !== "unavailable" && (local.opened?.sharedSettlementPending || local.opened?.undoSettlementPending ||
+      local.opened?.reversals?.some(write => write.state === undefined) ||
+      local.opened?.writes.some(write => write.kind === "field" && write.sharedFileUpdate && write.sharedFileUpdateState === undefined) ||
+      local.runs.some(run => run.sharedSettlementPending || run.undoSettlementPending || run.reversals?.some(write => write.state === undefined) ||
+        run.writes.some(write => write.kind === "field" && write.sharedFileUpdate && write.sharedFileUpdateState === undefined)))) void load();
+    const server = serverListRef.current;
+    if (server?.opened?.sharedSettlementPending || server?.opened?.undoSettlementPending || server?.runs.some(run => run.sharedSettlementPending || run.undoSettlementPending)) void loadServer();
+  }), [workspaceId, load, loadServer]);
   // Relative times stay honest while the view is open.
   const [, tick] = useState(0);
   useEffect(() => {

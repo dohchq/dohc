@@ -269,6 +269,29 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn owner_ydoc_write_states(
+        &self,
+        workspace_id: String,
+        writes: Vec<dohc_engine_collab::owner_outbox::draft::OwnerDraftWrite>,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<Result<Vec<String>, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::draft::write_states_in(
+                    conn,
+                    &workspace_id,
+                    &writes,
+                )
+            }))
+        })
+        .await
+    }
+
     pub async fn owner_ydoc_list_drafts(
         &self,
         workspace_id: String,
@@ -2137,13 +2160,20 @@ fn ydoc_file_holds_head(
 /// still equal knows the lineage is not ahead of its file. For an accepted
 /// prefix the file holds only accepted content, so the interval is consumed
 /// and the native boundary stays below the owner's private tail.
+#[allow(clippy::too_many_arguments)]
 fn record_file_holds_head(
     store: &mut EngineStore,
     key: &DocKey,
     verified_projection_sha: Option<&str>,
     accepted_prefix: bool,
     faults: &dyn FaultInjector,
-) -> Result<(), RuntimeError> {
+    path: &str,
+    richdoc: bool,
+    live_audit: Option<&dohc_engine_collab::live_update_application::LiveSettlementAudit>,
+    current: &dohc_engine_domain::TextSnapshot,
+    source_state_vector_sha256: &str,
+    now_ms: i64,
+) -> Result<bool, RuntimeError> {
     let (head, settled, pending_empty, last_sha): (i64, Option<i64>, bool, Option<String>) = store.read_with(|conn| {
         conn.query_row(
             "SELECT head_update_seq, settled_update_seq, pending_authors_json='[]', last_settled_sha FROM ydoc_docs \
@@ -2153,37 +2183,68 @@ fn record_file_holds_head(
         )
         .map_err(StorageError::persist_public)
     })?;
-    if (accepted_prefix || settled == Some(head))
+    let holds_head = (accepted_prefix || settled == Some(head))
         && pending_empty
-        && verified_projection_sha.is_none_or(|sha| last_sha.as_deref() == Some(sha))
-    {
-        return Ok(());
+        && verified_projection_sha.is_none_or(|sha| last_sha.as_deref() == Some(sha));
+    if holds_head && live_audit.is_none() {
+        let pending_binding = richdoc
+            && store.read_with(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM collection_records
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND file_path=?4
+                 AND adoption_state IN ('pending','pending-lossless'))",
+                    params![key.workspace_id, key.version_id, key.object_id, path],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(StorageError::persist_public)
+            })?;
+        if !pending_binding {
+            return Ok(false);
+        }
     }
     let recorded = store.write_with(faults, |tx| {
-        if accepted_prefix {
-            dohc_engine_collab::author_coverage::advance_accepted_prefix_in(tx, key, false)
-        } else {
-            dohc_engine_collab::author_coverage::advance_in(tx, key, false)
-        }
-        .map_err(StorageError::persist_public)?;
-        tx.execute(
-            "UPDATE ydoc_docs SET \
+        if !holds_head {
+            if accepted_prefix {
+                dohc_engine_collab::author_coverage::advance_accepted_prefix_in(tx, key, false)
+            } else {
+                dohc_engine_collab::author_coverage::advance_in(tx, key, false)
+            }
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "UPDATE ydoc_docs SET \
              last_settled_sha=COALESCE(?4,last_settled_sha) \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-            params![
-                key.workspace_id,
-                key.version_id,
-                key.object_id,
-                verified_projection_sha
-            ],
-        )
-        .map_err(StorageError::persist_public)?;
-        Ok::<_, StorageError>(())
+                params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    verified_projection_sha
+                ],
+            )
+            .map_err(StorageError::persist_public)?;
+        }
+        if let Some(audit) = live_audit {
+            let id = audit.record_in_tx(
+                tx,
+                &current.latest_moment_id,
+                &current.blob_sha256,
+                source_state_vector_sha256,
+                now_ms,
+            )?;
+            dohc_engine_sync::journal_live_settlement_in_tx(
+                tx,
+                &audit.binding().workspace_id,
+                &id,
+                now_ms,
+            )
+            .map_err(StorageError::persist_public)?;
+        }
+        settled_collection_record_reconcile_required_in_tx(tx, key, path, richdoc)
     })?;
-    if matches!(recorded, TxnOutcome::Crashed { .. }) {
-        return Err(RuntimeError::OperationCrashed);
+    match recorded {
+        TxnOutcome::Committed(required) => Ok(required),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
-    Ok(())
 }
 
 fn reconcile_author_coverage(
@@ -2312,29 +2373,55 @@ fn restore_live_settlement_marker(
     Ok(())
 }
 
-fn settled_collection_record_id_mismatch(
-    store: &EngineStore,
+fn settled_collection_record_reconcile_required_in_tx(
+    conn: &rusqlite::Connection,
     key: &DocKey,
     path: &str,
+    richdoc: bool,
+) -> Result<bool, DomainError> {
+    if !richdoc
+        || !is_collection_record_bound_in_tx(
+            conn,
+            &key.workspace_id,
+            &key.version_id,
+            &key.object_id,
+        )?
+    {
+        return Ok(false);
+    }
+    let mismatch = collection_record_id_mismatch_in_tx(
+        conn,
+        &key.workspace_id,
+        &key.version_id,
+        &[path.to_owned()],
+    )?;
+    if mismatch {
+        return Ok(true);
+    }
+    conn.execute(
+        "UPDATE collection_records SET adoption_state='adopted'
+        WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND file_path=?4
+        AND adoption_state IN ('pending','pending-lossless')",
+        params![key.workspace_id, key.version_id, key.object_id, path],
+    )
+    .map_err(StorageError::persist_public)?;
+    Ok(false)
+}
+
+#[cfg(test)]
+fn settled_collection_record_reconcile_required(
+    store: &mut EngineStore,
+    key: &DocKey,
+    path: &str,
+    richdoc: bool,
+    faults: &dyn FaultInjector,
 ) -> Result<bool, RuntimeError> {
-    store
-        .read_with(|conn| {
-            if !is_collection_record_bound_in_tx(
-                conn,
-                &key.workspace_id,
-                &key.version_id,
-                &key.object_id,
-            )? {
-                return Ok(false);
-            }
-            collection_record_id_mismatch_in_tx(
-                conn,
-                &key.workspace_id,
-                &key.version_id,
-                &[path.to_owned()],
-            )
-        })
-        .map_err(RuntimeError::from)
+    match store.write_with(faults, |tx| {
+        settled_collection_record_reconcile_required_in_tx(tx, key, path, richdoc)
+    })? {
+        TxnOutcome::Committed(required) => Ok(required),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2682,29 +2769,19 @@ pub(super) fn ydoc_settle_on_store(
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
         // Exact projection and disk equality restore the proof a prior prune cleared.
-        record_file_holds_head(store, key, Some(&projected_sha), settles_prefix, faults)?;
-        if let Some(audit) = live_audit {
-            let recorded = store.write_with(faults, |tx| {
-                let id = audit.record_in_tx(
-                    tx,
-                    &current.latest_moment_id,
-                    &current.blob_sha256,
-                    &projection.source_state_vector_sha256,
-                    now_ms,
-                )?;
-                dohc_engine_sync::journal_live_settlement_in_tx(
-                    tx,
-                    &audit.binding().workspace_id,
-                    &id,
-                    now_ms,
-                )
-                .map_err(StorageError::persist_public)?;
-                Ok::<_, StorageError>(id)
-            })?;
-            if matches!(recorded, TxnOutcome::Crashed { .. }) {
-                return Err(RuntimeError::OperationCrashed);
-            }
-        }
+        let collection_reconcile_required = record_file_holds_head(
+            store,
+            key,
+            Some(&projected_sha),
+            settles_prefix,
+            faults,
+            path,
+            content_kind == ContentKind::Richdoc,
+            live_audit,
+            &current,
+            &projection.source_state_vector_sha256,
+            now_ms,
+        )?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
@@ -2713,7 +2790,7 @@ pub(super) fn ydoc_settle_on_store(
             // Any pending job for this head was replayed above, and a Blocked
             // replay returns Err rather than reaching here.
             materialized: true,
-            collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
+            collection_reconcile_required,
             projection,
         })));
     }
@@ -2737,14 +2814,26 @@ pub(super) fn ydoc_settle_on_store(
         )
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
-        record_file_holds_head(store, key, None, false, faults)?;
+        let collection_reconcile_required = record_file_holds_head(
+            store,
+            key,
+            None,
+            false,
+            faults,
+            path,
+            content_kind == ContentKind::Richdoc,
+            None,
+            &current,
+            &projection.source_state_vector_sha256,
+            now_ms,
+        )?;
         return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
             content: inband_settled_content(current.text),
             sha256: current.blob_sha256,
             materialized: true,
-            collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
+            collection_reconcile_required,
             projection,
         })));
     }
@@ -2906,9 +2995,15 @@ pub(super) fn ydoc_settle_on_store(
                 result.deduped,
             )?;
         }
-        Ok(result)
+        let reconcile_required = settled_collection_record_reconcile_required_in_tx(
+            tx,
+            key,
+            path,
+            content_kind == ContentKind::Richdoc,
+        )?;
+        Ok((result, reconcile_required))
     })?;
-    let write = match outcome {
+    let (write, collection_reconcile_required) = match outcome {
         TxnOutcome::Committed(write) => write,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
@@ -3009,7 +3104,7 @@ pub(super) fn ydoc_settle_on_store(
         content,
         sha256: write.snapshot.blob_sha256,
         materialized,
-        collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
+        collection_reconcile_required,
         projection,
     })))
 }
@@ -3968,5 +4063,145 @@ mod scene_seed_transaction_tests {
             std::fs::read(target).expect("materialized asset"),
             [1, 2, 3, 4]
         );
+    }
+}
+
+#[cfg(test)]
+mod collection_adoption_settlement_tests {
+    use super::*;
+    use dohc_engine_domain::{WriteText, reconcile_collections_in_tx};
+    use dohc_engine_testkit::ScratchDir;
+
+    #[test]
+    fn adoption_completion_requires_richdoc_bound_identity() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("database"),
+            1,
+        )
+        .expect("store");
+        ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
+            .expect("version");
+        for (object, path, text) in [
+            ("schema", "tasks/collection.yaml", "fields: {}\n"),
+            (
+                "record",
+                "tasks/record.md",
+                "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n",
+            ),
+            (
+                "other",
+                "tasks/other.md",
+                "---\nid: rec_bbbbbbbbbbbbbbbbbbbbbbbbbb\n---\n",
+            ),
+        ] {
+            VersionedTextStore::new(&mut store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: "workspace".into(),
+                        version_id: "main".into(),
+                        object_id: object.into(),
+                        path: path.into(),
+                        text: text.into(),
+                        moment_id: format!("moment-{object}"),
+                        metadata_origin: "test".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 2,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .expect("fixture");
+        }
+        store
+            .write_with(&NoFaults, |tx| {
+                reconcile_collections_in_tx(tx, "workspace", "main")
+            })
+            .expect("pending bindings");
+        let key = DocKey::new("workspace", "main", "record").expect("key");
+        let state = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    conn.query_row(
+                        "SELECT adoption_state FROM collection_records WHERE object_id='record'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                })
+                .expect("binding")
+        };
+        assert_eq!(state(&store), "pending");
+        assert!(
+            !settled_collection_record_reconcile_required(
+                &mut store,
+                &key,
+                "tasks/record.md",
+                false,
+                &NoFaults
+            )
+            .expect("non-richdoc settlement")
+        );
+        assert_eq!(state(&store), "pending");
+        assert!(
+            settled_collection_record_reconcile_required(
+                &mut store,
+                &key,
+                "tasks/moved.md",
+                true,
+                &NoFaults
+            )
+            .expect("stale path")
+        );
+        assert_eq!(state(&store), "pending");
+        store.write_with(&NoFaults, |tx| tx.execute(
+            "UPDATE collection_records SET record_id='rec_cccccccccccccccccccccccccc' WHERE object_id='record'", [],
+        ).map_err(StorageError::persist_public)).expect("identity mismatch");
+        assert!(
+            settled_collection_record_reconcile_required(
+                &mut store,
+                &key,
+                "tasks/record.md",
+                true,
+                &NoFaults
+            )
+            .expect("mismatched settlement")
+        );
+        assert_eq!(state(&store), "pending");
+        store.write_with(&NoFaults, |tx| tx.execute(
+            "UPDATE collection_records SET record_id='rec_aaaaaaaaaaaaaaaaaaaaaaaaaa' WHERE object_id='record'", [],
+        ).map_err(StorageError::persist_public)).expect("restore binding");
+        assert!(
+            !settled_collection_record_reconcile_required(
+                &mut store,
+                &key,
+                "tasks/record.md",
+                true,
+                &NoFaults
+            )
+            .expect("completed settlement")
+        );
+        assert_eq!(state(&store), "adopted");
+        assert!(
+            !settled_collection_record_reconcile_required(
+                &mut store,
+                &key,
+                "tasks/record.md",
+                true,
+                &NoFaults
+            )
+            .expect("idempotent completion")
+        );
+        let other: String = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT adoption_state FROM collection_records WHERE object_id='other'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("other binding");
+        assert_eq!(other, "pending");
     }
 }

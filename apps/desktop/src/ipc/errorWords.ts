@@ -55,6 +55,7 @@ const ENGINE_CODE_WORDS = {
   INVALID_CHANNEL: "This channel cannot be shared.",
   RELAY_METHOD_NOT_ALLOWED: "The server does not support this.",
   RELAY_INVALID_RESPONSE: UNREADABLE_ANSWER,
+  COLLECTION_RECONCILIATION_LEASE_HELD: null,
   INTERNAL: null,
 } as const satisfies Record<DaemonErrorCode, Words>;
 

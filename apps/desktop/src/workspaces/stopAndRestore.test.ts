@@ -4,6 +4,7 @@ import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { restoreDirectWrites, type DirectWriteFile, type StopAndRestoreDependencies } from "./stopAndRestore";
 
+const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finished on", recordId: null };
 const SCHEMA = "name: Packing\nfields:\n  Title:\n    type: text\n";
 const SCHEMA_TWO = "name: Packing\nfields:\n  Title:\n    type: text\n  Count:\n    type: number\n";
 const STAMP = "  - id: stamp\n    name: Stamp\n    when: record-added\n    do:\n      - set:\n          Title: Packed\n";
@@ -71,7 +72,7 @@ function engine(moments: VersionedTextMoment[], folders: Record<string, string[]
     }),
     folderEntries: vi.fn(async (path: string) => folders[path] ?? []),
     removeEmptyFolder: vi.fn(async () => undefined),
-    undoRuns: vi.fn(async (_definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>) => ({ undone: 2, left: 1, kept: 3, missing: 0, otherKept: 0, errorMessage: null as string | null })),
+    undoRuns: vi.fn(async (_definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>) => ({ undone: 2, left: 1, keptFields: [KEPT, { ...KEPT, id: "1".repeat(32), field: "Field 1" }, { ...KEPT, id: "2".repeat(32), field: "Field 2" }], missing: 0, otherKept: 0, errorMessage: null as string | null })),
   };
   return { dependencies, restored, refused, changedAtRestore, failing, addedAtRestore, all };
 }
@@ -115,8 +116,8 @@ describe("restoring what a person wrote directly", () => {
       runChangesKept: 3,
       wroteAutomations: true,
       sendsMessages: false,
-      fieldsKept: 3, fieldsMissing: 0,
-      errorMessage: null,
+      keptFields: [KEPT, { ...KEPT, id: "1".repeat(32), field: "Field 1" }, { ...KEPT, id: "2".repeat(32), field: "Field 2" }], fieldsMissing: 0,
+      unfinished: null,
     });
     const wipe = { collectionPath: "trip/packing", id: "wipe" };
     expect(dependencies.undoRuns.mock.calls[0]![0]).toEqual([
@@ -143,13 +144,39 @@ describe("restoring what a person wrote directly", () => {
   it("keeps what undoing some runs found when a later run's Undo fails", async () => {
     const auto = moment("m-auto", "o-auto", "trip/packing/automations.yaml", automations(STAMP), automations(STAMP, WIPE));
     const { dependencies } = engine([auto]);
-    dependencies.undoRuns.mockResolvedValueOnce({ undone: 1, left: 0, kept: 4, missing: 0, otherKept: 0, errorMessage: "The workspace engine is not running." });
+    dependencies.undoRuns.mockResolvedValueOnce({ undone: 1, left: 0, keptFields: [KEPT, { ...KEPT, id: "1".repeat(32), field: "Field 1" }, { ...KEPT, id: "2".repeat(32), field: "Field 2" }, { ...KEPT, id: "3".repeat(32), field: "Field 3" }], missing: 0, otherKept: 0, errorMessage: "The workspace engine is not running." });
     await expect(restoreDirectWrites(dependencies, [file("m-auto", "o-auto", "trip/packing/automations.yaml")])).resolves.toMatchObject({
       restored: [{ path: "trip/packing/automations.yaml" }],
       runsUndone: 1,
       runChangesKept: 4,
-      errorMessage: "The workspace engine is not running.",
+      unfinished: { step: "runs", message: "The workspace engine is not running." },
     });
+  });
+
+  it("says a protected automations file hides its runs, and lists a protected later change without blaming its automations", async () => {
+    const auto = moment("m-auto", "o-auto", "trip/packing/automations.yaml", automations(STAMP), automations(STAMP, WIPE));
+    const { dependencies } = engine([auto]);
+    dependencies.moment.mockResolvedValueOnce("protected" as never);
+    await expect(restoreDirectWrites(dependencies, [file("m-auto", "o-auto", "trip/packing/automations.yaml")])).resolves.toMatchObject({
+      restored: [],
+      review: [{
+        path: "trip/packing/automations.yaml", reason: "restore-refused",
+        detail: "Its contents are protected here, so dohc could not read its automations or undo their runs. Restore it from its History, and undo their runs from its Collection's run history.",
+      }],
+      wroteAutomations: true,
+      unfinished: null,
+    });
+    expect(dependencies.undoRuns).not.toHaveBeenCalled();
+
+    // Only a later change is protected: their automations are read and their runs undone.
+    const later = engine([auto, moment("m-later", "o-auto", "trip/packing/automations.yaml", automations(STAMP, WIPE), automations(STAMP))]);
+    const read = later.dependencies.moment.getMockImplementation()!;
+    later.dependencies.moment.mockImplementation(async (id: string) => (id === "m-later" ? "protected" : await read(id)) as never);
+    await expect(restoreDirectWrites(later.dependencies, [file("m-auto", "o-auto", "trip/packing/automations.yaml")])).resolves.toMatchObject({
+      review: [{ path: "trip/packing/automations.yaml", reason: "restore-refused", detail: "Its contents are protected. Restore it from its History." }],
+      wroteAutomations: true,
+    });
+    expect(later.dependencies.undoRuns).toHaveBeenCalledTimes(1);
   });
 
   it("does not blame the person for an automation the owner added between their writes", async () => {
@@ -281,7 +308,7 @@ describe("restoring what a person wrote directly", () => {
     dependencies.folderEntries.mockRejectedValueOnce(Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }));
 
     await expect(restoreDirectWrites(dependencies, [file("m-new-schema", "o-new-schema", "trip/ideas/collection.yaml", true)]))
-      .resolves.toMatchObject({ restored: [], review: [], errorMessage: "EACCES: permission denied" });
+      .resolves.toMatchObject({ restored: [], review: [], unfinished: { step: "files", message: "EACCES: permission denied" } });
     expect(restored).toEqual([]);
   });
 
@@ -297,7 +324,7 @@ describe("restoring what a person wrote directly", () => {
     ])).resolves.toMatchObject({
       restored: [{ path: "trip/packing/automations.yaml", restoredMomentId: "back-m-auto" }],
       review: [],
-      errorMessage: "The workspace engine is not running.",
+      unfinished: { step: "files", message: "The workspace engine is not running." },
     });
     expect(dependencies.undoRuns).not.toHaveBeenCalled();
   });
@@ -317,13 +344,13 @@ describe("restoring what a person wrote directly", () => {
         { path: "trip/packing/automations.yaml", restoredMomentId: "back-m-auto" },
         { path: "trip/packing/collection.yaml", restoredMomentId: "back-m-schema" },
       ],
-      errorMessage: "The workspace engine is not running.",
+      unfinished: { step: "runs", message: "The workspace engine is not running." },
     });
     await expect(restoreDirectWrites(dependencies, files)).resolves.toMatchObject({
       restored: [],
       review: [],
       runsUndone: 2,
-      errorMessage: null,
+      unfinished: null,
     });
     expect(dependencies.restore).toHaveBeenCalledTimes(2);
   });

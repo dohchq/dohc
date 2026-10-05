@@ -1,8 +1,10 @@
 import { z } from "zod";
 import { WriteSchema } from "@dohc/automation-executor/automation-run-store";
-import { AutomationControlsTargetShape } from "../ipc/bridgeContract";
+import { SharedReversalsSchema } from "@dohc/workspace-contracts/shared-file-settlement";
+import { AutomationControlsTargetShape, KeptAutomationFieldShape } from "../ipc/bridgeContract";
 import type { DatasetUndoConfirmed } from "@dohc/automation-executor/dataset-automation-undo";
 import type {
+  KeptAutomationField,
   CollectionAutomationHold,
   CollectionAutomationRetry,
   CollectionAutomationRun,
@@ -28,6 +30,12 @@ export type ServerRequest =
   | { method: "POST"; action: "retry" | "undo" | "restore" | "allow"; body: Record<string, unknown> };
 
 const Run = z.object({
+  sharedSettlementPending: z.boolean().optional(),
+  sharedSettlementNotAccepted: z.boolean().optional(),
+  undoSettlementPending: z.boolean().optional(),
+  undoSettlementNotAccepted: z.boolean().optional(),
+  reversals: z.array(z.object({ recordId: z.string(), field: z.string(), path: z.string(),
+    state: z.enum(["pending", "settled", "not-accepted"]).optional() })).optional(),
   claimId: z.string(),
   state: z.enum(["pending", "running", "done", "failed"]),
   error: z.string().nullable(),
@@ -57,6 +65,7 @@ const Count = z.number().int().nonnegative();
 const Undo = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("undone"),
+    sharedReversals: SharedReversalsSchema.optional(),
     reverted: Count, removed: Count, kept: Count, changedSince: Count, missing: Count, irreversible: Count, actions: Count, actionsReversed: Count,
     deleted: Count, keptChanged: Count, gone: Count,
   }),
@@ -135,9 +144,9 @@ export function createServerRuns(send: (workspaceId: string, request: ServerRequ
       workspaceId: string,
       definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
       again: boolean,
-    ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: string[]; otherKept: number; errorMessage: string | null }> {
+    ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; sharedReversals?: z.infer<typeof SharedReversalsSchema>; errorMessage: string | null }> {
       const answer = await ask(workspaceId, { method: "POST", action: "restore", body: { definitions, again } },
-        z.object({ undone: Count, left: Count, reverted: Count, missing: Count, keptFields: z.array(z.string().regex(/^[a-f0-9]{32}$/)), otherKept: Count, errorMessage: z.string().nullable() }));
+        z.object({ undone: Count, left: Count, reverted: Count, missing: Count, keptFields: z.array(KeptAutomationFieldShape), otherKept: Count, sharedReversals: SharedReversalsSchema.optional(), errorMessage: z.string().nullable() }));
       return answer ?? { undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null };
     },
     /** The steps the server holds until a current editor allows them. */

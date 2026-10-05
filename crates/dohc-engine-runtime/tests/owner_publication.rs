@@ -7,13 +7,13 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::{path::PathBuf, sync::Arc};
 
 struct Fixture {
-    root: ScratchDir,
     db: PathBuf,
     store: EngineStore,
     binding: dohc_engine_collab::LiveObjectBinding,
     doc: Ydoc,
     bytes: Vec<u8>,
     text: String,
+    root: ScratchDir,
 }
 
 impl Fixture {
@@ -279,10 +279,17 @@ impl Fixture {
                                 principal_id: "owner".into(),
                             },
                             received_at_ms: 20 + cursor,
-                            agent_declaration,
                         },
                         first_seen: vec![],
-                    },
+
+                canonical_version: Some(2),
+
+                author_snapshot: Some((agent_declaration).into_iter().map(dohc_engine_collab::live_update_application::LiveAuthorEntry::from).collect()),
+
+                first_seen_deletes: Some(vec![]),
+
+                checkpoint_coverage: None,
+},
                     update_bytes: self.store.get_binary_blob(&digest).unwrap().unwrap(),
                 },
                 Arc::new(NoFaults),
@@ -380,9 +387,21 @@ async fn deliver_declared(
                             principal_id: "owner".into(),
                         },
                         received_at_ms: 20 + cursor,
-                        agent_declaration: Some(declaration),
                     },
                     first_seen: vec![],
+
+                    canonical_version: Some(2),
+
+                    author_snapshot: Some(
+                        (Some(declaration))
+                            .into_iter()
+                            .map(dohc_engine_collab::live_update_application::LiveAuthorEntry::from)
+                            .collect(),
+                    ),
+
+                    first_seen_deletes: Some(vec![]),
+
+                    checkpoint_coverage: None,
                 },
                 update_bytes: bytes.to_vec(),
             },
@@ -877,9 +896,12 @@ async fn configured_pending_edits_do_not_escape_through_ordinary_index_journal_o
                             principal_id: "owner".into(),
                         },
                         received_at_ms: 21,
-                        agent_declaration: None,
                     },
                     first_seen: vec![],
+                    canonical_version: Some(2),
+                    author_snapshot: Some(vec![]),
+                    first_seen_deletes: Some(vec![]),
+                    checkpoint_coverage: None,
                 },
                 update_bytes: update,
             },
@@ -1130,9 +1152,16 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
                             principal_id: "owner".into(),
                         },
                         received_at_ms: 21,
-                        agent_declaration: None,
                     },
                     first_seen: vec![],
+
+                    canonical_version: Some(2),
+
+                    author_snapshot: Some(vec![]),
+
+                    first_seen_deletes: Some(vec![]),
+
+                    checkpoint_coverage: None,
                 },
                 update_bytes: captured.full_state.clone(),
             },

@@ -1,7 +1,7 @@
 import {configRecord} from "./deviceLiveHostConfig";
 import {parseHostControlIdentifier} from "@dohc/live-session-contract/host-control";
 import {parseLiveObjectBinding, type LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import {parseAdmittedLiveUpdateMetadata, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt,
+import {parseCanonicalAdmittedLiveUpdateMetadata, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseLiveUpdateReceipt,
   type AdmittedLiveUpdateMetadata, type LiveUpdateReceipt} from "@dohc/live-session-contract/live-update-admission";
 import {parseNativeRestoreFenceReceipt, type NativeRestoreFenceReceipt} from "./liveRestoreFence";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
@@ -35,7 +35,7 @@ export function parseNativeRestoreApplicationReceipt(value: unknown): NativeRest
   const r=configRecord(value,["fence","candidateDigest","nativeSourceManifestDigest","admitted","localHeadSequence","hostCoordinate","recordedAtMs"]);
   const h=configRecord(r.hostCoordinate,["hostId","hostEpoch","instanceId","connectionId"]);
   return {fence:parseNativeRestoreFenceReceipt(r.fence),candidateDigest:parseLiveUpdateDigest(r.candidateDigest),
-    nativeSourceManifestDigest:parseLiveUpdateDigest(r.nativeSourceManifestDigest),admitted:parseAdmittedLiveUpdateMetadata(r.admitted),
+    nativeSourceManifestDigest:parseLiveUpdateDigest(r.nativeSourceManifestDigest),admitted:parseCanonicalAdmittedLiveUpdateMetadata(r.admitted),
     localHeadSequence:authorityInteger(r.localHeadSequence),hostCoordinate:{hostId:parseHostControlIdentifier(h.hostId),
       hostEpoch:authorityInteger(h.hostEpoch,1),instanceId:parseHostControlIdentifier(h.instanceId),connectionId:parseHostControlIdentifier(h.connectionId)},
     recordedAtMs:authorityInteger(r.recordedAtMs)};

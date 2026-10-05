@@ -1,5 +1,5 @@
 import {z} from "zod";
-import {parseAdmittedLiveUpdateMetadata, parseLiveDocumentKey, parseLiveUpdateReceipt, parseServerDerivedLiveUpdateAuthority} from "@dohc/live-session-contract/live-update-admission";
+import {parseCanonicalAdmittedLiveUpdateMetadata, parseLiveDocumentKey, parseLiveUpdateReceipt, parseServerDerivedLiveUpdateAuthority} from "@dohc/live-session-contract/live-update-admission";
 import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 
 const id = z.string().min(1).max(512), digest = z.string().regex(/^[a-f0-9]{64}$/), integer = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -45,7 +45,7 @@ export const OwnerRestoreReview = z.object({
   selectedHistoryDigest: digest, acceptedHistoryDigest: digest, nativeSourceManifestDigest: digest,
   content: z.object({frozenMarkdown: z.string(), restoredMarkdown: z.string(), frozenMarkdownDigest: digest,
     restoredMarkdownDigest: digest, frozenMarkdownByteLength: integer, restoredMarkdownByteLength: integer}),
-  acceptedEvents: z.array(z.object({metadata: parsed(parseAdmittedLiveUpdateMetadata), restoreOperationId: id.nullable()})),
+  acceptedEvents: z.array(z.object({metadata: parsed(parseCanonicalAdmittedLiveUpdateMetadata), restoreOperationId: id.nullable()})),
   priorRestoreCuts: z.array(priorCut),
   nativeSources: z.array(z.object({
     source: z.object({deliveryId: id, updateDigest: digest}).passthrough(), acceptedReceipt: receipt.nullable(),

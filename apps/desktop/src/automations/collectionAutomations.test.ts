@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import * as Y from "yjs";
 import type { AutomationEvaluator } from "@dohc/app-backend-runtime/automation";
 import { AUTOMATION_NEVER_STARTED_REFUSAL } from "@dohc/app-backend-runtime/dataset-automation-claims";
@@ -67,7 +67,7 @@ const editor = (email: string, paths: string[]): RosterGrant => ({
   files: { paths, versionId: null, access: "edit" }, channel: null,
 });
 
-interface FakeRecord { id: string; path: string; collection: string; doc: Y.Doc }
+interface FakeRecord { id: string; path: string; collection: string; doc: Y.Doc; conflicted?: boolean }
 
 // Every field these tests name. A field a Collection lacks keeps its
 // automation off, so each test Collection defines them all.
@@ -105,7 +105,11 @@ async function world(options: {
   const collections = new Map((options.collections ?? ["Tasks"]).map((path) => [path, path.replaceAll("/", "-")]));
   for (const collection of collections.keys()) {
     await mkdir(join(root, collection), { recursive: true });
-    await writeFile(join(root, collection, "collection.yaml"), SCHEMA);
+    const file = parseAutomationsFile(`version: 1\nautomations:\n${options.automations[collection] ?? ""}`);
+    const buttonFields = file.status === "read" ? new Set(file.entries.flatMap(entry =>
+      entry.status === "valid" && entry.automation.when.kind === "button" ? [entry.automation.when.field] : [])) : new Set<string>();
+    const schema = `fields:\n${[...new Set([...FIELDS, ...buttonFields])].map(field => `  ${field}:\n    type: ${buttonFields.has(field) ? "button" : "text"}\n`).join("")}`;
+    await writeFile(join(root, collection, "collection.yaml"), schema);
   }
   const summaryOf = (path: string) => ({ path, objectId: collections.get(path) ?? "object-gone", status: "valid" as const, reasons: [] });
   const writeAutomations = async (collection: string, body: string) =>
@@ -163,7 +167,7 @@ async function world(options: {
 
   const fieldsOf = (record: FakeRecord) => record.doc.getMap("frontmatter").toJSON() as Record<string, unknown>;
   const collectionRecord = (record: FakeRecord): CollectionRecord => ({
-    id: record.id, path: record.path, conflicted: false,
+    id: record.id, path: record.path, conflicted: record.conflicted ?? false,
     values: Object.entries(fieldsOf(record)).map(([field, value]) => ({
       field, value: value as CollectionRecord["values"][number]["value"], validation: { status: "valid" }, resolvedRelations: [],
     })),
@@ -179,12 +183,13 @@ async function world(options: {
     const id = `rec_${createHash("sha256").update(`${collection}/${name}`).digest("hex").slice(0, 26).replace(/[01890]/g, "a")}`;
     const doc = new Y.Doc();
     for (const [field, value] of Object.entries(fields)) doc.getMap("frontmatter").set(field, value);
-    const record = { id, path: `${collection}/${name}.md`, collection, doc };
+    const record: FakeRecord = { id, path: `${collection}/${name}.md`, collection, doc };
     records.set(id, record);
     return record;
   };
 
   const engine: CollectionAutomationEngine = {
+    sharedFileUpdateStates: async writes => writes.map(() => "settled"),
     workspaceId: "ws",
     listVersions: async () => [{ id: "main" }],
     // A path the version does not hold reads as null, as the engine answers.
@@ -889,6 +894,177 @@ describe("Collection automations", () => {
     await w.executor.idle();
     expect(w.runsChanged).toEqual(["changed"]);
     await w.until(() => w.failureReports.length > 0);
+  });
+
+  it("lists locally completed writes with current shared settlement state", async () => {
+    const w = await world({automations: {Tasks: "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n"}});
+    const record = w.addRecord("Tasks", "pending", {Status: "Done"});
+    const claim = w.claim("collection:Tasks#finish", record);
+    const executor = w.makeExecutor({withRecordWrites: async (_signal, work) => work({
+      setFields: async () => ({replaced: {Note: null}, kept: {}, sharedFileUpdates: {Note: {
+        outboxId: "outbox-one", appendKey: "write/Note", nativeHeadSequence: 2,
+        binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+          currentPath: "Tasks/pending.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0},
+      }}}),
+      create: async () => { throw new Error("No added record"); },
+    })});
+    onTestFinished(() => executor.dispose());
+    let pending = true;
+    const read = vi.fn(async (writes: readonly unknown[]) => writes.map(() => pending ? "pending" as const : "settled" as const));
+    w.engine.sharedFileUpdateStates = read;
+    await executor.open();
+    expect((await w.settledClaim(claim)).state).toBe("done");
+    expect((await executor.runs(claim.automationId)).runs[0]).toMatchObject({state: "done", error: null, sharedSettlementPending: true,
+      writes: [{kind: "field", field: "Note", after: "saved"}]});
+    expect(await executor.listedRun(claim.automationId, claim.claimId)).toMatchObject({sharedSettlementPending: true});
+    expect(await executor.run(claim.automationId, claim.claimId)).toMatchObject({sharedSettlementPending: true});
+    pending = false;
+    expect((await executor.runs(claim.automationId)).runs[0]?.sharedSettlementPending).toBeUndefined();
+    expect((await executor.run(claim.automationId, claim.claimId))?.sharedSettlementPending).toBeUndefined();
+    const reads = read.mock.calls.length;
+    pending = true;
+    expect((await executor.runs(claim.automationId)).runs[0]?.sharedSettlementPending).toBeUndefined();
+    expect(read).toHaveBeenCalledTimes(reads);
+  });
+
+  it("tracks fields from one Set independently and stops rereading each accepted field", async () => {
+    const w = await world({automations: {Tasks: "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved, Count: 2}}]\n"}});
+    const record = w.addRecord("Tasks", "one", {Status: "Done"});
+    const claim = w.claim("collection:Tasks#finish", record);
+    const base = {outboxId: "outbox", nativeHeadSequence: 2,
+      binding: {workspaceId: "workspace", mainVersionId: "main", objectId: record.id, lineageClaimId: "a".repeat(64),
+        currentPath: record.path, selectorPaths: ["Tasks"], restoreFenceGeneration: 0}};
+    const executor = w.makeExecutor({withRecordWrites: async (_signal, work) => work({
+      setFields: async () => ({replaced: {Note: null, Count: null}, kept: {}, sharedFileUpdates: {
+        Note: {...base, appendKey: "write/Note"}, Count: {...base, appendKey: "write/Count"},
+      }}), create: async () => {throw new Error("No added record");},
+    })});
+    onTestFinished(() => executor.dispose());
+    const read = vi.fn(async (writes: readonly import("@dohc/workspace-engine-client").SharedFileUpdate[]) =>
+      writes.map(write => write.appendKey === "write/Note" ? "settled" as const : "pending" as const));
+    w.engine.sharedFileUpdateStates = read;
+    await executor.open();
+    await w.settledClaim(claim);
+    const first = (await executor.runs(claim.automationId)).runs[0]!;
+    expect(first.writes.filter(write => write.kind === "field").map(write => [write.field, write.sharedFileUpdateState])).toEqual([
+      ["Note", "settled"], ["Count", "pending"],
+    ]);
+    record.path = "Tasks/renamed.md";
+    expect((await executor.runs(claim.automationId)).runs[0]?.sharedSettlementPending).toBe(true);
+    expect(read.mock.calls.at(-1)?.[0]).toEqual([{...base, appendKey: "write/Count"}]);
+  });
+
+  it("keeps History usable when status is overloaded, and checks the whole page once", async () => {
+    const w = await world({automations: {Tasks: "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n"}});
+    const draft = {outboxId: "outbox", appendKey: "write/Note", nativeHeadSequence: 2,
+      binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+        currentPath: "Tasks/one.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0}};
+    const executor = w.makeExecutor({withRecordWrites: async (_signal, work) => work({
+      setFields: async () => ({replaced: {Note: null}, kept: {}, sharedFileUpdates: {Note: draft}}),
+      create: async () => {throw new Error("No added record");},
+    })});
+    onTestFinished(() => executor.dispose());
+    const claims = ["one", "two"].map(name => w.claim("collection:Tasks#finish", w.addRecord("Tasks", name, {Status: "Done"})));
+    await executor.open();
+    for (const claim of claims) await w.settledClaim(claim);
+    const read = vi.fn(async () => {throw new Error("Overloaded");});
+    w.engine.sharedFileUpdateStates = read;
+    const page = await executor.runs("collection:Tasks#finish");
+    expect(page.runs).toHaveLength(2);
+    expect(page.runs.every(run => run.sharedSettlementPending === undefined)).toBe(true);
+    expect(read).toHaveBeenCalledOnce();
+    expect(w.errors).toEqual([]);
+  });
+
+  it.each(["quarantined", "restore-fenced"])("persists a %s write's refusal and keeps a renamed draft pending", async () => {
+    const w = await world({automations: {Tasks: "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n"}});
+    const record = w.addRecord("Tasks", "one", {Status: "Done"});
+    const claim = w.claim("collection:Tasks#finish", record);
+    const draft = {outboxId: "outbox", appendKey: "write/Note", nativeHeadSequence: 2,
+      binding: {workspaceId: "workspace", mainVersionId: "main", objectId: record.id, lineageClaimId: "a".repeat(64),
+        currentPath: record.path, selectorPaths: ["Tasks"], restoreFenceGeneration: 0}};
+    const executor = w.makeExecutor({withRecordWrites: async (_signal, work) => work({
+      setFields: async () => ({replaced: {Note: null}, kept: {}, sharedFileUpdates: {Note: draft}}),
+      create: async () => {throw new Error("No added record");},
+    })});
+    onTestFinished(() => executor.dispose());
+    let state: "pending" | "not-accepted" = "pending";
+    const read = vi.fn(async (writes: readonly unknown[]) => {
+      expect(writes).toEqual([draft]);
+      return writes.map(() => state);
+    });
+    w.engine.sharedFileUpdateStates = read;
+    await executor.open();
+    await w.settledClaim(claim);
+    record.path = "Tasks/renamed.md";
+    expect((await executor.runs(claim.automationId)).runs[0]).toMatchObject({sharedSettlementPending: true});
+    state = "not-accepted";
+    expect((await executor.runs(claim.automationId)).runs[0]).toMatchObject({sharedSettlementNotAccepted: true});
+    const reads = read.mock.calls.length;
+    state = "pending";
+    expect(await executor.listedRun(claim.automationId, claim.claimId)).toMatchObject({sharedSettlementNotAccepted: true});
+    expect(read).toHaveBeenCalledTimes(reads);
+  });
+
+  it("counts pending reversals once and keeps refused reversals retryable", async () => {
+    const definition = "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n";
+    const w = await world({automations: {Tasks: definition}});
+    const record = w.addRecord("Tasks", "one", {Status: "Done"});
+    const claim = w.claim("collection:Tasks#finish", record);
+    const draft = {outboxId: "reverse-outbox", appendKey: "reverse/Note", nativeHeadSequence: 2,
+      binding: {workspaceId: "workspace", mainVersionId: "main", objectId: record.id, lineageClaimId: "a".repeat(64),
+        currentPath: record.path, selectorPaths: ["Tasks"], restoreFenceGeneration: 0}};
+    const reverse = vi.fn(async (input: Parameters<ReturnType<typeof collectionRecordWrites>["setFields"]>[0]) => {
+      draft.appendKey = `${input.idempotencyKeyPrefix}/Note`;
+      return {replaced: {Note: "saved"}, kept: {}, sharedFileUpdates: {Note: {...draft}}};
+    });
+    const executor = w.makeExecutor({withUndoWrites: async (_signal, work) => work({
+      setFields: reverse, create: async () => {throw new Error("No added record");},
+    })});
+    onTestFinished(() => executor.dispose());
+    let state: "pending" | "not-accepted" | "settled" | "absent" = "pending";
+    w.engine.sharedFileUpdateStates = async writes => writes.map(() => state);
+    await executor.open();
+    await w.settledClaim(claim);
+    const input = {automationId: claim.automationId, claimId: claim.claimId, deletes: null};
+    expect(await executor.undo(input, async () => undefined)).toMatchObject({status: "undone", reverted: 0, sharedReversals: [{draft, state: "pending"}]});
+    expect(await executor.listedRun(claim.automationId, claim.claimId)).toMatchObject({undone: true, undoSettlementPending: true});
+    expect(await executor.undo(input, async () => undefined)).toEqual({status: "refused", reason: "You already undid this run."});
+    expect(reverse).toHaveBeenCalledOnce();
+    state = "not-accepted";
+    expect(await executor.run(claim.automationId, claim.claimId)).toMatchObject({undone: false, undoSettlementNotAccepted: true});
+    const hash = await hashOf(executor, "Tasks", "finish");
+    expect(await executor.undoRunsOf([{collectionPath: "Tasks", id: "finish", definitionHash: hash}], async () => undefined))
+      .toMatchObject({undone: 1, left: 0, reverted: 0, sharedReversals: [{state: "pending"}]});
+    expect(reverse).toHaveBeenCalledTimes(2);
+    expect(reverse.mock.calls[1]?.[0].idempotencyKeyPrefix).not.toBe(reverse.mock.calls[0]?.[0].idempotencyKeyPrefix);
+    state = "pending";
+    expect(await executor.undoRunsOf([{collectionPath: "Tasks", id: "finish", definitionHash: hash}], async () => undefined))
+      .toMatchObject({undone: 0, left: 0, sharedReversals: [{state: "pending"}]});
+    state = "settled";
+    expect(await executor.listedRun(claim.automationId, claim.claimId)).toMatchObject({undone: true});
+  });
+
+  it.each(["absent", "not-accepted"] as const)("persists a %s reversal and keeps only host refusals retryable", async state => {
+    const w = await world({automations: {Tasks: "  - id: finish\n    name: Finish\n    when: {field-changed: Status, to: Done}\n    do: [{set: {Note: saved}}]\n"}});
+    const record = w.addRecord("Tasks", "one", {Status: "Done"});
+    const claim = w.claim("collection:Tasks#finish", record);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const stored = (await w.baseStore.runsOf(claim.automationId, claim.claimId)).runs[0]!;
+    record.doc.getMap("frontmatter").set("Note", null);
+    const draft = {outboxId: "outbox", appendKey: "never-appended", nativeHeadSequence: 2,
+      binding: {workspaceId: "workspace", mainVersionId: "main", objectId: record.id, lineageClaimId: "a".repeat(64),
+        currentPath: record.path, selectorPaths: ["Tasks"], restoreFenceGeneration: 0}};
+    await w.baseStore.updateState(stored, {undo: "done", undoWrites: [{recordId: record.id, field: "Note", draft}]});
+    const read = vi.fn(async (writes: readonly unknown[]) => writes.map(() => state));
+    w.engine.sharedFileUpdateStates = read;
+    expect(await w.executor.listedRun(claim.automationId, claim.claimId)).toMatchObject({undone: state === "absent", reversals: [{state}]});
+    expect(await w.executor.undoRunsOf([{collectionPath: "Tasks", id: "finish", definitionHash: stored.definitionHash}], async () => undefined))
+      .toMatchObject({undone: 0, left: state === "absent" ? 0 : 1});
+    const reads = read.mock.calls.length;
+    await w.executor.listedRun(claim.automationId, claim.claimId);
+    expect(read).toHaveBeenCalledTimes(reads);
   });
 
   it("gives a record change's person to formulas and to the run's own writes", async () => {
@@ -2462,6 +2638,71 @@ describe("Collection automations", () => {
     expect(w.fieldsOf(task).Note).toBe("old");
   });
 
+  it("counts an unreadable claim as left when stopping and restoring", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const file = await w.executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]!.valid) throw new Error("expected Stamp to read");
+    const unreadable = w.makeExecutor({ store: {
+      ...w.baseStore,
+      runsOf: async () => ({ runs: [], unreadable: true }),
+    } });
+    await unreadable.open();
+    await expect(unreadable.undoRunsOf([
+      { collectionPath: "Tasks", id: "stamp", definitionHash: file.automations[0]!.definitionHash },
+    ], async () => undefined)).resolves.toEqual({ undone: 0, left: 1, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
+    await unreadable.dispose();
+  });
+
+  it("keeps the newest claim's path when two claims kept the same field", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const older = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(older);
+    const newer = w.claim("collection:Tasks#stamp", task);
+    w.executor.notifyClaimed();
+    await w.settledClaim(newer);
+    for (const [claim, path] of [[older, "Tasks/old.md"], [newer, "Tasks/new.md"]] as const) {
+      const { runs } = await w.baseStore.runsOf("collection:Tasks#stamp", claim.claimId);
+      for (const run of runs) await w.baseStore.updateState(run, {
+        undo: "started", undoKept: [{ recordId: task.id, field: "Note", fieldName: "Note", path, datasetRecordId: null }],
+      });
+    }
+    const file = await w.executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]!.valid) throw new Error("expected Stamp to read");
+    // A retry waits for each interrupted Undo, but still reports its saved kept fields.
+    await expect(w.executor.undoRunsOf([
+      { collectionPath: "Tasks", id: "stamp", definitionHash: file.automations[0]!.definitionHash },
+    ], async () => undefined, true)).resolves.toMatchObject({
+      keptFields: [{ id: expect.stringMatching(/^[a-f0-9]{32}$/), path: "Tasks/new.md", field: "Note", recordId: null }], errorMessage: null,
+    });
+  });
+
+  it("locates a renamed record's kept field and keeps one descriptor across a retry", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const file = await w.executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]!.valid) throw new Error("expected Stamp to read");
+    const definitions = [{ collectionPath: "Tasks", id: "stamp", definitionHash: file.automations[0]!.definitionHash }];
+    task.path = "Tasks/renamed.md";
+    task.doc.getMap("frontmatter").set("Note", "theirs");
+    const first = await w.executor.undoRunsOf(definitions, async () => undefined);
+    expect(first.keptFields).toEqual([{ id: expect.stringMatching(/^[a-f0-9]{32}$/), path: task.path, field: "Note", recordId: null }]);
+    expect(first.errorMessage).toBeNull();
+    task.path = "Tasks/renamed-again.md";
+    const retry = await w.executor.undoRunsOf(definitions, async () => undefined, true);
+    expect(retry.keptFields).toEqual([{ ...first.keptFields[0], path: task.path }]);
+    expect(retry.errorMessage).toBeNull();
+    expect(w.fieldsOf(task).Note).toBe("theirs");
+  });
+
   it("puts back a field Undo kept once the run written after it is undone", async () => {
     const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
     const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
@@ -2517,6 +2758,89 @@ describe("Collection automations", () => {
     // Runs already undone are passed over.
     await expect(w.executor.undoRunsOf([{ collectionPath: "Tasks", id: "stamp", definitionHash: hash }], async () => undefined))
       .resolves.toEqual({ undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null });
+  });
+
+  it.each([
+    ["no record has a sync conflict", false],
+    ["the newer run's other record has a sync conflict", true],
+  ] as const)("undoes runs of two automations newest first across both when %s", async (_case, conflict) => {
+    const later = STAMP.replace("id: stamp", "id: later").replace("name: Stamp", "name: Later");
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: `${STAMP}\n${later}\n` } });
+    let now = Date.UTC(2026, 8, 1);
+    const executor = w.makeExecutor({ nowMs: () => now });
+    const shared = w.addRecord("Tasks", "shared", { Status: "Done", Count: 2, Note: "two" });
+    const other = w.addRecord("Tasks", "other", { Status: "Done", Count: 2, Note: "y" });
+    const older = w.claim("collection:Tasks#stamp", shared);
+    await executor.open();
+    await w.settledClaim(older);
+    now += 1_000;
+    const newer = w.claim("collection:Tasks#later", shared);
+    executor.notifyClaimed();
+    await w.settledClaim(newer);
+    // Stamp's older run wrote Note "two" to "one"; Later's newer run wrote it
+    // back to "two", and wrote the other record too.
+    const rewrite = async (automationId: string, claimId: string, writes: Array<{ record: typeof shared; before: string; after: string }>) => {
+      const [run] = (await w.baseStore.runsOf(automationId, claimId)).runs;
+      await w.baseStore.save({
+        ...run!, created: [],
+        applied: run!.applied.map((entry, index) => ({
+          ...entry,
+          writes: index > 0 ? [] : writes.map(({ record, before, after }) => ({ kind: "field" as const, recordId: record.id, path: record.path, field: "Note", before, after })),
+        })),
+      });
+    };
+    await rewrite("collection:Tasks#stamp", older.claimId, [{ record: shared, before: "two", after: "one" }]);
+    await rewrite("collection:Tasks#later", newer.claimId, [{ record: other, before: "x", after: "y" }, { record: shared, before: "one", after: "two" }]);
+    shared.doc.getMap("frontmatter").set("Note", "two");
+    other.doc.getMap("frontmatter").set("Note", "y");
+    const file = await executor.automationsIn("Tasks");
+    if (file.status !== "read") throw new Error("expected the automations to read");
+    const hashOf = (id: string) => {
+      const found = file.automations.find((automation) => automation.valid && automation.automation.id === id);
+      if (!found?.valid) throw new Error(`expected ${id} to read`);
+      return found.definitionHash;
+    };
+    // The older automation's definition first: the order of the pass must not follow it.
+    const definitions = [
+      { collectionPath: "Tasks", id: "stamp", definitionHash: hashOf("stamp") },
+      { collectionPath: "Tasks", id: "later", definitionHash: hashOf("later") },
+    ];
+
+    if (conflict) {
+      other.conflicted = true;
+      // The pass stops at the newer run, after it put the shared record back, and leaves the older run as it is.
+      await expect(executor.undoRunsOf(definitions, async () => undefined)).resolves.toMatchObject({
+        undone: 0, errorMessage: "Tasks/other.md has a sync conflict. Resolve the conflict, then try again.",
+      });
+      expect(w.fieldsOf(shared).Note).toBe("one");
+      expect(w.fieldsOf(other).Note).toBe("y");
+      expect((await w.baseStore.runsOf("collection:Tasks#stamp", older.claimId)).runs.map((run) => run.undo)).toEqual([null]);
+      other.conflicted = false;
+    }
+    await expect(executor.undoRunsOf(definitions, async () => undefined)).resolves.toMatchObject({ undone: 2, errorMessage: null });
+    expect(w.fieldsOf(other).Note).toBe("x");
+    expect(w.fieldsOf(shared).Note).toBe("two");
+    await executor.dispose();
+  });
+
+  it("names a sync conflict that opened after Undo read the record, and keeps any other write failure as it is", async () => {
+    const w = await world({ collections: ["Tasks", "Log"], automations: { Tasks: STAMP } });
+    const task = w.addRecord("Tasks", "one", { Status: "Done", Count: 2, Note: "old" });
+    const claim = w.claim("collection:Tasks#stamp", task);
+    await w.executor.open();
+    await w.settledClaim(claim);
+    const file = await w.executor.automationsIn("Tasks");
+    if (file.status !== "read" || !file.automations[0]!.valid) throw new Error("expected Stamp to read");
+    const definitions = [{ collectionPath: "Tasks", id: "stamp", definitionHash: file.automations[0]!.definitionHash }];
+
+    w.failures.openSession = 1;
+    await expect(w.executor.undoRunsOf(definitions, async () => undefined))
+      .resolves.toMatchObject({ undone: 0, errorMessage: "The record is open in a live session elsewhere." });
+    // The conflict opens as the write is refused, after Undo read the record.
+    w.failures.openSession = 1;
+    Object.defineProperty(task, "conflicted", { get: () => w.failures.openSession === 0, configurable: true });
+    await expect(w.executor.undoRunsOf(definitions, async () => undefined))
+      .resolves.toMatchObject({ undone: 0, errorMessage: "Tasks/one.md has a sync conflict. Resolve the conflict, then try again." });
   });
 
   it("will not run a failed run again after someone undid what it changed", async () => {

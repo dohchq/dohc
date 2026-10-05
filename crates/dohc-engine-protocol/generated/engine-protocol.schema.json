@@ -266,6 +266,11 @@
           "const": "OVERLOADED"
         },
         {
+          "description": "Collection reconciliation waits for an open document's session lease.",
+          "type": "string",
+          "const": "COLLECTION_RECONCILIATION_LEASE_HELD"
+        },
+        {
           "description": "The session generation is no longer valid (engine restarted).",
           "type": "string",
           "const": "SESSION_EXPIRED"

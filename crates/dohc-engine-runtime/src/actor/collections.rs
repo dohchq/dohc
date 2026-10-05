@@ -24,6 +24,127 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 impl ActorHandle {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_adopt_collection_record(
+        &self,
+        key: DocKey,
+        path: String,
+        expected_lineage_claim_id: Option<String>,
+        root: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        draft: Option<dohc_engine_collab::owner_outbox::draft::OwnerDraftSnapshot>,
+        now_ms: i64,
+        token: CancellationToken,
+        reservation: Option<Arc<dyn Send + Sync>>,
+    ) -> Result<Result<&'static str, dohc_engine_collab::OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
+            let marker = dohc_engine_collab::read_marker(store, &key)?.ok_or(CollabError::NoMarker)?;
+            if marker.lineage_claim_id != expected_lineage_claim_id {
+                return Err(CollabError::LineageWriteStale {
+                    expected: expected_lineage_claim_id,
+                    observed: marker.lineage_claim_id,
+                }.into());
+            }
+            if marker.path.as_deref() != Some(path.as_str()) || marker.content_kind != ContentKind::Richdoc {
+                return Err(DomainError::ConflictStaleTarget.into());
+            }
+            use rusqlite::{OptionalExtension, params};
+            let candidate = store.read_with(|conn| {
+                conn.query_row("SELECT record_id, collection_path, adoption_state FROM collection_records
+                    WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND file_path=?4
+                    AND adoption_state IN ('pending','pending-lossless')",
+                    params![key.workspace_id, key.version_id, key.object_id, path], |row| {
+                        Ok(CollectionAdoptionCandidate {
+                            record_id: row.get(0)?, collection_path: row.get(1)?,
+                            file_path: path.clone(), object_id: key.object_id.clone(),
+                            lossless_insertion_required: row.get::<_, String>(2)? == "pending-lossless",
+                        })
+                    }).optional().map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })?;
+            let Some(candidate) = candidate else { return Ok(Ok("declined")); };
+            let execution = if let Some(draft) = draft {
+                let doc = Ydoc::wire();
+                doc.apply(&draft.initial_update)?;
+                let head = VersionedTextStore::new(store).read_text(&key.workspace_id, &key.version_id, &path)?;
+                let source = if candidate.lossless_insertion_required && head.as_ref().is_some_and(|snapshot| {
+                    snapshot.object_id == candidate.object_id && doc.project(ContentKind::Richdoc)
+                        .is_ok_and(|projection| projection.content == snapshot.text)
+                }) {
+                    head.as_ref().and_then(|snapshot| collection_record_markdown_with_id(&snapshot.text, &candidate.record_id)).map(Some)
+                } else {
+                    collection_adoption_source(store, &doc, &key, head.as_ref().map(|snapshot| &snapshot.blob_sha256), &candidate, false)?
+                };
+                match source {
+                    None => CollectionAdoptionExecution::Declined,
+                    Some(source) => {
+                        let update = match collection_adoption_update(&doc, &candidate.record_id, source.as_deref())? {
+                            None => { decline_oversized_collection_adoption(store, &candidate, &key.workspace_id, &key.version_id, &dohc_engine_storage::NoFaults)?;
+                                return Ok(Ok("declined")); },
+                            Some(update) => update,
+                        };
+                        if !update.is_empty() {
+                            let result = dohc_engine_collab::owner_outbox::draft::append_draft_cached(
+                                store, cache, &key.workspace_id,
+                                dohc_engine_collab::owner_outbox::draft::OwnerDraftAppendInput {
+                                    binding: draft.descriptor.binding,
+                                    expected_revision: draft.descriptor.revision,
+                                    append_key: format!("collection-adoption:{}:{}", candidate.record_id, hex_sha256(&update)),
+                                    update, now_ms, agent_declaration: None,
+                                }, &dohc_engine_storage::NoFaults);
+                            if let Err(error) = result { return Ok(Err(error)); }
+                        }
+                        return Ok(Ok("ownerPending"));
+                    }
+                }
+            } else {
+                adopt_collection_record_on_store(store, cache, &candidate, &key.workspace_id,
+                    &key.version_id, &root, &leases, self_writes.as_ref(), now_ms,
+                    &dohc_engine_storage::NoFaults, &token, None, Some(&key))?
+                    .ok_or(CollabError::LeaseHeld)?
+            };
+            match execution {
+                CollectionAdoptionExecution::Declined => delete_collection_adoption_binding(
+                    store, &candidate, &key.workspace_id, &key.version_id, &dohc_engine_storage::NoFaults)?,
+                CollectionAdoptionExecution::DeclinedOversized => decline_oversized_collection_adoption(
+                    store, &candidate, &key.workspace_id, &key.version_id, &dohc_engine_storage::NoFaults)?,
+                CollectionAdoptionExecution::Applied { .. } => return Ok(Ok("settled")),
+                CollectionAdoptionExecution::NeedsRichdocSeed => return Ok(Ok("declined")),
+            }
+            Ok(Ok("declined"))
+        }).await
+    }
+
+    pub async fn project_collections(
+        &self,
+        workspace_id: String,
+        previous: dohc_engine_domain::CollectionProjection,
+    ) -> Result<(dohc_engine_domain::CollectionProjection, Vec<String>), RuntimeError> {
+        self.run(move |store, _| {
+            let version_id = match VersionedTextStore::new(store).get_active_version(&workspace_id)
+            {
+                Ok(version) => version.version_id,
+                // A fresh share binding opens before its first pull bootstraps main.
+                Err(DomainError::WorkspaceNotFound) => return Ok((Default::default(), Vec::new())),
+                Err(error) => return Err(error.into()),
+            };
+            match store.write_with(&dohc_engine_storage::NoFaults, |tx| {
+                dohc_engine_domain::project_collections_in_tx(
+                    tx,
+                    &workspace_id,
+                    &version_id,
+                    previous,
+                )
+            })? {
+                TxnOutcome::Committed(result) => Ok(result),
+                TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+            }
+        })
+        .await
+    }
+
     /// Check changed collection records against their durable id bindings,
     /// blocking the calling capture worker thread.
     pub fn collection_record_id_mismatch_blocking(
@@ -273,6 +394,139 @@ enum CollectionAdoptionExecution {
     NeedsRichdocSeed,
 }
 
+#[cfg(test)]
+mod collection_adoption_update_tests {
+    use super::*;
+
+    #[test]
+    fn preserved_source_retry_is_noop() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(
+            ContentKind::Richdoc,
+            "A heading\n=========\n\n* first\n* second\n",
+        )
+        .expect("seed");
+        let markdown = collection_record_markdown_with_id(
+            "A heading\n=========\n\n* first\n* second\n",
+            "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("insert id");
+        assert!(
+            !collection_adoption_update(&doc, "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", Some(&markdown))
+                .expect("adopt")
+                .expect("accepted")
+                .is_empty()
+        );
+        assert!(
+            collection_adoption_update(&doc, "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", Some(&markdown))
+                .expect("retry")
+                .expect("accepted")
+                .is_empty()
+        );
+    }
+}
+
+fn collection_adoption_update(
+    doc: &Ydoc,
+    record_id: &str,
+    preserved_markdown: Option<&str>,
+) -> Result<Option<Vec<u8>>, RuntimeError> {
+    if doc
+        .frontmatter_json()
+        .get(RECORD_ID_FRONTMATTER_KEY)
+        .and_then(serde_json::Value::as_str)
+        == Some(record_id)
+        && preserved_markdown.is_none_or(|markdown| {
+            doc.markdown_source_reference().is_some_and(|reference| {
+                doc.markdown_source(&reference).as_deref() == Some(markdown)
+            })
+        })
+    {
+        return Ok(Some(Vec::new()));
+    }
+    let update = match preserved_markdown {
+        Some(markdown) => match doc.frontmatter_set_preserving_markdown_source(
+            RECORD_ID_FRONTMATTER_KEY,
+            record_id,
+            markdown,
+        ) {
+            Ok(update) => update,
+            Err(
+                CollabError::ProjectionTooLarge { .. }
+                | CollabError::UpdateTooLarge { .. }
+                | CollabError::FrontmatterEditRefused,
+            ) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        },
+        // An unsplittable block cannot take a key without rewriting
+        // the others; adoption declines until the file is edited.
+        None if doc.frontmatter_edits_refused() => return Ok(None),
+        None => match doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, record_id) {
+            Ok(update) => update,
+            Err(CollabError::FrontmatterEditRefused) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        },
+    };
+    Ok(Some(update))
+}
+
+fn collection_adoption_source(
+    store: &mut EngineStore,
+    doc: &Ydoc,
+    key: &DocKey,
+    head_blob_sha256: Option<&String>,
+    candidate: &CollectionAdoptionCandidate,
+    allow_pristine: bool,
+) -> Result<Option<Option<String>>, RuntimeError> {
+    let preserved = if candidate.lossless_insertion_required {
+        let preserved = match if allow_pristine {
+            dohc_engine_collab::read_pristine_seed_lineage_source(store, key)?
+        } else {
+            None
+        } {
+            Some(seed_source_sha) if Some(&seed_source_sha) == head_blob_sha256 => {
+                VersionedTextStore::new(store)
+                    .read_text(&key.workspace_id, &key.version_id, &candidate.file_path)?
+                    .filter(|snapshot| {
+                        snapshot.object_id == candidate.object_id
+                            && snapshot.blob_sha256 == seed_source_sha
+                    })
+                    .and_then(|snapshot| {
+                        collection_record_markdown_with_id(&snapshot.text, &candidate.record_id)
+                    })
+            }
+            _ => None,
+        };
+        match preserved {
+            Some(preserved) => Some(preserved),
+            None => {
+                let Some(reference) = doc.markdown_source_reference() else {
+                    return Ok(None);
+                };
+                if !doc.project(ContentKind::Richdoc).is_ok_and(|projection| {
+                    reference.projection_sha256 == hex_sha256(projection.content.as_bytes())
+                }) {
+                    return Ok(None);
+                }
+                let Some(source) = doc.markdown_source(&reference) else {
+                    return Ok(None);
+                };
+                let Some(inserted) =
+                    collection_record_markdown_with_id(&source, &candidate.record_id)
+                else {
+                    return Ok(None);
+                };
+                Some(inserted)
+            }
+        }
+    } else {
+        None
+    };
+    Ok(Some(preserved))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ensure_collection_record_id_on_store(
     store: &mut EngineStore,
@@ -298,30 +552,8 @@ fn ensure_collection_record_id_on_store(
         return Ok(Some((lineage_claim_id, false)));
     }
 
-    let update = match preserved_markdown {
-        Some(markdown) => match doc.frontmatter_set_preserving_markdown_source(
-            RECORD_ID_FRONTMATTER_KEY,
-            record_id,
-            markdown,
-        ) {
-            Ok(update) => update,
-            Err(
-                CollabError::ProjectionTooLarge { .. }
-                | CollabError::UpdateTooLarge { .. }
-                | CollabError::FrontmatterEditRefused,
-            ) => {
-                return Ok(None);
-            }
-            Err(error) => return Err(error.into()),
-        },
-        // An unsplittable block cannot take a key without rewriting
-        // the others; adoption declines until the file is edited.
-        None if doc.frontmatter_edits_refused() => return Ok(None),
-        None => match doc.frontmatter_set(RECORD_ID_FRONTMATTER_KEY, record_id) {
-            Ok(update) => update,
-            Err(CollabError::FrontmatterEditRefused) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        },
+    let Some(update) = collection_adoption_update(doc, record_id, preserved_markdown)? else {
+        return Ok(None);
     };
     let lineage_claim_id = ydoc_record_update_on_store(
         store,
@@ -361,6 +593,7 @@ fn adopt_collection_record_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
     root_guard: Option<&dyn WorkspaceRootGuard>,
+    session_key: Option<&DocKey>,
 ) -> Result<Option<CollectionAdoptionExecution>, RuntimeError> {
     let probe = ydoc_open_state_on_store(
         store,
@@ -384,10 +617,17 @@ fn adopt_collection_record_on_store(
     if !probe.lineage_existing {
         return Ok(Some(CollectionAdoptionExecution::NeedsRichdocSeed));
     }
-    let _lease = match leases.acquire(&probe.key) {
-        Ok(lease) => lease,
-        Err(CollabError::LeaseHeld) => return Ok(None),
-        Err(error) => return Err(error.into()),
+    let _lease = if let Some(key) = session_key {
+        if key != &probe.key {
+            return Err(DomainError::ConflictStaleTarget.into());
+        }
+        None
+    } else {
+        match leases.acquire(&probe.key) {
+            Ok(lease) => Some(lease),
+            Err(CollabError::LeaseHeld) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
     };
     // `drain_deferred = false`: this engine-internal open must not consume
     // the parked deferred queue. Its caller discards `state.record_facts`,
@@ -428,39 +668,16 @@ fn adopt_collection_record_on_store(
     let doc = Ydoc::wire();
     doc.apply(&state.initial_update)?;
     let lineage_claim_id = state.lineage_claim_id;
-    let settled_content_override = if candidate.lossless_insertion_required {
-        let preserved =
-            match dohc_engine_collab::read_pristine_seed_lineage_source(store, &state.key)? {
-                Some(seed_source_sha)
-                    if Some(&seed_source_sha) == state.head_blob_sha256.as_ref() =>
-                {
-                    VersionedTextStore::new(store)
-                        .read_text(workspace_id, version_id, &candidate.file_path)?
-                        .filter(|snapshot| {
-                            snapshot.object_id == candidate.object_id
-                                && snapshot.blob_sha256 == seed_source_sha
-                        })
-                        .and_then(|snapshot| {
-                            collection_record_markdown_with_id(&snapshot.text, &candidate.record_id)
-                        })
-                }
-                _ => None,
-            };
-        match preserved {
-            Some(preserved) => Some(preserved),
-            None if doc.markdown_source_reference().is_some_and(|reference| {
-                doc.project(ContentKind::Richdoc).is_ok_and(|projection| {
-                    reference.projection_sha256 == hex_sha256(projection.content.as_bytes())
-                        && doc.markdown_source(&reference).is_some()
-                })
-            }) =>
-            {
-                None
-            }
-            None => return Ok(Some(CollectionAdoptionExecution::Declined)),
-        }
-    } else {
-        None
+    let Some(settled_content_override) = collection_adoption_source(
+        store,
+        &doc,
+        &state.key,
+        state.head_blob_sha256.as_ref(),
+        candidate,
+        true,
+    )?
+    else {
+        return Ok(Some(CollectionAdoptionExecution::Declined));
     };
     let Some((lineage_claim_id, _id_added)) = ensure_collection_record_id_on_store(
         store,
@@ -749,16 +966,9 @@ fn reconcile_collections_on_store(
             faults,
             token,
             root_guard,
+            None,
         ) {
             Ok(Some(CollectionAdoptionExecution::Applied { changed_path })) => {
-                persist_collection_adoption_state(
-                    store,
-                    &candidate,
-                    workspace_id,
-                    version_id,
-                    "adopted",
-                    faults,
-                )?;
                 if let Some(path) = changed_path
                     && !changed_paths.contains(&path)
                 {

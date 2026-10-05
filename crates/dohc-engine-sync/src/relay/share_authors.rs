@@ -3,8 +3,8 @@ use serde_json::{Value, json};
 
 use crate::ReplicationEnvelope;
 
-/// Independently rebuild the declared-agent projection for a received file moment.
-pub(super) fn declared_agent_authors(envelope: &ReplicationEnvelope) -> Option<String> {
+/// Retain public author snapshots and declared agents from a received file moment.
+pub(super) fn received_authors(envelope: &ReplicationEnvelope) -> Option<String> {
     if envelope.op_kind != "moment.append" {
         return None;
     }
@@ -14,7 +14,28 @@ pub(super) fn declared_agent_authors(envelope: &ReplicationEnvelope) -> Option<S
     }
     let mut authors = Vec::new();
     for value in raw {
-        if value.get("kind").and_then(Value::as_str) != Some("agent") {
+        let kind = value.get("kind").and_then(Value::as_str);
+        if matches!(kind, Some("human" | "link")) {
+            let (id_field, label_field) = if kind == Some("human") {
+                ("humanId", "humanName")
+            } else {
+                ("publicPrincipalId", "label")
+            };
+            let author = json!({"kind": kind, id_field: value.get(id_field), label_field: value.get(label_field)});
+            if let Ok(parsed) = serde_json::from_value::<
+                dohc_engine_collab::live_update_application::LiveAuthorEntry,
+            >(author.clone())
+                && parsed.validate().is_ok()
+                && (kind != Some("human")
+                    || author[id_field]
+                        .as_str()
+                        .is_some_and(|id| crate::outbound::relay_person_id(id).is_some()))
+            {
+                authors.push(author);
+            }
+            continue;
+        }
+        if kind != Some("agent") {
             continue;
         }
         let declaration = serde_json::from_value::<AgentDeclaration>(json!({
@@ -36,6 +57,17 @@ pub(super) fn declared_agent_authors(envelope: &ReplicationEnvelope) -> Option<S
         }
         if declaration.depth > 0 {
             author["depth"] = json!(declaration.depth);
+        }
+        if let Some(name) = value.get("agentName").and_then(Value::as_str) {
+            let snapshot = dohc_engine_collab::live_update_application::LiveAuthorEntry::Agent {
+                agent_id: author["agentId"].as_str()?.to_owned(),
+                agent_name: Some(name.to_owned()),
+                on_behalf_of: None,
+                depth: None,
+            };
+            if snapshot.validate().is_ok() {
+                author["agentName"] = json!(name);
+            }
         }
         authors.push(author);
     }

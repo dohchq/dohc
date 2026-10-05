@@ -1,6 +1,408 @@
 use super::*;
 
 #[test]
+fn received_collection_projection_reads_pulls_incrementally_without_owner_side_effects() {
+    use dohc_engine_domain::{
+        CollectionProjection, CollectionQuery, get_collection, get_collection_record,
+        list_collections, project_collections_in_tx, query_collection_records,
+    };
+    for access in [ShareAccess::Edit, ShareAccess::View] {
+        let (_scratch, _path, mut engine) = open_store();
+        let schema = b"name: Tasks\nfields:\n  Title:\n    type: text\n".to_vec();
+        let record_id = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let first = format!("---\nid: {record_id}\nTitle: First\n---\nBody\n").into_bytes();
+        let second = format!("---\nid: {record_id}\nTitle: Second\n---\nBody\n").into_bytes();
+        let unadopted = b"---\nTitle: No owner id yet\n---\n".to_vec();
+        let automations = b"version: 1\nautomations:\n  - id: stamp\n    name: Stamp\n    when: record-added\n    do:\n      - set:\n          Title: Ran\n".to_vec();
+        let hash = dohc_engine_storage::hex_sha256;
+        let client = RelaySyncClient::new(
+            PagedShareRelay::new(
+                [],
+                [
+                    (
+                        0,
+                        ShareViewResponse {
+                            ops: vec![
+                                share_view_write_op(
+                                    0,
+                                    "docs/tasks/collection.yaml",
+                                    &hash(&schema),
+                                ),
+                                share_view_write_op(1, "docs/tasks/a.md", &hash(&first)),
+                                share_view_write_op(
+                                    2,
+                                    "docs/tasks/unadopted.md",
+                                    &hash(&unadopted),
+                                ),
+                                share_view_write_op(
+                                    3,
+                                    "docs/tasks/automations.yaml",
+                                    &hash(&automations),
+                                ),
+                                share_view_write_op(4, "private/collection.yaml", &hash(&schema)),
+                            ],
+                            next_cursor: 5,
+                            has_more: false,
+                        },
+                    ),
+                    (
+                        5,
+                        ShareViewResponse {
+                            ops: vec![share_view_write_op(5, "docs/tasks/a.md", &hash(&second))],
+                            next_cursor: 6,
+                            has_more: false,
+                        },
+                    ),
+                ],
+            )
+            .with_view_blobs(
+                [schema, first, second, unadopted, automations]
+                    .into_iter()
+                    .map(|bytes| (hash(&bytes), bytes)),
+            ),
+        );
+        let grant = ShareGrant {
+            paths: vec!["docs".to_owned()],
+            version_id: None,
+            access,
+        };
+        let mut projection = CollectionProjection::default();
+        for (expected_title, expected_paths) in [
+            (
+                "First",
+                vec![
+                    "docs/tasks/a.md",
+                    "docs/tasks/collection.yaml",
+                    "docs/tasks/unadopted.md",
+                ],
+            ),
+            ("Second", vec!["docs/tasks/a.md"]),
+        ] {
+            let mut pull = client
+                .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+                .unwrap();
+            if expected_title == "First" {
+                // A crash here leaves snapshots but no cursor. A new worker must
+                // not bind records before the shared indexing guard exists.
+                let TxnOutcome::Committed((next, paths)) = engine
+                    .write_with(&NoFaults, |tx| {
+                        project_collections_in_tx(tx, "ws", "main", projection)
+                    })
+                    .unwrap()
+                else {
+                    panic!("projection crashed")
+                };
+                projection = next;
+                assert!(paths.is_empty());
+                engine
+                    .read_with(|conn| {
+                        assert_eq!(
+                            conn.query_row("SELECT count(*) FROM collection_records", [], |row| {
+                                row.get::<_, i64>(0)
+                            })?,
+                            0
+                        );
+                        Ok::<_, rusqlite::Error>(())
+                    })
+                    .unwrap();
+                // Restarting after that crash replays already settled writes.
+                pull = client
+                    .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+                    .unwrap();
+                assert_eq!(pull.applied, 0);
+                assert!(!pull.changed_paths.is_empty());
+            }
+            client
+                .commit_share_view_cursor(&mut engine, "ws", &pull.pending_cursor, &NoFaults)
+                .unwrap();
+            let moment_count: i64 = engine
+                .read_with(|conn| {
+                    conn.query_row("SELECT count(*) FROM moments", [], |row| row.get(0))
+                })
+                .unwrap();
+            let outcome = engine
+                .write_with(&NoFaults, |tx| {
+                    project_collections_in_tx(tx, "ws", "main", projection)
+                })
+                .unwrap();
+            let TxnOutcome::Committed((next, paths)) = outcome else {
+                panic!("projection crashed")
+            };
+            projection = next;
+            assert_eq!(paths, expected_paths);
+            engine
+                .read_with(|conn| -> Result<(), dohc_engine_domain::DomainError> {
+                    let listed = list_collections(conn, "ws", 100, None)?;
+                    assert_eq!(listed.collections.len(), 1);
+                    assert_eq!(listed.collections[0].path, "docs/tasks");
+                    let collection = get_collection(conn, "ws", "docs/tasks")?.unwrap();
+                    assert_eq!(collection.schema.fields.len(), 1);
+                    let record =
+                        get_collection_record(conn, "ws", "docs/tasks", record_id, 100, None)?
+                            .unwrap();
+                    assert!(record.history.is_empty());
+                    let queried = query_collection_records(
+                        conn,
+                        "ws",
+                        "docs/tasks",
+                        &CollectionQuery::default(),
+                    )?
+                    .unwrap();
+                    assert_eq!(queried.records.len(), 1);
+                    assert_eq!(
+                        queried.records[0]
+                            .values
+                            .iter()
+                            .find(|field| field.field == "Title")
+                            .unwrap()
+                            .value,
+                        json!(expected_title)
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            engine.read_with(|conn| -> Result<(), rusqlite::Error> {
+                for table in ["automation_claims", "collection_field_history"] {
+                    let count: i64 = conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get(0))?;
+                    assert_eq!(count, 0, "projection created {table}");
+                }
+                assert_eq!(conn.query_row("SELECT count(*) FROM moments", [], |row| row.get::<_, i64>(0))?, moment_count);
+                assert_eq!(conn.query_row("SELECT count(*) FROM collection_records WHERE adoption_state<>'adopted'", [], |row| row.get::<_, i64>(0))?, 0);
+                Ok(())
+            }).unwrap();
+            let TxnOutcome::Committed((next, unchanged)) = engine
+                .write_with(&NoFaults, |tx| {
+                    project_collections_in_tx(tx, "ws", "main", projection)
+                })
+                .unwrap()
+            else {
+                panic!("projection crashed")
+            };
+            projection = next;
+            assert!(unchanged.is_empty());
+        }
+        // Disposable worker state is enough to rebuild an existing store.
+        let TxnOutcome::Committed((_, rebuilt)) = engine
+            .write_with(&NoFaults, |tx| {
+                project_collections_in_tx(tx, "ws", "main", CollectionProjection::default())
+            })
+            .unwrap()
+        else {
+            panic!("projection crashed")
+        };
+        assert!(!rebuilt.is_empty());
+    }
+}
+
+#[test]
+fn received_collection_projection_tracks_incremental_removals_renames_and_duplicates() {
+    use dohc_engine_domain::{
+        CollectionProjection, CollectionQuery, get_collection, list_collections,
+        project_collections_in_tx, query_collection_records,
+    };
+    let record_id = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let schema = b"name: Tasks\nfields:\n  Title:\n    type: text\n".to_vec();
+    let record = format!("---\nid: {record_id}\nTitle: First\n---\nBody\n").into_bytes();
+    let hash = dohc_engine_storage::hex_sha256;
+    let rename = |seq, before: &str, after: &str, sha: &str| {
+        let mut op = share_view_write_op(seq, after, sha);
+        op.payload["operation"] = json!("rename");
+        op.payload["payloadBeforePath"] = json!(before);
+        op
+    };
+    let delete = |seq, path: &str| {
+        let mut op = share_view_write_op(seq, path, "unused");
+        op.payload = json!({"versionId":"main","operation":"delete","path":path});
+        op
+    };
+    // Each case starts from the same pulled Collection, then changes it on
+    // later pulls. Duplicate promotion gets two pages to exercise its cache.
+    let cases = vec![
+        (
+            vec![vec![delete(2, "docs/tasks/a.md")]],
+            Some("docs/tasks"),
+            None,
+        ),
+        (
+            vec![vec![rename(
+                2,
+                "docs/tasks/a.md",
+                "docs/tasks/b.md",
+                &hash(&record),
+            )]],
+            Some("docs/tasks"),
+            Some("docs/tasks/b.md"),
+        ),
+        (
+            vec![vec![rename(
+                2,
+                "docs/tasks/a.md",
+                "docs/a.md",
+                &hash(&record),
+            )]],
+            Some("docs/tasks"),
+            None,
+        ),
+        (
+            vec![vec![delete(2, "docs/tasks/collection.yaml")]],
+            None,
+            None,
+        ),
+        (
+            vec![vec![
+                rename(
+                    2,
+                    "docs/tasks/collection.yaml",
+                    "docs/renamed/collection.yaml",
+                    &hash(&schema),
+                ),
+                rename(3, "docs/tasks/a.md", "docs/renamed/a.md", &hash(&record)),
+            ]],
+            Some("docs/renamed"),
+            Some("docs/renamed/a.md"),
+        ),
+        (
+            vec![
+                vec![share_view_write_op(2, "docs/tasks/b.md", &hash(&record))],
+                vec![delete(3, "docs/tasks/a.md")],
+            ],
+            Some("docs/tasks"),
+            Some("docs/tasks/b.md"),
+        ),
+    ];
+    for access in [ShareAccess::Edit, ShareAccess::View] {
+        for (pages, expected_collection, expected_record) in &cases {
+            let (_scratch, _path, mut engine) = open_store();
+            let mut responses = vec![(
+                0,
+                ShareViewResponse {
+                    ops: vec![
+                        share_view_write_op(0, "docs/tasks/collection.yaml", &hash(&schema)),
+                        share_view_write_op(1, "docs/tasks/a.md", &hash(&record)),
+                    ],
+                    next_cursor: 2,
+                    has_more: false,
+                },
+            )];
+            let mut cursor = 2;
+            for ops in pages {
+                let next_cursor = cursor + ops.len() as i64;
+                responses.push((
+                    cursor,
+                    ShareViewResponse {
+                        ops: ops.clone(),
+                        next_cursor,
+                        has_more: false,
+                    },
+                ));
+                cursor = next_cursor;
+            }
+            let client = RelaySyncClient::new(
+                PagedShareRelay::new([], responses).with_view_blobs(
+                    [schema.clone(), record.clone()]
+                        .into_iter()
+                        .map(|bytes| (hash(&bytes), bytes)),
+                ),
+            );
+            let grant = ShareGrant {
+                paths: vec!["docs".to_owned()],
+                version_id: None,
+                access,
+            };
+            let mut projection = CollectionProjection::default();
+            for page in 0..=pages.len() {
+                let pull = client
+                    .pull_share_view(&mut engine, "ws", "share", &grant, &NoFaults)
+                    .unwrap();
+                assert_eq!(pull.skipped, 0);
+                client
+                    .commit_share_view_cursor(&mut engine, "ws", &pull.pending_cursor, &NoFaults)
+                    .unwrap();
+                let TxnOutcome::Committed((next, _)) = engine
+                    .write_with(&NoFaults, |tx| {
+                        project_collections_in_tx(tx, "ws", "main", projection)
+                    })
+                    .unwrap()
+                else {
+                    panic!("projection crashed")
+                };
+                projection = next;
+                if page < pages.len() {
+                    engine
+                        .read_with(|conn| {
+                            let records = query_collection_records(
+                                conn,
+                                "ws",
+                                "docs/tasks",
+                                &CollectionQuery::default(),
+                            )?
+                            .unwrap()
+                            .records;
+                            assert_eq!(records.len(), 1);
+                            assert_eq!(records[0].id, record_id);
+                            assert_eq!(records[0].path, "docs/tasks/a.md");
+                            Ok::<_, dohc_engine_domain::DomainError>(())
+                        })
+                        .unwrap();
+                }
+            }
+            engine
+                .read_with(|conn| {
+                    let collections = list_collections(conn, "ws", 100, None)?.collections;
+                    assert_eq!(
+                        collections.len(),
+                        usize::from(expected_collection.is_some())
+                    );
+                    if let Some(path) = expected_collection {
+                        assert_eq!(collections[0].path, *path);
+                        let details = get_collection(conn, "ws", path)?.unwrap();
+                        assert_eq!(details.schema.fields.len(), 1);
+                        let records = query_collection_records(
+                            conn,
+                            "ws",
+                            path,
+                            &CollectionQuery::default(),
+                        )?
+                        .unwrap()
+                        .records;
+                        assert_eq!(records.len(), usize::from(expected_record.is_some()));
+                        if let Some(path) = expected_record {
+                            assert_eq!(records[0].path, *path);
+                            assert_eq!(records[0].id, record_id);
+                        }
+                    } else {
+                        assert!(get_collection(conn, "ws", "docs/tasks")?.is_none());
+                    }
+                    for table in ["collection_records", "collection_record_fields"] {
+                        if expected_record.is_none() {
+                            assert_eq!(
+                                conn.query_row(
+                                    &format!("SELECT count(*) FROM {table}"),
+                                    [],
+                                    |row| row.get::<_, i64>(0)
+                                )
+                                .unwrap(),
+                                0
+                            );
+                        }
+                    }
+                    for table in ["collection_field_history", "automation_claims"] {
+                        assert_eq!(
+                            conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                                row.get::<_, i64>(0)
+                            })
+                            .unwrap(),
+                            0
+                        );
+                    }
+                    Ok::<_, dohc_engine_domain::DomainError>(())
+                })
+                .unwrap();
+        }
+    }
+}
+
+#[test]
 fn share_view_secondary_path_out_of_boundary_is_rejected() {
     let (_scratch, _path, mut engine) = open_store();
     let boundary = ShareBoundary {
@@ -361,16 +763,20 @@ fn share_view_replay_keeps_declared_agents_in_list_and_detail_through_replay_and
     let body = b"Agent edited while hosted.".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
     let authors = json!([
-        {"kind":"agent","agentId":"trip-agent-hosted","onBehalfOf":"opaque-relay-owner","depth":0,
+        {"kind":"agent","agentId":"trip-agent-hosted","agentName":"Trip helper","onBehalfOf":"opaque-relay-owner","depth":0,
          "agentRunId":"private-run","principalId":"fabricated-authority","private":{"path":"private/hidden.md"}},
         {"kind":"agent","agentId":"chained-agent 旅行","onBehalfOf":"local:private-person","depth":64},
         {"kind":"human","humanId":"private-human"},
+        {"kind":"human","humanId":"person","humanName":"Person"},
+        {"kind":"link","publicPrincipalId":"edit-link","label":"Edit link"},
         {"kind":"automation","automationId":"private-automation","depth":1},
         {"kind":"public","principalId":"fabricated-principal","grantId":"fabricated-grant"}
     ]);
     let expected = json!([
-        {"kind":"agent","agentId":"trip-agent-hosted","onBehalfOf":"opaque-relay-owner"},
-        {"kind":"agent","agentId":"chained-agent 旅行","depth":64}
+        {"kind":"agent","agentId":"trip-agent-hosted","agentName":"Trip helper","onBehalfOf":"opaque-relay-owner"},
+        {"kind":"agent","agentId":"chained-agent 旅行","depth":64},
+        {"kind":"human","humanId":"person","humanName":"Person"},
+        {"kind":"link","publicPrincipalId":"edit-link","label":"Edit link"}
     ]);
     let binary = share_view_binary_write_op(1, "docs/blob.bin", &sha);
     let mut rename = share_view_write_op(2, "docs/continued.md", &sha);

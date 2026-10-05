@@ -4,7 +4,7 @@ import { WebSocket } from "ws";
 import { EngineClient, FrameDecoder, FrameType, encodeFrame, DEFAULT_MAX_BLOB_BYTES, NATIVE_RESTORE_STATUS, type Frame } from "@dohc/workspace-engine-client/daemon";
 import { DeviceCreditWindow } from "@dohc/service-http";
 import { deviceLiveHostReceive, type DeviceControlLimits, type DeviceLiveHostStart } from "@dohc/live-session-contract/device-control";
-import { parseAdmittedLiveUpdateMetadata, type LiveUpdateStructRange } from "@dohc/live-session-contract/live-update-admission";
+import { parseCanonicalAdmittedLiveUpdateMetadata, type LiveUpdateStructRange } from "@dohc/live-session-contract/live-update-admission";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { DeviceEngineConnection } from "./deviceEngineConnection.js";
 import { configRecord } from "./deviceLiveHostConfig.js";
@@ -327,8 +327,11 @@ export function startExistingOwnerDeviceTransport(options: {
         } else if (operation.method === "liveApplication.apply") {
           if (!registration.adopted) throw new Error("Owner adoption must finish first.");
           const update = operation.streams[0]!.bytes, packed = operation.streams[1]!.bytes, firstSeen: LiveUpdateStructRange[] = [];
-          for (let offset = 0; offset < packed.length; offset += 16) firstSeen.push({ clientId: Number(packed.readBigUInt64LE(offset)),startClock: packed.readUInt32LE(offset+8),endClock: packed.readUInt32LE(offset+12) });
-          const metadata = parseAdmittedLiveUpdateMetadata({ accepted: operation.params.accepted,firstSeen });
+          const rangeBytes = integer(operation.params.rangeCount,0,Math.floor((update.length-2)/5))*16;
+          for (let offset = 0; offset < rangeBytes; offset += 16) firstSeen.push({ clientId: Number(packed.readBigUInt64LE(offset)),startClock: packed.readUInt32LE(offset+8),endClock: packed.readUInt32LE(offset+12) });
+          const extensions: unknown = packed.length === rangeBytes ? {} : JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(packed.subarray(rangeBytes)));
+          if (typeof extensions !== "object" || extensions === null || Array.isArray(extensions) || Object.hasOwn(extensions,"accepted") || Object.hasOwn(extensions,"firstSeen")) throw new TypeError("Invalid admitted extension attachment.");
+          const metadata = parseCanonicalAdmittedLiveUpdateMetadata({ ...extensions, accepted: operation.params.accepted, firstSeen });
           const response = await config.client.sendLiveApplication(native,{ metadata,updateBytes: update },signal);
           owner.assertCurrent();
           if ((response.result as { status?: unknown }).status === "applied") await owner.remoteApplied(update);
@@ -405,7 +408,8 @@ export function startExistingOwnerDeviceTransport(options: {
     const params = value.params as Record<string,unknown>;
     if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("Invalid owner params.");
     const updateBytes = method === "liveApplication.apply" ? integer(params.updateByteLength,2,20_971_520) : 0;
-    const rangeBytes = method === "liveApplication.apply" ? integer(params.rangeCount,0,Math.floor((updateBytes-2)/5))*16 : 0;
+    const metadataBytes = method === "liveApplication.apply" && params.metadataByteLength !== undefined ? integer(params.metadataByteLength,1,128*20_971_520) : 0;
+    const rangeBytes = method === "liveApplication.apply" ? integer(params.rangeCount,0,Math.floor((updateBytes-2)/5))*16 + metadataBytes : 0;
     if (restoring) {
       configRecord(params,["streamId","byteLength","digest","maxOutputBytes"]);
       integer(params.maxOutputBytes,5,DEFAULT_MAX_BLOB_BYTES);
@@ -414,7 +418,7 @@ export function startExistingOwnerDeviceTransport(options: {
     if ((syncing || appliedRead) && !sync) throw new Error("Owner sync forwarding is not configured.");
     if (syncing) configRecord(params, ["registrationId", "streamId", "byteLength", "digest"]);
     const bytes = syncing ? integer(params.byteLength,1,sync!.maxClientVectorBytes) : restoring ? integer(params.byteLength,5,maxRestoreBytes!) : method === "liveApplication.adoptOwner" ? integer(params.byteLength,1,config.maxAdoptionBytes) : updateBytes + rangeBytes;
-    const charge = bytes * 3 + (syncing || appliedRead ? 3 * sync!.maxOutputBytes : restoring ? 2 * maxRestoreBytes! : 0) + config.maxFrameBytes;
+    const charge = bytes * 3 + metadataBytes * 2 + (syncing || appliedRead ? 3 * sync!.maxOutputBytes : restoring ? 2 * maxRestoreBytes! : 0) + config.maxFrameBytes;
     if (!Number.isSafeInteger(charge) || charged + charge + notificationReservation > config.aggregateBytes) throw new Error("Owner operation capacity exceeded.");
     charged += charge; lastId = id;
     const signal = new AbortController(), timer = setTimeout(stop,Math.min(integer(value.deadlineMs ?? config.requestDeadlineMs,1),config.requestDeadlineMs)); timer.unref();
@@ -424,10 +428,10 @@ export function startExistingOwnerDeviceTransport(options: {
     else if (restoring) operation.streams = [attachment(params.streamId,params.byteLength,params.digest,maxRestoreBytes!)];
     else if (method === "liveApplication.adoptOwner") operation.streams = [attachment(params.streamId,params.byteLength,params.digest,config.maxAdoptionBytes)];
     else if (method === "liveApplication.apply") {
-      const accepted = configRecord(params.accepted,["receipt","binding","authority","receivedAtMs"],["agentDeclaration"]);
+      const accepted = configRecord(params.accepted,["receipt","binding","authority","receivedAtMs"]);
       const receipt = configRecord(accepted.receipt,["deliveryId","updateDigest","journalCursor","acceptingHostEpoch"]);
       // The sender allocates the update stream first and the range stream second.
-      operation.streams = [attachment(params.updateStreamId,updateBytes,receipt.updateDigest,20_971_520),attachment(params.rangeStreamId,rangeBytes,params.rangeDigest,Math.floor((updateBytes-2)/5)*16)];
+      operation.streams = [attachment(params.updateStreamId,updateBytes,receipt.updateDigest,20_971_520),attachment(params.rangeStreamId,rangeBytes,params.rangeDigest,Math.floor((updateBytes-2)/5)*16+128*20_971_520)];
     } else void execute(operation);
   }
   const startup = (async () => {

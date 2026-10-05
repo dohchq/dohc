@@ -1,6 +1,8 @@
+import { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type {
   AttachedEngineWorkspace,
   EngineWorkspaceSessions,
+  EngineDaemonLifecycleOptions,
 } from "@dohc/workspace-engine-client/daemon";
 import { resolveEngineBinary } from "../../src/testing/engineBinary";
 import {
@@ -40,6 +42,7 @@ export interface LiveDaemonWorkspace {
   chats: DesktopLinkedChatStore;
   relay: EngineRelayClient;
   sessions: EngineWorkspaceSessions;
+  nativeClient(): EngineClient;
   close(): Promise<void>;
 }
 
@@ -57,10 +60,11 @@ function attachWorkspace(workspace: {
 
 export async function openLiveDaemonWorkspace(
   workspace: { workspaceId: string; rootPath: string },
-  options: { maxRestarts?: number } = {},
+  options: { maxRestarts?: number; allowInsecureLoopbackForTests?: boolean; privateOwnerHost?: EngineDaemonLifecycleOptions["privateOwnerHost"] } = {},
 ): Promise<LiveDaemonWorkspace> {
   const lifecycle = createRealDaemonLifecycle({
     command: resolveEngineBinary(),
+    ...(options.privateOwnerHost ? { privateOwnerHost: options.privateOwnerHost } : {}),
     ...(options.maxRestarts !== undefined ? { maxRestarts: options.maxRestarts } : {}),
   });
   await lifecycle.start();
@@ -71,7 +75,7 @@ export async function openLiveDaemonWorkspace(
   const relay = new EngineRelayClient({
     sessions,
     routes,
-    allowInsecureLoopbackForTests: true,
+    allowInsecureLoopbackForTests: options.allowInsecureLoopbackForTests ?? true,
   });
   let closed = false;
   return {
@@ -79,6 +83,11 @@ export async function openLiveDaemonWorkspace(
     chats: createLiveLinkedChatStore(attachedWorkspace, sessions),
     relay,
     sessions,
+    nativeClient() {
+      const client = lifecycle.currentClient();
+      if (!(client instanceof EngineClient)) throw new Error("Native delivery requires the daemon client.");
+      return client;
+    },
     close: async () => {
       if (closed) return;
       closed = true;

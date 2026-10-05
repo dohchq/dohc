@@ -276,7 +276,15 @@ impl EngineService {
                     .await?
             }
             "engine.ping" => engine_ping(),
-            "workspace.open" => self.workspace_open(&ctx, request.params).await?,
+            "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
+            "files.changesSince" => {
+                Box::pin(self.files_changes_since(&ctx, request.workspace, request.params, false))
+                    .await?
+            }
+            "files.drain" => {
+                Box::pin(self.files_changes_since(&ctx, request.workspace, request.params, true))
+                    .await?
+            }
             "workspace.close" => self.workspace_close(request.workspace).await?,
             "sync.push" => {
                 Box::pin(self.sync_push(&ctx, request.workspace, request.params)).await?
@@ -426,6 +434,10 @@ impl EngineService {
             }
             "ydoc.ownerOutbox.quarantine" => {
                 self.owner_ydoc_outbox_quarantine(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.adoptCollectionRecord" => {
+                Box::pin(self.ydoc_adopt_collection_record(&ctx, request.workspace, request.params))
                     .await?
             }
             "ydoc.settle" => {
@@ -976,6 +988,16 @@ impl EngineService {
         let Some(handle) = handle else {
             return Ok(());
         };
+        if method.starts_with("automations.")
+            && lock(&self.handles)
+                .get(handle)
+                .is_some_and(|open| open.projects_collections())
+        {
+            return Err(WireError::new(
+                ErrorCode::Forbidden,
+                "received shares do not execute automations",
+            ));
+        }
         let read_only = lock(&self.handles)
             .get(handle)
             .is_some_and(|open| open.mode == WorkspaceOpenMode::ReadOnly);
@@ -983,6 +1005,8 @@ impl EngineService {
             && !matches!(
                 method,
                 "workspace.close"
+                    | "files.changesSince"
+                    | "files.drain"
                     | "search.queryChatMessagesGranular"
                     | "chats.readState.listUnreadFileThreads"
                     | "history.page"
@@ -1389,6 +1413,7 @@ mod tests {
             "watcher.status",
             "workspace.close",
             "workspace.open",
+            "ydoc.adoptCollectionRecord",
             "ydoc.close",
             "ydoc.evict",
             "ydoc.open",

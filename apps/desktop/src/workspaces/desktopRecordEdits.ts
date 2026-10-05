@@ -41,7 +41,7 @@ function byPerson(session: RecordEditSession, personId: string): RecordEditSessi
         ? { ...options, actorOriginId: personId, attribution: { actorKind: "human", onBehalfOf: personId, depth: 0 } }
         : options),
     settleNow: options => session.settleNow(options),
-    close: () => session.close(),
+    close: options => session.close(options),
   };
 }
 

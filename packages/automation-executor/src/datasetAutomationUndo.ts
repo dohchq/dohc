@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import type { UndoKeptField } from "./automationRunStore";
 import type { JsonObject, JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { DatasetInvocationResult } from "@dohc/app-backend-runtime/supervisor";
 import type { DatasetDefinition, DatasetOperation } from "@dohc/security-contract/dataset";
@@ -478,14 +479,14 @@ export async function undoDatasetAutomationRuns(
   only?: { kind: "record"; datasetId: string; tableId: string; recordId: string | number } | { kind: "action"; datasetId: string; revision: number; operationId: string },
   prepared?: ReturnType<typeof datasetUndoChanges>,
   codeFiles: readonly string[] = [],
-): Promise<{ undone: CollectionAutomationUndone; keptFields: Array<{ recordId: string; field: string }> }> {
+): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[] }> {
   const saved = runs.flatMap((run) => run.undoRequests);
   // Each call once, though two saved lists may hold it: the same content has the same key.
   const calls = [...new Map(runs.flatMap((run) => run.undoCalls).map((call) => [call.idempotencyKey, call])).values()];
-  const keptFields: Array<{ recordId: string; field: string }> = [];
+  const keptFields: UndoKeptField[] = [];
   const keep = (last: Edit, fields: readonly FieldChange[]) => {
     const recordId = JSON.stringify([last.rules.datasetId, last.tableId, last.recordId]);
-    for (const field of fields) keptFields.push({ recordId, field: field.fieldId });
+    for (const field of fields) keptFields.push({ recordId, field: field.fieldId, path: collection.path, fieldName: field.last.fields.find((entry) => entry.fieldId === field.fieldId)!.field, datasetRecordId: last.recordId });
   };
   const undone: CollectionAutomationUndone = {
     reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0,

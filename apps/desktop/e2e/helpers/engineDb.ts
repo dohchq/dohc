@@ -1,3 +1,4 @@
+import { parseLiveAuthorSnapshot, type LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -377,11 +378,11 @@ export interface LiveAuditRecord {
   deliveryId: string;
   acceptingHostEpoch: number;
   recordDigest: string;
+  authorSnapshot: LiveAuthorSnapshot;
   accepted: {
     receipt: { deliveryId: string; updateDigest: string; journalCursor: number; acceptingHostEpoch: number };
     binding: { restoreFenceGeneration: number; currentPath: string };
     authority: { principalKind: string; principalId: string };
-    agentDeclaration?: { agentId: string; onBehalfOf: string | null; depth: number };
   };
 }
 
@@ -414,12 +415,12 @@ export function readLiveAuditRecord(db: Pick<EngineDb, "prepare">, deliveryId: s
   });
   const bytes = Buffer.concat(parts);
   if (bytes.byteLength !== manifest.byteLength || sha256(bytes) !== recordDigest) throw new Error(`Audit record ${recordDigest} does not match its digest.`);
-  const record = JSON.parse(bytes.toString("utf8")) as { metadata?: { accepted?: LiveAuditRecord["accepted"] } };
+  const record = JSON.parse(bytes.toString("utf8")) as { metadata?: { accepted?: LiveAuditRecord["accepted"]; authorSnapshot?: LiveAuthorSnapshot } };
   const accepted = record.metadata?.accepted;
   if (!accepted || accepted.receipt.deliveryId !== deliveryId) throw new Error(`Audit record ${recordDigest} names another delivery.`);
   return {
     namespace: String(event.namespace), eventCount: Number(event.event_count), evidenceDigest: String(event.evidence_digest),
-    journalCursor: Number(event.journal_cursor), deliveryId, acceptingHostEpoch: Number(event.accepting_host_epoch), recordDigest, accepted,
+    journalCursor: Number(event.journal_cursor), deliveryId, acceptingHostEpoch: Number(event.accepting_host_epoch), recordDigest, accepted, authorSnapshot: parseLiveAuthorSnapshot(record.metadata?.authorSnapshot ?? []),
   };
 }
 

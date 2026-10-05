@@ -12,6 +12,7 @@ export const YDOC_METHOD = {
   open: "ydoc.open",
   recordUpdate: "ydoc.recordUpdate",
   settle: "ydoc.settle",
+  adoptCollectionRecord: "ydoc.adoptCollectionRecord",
   close: "ydoc.close",
   // Ends a session without settling and without pruning: the daemon drops the
   // session and its lease and leaves the durable lineage alone. The only exit
@@ -148,6 +149,7 @@ const OwnerDraftSchema = mutableStruct({
   binding: LiveObjectBindingSchema,
   relayDatabaseNamespace: LiveIdentifierSchema, revision: PositiveSafeIntegerSchema,
   acceptedCursor: NonnegativeSafeIntegerSchema, nativeHeadSequence: NonnegativeSafeIntegerSchema,
+  nativeUnsettled: Schema.Boolean,
   outboxId: Schema.NullOr(LiveIdentifierSchema), pendingBytes: NonnegativeSafeIntegerSchema,
   state: Schema.NullOr(Schema.Literals(["active", "sealed", "quarantined"])),
 }).check(Schema.makeFilter((draft) =>
@@ -156,6 +158,15 @@ const OwnerDraftSchema = mutableStruct({
     : draft.state !== null || "A draft parent must have a state.",
 ));
 export type YdocOwnerDraft = typeof OwnerDraftSchema.Type;
+
+/** The particular locally committed write, independent of its current path. */
+export interface SharedFileUpdate {
+  outboxId: string | null;
+  binding: YdocOwnerDraft["binding"];
+  nativeHeadSequence: number;
+  appendKey: string;
+}
+export type SharedFileUpdateState = "pending" | "settled" | "not-accepted" | "absent";
 
 export function decodeOwnerYDocDraftDescriptor(value: unknown): YdocOwnerDraft {
   const decoded = Schema.decodeUnknownResult(OwnerDraftSchema)(value, { onExcessProperty: "error" });
@@ -237,6 +248,7 @@ const YdocResultSchemas = {
   [YDOC_METHOD.recordUpdate]: RecordUpdateResultSchema,
   [YDOC_METHOD.resync]: ResyncResultSchema,
   [YDOC_METHOD.settle]: SettleResultSchema,
+  [YDOC_METHOD.adoptCollectionRecord]: mutableStruct({ status: Schema.Literals(["settled", "ownerPending", "declined"]) }),
   [YDOC_METHOD.close]: CloseResultSchema,
   [YDOC_METHOD.evict]: EvictResultSchema,
 } as const;

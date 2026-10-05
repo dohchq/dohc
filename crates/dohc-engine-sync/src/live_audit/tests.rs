@@ -334,9 +334,12 @@ fn accept_enrollment_event(f: &mut Fixture, cursor: i64) {
                     principal_id: "owner".into(),
                 },
                 received_at_ms: cursor,
-                agent_declaration: None,
             },
             first_seen: Vec::new(),
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
         update_bytes: f.bytes.clone(),
     };
@@ -683,9 +686,21 @@ fn declared_owner_history_exports_and_imports_with_its_agent() {
                     principal_id: "owner".into(),
                 },
                 received_at_ms: 200,
-                agent_declaration: Some(declaration.clone()),
             },
             first_seen: Vec::new(),
+
+            canonical_version: Some(2),
+
+            author_snapshot: Some(
+                (Some(declaration.clone()))
+                    .into_iter()
+                    .map(dohc_engine_collab::live_update_application::LiveAuthorEntry::from)
+                    .collect(),
+            ),
+
+            first_seen_deletes: Some(vec![]),
+
+            checkpoint_coverage: None,
         },
         update_bytes: f.bytes.clone(),
     };
@@ -765,8 +780,13 @@ fn declared_owner_history_exports_and_imports_with_its_agent() {
             reader.finish().unwrap();
             let accepted = &record["metadata"]["accepted"];
             assert_eq!(
-                accepted["agentDeclaration"],
-                serde_json::to_value(&declaration).unwrap()
+                record["metadata"]["authorSnapshot"][0],
+                serde_json::to_value(
+                    dohc_engine_collab::live_update_application::LiveAuthorEntry::from(
+                        declaration.clone()
+                    )
+                )
+                .unwrap()
             );
             // The declaration sits beside the authority; it never replaces it.
             assert_eq!(accepted["authority"]["principalKind"], "owner");
@@ -802,9 +822,12 @@ fn admitted_link_history_roundtrips_without_creating_native_authority() {
                     grant_generation: 1,
                 },
                 received_at_ms: 200,
-                agent_declaration: None,
             },
             first_seen: Vec::new(),
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
         update_bytes: f.bytes.clone(),
     };

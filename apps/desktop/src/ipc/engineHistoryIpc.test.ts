@@ -20,13 +20,14 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import type { WorkspaceEngineMomentDetail } from "../workspaces/workspaceEngineCapture";
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 
 const names: EngineMomentAuthorNames = {
   agent: (author) => author.onBehalfOf === "local" ? "You" : author.onBehalfOf,
+  person: (author) => author.humanId === "local" ? "Ice" : undefined,
   automation: (automationId) =>
     automationId.startsWith("collection:") ? { name: `Named ${automationId}`, collection: "Tasks" } : null,
   named: (author) => `${author.userId}@example.com (Edit)`,
-  person: (author) => author.onBehalfOf === "ada" ? "You" : "Another person",
 };
 
 const TEXT_SHA = "a".repeat(64);
@@ -56,7 +57,7 @@ describe("listEngineMomentsForIpc", () => {
     const detail = detailWith({before: null, after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
     const authors: NonNullable<VersionedTextMoment["authors"]> = [
-      {kind: "human", humanId: "ada", onBehalfOf: "ada"},
+      {kind: "human", humanId: "local", onBehalfOf: "local"},
       {kind: "agent", agentId: "agent"},
       {kind: "automation", automationId: "collection:Tasks#stamp", depth: 1},
       {kind: "named", userId: "ana", grantId: "grant", grantGeneration: 1},
@@ -76,7 +77,7 @@ describe("listEngineMomentsForIpc", () => {
     expect(response.moments[0]).not.toHaveProperty("automationAuthor");
     // Several authors read as each of them, in order; none stands in for the rest.
     expect(response.moments[0]?.authorLabels).toEqual([
-      "You", "Agent", "Named collection:Tasks#stamp in Tasks", "ana@example.com (Edit)",
+      "Ice", "Agent", "Named collection:Tasks#stamp in Tasks", "ana@example.com (Edit)",
       "Edit link · holder holder", "Link holder public",
     ]);
   });
@@ -167,7 +168,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
   // by any identifier the relay accepts: up to 512 UTF-8 bytes, here all
   // quotes, at the largest generation. History keeps it whole.
   it("keeps a sole shared author with the longest live identifiers", async () => {
-    const id = "\"".repeat(512);
+    const id = "\"".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
     for (const [author, field] of [
       [{kind: "named", userId: id, grantId: id, grantGeneration: Number.MAX_SAFE_INTEGER}, {namedAuthor: {userId: id, label: "ana@example.com (Edit)"}}],
       [{kind: "link", grantId: id, grantGeneration: Number.MAX_SAFE_INTEGER, principalId: id},
@@ -188,9 +189,16 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
       expect(page.moments[0]).toMatchObject(field);
     }
     // One byte past the live bound is not an identifier the relay accepts.
+    const over = `${"é".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES / 2)}x`;
+    expect(new TextEncoder().encode(over).byteLength).toBe(LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 1);
     const record = engineMomentDetailForIpc(detailWith({before: null, after: textSide("new")}), names);
-    expect(EngineMomentRecord.omit({momentOrder: true}).safeParse({...record,
-      linkAuthor: {kind: "link", grantId: "é".repeat(257), grantGeneration: 1, principalId: "holder"}}).success).toBe(false);
+    for (const oversized of [
+      {namedAuthor: {userId: over, label: "ana@example.com (Edit)"}},
+      {linkAuthor: {kind: "link", grantId: over, grantGeneration: 1, principalId: "holder"}},
+      {linkAuthor: {kind: "link", grantId: "grant", grantGeneration: 1, principalId: over}},
+    ]) {
+      expect(EngineMomentRecord.omit({momentOrder: true}).safeParse({...record, ...oversized}).success).toBe(false);
+    }
   });
 
   it("preserves the public author without invoking the agent name resolver", () => {

@@ -2,7 +2,7 @@ import { rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
-import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
+import type { CollectionAutomations, KeptAutomationField } from "@dohc/automation-executor/collection-automations";
 import type { ServerRuns } from "../automations/serverRuns";
 import {
   LiveDocumentMutationError,
@@ -11,6 +11,7 @@ import {
   type WorkspaceEngineCapture,
 } from "../workspaces/workspaceEngineCapture";
 import { restoreDirectWrites, UndoRunsStopped, type DirectWriteFile, type UndoneRuns } from "../workspaces/stopAndRestore";
+import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { folderEntriesOrNone } from "../workspaces/folderEntries";
 import {
   StopAndRestorePayload,
@@ -106,6 +107,8 @@ export function registerStopAndRestoreIpc<
   requireEngineCapture(workspaceId: string): Promise<{
     capture: Pick<WorkspaceEngineCapture, "readMoment" | "listObjectMomentsAfter" | "restoreFileToBeforeMoment">;
   }>;
+  /** The person a request is made by, read from main's own account when it arrives. */
+  localPerson(): Promise<LocalPersonAuthor>;
   /** Asks the workspace's sync to pull now. */
   queuePull(workspaceId: string): void;
   /** Runs one sync pass of the workspace now, pushing and pulling, and throws when it did not sync. */
@@ -125,6 +128,17 @@ export function registerStopAndRestoreIpc<
     credentialGeneration: dependencies.currentCredentialGeneration,
   });
 
+  // Per workspace and person or link, the fields each computer's runs kept at
+  // its last pass that finished. A try that stops before a computer's pass
+  // finishes keeps that computer's earlier fields instead of counting none.
+  const keptByTarget = new Map<string, { server: KeptAutomationField[]; here: KeptAutomationField[]; latest: "server" | "here" }>();
+  const knownKept = (target: string): KeptAutomationField[] => {
+    const kept = keptByTarget.get(target);
+    if (!kept) return [];
+    const earlier = kept.latest === "here" ? kept.server : kept.here;
+    return [...new Map([...earlier, ...kept[kept.latest]].map((field) => [field.id, field])).values()];
+  };
+
   /**
    * Undoes the runs of these definitions on the owner's server and here. A
    * run on one of them may have written a field after a run on the other,
@@ -135,22 +149,26 @@ export function registerStopAndRestoreIpc<
    */
   async function undoRunsHereAndOnServer(
     workspaceId: string,
+    target: string,
     definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
     undoHere: (again: boolean) => ReturnType<CollectionAutomations["undoRunsOf"]>,
   ): Promise<UndoneRuns> {
-    const counts = { undone: 0, left: 0, missing: 0, otherKept: 0, errorMessage: null };
-    // The fields each computer's runs still keep, by hash: one kept on both counts once.
-    const kept = { server: [] as string[], here: [] as string[] };
-    const total = (): UndoneRuns => ({ ...counts, kept: new Set([...kept.server, ...kept.here]).size });
-    const add = (host: "server" | "here", pass: { undone: number; left: number; missing: number; keptFields: string[]; otherKept: number; errorMessage: string | null }, again: boolean) => {
+    const counts = { undone: 0, left: 0, missing: 0, otherKept: 0, errorMessage: null, sharedReversals: [] as NonNullable<UndoneRuns["sharedReversals"]> };
+    // The fields each computer's runs still keep, by identity: one kept on both appears once.
+    const kept = keptByTarget.get(target) ?? { server: [], here: [], latest: "here" as const };
+    keptByTarget.set(target, kept);
+    const total = (): UndoneRuns => ({ ...counts, keptFields: knownKept(target) });
+    const add = (host: "server" | "here", pass: UndoneRuns, again: boolean) => {
       if (!again) {
         counts.undone += pass.undone;
         counts.left += pass.left;
       }
       counts.missing += pass.missing;
-      kept[host] = pass.keptFields;
       counts.otherKept += pass.otherKept;
+      counts.sharedReversals.push(...(pass.sharedReversals ?? []));
       if (pass.errorMessage !== null) throw new UndoRunsStopped(pass.errorMessage, total());
+      kept[host] = pass.keptFields;
+      kept.latest = host;
     };
     try {
       for (let pass = 0; pass < UNDO_PASSES; pass += 1) {
@@ -166,7 +184,9 @@ export function registerStopAndRestoreIpc<
       }
     } catch (error) {
       // What it undid before it stopped is reported with why it stopped.
-      throw new UndoRunsStopped(error instanceof Error ? error.message : String(error), total());
+      throw new UndoRunsStopped(error instanceof z.ZodError
+        ? "Your server runs a different version of dohc. Update it, then try again."
+        : error instanceof Error ? error.message : String(error), total());
     }
     return total();
   }
@@ -174,6 +194,7 @@ export function registerStopAndRestoreIpc<
   registerHandler(CHANNELS.stopAndRestore, async (event, payload) => {
     assertTrustedSender(event);
     const input = StopAndRestorePayload.parse(payload);
+    const person = await dependencies.localPerson();
     return ownerRelayShareHandler(event.sender, input.workspaceId, async (operation, credentials, session) => {
       const workspaceId = operation.workspace.workspaceId;
       const relay = <Result>(path: string, init?: RequestInit) => session.run(() => relayJson<Result>(credentials, path, init));
@@ -247,56 +268,77 @@ export function registerStopAndRestoreIpc<
         grantIds = [grantId];
       }
 
-      const writes: Array<{ committedAtMs: number; files: DirectWriteFile[] }> = [];
-      for (const grantId of grantIds) {
-        let after: number | null = -1;
-        for (let page = 0; after !== null; page += 1) {
-          if (page === MAX_LEDGER_PAGES) throw new Error("dohc cannot restore this many direct changes at once.");
-          const answer = LedgerPage.parse(await relay<unknown>(
-            `/sync/${encodeURIComponent(workspaceId)}/collection-writes/${encodeURIComponent(grantId)}?afterOriginSeq=${after}`,
-          ));
-          writes.push(...answer.writes);
-          after = answer.nextAfterOriginSeq;
-        }
+      // Access is stopped. Anything that fails from here is said as what is
+      // still to finish, so the owner knows access stays stopped. A try that
+      // stops before undoing runs reports the fields earlier tries found kept.
+      const target = JSON.stringify([workspaceId, input.target]);
+      try {
+        const outcome = await restoreGrantWrites(grantIds);
+        if (outcome.status !== "restored" || outcome.unfinished?.step !== "files") return outcome;
+        const kept = knownKept(target);
+        return { ...outcome, keptFields: kept, runChangesKept: outcome.runChangesKept + kept.length };
+      } catch (error) {
+        const kept = knownKept(target);
+        return StopAndRestoreResult.parse({
+          status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, runChangesKept: kept.length,
+          wroteAutomations: false, sendsMessages: false, keptFields: kept, fieldsMissing: 0,
+          unfinished: {
+            step: "files",
+            message: error instanceof z.ZodError ? "dohc could not read the relay's list of their changes."
+              : error instanceof Error ? error.message : String(error),
+          },
+        });
       }
-      writes.sort((left, right) => left.committedAtMs - right.committedAtMs);
 
-      const { capture } = await dependencies.requireEngineCapture(workspaceId);
-      const root = operation.workspace.rootPath;
-      const outcome = await restoreDirectWrites({
-        moment: async (momentId) => {
-          const detail = await capture.readMoment(momentId);
-          if (detail?.protected) {
-            throw new Error(`dohc cannot restore ${detail.moment.path} here because its contents are protected. Restore it from its History.`);
+      async function restoreGrantWrites(grantIds: readonly string[]): Promise<StopAndRestoreResult> {
+        const writes: Array<{ committedAtMs: number; files: DirectWriteFile[] }> = [];
+        for (const grantId of grantIds) {
+          let after: number | null = -1;
+          for (let page = 0; after !== null; page += 1) {
+            if (page === MAX_LEDGER_PAGES) throw new Error("dohc cannot restore this many direct changes at once.");
+            const answer = LedgerPage.parse(await relay<unknown>(
+              `/sync/${encodeURIComponent(workspaceId)}/collection-writes/${encodeURIComponent(grantId)}?afterOriginSeq=${after}`,
+            ));
+            writes.push(...answer.writes);
+            after = answer.nextAfterOriginSeq;
           }
-          return detail?.moment ?? null;
-        },
-        momentsAfter: (objectId, momentId) => capture.listObjectMomentsAfter(objectId, momentId),
-        assertCurrent: () => operation.assertCurrent(),
-        restore: async (momentId, expectedHeadMomentId, aloneInFolder) => {
-          try {
-            const { path, restoredMomentId } = await capture.restoreFileToBeforeMoment(momentId, {
-              expectedHeadMomentId,
-              ...(aloneInFolder ? { aloneInFolder: true } : {}),
-            });
-            return { kind: "restored", receipt: { path, restoredMomentId } };
-          } catch (error) {
-            if (error instanceof RestoreHeadChangedError) return { kind: "changed" };
-            if (error instanceof RestoreFolderInUseError) return { kind: "folder-in-use" };
-            if (error instanceof LiveDocumentMutationError) return { kind: "refused", detail: error.message };
-            throw error;
-          }
-        },
-        folderEntries: (path) => folderEntriesOrNone(join(root, path)),
-        removeEmptyFolder: async (path) => await rmdir(join(root, path)).catch(() => undefined),
-        undoRuns: (definitions) => undoRunsHereAndOnServer(workspaceId, definitions, (again) =>
-          operation.state.collectionAutomations.undoRunsOf(definitions, async (relativePath) => {
-            await dependencies.deletePath(event, { workspaceId, relativePath });
-          }, again)),
-      }, writes.flatMap((write) => write.files));
-      if (outcome.status === "waiting") dependencies.queuePull(workspaceId);
-      else dependencies.notifyRenderer({ workspaceId });
-      return StopAndRestoreResult.parse(outcome);
+        }
+        writes.sort((left, right) => left.committedAtMs - right.committedAtMs);
+
+        const { capture } = await dependencies.requireEngineCapture(workspaceId);
+        const root = operation.workspace.rootPath;
+        const outcome = await restoreDirectWrites({
+          moment: async (momentId) => {
+            const detail = await capture.readMoment(momentId);
+            return detail?.protected ? "protected" : detail?.moment ?? null;
+          },
+          momentsAfter: (objectId, momentId) => capture.listObjectMomentsAfter(objectId, momentId),
+          assertCurrent: () => operation.assertCurrent(),
+          restore: async (momentId, expectedHeadMomentId, aloneInFolder) => {
+            try {
+              const { path, restoredMomentId } = await capture.restoreFileToBeforeMoment(momentId, person, {
+                expectedHeadMomentId,
+                ...(aloneInFolder ? { aloneInFolder: true } : {}),
+              });
+              return { kind: "restored", receipt: { path, restoredMomentId } };
+            } catch (error) {
+              if (error instanceof RestoreHeadChangedError) return { kind: "changed" };
+              if (error instanceof RestoreFolderInUseError) return { kind: "folder-in-use" };
+              if (error instanceof LiveDocumentMutationError) return { kind: "refused", detail: error.message };
+              throw error;
+            }
+          },
+          folderEntries: (path) => folderEntriesOrNone(join(root, path)),
+          removeEmptyFolder: async (path) => await rmdir(join(root, path)).catch(() => undefined),
+          undoRuns: (definitions) => undoRunsHereAndOnServer(workspaceId, target, definitions, (again) =>
+            operation.state.collectionAutomations.undoRunsOf(definitions, async (relativePath) => {
+              await dependencies.deletePath(event, { workspaceId, relativePath });
+            }, again)),
+        }, writes.flatMap((write) => write.files));
+        if (outcome.status === "waiting") dependencies.queuePull(workspaceId);
+        else dependencies.notifyRenderer({ workspaceId });
+        return StopAndRestoreResult.parse(outcome);
+      }
     }, dependencies.assertOriginalWorkspace);
   });
 
@@ -305,6 +347,7 @@ export function registerStopAndRestoreIpc<
   registerHandler(CHANNELS.undoStopAndRestore, async (event, payload) => {
     assertTrustedSender(event);
     const input = UndoStopAndRestorePayload.parse(payload);
+    const person = await dependencies.localPerson();
     await dependencies.withRendererWorkspaceOperation(
       event.sender, input.workspaceId, "Undo stopped because this window changed workspaces.",
       async (operation) => {
@@ -312,7 +355,7 @@ export function registerStopAndRestoreIpc<
         try {
           for (const momentId of [...input.restoredMomentIds].reverse()) {
             operation.assertCurrent();
-            await capture.restoreFileToBeforeMoment(momentId);
+            await capture.restoreFileToBeforeMoment(momentId, person);
           }
         } finally {
           dependencies.notifyRenderer({ workspaceId: operation.workspace.workspaceId });

@@ -1,3 +1,4 @@
+import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
 import {connectOwnerLiveTransport, type OwnerLiveTransport} from "@dohc/sync-relay/owner-live-transport";
@@ -27,6 +28,7 @@ export interface OwnerYDocFrameDeliveryOptions {
   attemptTimeoutMs: number;
   signal: AbortSignal;
   freshBearer(signal: AbortSignal): Promise<string>;
+  authenticatedAccountId?(signal: AbortSignal): Promise<string | undefined>;
   acceptedState: OwnerAcceptedState;
   connect?: typeof connectOwnerLiveTransport;
 }
@@ -65,7 +67,8 @@ interface Attempt {
   nextTransfer: number;
   maxFrameBytes: number;
   cursor: number;
-  envelope?: Pick<OwnerYDocDeliveryEnvelope, "deliveryId" | "update" | "updateDigest" | "agentDeclaration">;
+  accountId?: string;
+  envelope?: Pick<OwnerYDocDeliveryEnvelope, "deliveryId" | "update" | "updateDigest"> & {authorContext?: LiveAuthorContext};
   receipt?: LiveUpdateReceipt;
   stopTimer?: ReturnType<typeof setTimeout>;
 }
@@ -129,6 +132,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
       if (!(state.stateVector instanceof Uint8Array) || state.stateVector.length > this.options.frames.receive.maxStateVectorBytes ||
           !Number.isSafeInteger(state.journalCursor) || state.journalCursor < 0) throw new Error("Invalid native accepted state.");
       attempt.vector = Uint8Array.from(state.stateVector); attempt.cursor = state.journalCursor;
+      attempt.accountId = await this.options.authenticatedAccountId?.(attempt.signal); this.check(attempt);
       const bearer = await abortable(this.options.freshBearer(attempt.signal), attempt.signal); this.check(attempt);
       const transport = await abortable((this.options.connect ?? connectOwnerLiveTransport)({url: this.routeUrl(binding), bearer,
         maxFrameBytes: attempt.maxFrameBytes, signal: attempt.signal, receive: bytes => this.receive(attempt, bytes), closed: () => {if (this.active === attempt) this.stop(attempt);}}), attempt.signal);
@@ -148,7 +152,8 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
     let agentDeclaration: AgentDeclaration | undefined;
     try {agentDeclaration = declared === undefined ? undefined : parseAgentDeclaration(declared);} catch {this.stop(attempt); return {kind: "retry"};}
     attempt.envelope = {deliveryId: envelopeValue.deliveryId, updateDigest: envelopeValue.updateDigest, update: Uint8Array.from(envelopeValue.update),
-      ...(agentDeclaration ? {agentDeclaration} : {})};
+      ...(attempt.accountId && agentDeclaration ? {authorContext: {kind: "account", accountId: attempt.accountId, agent: {agentId: agentDeclaration.agentId,
+        ...(agentDeclaration.onBehalfOf !== null ? {onBehalfOf: agentDeclaration.onBehalfOf} : {}), depth: agentDeclaration.depth}}} : {})};
     void this.pump(attempt);
     return attempt.delivered.promise;
   }
@@ -173,7 +178,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
           } else if (attempt.authority && attempt.envelope && !attempt.submitted) {
             const entry = attempt.envelope;
             attempt.transfer = {begin: {kind: "begin", purpose: "submit-update", deliveryId: entry.deliveryId, transferId: attempt.nextTransfer++, totalBytes: entry.update.length, digest: entry.updateDigest,
-              ...(entry.agentDeclaration ? {agentDeclaration: entry.agentDeclaration} : {})}, bytes: entry.update, begun: false, offset: 0};
+              ...(entry.authorContext ? {authorContext: entry.authorContext} : {})}, bytes: entry.update, begun: false, offset: 0};
           } else return;
           control = attempt.controls[0];
         }

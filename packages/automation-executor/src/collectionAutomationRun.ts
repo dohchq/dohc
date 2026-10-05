@@ -97,6 +97,7 @@ export interface CollectionAutomationReads {
 
 /** What a field write did. */
 interface RecordFieldsWritten {
+  sharedFileUpdates?: Record<string, import("@dohc/workspace-engine-client").SharedFileUpdate>;
   /**
    * The value each written field held before this write, keyed by field.
    * A field the record did not have reads as null. Fields that already held
@@ -318,7 +319,7 @@ export async function savedRunOf(
 /** A new run's record, before anything of it is saved. */
 export function newRun(claim: Pick<AutomationClaim, "automationId" | "claimId">, automation: Automation, keySeed: string, nowMs: number): StoredRun {
   return {
-    version: 8,
+    version: 9,
     claimId: claim.claimId,
     automationId: claim.automationId,
     definitionHash: definitionHash(automation),
@@ -514,13 +515,15 @@ function fieldWrites(
   const writes: RunWrite[] = [];
   for (const { field, before, after } of fields) {
     const base = { recordId: target.recordId, path: target.path, field };
+    const draft = result.sharedFileUpdates?.[field];
+    const settlement = draft ? { sharedFileUpdate: draft } : {};
     if (Object.hasOwn(result.replaced, field)) {
-      writes.push({ kind: "field", ...base, before: (result.replaced[field] ?? null) as JsonValue, after });
+      writes.push({ kind: "field", ...base, ...settlement, before: (result.replaced[field] ?? null) as JsonValue, after });
     } else if (Object.hasOwn(result.kept, field)) {
       writes.push({ kind: "kept", ...base, planned: after, current: (result.kept[field] ?? null) as JsonValue });
     } else if (mode === "may-have-landed" && !isDeepStrictEqual(before, after)) {
       // The earlier attempt wrote it before the run stopped.
-      writes.push({ kind: "field", ...base, before, after });
+      writes.push({ kind: "field", ...base, ...settlement, before, after });
     } else if (mode === "resumed" && !isDeepStrictEqual(before, after)) {
       // Someone else gave it the planned value while the run waited.
       writes.push({ kind: "kept", ...base, planned: after, current: after });

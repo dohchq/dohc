@@ -41,6 +41,18 @@ type Doc = { id: string; path: string; collection: string; values: Record<string
 
 class Crash extends Error {}
 
+it("records a refused field write as a failed run without completed writes", async () => {
+  const space = workspace([task("rec_t", {})]);
+  const store = await scratchStore();
+  const dependencies = space.dependencies(store);
+  dependencies.withRecordWrites = async () => { throw new Error("The engine refused this write."); };
+  const signal = new AbortController().signal;
+  await expect(runCollectionAutomation(dependencies, {claim: added(), automation: automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Note: saved}}]"),
+    collection: {path: "Tasks", name: "Tasks"}, roster: {kind: "owner", ownerUserId: null, grants: []}, signal, stopped: signal}))
+    .resolves.toMatchObject({kind: "failed", error: "The engine refused this write."});
+  expect((await store.runsOf("collection:Tasks#chain", "atc_one")).runs[0]?.applied).toEqual([]);
+});
+
 type Fault = { at: number; when: "before" | "mid" | "after" };
 
 /**
@@ -281,6 +293,9 @@ describe("run stage timing", () => {
     expect(run!.applied.map(({ writeMs, writeCount, writes }) => ({ writeMs, writeCount, fields: writes.length }))).toEqual([
       { writeMs: 20, writeCount: 1, fields: 2 }, { writeMs: 20, writeCount: 1, fields: 2 },
     ]);
+    expect(run!.steps.map(({ appendMs, appendCount }) => ({ appendMs, appendCount }))).toEqual([
+      { appendMs: 0, appendCount: 0 }, { appendMs: 200, appendCount: 2 },
+    ]);
     // Two effect applications, plus the existing initial and final saves.
     expect(space.events()).toBe(6);
   });
@@ -296,6 +311,27 @@ describe("run stage timing", () => {
     })).resolves.toMatchObject({ kind: "failed", error: expect.stringContaining("The Find in step 1 matched more than") });
     expect(await store.runsOf("collection:Tasks#chain", "atc_one")).toEqual({ runs: [], unreadable: false });
     expect(space.events()).toBe(0);
+  });
+
+  it("leaves append timing missing after a crash loses a durable effect's measurement", async () => {
+    const definition = automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{find: 'true', as: all}, {set: {Count: 1}, records: all}]");
+    const space = workspace([task("rec_t", {}), task("rec_o", {})]);
+    const store = await scratchStore();
+    const signal = new AbortController().signal;
+    const input = { claim: added(), automation: definition, collection: { path: "Tasks", name: "Tasks" },
+      roster: { kind: "owner" as const, ownerUserId: null, grants: [] }, signal, stopped: signal };
+    const dependencies = timedDependencies(space, store);
+    const appendEffect = dependencies.store.appendEffect;
+    dependencies.store.appendEffect = async (run, effect) => {
+      await appendEffect(run, effect);
+      throw new Crash();
+    };
+    await expect(runCollectionAutomation(dependencies, input)).rejects.toThrow(Crash);
+    await expect(runCollectionAutomation(timedDependencies(space, store), input)).resolves.toEqual({ kind: "done" });
+    const [run] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+    expect(run!.applied).toHaveLength(2);
+    expect(run!.steps[1]!.appendMs).toBeUndefined();
+    expect(run!.steps[1]!.appendCount).toBeUndefined();
   });
 
   it("keeps saved stage times when a later step exceeds the write limit", async () => {

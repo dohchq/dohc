@@ -8,6 +8,9 @@ fn queued_author_repair_omits_people_and_shared_authors() {
     let named = json!({"kind":"named","userId":"ana","grantId":"grant","grantGeneration":2});
     let link = json!({"kind":"link","grantId":"grant","grantGeneration":2,"principalId":"holder"});
     let public = json!({"kind":"public","principalId":"holder","grantId":"grant"});
+    // A relay-admitted snapshot names these; they stay.
+    let snapshot_human = json!({"kind":"human","humanId":"person","humanName":"Person"});
+    let snapshot_link = json!({"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"});
     let agent =
         json!({"kind":"agent","agentId":"agent","onBehalfOf":"owner","agentRunId":"run","depth":3});
     let automation =
@@ -21,6 +24,10 @@ fn queued_author_repair_omits_people_and_shared_authors() {
         (json!([human, named, link, public]), None),
         (json!([human, agent]), Some(json!([agent]))),
         (json!([agent, named, link]), Some(json!([agent]))),
+        (
+            json!([snapshot_human, named, snapshot_link, link]),
+            Some(json!([snapshot_human, snapshot_link])),
+        ),
         // An unknown kind is not this repair's to judge; validation refuses it.
         (
             json!([named, {"kind":"other"}]),

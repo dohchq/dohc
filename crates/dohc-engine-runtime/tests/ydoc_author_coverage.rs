@@ -143,6 +143,47 @@ fn ids(value: &Value) -> Vec<&str> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_op_settle_of_non_record_document_opens_no_write_transaction() {
+    struct RejectWrites;
+    impl FaultInjector for RejectWrites {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            assert!(
+                !matches!(
+                    point,
+                    FaultPoint::StorageBeforePersist | FaultPoint::StorageAfterCommitBeforeAck
+                ),
+                "no-op settlement opened a write transaction"
+            );
+            FaultAction::Continue
+        }
+    }
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = engine_db_path(&scratch).expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&db, 1).expect("actor").actor;
+    let state = open(&actor).await;
+    let doc = Ydoc::wire();
+    append(
+        &actor,
+        &state.key,
+        doc.plaintext_insert(0, "ordinary document"),
+        "alice",
+    )
+    .await;
+    settle(&actor, scratch.path(), &state, Arc::new(NoFaults))
+        .await
+        .expect("initial settlement");
+    let before = coverage(&db);
+    let moments = authors(&db);
+    settle(&actor, scratch.path(), &state, Arc::new(RejectWrites))
+        .await
+        .expect("no-op settlement");
+    assert_eq!(coverage(&db), before);
+    assert_eq!(authors(&db), moments);
+    supervisor.close(&db).expect("stop actor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compaction_deletion_undo_noop_and_close_keep_interval_authors() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = engine_db_path(&scratch).expect("db");

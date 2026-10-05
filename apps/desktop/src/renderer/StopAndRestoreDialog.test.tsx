@@ -1,12 +1,28 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { StopAndRestoreResult } from "../ipc/bridgeContract";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 
+const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finished on", recordId: null };
 const WORKSPACE = "workspace";
 const ANA = { target: { kind: "person", userId: "user_ana" }, label: "ana@example.com (Edit)" } as const;
 const LINK = { target: { kind: "link", grantId: "grant-link" }, label: "Edit link" } as const;
+
+it.each(["pending", "not-accepted"] as const)("reports %s shared reversals with the matching run count", async state => {
+  const draft = {outboxId: "outbox", appendKey: "reverse/Status", nativeHeadSequence: 2,
+    binding: {workspaceId: WORKSPACE, mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "trip/task.md", selectorPaths: ["trip"], restoreFenceGeneration: 0}};
+  fixture([{status: "restored", restored: [], review: [], runsUndone: state === "pending" ? 1 : 0, runsLeft: state === "pending" ? 0 : 1, keptFields: [], fieldsMissing: 0,
+    runChangesKept: 0, wroteAutomations: true, sendsMessages: false, unfinished: null,
+    sharedReversals: [{recordId: "record", field: "Status", draft, state}]}]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText(state === "pending"
+    ? "Reversals saved on this computer. The shared host has not accepted them yet."
+    : "Reversals saved on this computer. The shared host did not accept them. Try Undo again in Run History.")).toBeTruthy();
+  expect(screen.queryByText(/^Undid 1 run/) !== null).toBe(state === "pending");
+  expect(screen.queryByText(/^dohc could not undo/) !== null).toBe(state === "not-accepted");
+});
 const row = (overrides: Record<string, unknown>) => ({
   shareId: "share", workspaceId: WORKSPACE, grantId: "grant", recipientUserId: "user_ana", recipientEmail: "ana@example.com",
   access: "edit", revokedAtMs: null, generation: 1, createdAtMs: 1, shareCode: "code", selector: { paths: ["trip"], versionId: null },
@@ -47,7 +63,9 @@ function fixture(results: Array<StopAndRestoreResult | Error>, first: typeof ANA
     onBeforeRestore: vi.fn(async () => release),
     onRestored: vi.fn(),
     onOpenFile: vi.fn(),
-    onError: vi.fn<(fallback: string, error: unknown, retry: () => void) => void>(),
+    onOpenCollection: vi.fn(),
+    onError: vi.fn<(fallback: string, error: unknown, retry: () => void, identity: string) => void>(),
+    onSettled: vi.fn<(identity: string) => void>(),
   };
   // The shell's part: it holds the dialog and the files put back.
   let shell!: ReturnType<typeof useStopAndRestore>;
@@ -88,8 +106,8 @@ it("stops the chosen person after one confirm, lists files to check with why, an
     ],
     runsUndone: 2,
     runsLeft: 0,
-    fieldsKept: 0, fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false,
-    errorMessage: null,
+    keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false,
+    unfinished: null,
   }]);
   const person = await screen.findByRole("combobox", { name: "Who to stop" });
   expect([...(person as HTMLSelectElement).options].map((option) => option.text)).toEqual(["ana@example.com", "bob@example.com", "Edit link to trip"]);
@@ -100,7 +118,7 @@ it("stops the chosen person after one confirm, lists files to check with why, an
   expect(f.stopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, target: { kind: "person", userId: "user_ana" } });
   expect(f.release).toHaveBeenCalledTimes(1);
   expect(f.props.onRestored).toHaveBeenCalledTimes(1);
-  expect(screen.getByText("Undid 2 runs of automations ana@example.com wrote.")).toBeTruthy();
+  expect(screen.getByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
   fireEvent.click(screen.getByText("trip/packing/automations.yaml"));
   expect(f.props.onOpenFile).toHaveBeenCalledWith("trip/packing/automations.yaml");
   expect(screen.getByText("Someone changed it after ana@example.com.")).toBeTruthy();
@@ -116,7 +134,7 @@ it("stops the chosen person after one confirm, lists files to check with why, an
 it("says access stopped while changes are still arriving, and tries again", async () => {
   const f = fixture([
     { status: "waiting" },
-    { status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, fieldsKept: 0, fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, errorMessage: null },
+    { status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: null },
   ]);
   fireEvent.change(await screen.findByRole("combobox", { name: "Who to stop" }), { target: { value: "person:user_bob" } });
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
@@ -135,17 +153,18 @@ it("reports failures through the shell, and a Try again after closing opens the 
       review: [],
       runsUndone: 0,
       runsLeft: 0,
-      fieldsKept: 0, fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false,
-      errorMessage: "The workspace engine is not running.",
+      keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false,
+      unfinished: { step: "files", message: "The workspace engine is not running." },
     },
     new Error("dohc could not reach the relay."),
-    { status: "restored", restored: [{ path: "trip/packing/collection.yaml", restoredMomentId: "back-2" }], review: [], runsUndone: 1, runsLeft: 0, fieldsKept: 0, fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, errorMessage: null },
+    { status: "restored", restored: [{ path: "trip/packing/collection.yaml", restoredMomentId: "back-2" }], review: [], runsUndone: 1, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: null },
   ]);
   await screen.findByRole("combobox", { name: "Who to stop" });
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
   expect(await screen.findByText("Stopped ana@example.com's access and restored 1 file.")).toBeTruthy();
+  expect(screen.getByText("dohc has not finished restoring files.")).toBeTruthy();
   const [fallback, error] = f.props.onError.mock.calls[0]!;
-  expect(fallback).toBe("dohc could not stop ana@example.com and restore their changes.");
+  expect(fallback).toBe("Stopped ana@example.com's access. dohc has not finished restoring their changes.");
   expect((error as Error).message).toBe("The workspace engine is not running.");
   expect(screen.queryByRole("alert")).toBeNull();
 
@@ -154,6 +173,8 @@ it("reports failures through the shell, and a Try again after closing opens the 
   expect(screen.queryByTestId("stop-and-restore-dialog")).toBeNull();
   act(() => f.props.onError.mock.calls[0]![2]());
   await waitFor(() => expect(f.props.onError).toHaveBeenCalledTimes(2));
+  // Access stopped on the first try, so the failure says so.
+  expect(f.props.onError.mock.calls[1]![0]).toBe("Stopped ana@example.com's access. dohc has not finished restoring their changes.");
   expect((f.props.onError.mock.calls[1]![1] as Error).message).toBe("dohc could not reach the relay.");
   // The reopened dialog keeps the earlier outcome and its Undo.
   expect(await screen.findByText("Stopped ana@example.com's access and restored 1 file.")).toBeTruthy();
@@ -171,7 +192,7 @@ it("ends a whole Edit link, says it stops for everyone, and never claims its aut
     status: "restored",
     restored: [{ path: "trip/packing/automations.yaml", restoredMomentId: "back-1" }],
     review: [{ path: "trip/packing/collection.yaml", reason: "changed-since" }],
-    fieldsKept: 0, fieldsMissing: 0, runsUndone: 1, runsLeft: 1, runChangesKept: 2, wroteAutomations: true, sendsMessages: true, errorMessage: null,
+    keptFields: [], fieldsMissing: 0, runsUndone: 1, runsLeft: 1, runChangesKept: 2, wroteAutomations: true, sendsMessages: true, unfinished: null,
   }], LINK);
   const who = await screen.findByRole("combobox", { name: "Who to stop" });
   expect((who as HTMLSelectElement).value).toBe("link:grant-link");
@@ -180,10 +201,10 @@ it("ends a whole Edit link, says it stops for everyone, and never claims its aut
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
   expect(await screen.findByText("Ended Edit link to trip and restored 1 file.")).toBeTruthy();
   expect(f.stopAndRestore).toHaveBeenCalledWith({ workspaceId: WORKSPACE, target: { kind: "link", grantId: "grant-link" } });
-  expect(screen.getByText("Undid 1 run of automations written through Edit link to trip.")).toBeTruthy();
-  expect(screen.getByText("dohc could not undo 1 run of automations written through Edit link to trip. Undo each from its Collection's run history.")).toBeTruthy();
+  expect(screen.getByText("Undid 1 run of automations changed through Edit link to trip.")).toBeTruthy();
+  expect(screen.getByText("dohc could not undo 1 run of automations changed through Edit link to trip. Undo each from its Collection's run history.")).toBeTruthy();
   expect(screen.getByText("Undo left 2 changes from those runs. Check each Collection's run history.")).toBeTruthy();
-  expect(screen.getByText("Messages and notices from automations written through Edit link to trip stay sent.")).toBeTruthy();
+  expect(screen.getByText("Messages and notices from automations changed through Edit link to trip stay sent.")).toBeTruthy();
   expect(screen.getByText("Runs on your other computers are not undone here. Undo them from the run history on each computer.")).toBeTruthy();
   expect(screen.getByText("Someone changed it after the link.")).toBeTruthy();
 
@@ -193,26 +214,26 @@ it("ends a whole Edit link, says it stops for everyone, and never claims its aut
 });
 
 it("carries forward what undoing runs found when a try stopped part way", async () => {
-  const none = { fieldsKept: 0, fieldsMissing: 0, review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false };
+  const none = { keptFields: [], fieldsMissing: 0, review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false };
   const f = fixture([
-    { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 2, errorMessage: "The workspace engine is not running." },
-    { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 1, errorMessage: null },
+    { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 2, unfinished: { step: "runs", message: "The workspace engine is not running." } },
+    { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 1, unfinished: null },
   ]);
   await screen.findByRole("combobox", { name: "Who to stop" });
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
   expect(await screen.findByText("Undo left 2 changes from those runs. Check each Collection's run history.")).toBeTruthy();
   act(() => f.props.onError.mock.calls[0]![2]());
-  expect(await screen.findByText("Undid 2 runs of automations ana@example.com wrote.")).toBeTruthy();
+  expect(await screen.findByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
   expect(screen.getByText("Undo left 3 changes from those runs. Check each Collection's run history.")).toBeTruthy();
 });
 
 it("keeps the runs a try undid after the files are undone, and after the dialog closed during the try", async () => {
-  const none = { fieldsKept: 0, fieldsMissing: 0, review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false };
+  const none = { keptFields: [], fieldsMissing: 0, review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false };
   let finish!: () => void;
   const gate = new Promise<void>((resolve) => { finish = resolve; });
   const f = fixture([
-    { status: "restored", restored: [{ path: "trip/a.yaml", restoredMomentId: "back-1" }], ...none, runsUndone: 2, runChangesKept: 1, errorMessage: null },
-    { status: "restored", restored: [], ...none, runsUndone: 0, runChangesKept: 0, errorMessage: null },
+    { status: "restored", restored: [{ path: "trip/a.yaml", restoredMomentId: "back-1" }], ...none, runsUndone: 2, runChangesKept: 1, unfinished: null },
+    { status: "restored", restored: [], ...none, runsUndone: 0, runChangesKept: 0, unfinished: null },
   ]);
   const first = f.stopAndRestore.getMockImplementation()!;
   f.stopAndRestore.mockImplementationOnce(async () => {
@@ -228,34 +249,34 @@ it("keeps the runs a try undid after the files are undone, and after the dialog 
 
   act(() => f.shell().retry(WORKSPACE, ANA, "undo"));
   expect(await screen.findByText("Put back 1 file as ana@example.com left them. Their access stays stopped.")).toBeTruthy();
-  expect(screen.getByText("Undid 2 runs of automations ana@example.com wrote.")).toBeTruthy();
+  expect(screen.getByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
 
   // A new try passes over the runs already undone, and still names them.
   act(() => f.shell().retry(WORKSPACE, ANA, "stop"));
   expect(await screen.findByText("Stopped ana@example.com's access and restored 0 files.")).toBeTruthy();
-  expect(screen.getByText("Undid 2 runs of automations ana@example.com wrote.")).toBeTruthy();
+  expect(screen.getByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
   expect(screen.getByText("Undo left 1 change from those runs. Check each Collection's run history.")).toBeTruthy();
 });
 
 it("shows each kept change once: fields at a later value, fields on records that left, and the rest", async () => {
   const none = { review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false };
   const f = fixture([
-    { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 4, fieldsKept: 2, fieldsMissing: 1, errorMessage: "The workspace engine is not running." },
+    { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 4, keptFields: [KEPT, { ...KEPT, id: "1".repeat(32), field: "Field 1" }], fieldsMissing: 1, unfinished: { step: "runs", message: "The workspace engine is not running." } },
     // The retry undoes the run the first try stopped on. It reports the same
     // 2 fields still kept, and no missing field or other change of its own.
-    { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 2, fieldsKept: 2, fieldsMissing: 0, errorMessage: null },
+    { status: "restored", restored: [], ...none, runsUndone: 1, runChangesKept: 2, keptFields: [KEPT, { ...KEPT, id: "1".repeat(32), field: "Field 1" }], fieldsMissing: 0, unfinished: null },
   ]);
   await screen.findByRole("combobox", { name: "Who to stop" });
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
-  expect(await screen.findByText("2 fields kept a later value. Restore them from each record's History.")).toBeTruthy();
+  expect(await screen.findByText("2 fields kept a later value.")).toBeTruthy();
   expect(screen.getByText("1 field was on records no longer in their Collection.")).toBeTruthy();
   expect(screen.getByText("Undo left 1 other change from those runs. Check each Collection's run history.")).toBeTruthy();
   expect(screen.getByTestId("stop-and-restore-outcome").textContent).not.toMatch(/\b4\b/);
 
   // Kept fields a retry reports replace the earlier try's; missing fields and other changes add up.
   act(() => f.props.onError.mock.calls[0]![2]());
-  expect(await screen.findByText("Undid 2 runs of automations ana@example.com wrote.")).toBeTruthy();
-  expect(screen.getByText("2 fields kept a later value. Restore them from each record's History.")).toBeTruthy();
+  expect(await screen.findByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
+  expect(screen.getByText("2 fields kept a later value.")).toBeTruthy();
   expect(screen.getByText("1 field was on records no longer in their Collection.")).toBeTruthy();
   expect(screen.getByText("Undo left 1 other change from those runs. Check each Collection's run history.")).toBeTruthy();
 });
@@ -263,11 +284,181 @@ it("shows each kept change once: fields at a later value, fields on records that
 it("shows no other-changes line when the fields account for every kept change", async () => {
   fixture([{
     status: "restored", restored: [], review: [], runsLeft: 0, wroteAutomations: true, sendsMessages: false,
-    runsUndone: 1, runChangesKept: 3, fieldsKept: 2, fieldsMissing: 1, errorMessage: null,
+    runsUndone: 1, runChangesKept: 3, keptFields: [KEPT, { ...KEPT, id: "1".repeat(32), field: "Field 1" }], fieldsMissing: 1, unfinished: null,
   }]);
   await screen.findByRole("combobox", { name: "Who to stop" });
   fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
-  expect(await screen.findByText("2 fields kept a later value. Restore them from each record's History.")).toBeTruthy();
+  expect(await screen.findByText("2 fields kept a later value.")).toBeTruthy();
   expect(screen.getByText("1 field was on records no longer in their Collection.")).toBeTruthy();
   expect(screen.getByTestId("stop-and-restore-outcome").textContent).not.toMatch(/Undo left|\b3\b/);
+});
+
+it("says before it runs that runs of automations they changed are undone", async () => {
+  fixture([]);
+  await screen.findByRole("combobox", { name: "Who to stop" });
+  expect(screen.getByText("Each file they changed directly goes back to how it was before their first change. Collections they created are removed. Runs of automations they changed are undone on this computer and your server. You can undo the file changes, not the runs.")).toBeTruthy();
+  fireEvent.change(screen.getByRole("combobox", { name: "Who to stop" }), { target: { value: "link:grant-link" } });
+  expect(screen.getByText("Each file changed through it goes back to how it was before its first change. Collections created through it are removed. Runs of automations changed through it are undone on this computer and your server. You can undo the file changes, not the runs.")).toBeTruthy();
+});
+
+it("never shows runs it did not finish undoing as done, and tries again from the dialog", async () => {
+  const none = { review: [], runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: true, sendsMessages: false };
+  const sync = "dohc could not sync this workspace with your server, so it stopped undoing runs part way. Try again.";
+  const f = fixture([
+    { status: "restored", restored: [{ path: "trip/packing/automations.yaml", restoredMomentId: "back-1" }], ...none, runsUndone: 0, unfinished: { step: "runs", message: sync } },
+    { status: "restored", restored: [], ...none, runsUndone: 1, unfinished: { step: "runs", message: sync } },
+    { status: "restored", restored: [], ...none, runsUndone: 1, unfinished: null },
+  ]);
+  await screen.findByRole("combobox", { name: "Who to stop" });
+  fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
+  // What finished, then what did not, with no run counted as undone.
+  expect(await screen.findByText("Stopped ana@example.com's access and restored 1 file.")).toBeTruthy();
+  expect(screen.getByText("dohc has not finished undoing runs of automations ana@example.com changed.")).toBeTruthy();
+  expect(screen.getByTestId("stop-and-restore-outcome").textContent).not.toMatch(/Undid/);
+  const [fallback, error, retry] = f.props.onError.mock.calls[0]!;
+  expect(fallback).toBe("Stopped ana@example.com's access. dohc has not finished undoing runs of automations they changed.");
+  expect((error as Error).message).toBe(sync);
+  expect(typeof retry).toBe("function");
+
+  // A try that undoes some runs and stops again names each count once.
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(await screen.findByText("Undid 1 run of automations ana@example.com changed.")).toBeTruthy();
+  expect(screen.getByText("dohc has not finished undoing runs.")).toBeTruthy();
+  expect(screen.getByText("Stopped ana@example.com's access and restored 1 file.")).toBeTruthy();
+  expect(f.props.onError).toHaveBeenCalledTimes(2);
+
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(await screen.findByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
+  expect(screen.getByTestId("stop-and-restore-outcome").textContent).not.toMatch(/not finished/);
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  expect(screen.getByTestId("stop-and-restore-undo")).toBeTruthy();
+  expect(f.props.onError).toHaveBeenCalledTimes(2);
+  // Every failure named the same row, and the finished try removed it.
+  const identity = f.props.onError.mock.calls[0]![3];
+  expect(f.props.onError.mock.calls[1]![3]).toBe(identity);
+  expect(f.props.onSettled).toHaveBeenCalledWith(identity);
+});
+
+it("gives each person their own Notices row", async () => {
+  const unfinished = (): StopAndRestoreResult => ({ status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
+    wroteAutomations: true, sendsMessages: false, unfinished: { step: "runs", message: "dohc stopped." } });
+  const f = fixture([unfinished(), unfinished()]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  await waitFor(() => expect(f.props.onError).toHaveBeenCalledTimes(1));
+  act(() => f.shell().open({ target: { kind: "person", userId: "user_bob" }, label: "bob@example.com" }));
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  await waitFor(() => expect(f.props.onError).toHaveBeenCalledTimes(2));
+  expect(f.props.onError.mock.calls[0]![3]).not.toBe(f.props.onError.mock.calls[1]![3]);
+});
+
+it("after Undo of the files, says how to finish undoing runs, and removes the row whose Try again would restore the files again", async () => {
+  const f = fixture([{
+    status: "restored", restored: [{ path: "trip/packing/automations.yaml", restoredMomentId: "back-1" }], review: [], runsUndone: 1, runsLeft: 0,
+    keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: true, sendsMessages: false, unfinished: { step: "runs", message: "dohc stopped." },
+  }]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  const identity = await waitFor(() => f.props.onError.mock.calls[0]![3]);
+  fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
+  expect(await screen.findByText("dohc has not finished undoing runs. Stop and restore again to finish. This restores the files again too.")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  expect(f.props.onSettled).toHaveBeenCalledWith(identity);
+});
+
+it("keeps what an earlier try showed when a retry stops before it reads their changes", async () => {
+  const f = fixture([
+    {
+      status: "restored", restored: [{ path: "trip/packing/automations.yaml", restoredMomentId: "back-1" }],
+      review: [{ path: "trip/packing/collection.yaml", reason: "changed-since" }],
+      runsUndone: 1, runsLeft: 0, keptFields: [KEPT], fieldsMissing: 0, runChangesKept: 1, wroteAutomations: true, sendsMessages: true,
+      unfinished: { step: "runs", message: "dohc stopped." },
+    },
+    {
+      status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, keptFields: [KEPT], fieldsMissing: 0, runChangesKept: 1,
+      wroteAutomations: false, sendsMessages: false, unfinished: { step: "files", message: "dohc could not reach your server." },
+    },
+  ]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText("1 field kept a later value.")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  expect(await screen.findByText("dohc has not finished restoring files.")).toBeTruthy();
+  expect(screen.getByText("Stopped ana@example.com's access and restored 1 file.")).toBeTruthy();
+  expect(screen.getByText("Undid 1 run of automations ana@example.com changed.")).toBeTruthy();
+  expect(screen.getByText("dohc has not finished undoing runs.")).toBeTruthy();
+  expect(screen.getByText("1 field kept a later value.")).toBeTruthy();
+  expect(screen.getByText("Messages and notices from automations ana@example.com changed stay sent.")).toBeTruthy();
+  expect(screen.getByText("trip/packing/collection.yaml")).toBeTruthy();
+  expect(f.props.onError.mock.calls[1]![0]).toBe("Stopped ana@example.com's access. dohc has not finished restoring their changes.");
+});
+
+it("does not say runs are unfinished after an earlier try finished them, when a later try stops at the files", async () => {
+  const f = fixture([
+    {
+      status: "restored", restored: [{ path: "trip/packing/automations.yaml", restoredMomentId: "back-1" }], review: [],
+      runsUndone: 2, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0, wroteAutomations: true, sendsMessages: false, unfinished: null,
+    },
+    {
+      status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
+      wroteAutomations: false, sendsMessages: false, unfinished: { step: "files", message: "dohc could not reach your server." },
+    },
+  ]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
+  // Stop and restore again, from History.
+  act(() => f.shell().retry(WORKSPACE, ANA, "stop"));
+  expect(await screen.findByText("dohc has not finished restoring files.")).toBeTruthy();
+  expect(screen.getByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
+  expect(screen.getByTestId("stop-and-restore-outcome").textContent).not.toMatch(/not finished undoing runs/);
+});
+
+it("shows one kept record and field across retry, and opens that record", async () => {
+  const result: StopAndRestoreResult = {
+    status: "restored", restored: [], review: [{ path: "trip/Tasks/automations.yaml", reason: "changed-since" }],
+    runsUndone: 1, runsLeft: 0, keptFields: [KEPT], fieldsMissing: 0, runChangesKept: 1,
+    wroteAutomations: true, sendsMessages: false, unfinished: { step: "runs", message: "The workspace engine is not running." },
+  };
+  const f = fixture([result, { ...result, runsUndone: 0, unfinished: null }]);
+  await screen.findByRole("combobox", { name: "Who to stop" });
+  fireEvent.click(screen.getByTestId("stop-and-restore-confirm"));
+  await screen.findByText("1 field kept a later value.");
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Try again" })).toBeNull());
+  const button = screen.getByRole("button", { name: KEPT.path });
+  expect(screen.getAllByRole("button", { name: KEPT.path })).toHaveLength(1);
+  const row = within(button.closest("li")!);
+  expect(row.getByText(KEPT.field)).toBeTruthy();
+  expect(row.getByText("Restore it from this record's History.")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "trip/Tasks/automations.yaml" })).toBeTruthy();
+  fireEvent.click(button);
+  expect(f.props.onOpenFile).toHaveBeenCalledExactlyOnceWith(KEPT.path);
+});
+
+it("keeps an unlocated field visible without an open button", async () => {
+  fixture([{
+    status: "restored", restored: [], review: [], runsUndone: 1, runsLeft: 0,
+    keptFields: [{ ...KEPT, path: null, field: "Status" }], fieldsMissing: 0, runChangesKept: 1,
+    wroteAutomations: true, sendsMessages: false, unfinished: null,
+  }]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText("Status")).toBeTruthy();
+  const row = screen.getByText("Status").closest("li")!;
+  expect(within(row).getByText("Find this record in its Collection to restore the field.")).toBeTruthy();
+  expect(within(row).queryByRole("button")).toBeNull();
+});
+
+it("distinguishes dataset records and opens their Collection for manual restoration", async () => {
+  const f = fixture([{
+    status: "restored", restored: [], review: [], runsUndone: 2, runsLeft: 0,
+    keptFields: [
+      { ...KEPT, path: "Budget", recordId: "a", field: "Status" },
+      { ...KEPT, id: "a".repeat(32), path: "Budget", recordId: 7, field: "Status" },
+    ], fieldsMissing: 0, runChangesKept: 2, wroteAutomations: true, sendsMessages: false, unfinished: null,
+  }]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  for (const record of ["a", 7]) {
+    const row = within((await screen.findByText(`Record ${record} · Status`)).closest("li")!);
+    expect(row.getByText("Check previous values in Collection History. Edit this record to restore the field.")).toBeTruthy();
+    fireEvent.click(row.getByRole("button", { name: "Budget" }));
+  }
+  expect(f.props.onOpenCollection.mock.calls).toEqual([["Budget"], ["Budget"]]);
+  expect(f.props.onOpenFile).not.toHaveBeenCalled();
 });

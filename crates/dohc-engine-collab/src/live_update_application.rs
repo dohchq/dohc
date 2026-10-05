@@ -86,7 +86,9 @@ pub enum ApplicationError {
     Interrupted,
     #[error("this document's settlement moments must reach the relay before a restore fence")]
     PublicationPending,
-    #[error("this document's last settlement must reach its file before its interval can name another author")]
+    #[error(
+        "this document's last settlement must reach its file before its interval can name another author"
+    )]
     MaterializationPending,
     #[error(transparent)]
     Storage(#[from] StorageError),
@@ -299,14 +301,6 @@ pub struct RelayAcceptedLiveUpdate {
     pub authority: ServerDerivedLiveUpdateAuthority,
     #[serde(deserialize_with = "wire_integer")]
     pub received_at_ms: i64,
-    /// The agent the authenticated owner declared for this delivery. Absent
-    /// when none was declared, so an undeclared event keeps its original bytes.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "AgentDeclaration::deserialize_present"
-    )]
-    pub agent_declaration: Option<AgentDeclaration>,
 }
 impl RelayAcceptedLiveUpdate {
     /// Validates historical facts; it does not confer current live authority.
@@ -314,24 +308,7 @@ impl RelayAcceptedLiveUpdate {
         self.receipt.validate()?;
         self.binding.validate_canonical().map_err(invalid)?;
         self.authority.validate()?;
-        integer(self.received_at_ms, 0, SAFE)?;
-        self.validate_declaration()
-    }
-
-    /// Only the owner lane carries a declaration, and it never changes the
-    /// authority beside it.
-    fn validate_declaration(&self) -> Result<(), ApplicationError> {
-        let Some(declaration) = &self.agent_declaration else {
-            return Ok(());
-        };
-        declaration.validate().map_err(invalid)?;
-        if !matches!(
-            self.authority,
-            ServerDerivedLiveUpdateAuthority::Owner { .. }
-        ) {
-            return Err(invalid("only the owner's delivery declares an agent"));
-        }
-        Ok(())
+        integer(self.received_at_ms, 0, SAFE)
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,11 +344,232 @@ impl LiveUpdateStructRange {
         Ok(())
     }
 }
+pub fn nonnull_optional<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    decoder: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(decoder).map(Some)
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum LiveAuthorEntry {
+    Human {
+        human_id: String,
+        human_name: String,
+    },
+    Link {
+        public_principal_id: String,
+        label: String,
+    },
+    Agent {
+        agent_id: String,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "nonnull_optional"
+        )]
+        agent_name: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "nonnull_optional"
+        )]
+        on_behalf_of: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "nonnull_optional"
+        )]
+        depth: Option<u8>,
+    },
+}
+impl From<AgentDeclaration> for LiveAuthorEntry {
+    fn from(declaration: AgentDeclaration) -> Self {
+        Self::Agent {
+            agent_id: declaration.agent_id,
+            agent_name: None,
+            on_behalf_of: declaration.on_behalf_of,
+            depth: Some(u8::try_from(declaration.depth).unwrap_or(u8::MAX)),
+        }
+    }
+}
+impl LiveAuthorEntry {
+    pub fn validate(&self) -> Result<(), ApplicationError> {
+        match self {
+            Self::Human {
+                human_id,
+                human_name,
+            } => {
+                identifier(human_id, 512)?;
+                identifier(human_name, 512)?;
+            }
+            Self::Link {
+                public_principal_id,
+                label,
+            } => {
+                identifier(public_principal_id, 512)?;
+                identifier(label, 512)?;
+            }
+            Self::Agent {
+                agent_id,
+                agent_name,
+                on_behalf_of,
+                depth,
+            } => {
+                identifier(agent_id, 512)?;
+                if let Some(name) = agent_name {
+                    identifier(name, 512)?;
+                }
+                if let Some(person) = on_behalf_of {
+                    identifier(person, 512)?;
+                }
+                if depth.is_some_and(|depth| depth > 64) {
+                    return Err(invalid("invalid agent depth"));
+                }
+            }
+        }
+        if serde_json::to_vec(self)
+            .map_err(|_| invalid("author JSON"))?
+            .len()
+            > 2114
+        {
+            return Err(invalid("author entry exceeds byte bound"));
+        }
+        Ok(())
+    }
+    pub fn identity(&self) -> (&'static str, Option<&str>, &str) {
+        match self {
+            Self::Human { human_id, .. } => ("human", None, human_id),
+            Self::Link {
+                public_principal_id,
+                ..
+            } => ("link", None, public_principal_id),
+            Self::Agent {
+                agent_id,
+                on_behalf_of,
+                ..
+            } => ("agent", on_behalf_of.as_deref(), agent_id),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AdmittedLiveUpdateMetadata {
     pub accepted: RelayAcceptedLiveUpdate,
     pub first_seen: Vec<LiveUpdateStructRange>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nonnull_optional"
+    )]
+    pub canonical_version: Option<u8>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nonnull_optional"
+    )]
+    pub author_snapshot: Option<Vec<LiveAuthorEntry>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nonnull_optional"
+    )]
+    pub first_seen_deletes: Option<Vec<LiveUpdateStructRange>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nonnull_optional"
+    )]
+    pub checkpoint_coverage: Option<Vec<LiveCheckpointAuthorCoverage>>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LiveCheckpointAuthorCoverage {
+    pub author: LiveAuthorEntry,
+    pub struct_ranges: Vec<LiveUpdateStructRange>,
+    pub deletion_ranges: Vec<LiveUpdateStructRange>,
+}
+pub fn validate_checkpoint_coverage(
+    coverage: &[LiveCheckpointAuthorCoverage],
+) -> Result<(), ApplicationError> {
+    let mut identities = std::collections::BTreeSet::new();
+    for entry in coverage {
+        entry.author.validate()?;
+        canonical_ranges(&entry.struct_ranges)?;
+        canonical_ranges(&entry.deletion_ranges)?;
+        if !identities.insert(entry.author.identity()) {
+            return Err(invalid("duplicate checkpoint author"));
+        }
+    }
+    let authors: Vec<&LiveAuthorEntry> = coverage.iter().map(|entry| &entry.author).collect();
+    if identities.len() > 1024
+        || serde_json::to_vec(&authors)
+            .map_err(|_| invalid("checkpoint authors JSON"))?
+            .len()
+            > 128 * 1024
+    {
+        return Err(invalid("checkpoint authors exceed bound"));
+    }
+    Ok(())
+}
+impl AdmittedLiveUpdateMetadata {
+    pub fn admitted_declaration(&self) -> Option<AgentDeclaration> {
+        self.author_snapshot
+            .as_ref()?
+            .iter()
+            .find_map(|author| match author {
+                LiveAuthorEntry::Agent {
+                    agent_id,
+                    on_behalf_of,
+                    depth,
+                    ..
+                } => Some(AgentDeclaration {
+                    agent_id: agent_id.clone(),
+                    on_behalf_of: on_behalf_of.clone(),
+                    depth: u32::from(depth.unwrap_or(0)),
+                }),
+                _ => None,
+            })
+    }
+
+    pub fn matches_draft_declaration(&self, declaration: Option<&AgentDeclaration>) -> bool {
+        self.admitted_declaration()
+            .as_ref()
+            .is_none_or(|admitted| Some(admitted) == declaration)
+    }
+
+    pub fn validate_extensions(&self) -> Result<(), ApplicationError> {
+        match (
+            self.canonical_version,
+            &self.author_snapshot,
+            &self.first_seen_deletes,
+        ) {
+            (None, None, None) if self.checkpoint_coverage.is_none() => Ok(()),
+            (Some(2), Some(authors), Some(deletes)) => {
+                if authors.len() > 2
+                    || (authors.len() == 2
+                        && (matches!(authors[0], LiveAuthorEntry::Agent { .. })
+                            || !matches!(authors[1], LiveAuthorEntry::Agent { .. })))
+                {
+                    return Err(invalid("noncanonical author snapshot"));
+                }
+                for author in authors {
+                    author.validate()?;
+                }
+                canonical_ranges(deletes)?;
+                if let Some(coverage) = &self.checkpoint_coverage {
+                    validate_checkpoint_coverage(coverage)?;
+                }
+                Ok(())
+            }
+            _ => Err(invalid("invalid admitted metadata version")),
+        }
+    }
 }
 /// Native state replay uses bounded records, not a cumulative proof-read budget.
 #[derive(Debug, Clone, Copy)]
@@ -380,7 +578,7 @@ pub struct NativeHistoryReconstruction {
 }
 impl NativeHistoryReconstruction {
     pub const MAX_RANGES: usize = (crate::limits::MAX_YDOC_UPDATE_BYTES - 2) / 5;
-    pub const HEADER_BYTES: usize = 643_576;
+    pub const HEADER_BYTES: usize = dohc_engine_storage::limits::MAX_LIVE_ACCEPTED_HEADER_BYTES;
     pub const CHUNK_BYTES: usize = 256 * 1024;
 
     /// Conservative Rust buffer spans plus the existing engine working allowance.
@@ -457,6 +655,7 @@ impl AdmittedLiveUpdate {
         let accepted = &self.metadata.accepted;
         accepted.validate()?;
         canonical_ranges(&self.metadata.first_seen)?;
+        self.metadata.validate_extensions()?;
         if self.update_bytes.is_empty()
             || hex_sha256(&self.update_bytes) != accepted.receipt.update_digest
         {
@@ -493,16 +692,27 @@ pub fn parse_admitted_metadata(
     a.receipt.validate()?;
     a.authority.validate()?;
     integer(a.received_at_ms, 0, SAFE)?;
-    a.validate_declaration()?;
     a.binding = a.binding.clone().normalized().map_err(invalid)?;
-    for range in &metadata.first_seen {
+    normalize_ranges(&mut metadata.first_seen)?;
+    if let Some(deletes) = &mut metadata.first_seen_deletes {
+        normalize_ranges(deletes)?;
+    }
+    if let Some(coverage) = &mut metadata.checkpoint_coverage {
+        for entry in coverage {
+            normalize_ranges(&mut entry.struct_ranges)?;
+            normalize_ranges(&mut entry.deletion_ranges)?;
+        }
+    }
+    metadata.validate_extensions()?;
+    Ok(metadata)
+}
+fn normalize_ranges(ranges: &mut Vec<LiveUpdateStructRange>) -> Result<(), ApplicationError> {
+    for range in ranges.iter() {
         range.validate()?;
     }
-    metadata
-        .first_seen
-        .sort_by_key(|range| (range.client_id, range.start_clock));
+    ranges.sort_by_key(|range| (range.client_id, range.start_clock));
     let mut merged: Vec<LiveUpdateStructRange> = Vec::new();
-    for range in metadata.first_seen {
+    for range in ranges.drain(..) {
         if let Some(previous) = merged.last_mut() {
             if previous.client_id == range.client_id && range.start_clock <= previous.end_clock {
                 previous.end_clock = previous.end_clock.max(range.end_clock);
@@ -511,8 +721,8 @@ pub fn parse_admitted_metadata(
         }
         merged.push(range);
     }
-    metadata.first_seen = merged;
-    Ok(metadata)
+    *ranges = merged;
+    Ok(())
 }
 pub fn parse_application_ack(
     input: Value,
@@ -878,32 +1088,20 @@ pub fn apply_committed(
             }) {
                 return Err(ApplicationError::Conflict.into());
             }
-            // The settlement that covers this delivery names its declared
-            // agent, and this owner's own native update names the author its
-            // journal row recorded. A person the owner shared with, or an Edit
-            // share link, is named from the relay's authority, never the frame.
-            // A full interval refuses before anything is written, so nothing is
-            // truncated. Settling releases it, unless an earlier moment still
-            // reserves its authors until its file write lands.
             let own = own_draft(tx, &key, &event.metadata.accepted.receipt)?;
-            // This owner's own native update delivers exactly what its outbox
-            // entry declared.
-            if own
-                .as_ref()
-                .is_some_and(|own| own.declaration != event.metadata.accepted.agent_declaration)
-            {
+            if own.as_ref().is_some_and(|own| {
+                !event.metadata.matches_draft_declaration(own.declaration.as_ref())
+            }) {
                 return Err(ApplicationError::Conflict.into());
             }
-            let mut authors = Vec::new();
-            if let Some(declaration) = &event.metadata.accepted.agent_declaration {
-                authors.push(crate::author_coverage::declared_json(declaration)?);
-            }
-            if let Some((actor, attribution)) = own.as_ref().and_then(|own| own.author.as_ref()) {
-                authors.extend(dohc_engine_domain::moment_author_json(
-                    actor.as_deref(),
-                    attribution.as_ref(),
-                ));
-            }
+            let mut authors = event.metadata.author_snapshot.as_ref()
+                .map(|authors| authors.iter().map(|author| serde_json::to_string(&[author])).collect::<Result<Vec<_>, _>>())
+                .transpose().map_err(|_| ApplicationError::Corrupt)?
+                .unwrap_or_default();
+            // A person the owner shared with, or an Edit share link, is named
+            // from the relay's authority, never the frame, whether or not
+            // their client sent a recording context. A full interval refuses
+            // before anything is written, so nothing is truncated.
             if let Some(shared) = event.metadata.accepted.authority.shared_author() {
                 authors.push(crate::author_coverage::shared_json(&shared)?);
             }
@@ -970,7 +1168,12 @@ pub fn apply_committed(
                 // the relay's log. The claim keeps its history-row key, so it
                 // dedupes as before, and the cursor lets the relay place it.
                 facts.live_cursor = Some(event.metadata.accepted.receipt.journal_cursor);
-                match own.and_then(|own| own.author) {
+                let admitted_actor = if let Some(own) = own {
+                    own.author
+                } else if event.metadata.canonical_version == Some(2) {
+                    event.metadata.admitted_declaration().map(|declaration| (Some(declaration.agent_id.clone()), Some(declaration.attribution())))
+                } else { None };
+                match admitted_actor {
                     Some((actor, attribution)) => {
                         facts.author_origin_id = actor;
                         facts.attribution = attribution;
@@ -1049,8 +1252,6 @@ pub fn apply_committed(
 /// delivery: the relay accepted the entry's own delivery, with the same
 /// bytes, for the same document.
 struct OwnDraft {
-    /// The actor and attribution the native journal row recorded. Trusted
-    /// local provenance; none for an adoption seed.
     author: Option<(
         Option<String>,
         Option<dohc_engine_domain::ChangeAttribution>,
@@ -1107,7 +1308,7 @@ fn read_application(
     namespace: &str,
     receipt: &LiveUpdateReceipt,
 ) -> Result<Option<ApplicationRecord>, ApplicationError> {
-    let mut query = conn.prepare("SELECT workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id,declared_agent_id,declared_on_behalf_of,declared_depth FROM live_device_update_applications WHERE relay_database_namespace=?1 AND (delivery_id=?2 OR journal_cursor=?3)").map_err(read_sql)?;
+    let mut query = conn.prepare("SELECT workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id,admitted_metadata_json FROM live_device_update_applications WHERE relay_database_namespace=?1 AND (delivery_id=?2 OR journal_cursor=?3)").map_err(read_sql)?;
     let mut rows = query
         .query(params![
             namespace,
@@ -1139,6 +1340,7 @@ fn read_application(
     };
     let length: i64 = row.get(9).map_err(read_sql)?;
     let authority: ServerDerivedLiveUpdateAuthority = serde_json::from_value(serde_json::json!({"principalKind":row.get::<_,String>(12).map_err(read_sql)?,"principalId":row.get::<_,String>(13).map_err(read_sql)?,"grantId":row.get::<_,Option<String>>(14).map_err(read_sql)?,"grantGeneration":row.get::<_,Option<i64>>(15).map_err(read_sql)?})).map_err(|_| ApplicationError::Corrupt)?;
+    let retained_metadata: Option<String> = row.get(23).map_err(read_sql)?;
     let received_at_ms = row.get(16).map_err(read_sql)?;
     let count: i64 = row.get(17).map_err(read_sql)?;
     let sequence: i64 = row.get(18).map_err(read_sql)?;
@@ -1148,11 +1350,6 @@ fn read_application(
         instance_id: row.get(21).map_err(read_sql)?,
         connection_id: row.get(22).map_err(read_sql)?,
     };
-    let agent_declaration = stored_declaration(
-        row.get(23).map_err(read_sql)?,
-        row.get(24).map_err(read_sql)?,
-        row.get(25).map_err(read_sql)?,
-    )?;
     if rows.next().map_err(read_sql)?.is_some() {
         return Err(ApplicationError::Conflict);
     }
@@ -1162,19 +1359,32 @@ fn read_application(
     if i64::try_from(update_bytes.len()).ok() != Some(length) {
         return Err(ApplicationError::Corrupt);
     }
-    let event = AdmittedLiveUpdate {
+    let mut event = AdmittedLiveUpdate {
         metadata: AdmittedLiveUpdateMetadata {
             accepted: RelayAcceptedLiveUpdate {
                 receipt,
                 binding,
                 authority,
                 received_at_ms,
-                agent_declaration,
             },
             first_seen,
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
         update_bytes,
     };
+    if let Some(json) = retained_metadata {
+        let metadata: AdmittedLiveUpdateMetadata =
+            serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
+        if metadata.accepted != event.metadata.accepted
+            || metadata.first_seen != event.metadata.first_seen
+        {
+            return Err(ApplicationError::Corrupt);
+        }
+        event.metadata = metadata;
+    }
     event.validate().map_err(|_| ApplicationError::Corrupt)?;
     coordinate
         .validate()
@@ -1185,29 +1395,6 @@ fn read_application(
         sequence,
         coordinate,
     }))
-}
-
-/// The declaration an application row stores in its three columns. The
-/// schema bounds each column; a partial or invalid triple is corrupt.
-fn stored_declaration(
-    agent_id: Option<String>,
-    on_behalf_of: Option<String>,
-    depth: Option<i64>,
-) -> Result<Option<AgentDeclaration>, ApplicationError> {
-    let (agent_id, depth) = match (agent_id, depth) {
-        (Some(agent_id), Some(depth)) => (agent_id, depth),
-        (None, None) if on_behalf_of.is_none() => return Ok(None),
-        _ => return Err(ApplicationError::Corrupt),
-    };
-    let declaration = AgentDeclaration {
-        agent_id,
-        on_behalf_of,
-        depth: u32::try_from(depth).map_err(|_| ApplicationError::Corrupt)?,
-    };
-    declaration
-        .validate()
-        .map_err(|_| ApplicationError::Corrupt)?;
-    Ok(Some(declaration))
 }
 
 fn read_ranges(
@@ -1328,13 +1515,14 @@ fn insert_application(
     event: &AdmittedLiveUpdate,
     sequence: i64,
 ) -> Result<(), ApplicationError> {
+    // admitted_metadata_json contains the private link principal and grant. Never export it.
+    // Author readers (A2b/B) must read only the author snapshot.
     let a = &event.metadata.accepted;
     let b = &a.binding;
     let c = &r.coordinate;
     let (kind, principal, grant, generation) = a.authority.fields();
-    let declared = a.agent_declaration.as_ref();
-    tx.execute("INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id,declared_agent_id,declared_on_behalf_of,declared_depth) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
-        params![r.namespace,b.workspace_id,a.receipt.delivery_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| invalid("selector JSON"))?,b.restore_fence_generation,a.receipt.update_digest,event.update_bytes.len() as i64,a.receipt.journal_cursor,a.receipt.accepting_host_epoch,kind,principal,grant,generation,a.received_at_ms,event.metadata.first_seen.len() as i64,sequence,c.host_id,c.host_epoch,c.instance_id,c.connection_id,declared.map(|d| &d.agent_id),declared.and_then(|d| d.on_behalf_of.as_ref()),declared.map(|d| i64::from(d.depth))]).map_err(write_sql)?;
+    tx.execute("INSERT INTO live_device_update_applications (relay_database_namespace,workspace_id,delivery_id,main_version_id,object_id,lineage_claim_id,current_path,selector_paths_json,restore_fence_generation,update_digest,update_byte_length,journal_cursor,accepting_host_epoch,principal_kind,principal_id,grant_id,grant_generation,received_at_ms,first_seen_count,local_ydoc_sequence,applied_host_id,applied_host_epoch,applied_instance_id,applied_connection_id,admitted_metadata_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)",
+        params![r.namespace,b.workspace_id,a.receipt.delivery_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.current_path,serde_json::to_string(&b.selector_paths).map_err(|_| invalid("selector JSON"))?,b.restore_fence_generation,a.receipt.update_digest,event.update_bytes.len() as i64,a.receipt.journal_cursor,a.receipt.accepting_host_epoch,kind,principal,grant,generation,a.received_at_ms,event.metadata.first_seen.len() as i64,sequence,c.host_id,c.host_epoch,c.instance_id,c.connection_id,serde_json::to_string(&event.metadata).map_err(|_| invalid("admitted metadata JSON"))?]).map_err(write_sql)?;
     for (ordinal, range) in event.metadata.first_seen.iter().enumerate() {
         tx.execute("INSERT INTO live_device_application_first_seen (relay_database_namespace,workspace_id,delivery_id,ordinal,client_id,start_clock,end_clock) VALUES (?1,?2,?3,?4,?5,?6,?7)", params![r.namespace,b.workspace_id,a.receipt.delivery_id,ordinal as i64,range.client_id,range.start_clock,range.end_clock]).map_err(write_sql)?;
     }
@@ -1441,53 +1629,6 @@ mod tests {
                 "unexercised {parser}"
             );
         }
-        // Agent declarations. The loop above already parsed each row; these
-        // prove the shared rows still exercise every declaration rule. A
-        // named or link record that declares an agent is refused for its
-        // lane alone: without the declaration it parses, and the committed
-        // record gate refuses it as the parser does.
-        let accepted_of = |row: &Value| match row["parser"].as_str() {
-            Some("parseRelayAcceptedLiveUpdate") => Some(row["input"].clone()),
-            Some("parseAdmittedLiveUpdateMetadata") => Some(row["input"]["accepted"].clone()),
-            _ => None,
-        };
-        let declared_accepted = vectors["accepted"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(accepted_of)
-            .filter(|accepted| accepted.get("agentDeclaration").is_some())
-            .count();
-        let (mut lane_refused, mut malformed_refused) = (0, 0);
-        for row in vectors["refused"].as_array().unwrap() {
-            let Some(accepted) = accepted_of(row) else {
-                continue;
-            };
-            if accepted.get("agentDeclaration").is_none() {
-                continue;
-            }
-            if accepted["authority"]["principalKind"] == "owner" {
-                malformed_refused += 1;
-                continue;
-            }
-            lane_refused += 1;
-            let parser = row["parser"].as_str().unwrap();
-            let mut without = row["input"].clone();
-            let record = if parser == "parseRelayAcceptedLiveUpdate" {
-                &mut without
-            } else {
-                &mut without["accepted"]
-            };
-            record.as_object_mut().unwrap().remove("agentDeclaration");
-            assert!(shared_parser(parser, without).is_ok(), "{}", row["case"]);
-            let mut committed: RelayAcceptedLiveUpdate = serde_json::from_value(accepted).unwrap();
-            assert!(committed.validate().is_err(), "{}", row["case"]);
-            committed.agent_declaration = None;
-            assert!(committed.validate().is_ok(), "{}", row["case"]);
-        }
-        assert!(declared_accepted >= 2, "declared owner records");
-        assert!(lane_refused >= 2, "named and link declarations");
-        assert!(malformed_refused >= 6, "malformed owner declarations");
         for row in vectors["jsonNumbers"].as_array().unwrap() {
             let input = serde_json::from_str(row["json"].as_str().unwrap()).unwrap();
             assert_eq!(
@@ -1594,9 +1735,12 @@ mod tests {
                         principal_id: "owner-1".into(),
                     },
                     received_at_ms: 10,
-                    agent_declaration: None,
                 },
                 first_seen: Vec::new(),
+                canonical_version: None,
+                author_snapshot: None,
+                first_seen_deletes: None,
+                checkpoint_coverage: None,
             },
             update_bytes: bytes,
         }
@@ -1637,6 +1781,75 @@ mod tests {
         store
             .read_with(|conn| durable::load_doc_in(conn, &key()))
             .unwrap()
+    }
+
+    #[test]
+    fn admitted_metadata_v1_bytes_and_v2_digest_versions() {
+        let source = Ydoc::wire();
+        let legacy = event("versioned", 1, source.plaintext_insert(0, "text"));
+        let json = serde_json::to_string(&legacy.metadata).unwrap();
+        assert!(json.ends_with(",\"firstSeen\":[]}"));
+        assert!(!json.contains("canonicalVersion"));
+        let expected = hex_sha256(
+            &serde_json::to_vec(&("accepted-event-v1", "previous", 1, &legacy.metadata)).unwrap(),
+        );
+        assert_eq!(
+            accepted_history::next_digest("previous", 1, &legacy.metadata).unwrap(),
+            expected
+        );
+        let mut modern = legacy.metadata.clone();
+        modern.canonical_version = Some(2);
+        modern.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+            human_id: "alice".into(),
+            human_name: "Alice".into(),
+        }]);
+        modern.first_seen_deletes = Some(vec![]);
+        assert!(accepted_history::require_version_transition(&legacy.metadata, &modern).is_ok());
+        assert!(accepted_history::require_version_transition(&modern, &legacy.metadata).is_err());
+        let expected = hex_sha256(
+            &serde_json::to_vec(&("accepted-event-v2", "previous", 1, &modern)).unwrap(),
+        );
+        assert_eq!(
+            accepted_history::next_digest("previous", 1, &modern).unwrap(),
+            expected
+        );
+        let mut malformed = serde_json::to_value(&modern).unwrap();
+        malformed["firstSeenDeletes"] = Value::Null;
+        assert!(parse_admitted_metadata(malformed).is_err());
+    }
+
+    #[test]
+    fn v2_receipt_retains_metadata_and_rejects_renamed_retries() {
+        let (_dir, mut store, mut cache, _owner, handle) = fixture();
+        let source = Ydoc::wire();
+        let mut update = event("v2-retry", 1, source.plaintext_insert(0, "text"));
+        update.metadata.canonical_version = Some(2);
+        update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+            human_id: "alice".into(),
+            human_name: "Alice".into(),
+        }]);
+        update.metadata.first_seen_deletes = Some(vec![]);
+        assert!(!ack(apply(&mut store, &mut cache, &handle, update.clone())).application_replayed);
+        assert!(ack(apply(&mut store, &mut cache, &handle, update.clone())).application_replayed);
+        let retained = store
+            .read_with(|conn| read_application(conn, "relay-A", &update.metadata.accepted.receipt))
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.event.metadata, update.metadata);
+        update.metadata.author_snapshot = Some(vec![LiveAuthorEntry::Human {
+            human_id: "alice".into(),
+            human_name: "Renamed".into(),
+        }]);
+        let result = apply_committed(
+            &mut store,
+            &mut cache,
+            &handle,
+            update,
+            &NoFaults,
+            100_000_000,
+            |_, _, _, _| Ok(()),
+        );
+        assert!(matches!(result, Err(ApplicationError::Conflict)));
     }
 
     #[test]
@@ -1936,12 +2149,19 @@ mod tests {
         })
     }
 
+    fn snapshot(metadata: &mut AdmittedLiveUpdateMetadata, declaration: Option<AgentDeclaration>) {
+        metadata.canonical_version = Some(2);
+        metadata.author_snapshot =
+            Some(declaration.into_iter().map(LiveAuthorEntry::from).collect());
+        metadata.first_seen_deletes = Some(vec![]);
+    }
+
     #[test]
     fn declared_delivery_replays_after_reopen_and_refuses_a_changed_declaration() {
         let (dir, mut store, mut cache, _owner, handle) = fixture();
         let source = Ydoc::wire();
         let mut agent = event("agent", 1, source.plaintext_insert(0, "agent"));
-        agent.metadata.accepted.agent_declaration = declared("trip-agent 旅行");
+        snapshot(&mut agent.metadata, declared("trip-agent 旅行"));
         let person = event("person", 2, source.plaintext_insert(5, " person"));
         let first = ack(apply(&mut store, &mut cache, &handle, agent.clone()));
         ack(apply(&mut store, &mut cache, &handle, person.clone()));
@@ -1958,16 +2178,14 @@ mod tests {
                 )
             };
         let mut changed = vec![agent.clone(), agent.clone(), agent.clone(), person.clone()];
-        changed[0].metadata.accepted.agent_declaration = declared("other-agent");
-        changed[1].metadata.accepted.agent_declaration = None;
-        changed[2]
-            .metadata
-            .accepted
-            .agent_declaration
-            .as_mut()
-            .unwrap()
-            .depth = 2;
-        changed[3].metadata.accepted.agent_declaration = declared("trip-agent 旅行");
+        snapshot(&mut changed[0].metadata, declared("other-agent"));
+        snapshot(&mut changed[1].metadata, None);
+        if let LiveAuthorEntry::Agent { depth, .. } =
+            &mut changed[2].metadata.author_snapshot.as_mut().unwrap()[0]
+        {
+            *depth = Some(2);
+        }
+        snapshot(&mut changed[3].metadata, declared("trip-agent 旅行"));
         store = reopen(store, &dir);
         for update in &changed {
             assert!(matches!(
@@ -1979,38 +2197,15 @@ mod tests {
         expected.application_replayed = true;
         assert_eq!(ack(apply(&mut store, &mut cache, &handle, agent)), expected);
         assert!(ack(apply(&mut store, &mut cache, &handle, person)).application_replayed);
-        let stored = store
-            .read_with(|conn| {
-                conn.prepare("SELECT delivery_id,declared_agent_id,declared_on_behalf_of,declared_depth FROM live_device_update_applications ORDER BY journal_cursor")
-                    .unwrap()
-                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
-                    .unwrap()
-                    .collect::<Result<Vec<(String, Option<String>, Option<String>, Option<i64>)>, _>>()
-            })
-            .unwrap();
-        assert_eq!(
-            stored,
-            vec![
-                (
-                    "agent".into(),
-                    Some("trip-agent 旅行".into()),
-                    Some("owner-1".into()),
-                    Some(1)
-                ),
-                ("person".into(), None, None, None),
-            ]
-        );
-        // A stored declaration the contract refuses is corrupt, not absent.
-        store
-            .write_with(&NoFaults, |tx| {
-                tx.execute(
-                    "UPDATE live_device_update_applications SET declared_agent_id=char(97,1) WHERE delivery_id='agent'",
-                    [],
-                )
-                .unwrap();
-                Ok::<_, StorageError>(())
-            })
-            .unwrap();
+        let stored: String = store.read_with(|conn| conn.query_row(
+            "SELECT admitted_metadata_json FROM live_device_update_applications WHERE delivery_id='agent'", [], |row| row.get(0)
+        )).unwrap();
+        let metadata: AdmittedLiveUpdateMetadata = serde_json::from_str(&stored).unwrap();
+        assert_eq!(metadata.admitted_declaration(), declared("trip-agent 旅行"));
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE live_device_update_applications SET admitted_metadata_json='{}' WHERE delivery_id='agent'", []).unwrap();
+            Ok::<_, StorageError>(())
+        }).unwrap();
         assert!(matches!(
             refused(&mut store, &mut cache, &changed[1]),
             Err(ApplicationError::Corrupt)
@@ -2026,7 +2221,7 @@ mod tests {
         declaration: &AgentDeclaration,
     ) -> Result<ApplicationResult, ApplicationError> {
         let mut update = event(&format!("declared-{cursor}"), cursor, bytes);
-        update.metadata.accepted.agent_declaration = Some(declaration.clone());
+        snapshot(&mut update.metadata, Some(declaration.clone()));
         apply_committed(
             store,
             cache,
@@ -2171,69 +2366,23 @@ mod tests {
     }
 
     #[test]
-    fn only_the_owner_lane_declares_and_a_declaration_has_one_strict_shape() {
-        let bytes = Ydoc::wire().plaintext_insert(0, "x");
-        let mut named = event("named", 1, bytes.clone());
-        named.metadata.accepted.authority = ServerDerivedLiveUpdateAuthority::Named {
-            principal_id: "friend".into(),
-            grant_id: "grant".into(),
-            grant_generation: 1,
-        };
-        assert!(named.validate().is_ok());
-        named.metadata.accepted.agent_declaration = declared("friend-agent");
-        assert!(named.validate().is_err());
-        let (_dir, mut store, mut cache, _owner, handle) = fixture();
-        assert!(apply_committed(
-            &mut store,
-            &mut cache,
-            &handle,
-            named,
-            &NoFaults,
-            100_000_000,
-            |_, _, _, _| Ok(()),
-        )
-        .is_err());
-        assert_eq!(count(&store, "live_device_update_applications"), 0);
+    fn accepted_headers_refuse_parallel_declarations() {
+        let owner = event("owner", 1, Ydoc::wire().plaintext_insert(0, "x"));
+        let mut value = serde_json::to_value(owner.metadata).unwrap();
+        value["accepted"]["agentDeclaration"] =
+            serde_json::json!({"agentId":"agent","onBehalfOf":null,"depth":0});
+        assert!(parse_admitted_metadata(value).is_err());
+    }
 
-        let owner = event("owner", 1, bytes);
-        let absent = serde_json::to_value(&owner.metadata).unwrap();
-        assert!(absent["accepted"].get("agentDeclaration").is_none());
-        assert_eq!(
-            parse_admitted_metadata(absent.clone()).unwrap(),
-            owner.metadata
-        );
-        let with = |declaration: Value| {
-            let mut metadata = absent.clone();
-            metadata["accepted"]["agentDeclaration"] = declaration;
-            parse_admitted_metadata(metadata)
-        };
-        let parsed = with(serde_json::json!({
-            "agentId": "trip-agent 旅行",
-            "onBehalfOf": null,
-            "depth": 64
-        }))
-        .unwrap();
-        assert_eq!(
-            parsed.accepted.agent_declaration,
-            Some(AgentDeclaration {
-                agent_id: "trip-agent 旅行".into(),
-                on_behalf_of: None,
-                depth: 64,
-            })
-        );
-        for refused in [
-            Value::Null,
-            serde_json::json!({"agentId": "a", "depth": 0}),
-            serde_json::json!({"agentId": "", "onBehalfOf": null, "depth": 0}),
-            serde_json::json!({"agentId": "a\u{85}", "onBehalfOf": null, "depth": 0}),
-            serde_json::json!({"agentId": "a", "onBehalfOf": "", "depth": 0}),
-            serde_json::json!({"agentId": "a", "onBehalfOf": null, "depth": 65}),
-            serde_json::json!({"agentId": "a", "onBehalfOf": null, "depth": -1}),
-            serde_json::json!({"agentId": "a".repeat(513), "onBehalfOf": null, "depth": 0}),
-            serde_json::json!({"agentId": "a", "onBehalfOf": null, "depth": 0, "principalId": "owner-1"}),
-        ] {
-            assert!(with(refused.clone()).is_err(), "{refused}");
-        }
+    #[test]
+    fn draft_snapshot_omission_is_allowed_but_present_agent_must_match() {
+        let mut metadata = event("owner", 1, Ydoc::wire().plaintext_insert(0, "x")).metadata;
+        snapshot(&mut metadata, None);
+        assert!(metadata.matches_draft_declaration(declared("agent").as_ref()));
+        snapshot(&mut metadata, declared("agent"));
+        assert!(metadata.matches_draft_declaration(declared("agent").as_ref()));
+        assert!(!metadata.matches_draft_declaration(declared("other").as_ref()));
+        assert!(!metadata.matches_draft_declaration(None));
     }
 
     fn warm_cache(store: &mut EngineStore, cache: &mut WriterDocCache) {
@@ -2872,8 +3021,9 @@ mod tests {
                     &handle,
                     conflict,
                     &NoFaults,
-                    100_000_000
-                , |_,_,_,_| Ok(())),
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                ),
                 Err(ApplicationError::Conflict)
             ));
             store
@@ -2892,8 +3042,9 @@ mod tests {
                         &handle,
                         event("noop", 3, vec![0, 0]),
                         &NoFaults,
-                        100_000_000
-                    , |_,_,_,_| Ok(())),
+                        100_000_000,
+                        |_, _, _, _| Ok(())
+                    ),
                     Err(ApplicationError::Corrupt)
                 ),
                 "{damage}"
@@ -2907,8 +3058,9 @@ mod tests {
                         &handle,
                         first,
                         &NoFaults,
-                        100_000_000
-                    , |_,_,_,_| Ok(())),
+                        100_000_000,
+                        |_, _, _, _| Ok(())
+                    ),
                     Err(ApplicationError::Corrupt)
                 ));
             }
@@ -3052,8 +3204,9 @@ mod tests {
                         &handle,
                         update,
                         &NoFaults,
-                        100_000_000
-                    , |_,_,_,_| Ok(())),
+                        100_000_000,
+                        |_, _, _, _| Ok(())
+                    ),
                     Ok(ApplicationResult::Applied(..))
                 ),
                 "{damage}"
@@ -3119,8 +3272,9 @@ mod tests {
                     &handle,
                     update,
                     &NoFaults,
-                    100_000_000
-                , |_,_,_,_| Ok(()))
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                )
                 .is_err(),
                 "{damage}"
             );
@@ -3217,6 +3371,36 @@ mod tests {
     /// changes once, as the principal the relay accepted it from.
     #[test]
     fn the_session_host_claims_each_accepted_field_change_once() {
+        host_claims_each_accepted_field_change(None, false);
+    }
+
+    #[test]
+    fn v2_own_draft_keeps_its_automation_author_depth_and_person() {
+        host_claims_each_accepted_field_change(Some(2), false);
+    }
+
+    #[test]
+    fn v2_capped_agent_own_draft_keeps_its_automation_author_depth_and_person() {
+        host_claims_each_accepted_field_change(Some(2), true);
+    }
+
+    fn host_claims_each_accepted_field_change(canonical_version: Option<u8>, capped_agent: bool) {
+        let event = |delivery: &str, cursor: i64, bytes: Vec<u8>| {
+            let mut admitted = event(delivery, cursor, bytes);
+            admitted.metadata.canonical_version = canonical_version;
+            if canonical_version == Some(2) {
+                admitted.metadata.author_snapshot = Some(if capped_agent {
+                    vec![LiveAuthorEntry::Human {
+                        human_id: "owner-1".into(),
+                        human_name: "Owner".into(),
+                    }]
+                } else {
+                    Vec::new()
+                });
+                admitted.metadata.first_seen_deletes = Some(Vec::new());
+            }
+            admitted
+        };
         use dohc_engine_domain::{
             AutomationChangeKind, AutomationSubscription, VersionedTextStore, WriteText,
         };
@@ -3400,8 +3584,12 @@ mod tests {
             shared_authors(&store),
             vec![
                 None,
-                Some(serde_json::json!({"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1})),
-                Some(serde_json::json!({"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"})),
+                Some(
+                    serde_json::json!({"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1})
+                ),
+                Some(
+                    serde_json::json!({"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"})
+                ),
             ],
             "a collaborator's or a link's edit names who the relay accepted it from; the owner's names nobody"
         );
@@ -3426,17 +3614,25 @@ mod tests {
             vec![None, Some("guest-1".to_owned()), None]
         );
         // The moment that settles these frames names the collaborator and the
-        // link from the same authority, so History says who changed the file.
+        // link from the same authority, so History says who changed the file,
+        // beside any author an admitted snapshot named.
         let interval = store
             .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
             .unwrap()
             .json();
+        let snapshot_author = capped_agent
+            .then(|| serde_json::json!({"kind":"human","humanId":"owner-1","humanName":"Owner"}));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&interval).unwrap(),
-            serde_json::json!([
-                {"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"},
-                {"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1},
-            ]),
+            serde_json::Value::Array(
+                snapshot_author
+                    .into_iter()
+                    .chain([
+                        serde_json::json!({"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"}),
+                        serde_json::json!({"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}),
+                    ])
+                    .collect()
+            ),
         );
 
         let body_only = event("body-only", 4, source.plaintext_insert(0, "body"));
@@ -3477,11 +3673,16 @@ mod tests {
             store
                 .write_with(&NoFaults, |tx| {
                     tx.execute(
-                        "UPDATE owner_ydoc_outbox_entries SET native_source_json = ?1 \
+                        "UPDATE owner_ydoc_outbox_entries SET native_source_json = ?1, agent_declaration_json = ?3 \
                          WHERE delivery_id = ?2",
                         params![
                             serde_json::to_string(&source).unwrap(),
-                            appended.delivery_id
+                            appended.delivery_id,
+                            capped_agent.then(|| serde_json::to_string(&AgentDeclaration {
+                                agent_id: "collection:notes#stamp".into(),
+                                on_behalf_of: Some("person-1".into()),
+                                depth: 2,
+                            }).unwrap())
                         ],
                     )
                     .unwrap();

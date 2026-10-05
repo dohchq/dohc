@@ -1981,3 +1981,32 @@ describe("listTextFileMetadata under a folder", () => {
     expect(requests.map(request => request.afterPath)).toEqual(["app/", "app/b/c.css"]);
   });
 });
+
+
+describe("shared file update states", () => {
+  it("looks up only recorded outboxes, batching at the wire limit", async () => {
+    const requests: string[] = [];
+    const draft = (path: string, nativeUnsettled: boolean, pendingBytes = 0) => ({
+      binding: {workspaceId: WORKSPACE, mainVersionId: "main", objectId: path, lineageClaimId: "a".repeat(64),
+        currentPath: path, selectorPaths: [path], restoreFenceGeneration: 0},
+      relayDatabaseNamespace: "relay", revision: 1, acceptedCursor: 1, nativeHeadSequence: 2,
+      nativeUnsettled, outboxId: pendingBytes ? "outbox" : null, pendingBytes, state: pendingBytes ? "active" : null,
+    });
+    const writes = Array.from({length: 65}, (_, sequence) => ({outboxId: `outbox-${sequence}`, appendKey: `write-${sequence}`,
+      binding: draft("renamed.md", false).binding, nativeHeadSequence: 2}));
+    const adapter = new VersionedLiveAdapter({close() {}, async sendRequest(request: Request): Promise<Response> {
+      requests.push(request.method);
+      if (request.method !== "ydoc.ownerDelivery.listDrafts") throw new Error("ydoc-session-busy");
+      const params = request.params as Record<string, unknown>;
+      expect(params.limit).toBe(64);
+      const batch = params.writes as typeof writes;
+      expect(batch.length).toBeLessThanOrEqual(64);
+      expect(batch.every(write => writes.includes(write) || writes.some(original => original.outboxId === write.outboxId))).toBe(true);
+      return {id: request.id, result: {states: batch.map(write => write.appendKey === "write-1" ? "absent" : "pending")}};
+    }}, WORKSPACE, {workspaceId: WORKSPACE});
+    const expected = Array(65).fill("pending");
+    expected[1] = "absent";
+    expect(await adapter.sharedFileUpdateStates(writes)).toEqual(expected);
+    expect(requests).toEqual(Array(2).fill("ydoc.ownerDelivery.listDrafts"));
+  });
+});

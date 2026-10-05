@@ -1041,6 +1041,17 @@ export class YdocAdapterSession {
     return this.requestRecordUpdate(record);
   }
 
+  async adoptCollectionRecord(): Promise<"settled" | "ownerPending" | "declined"> {
+    this.assertRecordable();
+    await this.recordChain;
+    await this.resyncIfNeeded();
+    const raw = await this.adapter.request(this.workspace, YDOC_METHOD.adoptCollectionRecord, { sessionId: this.sessionId });
+    const result = decodeYdocResult(YDOC_METHOD.adoptCollectionRecord, raw);
+    // Engine maintenance arrives through the same remote-state route as peer edits.
+    await this.resync();
+    return result.status;
+  }
+
   async settle(options?: { summary?: string }): Promise<YdocSettleResult> {
     this.assertRecordable();
     await this.recordChain;

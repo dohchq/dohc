@@ -55,7 +55,7 @@ const withAna: DatasetUndoReach = { roster: { ...OWNER, grants: [ANA] }, collect
 const anaMayDelete: ReachDatasetGrants = { workspaceId: "workspace", grants: [{ principalKey: datasetPrincipalKey("workspace", ANA.grantId, ANA.recipientUserId), operationIds: [REMOVE] }] };
 
 const run = (operationId: string): StoredRun => ({
-  version: 8, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
+  version: 9, claimId: "claim", automationId: "collection:Budget#close", definitionHash: "h", keySeed: "h-1", startedAtMs: 1, finishedAtMs: 1,
   steps: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, undoKept: [], settled: true, outcome: { state: "done" },
   applied: [{ ordinal: 0, writes: [
     { kind: "dataset-edit", rules, operationId, tableId: TABLE, recordId: "a", expectedVersion: 1, version: 2,
@@ -160,7 +160,7 @@ describe("undo of a dataset run", () => {
     const { undone, keptFields } = await undoDatasetAutomationRuns(host, collection, async () => OWNER, "claim", runs, async () => undefined, new AbortController().signal);
     expect(undone).toEqual({ ...none, changedSince: 1 });
     // Named with its dataset and table, so another dataset's field with the same ids is another field.
-    expect(keptFields).toEqual([{ recordId: JSON.stringify([rules.datasetId, TABLE, "a"]), field: STATUS }]);
+    expect(keptFields).toEqual([{ recordId: JSON.stringify([rules.datasetId, TABLE, "a"]), field: STATUS, path: collection.path, fieldName: "Field", datasetRecordId: "a" }]);
     expect(records.a.values[STATUS]).toBe("Paid");
     expect(writes).toEqual([]);
   });

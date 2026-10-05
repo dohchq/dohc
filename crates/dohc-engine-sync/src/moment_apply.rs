@@ -600,6 +600,7 @@ fn apply_moment_append(
     validate_payload_sides(tx, payload)?;
     let remote_before = moment_before_from_payload(tx, payload)?;
 
+    let mut owner_settlement_committed = false;
     if mode == MomentApplyMode::Ordinary {
         let key = DocKey::new(
             &envelope.workspace_id,
@@ -693,6 +694,7 @@ fn apply_moment_append(
             // predecessor may be history-only and was never materialized.
             head_fast_forward = false;
             content_fast_forward = true;
+            owner_settlement_committed = true;
         }
     }
 
@@ -840,6 +842,31 @@ fn apply_moment_append(
                 .unwrap_or(require_binary_blob(tx, &payload.payload_after_blob_sha256)?),
         };
         upsert_snapshot(tx, &envelope.workspace_id, payload, after_kind, byte_length)?;
+        // The audited host settlement is now this owner's committed head.
+        // Complete its matching binding even while the editor retains its lease.
+        if owner_settlement_committed
+            && !dohc_engine_domain::collection_record_id_mismatch_in_tx(
+                tx,
+                &envelope.workspace_id,
+                &payload.version_id,
+                std::slice::from_ref(&payload.payload_after_path),
+            )
+            .map_err(crate::ydoc_apply::map_domain_hard_error)?
+        {
+            tx.execute(
+                "UPDATE collection_records SET adoption_state='adopted'
+                 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND file_path=?4
+                   AND adoption_state IN ('pending','pending-lossless')",
+                params![
+                    envelope.workspace_id,
+                    payload.version_id,
+                    payload.object_id,
+                    payload.payload_after_path
+                ],
+            )
+            .map_err(SyncError::persist)?;
+        }
+
         let resulting = match after_kind {
             ContentKind::Text => crate::ResultingHead::Text {
                 path: &payload.payload_after_path,
@@ -862,21 +889,33 @@ fn apply_moment_append(
             // write is a suppressed self-write, so no capture apply indexes
             // it later: a bound record's index must ride this transaction.
             if let Some(text) = after_text.as_deref() {
-                // A write without parseable frontmatter must still clear the
-                // index. Mirror the ydoc lane: `Ydoc::frontmatter_json`
-                // projects an absent frontmatter map as an empty object.
-                // The prior snapshot's text is the before state, so a file
-                // edit derives the same per-field history and facts a
-                // frontmatter-map edit does; the author was written against
-                // its own head, so its authored pair is the applied pair.
+                // Moment-only edits diff the prior file snapshot. Audited owner
+                // settlements use the field index the live feed has advanced.
+                // Unparseable frontmatter must still clear the index.
                 let empty = || serde_json::Value::Object(serde_json::Map::new());
-                let before_frontmatter = local
-                    .as_ref()
-                    .filter(|snapshot| snapshot.kind == ContentKind::Text)
-                    .and_then(|snapshot| {
-                        dohc_engine_domain::collections::markdown_frontmatter_json(&snapshot.text)
-                    })
-                    .unwrap_or_else(empty);
+                let before_frontmatter = if owner_settlement_committed {
+                    // Accepted frames advance the field index before the file.
+                    // Diff that index so only changes not indexed by the feed
+                    // (such as an enrolled restore checkpoint) get history.
+                    dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                        tx,
+                        &envelope.workspace_id,
+                        &payload.version_id,
+                        &payload.object_id,
+                    )
+                    .map_err(crate::ydoc_apply::map_domain_hard_error)?
+                    .unwrap_or_else(empty)
+                } else {
+                    local
+                        .as_ref()
+                        .filter(|snapshot| snapshot.kind == ContentKind::Text)
+                        .and_then(|snapshot| {
+                            dohc_engine_domain::collections::markdown_frontmatter_json(
+                                &snapshot.text,
+                            )
+                        })
+                        .unwrap_or_else(empty)
+                };
                 let (frontmatter, provenance) =
                     dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
                         text,

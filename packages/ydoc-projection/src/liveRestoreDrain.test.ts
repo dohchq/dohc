@@ -17,7 +17,7 @@ import {validateLiveRestoreProposal} from "./liveRestoreProof.js";
 import * as restoreProof from "./liveRestoreProof.js";
 import {createLiveMarkdownJournalValidator} from "./liveDocumentValidation.js";
 import {LiveRestorePreparation, parseLiveRestoreConfig} from "../../../services/sync-relay/src/liveRestorePreparation.js";
-import {canonicalAcceptedMetadata} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
+import {canonicalVersionedAcceptedMetadata} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
 import {LiveCommittedDelivery} from "../../../services/sync-relay/src/liveCommittedDelivery.js";
 import {OwnerCommittedDelivery} from "../../../services/sync-relay/src/ownerCommittedDelivery.js";
 import {OwnerRestoreReview} from "../../../apps/desktop/src/ipc/ownerRestoreContract.js";
@@ -27,7 +27,7 @@ afterEach(cleanupLiveDeliveryFixtures);
 const jsonHash = (value: unknown) => hash(Buffer.from(JSON.stringify(value)));
 const ownerOriginDigest = ({binding, cut: c}: Pick<OwnerCutCapture, "binding" | "cut">) => jsonHash([binding,
   c.relayDatabaseNamespace, c.sourceMomentId, c.sourceDigest, c.sourceByteLength, c.baselineMomentRelaySequence,
-  c.baselineRegisteredAtMs, c.expectedLocalSequence, c.events.map(event => canonicalAcceptedMetadata(event.metadata))]);
+  c.baselineRegisteredAtMs, c.expectedLocalSequence, c.events.map(event => canonicalVersionedAcceptedMetadata(event.metadata))]);
 function proposalSourcesFixture(kind: "bootstrap" | "owner", mode: "service" | "device", acceptedNative = false, selectedPoint = false) {
   const f = readyNativeFence(kind, mode, acceptedNative ? "native" : true, selectedPoint);
   f.store.acknowledgeStopRestoreFence(f.lookup, f.receipt);
@@ -968,7 +968,10 @@ function readyNativeFence(kind: "bootstrap" | "owner", mode: "service" | "device
     const bytes = f.update("first", "first"), source = pendingSource(current.binding, bytes, 1);
     // The owner's delivery of that update declares the agent its attribution names.
     const capture = f.journalCapture(bytes, source.deliveryId);
-    const committed = f.storage.commitLiveUpdateJournal({...capture, metadata: {...capture.metadata, agentDeclaration: nativeAgent}}).result;
+    const accountId = capture.expectedAuthority.principalId;
+    const committed = f.storage.commitLiveUpdateJournal({...capture, trustedAccount: {accountId, name: accountId},
+      metadata: {...capture.metadata, authorContext: {kind: "account", accountId, agent: {
+        agentId: nativeAgent.agentId, ...(nativeAgent.onBehalfOf !== null ? {onBehalfOf: nativeAgent.onBehalfOf} : {}), depth: nativeAgent.depth}}}}).result;
     if (committed.kind !== "accepted") throw Error(committed.kind);
     receipts.push(committed.receipt); acceptedNative = {bytes, source: {...source, acceptedReceipt: committed.receipt}};
   } else if (events) receipts.push(f.add("first"));

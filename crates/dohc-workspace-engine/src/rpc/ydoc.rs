@@ -1331,6 +1331,74 @@ impl EngineService {
         .map_err(|_| WireError::new(ErrorCode::Internal, "response encode failed"))
     }
 
+    pub(super) async fn ydoc_adopt_collection_record(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: YdocResyncParams = parse(params)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let open = self.open(handle.as_ref())?;
+        let serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => return Err(cancellation.interruption("ydoc.adoptCollectionRecord (queued)")),
+            serial = Arc::clone(&open.session_ops).lock_owned() => serial,
+        };
+        let (_, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+        if session.content_kind != ContentKind::Richdoc || session.restore_generation.is_some() {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "collection-adoption-requires-richdoc",
+            ));
+        }
+        let (draft, reservation) = self
+            .ydoc_editor_draft(&open, &session.key, &cancellation)
+            .await?;
+        if draft.as_ref().is_some_and(|draft| {
+            draft.descriptor.binding.current_path != session.path
+                || Some(&draft.descriptor.binding.lineage_claim_id)
+                    != session.lineage_claim_id.as_ref()
+        }) {
+            return Err(map_owner_outbox(
+                dohc_engine_collab::OwnerOutboxError::ParentMismatch,
+            ));
+        }
+        if session.owner_draft.is_some() && draft.is_none() {
+            return Err(map_owner_outbox(
+                dohc_engine_collab::OwnerOutboxError::Frozen,
+            ));
+        }
+        let actor = open.actor.clone();
+        let leases = self.leases.clone();
+        let self_writes = Arc::new(self.self_writes.scoped(&open.root));
+        let token = cancellation.token();
+        let now = now_ms()?;
+        // Retain the session-operation guard until the actor finishes, even if the caller cancels.
+        let result = tokio::spawn(async move {
+            let _serial = serial;
+            actor
+                .ydoc_adopt_collection_record(
+                    session.key,
+                    session.path,
+                    session.lineage_claim_id,
+                    open.root.clone(),
+                    leases,
+                    self_writes,
+                    draft,
+                    now,
+                    token,
+                    reservation,
+                )
+                .await
+        })
+        .await
+        .map_err(|_| WireError::new(ErrorCode::Internal, "collection adoption task failed"))?
+        .map_err(map_runtime)?
+        .map_err(map_owner_outbox)?;
+        Ok(json!({"status": result}))
+    }
+
     pub(super) async fn ydoc_settle(
         &self,
         ctx: &RequestContext,

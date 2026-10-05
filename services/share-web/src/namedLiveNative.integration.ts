@@ -9,7 +9,7 @@ import { getCookies } from "better-auth/cookies";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
+import { createLiveValidationExecutor } from "../../sync-relay/src/liveValidation.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import { createEngineClient } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
 import { serveFetchHandler } from "@dohc/service-http";
@@ -109,7 +109,7 @@ it("preserves native ACKs, accepted feed, and registration lifetime through the 
     sync: { policy: { maxClientVectorBytes: 100000, maxHostVectorBytes: 100000, maxOutputBytes: 1000000, maxReadBytes: 4000000 }, workingReserveBytes: 4000000 },
     ingress: { aggregateBytes: 512 * 1024 * 1024, applicationWorkingReserveBytes: 8 * 1024 * 1024, maxUploads: 4, uploadDeadlineMs: 30000 },
     client: { aggregateBytes: 200000000, maxUploads: 4, connectTimeoutMs: 30000, requestDeadlineMs: 30000 } }));
-  const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(16), validate = createLiveMarkdownJournalValidator(validationPolicy);
+  const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(16);
   let released!: () => void;
   const noListeners = new Promise<void>(resolve => { released = resolve; });
   const frameChanges = { ...sharedChanges, subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
@@ -120,6 +120,9 @@ it("preserves native ACKs, accepted feed, and registration lifetime through the 
   const closes: (() => Promise<void>)[] = [], providers: Provider[] = [], sockets: WebSocket[] = [], upgrades: Promise<void>[] = [];
   const results: Record<string, unknown> = {};
   try {
+    const validationExecutor = createLiveValidationExecutor();
+    closes.push(() => validationExecutor.close());
+    const validate = validationExecutor.validator(validationPolicy);
     const { storage } = deployment;
     expect(storage.claimWorkspace({ workspaceId: "workspace", ownerUserId: "owner", createdAtMs: 1 })).toBe("created");
     expect(storage.provisionLiveHostControl({ mode: "service", hostId: "service", updatedAtMs: 1, guard: storage.captureStanding() }).ok).toBe(true);
@@ -211,7 +214,8 @@ it("preserves native ACKs, accepted feed, and registration lifetime through the 
     const ownerBytes = Y.encodeStateAsUpdate(ownerDoc, beforeOwner), cut = storage.readLiveUpdateJournalCut({ document });
     const ownerAuthority = storage.resolveCurrentLiveDocumentBinding({ document, actor });
     if (cut.kind !== "cut" || ownerAuthority.kind !== "current") throw new Error("Owner admission cut unavailable.");
-    const validation = validate({ document, currentPath: "docs/a.md", checkpoint: cut.cut.checkpoint.bytes, suffix: cut.cut.suffix.map(row => row.bytes), candidate: ownerBytes });
+    const validation = await validate({ document, currentPath: "docs/a.md", checkpoint: cut.cut.checkpoint.bytes, suffix: cut.cut.suffix.map(row => row.bytes), candidate: ownerBytes });
+    if (validation.kind === "retry") throw new Error("Owner proof validation capacity unavailable.");
     const ownerAccepted = storage.commitLiveUpdateJournal({ host: ownerAuthority.host, actor, expectedAuthority: ownerAuthority.authority,
       metadata: { deliveryId: "owner-over-network", updateDigest: hash(ownerBytes), binding: ownerAuthority.binding }, cutToken: cut.cut, validation, updateBytes: ownerBytes, receivedAtMs: Date.now() });
     expect(ownerAccepted.result.kind).toBe("accepted");

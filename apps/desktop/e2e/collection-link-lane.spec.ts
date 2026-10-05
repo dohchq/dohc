@@ -163,7 +163,7 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
       }, { workspaceId: WORKSPACE_ID, grantId: link.grantId });
       return outcome.status;
     }, { timeout: 120_000, intervals: [2_000] }).toBe("restored");
-    expect(outcome).toMatchObject({ review: [], errorMessage: null });
+    expect(outcome).toMatchObject({ review: [], unfinished: null });
     // Automations go back first.
     const restored = (outcome as unknown as { restored: Array<{ path: string; restoredMomentId: string }> }).restored;
     expect(restored.map((file) => file.path)).toEqual([AUTOMATIONS_PATH, SCHEMA_PATH]);

@@ -374,9 +374,12 @@ fn retained_activation_reopens_after_the_seed_application_and_outbox_ack() {
                     principal_id: "owner".into(),
                 },
                 received_at_ms: 5,
-                agent_declaration: None,
             },
             first_seen: vec![],
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
         update_bytes: captured.full_state.clone(),
     };
@@ -549,9 +552,21 @@ fn release_is_not_blocked_by_an_adoption_in_another_lineage_or_namespace() {
                 tx.execute("UPDATE live_owner_adoptions SET relay_database_namespace='other-namespace'", [])
             }.map_err(write_sql)
         }).unwrap();
-        release_imported_owner_activation(&mut f.store, "namespace", "workspace", &captured.activation_id,
-            Some((&f.key, &f.binding.lineage_claim_id)), &NoFaults).unwrap();
-        assert_eq!(f.store.table_row_count("ydoc_owner_activation_sources").unwrap(), 0);
+        release_imported_owner_activation(
+            &mut f.store,
+            "namespace",
+            "workspace",
+            &captured.activation_id,
+            Some((&f.key, &f.binding.lineage_claim_id)),
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(
+            f.store
+                .table_row_count("ydoc_owner_activation_sources")
+                .unwrap(),
+            0
+        );
         assert_eq!(f.store.table_row_count("live_owner_adoptions").unwrap(), 1);
     }
 }

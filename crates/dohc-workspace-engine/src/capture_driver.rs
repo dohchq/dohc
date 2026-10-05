@@ -1,14 +1,14 @@
-//! The files-into-daemon composition driver: owns the [`FilesActor`], the
-//! [`NativeWatcher`], and the reconcile→apply→acknowledge loop that makes
+//! The files-into-daemon composition driver: owns the [`FilesActor`], a shared-watch
+//! registration, and the reconcile→apply→acknowledge loop that makes
 //! capture autonomous — once a root-bound workspace is open, external file
 //! changes on disk are noticed and recorded with no RPC involved.
 //!
-//! Ownership model: the DRIVER TASK owns the files actor and the watcher, so
+//! Ownership model: the DRIVER TASK owns the files actor and watch registration, so
 //! it can tear them down and re-spawn them freely (the policy-flip re-offer
 //! below, and the D-shard watcher supervision that builds on the same lever).
 //! The daemon holds only a [`CaptureDriver`]: a cancellation token, the
 //! driver's join handle, and a small observable status snapshot for the E
-//! RPCs. Shutdown is strictly ordered — watcher.stop() → files.close() →
+//! RPCs. Shutdown is strictly ordered — unregister watch → files.close() →
 //! driver exit — and on PER-WORKSPACE close the daemon awaits the driver
 //! before closing the store actor, so no capture write can race workspace
 //! teardown. (At whole-DAEMON exit the transport's close hook closes actors
@@ -35,7 +35,7 @@ use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_domain::COLLECTION_SCHEMA_FILENAME;
 use dohc_engine_files::{
     CancellationToken, CaptureApplyResult, CaptureOp, FilesActor, FilesError, FilesHandle,
-    IngestReason, ManifestEntry, NativeWatcher, PoolGauge, ReconcilePlan, ReconcileRun, ScanBounds,
+    IngestReason, ManifestEntry, PoolGauge, ReconcilePlan, ReconcileRun, ScanBounds,
     ScanGeneration, ScanManifest, apply_reconcile_plan_cancellable,
 };
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
@@ -60,6 +60,8 @@ pub const EARLY_IMPORT_MIN_ADDED_FILES: usize = 1_000;
 #[derive(Clone)]
 #[cfg_attr(any(test, feature = "harness"), derive(Default))]
 pub struct CaptureApplyProbe {
+    #[cfg(test)]
+    pub(crate) observation_root: Option<PathBuf>,
     #[cfg(feature = "harness")]
     inner: Arc<CaptureApplyProbeInner>,
     #[cfg(any(test, feature = "harness"))]
@@ -78,6 +80,14 @@ pub struct CaptureApplyProbe {
 
 #[cfg(any(test, feature = "harness"))]
 impl CaptureApplyProbe {
+    #[cfg(test)]
+    pub(crate) fn with_observation_root(root: PathBuf) -> Self {
+        Self {
+            observation_root: Some(root),
+            ..Self::default()
+        }
+    }
+
     pub fn pause_next_open_install(&self) {
         self.open_install_armed.store(true, Ordering::Release);
     }
@@ -529,7 +539,7 @@ const TERMINAL_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_s
 /// How long to wait before the next files-layer start attempt, given the
 /// number of consecutive failures so far. Pure so the schedule is testable
 /// without waiting out a real minute of backoff.
-fn restart_delay(consecutive_failures: u32) -> std::time::Duration {
+pub(crate) fn restart_delay(consecutive_failures: u32) -> std::time::Duration {
     if consecutive_failures == 0 {
         return DRIVE_INTERVAL;
     }
@@ -931,6 +941,7 @@ mod supervision_tests;
 mod drive_loop_tests;
 
 pub(crate) struct CaptureDriverSpawnParams {
+    pub(crate) observation: Arc<crate::file_observation::FileObservation>,
     pub(crate) root: PathBuf,
     pub(crate) actor: ActorHandle,
     pub(crate) workspace_id: String,
@@ -979,6 +990,7 @@ impl CaptureDriver {
     /// store actor, and an unbound root must never spawn a watcher.
     pub(crate) fn spawn(params: CaptureDriverSpawnParams) -> CaptureDriver {
         let CaptureDriverSpawnParams {
+            observation,
             root,
             actor,
             workspace_id,
@@ -1013,6 +1025,7 @@ impl CaptureDriver {
         let drive_refresh_epoch = Arc::clone(&refresh_epoch);
         let task = tokio::spawn(async move {
             let mut env = RealEnv {
+                observation,
                 root,
                 actor,
                 lease_releases_seen: leases.release_generation(&workspace_id),
@@ -1143,7 +1156,7 @@ impl CaptureDriver {
 /// One incarnation of the files layer.
 struct FilesLayer {
     files: FilesActor,
-    watcher: NativeWatcher,
+    watcher: crate::file_observation::CaptureWatch,
     policy_fingerprint: Option<u64>,
     refresh_epoch: u64,
 }
@@ -1191,6 +1204,7 @@ impl FilesLayer {
         policy_fingerprint: Option<u64>,
         refresh_epoch: u64,
         scan: &ScanGauge,
+        observation: &Arc<crate::file_observation::FileObservation>,
     ) -> Result<(FilesLayer, RootBoundRun), FilesError> {
         let captured_root = bind_capture_root(root)?;
         let files =
@@ -1199,18 +1213,21 @@ impl FilesLayer {
         // Before the watcher's initial scan, so the scan's count is readable.
         scan.set(files.gauge());
         let handle = files.handle();
-        match NativeWatcher::start(root.to_path_buf(), handle, cancel.child_token()).await {
-            Ok(start) => Ok((
+        let initial = async {
+            let watcher = observation.attach_capture(handle.clone(), cancel).await?;
+            let run = handle.reconcile_if_dirty(cancel.child_token()).await?;
+            Ok::<_, FilesError>((watcher, run))
+        }
+        .await;
+        match initial {
+            Ok((watcher, run)) => Ok((
                 FilesLayer {
                     files,
-                    watcher: start.watcher,
+                    watcher,
                     policy_fingerprint,
                     refresh_epoch,
                 },
-                RootBoundRun {
-                    captured_root,
-                    run: start.initial_reconcile,
-                },
+                RootBoundRun { captured_root, run },
             )),
             Err(err) => {
                 let mut files = files;
@@ -1220,11 +1237,10 @@ impl FilesLayer {
         }
     }
 
-    /// Strictly ordered teardown: stop+join the watcher first (no dirty marks
-    /// can arrive afterwards), then close+join the files actor.
+    /// Unregister capture from the binding watcher, then close the files actor.
     async fn stop(mut self) {
         let _ = tokio::task::spawn_blocking(move || {
-            let _ = self.watcher.stop();
+            drop(self.watcher);
             let _ = self.files.close();
         })
         .await;
@@ -1895,6 +1911,7 @@ fn answer_flush(
 
 /// The real filesystem-backed environment.
 struct RealEnv {
+    observation: Arc<crate::file_observation::FileObservation>,
     root: PathBuf,
     actor: ActorHandle,
     workspace_id: String,
@@ -2034,12 +2051,13 @@ impl DriverEnv for RealEnv {
             fingerprint_before_seed,
             refresh_epoch,
             &self.scan,
+            &self.observation,
         )
         .await
         .map_err(|_| ())?;
 
-        // EARLY-OPEN PROOF. The watcher is attached before NativeWatcher
-        // returns this initial plan. Re-read every mutable prerequisite after
+        // EARLY-OPEN PROOF. The binding watcher is attached before the
+        // initial capture plan is prepared. Re-read every mutable prerequisite after
         // the scan, then publish Importing in one atomic transition before the
         // first actor batch can be enqueued. Anything uncertain falls back to
         // the settled-baseline barrier below.

@@ -7,7 +7,7 @@ import type { JsonValue } from "../protocol";
 describe("owner Y.Doc draft descriptor", () => {
   const descriptor = {
     binding: { workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "lineage", currentPath: "a.md", selectorPaths: ["a.md"], restoreFenceGeneration: 0 },
-    relayDatabaseNamespace: "relay", revision: 1, acceptedCursor: 0, nativeHeadSequence: 0,
+    relayDatabaseNamespace: "relay", revision: 1, acceptedCursor: 0, nativeHeadSequence: 0, nativeUnsettled: false,
     outboxId: null, pendingBytes: 0, state: null,
   };
   function open(ownerDraft: JsonValue, extra: Record<string, JsonValue> = {}) {
@@ -29,6 +29,10 @@ describe("owner Y.Doc draft descriptor", () => {
       expect(decodeYdocResult(YDOC_METHOD.open, open(value)).ownerDraft).toEqual(value);
       expect(decodeYdocResult(YDOC_METHOD.resync, resync(value)).ownerDraft).toEqual(value);
     }
+  });
+
+  it.each([undefined, null, 0, "false"])("requires a boolean native settlement state: %s", (nativeUnsettled) => {
+    expect(() => decodeOwnerYDocDraftDescriptor({...descriptor, nativeUnsettled})).toThrow(TypeError);
   });
 
   it("accepts safe numeric and opaque identifier boundaries", () => {

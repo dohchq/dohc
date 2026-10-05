@@ -123,9 +123,12 @@ fn append_history_copies(f: &mut Fixture, copies: i64, bytes: Vec<u8>) -> Vec<Li
                                 principal_id: "owner".into(),
                             },
                             received_at_ms: ordinal,
-                            agent_declaration: None,
                         },
                         first_seen: vec![],
+                        canonical_version: Some(2),
+                        author_snapshot: Some(vec![]),
+                        first_seen_deletes: Some(vec![]),
+                        checkpoint_coverage: None,
                     },
                     update_bytes: bytes.clone(),
                 };
@@ -232,25 +235,55 @@ fn accepted_history_checkpoints_bound_lifetime_replay_and_keep_old_delivery_iden
         "UPDATE live_device_bootstraps SET bootstrap_moment_id='changed-origin'",
         "DELETE FROM live_accepted_checkpoints WHERE event_count=4095",
     ] {
-        f.store.write_with(&NoFaults,|tx|->Result<(),ApplicationError>{
-            tx.execute_batch("SAVEPOINT damage").map_err(write_sql)?;
-            tx.execute(sql,[]).map_err(write_sql)?;
-            assert!(accepted_history::read(tx,&held,receipts[4097].journal_cursor,&mut Budget{remaining:1_000_000},3).is_err(),"{sql}");
-            tx.execute_batch("ROLLBACK TO damage; RELEASE damage").map_err(write_sql)?;
-            Ok(())
-        }).unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+                tx.execute_batch("SAVEPOINT damage").map_err(write_sql)?;
+                tx.execute(sql, []).map_err(write_sql)?;
+                assert!(
+                    accepted_history::read(
+                        tx,
+                        &held,
+                        receipts[4097].journal_cursor,
+                        &mut Budget {
+                            remaining: 1_000_000
+                        },
+                        3
+                    )
+                    .is_err(),
+                    "{sql}"
+                );
+                tx.execute_batch("ROLLBACK TO damage; RELEASE damage")
+                    .map_err(write_sql)?;
+                Ok(())
+            })
+            .unwrap();
     }
     for sql in [
         "UPDATE live_accepted_updates SET metadata_json=json_set(metadata_json,'$.accepted.receivedAtMs',999) WHERE event_count=1",
         "UPDATE live_accepted_updates SET evidence_digest=printf('%064d',0) WHERE event_count=1",
     ] {
-        f.store.write_with(&NoFaults,|tx|->Result<(),ApplicationError>{
-            tx.execute_batch("SAVEPOINT old_source_damage").map_err(write_sql)?;
-            tx.execute(sql,[]).map_err(write_sql)?;
-            assert!(accepted_history::accepted_source(tx,&held,&receipts[0].delivery_id,&mut Budget{remaining:1_000_000}).is_err(),"{sql}");
-            tx.execute_batch("ROLLBACK TO old_source_damage; RELEASE old_source_damage").map_err(write_sql)?;
-            Ok(())
-        }).unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| -> Result<(), ApplicationError> {
+                tx.execute_batch("SAVEPOINT old_source_damage")
+                    .map_err(write_sql)?;
+                tx.execute(sql, []).map_err(write_sql)?;
+                assert!(
+                    accepted_history::accepted_source(
+                        tx,
+                        &held,
+                        &receipts[0].delivery_id,
+                        &mut Budget {
+                            remaining: 1_000_000
+                        }
+                    )
+                    .is_err(),
+                    "{sql}"
+                );
+                tx.execute_batch("ROLLBACK TO old_source_damage; RELEASE old_source_damage")
+                    .map_err(write_sql)?;
+                Ok(())
+            })
+            .unwrap();
     }
 }
 
@@ -384,9 +417,16 @@ fn ordinary_checkpoint_streams_cumulative_metadata_above_working_reserve() {
                                 principal_id: "o".repeat(512),
                             },
                             received_at_ms: ordinal,
-                            agent_declaration: None,
                         },
                         first_seen: vec![],
+
+                        canonical_version: Some(2),
+
+                        author_snapshot: Some(vec![]),
+
+                        first_seen_deletes: Some(vec![]),
+
+                        checkpoint_coverage: None,
                     },
                     update_bytes: bytes.clone(),
                 };
@@ -425,11 +465,23 @@ fn native_state_reader_refuses_metadata_application_count_and_blob_corruption() 
         "UPDATE live_accepted_updates SET suffix_count=2",
         "UPDATE live_accepted_updates SET suffix_bytes=suffix_bytes+1",
     ] {
-        let mut f=Fixture::new("baseline");
-        f.edit("accepted text",7);
-        damage(&f,sql);
-        let held=f.handle.registration.lock().unwrap();
-        assert!(f.store.read_with(|conn|accepted_history::read_state(conn,&held,7,NativeHistoryReconstruction {working_reserve_bytes:8*1024*1024})).is_err(),"{sql}");
+        let mut f = Fixture::new("baseline");
+        f.edit("accepted text", 7);
+        damage(&f, sql);
+        let held = f.handle.registration.lock().unwrap();
+        assert!(
+            f.store
+                .read_with(|conn| accepted_history::read_state(
+                    conn,
+                    &held,
+                    7,
+                    NativeHistoryReconstruction {
+                        working_reserve_bytes: 8 * 1024 * 1024
+                    }
+                ))
+                .is_err(),
+            "{sql}"
+        );
     }
     let f = Fixture::new("baseline");
     let held = f.handle.registration.lock().unwrap();
@@ -530,11 +582,21 @@ fn native_resume_generation_checks_compact_receipt_checkpoint_and_settlement_ass
         "UPDATE live_device_settlements SET source_state_vector_digest=printf('%064d',0) WHERE settlement_kind='restore'",
         "UPDATE live_accepted_checkpoints SET state_sha256=printf('%064d',0) WHERE restore_operation_id IS NOT NULL",
     ] {
-        let mut f=Fixture::new("baseline"); f.edit("accepted",7); restore_and_resume(&mut f);
-        let held=f.handle.registration.lock().unwrap();
-        f.store.read_with(|conn|restore_resume::generation(conn,&held)).unwrap().unwrap();
-        damage(&f,sql);
-        assert!(f.store.read_with(|conn|restore_resume::generation(conn,&held)).is_err(),"{sql}");
+        let mut f = Fixture::new("baseline");
+        f.edit("accepted", 7);
+        restore_and_resume(&mut f);
+        let held = f.handle.registration.lock().unwrap();
+        f.store
+            .read_with(|conn| restore_resume::generation(conn, &held))
+            .unwrap()
+            .unwrap();
+        damage(&f, sql);
+        assert!(
+            f.store
+                .read_with(|conn| restore_resume::generation(conn, &held))
+                .is_err(),
+            "{sql}"
+        );
     }
 }
 
@@ -549,14 +611,46 @@ fn native_restore_checkpoint_compact_association_refuses_changed_generation_rece
         "UPDATE live_restore_fences SET application_json=json_set(application_json,'$.admitted.firstSeen',json('[]'))",
         "UPDATE live_accepted_checkpoints SET state_sha256=printf('%064d',0) WHERE restore_operation_id IS NOT NULL",
     ] {
-        let mut f=Fixture::new("baseline");
-        f.edit("accepted",7);
+        let mut f = Fixture::new("baseline");
+        f.edit("accepted", 7);
         restore_and_resume(&mut f);
-        let cursor:i64=f.store.read_with(|conn|conn.query_row("SELECT max(journal_cursor) FROM live_accepted_updates",[],|r|r.get(0))).unwrap();
-        let held=f.handle.registration.lock().unwrap();
-        f.store.read_with(|conn|accepted_history::read_state(conn,&held,cursor,NativeHistoryReconstruction {working_reserve_bytes:8*1024*1024})).unwrap();
-        damage(&f,sql);
-        assert!(f.store.read_with(|conn|accepted_history::read_state(conn,&held,cursor,NativeHistoryReconstruction {working_reserve_bytes:8*1024*1024})).is_err(),"{sql}");
+        let cursor: i64 = f
+            .store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT max(journal_cursor) FROM live_accepted_updates",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        let held = f.handle.registration.lock().unwrap();
+        f.store
+            .read_with(|conn| {
+                accepted_history::read_state(
+                    conn,
+                    &held,
+                    cursor,
+                    NativeHistoryReconstruction {
+                        working_reserve_bytes: 8 * 1024 * 1024,
+                    },
+                )
+            })
+            .unwrap();
+        damage(&f, sql);
+        assert!(
+            f.store
+                .read_with(|conn| accepted_history::read_state(
+                    conn,
+                    &held,
+                    cursor,
+                    NativeHistoryReconstruction {
+                        working_reserve_bytes: 8 * 1024 * 1024
+                    }
+                ))
+                .is_err(),
+            "{sql}"
+        );
     }
 }
 
@@ -607,9 +701,12 @@ fn append_after_restore_avoids_historical_json_and_checkpoint_document_reads() {
                     principal_id: "owner".into(),
                 },
                 received_at_ms: 101,
-                agent_declaration: None,
             },
             first_seen: vec![],
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
         },
         update_bytes: bytes,
     };
@@ -647,7 +744,10 @@ fn append_after_restore_avoids_historical_json_and_checkpoint_document_reads() {
             )
         })
         .unwrap();
-    damage(&f, "UPDATE live_restore_fences SET proposal_json=json_set(proposal_json,'$.finalContentDigest',printf('%064d',0))");
+    damage(
+        &f,
+        "UPDATE live_restore_fences SET proposal_json=json_set(proposal_json,'$.finalContentDigest',printf('%064d',0))",
+    );
     assert!(f
         .store
         .read_with(|conn| accepted_history::read_state(
@@ -889,9 +989,17 @@ impl Fixture {
                         principal_id: "owner".into(),
                     },
                     received_at_ms: cursor,
-                    agent_declaration,
                 },
                 first_seen: vec![],
+                canonical_version: Some(2),
+                author_snapshot: Some(
+                    (agent_declaration)
+                        .into_iter()
+                        .map(crate::live_update_application::LiveAuthorEntry::from)
+                        .collect(),
+                ),
+                first_seen_deletes: Some(vec![]),
+                checkpoint_coverage: None,
             },
             update_bytes: bytes,
         };
@@ -1301,9 +1409,12 @@ fn admitted_restore(
                     principal_id: "restoring-owner".into(),
                 },
                 received_at_ms: 80,
-                agent_declaration: None,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
         },
     }
 }
@@ -2423,7 +2534,7 @@ fn interval_keeps_declared_agents_through_dedupe_compaction_and_reopen() {
     );
     let expected = json!([
         {"kind":"agent","agentId":"review-agent","onBehalfOf":"owner","depth":2},
-        {"kind":"agent","agentId":"trip-agent","onBehalfOf":"owner"},
+        {"kind":"agent","agentId":"trip-agent","onBehalfOf":"owner","depth":0},
     ]);
     assert_eq!(declared(&f), expected);
     let key = DocKey::new("workspace", "main", "object").unwrap();
@@ -2677,18 +2788,54 @@ fn publication_proof_charges_each_raw_row_before_reading_it() {
     let pad = "replace(hex(zeroblob(1000000)),'00','x')";
     let cases = [
         // Registration, before anything else is read.
-        (Predecessor, format!("UPDATE live_device_application_bindings SET connection_id=connection_id||{pad}")),
-        (Accepted, format!("UPDATE live_device_application_bindings SET connection_id=connection_id||{pad}")),
+        (
+            Predecessor,
+            format!(
+                "UPDATE live_device_application_bindings SET connection_id=connection_id||{pad}"
+            ),
+        ),
+        (
+            Accepted,
+            format!(
+                "UPDATE live_device_application_bindings SET connection_id=connection_id||{pad}"
+            ),
+        ),
         // The current-state marker and resumed fence registration.
-        (Predecessor, format!("UPDATE ydoc_docs SET path=path||{pad}")),
-        (Accepted, format!("UPDATE live_restore_fences SET resume_receipt_json=json_set(resume_receipt_json,'$.padding',{pad})")),
+        (
+            Predecessor,
+            format!("UPDATE ydoc_docs SET path=path||{pad}"),
+        ),
+        (
+            Accepted,
+            format!(
+                "UPDATE live_restore_fences SET resume_receipt_json=json_set(resume_receipt_json,'$.padding',{pad})"
+            ),
+        ),
         // The resume receipt's settlement and evidence, and the saved application.
-        (Predecessor, format!("UPDATE live_restore_fences SET resume_evidence_digest=resume_evidence_digest||{pad}")),
-        (Predecessor, format!("UPDATE live_restore_fences SET application_delivery_id=application_delivery_id||{pad}")),
+        (
+            Predecessor,
+            format!(
+                "UPDATE live_restore_fences SET resume_evidence_digest=resume_evidence_digest||{pad}"
+            ),
+        ),
+        (
+            Predecessor,
+            format!(
+                "UPDATE live_restore_fences SET application_delivery_id=application_delivery_id||{pad}"
+            ),
+        ),
         // The replaced settlement's digests, read after the restore evidence.
-        (Predecessor, format!("UPDATE live_device_settlements SET interval_digest=interval_digest||{pad} WHERE moment_id='replaced-moment'")),
+        (
+            Predecessor,
+            format!(
+                "UPDATE live_device_settlements SET interval_digest=interval_digest||{pad} WHERE moment_id='replaced-moment'"
+            ),
+        ),
         // The accepted checkpoint's stored digests.
-        (Accepted, format!("UPDATE live_accepted_checkpoints SET evidence_digest=evidence_digest||{pad}")),
+        (
+            Accepted,
+            format!("UPDATE live_accepted_checkpoints SET evidence_digest=evidence_digest||{pad}"),
+        ),
     ];
     for (reader, sql) in cases {
         let f = resumed_with_prior();
@@ -2724,7 +2871,12 @@ fn publication_proof_charges_valid_repeated_registration_text() {
         };
         let before = used(&f);
         let longer = 200;
-        damage(&f, &format!("UPDATE live_device_application_bindings SET host_id=host_id||replace(hex(zeroblob({longer})),'00','h')"));
+        damage(
+            &f,
+            &format!(
+                "UPDATE live_device_application_bindings SET host_id=host_id||replace(hex(zeroblob({longer})),'00','h')"
+            ),
+        );
         assert_eq!(used(&f) - before, 2 * longer, "{reader:?}");
     }
 }

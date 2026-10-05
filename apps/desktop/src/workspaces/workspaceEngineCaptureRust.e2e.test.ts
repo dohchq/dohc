@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import * as Y from "yjs";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import { defaultWorkspaceMode, type WatcherEvent } from "@dohc/workspace-core";
 import type {
@@ -34,6 +35,9 @@ import { waitForPathMoments } from "./waitForPathMoments";
 import { encodeFixtureBigInts } from "@dohc/workspace-engine-client/testing";
 import { decodeCollectionValue } from "../../../../packages/workspace-engine-client/src/workspace/workspaceWireContract";
 import type { JsonValue } from "@dohc/workspace-engine-client";
+
+// The person a restore names, as desktop main reads them.
+const RESTORER = { kind: "human", humanId: "local-person" } as const;
 
 function createWorkspaceEngineCapture(
   options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
@@ -100,6 +104,60 @@ async function listDaemonPathMoments(
   );
   return page.moments.filter((moment) => moment.path === path);
 }
+
+it.skipIf(engine.missing).each([false, true])(
+  "preserves hand-made Markdown opened before adoption (later edit=%s)",
+  async laterEdit => {
+    const root = await createTestScratch("dohc-open-lossless-adoption-");
+    const lifecycle = createRealDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+    await lifecycle.start();
+    const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+    const workspace = { workspaceId: "open-lossless-adoption", rootPath: root, attachmentId: Symbol("lossless") };
+    const errors: unknown[] = [];
+    const capture = createAttachedWorkspaceEngineCapture({ ...workspace, rustEngineSessions: sessions, settleDebounceMs: 60_000,
+      onError: (_context, error) => { errors.push(error); } });
+    const original = "A setext heading\n================\n\n* first\n* second\n";
+    try {
+      const adapter = await sessions.run(workspace, async ({ client, workspace: handle }) =>
+        new VersionedLiveAdapter(client, handle, { workspaceId: workspace.workspaceId }));
+      await adapter.ensureMainVersion({ workspaceId: workspace.workspaceId });
+      for (const [path, text] of [["tasks/collection.yaml", "fields: {}\n"], ["tasks/record.md", original]]) {
+        await adapter.writeTextFile({ workspaceId: workspace.workspaceId, versionId: "main", path: path!, text: text!, publish: true,
+          metadata: { origin: "api" } });
+      }
+      await expect.poll(async () => (await adapter.listPendingCollectionAdoptions()).adoptions.length,
+        { timeout: 60_000 }).toBe(1);
+      const session = await capture.openYDocSession({ path: "tasks/record.md", contentKind: "richdoc", onRemoteUpdate: () => undefined });
+      if (laterEdit) {
+        await session.applyDecidedLocalUpdate(doc => {
+          const scratch = new Y.Doc();
+          try { Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc)); const before = Y.encodeStateVector(scratch);
+            patchFrontmatter(scratch, new Map([["Name", "Edited"]])); return Y.encodeStateAsUpdate(scratch, before);
+          } finally { scratch.destroy(); }
+        }, undefined, { idempotencyKey: "lossless-edit" });
+      }
+      await capture.flush();
+      await expect.poll(async () => (await adapter.listPendingCollectionAdoptions()).adoptions.length,
+        { timeout: 60_000 }).toBe(0);
+      const adopted = await readFile(join(root, "tasks/record.md"), "utf8");
+      if (laterEdit) {
+        expect(adopted).toBe(original);
+        expect(session.doc.getMap("frontmatter").get("id")).toBeUndefined();
+        expect((await adapter.queryCollectionRecords({ collectionPath: "tasks" })).records).toEqual([]);
+      } else {
+        expect(adopted.replace(/^---\nid: [^\n]+\n---\n\n/, "")).toBe(original);
+        expect(session.doc.getMap("frontmatter").get("id")).toBeTruthy();
+        await session.settleNow();
+        expect(await readFile(join(root, "tasks/record.md"), "utf8")).toBe(adopted);
+      }
+      expect(errors).toEqual([]);
+      await session.close();
+    } finally {
+      await capture.stop().catch(() => undefined);
+      await sessions.closeAll(); await lifecycle.stop();
+    }
+  }, 120_000,
+);
 
 it.skipIf(engine.missing)(
   "adopts rich collection Markdown through the shared Y.Doc importer without flattening it",
@@ -390,10 +448,13 @@ it.skipIf(engine.missing)(
       const binaryEdit = binaryMoments[0];
       expect(binaryEdit).toBeTruthy();
 
-      await capture.restoreFileToBeforeMoment(binaryEdit!.id);
+      const { restoredMomentId } = await capture.restoreFileToBeforeMoment(binaryEdit!.id, RESTORER);
       expect(await readFile(join(root, "asset.bin"))).toEqual(
         Buffer.from(firstBinary),
       );
+      const restored = (await capture.listMoments({ limit: 100 })).moments
+        .find((moment) => moment.id === restoredMomentId);
+      expect(restored?.authors).toEqual([RESTORER]);
     } finally {
       await capture.stop();
       await sessions.closeAll();
@@ -669,14 +730,12 @@ it.skipIf(engine.missing)(
       states.length = 0;
       errors.length = 0;
 
-      // A clean close: nothing was typed since the settle, so the release
-      // prunes, which is what proves the refusal benign — the file belongs to
-      // the outside author and this document's text is a settled moment in
-      // History. The refusal is still reported as it happens and withdrawn
-      // after the release; the editor's last word is what it acts on.
+      // Nothing was typed since the verified settle. Close reuses that
+      // settlement and releases the lease without settling or reporting save
+      // states or errors. The outside author's bytes remain on disk.
       await expect(session.close()).resolves.toBeUndefined();
-      expect(states).toEqual(["settling", "error", "changed-on-disk"]);
-      expect(errors).toEqual(["ydoc settle of note.md"]);
+      expect(states).toEqual([]);
+      expect(errors).toEqual([]);
 
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
 

@@ -220,9 +220,12 @@ mod tests {
                             principal_id: "owner".into(),
                         },
                         received_at_ms: 4,
-                        agent_declaration: None,
                     },
                     first_seen: vec![],
+                    canonical_version: None,
+                    author_snapshot: None,
+                    first_seen_deletes: None,
+                    checkpoint_coverage: None,
                 },
                 update_bytes: bytes,
             });

@@ -8,6 +8,7 @@ use crate::rpc::request::parse;
 use crate::rpc::secrets::secret_moment_json;
 use crate::rpc::versions::version_record_json;
 use crate::rpc::workspace::validate_workspace_param;
+use dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES;
 use dohc_engine_domain::MomentPage;
 use dohc_engine_domain::SecretMomentRecord;
 use dohc_engine_protocol::error::ErrorCode;
@@ -190,7 +191,7 @@ fn parsed_moment_author(value: Value) -> Value {
             object
                 .get(*key)
                 .and_then(Value::as_str)
-                .is_some_and(|v| !v.is_empty() && v.len() <= 500)
+                .is_some_and(|v| !v.is_empty() && v.len() <= MAX_AUTHOR_FIELD_BYTES)
         })
     };
     let principal_ok = object
@@ -449,6 +450,7 @@ impl EngineService {
 #[cfg(test)]
 mod relay_author_tests {
     use super::parsed_moment_authors;
+    use dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES;
     use serde_json::{Value, json};
 
     /// One stored author, read back as the entry history returns for it.
@@ -594,6 +596,34 @@ mod relay_author_tests {
     }
 
     #[test]
+    fn keeps_shared_author_ids_up_to_the_author_field_bound() {
+        // A live share admits identifiers of up to 512 bytes; quotes escape
+        // to twice that in the stored JSON.
+        let longest = "\"".repeat(MAX_AUTHOR_FIELD_BYTES);
+        let named = json!({"kind":"named", "userId":longest, "grantId":longest, "grantGeneration":9_007_199_254_740_991_i64});
+        let link = json!({"kind":"link", "grantId":longest, "grantGeneration":9_007_199_254_740_991_i64, "principalId":longest});
+        assert_eq!(parsed_moment_author(&named.to_string()), named);
+        assert_eq!(parsed_moment_author(&link.to_string()), link);
+        // One byte over, from a 2-byte character, is corrupt in every field.
+        let over = format!("{}x", "é".repeat(MAX_AUTHOR_FIELD_BYTES / 2));
+        assert_eq!(over.len(), MAX_AUTHOR_FIELD_BYTES + 1);
+        for (author, field) in [
+            (&named, "userId"),
+            (&named, "grantId"),
+            (&link, "grantId"),
+            (&link, "principalId"),
+        ] {
+            let mut oversized = author.clone();
+            oversized[field] = json!(over);
+            assert_eq!(
+                parsed_moment_author(&oversized.to_string()),
+                json!({"corrupt":true}),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
     fn preserves_link_author_and_refuses_incomplete_or_mixed_shapes() {
         let author =
             json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"holder"});
@@ -604,7 +634,6 @@ mod relay_author_tests {
             json!({"kind":"link", "grantId":"", "grantGeneration":2, "principalId":"holder"}),
             json!({"kind":"link", "grantId":"grant", "grantGeneration":0, "principalId":"holder"}),
             json!({"kind":"link", "grantId":"grant", "grantGeneration":"2", "principalId":"holder"}),
-            json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"p".repeat(501)}),
             // A claimed name never rides a link author, and neither does a user.
             json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"holder", "displayName":"Ana"}),
             json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"holder", "userId":"ana"}),

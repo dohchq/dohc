@@ -1,3 +1,6 @@
+import { getCACertificates, setDefaultCACertificates } from "node:tls";
+import { mintLocalhostCa } from "../../../../services/share-web/src/testing/localhostCa";
+import { startServerProxy } from "../../e2e/helpers/selfHostOnboarding";
 import { DatabaseSync } from "node:sqlite";
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -6,8 +9,18 @@ import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { buildRelay } from "../../../../services/sync-relay/scripts/build.mjs";
 import { stableJsonStringify } from "../../../../services/sync-relay/src/canonicalJson";
 import * as Y from "yjs";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
-import { VersionedLiveAdapter, WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";
+import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
+import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
+import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
+import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
+import { runCollectionAutomation } from "@dohc/automation-executor/collection-automation-run";
+import { undoCollectionAutomationRuns } from "../../../../packages/automation-executor/src/collectionAutomationUndo";
+import { createAutomationTargets } from "../../../../packages/automation-executor/src/automationTargets";
+import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
@@ -32,6 +45,10 @@ import { enrollWorkspaceKeyEnvelope } from "./workspaceKeyEnvelopeEnrollment";
 import { bootstrapJoinedWorkspace } from "./workspaceJoinEnrollment";
 import { createRelaySyncEngine, type CloudSyncEngine } from "./relaySyncEngine";
 import { createRelayLogWait } from "./relayLogWait";
+import { selfHostLiveProfile } from "../../../../services/sync-relay/src/selfHostLiveProfile";
+import { runNativeOwnerDeliveryPass } from "./nativeOwnerDelivery";
+import { readyOwnerDeliveryDocuments } from "./serverOwnerDelivery";
+import { startServerOwnerDelivery } from "./serverOwnerDelivery";
 
 const engine = requireEngineBinaryOrSkip();
 let relayBuildDirectory: string;
@@ -66,7 +83,8 @@ async function openLiveDaemonCapture(input: {
   relay: { baseUrl: string; token: string };
   settleDebounceMs?: number;
 }): Promise<LiveDaemonCapture> {
-  const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0 });
+  const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0,
+    allowInsecureLoopbackForTests: new URL(input.relay.baseUrl).protocol === "http:" });
   const capture = createWorkspaceEngineCapture({
     ...workspace.workspace,
     rustEngineSessions: workspace.sessions,
@@ -103,7 +121,8 @@ async function openJoinedDaemonCapture(input: {
   relay: { baseUrl: string; token: string };
   passphrase?: string;
 }): Promise<LiveDaemonCapture> {
-  const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0 });
+  const workspace = await openLiveDaemonWorkspace(input, { maxRestarts: 0,
+    allowInsecureLoopbackForTests: new URL(input.relay.baseUrl).protocol === "http:" });
   const relay = workspace.relay.bind({
     ...workspace.workspace,
     relay: input.relay,
@@ -345,6 +364,321 @@ async function expectTwoDaemonFileSync(input: {
   }
 }
 
+it.skipIf(engine.missing).each([
+  { name: "existing id", hasId: true, body: "# Keep this body\n" },
+  { name: "id-less canonical", hasId: false, body: "# Body\n" },
+  { name: "id-less non-canonical", hasId: false, body: "A setext heading\n================\n\n* first\n* second\n" },
+])("settles open Collection adoption with native owner delivery and recipient sync ($name)", async ({ name, hasId, body: originalBody }) => {
+  const canonical = markdownToYDoc(originalBody);
+  const body = name === "id-less canonical" ? yDocToMarkdown(canonical) : originalBody;
+  canonical.destroy();
+  const workspaceId = `native-open-adoption-${name.replaceAll(" ", "-")}`;
+  const rootA = await createTestScratch("dohc-native-adoption-owner-");
+  const rootB = await createTestScratch("dohc-native-adoption-peer-");
+  const relayRoot = await createTestScratch("dohc-native-adoption-relay-");
+  const ca = await mintLocalhostCa(relayRoot);
+  const previousRoots = getCACertificates("default");
+  setDefaultCACertificates([...previousRoots, ca.ca]);
+  const trustEnv = { NODE_EXTRA_CA_CERTS: ca.caPath, DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
+    DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath, DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0" };
+  for (const [name, value] of Object.entries(trustEnv)) vi.stubEnv(name, value);
+  const proxy = await startServerProxy(ca);
+  let relayServer: Awaited<ReturnType<typeof spawnSyncRelay>> | undefined;
+  let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+  let capture: WorkspaceEngineCapture | undefined;
+  let delivery: ReturnType<typeof startServerOwnerDelivery> | undefined;
+  let peer: LiveDaemonCapture | undefined;
+  const errors: string[] = [];
+  const path = "tasks/pending.md", recordId = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+  try {
+    relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay", "relay.sqlite"), compiledMain: compiledRelayMain,
+    editLinks: { engineExecutable: engine.require(), publicOrigin: proxy.origin, trustEnv },
+    linkBoundary: { linkKey: "native-adoption-link-key-".repeat(2), relayExchangeKey: "native-adoption-exchange-".repeat(2),
+      publicViewerOrigin: proxy.origin } });
+    proxy.routeRelayTo(relayServer.baseUrl);
+    const relayConnection = { baseUrl: proxy.origin, token: `test:${workspaceId}` };
+    const profile = selfHostLiveProfile();
+    const nativeConfigPath = join(rootA, "owner-ingress.json");
+    await writeFile(nativeConfigPath, JSON.stringify(profile.nativeIngress));
+    owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0,
+      allowInsecureLoopbackForTests: false, privateOwnerHost: { configPath: nativeConfigPath, client: profile.nativeClient } });
+    const source = owner;
+    const relay = source.relay.bind({ ...source.workspace, relay: relayConnection });
+    await relay.claim();
+    await source.chats.ensureGeneralChannel({ workspaceId });
+    await relay.push();
+    const adapter = await source.sessions.run(source.workspace, async ({client, workspace}) => new VersionedLiveAdapter(client, workspace, {workspaceId}));
+    await adapter.ensureMainVersion({workspaceId});
+    await adapter.writeTextFile({workspaceId, versionId: "main", path, text: hasId ? `---\nid: ${recordId}\n---\n\n${body}` : body,
+      publish: true, metadata: {origin: "api"}, author: {kind: "human", humanId: "local-person"}});
+    capture = createWorkspaceEngineCapture({...source.workspace, rustEngineSessions: source.sessions, settleDebounceMs: 60_000,
+      onError: (context, error) => errors.push(`${context}: ${String(error)}`)});
+    const seeded = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
+    if (hasId) await seeded.applyDecidedLocalUpdate(doc => {
+      const scratch = new Y.Doc();
+      try {
+        Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+        const before = Y.encodeStateVector(scratch);
+        patchFrontmatter(scratch, new Map([["beforeActivation", "ordinary-owner"]]));
+        return Y.encodeStateAsUpdate(scratch, before);
+      } finally { scratch.destroy(); }
+    }, undefined, { actorOriginId: "local-person", attribution: { actorKind: "human" }, idempotencyKey: "native-baseline" });
+    await seeded.settleNow();
+    await relay.push();
+    await seeded.close();
+    const share = await fetch(`${proxy.origin}/sync/${workspaceId}/shares`, {method: "POST",
+      headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"},
+      body: JSON.stringify({recipientEmail: "native-recipient@dohc.test", paths: ["tasks"], access: "edit"})});
+    expect(share.status).toBe(200);
+    const shareResult = await share.json() as { shareId: string };
+    const enrollment = await fetch(`${proxy.origin}/sync/${workspaceId}/live-host`, {method: "POST",
+      headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"},
+      body: JSON.stringify({shareId: shareResult.shareId})});
+    expect([200, 202]).toContain(enrollment.status);
+    let discoveryPayload: unknown;
+    const discovery = async () => {
+      const response = await fetch(`${proxy.origin}/sync/${workspaceId}/live-host`, {headers: {authorization: `Bearer ${relayConnection.token}`}});
+      expect(response.status).toBe(200);
+      discoveryPayload = await response.json();
+      return readyOwnerDeliveryDocuments(discoveryPayload, workspaceId);
+    };
+    try { await expect.poll(async () => (await discovery()).length, {timeout: 120_000}).toBe(1); }
+    catch (error) { throw new Error(JSON.stringify({ discoveryPayload, diagnostics: relayServer.diagnostics() }), { cause: error }); }
+    const document = (await discovery())[0]!;
+    const config = {...profile.owner, nativeConfigPath, nativeClient: profile.nativeClient, relayUrl: proxy.origin, documents: [document]};
+    const pass = (signal: AbortSignal) => source.sessions.run(source.workspace, async ({client, workspace}) =>
+      runNativeOwnerDeliveryPass({client: source.nativeClient(), workspaceHandle: workspace, document, config, signal, bearer: relayConnection.token, assertCurrent() {}}));
+    expect(["empty", "acknowledged"]).toContain(await pass(AbortSignal.timeout(60_000)));
+    const session = await capture.openYDocSession({path, contentKind: "richdoc", onRemoteUpdate: () => undefined});
+    const beforeAdoption = await readFile(join(rootA, path), "utf8");
+    if (!hasId) expect(session.doc.getMap("meta").has("dohcMarkdownSource")).toBe(name === "id-less non-canonical");
+    await adapter.writeTextFile({workspaceId, versionId: "main", path: "tasks/collection.yaml", text: "fields:\n  Name:\n    type: text\n",
+      publish: true, metadata: {origin: "api"}});
+    await expect.poll(async () => (await adapter.listPendingCollectionAdoptions()).adoptions.length, {timeout: 60_000}).toBe(1);
+    await relay.push();
+    const pending = (await adapter.listPendingCollectionAdoptions()).adoptions[0]!;
+    const bindingDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
+    try {
+      expect(bindingDb.prepare("SELECT adoption_state FROM collection_records WHERE workspace_id=? AND file_path=?")
+        .get(workspaceId, path)).toEqual({ adoption_state: hasId ? "pending" : "pending-lossless" });
+    } finally { bindingDb.close(); }
+    if (hasId) {
+      await session.applyDecidedLocalUpdate(doc => {
+        const scratch = new Y.Doc();
+        try {Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc)); const before = Y.encodeStateVector(scratch);
+          patchFrontmatter(scratch, new Map([["Name", "Manual"]])); return Y.encodeStateAsUpdate(scratch, before);
+        } finally {scratch.destroy();}
+      }, undefined, {actorOriginId: "local-person", attribution: {actorKind: "human"}, idempotencyKey: "native-name"});
+    } else {
+      await expect(capture.flush()).rejects.toThrow("did not settle");
+      expect(session.doc.getMap("frontmatter").get("id")).toBe(pending.recordId);
+      expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([pending]);
+      await expect(capture.flush()).rejects.toThrow("did not settle");
+      expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([pending]);
+    }
+    await expect(session.settleNow()).rejects.toMatchObject({name: "YdocOwnerDraftPendingError"});
+    expect((await adapter.listPendingCollectionAdoptions()).adoptions).toHaveLength(1);
+    capture.start();
+    delivery = startServerOwnerDelivery({workspaceIds: () => [workspaceId], attemptTimeoutMs: 60_000, retryDelayMs: 250,
+      async runPass(_workspaceId, _index, signal) {
+        const result = await pass(signal);
+        await capture!.runRelaySync(materializePage => relay.pull(materializePage));
+        return {documentCount: 1, acknowledged: result === "acknowledged"};
+      },
+      onError: error => { errors.push(String(error)); }});
+    await expect.poll(async () => {
+      expect(errors).toEqual([]);
+      return { pending: (await adapter.listPendingCollectionAdoptions()).adoptions.length,
+        settled: (await adapter.flushCapture()).settled, errors };
+    }, {timeout: 120_000})
+      .toEqual({pending: 0, settled: true, errors: []});
+    await capture.flush();
+    const markdown = await readFile(join(rootA, path), "utf8");
+    if (hasId) expect(markdown).toContain("Name: Manual");
+    expect(markdown).toContain(`id: ${pending.recordId}`);
+    if (hasId) expect(markdown).toContain(body.trimEnd());
+    else expect(markdown).toBe(`---\nid: ${pending.recordId}\n---\n\n${beforeAdoption}`);
+    await capture.flush();
+    expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([]);
+    if (hasId) {
+      await delivery.stop();
+      delivery = undefined;
+      const formula = createAutomationFormulaEvaluator();
+      try {
+        const parsed = parseAutomationsFile("version: 1\nautomations:\n  - id: finish\n    name: Finish\n    when: {button: Finish}\n    do: [{set: {Name: Automation}}]\n");
+        if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw new Error("Invalid test automation");
+        const automation = parsed.entries[0].automation;
+        const collectionId = (await adapter.listCollections()).collections.find(entry => entry.path === "tasks")!.objectId;
+        const claim: AutomationClaim = {
+          claimId: "atc_pending", automationId: `collection:${collectionId}#finish`, trigger: { key: "pending-button" },
+          recordId, collectionPath: "tasks", depth: 0, state: "running", attempts: 1, run: 1,
+          createdAtMs: Date.now(), updatedAtMs: Date.now(),
+          change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "local-person", sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
+        };
+        const store = createAutomationRunStore(rootA, resolveWorkspaceMetadataDir);
+        const signal = new AbortController().signal;
+        const edits = (signal: AbortSignal) => collectionRecordWrites(desktopRecordEditContext({
+          capture: capture!, workspaceRoot: rootA, person: {kind: "human", humanId: "local-person"},
+          withAdapter: work => work(adapter), signal,
+          onCaptureSettled: () => () => undefined,
+        }));
+        const dependencies = {
+          withReads: async <T,>(work: (engine: VersionedLiveAdapter) => Promise<T>) => work(adapter),
+          withRecordWrites: async <T,>(signal: AbortSignal, work: (writes: ReturnType<typeof edits>) => Promise<T>) => work(edits(signal)),
+          collectionIdOf: () => collectionId, collectionPathOf: () => "tasks",
+          targets: createAutomationTargets({ isCollection: path => path === "tasks", readText: async () => null,
+            readSchemaFields: async () => new Set(["Name"]), withHost: async () => null }),
+          readCode: async () => null, personName: () => "Owner", evaluator: formula.forWorkspace(workspaceId), store, nowMs: Date.now,
+          chat: { directory: async () => null, write: async () => { throw new Error("No chat in this test"); } },
+          postNotice: async () => { throw new Error("No notices in this test"); }, readMessageBody: async () => null, recipientVerdicts: async () => [],
+        };
+        await expect(runCollectionAutomation(dependencies, { claim, automation, collection: {path: "tasks", name: "Tasks"},
+          roster: {kind: "owner", ownerUserId: "local-person", grants: []}, signal, stopped: signal })).resolves.toMatchObject({kind: "done"});
+        const runs = (await store.runsOf(claim.automationId, claim.claimId)).runs;
+        expect(runs[0]!.applied.flatMap(entry => entry.writes)).toMatchObject([
+          {kind: "field", recordId, path, field: "Name", before: "Manual", after: "Automation", sharedFileUpdate: {appendKey: expect.any(String)}},
+        ]);
+        const write = runs[0]!.applied.flatMap(entry => entry.writes).find(write => write.kind === "field");
+        if (write?.kind !== "field" || !write.sharedFileUpdate) throw new Error("Missing recorded draft");
+        expect(await adapter.sharedFileUpdateStates([write.sharedFileUpdate])).toEqual(["pending"]);
+        // Both run Undo and Stop and restore use this document reversal.
+        // A journaled reversal is pending until its own receipt arrives.
+        const undo = {...dependencies, trash: async () => { throw new Error("No added records"); }};
+        const reversal = await undoCollectionAutomationRuns(undo, runs, signal);
+        expect(reversal).toMatchObject({undone: {reverted: 0}, undoWrites: [{draft: {appendKey: expect.any(String)}}]});
+        await expect(undoCollectionAutomationRuns(undo, runs, signal)).resolves.toMatchObject({undone: {reverted: 0}});
+        expect(session.doc.getMap("frontmatter").get("Name")).toBe("Manual");
+        expect(await adapter.sharedFileUpdateStates(reversal.undoWrites.map(write => write.draft))).toEqual(["pending"]);
+        // Host acknowledgement alone leaves the accepted native lineage dirty.
+        await expect.poll(() => pass(signal), {timeout: 120_000}).toBe("empty");
+        await expect.poll(async () => {
+          try { return await adapter.sharedFileUpdateStates(reversal.undoWrites.map(write => write.draft)); }
+          catch (error) {
+            if (error instanceof DaemonRefusalError && error.wireCode === "OVERLOADED" &&
+                error.message === "live-settlement-capacity") return null;
+            throw error;
+          }
+        }, {timeout: REAL_DAEMON_DEADLINE_MS}).toEqual(["settled"]);
+        await expect.poll(async () => {
+          await pass(signal);
+          await capture!.runRelaySync(materializePage => relay.pull(materializePage));
+          await capture!.flush();
+          return readFile(join(rootA, path), "utf8");
+        }, {timeout: 120_000}).toBe(markdown).catch(error => {
+          const db = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
+          try {
+            throw new Error(JSON.stringify({
+              markers: db.prepare("SELECT head_update_seq,settled_update_seq,last_settled_sha,settle_prior_update_seq,path FROM ydoc_docs").all(),
+              snapshots: db.prepare("SELECT path,blob_sha256 FROM snapshots").all(),
+              materializations: db.prepare("SELECT target_path,status,content_sha256 FROM materialization_jobs").all(),
+            }), {cause: error});
+          } finally {db.close();}
+        });
+      } finally { await formula.close(); }
+    }
+    await relay.push();
+    peer = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: relayConnection});
+    await pullAndExpect(peer, rootB, path, markdown);
+    expect(errors).toEqual([]);
+    await session.close({settle: false});
+  } finally {
+    await delivery?.stop(); await peer?.close();
+    try {await capture?.stop().catch(() => undefined);} finally {await owner?.close(); await relayServer?.stop(); await proxy.close();
+      setDefaultCACertificates(previousRoots); vi.unstubAllEnvs();}
+  }
+}, 240_000);
+
+it.skipIf(engine.missing).each([true, false])(
+  "settles adoption of an already-open Collection record through the real relay (has id=%s)",
+  async (hasId) => {
+    const workspaceId = `two-daemon-open-adoption-${hasId}`;
+    const rootA = await createTestScratch("dohc-open-adoption-a-");
+    const rootB = await createTestScratch("dohc-open-adoption-b-");
+    const relayRoot = await createTestScratch("dohc-open-adoption-relay-");
+    const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relayConnection = { baseUrl: relayServer.baseUrl, token: `test:${workspaceId}` };
+    const person = { kind: "human", humanId: "local-person" } as const;
+    const path = "tasks/pending.md";
+    let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+    let capture: WorkspaceEngineCapture | undefined;
+    let peer: LiveDaemonCapture | undefined;
+    let sync: CloudSyncEngine | undefined;
+    try {
+      owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: rootA }, { maxRestarts: 0 });
+      const source = owner;
+      const relay = source.relay.bind({ ...source.workspace, relay: relayConnection });
+      await relay.claim();
+      await source.chats.ensureGeneralChannel({ workspaceId });
+      await relay.push();
+      const adapter = await source.sessions.run(source.workspace, async ({ client, workspace }) =>
+        new VersionedLiveAdapter(client, workspace, { workspaceId }));
+      await adapter.ensureMainVersion({ workspaceId });
+      for (const [filePath, text] of [
+        ["tasks/collection.yaml", "fields:\n  Name:\n    type: text\n"],
+        [path, `${hasId ? "---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n\n" : ""}# Keep this body\n`],
+      ]) {
+        await adapter.writeTextFile({ workspaceId, versionId: "main", path: filePath!, text: text!, publish: true,
+          metadata: { origin: "api" }, author: person });
+      }
+      // Reconciliation inserts the binding but cannot adopt it until desktop
+      // imports the rich-document lineage. Open the editor in that window.
+      await expect.poll(async () => (await adapter.listPendingCollectionAdoptions()).adoptions.map(item => item.filePath),
+        { timeout: REAL_DAEMON_DEADLINE_MS }).toEqual([path]);
+      const errors: string[] = [];
+      capture = createWorkspaceEngineCapture({ ...source.workspace, rustEngineSessions: source.sessions,
+        settleDebounceMs: 60_000, onError: (context, error) => errors.push(`${context}: ${String(error)}`) });
+      const session = await capture.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+      expect((await adapter.listPendingCollectionAdoptions()).adoptions.map(item => item.filePath)).toEqual([path]);
+      if (!hasId) await capture.flush();
+      await session.applyDecidedLocalUpdate(doc => {
+        const scratch = new Y.Doc();
+        try {
+          Y.applyUpdate(scratch, Y.encodeStateAsUpdate(doc));
+          const before = Y.encodeStateVector(scratch);
+          patchFrontmatter(scratch, new Map([["Name", "Manual"]]));
+          return Y.encodeStateAsUpdate(scratch, before);
+        } finally { scratch.destroy(); }
+      }, undefined, { actorOriginId: "local-person", attribution: { actorKind: "human" }, idempotencyKey: "owner-name" });
+      if (!hasId) await session.settleNow();
+      // The editor keeps its lease throughout adoption and capture settlement.
+      await capture.flush();
+      capture.start();
+      await expect.poll(async () => ({ pending: (await adapter.listPendingCollectionAdoptions()).adoptions.length,
+        settled: (await adapter.flushCapture()).settled, errors }), { timeout: REAL_DAEMON_DEADLINE_MS })
+        .toEqual({ pending: 0, settled: true, errors: [] });
+      expect(errors).toEqual([]);
+      await expect.poll(() => adapter.watcherStatus(), { timeout: REAL_DAEMON_DEADLINE_MS })
+        .toMatchObject({ running: true, degraded: false, phase: "ready" });
+      const markdown = await readFile(join(rootA, path), "utf8");
+      expect(markdown).toContain("Name: Manual");
+      expect(markdown).toContain("# Keep this body");
+      expect(session.doc.getMap("frontmatter").get("Name")).toBe("Manual");
+      const recordId = session.doc.getMap("frontmatter").get("id");
+      if (typeof recordId !== "string") throw new Error("Adoption did not install the record id.");
+      const record = await adapter.getCollectionRecord({ collectionPath: "tasks", recordId, historyLimit: 100 });
+      expect(record.history.find(change => change.field === "Name")).toMatchObject({ authorOriginId: "local-person" });
+      const head = await adapter.readTextFile({ workspaceId, versionId: "main", path });
+      const moments = (await capture.listMoments({ limit: 100 })).moments;
+      expect(moments.find(moment => moment.id === head?.latestMomentId)?.authors).toContainEqual(person);
+      expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([]);
+      sync = createRelaySyncEngine({ rootDir: rootA, relay: relayConnection, operations: relay, capture,
+        onChange: () => undefined });
+      sync.queueSync();
+      await sync.start();
+      expect(sync.snapshot()).toMatchObject({ pendingChangeCount: 0, syncFailure: null });
+      await sync.stop();
+      peer = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: relayConnection });
+      await pullAndExpect(peer, rootB, path, markdown);
+      await session.close();
+    } finally {
+      await sync?.stop();
+      await peer?.close();
+      try { await capture?.stop().catch(() => undefined); } finally { await owner?.close(); await relayServer.stop(); }
+    }
+  },
+  60_000,
+);
+
 it.skipIf(engine.missing).each(["new", "legacy", "accepted"] as const)(
   "syncs a %s hand-made Collection record with local human History through the real relay",
   async (queueStyle) => {
@@ -469,6 +803,59 @@ it.skipIf(engine.missing).each(["new", "legacy", "accepted"] as const)(
       expect(afterEcho?.authors).toEqual([person]);
     } finally {
       await peer?.close();
+      await capture?.stop();
+      await owner?.close();
+      await relayServer.stop();
+    }
+  },
+  3 * REAL_DAEMON_DEADLINE_MS,
+);
+
+it.skipIf(engine.missing)(
+  "names the person on their restore in local History after a reopen, and never sends them to the relay",
+  async () => {
+    const workspaceId = "two-daemon-person-restore";
+    const root = await createTestScratch("dohc-person-restore-");
+    const relayRoot = await createTestScratch("dohc-person-restore-relay-");
+    const relayServer = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    const relayConnection = { baseUrl: relayServer.baseUrl, token: "test:" + workspaceId };
+    const person = { kind: "human", humanId: "local-person" } as const;
+    let owner: Awaited<ReturnType<typeof openLiveDaemonWorkspace>> | undefined;
+    let capture: WorkspaceEngineCapture | undefined;
+    const restoreMoment = async (momentId: string) =>
+      (await capture!.listMoments({ limit: 100 })).moments.find(moment => moment.id === momentId);
+    try {
+      owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: root }, { maxRestarts: 0 });
+      capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
+      const relay = owner.relay.bind({ ...owner.workspace, relay: relayConnection });
+      await relay.claim();
+      await owner.chats.ensureGeneralChannel({ workspaceId });
+      await capture.writeAuthoredFile(join(root, "plan.md"), "first\n", person, { createOnly: true });
+      await capture.writeAuthoredFile(join(root, "plan.md"), "second\n", person);
+      const [edit] = await waitForPathMoments(capture, "plan.md", 2);
+      const { restoredMomentId } = await capture.restoreFileToBeforeMoment(edit!.id, person);
+      expect(await readFile(join(root, "plan.md"), "utf8")).toBe("first\n");
+      expect(await restoreMoment(restoredMomentId)).toMatchObject({ metadata: { origin: "restore" }, authors: [person] });
+
+      expect((await relay.push()).pushed).toBeGreaterThan(0);
+      const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
+      try {
+        const sent = relayDb.prepare(
+          "SELECT payload_json FROM sync_relay_log WHERE workspace_id=? AND op_kind='moment.append' AND json_extract(payload_json, '$.momentId')=?",
+        ).get(workspaceId, restoredMomentId) as { payload_json: string } | undefined;
+        expect(JSON.parse(sent!.payload_json)).toMatchObject({ metadata: { origin: "restore" } });
+        expect(JSON.parse(sent!.payload_json).authors).toBeUndefined();
+        expect(sent!.payload_json).not.toContain(person.humanId);
+      } finally {
+        relayDb.close();
+      }
+
+      await capture.stop();
+      await owner.close();
+      owner = await openLiveDaemonWorkspace({ workspaceId, rootPath: root }, { maxRestarts: 0 });
+      capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
+      expect(await restoreMoment(restoredMomentId)).toMatchObject({ metadata: { origin: "restore" }, authors: [person] });
+    } finally {
       await capture?.stop();
       await owner?.close();
       await relayServer.stop();

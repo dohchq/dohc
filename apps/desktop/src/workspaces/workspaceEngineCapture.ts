@@ -650,9 +650,12 @@ export interface WorkspaceEngineCapture {
   // after its disk state is captured, is still that one; otherwise it throws
   // RestoreHeadChangedError and changes nothing. `aloneInFolder` removes a
   // file the moment created only while nothing else is in its folder;
-  // otherwise it throws RestoreFolderInUseError.
+  // otherwise it throws RestoreFolderInUseError. `person` is who restores, as
+  // desktop main read them when the request arrived; the restore moment names
+  // them. A protected file's restore names nobody, as its other moments do.
   restoreFileToBeforeMoment(
     momentId: string,
+    person: Extract<MomentWriteAuthor, { kind: "human" }>,
     options?: { expectedHeadMomentId?: string; aloneInFolder?: true },
   ): Promise<WorkspaceEngineRestoreResult>;
   // `author` names an agent's removal during a run an automation started, so
@@ -2121,7 +2124,7 @@ export function createWorkspaceEngineCapture(
       },
       token: number,
       generation: number,
-    ) => void | Promise<void>;
+    ) => boolean | void | Promise<boolean | void>;
     onSettleStart: (token: number, generation: number) => void;
     onSettleError: (error: unknown, token: number, generation: number) => void;
     // The first generation's answers to "does the entered version have a
@@ -3177,6 +3180,12 @@ export function createWorkspaceEngineCapture(
       applyDecidedLocalUpdate(decide, onArmed, applyOptions) {
         return journalLocalUpdate(decide, onArmed, applyOptions);
       },
+      adoptCollectionRecord() {
+        return append(() => executeWithReconnect(async session => {
+          if (!session.adoptCollectionRecord) return "declined";
+          return session.adoptCollectionRecord();
+        }));
+      },
       settleNow(settleOptions) {
         return append(async () => {
           // The delete seam's own vacate settles on this capture chain before
@@ -3721,6 +3730,8 @@ export function createWorkspaceEngineCapture(
     const workspace = { workspaceId, rootPath, attachmentId };
     let cursor: CollectionPendingAdoptionCursor | null = null;
     let found = false;
+    let deferred = false;
+    let reconcileReady = false;
     const pendingAdoptionKeys = new Set<string>();
     do {
       const pending: CollectionPendingAdoptionsPage | undefined =
@@ -3736,6 +3747,29 @@ export function createWorkspaceEngineCapture(
         pendingAdoptionKeys.add(adoptionKey);
         let retained = pendingCollectionAdoptionProviders.get(adoptionKey);
         try {
+          const live = liveYDocSessions.get(adoption.filePath);
+          if (live !== undefined && !live.orphaned) {
+            if (
+              live.versionId !== adoption.versionId ||
+              live.publicSession?.objectId !== adoption.objectId ||
+              live.publicSession.contentKind !== "richdoc"
+            ) {
+              deferred = true;
+              continue;
+            }
+            if (live.closing || live.status === "failing-close" || live.publicSession === null) {
+              deferred = true;
+              continue;
+            }
+            const borrowed = borrowRecordSession(live);
+            try {
+              const status = await live.session.adoptCollectionRecord?.();
+              if (status !== "settled") deferred = true;
+            } finally {
+              await borrowed.close();
+            }
+            continue;
+          }
           await options.rustEngineSessions.run(
             workspace,
             async (binding) => {
@@ -3779,7 +3813,12 @@ export function createWorkspaceEngineCapture(
             { retryTransportErrors: true },
           );
           pendingCollectionAdoptionProviders.delete(adoptionKey);
+          reconcileReady = true;
         } catch (error) {
+          if (error instanceof YdocOwnerDraftPendingError) {
+            deferred = true;
+            continue;
+          }
           // Every unconfirmed eviction — busy, cancelled while queued, or any
           // other failure — leaves the daemon session live and its lease
           // held. Deleting the only handle here would leak that lease:
@@ -3801,8 +3840,14 @@ export function createWorkspaceEngineCapture(
       cursor = pending.nextCursor;
     } while (cursor !== null);
     await releaseRetainedCollectionAdoptionProviders(pendingAdoptionKeys);
-    if (!found || pendingCollectionAdoptionProviders.size > 0) return;
-    await engine.reconcileCapture?.();
+    if (!found || !reconcileReady) return;
+    try {
+      await engine.reconcileCapture?.();
+    } catch (error) {
+      if ((deferred || pendingCollectionAdoptionProviders.size > 0) &&
+          error instanceof DaemonRefusalError && error.wireCode === "COLLECTION_RECONCILIATION_LEASE_HELD") return;
+      throw error;
+    }
   }
 
   async function releaseRetainedCollectionAdoptionProviders(
@@ -4059,7 +4104,7 @@ export function createWorkspaceEngineCapture(
               ),
             );
             reportSaveState("error", takeSaveToken(token, generation), "outcome");
-            return;
+            return false;
           }
           // The engine just wrote this path's settled content to disk — the
           // proof a stand-down marker denies. This fires for every
@@ -4148,7 +4193,7 @@ export function createWorkspaceEngineCapture(
               ),
             );
             reportSaveState("error", takeSaveToken(token, generation), "outcome");
-            return;
+            return false;
           }
           if (digest.kind === "changed" || digest.sha256 !== result.sha256) {
             // Gone, too big to be this document, or simply different: in none of
@@ -4157,9 +4202,10 @@ export function createWorkspaceEngineCapture(
             // same overwrite in reverse. The text stays in the CRDT and in
             // History either way.
             reportSaveState("changed-on-disk", takeSaveToken(token, generation), "outcome");
-            return;
+            return false;
           }
           reportSaveState("saved", takeSaveToken(token, generation), "outcome");
+          return true;
         };
         // Claim exactly what this settle can carry. The daemon serves one
         // session's commands in order, so an update already sent is in the
@@ -5299,7 +5345,7 @@ export function createWorkspaceEngineCapture(
             ...applyOptions, idempotencyKey: applyOptions.idempotencyKey ?? createId(),
           }),
           settleNow: opts => publicSession.settleNow(opts),
-          close: () => publicSession.close(),
+          close: opts => publicSession.close(opts),
         } satisfies RecordEditSession;
         return publicSession;
       }
@@ -6210,7 +6256,9 @@ export function createWorkspaceEngineCapture(
       }
     },
 
-    restoreFileToBeforeMoment(momentId, options = {}) {
+    restoreFileToBeforeMoment(momentId, person, options = {}) {
+      // The person as submitted, before the restore waits for its turn.
+      const author = structuredClone(person);
       return enqueueResult("restore file", async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
@@ -6401,6 +6449,7 @@ export function createWorkspaceEngineCapture(
                       path,
                       bytes,
                       metadata,
+                      author,
                     });
                   })()
                 : await engine.writeTextFile({
@@ -6411,6 +6460,7 @@ export function createWorkspaceEngineCapture(
                     publish: true,
                     restoreBeforeMomentId: momentId,
                     metadata,
+                    author,
                   });
             requirePublishedWrite(path, result);
             return {
@@ -6434,6 +6484,7 @@ export function createWorkspaceEngineCapture(
             versionId: activeVersionId,
             path,
             metadata,
+            author,
           });
           await materialize([{ kind: "delete", path }], policy);
           return {
@@ -7167,11 +7218,13 @@ export function createWorkspaceEngineCapture(
       });
     },
 
-    async flush() {
-      await chain;
-      const engine = await engineStore();
-      await engine.flushCapture?.();
-      await drainPendingCollectionAdoptions(engine);
+    flush() {
+      return enqueueResult("flush capture", async () => {
+        const engine = await engineStore();
+        await drainPendingCollectionAdoptions(engine);
+        await engine.flushCapture?.();
+        await drainPendingCollectionAdoptions(engine);
+      });
     },
 
     async stop() {
@@ -7187,8 +7240,8 @@ export function createWorkspaceEngineCapture(
       try {
         if (store) {
           try {
-            await store.flushCapture?.();
             await drainPendingCollectionAdoptions(store);
+            await store.flushCapture?.();
           } catch (error) {
             // A refused store was never opened, so nothing is pending in
             // it. Failing the stop here would block the move-aside rebuild,

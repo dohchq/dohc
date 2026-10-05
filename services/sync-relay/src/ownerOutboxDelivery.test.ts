@@ -51,12 +51,13 @@ function fixture(maxEntriesPerDrain = 3, maxBytesPerDrain = 10_000, agentDeclara
   })};
   const storage = {
     getShare: () => ({workspaceId: "workspace",shareId: "share",granterUserId: "owner"}),
-    resolveCurrentLiveDocumentBinding: () => ({kind: "current",host,binding,authority: {}}),
+    resolveCurrentLiveDocumentBinding: () => ({kind: "current",host,binding,authority: {principalKind: "owner", principalId: "owner"}}),
     readLiveUpdateJournalCut: () => ({kind: "cut",cut: {checkpoint: {bytes: new Uint8Array([0,0])},suffix: []}}),
     commitLiveUpdateJournal: vi.fn((input: {metadata: {deliveryId: string; updateDigest: string}}) => ({result: {kind: "accepted",receipt: {deliveryId: input.metadata.deliveryId,updateDigest: input.metadata.updateDigest,journalCursor: receipts.length + 1,acceptingHostEpoch: 1}}})),
   };
   const validate = vi.fn<OwnerOutboxAdmission["validate"]>(() => ({} as never));
-  return {requests,receipts,storage,state,applyThrough,validate,applied,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission: {shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,validate},workspace: "handle",host: host as never,registrationId: 1,binding,
+  const admission: OwnerOutboxAdmission = {shares: new Map([["workspace","share"]]),maxEntriesPerDrain,maxBytesPerDrain,validate};
+  return {requests,receipts,storage,state,applyThrough,validate,applied,admission,run: () => drainOwnerOutbox({client: client as never,storage: storage as never,admission,workspace: "handle",host: host as never,registrationId: 1,binding,
     adoption: {adoptionId: "adoption",sequence: 7,applied},nextRequestId: () => ++requestId,deadlineMs: 30_000,assertCurrent() {},applyThrough})};
 }
 
@@ -110,10 +111,25 @@ it("submits the agent each entry declared and none for an entry that declared no
   const run = fixture(2, 10_000, agentDeclaration);
   expect(await run.run()).toEqual({admittedEntries: 2, hasMore: true});
   const [first, second] = run.storage.commitLiveUpdateJournal.mock.calls.map(([input]) => (input as {metadata: Record<string, unknown>}).metadata);
-  expect(first).toMatchObject({deliveryId: "delivery-1",agentDeclaration});
+  expect(first).toMatchObject({deliveryId: "delivery-1",authorContext: {kind: "account",accountId: "owner",agent: agentDeclaration}});
+  expect(first).not.toHaveProperty("agentDeclaration");
   expect(second).toMatchObject({deliveryId: "delivery-3"});
   expect(second).not.toHaveProperty("agentDeclaration");
+  expect(second).not.toHaveProperty("authorContext");
   await expect(fixture(1, 10_000, {agentId: "",onBehalfOf: null,depth: 0}).run()).rejects.toThrow();
+});
+
+it("uses authenticated account names and refuses another account's metadata", async () => {
+  const f = fixture(1, 10_000, {agentId: "trip-agent", onBehalfOf: null, depth: 0});
+  f.admission.trustedAccount = vi.fn(async accountId => ({accountId, name: "Owner name"}));
+  await f.run();
+  expect(f.admission.trustedAccount).toHaveBeenCalledWith("owner");
+  expect(f.storage.commitLiveUpdateJournal.mock.calls[0]![0]).toMatchObject({trustedAccount: {accountId: "owner", name: "Owner name"},
+    metadata: {authorContext: {kind: "account", accountId: "owner", agent: {agentId: "trip-agent", depth: 0}}}});
+  const changed = fixture(1, 10_000, {agentId: "trip-agent", onBehalfOf: null, depth: 0});
+  changed.admission.trustedAccount = () => ({accountId: "another", name: "Another"});
+  await expect(changed.run()).rejects.toThrow("Owner account changed.");
+  expect(changed.storage.commitLiveUpdateJournal).not.toHaveBeenCalled();
 });
 
 it("retains configured entry and byte limits without acknowledging unread updates", async () => {

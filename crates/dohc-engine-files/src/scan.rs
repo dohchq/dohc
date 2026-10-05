@@ -4,7 +4,8 @@
 //!
 //! The walk is an explicit bounded stack (no recursion — a deep tree cannot
 //! blow the call stack) and never follows a symlink: a symlinked directory is
-//! not descended and a symlink leaf is untracked (`lstat`, never `stat`). A
+//! not descended and a symlink leaf is excluded from capture (`lstat`,
+//! never `stat`). A
 //! file that vanishes
 //! mid-walk is a benign race and is skipped. Other per-entry readability
 //! failures are bounded and reported in [`ScanListing::failed`] while the walk
@@ -455,21 +456,23 @@ impl Scanner {
                         }
                     },
                 };
-                // Never follow a symlink: leaf untracked, symlinked dir not
+                // Never follow a symlink: leaf observed only, symlinked dir not
                 // descended.
-                if file_type.is_symlink() {
-                    continue;
-                }
                 if file_type.is_dir() {
                     if !floor::segment_is_ignored(&floor::normalize_segment(&name)) {
                         stack.push(path);
                     }
                     continue;
                 }
-                if !file_type.is_file() {
+                if !file_type.is_file() && !file_type.is_symlink() {
                     continue;
                 }
-                if floor::is_excluded_file(&rel) {
+                let normalized = floor::normalize_segment(&name);
+                if file_type.is_symlink()
+                    || floor::segment_is_ignored(&normalized)
+                    || floor::is_database_sidecar_normalized(&normalized)
+                    || normalized.ends_with(".conflict")
+                {
                     continue;
                 }
                 let metadata = match self.injected(&rel, ScanIoOperation::Metadata) {

@@ -24,6 +24,7 @@ import { expect, it } from "vitest";
 import * as Y from "yjs";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLiveMarkdownJournalValidator } from "@dohc/ydoc-projection/live-journal-validation";
+import { createLiveValidationExecutor } from "../../sync-relay/src/liveValidation.js";
 import { createLiveMarkdownRegistrationValidator } from "../../../packages/ydoc-projection/src/liveDocumentValidation.js";
 import { createEngineClient } from "../../../packages/workspace-engine-client/src/daemon/engineClient.js";
 import { serveFetchHandler } from "@dohc/service-http";
@@ -56,7 +57,7 @@ interface PublicProofAdmission {
   gateway: Parameters<typeof createLiveGateway>[0]["limits"];
   requests: NonNullable<Parameters<typeof createShareWebApplication>[0]["linkLive"]>["requests"];
   editor: NonNullable<Parameters<typeof createShareWebApplication>[0]["linkLive"]>["editor"];
-  validation: Parameters<typeof createLiveMarkdownJournalValidator>[0];
+  validation: Parameters<ReturnType<typeof createLiveValidationExecutor>["validator"]>[0];
   liveTickets: {retainedTicketsPerPrincipalGrant: number; expiredTicketCleanupBatchSize: number};
   maxRegistrations: number;
   maxChangeListeners: number;
@@ -119,7 +120,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
   const serviceConfig = join(root, "service.json");
   writeFileSync(serviceConfig, JSON.stringify({version: 1, ...capacity.native, engineExecutable: executable,
     hostId: "service", instanceId: "instance", workspaces: [{root: workspace, workspaceId: "workspace", maxRegistrations: capacity.maxRegistrations}]}));
-  const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(capacity.maxChangeListeners), validate = createLiveMarkdownJournalValidator(validationPolicy);
+  const ownerDoc = markdownToYDoc("Hello"), sharedChanges = createNamedFrameChanges(capacity.maxChangeListeners);
   let captureCount = 0;
   const frameChanges = { ...sharedChanges, subscribe(...args: Parameters<typeof sharedChanges.subscribe>) {
     const remove = sharedChanges.subscribe(...args);
@@ -141,6 +142,10 @@ it("exercises public Edit through owner creation, exchange and native applicatio
   let proofPassed = false;
   const protectedSecrets = new Set<string>(), publicBodies: Promise<{body: string} | {error: unknown}>[] = [];
   try {
+    const validationExecutor = createLiveValidationExecutor();
+    closes.push(() => validationExecutor.close());
+    const validate = validationExecutor.validator(validationPolicy);
+    const validateProjection = createLiveMarkdownJournalValidator(validationPolicy);
     const authHttp = serveFetchHandler({ handler: request => auth.handler(request), maxBodyBytes: () => 8192,
       oversized: () => new Response(null, { status: 404 }), failure: () => new Response(null, { status: 500 }) });
     authHttp.listen(0, "127.0.0.1"); await once(authHttp, "listening");
@@ -528,7 +533,7 @@ it("exercises public Edit through owner creation, exchange and native applicatio
         results.restoreViewPublication = {kind: "fixture-relay-publication-of-native-file", objectId: document.objectId,
           path, blobSha256: digest, byteLength: bytes.length, automaticReplicationProven: false};
       },
-      listeners: () => frameChanges.captureCount(), allListeners: () => sharedChanges.listenerCount(), ownerRequest, openLink, wire, validate, assertTicketCapacity,
+      listeners: () => frameChanges.captureCount(), allListeners: () => sharedChanges.listenerCount(), ownerRequest, openLink, wire, validate: validateProjection, assertTicketCapacity,
       interruptedBounds: {maxSubmissionBytes: capacity.bounds.maxSubmissionBytes, maxAdmissionBytes: capacity.bounds.maxAdmissionBytes, maxUpdateBytes: frames.receive.maxUpdateBytes},
       register: async (id, checkpoint, markdown) => {
         const path = `docs/${id}.md`, document = {workspaceId: "workspace", mainVersionId: mainVersionId!, objectId: id, lineageClaimId: hash(checkpoint)};

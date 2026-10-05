@@ -19,6 +19,9 @@ use serde_json::Value;
 
 use crate::chats::{base32_lowercase_no_padding, is_js_trim_ws};
 
+mod projection;
+pub use projection::{CollectionProjection, project_collections_in_tx};
+
 pub const COLLECTION_SCHEMA_FILENAME: &str = "collection.yaml";
 pub const DEFAULT_COLLECTION_QUERY_LIMIT: usize = 100;
 pub const MAX_COLLECTION_QUERY_LIMIT: usize = 500;
@@ -2698,7 +2701,8 @@ fn bound_record(
     conn.query_row(
         "SELECT record_id,collection_path,index_initialized FROM collection_records \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
-           AND record_id IS NOT NULL",
+           AND record_id IS NOT NULL \
+           AND NOT EXISTS(SELECT 1 FROM share_view_cursors WHERE workspace_id=?1)",
         params![workspace_id, version_id, object_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )
@@ -3181,6 +3185,37 @@ fn history_value(value: Option<&Value>) -> Result<Option<String>, crate::DomainE
     value.map(json_text).transpose()
 }
 
+/// The frontmatter fields this record's current index already contains.
+/// Accepted live updates can advance it ahead of the file snapshot.
+pub fn indexed_collection_record_frontmatter_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<Option<Value>, crate::DomainError> {
+    let Some((record_id, _, _)) = bound_record(conn, workspace_id, version_id, object_id)? else {
+        return Ok(None);
+    };
+    indexed_record_frontmatter(conn, workspace_id, version_id, &record_id).map(Some)
+}
+
+fn indexed_record_frontmatter(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    record_id: &str,
+) -> Result<Value, crate::DomainError> {
+    let mut fields = serde_json::Map::new();
+    for (field_name, value_json) in
+        indexed_record_fields(conn, workspace_id, version_id, record_id)?
+    {
+        let value = serde_json::from_str(&value_json)
+            .map_err(|error| crate::DomainError::Storage(StorageError::corrupt_public(error)))?;
+        fields.insert(field_name, value);
+    }
+    Ok(Value::Object(fields))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn insert_field_history(
     conn: &Connection,
@@ -3434,14 +3469,7 @@ pub fn index_collection_record_text_in_tx(
     let Some((after, provenance)) = markdown_frontmatter_json_with_provenance(text) else {
         return Ok(None);
     };
-    let mut before = serde_json::Map::new();
-    for (field_name, value_json) in
-        indexed_record_fields(conn, workspace_id, version_id, &record_id)?
-    {
-        let value = serde_json::from_str(&value_json)
-            .map_err(|error| crate::DomainError::Storage(StorageError::corrupt_public(error)))?;
-        before.insert(field_name, value);
-    }
+    let before = indexed_record_frontmatter(conn, workspace_id, version_id, &record_id)?;
     let after_fields = after.as_object().map(|values| {
         values
             .iter()
@@ -3449,7 +3477,7 @@ pub fn index_collection_record_text_in_tx(
             .map(|(field_name, value)| (field_name.clone(), value.clone()))
             .collect::<serde_json::Map<_, _>>()
     });
-    if collection_mappings_equal(Some(&before), after_fields.as_ref()) {
+    if collection_mappings_equal(before.as_object(), after_fields.as_ref()) {
         // Equal values can still validate differently (`estimate: .nan`
         // against `estimate: ".nan"`). Reindex, without a change, when the
         // file or the index flags a value.
@@ -3469,7 +3497,6 @@ pub fn index_collection_record_text_in_tx(
             return Ok(None);
         }
     }
-    let before = Value::Object(before);
     index_collection_frontmatter_apply_in_tx(
         conn,
         workspace_id,

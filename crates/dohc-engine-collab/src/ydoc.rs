@@ -2335,6 +2335,21 @@ fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) 
             index += 1;
             continue;
         }
+        if reading == MarkdownReading::Source && block_start(line, true, true).is_none() {
+            if let Some(underline) = lines
+                .get(index + 1)
+                .map(|line| line.trim_end_matches([' ', '\t']))
+            {
+                if !underline.is_empty() && underline.bytes().all(|byte| byte == b'=') {
+                    blocks.push(MdBlock::Heading {
+                        level: 1,
+                        text: line.to_owned(),
+                    });
+                    index += 2;
+                    continue;
+                }
+            }
+        }
         if line == ">" || line.starts_with("> ") {
             let mut inner = Vec::new();
             let start = index;
@@ -7243,6 +7258,7 @@ mod projection_tests {
     fn a_source_whose_text_reads_as_plain_text_is_preserved() {
         for source in [
             "Tom & Jerry, 5 > 3 and 2 < 4\n\n* one\n* two\n",
+            "A setext heading\n================\n\n* first\n* second\n",
             // The projector escapes these, and the importer reads them as
             // the same text.
             "[WIP] fix\n",

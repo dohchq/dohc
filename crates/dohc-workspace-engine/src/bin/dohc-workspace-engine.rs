@@ -18,10 +18,10 @@ use dohc_engine_protocol::{
     },
 };
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
+#[cfg(test)]
+use dohc_workspace_engine::EngineEventNotice;
 use dohc_workspace_engine::live_application_ingress::LiveApplicationIngress;
-use dohc_workspace_engine::{
-    ConfiguredLiveHostConfig, EngineEventNotice, EngineService, LiveApplicationInput,
-};
+use dohc_workspace_engine::{ConfiguredLiveHostConfig, EngineService, LiveApplicationInput};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
@@ -118,7 +118,7 @@ async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
         tokio::io::stdin(),
         tokio::io::stdout(),
         supervisor,
-        service.events().subscribe(),
+        service.events().subscribe_with_files(),
         || WorkspaceSupervisor::global().close_all(),
         live,
     )
@@ -151,7 +151,7 @@ where
         input,
         output,
         supervisor,
-        events_rx,
+        events_rx.into(),
         close_workspaces,
         None,
     )
@@ -164,7 +164,7 @@ async fn run_transport_with_live<R, W, S, C>(
     mut input: R,
     output: W,
     supervisor: Arc<Supervisor<S>>,
-    mut events_rx: tokio::sync::mpsc::Receiver<EngineEventNotice>,
+    mut events_rx: dohc_workspace_engine::EngineEventReceiver,
     close_workspaces: C,
     live: Option<(ConnectionOwner, LiveApplicationIngress)>,
 ) -> Result<(), io::Error>
@@ -1383,7 +1383,7 @@ mod tests {
                 input,
                 output,
                 supervisor,
-                no_events(),
+                no_events().into(),
                 || Ok(()),
                 Some((owner, ingress)),
             )

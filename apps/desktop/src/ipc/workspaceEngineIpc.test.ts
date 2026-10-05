@@ -5,7 +5,9 @@ import type { CollectionGetRecordResult } from "@dohc/workspace-contracts";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
-import type { RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
+import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
+import { GetCollectionRecordHistoryResult } from "./bridgeContract";
+import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
 import { RendererWorkspaceSessionOwner } from "../window/rendererWorkspaceSessionOwner";
@@ -172,6 +174,9 @@ async function harness(sharedStore?: SharedHistoryStore) {
   });
   const registrations = createWorkspaceEngineIpc({
     localPersonId: () => "person-local",
+    localPersonName: () => "Ice",
+    // Read from main's own account, as the sign-in stands when the request arrives.
+    localPerson: async () => ({ kind: "human", humanId: session.account ?? "install-local" }),
     registerHandler: (channel, handler) => { handlers.set(channel, handler); },
     assertTrustedSender: (event: { sender: Sender }) => { if (event.sender.id === -1) throw new Error("untrusted"); },
     withRendererWorkspaceOperation, receivedShareEngine,
@@ -183,7 +188,8 @@ async function harness(sharedStore?: SharedHistoryStore) {
     automationAuthor: (_workspaceId, automationId) => ({ name: automationId, collection: "Tasks" }),
     automationRunOnThisComputer, serverRuns, signedInAccount: () => session.account,
     notifyRenderer: notify,
-    namedAuthorLabel: () => "Someone you shared with",
+    namedAuthorLabels: () => () => "Someone you shared with",
+    automationPersonName: (_workspaceId, userId) => userId === "person-local" ? null : userId,
     retryOwnerLiveDelivery, retryCloudSync,
     requireWorkspace, assertWritableWorkspace: writable, syncStatusWithOwnedProjection: syncProjection,
     activity: { getStatus, hasAgentRun }, workspaceAuthorities: authority, canonicalWorkspaceFor,
@@ -311,11 +317,39 @@ describe("workspace engine IPC registrations", () => {
     }
   });
 
+  it("keeps the host and healthy mount Collections when another mount cannot open", async () => {
+    const h = await harness();
+    h.workspace.shareMounts = ["broken", "healthy", "other"].map(label => ({
+      shareId: label, label, granterEmail: null, relayUrl: "http://127.0.0.1:1234",
+      grantedSelector: { paths: ["tasks"], versionId: null, access: "view" as const },
+    }));
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let calls = 0;
+    h.adapter.listCollections.mockImplementation(async () => {
+      const call = calls++;
+      if (call === 1) throw new Error("mount store refused");
+      if (call === 2) await release.promise;
+      if (call === 3) entered.resolve();
+      return { collections: [{ path: "tasks", objectId: "schema", status: "valid", reasons: [] }] };
+    });
+    const listed = h.invoke(CHANNELS.listCollections);
+    await entered.promise;
+    release.resolve();
+    await expect(listed).resolves.toEqual({ collections: [
+      { path: "tasks", objectId: "schema", status: "valid", reasons: [] },
+      { path: "shared-with-me/healthy/tasks", objectId: "schema", status: "valid", reasons: [] },
+      { path: "shared-with-me/other/tasks", objectId: "schema", status: "valid", reasons: [] },
+    ] });
+    h.adapter.listCollections.mockRejectedValue(new Error("host store refused"));
+    await expect(h.invoke(CHANNELS.listCollections)).rejects.toThrow("host store refused");
+  });
+
   it("routes shared views through the received-share owner and strips only workspaceId from queries", async () => {
     const h = await harness();
     h.workspace.shareView = {
       shareId: "share", granterEmail: null, genericChatWritable: false,
-      grantedSelector: { paths: [], versionId: null, access: "view" },
+      grantedSelector: { paths: ["data"], versionId: null, access: "view" },
     };
     const params = {
       collectionPath: "data", filter: { field: "name", operator: "equals", value: "Ada" },
@@ -327,6 +361,32 @@ describe("workspace engine IPC registrations", () => {
     expect(h.routed).toEqual([{
       workspaceId: "workspace", rootPath: "C:/canonical", attachmentId: h.physical.attachmentId, shareMount: true,
     }]);
+  });
+
+  it("lists and reads an ended Edit share's retained schema and records within its saved selector", async () => {
+    const h = await harness();
+    h.workspace.shareView = {
+      shareId: "share", granterEmail: null, genericChatWritable: false, ended: true,
+      grantedSelector: { paths: ["data"], versionId: null, access: "edit" },
+    };
+    const collection = { path: "data", objectId: "schema", status: "valid" as const, reasons: [] };
+    h.adapter.listCollections.mockResolvedValue({ collections: [collection,
+      { ...collection, path: "private" }] });
+    h.adapter.getCollection.mockResolvedValue({ ...collection,
+      schema: { name: "Retained", description: null, fields: [], views: [] }, recordCount: 1 });
+    const record = { id: "retained", path: "data/a.md", conflicted: false, values: [] };
+    h.adapter.queryCollectionRecords.mockResolvedValue({ collection,
+      records: [record, { ...record, id: "outside", path: "private/a.md" }], groups: null, nextCursor: null });
+    await expect(h.invoke(CHANNELS.listCollections)).resolves.toEqual({ collections: [collection] });
+    await expect(h.invoke(CHANNELS.getCollection, { workspaceId: "workspace", collectionPath: "data" }))
+      .resolves.toMatchObject({ schema: { name: "Retained" }, recordCount: 1 });
+    await expect(h.invoke(CHANNELS.queryCollectionRecords, { workspaceId: "workspace", collectionPath: "data" }))
+      .resolves.toMatchObject({ records: [record] });
+    for (const channel of [CHANNELS.getCollection, CHANNELS.queryCollectionRecords]) {
+      await expect(h.invoke(channel, { workspaceId: "workspace", collectionPath: "private" })).rejects.toThrow("outside");
+    }
+    expect(h.routed).toEqual(Array.from({ length: 3 }, () => expect.objectContaining({ shareMount: true })));
+    expect(h.requireEngineCapture).not.toHaveBeenCalled();
   });
 
   it("parses collection results and preserves get arguments", async () => {
@@ -361,6 +421,7 @@ describe("workspace engine IPC registrations", () => {
         entry(5, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "person-local", depth: 0 }),
         entry(4, { authorOriginId: "codex", actorKind: "agent", onBehalfOf: "user-ana", depth: 0 }),
         entry(3, { actorKind: "human" }),
+        entry(2, { ...automation, onBehalfOf: "user-ana" }),
       ],
       nextBeforeHistoryId: 3,
     });
@@ -379,8 +440,10 @@ describe("workspace engine IPC registrations", () => {
         // Another person's agent, as the file timeline names it.
         { historyId: 4, author: { kind: "agent", name: "Agent" } },
         { historyId: 3, author: null },
+        { historyId: 2, author: { kind: "automation", name: stamp, person: "user-ana", run: null } },
       ],
     });
+    expect(GetCollectionRecordHistoryResult.parse(page).entries[0]?.author).not.toHaveProperty("person");
     expect(h.automationRunOnThisComputer.mock.calls).toEqual([
       ["workspace", stamp, "claim-here"],
       ["workspace", stamp, "claim-gone"],
@@ -645,6 +708,25 @@ describe("workspace engine IPC registrations", () => {
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "detail" })).resolves.toMatchObject({
       moment: { agentAuthorName: "ice@example.com", beforeText: null, afterText: "body" },
     });
+  });
+
+  it("restores as the person signed in here, never one the renderer names, and History names them", async () => {
+    const h = await harness();
+    await h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "moment",
+      author: { kind: "human", humanId: "mallory" } });
+    expect(h.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("moment", { kind: "human", humanId: "person-local" });
+
+    const restore = (id: string, humanId: string) => ({
+      id, versionId: "main", path: "notes/a.md", recordedAtMs: 1, operation: "write" as const,
+      metadata: { origin: "restore" as const }, protected: false as const, momentOrder: 0, authors: [{ kind: "human" as const, humanId }],
+    });
+    h.capture.listMoments.mockResolvedValue({
+      moments: [restore("mine", "person-local"), restore("earlier-account", "person-before")],
+      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+    });
+    const listed = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] };
+    expect(listed.moments.map((moment) => moment.personAuthorName)).toEqual(["Ice", undefined]);
+    expect(listed.moments.map(engineMomentSourceLabel)).toEqual(["Ice", "Restore"]);
   });
 
   it("notifies after a restore and before parsing its result", async () => {

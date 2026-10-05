@@ -1,13 +1,13 @@
 import {createHash} from "node:crypto";
 import {isDeepStrictEqual} from "node:util";
 import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
-import {parseAdmittedLiveUpdateMetadata, parseAgentDeclaration, parseLiveUpdateDigest, parseLiveUpdateIdentifier,
+import {parseCanonicalAdmittedLiveUpdateMetadata, parseAgentDeclaration, parseLiveUpdateDigest, parseLiveUpdateIdentifier,
   parseLiveUpdateReceipt, parseLiveUpdateStructRange} from "@dohc/live-session-contract/live-update-admission";
 import {parseNativeRestoreFenceReceipt} from "./liveRestoreFence";
 import {configRecord} from "./deviceLiveHostConfig";
 import {authorityInteger} from "./storage/liveDocumentAuthority";
 import type {LiveRestoreProposalBytes} from "@dohc/ydoc-projection/restore-proof";
-import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHistoryDigest} from "./liveAcceptedHistory";
+import {canonicalVersionedAcceptedMetadata, initialAcceptedHistoryDigest, nextVersionedAcceptedHistoryDigest} from "./liveAcceptedHistory";
 
 export type RestoreProofBudget = {maxBytes: number; maxEvents: number};
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -81,23 +81,30 @@ function adoptedSource(row: Record<string, unknown>, binding: ReturnType<typeof 
 }
 
 function historyProof(value: unknown, namespace: string, maximum: number) {
+  // This is untrusted proof syntax. Storage derives the checkpoint version from its retained row and compares the complete proof.
   const row = configRecord(value, ["checkpoint", "suffix", "eventCount", "terminal", "evidenceDigest"]);
-  const c = configRecord(row.checkpoint, ["eventCount", "terminal", "binding", "stateDigest", "evidenceDigest"], ["restoreOperationId"]);
+  const c = configRecord(row.checkpoint, ["eventCount", "terminal", "binding", "stateDigest", "evidenceDigest"], ["restoreOperationId", "canonicalVersion"]);
+  if (c.canonicalVersion !== undefined) require(c.canonicalVersion === 2);
   const checkpoint = {eventCount: integer(c.eventCount), terminal: c.terminal === null ? null : parseLiveUpdateReceipt(c.terminal),
     binding: parseLiveObjectBinding(c.binding), stateDigest: parseLiveUpdateDigest(c.stateDigest), evidenceDigest: parseLiveUpdateDigest(c.evidenceDigest),
-    ...(c.restoreOperationId === undefined ? {} : {restoreOperationId: parseLiveUpdateIdentifier(c.restoreOperationId)})};
+    ...(c.restoreOperationId === undefined ? {} : {restoreOperationId: parseLiveUpdateIdentifier(c.restoreOperationId)}),
+    ...(c.canonicalVersion === undefined ? {} : {canonicalVersion: 2 as const})};
   require((checkpoint.eventCount === 0) === (checkpoint.terminal === null));
   if (checkpoint.restoreOperationId !== undefined) require(checkpoint.eventCount > 0);
+  if (checkpoint.canonicalVersion !== undefined) require(checkpoint.eventCount > 0);
   if (checkpoint.eventCount === 0) require(checkpoint.evidenceDigest === initialAcceptedHistoryDigest(namespace, checkpoint.binding)
     && checkpoint.stateDigest === checkpoint.binding.lineageClaimId);
-  const suffix = array(row.suffix, Math.min(maximum, 4094), value => canonicalAcceptedMetadata(parseAdmittedLiveUpdateMetadata(value)));
+  const suffix = array(row.suffix, Math.min(maximum, 4094), value => canonicalVersionedAcceptedMetadata(parseCanonicalAdmittedLiveUpdateMetadata(value)));
   let count = checkpoint.eventCount, evidence = checkpoint.evidenceDigest, terminal = checkpoint.terminal;
+  let canonicalVersion = checkpoint.canonicalVersion ?? 1;
   for (const event of suffix) {
     const {binding, receipt} = event.accepted;
     require(binding.workspaceId === checkpoint.binding.workspaceId && binding.mainVersionId === checkpoint.binding.mainVersionId &&
       binding.objectId === checkpoint.binding.objectId && binding.lineageClaimId === checkpoint.binding.lineageClaimId);
     require(count < Number.MAX_SAFE_INTEGER && receipt.journalCursor > (terminal?.journalCursor ?? 0));
-    evidence = nextAcceptedHistoryDigest(evidence, ++count, event); terminal = receipt;
+    require(canonicalVersion !== 2 || event.canonicalVersion === 2);
+    canonicalVersion = event.canonicalVersion ?? 1;
+    evidence = nextVersionedAcceptedHistoryDigest(evidence, ++count, event); terminal = receipt;
   }
   require(integer(row.eventCount) === count && parseLiveUpdateDigest(row.evidenceDigest) === evidence);
   require(isDeepStrictEqual(row.terminal === null ? null : parseLiveUpdateReceipt(row.terminal), terminal));

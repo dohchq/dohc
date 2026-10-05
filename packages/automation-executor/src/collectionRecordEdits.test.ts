@@ -15,7 +15,7 @@ import {
   type CollectionRecordEditContext,
   type RecordEditSession,
 } from "./collectionRecordEdits";
-import { DaemonRefusalError } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, YdocOwnerDraftPendingError } from "@dohc/workspace-engine-client";
 import { derivedRecordId } from "./recordIds";
 import { createTestScratch } from "./testScratch";
 
@@ -33,6 +33,77 @@ const AUTOMATION = {
   depth: 1,
   run: { claimId: "claim-7", automationName: "Stamp the finish date" },
 } as const;
+
+it.each(["write-refused", "conflict-stale-target", "Saved locally. The shared file update is pending."])("does not accept other settlement errors as a completed automation effect (%s)", async message => {
+  const root = await createTestScratch("dohc-automation-settle-refusal-");
+  const error = new Error(message);
+  error.name = "YdocOwnerDraftPendingError";
+  const {session} = fakeSession({settleError: error});
+  await expect(collectionRecordWrites(contextFor(root, session)).setFields({recordPath: "tasks/one.md", fields: {status: "done"}, author: AUTOMATION})).rejects.toBe(error);
+});
+
+it("records each field's append key when automation settlement is pending, including a resumed write", async () => {
+  const root = await createTestScratch("dohc-automation-draft-identity-");
+  const draft = {outboxId: "outbox", nativeHeadSequence: 3, relayDatabaseNamespace: "relay", revision: 1,
+    acceptedCursor: 2, nativeUnsettled: false, pendingBytes: 10, state: "active" as const,
+    binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "tasks/one.md", selectorPaths: ["tasks"], restoreFenceGeneration: 4}};
+  const {session, log} = fakeSession({settleError: new YdocOwnerDraftPendingError(draft)});
+  const context = contextFor(root, session, {withAdapter: async work => work({
+    getCollectionRecord: async () => {throw new Error("Not used");},
+    sharedFileUpdateStates: async writes => writes.map(write => log.journaled.some(entry => entry.idempotencyKey === write.appendKey) ? "pending" : "absent"),
+  })});
+  const result = await collectionRecordWrites(context).setFields({
+    recordPath: "tasks/one.md", fields: {status: "done", note: "saved"}, author: AUTOMATION, idempotencyKeyPrefix: "write",
+  });
+  const update = {outboxId: "outbox", binding: draft.binding, nativeHeadSequence: 3};
+  expect(result.sharedFileUpdates).toEqual({status: {...update, appendKey: "write/status"}, note: {...update, appendKey: "write/note"}});
+  expect(log.journaled.map(write => write.idempotencyKey)).toEqual(["write/status", "write/note"]);
+  const resumed = await collectionRecordWrites(context).setFields({
+    recordPath: "tasks/one.md", fields: {status: "done", note: "saved"}, author: AUTOMATION, idempotencyKeyPrefix: "write",
+  });
+  expect(resumed.sharedFileUpdates).toEqual(result.sharedFileUpdates);
+  expect(log.journaled).toHaveLength(2);
+  log.doc.getMap("frontmatter").set("status", "todo");
+  const handReverted = await collectionRecordWrites(context).setFields({
+    recordPath: "tasks/one.md", fields: {status: "todo", note: null}, expectedBefore: {status: "done", note: "saved"},
+    author: AUTOMATION, idempotencyKeyPrefix: "undo",
+  });
+  expect(handReverted.sharedFileUpdates).toEqual({note: {...update, appendKey: "undo/note"}});
+  expect(log.journaled.map(entry => entry.idempotencyKey)).not.toContain("undo/status");
+  const neverLanded = await collectionRecordWrites(context).setFields({
+    recordPath: "tasks/one.md", fields: {status: "todo"}, author: AUTOMATION, idempotencyKeyPrefix: "never-landed",
+  });
+  expect(neverLanded.sharedFileUpdates).toEqual({});
+});
+
+it.each(["write", "undo"])("keeps a journaled %s when an unchanged field's status read is overloaded", async prefix => {
+  const root = await createTestScratch("dohc-automation-status-overloaded-");
+  const draft = {outboxId: "outbox", nativeHeadSequence: 3, relayDatabaseNamespace: "relay", revision: 1,
+    acceptedCursor: 2, nativeUnsettled: false, pendingBytes: 10, state: "active" as const,
+    binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "tasks/one.md", selectorPaths: ["tasks"], restoreFenceGeneration: 4}};
+  const {session, log} = fakeSession({settleError: new YdocOwnerDraftPendingError(draft)});
+  log.doc.getMap("frontmatter").set("status", "done");
+  const read = vi.fn(async () => {
+    throw new DaemonRefusalError({code: "OVERLOADED", message: "Overloaded", retry: "afterBackoff"}, undefined);
+  });
+  const context = contextFor(root, session, {withAdapter: async work => work({
+    getCollectionRecord: async () => {throw new Error("Not used");}, sharedFileUpdateStates: read,
+  })});
+  const result = await collectionRecordWrites(context).setFields({
+    recordPath: "tasks/one.md", fields: {status: "done", note: "saved"}, author: AUTOMATION,
+    idempotencyKeyPrefix: prefix,
+    ...(prefix === "undo" ? {expectedBefore: {status: "done", note: null}} : {}),
+  });
+  expect(result.sharedFileUpdates).toEqual({note: {
+    outboxId: draft.outboxId, binding: draft.binding, nativeHeadSequence: draft.nativeHeadSequence, appendKey: `${prefix}/note`,
+  }});
+  expect(read).toHaveBeenCalledOnce();
+  expect(log.journaled.map(write => write.idempotencyKey)).toEqual([`${prefix}/note`]);
+  expect(log.doc.getMap("frontmatter").get("note")).toBe("saved");
+  expect(log.order.at(-1)).toBe("close");
+});
 
 interface FakeSessionLog {
   doc: Y.Doc;
@@ -182,6 +253,7 @@ function fakeEngine() {
   const overrides: Partial<CollectionRecordEditContext> = {
     withAdapter: async (work) =>
       await work({
+        sharedFileUpdateStates: async writes => writes.map(() => "absent"),
         async getCollectionRecord({ collectionPath, recordId }) {
           lookups.push(recordId);
           for (const waiter of [...waitingForLookups]) {

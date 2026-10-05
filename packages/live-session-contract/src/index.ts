@@ -1,3 +1,4 @@
+export * from "./liveAuthorship.js";
 export {
   HOST_CONTROL_IDENTIFIER_MAX_BYTES,
   HOST_MODE_VALUES,
@@ -32,6 +33,8 @@ export {
   LIVE_UPDATE_YJS_START_CLOCK_MAX,
   parseAdmittedLiveUpdate,
   parseAdmittedLiveUpdateMetadata,
+  parseCanonicalAdmittedLiveUpdateMetadata,
+  parseLiveCheckpointCoverage,
   parseLiveDocumentKey,
   parseAgentDeclaration,
   parseLiveUpdateAcceptResult,
@@ -49,6 +52,7 @@ export {
   parseServerDerivedLiveUpdateAuthority,
   type AdmittedLiveUpdate,
   type AdmittedLiveUpdateMetadata,
+  type LiveCheckpointAuthorCoverage,
   type AgentDeclaration,
   type LiveDocumentKey,
   type LiveUpdateAcceptResult,

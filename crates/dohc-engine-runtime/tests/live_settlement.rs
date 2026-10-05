@@ -99,9 +99,12 @@ async fn applied_restore(
                     principal_id: "owner".into(),
                 },
                 received_at_ms: 21,
-                agent_declaration: None,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
         },
     };
     f.owner
@@ -761,9 +764,17 @@ impl Fixture {
                     binding: self.binding.clone(),
                     authority,
                     received_at_ms,
-                    agent_declaration,
                 },
                 first_seen: vec![],
+                canonical_version: Some(2),
+                author_snapshot: Some(
+                    (agent_declaration)
+                        .into_iter()
+                        .map(dohc_engine_collab::live_update_application::LiveAuthorEntry::from)
+                        .collect(),
+                ),
+                first_seen_deletes: Some(vec![]),
+                checkpoint_coverage: None,
             },
             update_bytes: bytes,
         };
@@ -807,9 +818,12 @@ impl Fixture {
                         principal_id: "owner".into(),
                     },
                     received_at_ms: 2,
-                    agent_declaration: None,
                 },
                 first_seen: vec![],
+                canonical_version: None,
+                author_snapshot: None,
+                first_seen_deletes: None,
+                checkpoint_coverage: None,
             },
             update_bytes: vec![0, 0],
         };
@@ -1150,9 +1164,12 @@ async fn live_settlement_history_syncs_after_restore_without_granting_native_aut
                 grant_generation: 1,
             },
             received_at_ms: 2,
-            agent_declaration: None,
         },
         first_seen,
+        canonical_version: None,
+        author_snapshot: None,
+        first_seen_deletes: None,
+        checkpoint_coverage: None,
     };
     assert!(matches!(
         f.handle
@@ -1766,9 +1783,12 @@ async fn restore_fence_serializes_queued_writes_and_preserves_other_documents() 
                     principal_id: "owner".into(),
                 },
                 received_at_ms: 4,
-                agent_declaration: None,
             },
             first_seen: vec![],
+            canonical_version: None,
+            author_snapshot: None,
+            first_seen_deletes: None,
+            checkpoint_coverage: None,
         },
         update_bytes: vec![0, 0],
     };
@@ -2744,9 +2764,12 @@ async fn restore_application_keeps_queued_memory_and_replays_after_cancelled_or_
                         principal_id: "restoring-owner".into(),
                     },
                     received_at_ms: 25,
-                    agent_declaration: None,
                 },
                 first_seen: proposal.receipt().replacement_ranges.clone(),
+                canonical_version: Some(2),
+                author_snapshot: Some(vec![]),
+                first_seen_deletes: Some(vec![]),
+                checkpoint_coverage: None,
             },
         };
         let (entered, at_commit) = tokio::sync::oneshot::channel();

@@ -1,11 +1,11 @@
 import { CreationPartialError, type CreationPartial, type CreationStage } from "@dohc/cli/creation";
 import { VersionedTextStoreError } from "@dohc/workspace-contracts/engine";
 import { validateUserMaterializePath } from "@dohc/workspace-core";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
-import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
-import { isIdempotencyKeyReuseRefusal } from "@dohc/workspace-engine-client";
+import type { ChangeAttributionWire, SharedFileUpdate, SharedFileUpdateState } from "@dohc/workspace-engine-client";
+import { isIdempotencyKeyReuseRefusal, YdocOwnerDraftPendingError } from "@dohc/workspace-engine-client";
 import {
   RECORD_ID_FRONTMATTER_KEY,
   isRecordId,
@@ -54,6 +54,7 @@ const ADOPTION_DEADLINE_MS = 15_000;
 
 /** The engine adapter subset the seam reads through. VersionedLiveAdapter satisfies it. */
 export interface CollectionRecordEditAdapter {
+  sharedFileUpdateStates(writes: readonly SharedFileUpdate[]): Promise<SharedFileUpdateState[]>;
   getCollectionRecord(
     params: CollectionGetRecordParams,
   ): Promise<CollectionGetRecordResult>;
@@ -79,9 +80,9 @@ export interface RecordEditSession {
     onArmed: () => void,
     options: RecordUpdateOptions,
   ): Promise<boolean>;
-  /** Settles the journaled updates, so they are durable and the file is written. Throws when it cannot. */
+  /** Writes journaled updates to the settled file. Owner drafts can remain pending. */
   settleNow(options: { summary: string }): Promise<unknown>;
-  close(): Promise<void>;
+  close(options?: { settle?: boolean }): Promise<void>;
 }
 
 /** Workspace-scoped authority the host supplies. The CLI/MCP caller never sees it. */
@@ -117,6 +118,8 @@ export interface CollectionRecordEditContext {
 }
 
 export interface SetCollectionRecordFieldsInput {
+  /** Automation effects finish once the owner draft journals them locally. */
+  allowPendingSharedSettlement?: boolean;
   /** A creation key already recorded by the engine must not seed the field again. */
   preserveCompletedSeeds?: boolean;
   /** Creation reports the stage that could not finish. */
@@ -144,6 +147,8 @@ export interface SetCollectionRecordFieldsInput {
 }
 
 export interface SetCollectionRecordFieldsResult {
+  /** The owner draft is durable locally; its shared file has not settled. */
+  sharedFileUpdates?: Record<string, SharedFileUpdate>;
   path: string;
   /**
    * The value each written field held before this write, keyed by field.
@@ -312,6 +317,9 @@ export async function setCollectionRecordFields(
   input.onStage?.("bind");
   const session = await context.openRecord(input.recordPath);
   let failed = false;
+  let sharedSettlementPending = false;
+  let sharedFileUpdates: Record<string, SharedFileUpdate> | undefined;
+  const appendPrefix = input.idempotencyKeyPrefix ?? (input.allowPendingSharedSettlement ? `collection-fields/${randomUUID()}` : undefined);
   try {
     // The caller can end while the session opens (an automation run's
     // deadline); a write must not land after that.
@@ -321,14 +329,14 @@ export async function setCollectionRecordFields(
     const kept: Record<string, unknown> = Object.create(null);
     const expected = input.expectedBefore;
     const actorOriginId = actorOriginIdFor(input.author);
+    const decidedFields = new Set<string>();
     let armed = 0;
     // Each field is compared and written at its own turn on the session's
     // chain, against the canonical doc as it stands then, so a change that
     // arrived after the session opened is compared, not overwritten.
     input.onStage?.("fields");
     const journaled = await Promise.all(entries.map(([field, value]) => {
-      const idempotencyKey = input.idempotencyKeyPrefix === undefined
-        ? undefined : `${input.idempotencyKeyPrefix}/${field}`;
+      const idempotencyKey = appendPrefix === undefined ? undefined : `${appendPrefix}/${field}`;
       let fieldArmed = false;
       let fieldDecided = false;
       return session.applyDecidedLocalUpdate(
@@ -349,6 +357,7 @@ export async function setCollectionRecordFields(
           if (frontmatterEditsRefused(doc)) throw new Error(FRONTMATTER_EDIT_REFUSED_MESSAGE);
           replaced[field] = currentValue;
           fieldDecided = true;
+          decidedFields.add(field);
           return frontmatterUpdate(doc, field, value);
         },
         () => {
@@ -371,6 +380,7 @@ export async function setCollectionRecordFields(
         // restores canonical state before rejecting; no new seed was recorded.
         if (fieldArmed) armed -= 1;
         delete replaced[field];
+        decidedFields.delete(field);
         return session.applyDecidedLocalUpdate(doc => {
           const current = doc.getMap(FRONTMATTER_FIELD).get(field);
           kept[field] = (current instanceof Y.AbstractType ? current.toJSON() : current) ?? null;
@@ -388,21 +398,37 @@ export async function setCollectionRecordFields(
     // it observes the journaled edits; it throws when the settle cannot
     // commit.
     input.onStage?.("settle");
-    await session.settleNow({
-      summary: `Updated ${recordBasename(input.recordPath)}`,
-    });
+    try {
+      await session.settleNow({
+        summary: `Updated ${recordBasename(input.recordPath)}`,
+      });
+    } catch (error) {
+      if (!input.allowPendingSharedSettlement || !(error instanceof YdocOwnerDraftPendingError) || appendPrefix === undefined) throw error;
+      sharedSettlementPending = true;
+      const candidates = entries.filter(([field]) => !Object.hasOwn(kept, field)).map(([field]) => [field, {
+        outboxId: error.draft.outboxId, binding: error.draft.binding,
+        nativeHeadSequence: error.draft.nativeHeadSequence, appendKey: `${appendPrefix}/${field}`,
+      }] as const);
+      const unchanged = candidates.filter(([field]) => !decidedFields.has(field));
+      // A failed status read leaves unchanged fields unknown; journaled writes still succeeded.
+      const states = unchanged.length === 0 ? [] : await context.withAdapter(adapter =>
+        adapter.sharedFileUpdateStates(unchanged.map(([, draft]) => draft))).catch(() => []);
+      const existing = new Set(unchanged.filter((_, index) => states?.[index] !== undefined && states[index] !== "absent")
+        .map(([field]) => field));
+      sharedFileUpdates = Object.fromEntries(candidates.filter(([field]) => decidedFields.has(field) || existing.has(field)));
+    }
     if (armed !== updates) {
       throw new Error(
         `The engine session did not accept the field change for ${input.recordPath}.`,
       );
     }
     input.onStage?.("close");
-    return { path: input.recordPath, replaced, kept };
+    return { path: input.recordPath, replaced, kept, ...(sharedFileUpdates ? { sharedFileUpdates } : {}) };
   } catch (error) {
     failed = true;
     throw error;
   } finally {
-    try { await session.close(); }
+    try { await session.close(sharedSettlementPending ? { settle: false } : undefined); }
     catch (error) {
       if (!failed) { input.onStage?.("close"); throw error; }
     }
@@ -528,7 +554,11 @@ export async function runCollectionRecordCreation(
 /** The record writes an automation run makes, in this edit context. */
 export function collectionRecordWrites(context: CollectionRecordEditContext): CollectionRecordWrites {
   return {
-    setFields: (input) => setCollectionRecordFields(context, input),
+    setFields: (input) => setCollectionRecordFields(context, {
+      ...input, allowPendingSharedSettlement: true,
+      // A keyed effect can have landed before its run recorded the result.
+      settleUnchanged: input.idempotencyKeyPrefix !== undefined,
+    }),
     create: async (input) => {
       const result = await createCollectionRecord(context, input);
       if ("kind" in result) {

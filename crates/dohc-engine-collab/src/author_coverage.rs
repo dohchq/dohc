@@ -1,9 +1,7 @@
 //! Author coverage belongs to the admitted interval, independently of CRDT compaction.
 
 use crate::{CollabError, DocKey};
-use dohc_engine_domain::{
-    AgentDeclaration, ChangeActorKind, ChangeAttribution, SharedChangeAuthor,
-};
+use dohc_engine_domain::{ChangeActorKind, ChangeAttribution, SharedChangeAuthor};
 use dohc_engine_storage::StorageError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -46,12 +44,16 @@ impl Authors {
             .get("kind")
             .and_then(Value::as_str)
             .ok_or_else(|| corrupt("author has no kind"))?;
-        // A shared author is one identity per grant: its person or link principal.
+        // A shared author is one identity per grant: its person or link
+        // principal. A link an admitted snapshot names is its public principal.
         let (field, scope_field) = match kind {
             "agent" => ("agentId", "onBehalfOf"),
             "automation" => ("automationId", "onBehalfOf"),
             "human" => ("humanId", "onBehalfOf"),
             "named" => ("userId", "grantId"),
+            "link" if author.get("publicPrincipalId").is_some() => {
+                ("publicPrincipalId", "onBehalfOf")
+            }
             "link" => ("principalId", "grantId"),
             _ => return Err(corrupt("unsupported live author kind")),
         };
@@ -245,15 +247,6 @@ pub fn reserved_in(conn: &Connection, key: &DocKey) -> Result<Authors, CollabErr
     Ok(authors)
 }
 
-/// The author a declared agent's accepted delivery names.
-pub fn declared_json(declaration: &AgentDeclaration) -> Result<String, CollabError> {
-    dohc_engine_domain::moment_author_json(
-        Some(declaration.agent_id.as_str()),
-        Some(&declaration.attribution()),
-    )
-    .ok_or_else(|| corrupt("declaration has no author"))
-}
-
 /// The author a collaborator's or an Edit share link's accepted delivery names.
 pub fn shared_json(author: &SharedChangeAuthor) -> Result<String, CollabError> {
     if !author.is_valid() {
@@ -321,9 +314,9 @@ pub fn check_admission_in(
 }
 
 /// Admits the authors of one accepted delivery to the current interval, under
-/// the bounds a local author meets: the agent it declared, the trusted author
-/// of this owner's own native update, and the collaborator or Edit share link
-/// the relay accepted it from. The delivery retains no
+/// the bounds a local author meets: the authors its admitted snapshot names,
+/// and the collaborator or Edit share link the relay accepted it from. The
+/// delivery retains no
 /// attributed update row, so the interval keeps them with the authors
 /// compaction folded until a settlement names them. Refuses before writing
 /// when a new author would not fit.
@@ -680,5 +673,23 @@ mod tests {
         }
         assert_eq!(covered.len(), 1);
         assert_eq!(covered.json().len() - "[]".len(), MAX_AUTHOR_ENTRY_BYTES);
+    }
+
+    /// An admitted snapshot names a link by its public principal, the relay's
+    /// authority by its grant. Each stays its own author, and returns as known.
+    #[test]
+    fn a_snapshot_link_and_an_authority_link_are_separate_authors() {
+        let snapshot = r#"[{"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"}]"#;
+        let authority = shared_json(&SharedChangeAuthor::Link {
+            grant_id: "grant".into(),
+            grant_generation: 1,
+            principal_id: "holder".into(),
+        })
+        .unwrap();
+        let mut covered = Authors::default();
+        for json in [snapshot, authority.as_str(), snapshot, authority.as_str()] {
+            admit(&mut covered, json).expect("a link applies");
+        }
+        assert_eq!(covered.len(), 2);
     }
 }

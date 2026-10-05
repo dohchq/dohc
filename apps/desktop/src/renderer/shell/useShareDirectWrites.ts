@@ -32,6 +32,7 @@ export function useShareDirectWrites(input: {
   workspaceId: string;
   // An Edit share view that has not ended and whose grant is readable.
   enabled: boolean;
+  ready: boolean;
   ownerName: string;
   refreshShareView(): Promise<ShareViewRefresh>;
   sendShareChanges(): Promise<void>;
@@ -39,13 +40,15 @@ export function useShareDirectWrites(input: {
 }): void {
   const latest = useRef(input);
   latest.current = input;
+  const pushOnOpen = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
-    if (!input.enabled) return;
     const workspaceId = input.workspaceId;
     let disposed = false;
+    const isCurrent = () => !disposed && latest.current.workspaceId === workspaceId;
 
     const push = async (): Promise<void> => {
+      if (!isCurrent() || !latest.current.enabled || !latest.current.ready) return;
       let result: PushShareDirectWritesResult;
       try {
         result = await bridge().pushShareDirectWrites({ workspaceId });
@@ -57,17 +60,19 @@ export function useShareDirectWrites(input: {
           lasting: false,
         };
       }
-      if (!disposed) report(result);
+      if (isCurrent()) report(result);
     };
 
     const report = (result: PushShareDirectWritesResult): void => {
+      if (!isCurrent()) return;
+      if (result.status === "unavailable" && !latest.current.ready) return;
       const { ownerName, showNotice, refreshShareView, sendShareChanges } = latest.current;
-      const sendAsProposal = { label: "Send as proposal", run: () => void sendShareChanges() };
+      const sendAsProposal = { label: "Send as proposal", run: () => { if (isCurrent()) void sendShareChanges(); } };
       if (result.status === "unavailable") {
         // Any 404 on the way to the relay reads as unavailable, so only the
         // view's own refresh can say the share ended. It then shows it ended.
         void refreshShareView().catch((): ShareViewRefresh => "stale").then((refresh) => {
-          if (latest.current.workspaceId !== workspaceId) return;
+          if (!isCurrent()) return;
           latest.current.showNotice(refresh === "ended"
             ? {
                 kind: "direct-write-unavailable",
@@ -125,16 +130,21 @@ export function useShareDirectWrites(input: {
           });
     };
 
-    // Anything a closed view left unsent goes now.
-    void push();
+    pushOnOpen.current = push;
     const unsubscribe = bridge().onShareDirectWritesPushed((event) => {
-      if (event.workspaceId === workspaceId && !disposed) report(event.result);
+      if (event.workspaceId === workspaceId) report(event.result);
     });
     return () => {
       disposed = true;
+      pushOnOpen.current = null;
       unsubscribe();
     };
-  }, [input.enabled, input.workspaceId]);
+  }, [input.workspaceId]);
+
+  useEffect(() => {
+    // Anything a closed view left unsent goes once this workspace is ready.
+    if (input.enabled && input.ready) void pushOnOpen.current?.();
+  }, [input.enabled, input.ready, input.workspaceId]);
 }
 
 // Why the relay refused: its reason alone, which already starts with the

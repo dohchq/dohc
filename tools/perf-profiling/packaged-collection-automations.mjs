@@ -361,7 +361,12 @@ export async function readRunJournal(workspaceRoot, automation) {
     const findMs = steps.length ? total(steps, 'findMs') : null;
     const planMs = steps.length ? total(steps, 'planMs') : null;
     const measured = findMs !== null && planMs !== null;
+    const appendMeasured = steps.length > 0 && steps.every(step => Number.isFinite(step.appendMs)
+      && Number.isInteger(step.appendCount) && step.appendCount >= 0
+      && step.appendCount === effects.filter(effect => effect.ordinal === step.ordinal).length);
     runs.push({ claimId: header.claimId, startedAtMs: header.startedAtMs, finishedAtMs: header.finishedAtMs, outcome: header.outcome,
+      appendMs: appendMeasured ? total(steps, 'appendMs') : null,
+      appendCount: appendMeasured ? total(steps, 'appendCount') : null,
       findMs, planMs, writeMs: effects.length || measured ? total(effects, 'writeMs') : null,
       writes: effects.length || measured ? total(effects, 'writeCount') : null,
       headerBytes: Buffer.byteLength(headerText), progressBytes: Buffer.byteLength(progressText), progressLines: lines.length,

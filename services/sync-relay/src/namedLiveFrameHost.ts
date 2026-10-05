@@ -1,8 +1,11 @@
+import type { StorageContext } from "./storage/context.js";
+import { parseLiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { EngineClient, NativeAppliedPosition } from "@dohc/workspace-engine-client/daemon";
+import { limitLiveDeclaredAgents, liveAuthorCheckpointAnticipated } from "./storage/liveAuthorWindow";
 import { parseRedeemedLiveTicket, type RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
-import { parseAgentDeclaration, parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseServerDerivedLiveUpdateAuthority, type ServerDerivedLiveUpdateAuthority, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
+import { parseLiveUpdateDigest, parseLiveUpdateIdentifier, parseServerDerivedLiveUpdateAuthority, type ServerDerivedLiveUpdateAuthority, type LiveDocumentKey } from "@dohc/live-session-contract/live-update-admission";
 import type { LiveFrameLease } from "@dohc/live-session-contract/live-frame";
 import { parseLiveObjectBinding, type LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import type { CurrentLiveBindingRequest, LiveHostConnectionCoordinate, SyncRelayStorage } from "./storage.js";
@@ -10,6 +13,7 @@ import { snapshotCurrentBindingRequest } from "./storage/liveDocumentAuthority.j
 import type { OwnerOutboxAdmission } from "./ownerOutboxDelivery.js";
 import type { NamedFrameAppliedUpdate, NamedFrameHostSession, NamedFrameSync } from "./namedLiveFrameSession.js";
 import type { NamedFrameChanges } from "./liveHostChanges.js";
+import { deriveLiveAuthorSnapshot, type TrustedLiveAccount } from "./storage/liveAuthorSnapshot.js";
 import { createAccountlessPathProjection } from "./accountlessPathProjection.js";
 export { createNamedFrameChanges, type NamedFrameChanges } from "./liveHostChanges.js";
 
@@ -38,6 +42,7 @@ export interface NamedFrameHostBounds {
 export function captureNamedLiveFrameHost(options: {
   ticket: RedeemedLiveTicket;
   actor: CurrentLiveBindingRequest["actor"];
+  trustedAccount?: TrustedLiveAccount;
   storage: SyncRelayStorage;
   native: NamedFrameNativeHost;
   bounds: NamedFrameHostBounds;
@@ -55,6 +60,7 @@ export function captureNamedLiveFrameHost(options: {
 /** The owner route supplies the authenticated account, never an identity from a frame. */
 export function captureOwnerLiveFrameHost(options: {
   authenticatedUserId: string;
+  trustedAccount?: TrustedLiveAccount;
   shareId: string;
   storage: SyncRelayStorage;
   native: NamedFrameNativeHost;
@@ -74,6 +80,7 @@ export function captureOwnerLiveFrameHost(options: {
 
 function captureLiveFrameHost(options: {
   actor: CurrentLiveBindingRequest["actor"];
+  trustedAccount?: TrustedLiveAccount;
   binding: LiveObjectBinding;
   authority: ServerDerivedLiveUpdateAuthority;
   hostEpoch: NamedFrameNativeHost["coordinate"]["hostEpoch"];
@@ -87,6 +94,7 @@ function captureLiveFrameHost(options: {
   const authority = Object.freeze(parseServerDerivedLiveUpdateAuthority(options.authority));
   const hostEpoch = options.hostEpoch;
   const { storage } = options;
+  const trustedAccount = options.trustedAccount ? Object.freeze({...options.trustedAccount}) : undefined;
   const original = options.native;
   const native = { ...original, coordinate: { ...original.coordinate }, binding: parseLiveObjectBinding(original.binding),
     nextRequestId: original.nextRequestId.bind(original), drain: original.drain.bind(original) };
@@ -203,9 +211,7 @@ function captureLiveFrameHost(options: {
       try {
         const deliveryId = parseLiveUpdateIdentifier(input.deliveryId), updateDigest = parseLiveUpdateDigest(input.updateDigest);
         const updateBytes = input.updateBytes;
-        // A recipient or link holder declares no agent through the owner's provenance.
-        const declared = input.agentDeclaration === undefined ? undefined : parseAgentDeclaration(input.agentDeclaration);
-        if (declared && actor.kind !== "owner") return { result: "refused", reason: "authority-refused" };
+        const authorContext = input.authorContext === undefined ? undefined : parseLiveAuthorContext(input.authorContext);
         if (updateBytes.length < 1 || updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "capacity-refused" };
         if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest) return { result: "refused", reason: "invalid-update" };
         const read = storage.readLiveUpdateJournalCut({ document });
@@ -215,12 +221,15 @@ function captureLiveFrameHost(options: {
           return { result: "refused", reason: "capacity-refused" };
         }
         const validation = await validate({ document, currentPath: binding.currentPath, checkpoint: cut.checkpoint.bytes,
-          suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes }, signal);
+          suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes,
+          retainStateUpdate: liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata),
+            limitLiveDeclaredAgents(cut.suffix.map(row => row.metadata), authority,
+              deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount))) }, signal);
         check(signal);
         if (validation.kind === "retry") return {result: "retry", reason: validation.reason};
         const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
-          metadata: { deliveryId, updateDigest, binding, ...(declared ? { agentDeclaration: declared } : {}) },
-          cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
+          ...(trustedAccount ? {trustedAccount} : {}),
+          metadata: { deliveryId, updateDigest, binding, ...(authorContext ? {authorContext} : {}) }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
         if (committed.result.kind === "refused") return { result: "refused", reason: committed.result.reason };
         if (committed.result.kind === "retry") return { result: "retry", reason: committed.result.reason };
         // An ambiguous drain can still have committed the application. Read the exact durable ACK.

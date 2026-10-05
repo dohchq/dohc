@@ -1,4 +1,5 @@
 import {parsePublicEditRelease} from "@dohc/security-contract";
+import {accountDisplayName} from "./discussionRoutes";
 import { APP_PUBLICATION_MAX_FILES, APP_PUBLICATION_MAX_METADATA_BYTES, APP_PUBLICATION_MAX_BUNDLE_BYTES } from "@dohc/security-contract/app-publication";
 import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { createSessionActorResolver, UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
@@ -518,7 +519,10 @@ if (process.env.DOHC_DEVICE_CONTROL_LIMITS !== undefined) {
   try {
     const limits = parseDeviceControlLimits(JSON.parse(process.env.DOHC_DEVICE_CONTROL_LIMITS));
     const delivery = deviceDeliveryConfig ? readRelayDeviceDeliveryConfig(deviceDeliveryConfig,limits) : undefined;
-    if (ownerAdmissionPath && delivery) ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds);
+    if (ownerAdmissionPath && delivery) {
+      ownerAdmission = readOwnerAdmissionConfig(ownerAdmissionPath,delivery.workspaceIds);
+      ownerAdmission.admission.trustedAccount = async accountId => ({accountId, name: await accountDisplayName(lookupUserDisplayName, accountId) ?? "Unnamed"});
+    }
     deviceControl = createDeviceControl({
       storage, relayExchangeKey: relayExchangeKey ?? "",
       hosts: new Set((process.env.DOHC_RELAY_DEVICE_CONTROL_HOSTS ?? "").split(",")),
@@ -580,7 +584,7 @@ if (namedLiveConfig) {
   const admission = createLiveConnectionAdmission();
   const membership = createLiveMembershipRegistry({maxSessions: namedLiveConfig.transport.maxConnections, maxMembers: namedLiveConfig.transport.maxConnections,
     maxSnapshotBytes: namedLiveConfig.frames.receive.maxFrameBytes}, storage.readLiveAuthority.bind(storage));
-  namedLive = createNamedLiveRoutes({ kind: "named", storage, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+  namedLive = createNamedLiveRoutes({ kind: "named", storage, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
     sessions: { resolve: relayApplication.resolveNamedBrowserSession }, tickets, captureNative, membership, admission });
@@ -596,13 +600,13 @@ if (namedLiveConfig) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
     desktopAdmission = createNamedDesktopLive({storage, resolveActor, publicOrigin: shareWebOrigin!, hosts,
       limits: namedBrowserSessionLimits!, editorLimits: desktopEditorLimits, tickets});
-    desktopLive = createNamedLiveRoutes({kind: "named", desktopBearer: true, storage, hosts,
+    desktopLive = createNamedLiveRoutes({kind: "named", desktopBearer: true, storage, lookupUserDisplayName, hosts,
       publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
       frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
       sessions: desktopAdmission, tickets, captureNative, membership, admission});
     server.once("close", desktopLive.close); process.once("SIGINT", desktopLive.close); process.once("SIGTERM", desktopLive.close);
   }
-  const ownerLive = createOwnerLiveRoutes({ storage, resolveActor, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
+  const ownerLive = createOwnerLiveRoutes({ storage, resolveActor, lookupUserDisplayName, hosts: new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(",")),
     publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
     frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate, captureNative, admission });
   server.once("close", ownerLive.close);

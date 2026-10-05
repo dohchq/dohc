@@ -1,51 +1,82 @@
+import {createHash} from "node:crypto";
 import {readFileSync} from "node:fs";
+import {gunzipSync} from "node:zlib";
 import {expect, it} from "vitest";
-import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
-import type {AdmittedLiveUpdateMetadata} from "@dohc/live-session-contract/live-update-admission";
-import {canonicalAcceptedMetadata, initialAcceptedHistoryDigest, nextAcceptedHistoryDigest} from "./liveAcceptedHistory";
+import {parseAdmittedLiveUpdateMetadata, type AdmittedLiveUpdateMetadata} from "@dohc/live-session-contract/live-update-admission";
+import {canonicalAcceptedMetadata, canonicalVersionedAcceptedMetadata, initialAcceptedHistoryDigest,
+  nextAcceptedHistoryDigest, nextVersionedAcceptedHistoryDigest} from "./liveAcceptedHistory";
+import {parseNativeRestoreProposalReceipt, type NativeRestoreHistoryProof} from "./liveRestoreProposal";
 
-// The native engine hashes the same bytes. These digests were computed from the
-// literal JSON below with sha256sum, independently of this module.
-const document = {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "b".repeat(64)};
-const metadata: AdmittedLiveUpdateMetadata = {
-  accepted: {
-    receipt: {deliveryId: "delivery-1", updateDigest: "a".repeat(64), journalCursor: 1, acceptingHostEpoch: parseHostEpoch(1)},
-    binding: {...document, currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 0},
-    authority: {principalKind: "owner", principalId: "owner", grantId: null, grantGeneration: null},
-    receivedAtMs: 30,
-  },
-  firstSeen: [{clientId: 1, startClock: 0, endClock: 2}],
+const fixture = JSON.parse(gunzipSync(readFileSync(new URL("../../../packages/ydoc-projection/src/fixtures/native-accepted-history/small.json.gz", import.meta.url))).toString()) as {
+  receiptJson: string; acceptedEvents: {metadataJson: string; evidenceDigest: string}[];
 };
-const absentJson = `{"accepted":{"receipt":{"deliveryId":"delivery-1","updateDigest":"${"a".repeat(64)}","journalCursor":1,"acceptingHostEpoch":1},` +
-  `"binding":{"workspaceId":"workspace","mainVersionId":"main","objectId":"object","lineageClaimId":"${"b".repeat(64)}","currentPath":"docs/a.md","selectorPaths":["docs"],"restoreFenceGeneration":0},` +
-  `"authority":{"grantGeneration":null,"grantId":null,"principalId":"owner","principalKind":"owner"},"receivedAtMs":30},` +
-  `"firstSeen":[{"clientId":1,"startClock":0,"endClock":2}]}`;
-const initial = "0c9c20efaac4316fb778488adbd36bf99a1a6cbc2f1307bd5d1be64a02df8ceb";
+const budget = {maxBytes: 1_000_000, maxEvents: 10};
+const legacy = () => parseAdmittedLiveUpdateMetadata(JSON.parse(fixture.acceptedEvents[0]!.metadataJson));
+const modern = (metadata = legacy()): AdmittedLiveUpdateMetadata => ({...metadata, canonicalVersion: 2,
+  authorSnapshot: [{kind: "human", humanId: "alice", humanName: "Alice"}],
+  firstSeenDeletes: [{clientId: 7, startClock: 1, endClock: 3}]});
+const proofDigest = (history: NativeRestoreHistoryProof) => history.suffix.reduce((previous, event, index) =>
+  nextVersionedAcceptedHistoryDigest(previous, history.checkpoint.eventCount + index + 1, event), history.checkpoint.evidenceDigest);
 
-// The native engine reads the same rows from the shared contract vectors.
+it("keeps the native v1 canonical bytes and event digests unchanged", () => {
+  const old = legacy(), initial = initialAcceptedHistoryDigest("namespace", old.accepted.binding);
+  expect(JSON.stringify(canonicalAcceptedMetadata(old))).toBe(fixture.acceptedEvents[0]!.metadataJson);
+  expect(JSON.stringify(canonicalVersionedAcceptedMetadata(old))).toBe(fixture.acceptedEvents[0]!.metadataJson);
+  expect(nextAcceptedHistoryDigest(initial, 1, old)).toBe(fixture.acceptedEvents[0]!.evidenceDigest);
+  expect(nextVersionedAcceptedHistoryDigest(initial, 1, old)).toBe(fixture.acceptedEvents[0]!.evidenceDigest);
+  expect(parseNativeRestoreProposalReceipt(fixture.receiptJson, budget).acceptedHistory.eventCount).toBe(2);
+});
+
+it("uses the v2 field order and binds authors, deletion ranges and checkpoint coverage", () => {
+  const old = legacy(), metadata = modern(old);
+  const reordered: AdmittedLiveUpdateMetadata = {...metadata,
+    authorSnapshot: [{humanName: "Alice", humanId: "alice", kind: "human"}],
+    firstSeenDeletes: [{endClock: 3, startClock: 1, clientId: 7}]};
+  const canonical = canonicalVersionedAcceptedMetadata(reordered);
+  const json = fixture.acceptedEvents[0]!.metadataJson.slice(0, -1) +
+    ',"canonicalVersion":2,"authorSnapshot":[{"kind":"human","humanId":"alice","humanName":"Alice"}],"firstSeenDeletes":[{"clientId":7,"startClock":1,"endClock":3}]}';
+  expect(JSON.stringify(canonical)).toBe(json);
+  const initial = initialAcceptedHistoryDigest("namespace", old.accepted.binding);
+  const evidence = createHash("sha256").update(`["accepted-event-v2","${initial}",1,${json}]`).digest("hex");
+  expect(nextVersionedAcceptedHistoryDigest(initial, 1, reordered)).toBe(evidence);
+  expect(nextVersionedAcceptedHistoryDigest(initial, 1, {...metadata, authorSnapshot: []})).not.toBe(evidence);
+  expect(nextVersionedAcceptedHistoryDigest(initial, 1, {...metadata, firstSeenDeletes: []})).not.toBe(evidence);
+  expect(nextVersionedAcceptedHistoryDigest(initial, 1, {...metadata, checkpointCoverage: []})).not.toBe(evidence);
+  const checkpoint = {...metadata, checkpointCoverage: [{author: {kind: "human" as const, humanId: "alice", humanName: "Alice"},
+    structRanges: [], deletionRanges: metadata.firstSeenDeletes!}]};
+  expect(Object.keys(canonicalVersionedAcceptedMetadata(checkpoint))).toEqual([
+    "accepted", "firstSeen", "canonicalVersion", "authorSnapshot", "firstSeenDeletes", "checkpointCoverage"]);
+});
+
+it("allows a v1-to-v2 suffix and refuses a validly hashed downgrade", () => {
+  const receipt = parseNativeRestoreProposalReceipt(fixture.receiptJson, budget);
+  receipt.acceptedHistory.suffix[1] = modern(receipt.acceptedHistory.suffix[1]);
+  receipt.acceptedHistory.evidenceDigest = proofDigest(receipt.acceptedHistory);
+  expect(parseNativeRestoreProposalReceipt(JSON.stringify(receipt), budget).acceptedHistory.suffix[1]!.canonicalVersion).toBe(2);
+  receipt.acceptedHistory.suffix[0] = modern(receipt.acceptedHistory.suffix[0]);
+  receipt.acceptedHistory.suffix[1] = canonicalAcceptedMetadata(receipt.acceptedHistory.suffix[1]!);
+  receipt.acceptedHistory.evidenceDigest = proofDigest(receipt.acceptedHistory);
+  expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(receipt), budget)).toThrow(/inconsistent/);
+});
+
+it("refuses downgrade across a v2 checkpoint boundary", () => {
+  const receipt = parseNativeRestoreProposalReceipt(fixture.receiptJson, budget), history = receipt.acceptedHistory;
+  const first = modern(history.suffix[0]), second = history.suffix[1]!;
+  const evidence = nextVersionedAcceptedHistoryDigest(history.checkpoint.evidenceDigest, 1, first);
+  history.checkpoint = {...history.checkpoint, eventCount: 1, terminal: first.accepted.receipt,
+    canonicalVersion: 2, evidenceDigest: evidence};
+  history.suffix = [second];history.evidenceDigest = proofDigest(history);
+  expect(() => parseNativeRestoreProposalReceipt(JSON.stringify(receipt), budget)).toThrow(/inconsistent/);
+  history.suffix = [modern(second)];history.evidenceDigest = proofDigest(history);
+  expect(parseNativeRestoreProposalReceipt(JSON.stringify(receipt), budget).acceptedHistory.checkpoint.canonicalVersion).toBe(2);
+});
+
 const shared = JSON.parse(readFileSync(new URL("../../../packages/live-session-contract/vectors/live-update-admission-vectors.json", import.meta.url), "utf8")) as {
-  acceptedHistoryDigests: {case: string; namespace: string; document: typeof document; initialDigest: string; eventCount: number;
-    metadata: AdmittedLiveUpdateMetadata; canonicalJson: string; eventDigest: string}[];
+  acceptedHistoryDigests: {case: string; namespace: string; document: import("@dohc/live-session-contract").LiveDocumentKey;
+    initialDigest: string; eventCount: number; metadata: AdmittedLiveUpdateMetadata; canonicalJson: string; eventDigest: string}[];
 };
 it.each(shared.acceptedHistoryDigests.map(row => [row.case, row] as const))("matches the shared accepted-history vector: %s", (_case, row) => {
   expect(initialAcceptedHistoryDigest(row.namespace, row.document)).toBe(row.initialDigest);
-  expect(JSON.stringify(canonicalAcceptedMetadata(row.metadata))).toBe(row.canonicalJson);
-  expect(nextAcceptedHistoryDigest(row.initialDigest, row.eventCount, row.metadata)).toBe(row.eventDigest);
-});
-
-it("keeps an undeclared event's canonical bytes and evidence digest", () => {
-  expect(initialAcceptedHistoryDigest("relay", document)).toBe(initial);
-  expect(JSON.stringify(canonicalAcceptedMetadata(metadata))).toBe(absentJson);
-  expect(nextAcceptedHistoryDigest(initial, 1, metadata)).toBe("ff31ce6590c8a8cf8a6095d29f68a2df1c91476e54882336f06b7e5790701ab6");
-});
-
-it("places a Unicode agent declaration after receivedAtMs in the hashed bytes", () => {
-  // Members out of order and a stray member must not reach the hash.
-  const declared = {...metadata, accepted: {...metadata.accepted,
-    agentDeclaration: {depth: 2, onBehalfOf: "人", agentId: "trip-agent-ü", stray: true} as never}};
-  expect(JSON.stringify(canonicalAcceptedMetadata(declared))).toBe(absentJson.replace(`"receivedAtMs":30}`,
-    `"receivedAtMs":30,"agentDeclaration":{"agentId":"trip-agent-ü","onBehalfOf":"人","depth":2}}`));
-  expect(nextAcceptedHistoryDigest(initial, 1, declared)).toBe("f49898b95992874ac8c7c13a068fc5d4cbf46f1344abc6a4fa3aa5565a170cf6");
-  const unattributed = {...declared, accepted: {...declared.accepted, agentDeclaration: {agentId: "trip-agent-ü", onBehalfOf: null, depth: 2}}};
-  expect(nextAcceptedHistoryDigest(initial, 1, unattributed)).not.toBe(nextAcceptedHistoryDigest(initial, 1, declared));
+  expect(JSON.stringify(canonicalVersionedAcceptedMetadata(row.metadata))).toBe(row.canonicalJson);
+  expect(nextVersionedAcceptedHistoryDigest(row.initialDigest, row.eventCount, row.metadata)).toBe(row.eventDigest);
 });

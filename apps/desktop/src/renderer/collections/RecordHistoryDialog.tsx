@@ -75,6 +75,7 @@ function AuthorName(props: { author: Author; id: string }) {
       <Zap size={12} strokeWidth={1.9} aria-hidden className="shrink-0" />
       <span className="sr-only">Automation </span>
       <span className="truncate">{author.name}</span>
+      {author.person ? <span className="truncate">for {author.person}</span> : null}
     </span>
   );
 }

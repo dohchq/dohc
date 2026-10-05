@@ -1,4 +1,5 @@
 import { rebaseRun } from "./collectionAutomationRun";
+import type { UndoKeptField, UndoWrite } from "./automationRunStore";
 import type { AutomationTargets } from "./automationTargets";
 import type { ReachStep } from "./automationReach";
 
@@ -23,7 +24,7 @@ export async function undoAutomationRuns(
   documents: CollectionAutomationUndoDependencies, host: DatasetUndoHost | null, collection: import("./automationReach").ReachCollection, rosterNow: () => Promise<import("./automationReach").ReachRoster>, claimId: string, runs: readonly StoredRun[],
   saveRequest: (request: DatasetUndoRequest) => Promise<void>, signal: AbortSignal,
   codeFiles: readonly string[] = [],
-): Promise<{ undone: CollectionAutomationUndone; keptFields: Array<{ recordId: string; field: string }> }> {
+): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[]; undoWrites: UndoWrite[] }> {
   if (host !== null && datasetUndoRulesChanged(host, runs)) throw new Error(DATASET_UNDO_RULES_CHANGED);
   const targets = new Map<string, Target>();
   const touch = (key: string, target: Target) => { targets.delete(key); targets.set(key, target); };
@@ -57,8 +58,9 @@ export async function undoAutomationRuns(
   }));
   const datasetChanges = host === null ? [] : datasetUndoChanges(host, runs);
   const result = empty();
-  const keptFields: Array<{ recordId: string; field: string }> = [];
-  const accumulate = (next: CollectionAutomationUndone) => { for (const key of Object.keys(result) as Array<keyof CollectionAutomationUndone>) result[key] += next[key]; };
+  const keptFields: UndoKeptField[] = [];
+  const undoWrites: UndoWrite[] = [];
+  const accumulate = (next: CollectionAutomationUndone) => { for (const key of Object.keys(result) as Array<Exclude<keyof CollectionAutomationUndone, "sharedReversals">>) result[key] += next[key]; };
   const ordered = [...targets.values()].reverse();
   const actions = new Map<string, Array<Extract<Target, { kind: "action" }>>>();
   for (const target of ordered) {
@@ -76,6 +78,7 @@ export async function undoAutomationRuns(
       const document = await undoCollectionAutomationRuns(documents, runs, signal, undefined, target.recordId, documentChanges);
       accumulate(document.undone);
       keptFields.push(...document.keptFields);
+      undoWrites.push(...document.undoWrites);
       continue;
     }
     if (host === null) throw new Error("The dataset host is unavailable.");
@@ -84,7 +87,7 @@ export async function undoAutomationRuns(
     accumulate(dataset.undone);
     keptFields.push(...dataset.keptFields);
   }
-  return { undone: result, keptFields };
+  return { undone: result, keptFields, undoWrites };
 }
 
 /** Reach and descriptor checks come from recorded writes, not the source Collection's current storage kind. */

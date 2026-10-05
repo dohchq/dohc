@@ -71,6 +71,11 @@ const FormerGrantSchema = z.object({ grant: ListedGrantSchema, automationsGenera
   .refine((former) => coversFiles(former.grant));
 export type FormerGrant = z.infer<typeof FormerGrantSchema>;
 
+// A person's grant that was revoked without writing automations. Only
+// History reads it, to name who wrote through it; reach never does.
+const EndedGrantSchema = z.object({ grantId: ID, recipientUserId: ID, recipientEmail: z.string().min(1).max(320) });
+export type EndedGrant = z.infer<typeof EndedGrantSchema>;
+
 const ProblemSchema = z.union([
   z.object({ kind: z.literal("damaged-share"), recipientEmail: z.string().min(1).max(320).nullable() }),
   z.object({ kind: z.literal("damaged-link") }),
@@ -79,18 +84,21 @@ const ProblemSchema = z.union([
 ]);
 
 /**
- * What one listing found: the active grants, the share links, and the named
- * grants that wrote automations and stopped editing; or why dohc cannot use
- * them.
+ * What one listing found: the active grants, the share links, the named
+ * grants that wrote automations and stopped editing, and the other revoked
+ * named grants; or why dohc cannot use them.
  */
 export type RosterListing =
-  | { grants: ListedGrant[]; links: ListedLink[]; formerGrants: FormerGrant[] }
+  | { grants: ListedGrant[]; links: ListedLink[]; formerGrants: FormerGrant[]; endedGrants: EndedGrant[] }
   | { grants: null; problem: Exclude<RosterProblem, { kind: "unchecked" }> };
 
 // A copy from before links were listed has no `links`, so it reads as
 // unchecked rather than as a workspace with no links.
 const StoredRoster = z.union([
-  z.object({ grants: z.array(ListedGrantSchema), links: z.array(ListedLinkSchema), formerGrants: z.array(FormerGrantSchema) }),
+  z.object({
+    grants: z.array(ListedGrantSchema), links: z.array(ListedLinkSchema),
+    formerGrants: z.array(FormerGrantSchema), endedGrants: z.array(EndedGrantSchema),
+  }),
   z.object({ grants: z.null(), problem: ProblemSchema }),
 ]);
 
@@ -156,16 +164,18 @@ const LinkPage = z.object({ links: z.array(z.unknown()), nextCursor: z.string().
 
 // The owner's grants on this workspace from GET /sync/shares. Rows for other
 // workspaces are skipped before anything else is read, so their damage cannot
-// hide this workspace's grants. A revoked grant is gone unless it wrote
-// automations directly; then it stays as a former editor.
+// hide this workspace's grants. A revoked grant that wrote automations
+// directly stays as a former editor. Any other revoked grant that names a
+// person stays only as an ended grant, so History can still name them.
 function grantedListing(
   workspaceId: string,
   shares: unknown,
-): { grants: ListedGrant[]; formerGrants: FormerGrant[] } | Extract<RosterListing, { grants: null }> {
+): { grants: ListedGrant[]; formerGrants: FormerGrant[]; endedGrants: EndedGrant[] } | Extract<RosterListing, { grants: null }> {
   const listing = z.object({ granted: z.array(z.unknown()) }).safeParse(shares);
   if (!listing.success) return { grants: null, problem: { kind: "unusable-listing" } };
   const grants: ListedGrant[] = [];
   const formerGrants: FormerGrant[] = [];
+  const endedGrants: EndedGrant[] = [];
   for (const row of listing.data.granted) {
     const where = RowWorkspace.safeParse(row);
     if (!where.success) return { grants: null, problem: { kind: "unusable-listing" } };
@@ -178,7 +188,11 @@ function grantedListing(
     if (state.success && state.data.principalKind === "link") continue;
     const generation = state.success ? state.data.automationsGeneration : null;
     const revoked = state.success && state.data.revokedAtMs !== null;
-    if (revoked && generation === null) continue;
+    if (revoked && generation === null) {
+      const ended = EndedGrantSchema.safeParse(row);
+      if (ended.success) endedGrants.push(ended.data);
+      continue;
+    }
     const grant = ListedGrantSchema.safeParse(row);
     if (!state.success || !grant.success || (generation !== null && !coversFiles(grant.data))) {
       const email = RecipientEmail.safeParse(row);
@@ -189,7 +203,7 @@ function grantedListing(
       formerGrants.push({ grant: grant.data, automationsGeneration: generation });
     }
   }
-  return { grants, formerGrants };
+  return { grants, formerGrants, endedGrants };
 }
 
 // One page of the owner's share links: each link that can edit files or
@@ -226,7 +240,7 @@ function linkListing(links: readonly unknown[]): RosterListing {
       grants.push(grant.data);
     }
   }
-  return { grants, links: listed, formerGrants: [] };
+  return { grants, links: listed, formerGrants: [], endedGrants: [] };
 }
 
 const byGrantId = (left: { grantId: string }, right: { grantId: string }) =>
@@ -272,7 +286,7 @@ export async function listRosterGrants(
   if (!shares.ok) return shares.answer;
   const granted = grantedListing(workspaceId, shares.body);
   if (granted.grants === null) return answered(granted);
-  const { grants, formerGrants } = granted;
+  const { grants, formerGrants, endedGrants } = granted;
   const links: ListedLink[] = [];
   const cursors = new Set<string>();
   let cursor: string | undefined;
@@ -296,20 +310,27 @@ export async function listRosterGrants(
     grants: grants.sort(byGrantId),
     links: links.sort((left, right) => byGrantId(left.grant, right.grant)),
     formerGrants: formerGrants.sort((left, right) => byGrantId(left.grant, right.grant)),
+    endedGrants: endedGrants.sort(byGrantId),
   });
 }
 
-export function ownerRoster(ownerUserId: string, listing: unknown, next: string): ReachRoster {
+/** A saved listing as this build reads it, or null when it cannot. */
+export function readStoredRoster(listing: unknown): RosterListing | null {
   const stored = StoredRoster.safeParse(listing);
-  if (!stored.success) return { kind: "unknown", problem: { kind: "unchecked", next: next } };
-  if (stored.data.grants === null) return { kind: "unknown", problem: stored.data.problem };
-  const links = stored.data.links;
+  return stored.success ? stored.data : null;
+}
+
+export function ownerRoster(ownerUserId: string, listing: unknown, next: string): ReachRoster {
+  const stored = readStoredRoster(listing);
+  if (stored === null) return { kind: "unknown", problem: { kind: "unchecked", next: next } };
+  if (stored.grants === null) return { kind: "unknown", problem: stored.problem };
+  const links = stored.links;
   return {
     kind: "owner",
     ownerUserId,
-    grants: [...stored.data.grants, ...links.filter((link) => !link.ended).map((link) => link.grant)].map(rosterGrantOf),
+    grants: [...stored.grants, ...links.filter((link) => !link.ended).map((link) => link.grant)].map(rosterGrantOf),
     formerEditors: [
-      ...stored.data.formerGrants.flatMap(({ grant, automationsGeneration }) => formerEditorOf(grant, automationsGeneration, "person")),
+      ...stored.formerGrants.flatMap(({ grant, automationsGeneration }) => formerEditorOf(grant, automationsGeneration, "person")),
       ...links.flatMap(formerLinkOf),
     ],
   };

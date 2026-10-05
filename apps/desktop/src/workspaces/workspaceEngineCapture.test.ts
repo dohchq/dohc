@@ -33,6 +33,7 @@ import {
 } from "./workspaceEngineCapture";
 import {
   DaemonRefusalError,
+  YdocOwnerDraftPendingError,
   type ArtifactAssetDescriptor,
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
@@ -53,6 +54,10 @@ import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/li
 import { deferred } from "../testing/deferred";
 
 import { createTestScratch } from "./testTemp";
+
+// The person a restore names, as desktop main reads them.
+const RESTORER = { kind: "human", humanId: "local-person" } as const;
+
 afterEach(async () => {
   vi.restoreAllMocks();
 });
@@ -392,6 +397,111 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it.each(["ownerPending", "declined", "mismatch"] as const)(
+    "defers an open adoption (%s) while another record proceeds", async (status) => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const path = "tasks/pending.md";
+    const objectId = "pending-object";
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, objectId, text: "# Body\n" });
+    const sessions = mockLiveSessions(loopback);
+    const liveStore = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root,
+      attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    let pending = true;
+    let healthyPending = true;
+    const reconcile = vi.fn(async () => {
+      healthyPending = false;
+      throw new DaemonRefusalError({ code: "COLLECTION_RECONCILIATION_LEASE_HELD", message: "A document is still open.", retry: "afterBackoff" }, undefined);
+    });
+    const store = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "flushCapture") return async () => undefined;
+        if (property === "reconcileCapture") return reconcile;
+        if (property === "listPendingCollectionAdoptions") return async () => ({
+          adoptions: [
+            ...(pending ? [{ versionId: "main", recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+              collectionPath: "tasks", filePath: path, objectId: status === "mismatch" ? "stale-object" : objectId }] : []),
+            ...(healthyPending ? [{ versionId: "main", recordId: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+              collectionPath: "tasks", filePath: "tasks/healthy.md", objectId: "healthy-object" }] : []),
+          ], nextCursor: null,
+        });
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("Name", "Manual");
+    const close = vi.fn(async () => undefined);
+    const evict = vi.fn(async () => undefined);
+    const healthyEvict = vi.fn(async () => undefined);
+    const open = vi.fn(async (input: EngineYdocProviderSessionOptions) => input.path !== path
+      ? { path: input.path, evict: healthyEvict } as unknown as EngineYdocProviderSession : ({
+      doc, initialUpdate: Y.encodeStateAsUpdate(doc), contentKind: "richdoc" as const,
+      path, objectId, versionId: "main", head: "present" as const, lineage: "existing" as const,
+      unsettled: false, close, evict,
+      applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); },
+      adoptCollectionRecord: async () => {
+        if (status === "ownerPending") doc.getMap("frontmatter").set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
+        return status === "declined" ? "declined" as const : "ownerPending" as const;
+      },
+      settleNow: async () => { throw new YdocOwnerDraftPendingError({
+        binding: { workspaceId: WORKSPACE_ID, mainVersionId: "main", objectId,
+          lineageClaimId: "a".repeat(64), currentPath: path, selectorPaths: [path], restoreFenceGeneration: 0 },
+        relayDatabaseNamespace: "relay", revision: 1, acceptedCursor: 0, nativeHeadSequence: 1, nativeUnsettled: false,
+        outboxId: "outbox", pendingBytes: 20, state: "active",
+      }); },
+    }));
+    const errors: unknown[] = [];
+    const engine = capture(root, { store, rustEngineSessions: sessions, openRustYDocProviderSession: open,
+      onError: (_context, error) => errors.push(error) });
+    const session = await engine.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    await engine.flush();
+    expect(session.doc.getMap("frontmatter").toJSON()).toEqual(status === "ownerPending"
+      ? { Name: "Manual", id: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa" } : { Name: "Manual" });
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(healthyEvict).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    expect(evict).not.toHaveBeenCalled();
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(errors).toEqual([]);
+    healthyPending = true;
+    reconcile.mockRejectedValueOnce(new DaemonRefusalError({
+      code: "INTERNAL", message: "collection-reconciliation-lease-held", retry: "no",
+    }, undefined));
+    await expect(engine.flush()).rejects.toThrow("collection-reconciliation-lease-held");
+    healthyPending = false;
+    // The configured owner host completes adoption with its audited settlement.
+    pending = false;
+    await engine.flush();
+    await session.close({ settle: false });
+    await engine.stop();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("adopts records discovered by this flush's capture in one fixed second pass", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    let pending = false;
+    const calls: string[] = [];
+    const store = {
+      ensureMainVersion: async () => undefined,
+      flushCapture: async () => { calls.push("capture"); pending = true; },
+      listPendingCollectionAdoptions: async () => {
+        calls.push("list");
+        return { adoptions: pending ? [{ versionId: "main", recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+          collectionPath: "tasks", filePath: "tasks/record.md", objectId: "record" }] : [], nextCursor: null };
+      },
+      reconcileCapture: async () => { calls.push("reconcile"); pending = false; },
+    } as unknown as CaptureVersionedTextStore;
+    const sessions = { run: async (_workspace: unknown, task: (binding: unknown) => unknown) =>
+      task({ client: {}, workspace: "workspace" }) } as unknown as EngineWorkspaceSessions;
+    const engine = capture(root, { store, rustEngineSessions: sessions,
+      openRustYDocProviderSession: async input => ({path: input.path, evict: async () => { calls.push("evict"); }}) as EngineYdocProviderSession });
+    await engine.flush();
+    expect(calls).toEqual(["list", "capture", "list", "evict", "reconcile"]);
+    expect(pending).toBe(false);
+    await engine.stop();
+  });
+
   it("continues draining pending collection adoptions after one adoption fails", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     let listed = false;
@@ -480,7 +590,7 @@ describe("workspaceEngineCapture batch capture", () => {
       reconcileCapture: async () => {
         attempts.push("reconcile");
         if (leasedPaths.size > 0) {
-          throw new Error("collection-reconciliation-lease-held");
+          throw new DaemonRefusalError({ code: "COLLECTION_RECONCILIATION_LEASE_HELD", message: "A document is still open.", retry: "afterBackoff" }, undefined);
         }
       },
       listPendingCollectionAdoptions: async () => ({
@@ -529,10 +639,10 @@ describe("workspaceEngineCapture batch capture", () => {
 
     await engine.flush();
 
-    expect(completed).toEqual(new Set(["projects/healthy.md"]));
+    expect(completed).toEqual(new Set(["projects/healthy.md", "projects/busy.md"]));
     expect(attempts).toEqual([
-      "projects/busy.md:1",
-      "projects/healthy.md:1",
+      "projects/busy.md:1", "projects/healthy.md:1", "reconcile",
+      "projects/busy.md:2", "reconcile",
     ]);
     expect(errors).toEqual([]);
 
@@ -544,6 +654,7 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(attempts).toEqual([
       "projects/busy.md:1",
       "projects/healthy.md:1",
+      "reconcile",
       "projects/busy.md:2",
       "reconcile",
     ]);
@@ -575,7 +686,7 @@ describe("workspaceEngineCapture batch capture", () => {
       reconcileCapture: async () => {
         attempts.push("reconcile");
         if (leasedPaths.size > 0) {
-          throw new Error("collection-reconciliation-lease-held");
+          throw new DaemonRefusalError({ code: "COLLECTION_RECONCILIATION_LEASE_HELD", message: "A document is still open.", retry: "afterBackoff" }, undefined);
         }
       },
       listPendingCollectionAdoptions: async () => ({
@@ -613,7 +724,7 @@ describe("workspaceEngineCapture batch capture", () => {
 
     await engine.flush();
 
-    expect(attempts).toEqual(["projects/cancelled.md:1"]);
+    expect(attempts).toEqual(["projects/cancelled.md:1", "projects/cancelled.md:2", "reconcile"]);
     expect(errors).toEqual([
       {
         context: "collection adoption of projects/cancelled.md",
@@ -673,20 +784,20 @@ describe("workspaceEngineCapture batch capture", () => {
           path: options.path,
           evict: async () => {
             evictionAttempts += 1;
-            if (evictionAttempts === 1) throw busy;
+            if (existsSync(join(root, adoption.filePath))) throw busy;
           },
         }) as EngineYdocProviderSession,
     });
 
     await engine.flush();
-    expect(evictionAttempts).toBe(1);
+    expect(evictionAttempts).toBe(2);
 
     await unlink(join(root, adoption.filePath));
     await engine.flush();
     const evictionAttemptsAfterDeletionPass = evictionAttempts;
     await engine.stop();
 
-    expect(evictionAttemptsAfterDeletionPass).toBe(2);
+    expect(evictionAttemptsAfterDeletionPass).toBe(3);
   });
 
   it("releases a retained collection adoption when its provider path matches a renamed pending item", async () => {
@@ -738,7 +849,7 @@ describe("workspaceEngineCapture batch capture", () => {
             },
             evict: async () => {
               originalEvictionAttempts += 1;
-              if (originalEvictionAttempts === 1) throw busy;
+              if (pendingAdoption === originalAdoption) throw busy;
             },
           } as EngineYdocProviderSession;
         }
@@ -752,7 +863,7 @@ describe("workspaceEngineCapture batch capture", () => {
     });
 
     await engine.flush();
-    expect(originalEvictionAttempts).toBe(1);
+    expect(originalEvictionAttempts).toBe(2);
 
     pendingAdoption = renamedAdoption;
     originalProviderPath = renamedAdoption.filePath;
@@ -761,8 +872,8 @@ describe("workspaceEngineCapture batch capture", () => {
     const renamedEvictionsAfterRenamePass = renamedEvictionAttempts;
     await engine.stop();
 
-    expect(renamedEvictionsAfterRenamePass).toBe(1);
-    expect(originalEvictionsAfterRenamePass).toBe(2);
+    expect(renamedEvictionsAfterRenamePass).toBe(2);
+    expect(originalEvictionsAfterRenamePass).toBe(3);
   });
 
   it("releases the old collection adoption provider before reopening after a transport rebind", async () => {
@@ -1001,7 +1112,7 @@ describe("workspaceEngineCapture batch capture", () => {
     });
 
     const outcome = await engine
-      .restoreFileToBeforeMoment("missing-moment")
+      .restoreFileToBeforeMoment("missing-moment", RESTORER)
       .catch((error: unknown) => error);
     expect(outcome).toBeInstanceOf(Error);
     const relevant = requests
@@ -1092,7 +1203,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root,created.snapshot.path,"response 104");
     expect(await engine.undoAcceptedAppResponse(selection)).toEqual(deleted);
     expect(existsSync(join(root,created.snapshot.path))).toBe(false);
-    await engine.restoreFileToBeforeMoment(deleted.momentId!);
+    await engine.restoreFileToBeforeMoment(deleted.momentId!, RESTORER);
     expect(requests.filter(request=>request.method==="versionedText.write").at(-1)?.params).toMatchObject({
       restoreBeforeMomentId: deleted.momentId,
       origin: "restore",
@@ -1165,7 +1276,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const created = await store.writeTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md", text: "original", metadata: { origin: "api" } });
     if (artifact === "present") await write(root, "shared.md", "original");
     const engine = capture(root, { store, rustEngineSessions: sessions });
-    await expect(engine.restoreFileToBeforeMoment(created.moment.id)).rejects.toThrow("dohc could not restore shared.md. This action is unavailable for shared live files.");
+    await expect(engine.restoreFileToBeforeMoment(created.moment.id, RESTORER)).rejects.toThrow("dohc could not restore shared.md. This action is unavailable for shared live files.");
     expect(deletionAttempts).toBe(1);
     expect((await store.readTextFile({ workspaceId: WORKSPACE_ID, versionId: "main", path: "shared.md" }))?.text).toBe("original");
     if (artifact === "present") expect(await readFile(join(root, "shared.md"), "utf8")).toBe("original");
@@ -1198,7 +1309,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root, target.path, disk);
     refuseBinaryWrites = true;
     const engine = capture(root, { store, rustEngineSessions: sessions });
-    await expect(engine.restoreFileToBeforeMoment(changed.moment.id)).rejects.toMatchObject({
+    await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER)).rejects.toMatchObject({
       message: "dohc could not restore shared.md. This action is unavailable for shared live files. Continue editing at the current location.",
       cause: refusal,
     });
@@ -1230,7 +1341,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root, target.path, "current");
     conflict = true;
     const engine = capture(root, { store, rustEngineSessions: sessions });
-    await expect(engine.restoreFileToBeforeMoment(changed.moment.id)).rejects.toBeInstanceOf(AuthoredTextChangedError);
+    await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER)).rejects.toBeInstanceOf(AuthoredTextChangedError);
     expect(await readFile(join(root, target.path), "utf8")).toBe("outside edit");
     await engine.stop();
   });
@@ -1247,7 +1358,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await write(root, target.path, current);
     const engine = capture(root, { store, rustEngineSessions: sessions });
 
-    await engine.restoreFileToBeforeMoment(changed.moment.id);
+    await engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER);
 
     const summaries = (await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments.map(
       (moment) => moment.metadata.summary,
@@ -1271,7 +1382,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const before = (await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments.length;
     const engine = capture(root, { store, rustEngineSessions: sessions });
 
-    await expect(engine.restoreFileToBeforeMoment(edited.moment.id)).resolves.toMatchObject({
+    await expect(engine.restoreFileToBeforeMoment(edited.moment.id, RESTORER)).resolves.toMatchObject({
       restoredMomentId: edited.moment.id,
     });
 
@@ -1864,7 +1975,7 @@ describe("workspaceEngineCapture batch capture", () => {
       await engine.flush();
       // One current observation, not twelve obsolete observations queued behind it.
       expect(watcherStatus).toHaveBeenCalledTimes(1);
-      expect(adoptions).toHaveBeenCalledTimes(failFirst ? 1 : 2);
+      expect(adoptions).toHaveBeenCalledTimes(failFirst ? 2 : 3);
       expect(outcomes).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(DAEMON_CAPTURE_HEALTH_POLL_MS);
       await engine.flush();

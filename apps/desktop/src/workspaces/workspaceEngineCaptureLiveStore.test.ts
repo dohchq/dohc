@@ -18,6 +18,7 @@ import {
 } from "@dohc/workspace-engine-client";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createHash } from "node:crypto";
+import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { describe, expect, it } from "vitest";
 import { createCaptureLiveStores as createAttachedCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 
@@ -1528,9 +1529,13 @@ describe("createCaptureLiveStores", () => {
     },
   );
 
+  const LONGEST_LIVE_ID = "\"".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
   it.each(([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const).flatMap((method) => [
     { method, author: { kind: "named", userId: "ana", grantId: "grant", grantGeneration: 2 } as const },
     { method, author: { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" } as const },
+    // The longest identifiers a live share admits: 512 UTF-8 bytes, at the largest generation.
+    { method, author: { kind: "named", userId: LONGEST_LIVE_ID, grantId: LONGEST_LIVE_ID, grantGeneration: Number.MAX_SAFE_INTEGER } as const },
+    { method, author: { kind: "link", grantId: LONGEST_LIVE_ID, grantGeneration: Number.MAX_SAFE_INTEGER, principalId: LONGEST_LIVE_ID } as const },
     { method, author: { kind: "agent", agentId: "agent" } as const },
     { method, author: { kind: "automation", automationId: "collection:Tasks#stamp", depth: 4 } as const },
     { method, author: { kind: "human", humanId: "ada", onBehalfOf: "ada" } as const },

@@ -156,6 +156,10 @@ pub fn has_ignored_segment(rel_path: &str) -> bool {
 /// (alias-stripped, lowercased) file name.
 pub fn is_database_sidecar(file_name: &str) -> bool {
     let lower = normalize_segment(file_name);
+    is_database_sidecar_normalized(&lower)
+}
+
+pub(crate) fn is_database_sidecar_normalized(lower: &str) -> bool {
     SIDECAR_SUFFIXES.iter().any(|suffix| {
         lower
             .strip_suffix(suffix)

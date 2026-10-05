@@ -103,14 +103,15 @@ export function baselineRecord(value: unknown, fields: readonly string[], allowE
     (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) {
     throw new TypeError("Invalid baseline record.");
   }
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const keys = Reflect.ownKeys(descriptors);
-  if (!allowExtra && (keys.length !== fields.length || keys.some(key => typeof key !== "string" || !fields.includes(key)))) {
-    throw new TypeError("Invalid baseline fields.");
+  if (!allowExtra) {
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== fields.length || keys.some(key => typeof key !== "string" || !fields.includes(key))) {
+      throw new TypeError("Invalid baseline fields.");
+    }
   }
   const result: Record<string, unknown> = {};
   for (const field of fields) {
-    const descriptor = descriptors[field];
+    const descriptor = Object.getOwnPropertyDescriptor(value, field);
     if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) throw new TypeError("Invalid baseline field.");
     result[field] = descriptor.value;
   }

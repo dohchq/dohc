@@ -72,7 +72,7 @@ fn native_tail_apply(
             .optional()
         })
         .unwrap();
-    let agent_declaration = declared
+    let agent_declaration: Option<AgentDeclaration> = declared
         .flatten()
         .map(|json| serde_json::from_str(&json).unwrap());
     let event = AdmittedLiveUpdate {
@@ -89,9 +89,17 @@ fn native_tail_apply(
                     principal_id: "owner".into(),
                 },
                 received_at_ms: cursor,
-                agent_declaration,
             },
             first_seen: vec![],
+            canonical_version: Some(2),
+            author_snapshot: Some(
+                (agent_declaration)
+                    .into_iter()
+                    .map(crate::live_update_application::LiveAuthorEntry::from)
+                    .collect(),
+            ),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
         },
         update_bytes: bytes.clone(),
     };
@@ -208,9 +216,12 @@ fn native_restore_classifies_a_lost_ack_before_the_accepted_checkpoint() {
                                 principal_id: "owner".into(),
                             },
                             received_at_ms: ordinal,
-                            agent_declaration: None,
                         },
                         first_seen: vec![],
+                        canonical_version: Some(2),
+                        author_snapshot: Some(vec![]),
+                        first_seen_deletes: Some(vec![]),
+                        checkpoint_coverage: None,
                     },
                     update_bytes: vec![0, 0],
                 };
@@ -238,12 +249,13 @@ fn native_restore_classifies_a_lost_ack_before_the_accepted_checkpoint() {
         proposal.receipt().native_sources[0].accepted_receipt,
         Some(old_receipt)
     );
-    let native = proposal.receipt().native_sources[0].source.native().unwrap();
+    let native = proposal.receipt().native_sources[0]
+        .source
+        .native()
+        .unwrap();
     assert_eq!(native.native_sequence, 1);
-    assert!(
-        matches!(&native.origin,
-        owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {actor_origin_id:Some(id), ..} if id=="native-agent")
-    );
+    assert!(matches!(&native.origin,
+        owner_outbox::OwnerOutboxNativeOrigin::NativeUpdate {actor_origin_id:Some(id), ..} if id=="native-agent"));
     assert_eq!(native_tail_inventory(&f.store), before);
 }
 
@@ -444,7 +456,7 @@ fn native_restore_tail_retains_adoption_seed_without_admitting_it() {
 
 #[test]
 fn native_restore_tail_refuses_missing_or_changed_provenance_without_mutating_canonical_state() {
-    let mutations=[
+    let mutations = [
         "UPDATE owner_ydoc_outbox_entries SET native_source_json=NULL",
         "UPDATE owner_ydoc_outbox_entries SET native_source_json=json_set(native_source_json,'$.binding.objectId','other')",
         "UPDATE owner_ydoc_outbox_entries SET native_source_json=json_set(native_source_json,'$.adoptionId','other')",
@@ -659,8 +671,8 @@ fn native_restore_tail_does_not_infer_generic_pending_provenance_from_matching_b
 
 /// An adopted owner's native agent edit declares the agent its journal row
 /// recorded, as an editor's draft declares it, with no draft proof. A retry
-/// reads back the same entry. The owner's own acceptance and restore require
-/// exactly that declaration. A person's or an automation's edit declares none.
+/// reads back the same entry. Restore verifies that native source declaration.
+/// A person's or an automation's edit declares none.
 #[test]
 fn adopted_native_agent_edit_declares_its_recorded_agent() {
     let mut f = Fixture::new();
@@ -707,45 +719,6 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
             .table_row_count("owner_ydoc_outbox_entries")
             .unwrap(),
         1
-    );
-    // Its delivery accepted without the declaration is not this entry's.
-    let undeclared = AdmittedLiveUpdate {
-        metadata: AdmittedLiveUpdateMetadata {
-            accepted: RelayAcceptedLiveUpdate {
-                receipt: LiveUpdateReceipt {
-                    delivery_id: entry.delivery_id.clone(),
-                    update_digest: entry.update_digest.clone(),
-                    journal_cursor: 7,
-                    accepting_host_epoch: 1,
-                },
-                binding: f.binding.clone(),
-                authority: ServerDerivedLiveUpdateAuthority::Owner {
-                    principal_id: "owner".into(),
-                },
-                received_at_ms: 7,
-                agent_declaration: None,
-            },
-            first_seen: vec![],
-        },
-        update_bytes: entry.update.clone(),
-    };
-    assert!(matches!(
-        apply_committed(
-            &mut f.store,
-            &mut WriterDocCache::new(),
-            &f.handle,
-            undeclared,
-            &NoFaults,
-            100_000_000,
-            |_, _, _, _| Ok(()),
-        ),
-        Err(ApplicationError::Conflict)
-    ));
-    assert_eq!(
-        f.store
-            .table_row_count("live_device_update_applications")
-            .unwrap(),
-        0
     );
     // Restore classifies the native source with its derived declaration, and
     // refuses a stored one the source does not derive.
@@ -826,6 +799,57 @@ fn adopted_native_agent_edit_declares_its_recorded_agent() {
     }
 }
 
+#[test]
+fn adopted_native_agent_edit_accepts_a_capped_snapshot_without_agent_credit() {
+    let mut f = Fixture::new();
+    f.adopt().unwrap();
+    let entry = native_tail_edit(&mut f, "Agent pending", 11);
+    let undeclared = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: entry.delivery_id.clone(),
+                    update_digest: entry.update_digest.clone(),
+                    journal_cursor: 7,
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 7,
+            },
+            first_seen: vec![],
+
+            canonical_version: Some(2),
+
+            author_snapshot: Some(vec![]),
+
+            first_seen_deletes: Some(vec![]),
+
+            checkpoint_coverage: None,
+        },
+        update_bytes: entry.update.clone(),
+    };
+    let result = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        undeclared,
+        &NoFaults,
+        100_000_000,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap();
+    assert!(matches!(result, ApplicationResult::Applied(..)));
+    assert_eq!(
+        f.store
+            .table_row_count("live_device_update_applications")
+            .unwrap(),
+        1
+    );
+}
+
 /// An enrolled owner's pending draft names no native journal update. Restore
 /// keeps it as an owner draft source with its delivery identity and declared
 /// agent; an accepted draft also carries its own receipt, whose declaration
@@ -873,9 +897,21 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
                             principal_id: "owner".into(),
                         },
                         received_at_ms: 7,
-                        agent_declaration: Some(declaration.clone()),
                     },
                     first_seen: vec![],
+
+                    canonical_version: Some(2),
+
+                    author_snapshot: Some(
+                        (Some(declaration.clone()))
+                            .into_iter()
+                            .map(crate::live_update_application::LiveAuthorEntry::from)
+                            .collect(),
+                    ),
+
+                    first_seen_deletes: Some(vec![]),
+
+                    checkpoint_coverage: None,
                 },
                 update_bytes: update.clone(),
             };
@@ -940,7 +976,9 @@ fn native_restore_keeps_enrolled_owner_drafts_as_truthful_sources() {
             ),
         ] {
             f.store
-                .write_with(&NoFaults, |tx| tx.execute_batch(&mutation).map_err(write_sql))
+                .write_with(&NoFaults, |tx| {
+                    tx.execute_batch(&mutation).map_err(write_sql)
+                })
                 .unwrap();
             assert!(
                 native_tail_prepare(&mut f, input.clone()).is_err(),
@@ -1120,9 +1158,12 @@ fn native_restore_apply_preserves_quarantined_tail_and_survives_compaction_and_b
                     principal_id: "restoring-owner".into(),
                 },
                 received_at_ms: 80,
-                agent_declaration: None,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
         },
     };
     let inventory = native_tail_inventory(&f.store);
@@ -1291,9 +1332,12 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
                     principal_id: "restoring-owner".into(),
                 },
                 received_at_ms: 80,
-                agent_declaration: None,
             },
             first_seen: proposal.receipt().replacement_ranges.clone(),
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
         },
     };
     f._owner
@@ -1443,96 +1487,289 @@ fn resumed_owner_retains_old_pending_sources_and_creates_an_independent_generati
 
 #[test]
 fn restored_owner_capacity_rescue_streams_past_a_large_prior_proof_and_private_tail() {
-    restored_owner_capacity_rescue(350,true);
+    restored_owner_capacity_rescue(350, true);
 }
 
 #[test]
 fn restored_owner_capacity_rescue_streams_past_a_large_baseline_restore_proof_and_private_tail() {
-    restored_owner_capacity_rescue(700,false);
+    restored_owner_capacity_rescue(700, false);
 }
 
-fn restored_owner_capacity_rescue(events:i64,select_terminal:bool) {
-    let seed=Fixture::new();
-    let baseline=seed.cut.baseline_bytes.clone();
-    let source:String=seed.store.read_with(|conn|conn.query_row("SELECT text FROM blobs WHERE sha256=?1",[&seed.cut.source_digest],|r|r.get(0))).unwrap();
+fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
+    let seed = Fixture::new();
+    let baseline = seed.cut.baseline_bytes.clone();
+    let source: String = seed
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT text FROM blobs WHERE sha256=?1",
+                [&seed.cut.source_digest],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
     drop(seed);
-    let mut selectors=vec!["owner.md".into()];
-    selectors.extend((0..99).map(|i|format!("z{i:02}{}", "x".repeat(1020)))); selectors.sort();
-    let mut f=Fixture::with_source_selectors(source,baseline.clone(),selectors);
+    let mut selectors = vec!["owner.md".into()];
+    selectors.extend((0..99).map(|i| format!("z{i:02}{}", "x".repeat(1020))));
+    selectors.sort();
+    let mut f = Fixture::with_source_selectors(source, baseline.clone(), selectors);
     f.adopt().unwrap();
-    let mut terminal=None;
-    let mut sequence=0;
+    let mut terminal = None;
+    let mut sequence = 0;
     for cursor in 1..=events {
-        let ack=native_tail_apply(&mut f,baseline.clone(),format!("proof-{cursor}"),cursor);
-        sequence=ack.local_ydoc_sequence;
-        terminal=Some(LiveUpdateReceipt {delivery_id:ack.delivery_id,update_digest:ack.update_digest,journal_cursor:cursor,accepting_host_epoch:1});
+        let ack = native_tail_apply(&mut f, baseline.clone(), format!("proof-{cursor}"), cursor);
+        sequence = ack.local_ydoc_sequence;
+        terminal = Some(LiveUpdateReceipt {
+            delivery_id: ack.delivery_id,
+            update_digest: ack.update_digest,
+            journal_cursor: cursor,
+            accepting_host_epoch: 1,
+        });
     }
-    let mut preparation=native_tail_input(&mut f,terminal,sequence);
+    let mut preparation = native_tail_input(&mut f, terminal, sequence);
     // The selected current point retains a second authentic copy of the
     // accepted suffix: >60MiB of proof with half as many ingress operations.
-    if select_terminal {preparation.point.journal_cursor=events;}
-    let coordinate=f.handle.registration.lock().unwrap().coordinate.clone();
-    const PROOF_BYTES:usize=512*1024*1024;
-    let proposal=f._owner.prepare_restore(&mut f.store,preparation.clone(),coordinate.clone(),PROOF_BYTES,1000,&NoFaults).unwrap();
-    let proof_length:i64=f.store.read_with(|conn|conn.query_row("SELECT length(CAST(proposal_json AS BLOB)) FROM live_restore_fences",[],|r|r.get(0))).unwrap();
-    assert!(proof_length>60*1024*1024);
-    let mut binding=f.binding.clone(); binding.restore_fence_generation=1;
-    let input=NativeRestoreApplication {
-        preparation,candidate_digest:proposal.receipt().candidate_digest.clone(),native_source_manifest_digest:proposal.receipt().native_source_manifest_digest.clone(),
-        admitted:AdmittedLiveUpdateMetadata {
-            accepted:RelayAcceptedLiveUpdate {
-                receipt:LiveUpdateReceipt {delivery_id:"proof-restore".into(),update_digest:proposal.receipt().candidate_digest.clone(),journal_cursor:events+1,accepting_host_epoch:1},
-                binding:binding.clone(),authority:ServerDerivedLiveUpdateAuthority::Owner {principal_id:"owner".into()},received_at_ms:events+1,agent_declaration:None,
-            },first_seen:proposal.receipt().replacement_ranges.clone(),
+    if select_terminal {
+        preparation.point.journal_cursor = events;
+    }
+    let coordinate = f.handle.registration.lock().unwrap().coordinate.clone();
+    const PROOF_BYTES: usize = 512 * 1024 * 1024;
+    let proposal = f
+        ._owner
+        .prepare_restore(
+            &mut f.store,
+            preparation.clone(),
+            coordinate.clone(),
+            PROOF_BYTES,
+            1000,
+            &NoFaults,
+        )
+        .unwrap();
+    let proof_length: i64 = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT length(CAST(proposal_json AS BLOB)) FROM live_restore_fences",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(proof_length > 60 * 1024 * 1024);
+    let mut binding = f.binding.clone();
+    binding.restore_fence_generation = 1;
+    let input = NativeRestoreApplication {
+        preparation,
+        candidate_digest: proposal.receipt().candidate_digest.clone(),
+        native_source_manifest_digest: proposal.receipt().native_source_manifest_digest.clone(),
+        admitted: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "proof-restore".into(),
+                    update_digest: proposal.receipt().candidate_digest.clone(),
+                    journal_cursor: events + 1,
+                    accepting_host_epoch: 1,
+                },
+                binding: binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: events + 1,
+            },
+            first_seen: proposal.receipt().replacement_ranges.clone(),
+
+            canonical_version: Some(2),
+
+            author_snapshot: Some(vec![]),
+
+            first_seen_deletes: Some(vec![]),
+
+            checkpoint_coverage: None,
         },
     };
     drop(proposal);
-    f._owner.apply_restore(&mut f.store,&mut WriterDocCache::new(),input.clone(),coordinate.clone(),PROOF_BYTES,1000,events+2,&NoFaults,|_,_,_,_|Ok(())).unwrap();
-    let settled=f._owner.with_restore_settlement(&mut f.store,input.clone(),coordinate.clone(),PROOF_BYTES,1000,|store,audit|restore_content::tests::record_test_projection(store,audit,"large-proof-restored")).unwrap();
-    f._owner.resume_restore(&mut f.store,NativeRestoreResume {application:input,settlement_id:settled.settlement_id},coordinate.clone(),PROOF_BYTES,1000,events+3,&NoFaults,|_,_,_,_|Ok(())).unwrap();
-    f.binding=binding;
-    f.doc=f.store.read_with(|conn|durable::load_doc_in(conn,&f.key)).unwrap();
-    f.handle=f._owner.register(&mut f.store,"namespace".into(),coordinate,f.binding.clone()).unwrap();
+    f._owner
+        .apply_restore(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            input.clone(),
+            coordinate.clone(),
+            PROOF_BYTES,
+            1000,
+            events + 2,
+            &NoFaults,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+    let settled = f
+        ._owner
+        .with_restore_settlement(
+            &mut f.store,
+            input.clone(),
+            coordinate.clone(),
+            PROOF_BYTES,
+            1000,
+            |store, audit| {
+                restore_content::tests::record_test_projection(store, audit, "large-proof-restored")
+            },
+        )
+        .unwrap();
+    f._owner
+        .resume_restore(
+            &mut f.store,
+            NativeRestoreResume {
+                application: input,
+                settlement_id: settled.settlement_id,
+            },
+            coordinate.clone(),
+            PROOF_BYTES,
+            1000,
+            events + 3,
+            &NoFaults,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
+    f.binding = binding;
+    f.doc = f
+        .store
+        .read_with(|conn| durable::load_doc_in(conn, &f.key))
+        .unwrap();
+    f.handle = f
+        ._owner
+        .register(
+            &mut f.store,
+            "namespace".into(),
+            coordinate,
+            f.binding.clone(),
+        )
+        .unwrap();
     {
-        let held=f.handle.registration.lock().unwrap();
-        let resumed=f.store.read_with(|conn|restore_resume::generation(conn,&held)).unwrap().unwrap();
-        assert_eq!(resumed.application_receipt.journal_cursor,events+1);
-        assert_eq!(resumed.binding,f.binding);
+        let held = f.handle.registration.lock().unwrap();
+        let resumed = f
+            .store
+            .read_with(|conn| restore_resume::generation(conn, &held))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.application_receipt.journal_cursor, events + 1);
+        assert_eq!(resumed.binding, f.binding);
     }
-    let peer=Ydoc::wire(); peer.apply(&f.doc.encode_full_state()).unwrap();
-    native_tail_edit(&mut f,"Private after restore",events+4);
-    let remote=peer.richdoc_append_paragraph("Accepted after restore");
-    let mut cursor=events+2;
-    let mut terminal=None;
-    let blocked=loop {
-        assert!(cursor<events+82);
-        let event=AdmittedLiveUpdate {
-            metadata:AdmittedLiveUpdateMetadata {
-                accepted:RelayAcceptedLiveUpdate {
-                    receipt:LiveUpdateReceipt {delivery_id:format!("post-restore-{cursor}"),update_digest:hex_sha256(&remote),journal_cursor:cursor,accepting_host_epoch:1},
-                    binding:f.binding.clone(),authority:ServerDerivedLiveUpdateAuthority::Owner {principal_id:"owner".into()},received_at_ms:cursor,
-                    agent_declaration:Some(AgentDeclaration {agent_id:format!("{cursor:03}{}", "\"".repeat(509)),on_behalf_of:Some("\"".repeat(512)),depth:1}),
-                },first_seen:vec![],
-            },update_bytes:remote.clone(),
+    let peer = Ydoc::wire();
+    peer.apply(&f.doc.encode_full_state()).unwrap();
+    native_tail_edit(&mut f, "Private after restore", events + 4);
+    let remote = peer.richdoc_append_paragraph("Accepted after restore");
+    let mut cursor = events + 2;
+    let mut terminal = None;
+    let blocked = loop {
+        assert!(cursor < events + 82);
+        let event = AdmittedLiveUpdate {
+            metadata: AdmittedLiveUpdateMetadata {
+                accepted: RelayAcceptedLiveUpdate {
+                    receipt: LiveUpdateReceipt {
+                        delivery_id: format!("post-restore-{cursor}"),
+                        update_digest: hex_sha256(&remote),
+                        journal_cursor: cursor,
+                        accepting_host_epoch: 1,
+                    },
+                    binding: f.binding.clone(),
+                    authority: ServerDerivedLiveUpdateAuthority::Owner {
+                        principal_id: "owner".into(),
+                    },
+                    received_at_ms: cursor,
+                },
+                first_seen: vec![],
+
+                canonical_version: Some(2),
+
+                author_snapshot: Some(
+                    (Some(AgentDeclaration {
+                        agent_id: format!("{cursor:03}{}", "\"".repeat(509)),
+                        on_behalf_of: Some("\"".repeat(512)),
+                        depth: 1,
+                    }))
+                    .into_iter()
+                    .map(crate::live_update_application::LiveAuthorEntry::from)
+                    .collect(),
+                ),
+
+                first_seen_deletes: Some(vec![]),
+
+                checkpoint_coverage: None,
+            },
+            update_bytes: remote.clone(),
         };
-        let result=apply_committed(&mut f.store,&mut WriterDocCache::new(),&f.handle,event.clone(),&NoFaults,8*1024*1024,|_,_,_,_|Ok(())).unwrap();
+        let result = apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event.clone(),
+            &NoFaults,
+            8 * 1024 * 1024,
+            |_, _, _, _| Ok(()),
+        )
+        .unwrap();
         match result {
-            ApplicationResult::Applied(..)=> {terminal=Some(event.metadata.accepted.receipt);cursor+=1;}
-            ApplicationResult::Pending(ApplicationPending::SettlementRequired)=>break event,
-            other=>panic!("unexpected {other:?}"),
+            ApplicationResult::Applied(..) => {
+                terminal = Some(event.metadata.accepted.receipt);
+                cursor += 1;
+            }
+            ApplicationResult::Pending(ApplicationPending::SettlementRequired) => break event,
+            other => panic!("unexpected {other:?}"),
         }
     };
-    let rescue=with_settlement(&mut f.store,&f.handle,terminal.clone(),128,NativeHistoryReconstruction {working_reserve_bytes:8*1024*1024},|store,audit| {
-        let doc=audit.accepted_prefix().expect("private tail needs accepted state");
-        let text=doc.project(ContentKind::Richdoc)?.content;
-        assert!(text.contains("Accepted after restore")); assert!(!text.contains("Private after restore"));
-        restore_content::tests::record_test_projection(store,audit,"rescued-after-restore")
-    }).unwrap();
-    let text:String=f.store.read_with(|conn|conn.query_row("SELECT text FROM blobs WHERE sha256=?1",[&rescue.markdown_digest],|r|r.get(0))).unwrap();
-    assert!(text.contains("Accepted after restore")); assert!(!text.contains("Private after restore"));
-    let held=f.handle.registration.lock().unwrap();
-    assert!(matches!(f.store.read_with(|conn|accepted_history::read(conn,&held,terminal.unwrap().journal_cursor,&mut restore_content::Budget {remaining:60*1024*1024},4095)),Err(ApplicationError::ConfiguredByteBudgetExceeded)));
+    let rescue = with_settlement(
+        &mut f.store,
+        &f.handle,
+        terminal.clone(),
+        128,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        |store, audit| {
+            let doc = audit
+                .accepted_prefix()
+                .expect("private tail needs accepted state");
+            let text = doc.project(ContentKind::Richdoc)?.content;
+            assert!(text.contains("Accepted after restore"));
+            assert!(!text.contains("Private after restore"));
+            restore_content::tests::record_test_projection(store, audit, "rescued-after-restore")
+        },
+    )
+    .unwrap();
+    let text: String = f
+        .store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT text FROM blobs WHERE sha256=?1",
+                [&rescue.markdown_digest],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(text.contains("Accepted after restore"));
+    assert!(!text.contains("Private after restore"));
+    let held = f.handle.registration.lock().unwrap();
+    assert!(matches!(
+        f.store.read_with(|conn| accepted_history::read(
+            conn,
+            &held,
+            terminal.unwrap().journal_cursor,
+            &mut restore_content::Budget {
+                remaining: 60 * 1024 * 1024
+            },
+            4095
+        )),
+        Err(ApplicationError::ConfiguredByteBudgetExceeded)
+    ));
     drop(held);
-    let retry=apply_committed(&mut f.store,&mut WriterDocCache::new(),&f.handle,blocked,&NoFaults,8*1024*1024,|_,_,_,_|Ok(())).unwrap();
-    assert!(matches!(retry,ApplicationResult::Applied(..)));
+    let retry = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        blocked,
+        &NoFaults,
+        8 * 1024 * 1024,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap();
+    assert!(matches!(retry, ApplicationResult::Applied(..)));
 }

@@ -804,12 +804,17 @@ export interface RelayAutomationPress {
   confirmed: string[];
 }
 
+/** Inspection names the authored id in automations.yaml. The host answers with its Collection-bound Button id. */
 export interface RelayButtonTarget { automationId: string; collectionPath: string; definitionHash: string }
 export type RelayButtonInspection =
   | { kind: "ready"; automationId: string; definitionHash: string; irreversible: Array<{ name: string; label: string }> }
   | { kind: "denied" | "unchecked"; reason: string };
 export interface RelayButtonInspectionRequest extends RelayButtonTarget { inspectionId: string }
-/** Host-only authority, derived from a stored press or inspection, never recipient JSON. */
+/** Identity and grants come from the relay's stored authority.
+ * The recipient supplies the Button id. The owner's host resolves and checks it
+ * against its own index and the relay-checked path. Inspection carries the
+ * authored id; a press carries the Collection-bound id.
+ */
 export interface RelayButtonAuthority extends RelayButtonTarget {
   workspaceId: string;
   userId: string;

@@ -316,7 +316,7 @@ async function walkSteps(
       if (result === null) return { outcome: { kind: "wait", reason: "engine" } };
       if (result !== "changed") {
         enter(stage);
-        if ("step" in result) Object.assign(result.step, timing);
+        if ("step" in result) Object.assign(result.step, timing, { appendMs: 0, appendCount: 0 });
         return result;
       }
       if (input.signal.aborted) return { outcome: failed(DEADLINE_ERROR, true) };
@@ -328,6 +328,12 @@ async function walkSteps(
   const land = async (step: StoredStep, fresh: boolean): Promise<CollectionAutomationRunOutcome | null> => {
     const first = effectIndex;
     effectIndex += step.effects.length;
+    const recorded = run.applied.filter((effect) => effect.ordinal === step.ordinal).length;
+    // A crash can leave durable effects whose append timing was never saved.
+    if (step.appendCount !== recorded) {
+      delete step.appendMs;
+      delete step.appendCount;
+    }
     if (effectIndex <= run.applied.length) return null;
     // Every message and notice is checked under this roster before it is sent.
     const messages = await checkPlannedMessages(dependencies, { automationId: ctx.claim.automationId, automation, collection: input.collection, roster: input.roster }, [step], ctx.chat);
@@ -352,7 +358,13 @@ async function walkSteps(
         return input.signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
       }
       const landed = { ordinal: step.ordinal, writes, writeMs: Math.max(0, dependencies.nowMs() - writeStarted), writeCount: 1 };
+      const appendStarted = dependencies.nowMs();
       await store.appendEffect(run, landed);
+      const appendMs = Math.max(0, dependencies.nowMs() - appendStarted);
+      if (step.appendMs !== undefined && step.appendCount !== undefined) {
+        step.appendMs += appendMs;
+        step.appendCount += 1;
+      }
       run.applied.push(landed);
     }
     return null;

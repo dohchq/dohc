@@ -6,16 +6,41 @@ import {openRelayDeployment} from "../relayDeployment.js";
 import type {SyncRelayStorage} from "../storage.js";
 import type {StorageContext} from "./context.js";
 import {readAcceptedHistoryDelivery, readAcceptedHistoryInterval, RestoreHistoryBudget} from "./liveAcceptedHistory.js";
+import {nativeSourceAuthorMatches} from "./liveNativeSourceAuthors.js";
+import type {NativeRestoreProposalReceipt} from "../liveRestoreProposal.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 
 type Fixture = ReturnType<typeof registered>;
-type Input = ReturnType<Fixture["capture"]>;
+type Input = ReturnType<Fixture["capture"]> & {trustedAccount?: {accountId:string;name:string}; metadata: ReturnType<Fixture["capture"]>["metadata"] & {authorContext?: import("@dohc/live-session-contract").LiveAuthorContext}};
 const declared: AgentDeclaration = {agentId: "trip-agent-ü", onBehalfOf: "local-person", depth: 2};
 const declare = (input: Input, agentDeclaration: AgentDeclaration): Input =>
-  ({...input, metadata: {...input.metadata, agentDeclaration}});
+  ({...input, trustedAccount: {accountId: input.expectedAuthority.principalId, name: "Owner"}, metadata: {...input.metadata,
+    authorContext: {kind: "account", accountId: input.expectedAuthority.principalId,
+      agent: {agentId: agentDeclaration.agentId, ...(agentDeclaration.onBehalfOf === null ? {} : {onBehalfOf: agentDeclaration.onBehalfOf}), depth: agentDeclaration.depth}}}});
 const declarations = (f: Fixture) =>
-  f.raw.prepare("SELECT * FROM sync_relay_live_update_agent_declarations ORDER BY journal_cursor").all();
+  f.raw.prepare("SELECT author_snapshot_json FROM sync_relay_live_update_journal WHERE author_context_json IS NOT NULL ORDER BY journal_cursor").all();
+const admittedAgent = (metadata: import("@dohc/live-session-contract").AdmittedLiveUpdateMetadata | null | undefined) => metadata?.authorSnapshot?.find(author => author.kind === "agent");
+const expectedAgent = {kind: "agent", ...declared};
+
+it("charges native request context before loading it for restore association", () => {
+  const f = registered({deployment: true});
+  try {
+    const result = f.storage.commitLiveUpdateJournal(declare(f.capture(f.update(), "context-budget"), declared));
+    expect(result.result.kind).toBe("accepted");
+    const metadata = result.admitted!.metadata;
+    const source = {source: {origin: {kind: "ownerDraft", agentDeclaration: declared}}} as NativeRestoreProposalReceipt["nativeSources"][number];
+    const contextBytes = Number(f.raw.prepare("SELECT length(CAST(author_context_json AS BLOB)) AS bytes FROM sync_relay_live_update_journal WHERE delivery_id='context-budget'").get()!.bytes);
+    expect(() => nativeSourceAuthorMatches(f.storage as unknown as StorageContext, source, metadata, new RestoreHistoryBudget(contextBytes - 1, 1)))
+      .toThrow("Restore history exceeds configured byte bounds.");
+    const budget = new RestoreHistoryBudget(contextBytes, 1);
+    expect(nativeSourceAuthorMatches(f.storage as unknown as StorageContext, source, metadata, budget)).toBe(true);
+    expect(budget.bytes).toBe(0);
+    f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET author_context_json=? WHERE delivery_id='context-budget'").run(JSON.stringify({kind: "account", accountId: "x".repeat(1_000_000)})));
+    expect(() => nativeSourceAuthorMatches(f.storage as unknown as StorageContext, source, metadata, new RestoreHistoryBudget(contextBytes, 1)))
+      .toThrow("Restore history exceeds configured byte bounds.");
+  } finally {f.close();}
+});
 
 it("binds an owner's declared agent to its delivery and refuses a changed, added, or removed declaration", () => {
   const f = registered({deployment: true});
@@ -23,20 +48,20 @@ it("binds an owner's declared agent to its delivery and refuses a changed, added
     const first = declare(f.capture(f.update(), "declared"), declared);
     const accepted = f.storage.commitLiveUpdateJournal(first);
     expect(accepted.result).toMatchObject({kind: "accepted", replayed: false});
-    expect(accepted.admitted!.metadata.accepted.agentDeclaration).toEqual(declared);
+    expect(admittedAgent(accepted.admitted!.metadata)).toEqual(expectedAgent);
     // The declaration names an agent; the authenticated owner stays the authority.
     expect(accepted.admitted!.metadata.accepted.authority).toEqual(first.expectedAuthority);
-    expect(declarations(f)).toEqual([{journal_cursor: 1, agent_id: "trip-agent-ü", on_behalf_of: "local-person", depth: 2}]);
+    expect(JSON.parse(String(declarations(f)[0]!.author_snapshot_json))).toContainEqual(expectedAgent);
     expect(f.storage.commitLiveUpdateJournal(first).result).toMatchObject({kind: "accepted", replayed: true});
 
     // This cut carries the declared event, so admission compares it with storage.
     const plain = f.capture(f.update("more", "plain"), "plain");
-    expect(plain.cutToken.suffix[0]!.metadata.accepted.agentDeclaration).toEqual(declared);
+    expect(admittedAgent(plain.cutToken.suffix[0]!.metadata)).toEqual(expectedAgent);
     const second = f.storage.commitLiveUpdateJournal(plain);
     expect(second.result).toMatchObject({kind: "accepted", replayed: false});
     expect(second.admitted!.metadata.accepted).not.toHaveProperty("agentDeclaration");
 
-    const {agentDeclaration: _removed, ...undeclared} = first.metadata;
+    const {authorContext: _removed, ...undeclared} = first.metadata;
     const before = f.journalRows();
     for (const retry of [declare(first, {...declared, agentId: "other-agent"}), declare(first, {...declared, onBehalfOf: null}),
       declare(first, {...declared, depth: 3}), {...first, metadata: undeclared}, declare(plain, declared)]) {
@@ -47,17 +72,16 @@ it("binds an owner's declared agent to its delivery and refuses a changed, added
   } finally { f.close(); }
 });
 
-it("refuses an agent declaration from a named recipient without writing", () => {
+it("refuses the removed declaration field before writing", () => {
   const f = registered({deployment: true});
   try {
     const named = f.capture(f.update(), "named", {kind: "named", userId: "reader", grantId: "grant"});
     const before = f.journalRows();
-    expect(f.storage.commitLiveUpdateJournal(declare(named, declared)))
-      .toEqual({result: {kind: "refused", reason: "authority-refused"}, admitted: null});
+    expect(() => f.storage.commitLiveUpdateJournal({...named, metadata: {...named.metadata, agentDeclaration: declared}} as never)).toThrow();
     expect(f.journalRows()).toEqual(before);
     expect(declarations(f)).toEqual([]);
     expect(f.storage.commitLiveUpdateJournal(named).result).toMatchObject({kind: "accepted", replayed: false});
-  } finally { f.close(); }
+  } finally {f.close();}
 });
 
 it("reads a declaration folded into a checkpoint from committed delivery, accepted history, and a reopened store", () => {
@@ -87,14 +111,14 @@ it("reads a declaration folded into a checkpoint from committed delivery, accept
       const eventCount = Number(terminal.accepted_event_count), through = Number(terminal.journal_cursor);
       const delivery = readAcceptedHistoryDelivery(storage as unknown as StorageContext,
         {document, namespace, through, eventCount, deliveryId: "declared"}, new RestoreHistoryBudget(1 << 30, 10_000));
-      expect(delivery?.accepted.agentDeclaration).toEqual(declared);
+      expect(admittedAgent(delivery)).toEqual(expectedAgent);
       const events = readAcceptedHistoryInterval(storage as unknown as StorageContext, {document, namespace,
         selected: {eventCount: 0, terminal: null, evidenceDigest: initialAcceptedHistoryDigest(namespace, document)},
         accepted: {eventCount, evidenceDigest: String(terminal.accepted_evidence_digest),
           terminal: {deliveryId: String(terminal.delivery_id), updateDigest: String(terminal.update_digest),
             journalCursor: through, acceptingHostEpoch: first.host.hostEpoch}}}, new RestoreHistoryBudget(1 << 30, 10_000));
-      expect(events.map(event => event.metadata.accepted.agentDeclaration ?? null))
-        .toEqual([declared, ...Array.from({length: events.length - 1}, () => null)]);
+      expect(events.map(event => admittedAgent(event.metadata) ?? null))
+        .toEqual([expectedAgent, ...Array.from({length: events.length - 1}, () => null)]);
     };
     read(f.storage);
     f.close(); open = false;

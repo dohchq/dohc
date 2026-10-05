@@ -6,9 +6,10 @@ use rusqlite::{Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx};
 
-/// The relay derives person attribution and mints shared authors (named,
-/// link, public), so those stay in this computer's history and never reach
-/// the wire. Any other author is left for validation to judge.
+/// The relay derives person attribution and mints the authors it accepted a
+/// shared change under (named, a grant's link, public), so those stay in this
+/// computer's history and never reach the wire. A relay-admitted snapshot's
+/// person stays, and any other author is left for validation to judge.
 pub(crate) fn omit_relay_attributed_authors(payload: &mut serde_json::Value) -> bool {
     let Some(authors) = payload
         .get_mut("authors")
@@ -17,12 +18,23 @@ pub(crate) fn omit_relay_attributed_authors(payload: &mut serde_json::Value) -> 
         return false;
     };
     let original_len = authors.len();
-    authors.retain(|author| {
-        !matches!(
-            author.get("kind").and_then(serde_json::Value::as_str),
-            Some("human" | "named" | "link" | "public")
-        )
-    });
+    authors.retain(
+        |author| match author.get("kind").and_then(serde_json::Value::as_str) {
+            Some("named" | "public") => false,
+            Some("link") => author.get("grantId").is_none(),
+            Some("human") => {
+                author
+                    .get("humanName")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+                    && author
+                        .get("humanId")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| relay_person_id(id).is_some())
+            }
+            _ => true,
+        },
+    );
     if authors.len() == original_len {
         return false;
     }

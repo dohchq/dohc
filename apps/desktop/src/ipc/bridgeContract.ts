@@ -13,6 +13,7 @@ import {
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
 import { z } from "zod";
+import { SharedReversalsSchema } from "@dohc/workspace-contracts/shared-file-settlement";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
@@ -45,7 +46,7 @@ import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
-import { MAX_SCHEMA_COLLECTION_ITEMS } from "@dohc/workspace-contracts/collection-values";
+import { isNormalizedRelativePath, MAX_SCHEMA_COLLECTION_ITEMS } from "@dohc/workspace-contracts/collection-values";
 import type {
   CollectionGetResult as CollectionGetResultContract,
   CollectionListResult as CollectionListResultContract,
@@ -700,6 +701,7 @@ const RecordHistoryAuthor = z.discriminatedUnion("kind", [
     automationId: z.string().min(1).max(4096),
     // The automation's name when it ran, or its name now for a change recorded without its run.
     name: z.string().min(1).max(4096),
+    person: z.string().min(1).max(4096).optional(),
     // The run that made the change, or null for a change recorded without it.
     run: z.object({ claimId: z.string().min(1).max(256), location: RecordHistoryRunLocation }).nullable(),
   }),
@@ -1515,6 +1517,9 @@ export const EngineMomentRecord = z.object({
   // Present only when a dohc-tracked agent run authored the moment; main
   // resolves the configured agent name for local runs.
   agentAuthorName: z.string().min(1).max(500).optional(),
+  // Present when this computer's person authored the moment: main names them
+  // as the account settled here now, or this installation when signed out.
+  personAuthorName: z.string().min(1).max(500).optional(),
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
   // Present when a Collection automation authored the moment: its name as
   // this computer's automations.yaml has it, and the Collection it belongs to.
@@ -4846,6 +4851,12 @@ export const StopAndRestorePayload = z.object({
   target: StopAndRestoreTarget,
 }).strict();
 export type StopAndRestorePayload = z.infer<typeof StopAndRestorePayload>;
+export const KeptAutomationFieldShape = z.object({
+  id: z.string().regex(/^[a-f0-9]{32}$/),
+  path: PATH_STRING.refine(isNormalizedRelativePath).nullable(),
+  field: z.string(),
+  recordId: z.union([z.string(), z.number()]).nullable(),
+}).strict();
 export const StopAndRestoreResult = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("restored"),
@@ -4859,6 +4870,7 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
     ])),
     // Runs of the person's automations undone, and those Undo could not undo.
     runsUndone: z.number().int().nonnegative(),
+    sharedReversals: SharedReversalsSchema.optional(),
     runsLeft: z.number().int().nonnegative(),
     // Changes the undone runs made that stay as they are.
     runChangesKept: z.number().int().nonnegative(),
@@ -4868,10 +4880,11 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
     sendsMessages: z.boolean(),
     // Fields those runs wrote that kept a later value, and fields on records
     // no longer in their Collection.
-    fieldsKept: z.number().int().nonnegative(),
+    keptFields: z.array(KeptAutomationFieldShape),
     fieldsMissing: z.number().int().nonnegative(),
-    // What stopped the restore part way; the files above were restored.
-    errorMessage: z.string().nullable(),
+    // The step a failure stopped, with why; what the fields above count happened.
+    // At files, this try undid no run.
+    unfinished: z.object({ step: z.enum(["files", "runs"]), message: z.string() }).strict().nullable(),
   }).strict(),
   // Access stopped, but this computer has not received every change the
   // person wrote yet. Nothing was restored; trying again continues.

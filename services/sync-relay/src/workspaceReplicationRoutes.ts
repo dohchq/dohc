@@ -5,7 +5,7 @@ import {
   type DiscussionActivityHub,
 } from "./discussionActivity";
 import { badRequest, notFound, relayError } from "./errors";
-import { assertChatAuthorship, assertClientLogProvenance, parseLogOp } from "./relayLogInputs";
+import { assertChatAuthorship, assertClientLogProvenance, parseAuthenticatedLogOps, type LogAuthorNameLookup } from "./relayLogInputs";
 import { parseCursor, parseLimit, parseString, parseWorkspaceId, readJsonObject } from "./requestInputs";
 import type { EnforceWorkspaceIdentityResult, SyncRelayStorage } from "./storage";
 import { MAX_DISCUSSION_ACTIVITY_HOLD_MS, MAX_OPS_PER_REQUEST, MAX_ORIGIN_ID_CHARS } from "./wireLimits";
@@ -34,6 +34,7 @@ export function createWorkspaceReplicationRoutes(
   >,
   nowMs: () => number,
   discussionActivity: Pick<DiscussionActivityHub, "wakeLog" | "wait">,
+  lookupUserDisplayName?: LogAuthorNameLookup,
 ) {
   async function respondToWorkspaceRegistration(
     request: Request,
@@ -125,7 +126,7 @@ export function createWorkspaceReplicationRoutes(
       // before it writes any operation.
       assertChatAuthorship(input.ops, actor.userId);
       assertClientLogProvenance(originId, input.ops);
-      const ops = input.ops.map(parseLogOp);
+      const ops = await parseAuthenticatedLogOps(input.ops, actor.userId, lookupUserDisplayName);
       const result = storage.appendLogBatch({
         workspaceId: route.workspaceId,
         originId,
@@ -194,6 +195,7 @@ export function createWorkspaceReplicationRoutes(
           opKind: row.opKind,
           payload: JSON.parse(row.payloadJson) as unknown,
           recordedAtMs: row.recordedAtMs,
+          ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
         })),
         // A hidden epoch floor is a read filter, not a served log row. An
         // empty response therefore cannot advance the caller's cursor: the
@@ -226,6 +228,7 @@ export function createWorkspaceReplicationRoutes(
         opKind: row.opKind,
         payload: JSON.parse(row.payloadJson) as unknown,
         recordedAtMs: row.recordedAtMs,
+        ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
       };
       if (row.relaySeq <= epochLogFloor) {
         return jsonResponse({

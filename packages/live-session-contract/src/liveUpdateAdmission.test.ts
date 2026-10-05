@@ -13,6 +13,7 @@ import {
   LIVE_UPDATE_YJS_START_CLOCK_MAX,
   parseAdmittedLiveUpdate,
   parseAdmittedLiveUpdateMetadata,
+  parseCanonicalAdmittedLiveUpdateMetadata,
   parseAgentDeclaration,
   parseLiveDocumentKey,
   parseLiveUpdateAcceptResult,
@@ -328,34 +329,15 @@ describe("agent declarations", () => {
     }
   });
 
-  it("keeps a present declaration after receivedAtMs and adds none when it is absent", () => {
-    const agentDeclaration = { agentId: "trip-agent-ü", onBehalfOf: "人", depth: 2 };
-    const owner = { principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null };
-    const parsed = parseRelayAcceptedLiveUpdate({ ...accepted, authority: owner, agentDeclaration });
-    expect(Object.keys(parsed)).toEqual(["receipt", "binding", "authority", "receivedAtMs", "agentDeclaration"]);
-    expect(parsed.agentDeclaration).toEqual(agentDeclaration);
-    // The declared person stays provenance; the authenticated owner stays the authority.
-    expect(parsed.authority).toEqual(owner);
-    expect(parseAdmittedLiveUpdateMetadata({ ...admittedMetadata, accepted: { ...accepted, authority: owner, agentDeclaration } })
-      .accepted.agentDeclaration).toEqual(agentDeclaration);
-    for (const shared of [authority, { ...authority, principalKind: "link" }]) {
-      expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, authority: shared, agentDeclaration })).toThrow(TypeError);
-    }
-    expect(parseRelayAcceptedLiveUpdate(accepted)).not.toHaveProperty("agentDeclaration");
-    const submission = { deliveryId: "delivery-1", updateDigest: digestA, binding };
-    expect(parseLiveUpdateSubmissionMetadata({ ...submission, agentDeclaration }).agentDeclaration).toEqual(agentDeclaration);
-    expect(parseLiveUpdateSubmissionMetadata(submission)).not.toHaveProperty("agentDeclaration");
-  });
-
-  it("refuses an undefined, null, or malformed declaration member and any other member", () => {
-    const submission = { deliveryId: "delivery-1", updateDigest: digestA, binding };
-    for (const agentDeclaration of [undefined, null, {}, { agentId: "agent", onBehalfOf: null, depth: 65 }]) {
-      expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, agentDeclaration })).toThrow(TypeError);
-      expect(() => parseLiveUpdateSubmissionMetadata({ ...submission, agentDeclaration })).toThrow(TypeError);
-    }
-    const agentDeclaration = { agentId: "agent", onBehalfOf: null, depth: 0 };
-    expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, agentDeclaration, agent: "agent" })).toThrow(TypeError);
-    expect(() => parseLiveUpdateReceipt({ ...receipt, agentDeclaration })).toThrow(TypeError);
+  it("records declarations only in submission context and admitted snapshots", () => {
+    const agent = {agentId: "trip-agent-ü", onBehalfOf: "人", depth: 2};
+    const authorContext = {kind: "account", accountId: "owner-1", agent};
+    const submission = {deliveryId: "delivery-1", updateDigest: digestA, binding};
+    expect(parseLiveUpdateSubmissionMetadata({...submission, authorContext}).authorContext).toEqual(authorContext);
+    expect(parseLiveUpdateSubmissionMetadata(submission)).not.toHaveProperty("authorContext");
+    const metadata = {...admittedMetadata, canonicalVersion: 2, authorSnapshot: [{kind: "agent", ...agent}], firstSeenDeletes: []};
+    expect(parseAdmittedLiveUpdateMetadata(metadata).authorSnapshot).toEqual(metadata.authorSnapshot);
+    expect(() => parseRelayAcceptedLiveUpdate({...accepted, agentDeclaration: {...agent}})).toThrow(TypeError);
   });
 
   it("refuses the engine's out-of-bounds values and any other field", () => {
@@ -647,6 +629,47 @@ describe("receipt and relay admission records", () => {
     ]);
     expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, route: "device" })).toThrow();
     expect(() => parseRelayAcceptedLiveUpdate({ ...accepted, updateBytes: [1] })).toThrow();
+  });
+});
+
+describe("canonical admitted metadata", () => {
+  const human = {kind: "human" as const, humanId: "alice", humanName: "Alice"};
+  const valid = [{clientId: 7, startClock: 0, endClock: 3}, {clientId: 7, startClock: 5, endClock: 10}];
+  const invalid = [
+    [{clientId: 7, startClock: 0, endClock: 3}, {clientId: 7, startClock: 3, endClock: 10}],
+    [{clientId: 7, startClock: 0, endClock: 6}, {clientId: 7, startClock: 5, endClock: 10}],
+    [{clientId: 7, startClock: 0, endClock: 3}, {clientId: 6, startClock: 5, endClock: 10}],
+    [{clientId: -1, startClock: 0, endClock: 3}],
+  ];
+
+  it.each([undefined, 2] as const)("refuses non-canonical firstSeen for version %s", canonicalVersion => {
+    for (const firstSeen of invalid) {
+      expect(() => parseCanonicalAdmittedLiveUpdateMetadata({accepted, firstSeen,
+        ...(canonicalVersion === 2 ? {canonicalVersion, authorSnapshot: [human], firstSeenDeletes: []} : {})}))
+        .toThrow("Invalid live application range.");
+    }
+  });
+
+  it.each(["firstSeenDeletes", "structRanges", "deletionRanges"])("refuses non-canonical v2 %s", field => {
+    for (const ranges of invalid) {
+      expect(() => parseCanonicalAdmittedLiveUpdateMetadata({accepted, firstSeen: valid, canonicalVersion: 2,
+        authorSnapshot: [human], firstSeenDeletes: field === "firstSeenDeletes" ? ranges : [],
+        checkpointCoverage: [{author: human, structRanges: field === "structRanges" ? ranges : valid,
+          deletionRanges: field === "deletionRanges" ? ranges : []}]}))
+        .toThrow("Invalid live application range.");
+    }
+  });
+
+  it("preserves canonical ranges and owns every copy", () => {
+    const metadata = {accepted, firstSeen: valid, canonicalVersion: 2, authorSnapshot: [human], firstSeenDeletes: valid,
+      checkpointCoverage: [{author: human, structRanges: valid, deletionRanges: valid}]};
+    const parsed = parseCanonicalAdmittedLiveUpdateMetadata(metadata);
+    expect(parsed).toEqual(metadata);
+    expect(parsed.firstSeen).not.toBe(valid);
+    expect(parsed.firstSeen[0]).not.toBe(valid[0]);
+    expect(parsed.firstSeenDeletes).not.toBe(valid);
+    expect(parsed.checkpointCoverage![0]!.structRanges).not.toBe(valid);
+    expect(parsed.checkpointCoverage![0]!.deletionRanges).not.toBe(valid);
   });
 });
 

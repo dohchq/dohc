@@ -356,21 +356,30 @@ const ACCESS_WORDS: Record<ListedGrant["access"], string> = {
 /**
  * How History names a person who wrote a Collection's own files directly
  * (ADR 0013): their email and level from the owner's roster, as
- * "ana@example.com (Edit)". A grant the roster no longer lists, such as a
- * revoked one, still names the person by another grant of theirs, without
- * a level. Anyone else is "Someone you shared with".
+ * "ana@example.com (Edit)". A grant the roster no longer lists as active,
+ * such as a revoked one, still names the person without a level: by another
+ * active grant of theirs, or by a former or ended grant the roster keeps.
+ * Anyone else, or anyone when the saved roster could not be read (null), is
+ * "Someone you shared with". Read the saved roster once per History read
+ * with `readStoredRoster`.
  */
 export function rosterAuthorLabel(
-  roster: ShareRoster | undefined,
+  listing: RosterListing | null,
   author: { userId: string; grantId: string },
 ): string {
-  const grants = roster?.grants ?? [];
-  const grant = grants.find((candidate) => candidate.grantId === author.grantId);
+  if (listing === null || listing.grants === null) return "Someone you shared with";
+  const grant = listing.grants.find((candidate) => candidate.grantId === author.grantId);
   if (grant?.recipientEmail && (grant.recipientUserId === null || grant.recipientUserId === author.userId)) {
     return `${grant.recipientEmail} (${ACCESS_WORDS[grant.access]})`;
   }
-  const email = grants.find(
-    (candidate) => candidate.recipientUserId === author.userId && candidate.recipientEmail !== null,
+  return rosterPersonLabel(listing, author.userId);
+}
+
+/** A Button presser's name, including people whose grants have ended. */
+export function rosterPersonLabel(listing: RosterListing | null, userId: string): string {
+  if (listing === null || listing.grants === null) return "Someone you shared with";
+  const email = [...listing.grants, ...listing.formerGrants.map((former) => former.grant), ...listing.endedGrants].find(
+    (candidate) => candidate.recipientUserId === userId && candidate.recipientEmail !== null,
   )?.recipientEmail;
   return email ?? "Someone you shared with";
 }

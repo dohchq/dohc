@@ -1,3 +1,4 @@
+import { parseLiveAuthorContext, type LiveAuthorContext } from "./liveAuthorship.js";
 import { parseHostEpoch, type HostEpoch } from "./hostControl.js";
 import {
   LIVE_OBJECT_BINDING_IDENTIFIER_MAX_BYTES,
@@ -8,13 +9,11 @@ import {
 } from "./liveObjectBinding.js";
 import {
   LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
-  parseAgentDeclaration,
   parseLiveUpdateDigest,
   parseLiveUpdateHostApplicationAck,
   parseLiveUpdateIdentifier,
   parseLiveUpdateRefusal,
   parseLiveUpdateRetry,
-  type AgentDeclaration,
   type LiveUpdateHostApplicationAck,
   type LiveUpdateRefusal,
   type LiveUpdateRetry,
@@ -32,10 +31,9 @@ export interface LiveMembershipFrame {
 }
 // RESULT success: header + string length/identifier + digest + tag + three u64 + bool.
 export const LIVE_FRAME_MINIMUM_MAX_BYTES = LIVE_FRAME_HEADER_BYTES + 4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES + 32 + 1 + 24 + 1;
-// BEGIN submit-update with the largest agent declaration: header + transfer id + purpose + total + digest
-// + delivery id, then agent id, onBehalfOf tag and string, and depth. Only the owner route sends one.
+// BEGIN submit-update: fixed fields, delivery/account/agent identifiers, optional name and scope, and tags.
 export const LIVE_FRAME_DECLARED_SUBMIT_MAX_BYTES = LIVE_FRAME_HEADER_BYTES + 8 + 1 + 8 + 32 +
-  3 * (4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES) + 1 + 1;
+  5 * (4 + LIVE_UPDATE_IDENTIFIER_MAX_BYTES) + 6;
 
 export interface LiveFrameReceivePolicy {
   readonly maxFrameBytes: number;
@@ -51,7 +49,7 @@ export type LiveFrameBegin = {
 } & (
   | { readonly purpose: "client-vector" }
   | { readonly purpose: "initial-sync"; readonly appliedThroughJournalCursor: number }
-  | { readonly purpose: "submit-update"; readonly deliveryId: string; readonly agentDeclaration?: AgentDeclaration }
+  | { readonly purpose: "submit-update"; readonly deliveryId: string; readonly authorContext?: LiveAuthorContext }
   | { readonly purpose: "applied-update"; readonly journalCursor: number }
 );
 export type LiveFrame =
@@ -113,8 +111,19 @@ function byteView(value: unknown): Uint8Array {
     return new Uint8Array(buffer, offsetGetter.call(value), lengthGetter.call(value));
   } catch { throw new LiveFrameError("invalid"); }
 }
-function declaration(value: unknown): AgentDeclaration {
-  try { return parseAgentDeclaration(value); } catch { throw new LiveFrameError("invalid"); }
+function authorContext(value: unknown): LiveAuthorContext {
+  try {
+    const kind = discriminant(value, "kind");
+    const fields = kind === "account" ? ["kind", "accountId"] : kind === "link" ? ["kind", "publicPrincipalId"] : ["kind"];
+    const declared = Object.hasOwn(value as object, "agent");
+    const source = record(value, [...fields, ...(declared ? ["agent"] : [])]);
+    if (declared) {
+      const keys = Reflect.ownKeys(source.agent as object);
+      requireFrame(keys.every(key => typeof key === "string" && ["agentId", "agentName", "onBehalfOf", "depth"].includes(key)));
+      source.agent = record(source.agent, keys as string[]);
+    }
+    return parseLiveAuthorContext(source);
+  } catch { throw new LiveFrameError("invalid"); }
 }
 const policyFields = ["maxFrameBytes", "maxStateVectorBytes", "maxUpdateBytes", "maxSyncBytes"] as const;
 function policy(value: unknown): LiveFrameReceivePolicy {
@@ -170,13 +179,13 @@ function snapshotFrame(value: unknown, maxFrameBytes: number): LiveFrame {
     case "begin": {
       const purpose = discriminant(value, "purpose");
       requireFrame(typeof purpose === "string" && Object.hasOwn(purposeCodes, purpose));
-      const declared = purpose === "submit-update" && Object.hasOwn(value as object, "agentDeclaration");
-      const extra = purpose === "initial-sync" ? ["appliedThroughJournalCursor"] : purpose === "submit-update" ? ["deliveryId", ...(declared ? ["agentDeclaration"] : [])] : purpose === "applied-update" ? ["journalCursor"] : [];
+      const declared = purpose === "submit-update" && Object.hasOwn(value as object, "authorContext");
+      const extra = purpose === "initial-sync" ? ["appliedThroughJournalCursor"] : purpose === "submit-update" ? ["deliveryId", ...(declared ? ["authorContext"] : [])] : purpose === "applied-update" ? ["journalCursor"] : [];
       const r = record(value, ["kind", "purpose", "transferId", "totalBytes", "digest", ...extra]);
       const common = { kind, transferId: integer(r.transferId, true), totalBytes: integer(r.totalBytes, true), digest: parseLiveUpdateDigest(r.digest) } as const;
       if (purpose === "initial-sync") return { ...common, purpose, appliedThroughJournalCursor: integer(r.appliedThroughJournalCursor) };
       if (purpose === "submit-update") return { ...common, purpose, deliveryId: parseLiveUpdateIdentifier(r.deliveryId),
-        ...(declared ? { agentDeclaration: declaration(record(r.agentDeclaration, ["agentId", "onBehalfOf", "depth"])) } : {}) };
+        ...(declared ? { authorContext: authorContext(r.authorContext) } : {}) };
       if (purpose === "applied-update") return { ...common, purpose, journalCursor: integer(r.journalCursor, true) };
       return { ...common, purpose: "client-vector" };
     }
@@ -284,12 +293,22 @@ function payload(w: Writer, frame: LiveFrame) {
       if (frame.purpose === "initial-sync") w.number(frame.appliedThroughJournalCursor, 8);
       if (frame.purpose === "submit-update") {
         w.string(frame.deliveryId);
-        // An undeclared submission ends at its delivery ID, so its bytes are unchanged.
-        const declared = frame.agentDeclaration;
-        if (declared) {
-          w.string(declared.agentId); w.number(declared.onBehalfOf === null ? 0 : 1, 1);
-          if (declared.onBehalfOf !== null) w.string(declared.onBehalfOf);
-          w.number(declared.depth, 1);
+        const context = frame.authorContext;
+        if (context) {
+          w.number(context.kind === "account" ? 1 : context.kind === "link" ? 2 : 3, 1);
+          if (context.kind === "account") w.string(context.accountId);
+          if (context.kind === "link") w.string(context.publicPrincipalId);
+          const agent = context.agent;
+          w.number(agent ? 1 : 0, 1);
+          if (agent) {
+            w.string(agent.agentId);
+            for (const field of ["agentName", "onBehalfOf"] as const) {
+              w.number(agent[field] !== undefined ? 1 : 0, 1);
+              if (agent[field] !== undefined) w.string(agent[field]);
+            }
+            w.number(agent.depth !== undefined ? 1 : 0, 1);
+            if (agent.depth !== undefined) w.number(agent.depth, 1);
+          }
         }
       }
       if (frame.purpose === "applied-update") w.number(frame.journalCursor, 8);
@@ -354,10 +373,22 @@ function decodeFrame(value: Uint8Array, maxFrameBytes: number, copyChunk: boolea
         const deliveryId = parseLiveUpdateIdentifier(r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES));
         if (r.offset === bytes.length) frame = { ...common, purpose, deliveryId };
         else {
-          const agentId = r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES), tag = r.number(1);
-          requireFrame(tag <= 1);
-          const onBehalfOf = tag === 1 ? r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES) : null;
-          frame = { ...common, purpose, deliveryId, agentDeclaration: declaration({ agentId, onBehalfOf, depth: r.number(1) }) };
+          const tag = r.number(1);
+          requireFrame(tag >= 1 && tag <= 3);
+          const context: Record<string, unknown> = tag === 1 ? {kind: "account", accountId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES)}
+            : tag === 2 ? {kind: "link", publicPrincipalId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES)} : {kind: "signed-out"};
+          const declared = r.number(1); requireFrame(declared <= 1);
+          if (declared) {
+            const agent: Record<string, unknown> = {agentId: r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES)};
+            for (const field of ["agentName", "onBehalfOf"] as const) {
+              const present = r.number(1); requireFrame(present <= 1);
+              if (present) agent[field] = r.string(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
+            }
+            const depth = r.number(1); requireFrame(depth <= 1);
+            if (depth) agent.depth = r.number(1);
+            context.agent = agent;
+          }
+          frame = { ...common, purpose, deliveryId, authorContext: authorContext(context) };
         }
       }
       else if (purpose === "applied-update") frame = { ...common, purpose, journalCursor: integer(r.number(8), true) };
@@ -527,7 +558,10 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
     if (frame.kind === "welcome" || frame.kind === "hello") Object.freeze(frame.receivePolicy);
     if (frame.kind === "result" && frame.result === "success") Object.freeze(frame.ack);
     if (frame.kind === "membership") Object.freeze(frame.members);
-    if (frame.kind === "begin" && frame.purpose === "submit-update" && frame.agentDeclaration) Object.freeze(frame.agentDeclaration);
+    if (frame.kind === "begin" && frame.purpose === "submit-update" && frame.authorContext) {
+      if (frame.authorContext.agent) Object.freeze(frame.authorContext.agent);
+      Object.freeze(frame.authorContext);
+    }
     if (frame.kind === "welcome" || frame.kind === "hello") {
       requireFrame(!state.greeted && (frame.kind === "welcome" ? sender === "server" : sender === "client"), "state");
       if (sender === role) requireFrame(policyFields.every(field => frame.receivePolicy[field] === limits.receive[field]), "state");

@@ -67,6 +67,7 @@ import { useAutomationButtons, useButtonStates } from "./collections/useAutomati
 export const DRAIN_RECORD_LIMIT = 1000;
 
 export interface CollectionPageProps {
+  readOnly?: boolean;
   workspaceId: string;
   collectionPath: string;
   // Which view is open is per-user local state the shell persists in the
@@ -108,6 +109,7 @@ function NewRecordButton({ onClick }: { onClick: () => void }) {
 }
 
 export function CollectionPage({
+  readOnly = false,
   workspaceId,
   collectionPath,
   activeViewName,
@@ -271,7 +273,7 @@ export function CollectionPage({
   // coalescing cadence. The store's token makes the refresh latest-wins.
   // Button fields: what each shows, and presses in flight from this window.
   // Their states follow the Collection's files, automations.yaml included.
-  const buttons = useAutomationButtons({ workspaceId, of: { collectionPath }, onError, onNotice });
+  const buttons = useAutomationButtons({ workspaceId, of: readOnly ? null : { collectionPath }, onError, onNotice });
   useEffect(() => {
     void buttons?.refresh();
   }, [buttons]);
@@ -399,30 +401,46 @@ export function CollectionPage({
   // store only while it is open, so a press re-renders just its button.
   const buttonStates = useButtonStates(fieldsOpen ? buttons : null);
   const [viewsOpen, setViewsOpen] = useState(false);
+  const schemaDialog = useMemo(() => ({}), [fieldsOpen, viewsOpen, readOnly]);
+  const currentSchemaDialog = useRef(schemaDialog);
+  currentSchemaDialog.current = schemaDialog;
+  const schemaWrites = useRequestSequence();
+  useEffect(() => {
+    if (!readOnly) return;
+    setFieldsOpen(false);
+    setViewsOpen(false);
+  }, [readOnly]);
   const applySchemaChange = useCallback(
     async (
       mutate: (schema: CollectionSchema) => CollectionSchema,
     ): Promise<string | null> => {
+      const request = schemaWrites.current();
+      const dialog = currentSchemaDialog.current;
       const result = await rewriteCollectionSchema({
         workspaceId,
         collectionPath,
         mutate,
       });
+      if (!schemaWrites.isCurrent(request)) return null;
       if (result.status === "written") {
         void refreshDetails();
         void store.refresh();
         return null;
       }
+      let failure: string;
       if (result.status === "conflict") {
         // The conflict machinery holds the other write; re-read and retry.
         void refreshDetails();
-        return "This collection changed while you were editing. Try again.";
+        failure = "This collection changed while you were editing. Try again.";
+      } else {
+        failure = result.detail
+          ? `dohc could not update this collection. ${result.detail}`
+          : "dohc could not update this collection.";
       }
-      return result.detail
-        ? `dohc could not update this collection. ${result.detail}`
-        : "dohc could not update this collection.";
+      if (currentSchemaDialog.current !== dialog) onError(failure, new Error(failure));
+      return failure;
     },
-    [workspaceId, collectionPath, refreshDetails, store],
+    [workspaceId, collectionPath, refreshDetails, store, onError, schemaWrites],
   );
 
   // A typed select value not in the options yet: the whole edit enters the
@@ -510,6 +528,7 @@ export function CollectionPage({
   // The ⚡ panel docks at the right of whatever the page shows.
   const automationsPanel = automationsOpen ? (
     <AutomationsPanel
+      readOnly={readOnly}
       workspaceId={workspaceId}
       collectionPath={collectionPath}
       automations={automations}
@@ -541,12 +560,12 @@ export function CollectionPage({
         count={automationCount(automations.file)}
         onClick={() => (automationsOpen ? setCloseAsk((ask) => ask + 1) : setAutomationsOpen(true))}
       />
-      <SecondaryButton
+      {!readOnly ? <SecondaryButton
         data-testid="collection-fields-button"
         onClick={() => setFieldsOpen(true)}
       >
         Fields
-      </SecondaryButton>
+      </SecondaryButton> : null}
       <MoreMenu
         label="Collection actions"
         items={[{ label: "Customize…", onSelect: () => setCustomizing(true) }]}
@@ -560,7 +579,7 @@ export function CollectionPage({
       onClose={() => setCustomizing(false)}
     />
   ) : null;
-  const fieldsDialog = fieldsOpen ? (
+  const fieldsDialog = fieldsOpen && !readOnly ? (
     <FieldsDialog
       schema={schema}
       relationTargets={relationTargets}
@@ -595,7 +614,7 @@ export function CollectionPage({
             <span className="text-sm text-muted">
               No records in this collection yet.
             </span>
-            <NewRecordButton onClick={newRecord} />
+            {!readOnly ? <NewRecordButton onClick={newRecord} /> : null}
           </div>
           {automationsPanel}
         </div>
@@ -661,13 +680,13 @@ export function CollectionPage({
           </span>
         ) : null}
         {setupButtons}
-        <SecondaryButton
+        {!readOnly ? <SecondaryButton
           data-testid="collection-views-button"
           onClick={() => setViewsOpen(true)}
         >
           Views
-        </SecondaryButton>
-        <NewRecordButton onClick={newRecord} />
+        </SecondaryButton> : null}
+        {!readOnly ? <NewRecordButton onClick={newRecord} /> : null}
       </div>
       {drainCapped ? (
         <div
@@ -685,7 +704,7 @@ export function CollectionPage({
             groups={state.groups ?? []}
             groupBy={activeView?.groupBy ?? ""}
             visibleFields={activeView?.visibleFields ?? null}
-            onCellChange={onCellChange}
+            onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}
           />
         ) : calendarReady ? (
@@ -694,7 +713,7 @@ export function CollectionPage({
             records={state.records}
             dateField={activeView?.dateField ?? ""}
             visibleFields={activeView?.visibleFields ?? null}
-            onCellChange={onCellChange}
+            onCellChange={readOnly ? undefined : onCellChange}
             onOpenRecord={openRecord}
           />
         ) : (
@@ -704,15 +723,15 @@ export function CollectionPage({
             sort={state.query.sort ?? []}
             visibleFields={activeView?.visibleFields ?? null}
             onSortChange={(sort) => void store.setQuery({ sort })}
-            onCellChange={enqueueCellChange}
-            editingDisabled={writesPaused}
+            onCellChange={readOnly ? undefined : enqueueCellChange}
+            editingDisabled={readOnly || writesPaused}
             acknowledgedWriteId={acknowledgedWriteId}
             subscribeToDiscardedWrites={subscribeToDiscardedWrites}
-            onCreateOption={createOption}
+            onCreateOption={readOnly ? undefined : createOption}
             onOpenRecord={openRecord}
             relationExecutor={executor}
             fieldMarks={tableFieldMarks}
-            renderButton={renderButton}
+            renderButton={readOnly ? undefined : renderButton}
             onNearEnd={loadNextPage}
           />
         )}
@@ -721,7 +740,7 @@ export function CollectionPage({
       </div>
       {fieldsDialog}
       {customizeDialog}
-      {viewsOpen ? (
+      {viewsOpen && !readOnly ? (
         <ViewsDialog
           schema={schema}
           apply={applySchemaChange}

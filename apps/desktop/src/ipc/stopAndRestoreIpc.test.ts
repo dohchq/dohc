@@ -1,20 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
+import { createServerRuns } from "../automations/serverRuns";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { writeAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
 import { collectionAutomationId, definitionHash } from "@dohc/automation-executor/automation-plan";
-import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
+import type { CollectionAutomations, KeptAutomationField } from "@dohc/automation-executor/collection-automations";
 import { CHANNELS } from "./channels";
 import { registerStopAndRestoreIpc } from "./stopAndRestoreIpc";
+import { KeptAutomationFieldShape } from "./bridgeContract";
 import {
   LiveDocumentMutationError,
   RestoreHeadChangedError,
   type WorkspaceEngineMomentDetail,
 } from "../workspaces/workspaceEngineCapture";
+import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 
+const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finished on", recordId: null };
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
-type Pass = { undone: number; left: number; reverted: number; missing: number; keptFields: string[]; otherKept: number; errorMessage: string | null };
+type Pass = { undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; errorMessage: string | null };
 const NOTHING: Pass = { undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null };
 const SCHEMA = "trip/packing/collection.yaml";
+const OWNER: LocalPersonAuthor = { kind: "human", humanId: "user_owner" };
 
 function grant(overrides: Record<string, unknown>) {
   return {
@@ -44,9 +49,12 @@ function fixture(options: {
   undoRunsOf?: CollectionAutomations["undoRunsOf"];
   serverRestore?: (definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>, again: boolean) => Promise<Pass>;
   syncNow?: () => Promise<void>;
+  ledgerError?: () => Error | null;
 } = {}) {
   const handlers = new Map<string, (event: { sender: string }, payload: unknown) => unknown>();
   const calls: Array<{ path: string; method: string }> = [];
+  // The account main has settled on; a test signs in as someone else mid-request.
+  const account = { person: OWNER };
   const granted = options.granted ?? [
     grant({}),
     grant({ grantId: "grant-view", shareId: "share-2", access: "view" }),
@@ -72,6 +80,8 @@ function fixture(options: {
       return { links: links[index] ?? [], ...(index + 1 < links.length ? { nextCursor: String(index + 1) } : {}) };
     }
     const read = /\/collection-writes\/([^?]+)\?afterOriginSeq=(-?\d+)$/.exec(path);
+    const ledgerError = read ? options.ledgerError?.() : null;
+    if (ledgerError) throw ledgerError;
     if (read) {
       const pages = ledger[decodeURIComponent(read[1]!)] ?? [{ writes: [], nextAfterOriginSeq: null }];
       return pages[Number(read[2]) + 1];
@@ -89,15 +99,26 @@ function fixture(options: {
     for (const list of links) for (const link of list as Array<{ status: string }>) link.status = "revoked";
     return "ended";
   });
+  // Each restore's own moment, which puts the file back as it was before the person.
+  const restores = new Map<string, VersionedTextMoment>();
   const capture = {
-    readMoment: vi.fn(async (): Promise<WorkspaceEngineMomentDetail | null> => {
+    readMoment: vi.fn(async (momentId: string): Promise<WorkspaceEngineMomentDetail | null> => {
       if (options.protectedMoment) return { protected: true, moment: { ...schemaMoment, momentOrder: 1, protected: true } as never };
+      const restore = restores.get(momentId);
+      if (restore) return { protected: false, moment: restore };
       return options.moment === null ? null : { protected: false, moment: options.moment ?? schemaMoment };
     }),
-    listObjectMomentsAfter: vi.fn(async () => []),
-    restoreFileToBeforeMoment: vi.fn(async (momentId: string, _options?: { expectedHeadMomentId?: string }) => {
+    listObjectMomentsAfter: vi.fn(async (objectId: string) =>
+      [...restores.values()].filter((restore) => restore.objectId === objectId).map((restore) => restore.id).reverse()),
+    restoreFileToBeforeMoment: vi.fn(async (momentId: string, _person: LocalPersonAuthor, _options?: { expectedHeadMomentId?: string }) => {
       if (options.changed) throw new RestoreHeadChangedError(SCHEMA);
       if (options.restoreError) throw options.restoreError;
+      const theirs = options.moment ?? schemaMoment;
+      const before = theirs.payload.before;
+      restores.set(`back-${momentId}`, {
+        ...theirs, id: `back-${momentId}`, metadata: { origin: "restore" },
+        ...(before ? { payload: { before: theirs.payload.after, after: before } } : { operation: "delete" }),
+      });
       return { restored: "text" as const, restoredMomentId: `back-${momentId}`, path: SCHEMA };
     }),
   };
@@ -121,6 +142,7 @@ function fixture(options: {
     endLink,
     sharesChanged,
     requireEngineCapture: async () => ({ capture }),
+    localPerson: async () => account.person,
     queuePull,
     deletePath: async () => undefined,
     notifyRenderer: () => undefined,
@@ -130,7 +152,7 @@ function fixture(options: {
   });
   const call = (channel: string, payload: Record<string, unknown>) =>
     handlers.get(channel)!({ sender: "window" }, { workspaceId: WORKSPACE_ID, ...payload });
-  return { call, calls, bodies, capture, queuePull, sharesChanged };
+  return { call, calls, bodies, capture, queuePull, sharesChanged, account };
 }
 
 describe("stop and restore in main", () => {
@@ -145,10 +167,10 @@ describe("stop and restore in main", () => {
       runChangesKept: 0,
       wroteAutomations: false,
       sendsMessages: false,
-      fieldsKept: 0, fieldsMissing: 0,
-      errorMessage: null,
+      keptFields: [], fieldsMissing: 0,
+      unfinished: null,
     });
-    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", { expectedHeadMomentId: "m-schema" });
+    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema" });
     expect(f.calls.filter((call) => call.method === "POST").map((call) => call.path))
       .toEqual(["/sync/shares/share-1/grants/grant-edit/revoke"]);
     expect(f.sharesChanged).toHaveBeenCalledWith(WORKSPACE_ID);
@@ -181,7 +203,7 @@ describe("stop and restore in main", () => {
       moment, undoRunsOf, serverRestore,
       ledger: { "grant-edit": [{ writes: [{ committedAtMs: 2, files: [{ path: file, objectId: "o-auto", momentId: "m-auto", created: true }] }], nextAfterOriginSeq: null }] },
     });
-    await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({ runsUndone: 3, runsLeft: 1, fieldsKept: 0, fieldsMissing: 1, errorMessage: null });
+    await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({ runsUndone: 3, runsLeft: 1, keptFields: [], fieldsMissing: 1, unfinished: null });
     // A second pass finds nothing kept to try again, and ends.
     expect(undoRunsOf.mock.calls.map((call) => [call[0], call[2]])).toEqual([[definitions, false], [definitions, true]]);
     expect(serverRestore.mock.calls).toEqual([[definitions, false], [definitions, true]]);
@@ -218,7 +240,7 @@ describe("stop and restore in main", () => {
         }
       }
       // The runs write one field, so its hash is the same on both computers.
-      return { ...result, keptFields: hosts[host].some((run) => run.kept) ? ["f".repeat(32)] : [] };
+      return { ...result, keptFields: hosts[host].some((run) => run.kept) ? [{ ...KEPT, path: host === "server" ? "trip/Tasks/Old.md" : KEPT.path }] : [] };
     };
     return {
       relay, copies,
@@ -257,7 +279,7 @@ describe("stop and restore in main", () => {
     const computers = twoComputers(runs, 2);
     const f = fixture({ ...automationsFile(), ...computers });
     await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } }))
-      .resolves.toMatchObject({ runsUndone: 2, runsLeft: 0, fieldsKept: 0, fieldsMissing: 0, errorMessage: null });
+      .resolves.toMatchObject({ runsUndone: 2, runsLeft: 0, keptFields: [], fieldsMissing: 0, unfinished: null });
     expect([computers.relay.value, computers.copies.here.value, computers.copies.server.value]).toEqual([0, 0, 0]);
   });
 
@@ -265,7 +287,7 @@ describe("stop and restore in main", () => {
     const computers = twoComputers({ here: [[0, 1]], server: [[1, 2]] }, 2);
     const f = fixture({ ...automationsFile(), ...computers, syncNow: async () => { throw new Error("dohc could not sync this workspace with your server, so it stopped undoing runs part way. Try again."); } });
     await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } }))
-      .resolves.toMatchObject({ errorMessage: "dohc could not sync this workspace with your server, so it stopped undoing runs part way. Try again." });
+      .resolves.toMatchObject({ unfinished: { step: "runs", message: "dohc could not sync this workspace with your server, so it stopped undoing runs part way. Try again." } });
     // The server's pass ran; nothing ran here over a copy that did not sync.
     expect(computers.undoRunsOf).not.toHaveBeenCalled();
   });
@@ -282,7 +304,123 @@ describe("stop and restore in main", () => {
     };
     const f = fixture({ ...automationsFile(), ...computers, syncNow });
     await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
-      runsUndone: 2, runsLeft: 0, fieldsKept: 0, errorMessage: "dohc could not sync this workspace with your server, so it stopped undoing runs part way. Try again.",
+      runsUndone: 2, runsLeft: 0, keptFields: [], unfinished: { step: "runs", message: "dohc could not sync this workspace with your server, so it stopped undoing runs part way. Try again." },
+    });
+  });
+
+  // Undoing runs goes server, sync, here, sync. A try that one of those
+  // stops tells which step it did not finish; trying again continues from
+  // where it stopped, counts each run once across the tries, and a third try
+  // changes nothing.
+  const STOPPED = "dohc stopped here.";
+  it("shows a recovery sentence when the server restore contract does not match", async () => {
+    const server = createServerRuns(async () => ({
+      status: 200, body: { ok: true, ...NOTHING, keptFields: 1 }, asker: { account: "owner", current: () => true },
+    }));
+    const f = fixture({ ...automationsFile(), serverRestore: async (definitions, again) => server.restore(WORKSPACE_ID, definitions, again) });
+    await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+      unfinished: { step: "runs", message: "Your server runs a different version of dohc. Update it, then try again." },
+    });
+  });
+
+  it.each(["../outside", "/outside", "C:/outside", "trip/../outside", "trip\\outside", "trip//outside"])("rejects kept field path %s", (path) => {
+    expect(KeptAutomationFieldShape.safeParse({ ...KEPT, path }).success).toBe(false);
+  });
+
+  it("accepts normalized Collection and document paths, and an unlocated field", () => {
+    for (const path of ["Budget", KEPT.path, null]) expect(KeptAutomationFieldShape.parse({ ...KEPT, path })).toEqual({ ...KEPT, path });
+  });
+
+  it("uses the latest finished host's path when this computer's next pass fails", async () => {
+    let failing = false;
+    const serverField = { ...KEPT, path: "trip/Tasks/moved.md" };
+    const f = fixture({
+      ...automationsFile(),
+      serverRestore: async () => ({ ...NOTHING, keptFields: [failing ? serverField : KEPT] }),
+      undoRunsOf: async () => ({ ...NOTHING, keptFields: [KEPT], errorMessage: failing ? STOPPED : null }),
+    });
+    const stop = () => f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } });
+    await expect(stop()).resolves.toMatchObject({ keptFields: [KEPT], unfinished: null });
+    failing = true;
+    await expect(stop()).resolves.toMatchObject({ keptFields: [serverField], unfinished: { step: "runs", message: STOPPED } });
+  });
+  it.each([
+    ["the server's Undo", 0],
+    ["the sync before the Undo here", 1],
+    ["the Undo here", 2],
+    ["the sync after the Undo here", 3],
+  ] as const)("continues after %s stopped a try, and repeats safely", async (_stage, stage) => {
+    for (const runs of [{ here: [[0, 1]], server: [[1, 2]] }, { here: [[1, 2]], server: [[0, 1]] }] as const) {
+      const computers = twoComputers(runs, 2);
+      let failed = false;
+      // Fails the first time the try reaches this stage, before it acts.
+      const failAt = (at: number) => {
+        if (at !== stage || failed) return false;
+        failed = true;
+        return true;
+      };
+      let syncs = 0;
+      const f = fixture({
+        ...automationsFile(),
+        serverRestore: async (definitions, again) => failAt(0) ? { ...NOTHING, errorMessage: STOPPED } : await computers.serverRestore(definitions, again),
+        undoRunsOf: async (definitions, trash, again) => failAt(2) ? { ...NOTHING, errorMessage: STOPPED } : await computers.undoRunsOf(definitions, trash, again),
+        syncNow: async () => {
+          syncs += 1;
+          if (failAt(syncs % 2 === 1 ? 1 : 3)) throw new Error(STOPPED);
+          await computers.syncNow();
+        },
+      });
+      const stop = () => f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } }) as Promise<{ runsUndone: number }>;
+
+      const first = await stop();
+      expect(first).toMatchObject({ restored: [{ restoredMomentId: "back-m-auto" }], unfinished: { step: "runs", message: STOPPED } });
+      const second = await stop();
+      expect(second).toMatchObject({ restored: [], review: [], runsLeft: 0, keptFields: [], fieldsMissing: 0, unfinished: null });
+      expect(first.runsUndone + second.runsUndone).toBe(2);
+      expect([computers.relay.value, computers.copies.here.value, computers.copies.server.value]).toEqual([0, 0, 0]);
+
+      await expect(stop()).resolves.toMatchObject({ restored: [], runsUndone: 0, runsLeft: 0, keptFields: [], unfinished: null });
+      expect([computers.relay.value, computers.copies.here.value, computers.copies.server.value]).toEqual([0, 0, 0]);
+      // The file went back once; later tries pass it over.
+      expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("keeps the fields a computer's runs kept when a later try stops before that computer's pass", async () => {
+    // Someone set 9 after the runs, so both computers' runs keep the field.
+    const computers = twoComputers({ here: [[0, 1]], server: [[1, 2]] }, 9);
+    let syncs = 0;
+    let serverFails = false;
+    const f = fixture({
+      ...automationsFile(),
+      ...computers,
+      serverRestore: async (definitions, again) => serverFails ? { ...NOTHING, errorMessage: STOPPED } : await computers.serverRestore(definitions, again),
+      syncNow: async () => {
+        syncs += 1;
+        // The first try stops at the sync after the Undo here.
+        if (syncs === 2) throw new Error(STOPPED);
+        await computers.syncNow();
+      },
+    });
+    const stop = () => f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } });
+    await expect(stop()).resolves.toMatchObject({ runsUndone: 2, keptFields: [KEPT], unfinished: { step: "runs" } });
+    // The next try stops before either computer's pass finishes, and still counts the field.
+    serverFails = true;
+    await expect(stop()).resolves.toMatchObject({ runsUndone: 0, keptFields: [KEPT], unfinished: { step: "runs" } });
+    serverFails = false;
+    await expect(stop()).resolves.toMatchObject({ runsUndone: 0, keptFields: [KEPT], unfinished: null });
+    expect(computers.relay.value).toBe(9);
+  });
+
+  it("reports the fields an earlier try found kept when a retry stops before undoing runs", async () => {
+    const computers = twoComputers({ here: [[0, 1]], server: [[1, 2]] }, 9);
+    let ledgerFails = false;
+    const f = fixture({ ...automationsFile(), ...computers, ledgerError: () => ledgerFails ? new Error("dohc could not reach your server.") : null });
+    const stop = () => f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } });
+    await expect(stop()).resolves.toMatchObject({ keptFields: [KEPT], unfinished: null });
+    ledgerFails = true;
+    await expect(stop()).resolves.toMatchObject({
+      keptFields: [KEPT], runChangesKept: 1, unfinished: { step: "files", message: "dohc could not reach your server." },
     });
   });
 
@@ -291,7 +429,7 @@ describe("stop and restore in main", () => {
     const computers = twoComputers({ here: [[0, 1]], server: [[1, 2]] }, 9);
     const f = fixture({ ...automationsFile(), ...computers });
     await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } }))
-      .resolves.toMatchObject({ runsUndone: 2, runsLeft: 0, fieldsKept: 1, errorMessage: null });
+      .resolves.toMatchObject({ runsUndone: 2, runsLeft: 0, keptFields: [KEPT], unfinished: null });
     expect(computers.relay.value).toBe(9);
     // One pass to undo, one that restores nothing and ends.
     expect(computers.serverRestore).toHaveBeenCalledTimes(2);
@@ -306,7 +444,10 @@ describe("stop and restore in main", () => {
 
   it("refuses a ledger path that leaves the workspace, and a person with no share here", async () => {
     const f = fixture({ ledger: { "grant-edit": [{ writes: [{ committedAtMs: 1, files: [{ path: "../outside", objectId: "o", momentId: "m", created: true }] }], nextAfterOriginSeq: null }] } });
-    await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).rejects.toThrow();
+    // Access already stopped, so the answer says what is still to finish.
+    await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+      restored: [], unfinished: { step: "files", message: "dohc could not read the relay's list of their changes." },
+    });
     expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
     await expect(fixture().call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_nobody" } }))
       .rejects.toThrow("dohc found no share of this workspace with this person.");
@@ -324,20 +465,34 @@ describe("stop and restore in main", () => {
     const live = fixture({ restoreError: new LiveDocumentMutationError("dohc could not restore it. This action is unavailable for shared live files.") });
     await expect(live.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
       review: [{ path: SCHEMA, reason: "restore-refused", detail: "dohc could not restore it. This action is unavailable for shared live files." }],
-      errorMessage: null,
+      unfinished: null,
     });
     const down = fixture({ restoreError: new Error("The workspace engine is not running.") });
     await expect(down.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
       review: [],
-      errorMessage: "The workspace engine is not running.",
+      unfinished: { step: "files", message: "The workspace engine is not running." },
     });
   });
 
-  it("names a protected file it cannot restore, instead of waiting for it", async () => {
+  it("lists a protected file it cannot restore here for the owner to check, instead of waiting for it", async () => {
     const f = fixture({ protectedMoment: true });
-    await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } }))
-      .rejects.toThrow(`dohc cannot restore ${SCHEMA} here because its contents are protected. Restore it from its History.`);
+    await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
+      restored: [],
+      review: [{ path: SCHEMA, reason: "restore-refused", detail: "Its contents are protected. Restore it from its History." }],
+      unfinished: null,
+    });
     expect(f.queuePull).not.toHaveBeenCalled();
+    expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+  });
+
+  it("says access stays stopped when reading their changes fails after it stopped access", async () => {
+    const f = fixture({ ledgerError: () => new Error("dohc could not reach your server.") });
+    await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toEqual({
+      status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, runChangesKept: 0,
+      wroteAutomations: false, sendsMessages: false, keptFields: [], fieldsMissing: 0,
+      unfinished: { step: "files", message: "dohc could not reach your server." },
+    });
+    expect(f.calls.filter((call) => call.method === "POST").map((call) => call.path)).toEqual(["/sync/shares/share-1/grants/grant-edit/revoke"]);
   });
 
   const link = (overrides: Record<string, unknown> = {}) => ({
@@ -398,6 +553,24 @@ describe("stop and restore in main", () => {
   it("undoes the restores newest first", async () => {
     const f = fixture();
     await f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: ["back-1", "back-2"] });
-    expect(f.capture.restoreFileToBeforeMoment.mock.calls.map(([id]) => id)).toEqual(["back-2", "back-1"]);
+    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["back-2", OWNER], ["back-1", OWNER]]);
+  });
+
+  it("names the person signed in here when the request arrived, never one the renderer sends", async () => {
+    const f = fixture();
+    const mallory = { kind: "human", humanId: "user_mallory" };
+    for (const [channel, payload] of [
+      [CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" }, person: mallory }],
+      [CHANNELS.undoStopAndRestore, { restoredMomentIds: ["back-1"], author: mallory }],
+    ] as const) {
+      await expect(f.call(channel, payload)).rejects.toThrow();
+    }
+    expect(f.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+
+    // Another account settles while the restore waits on the relay: the restore stays the first person's.
+    const restored = f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } });
+    f.account.person = { kind: "human", humanId: "user_other" };
+    await restored;
+    expect(f.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("m-schema", OWNER, { expectedHeadMomentId: "m-schema" });
   });
 });

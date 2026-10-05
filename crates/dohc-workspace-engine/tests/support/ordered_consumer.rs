@@ -72,7 +72,7 @@ pub async fn run() {
         input,
         output,
         supervisor,
-        events,
+        events.into(),
         || Ok(()),
         Some((owner, ingress)),
     )

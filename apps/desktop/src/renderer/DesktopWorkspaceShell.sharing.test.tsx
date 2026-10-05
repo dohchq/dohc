@@ -9,6 +9,160 @@ import { CHATS_TAB_PATH } from "./workbench/workbenchState";
 import { deferred } from "../testing/deferred";
 import { DesktopWorkspaceShell, WORKSPACE, SYNC_STATUS, STORED_STATE, storedStateWithTabs, makeBridge, renderShell, shellBootstrapProps, SHARE_STATUS, SHARE_VIEW, makeShareBridge, settleShareView } from "./DesktopWorkspaceShell.testHarness";
 
+describe("share background work readiness", () => {
+  const EDIT_SHARE: Workspace = {
+    ...SHARE_VIEW,
+    shareView: { ...SHARE_VIEW.shareView!, access: "edit" },
+  };
+
+  it("waits for readiness before pushing, then reports one real failure with Try again", async () => {
+    const admission = deferred<typeof SHARE_STATUS>();
+    const bridge = makeShareBridge();
+    bridge.openWorkspace.mockImplementation(() => admission.promise);
+    let ready = false;
+    bridge.pushShareDirectWrites.mockImplementation(async () => {
+      throw new Error(ready ? "The relay did not answer." : "Share changes stopped because this window changed workspaces.");
+    });
+    renderShell(bridge, EDIT_SHARE);
+    await settleShareView();
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledOnce());
+
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
+    expect(bridge.onShareDirectWritesPushed).toHaveBeenCalledOnce();
+    expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(true);
+
+    await act(async () => {
+      ready = true;
+      admission.resolve(SHARE_STATUS);
+    });
+    const message = "dohc could not send your Collection changes to granter@dohc.test. The relay did not answer.";
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+    expect(toast.textContent).toContain(message);
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(bridge.pushShareDirectWrites).toHaveBeenCalledOnce();
+    expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notices = await screen.findByTestId("notice-center");
+    expect(within(notices).getAllByText(message)).toHaveLength(1);
+    bridge.pushShareDirectWrites.mockResolvedValue({ status: "pushed", writes: [] });
+    await user.click(within(notices).getByRole("button", { name: "Try again" }));
+    expect(bridge.pushShareDirectWrites).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["refused", "stale"] as const)("keeps a %s push answer delivered after admission but before readiness", async (result) => {
+    const readiness = deferred<typeof SHARE_STATUS>();
+    const bridge = makeShareBridge();
+    bridge.openWorkspace.mockImplementation(() => readiness.promise);
+    renderShell(bridge, EDIT_SHARE);
+    await waitFor(() => expect(bridge.openWorkspace).toHaveBeenCalledOnce());
+    expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("false");
+    expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
+
+    act(() => bridge.emitShareDirectWritesPushed({
+      workspaceId: EDIT_SHARE.workspaceId,
+      result: {
+        status: "pushed",
+        writes: [result === "refused"
+          ? { result, paths: ["trip/packing/automations.yaml"], reason: "" }
+          : { result, paths: ["trip/packing/collection.yaml"], stalePath: "trip/packing/collection.yaml" }],
+      },
+    }));
+    await act(async () => { readiness.resolve(SHARE_STATUS); });
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+
+    const message = result === "refused"
+      ? "granter@dohc.test's server didn't take your change to packing/automations.yaml. Send it as a proposal."
+      : "packing/collection.yaml changed before your change reached granter@dohc.test. Check the new version, or send yours as a proposal.";
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(message);
+    expect(screen.getAllByTestId("workspace-shell-error")).toHaveLength(1);
+    await userEvent.setup().click(screen.getByTestId("notice-center-toggle"));
+    expect(within(screen.getByTestId("notice-center")).getAllByText(message)).toHaveLength(1);
+    expect(bridge.onShareDirectWritesPushed).toHaveBeenCalledOnce();
+    expect(bridge.pushShareDirectWrites).toHaveBeenCalledOnce();
+  });
+
+  it("discards a pending push when the workspace changes and waits for the next admission", async () => {
+    const bridge = makeShareBridge();
+    const push = deferred<Awaited<ReturnType<typeof bridge.pushShareDirectWrites>>>();
+    bridge.pushShareDirectWrites.mockImplementationOnce(() => push.promise);
+    const nextShare = { ...EDIT_SHARE, workspaceId: "next-share" };
+    const shell = (workspace: Workspace) => <DesktopWorkspaceShell
+      workspace={workspace} workspaces={[EDIT_SHARE, nextShare]}
+      {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />;
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(EDIT_SHARE));
+    await waitFor(() => expect(bridge.pushShareDirectWrites).toHaveBeenCalledOnce());
+    const admission = deferred<typeof SHARE_STATUS>();
+    bridge.openWorkspace.mockImplementation(() => admission.promise);
+    view.rerender(shell(nextShare));
+    await act(async () => {
+      push.reject(new Error("Share changes stopped because this window changed workspaces."));
+      bridge.emitShareDirectWritesPushed({
+        workspaceId: EDIT_SHARE.workspaceId,
+        result: { status: "failed", writes: [], errorMessage: "retired", lasting: false },
+      });
+    });
+    expect(bridge.pushShareDirectWrites).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await userEvent.setup().click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).not.toContain("could not send your Collection changes");
+    await act(async () => { admission.resolve(SHARE_STATUS); });
+    await waitFor(() => expect(bridge.pushShareDirectWrites).toHaveBeenCalledTimes(2));
+    expect(bridge.pushShareDirectWrites).toHaveBeenLastCalledWith({ workspaceId: nextShare.workspaceId });
+  });
+
+  it("discards a refresh failure from a retired workspace", async () => {
+    const bridge = makeShareBridge();
+    const refresh = deferred<Awaited<ReturnType<typeof bridge.refreshSharedView>>>();
+    bridge.refreshSharedView.mockImplementationOnce(() => refresh.promise);
+    const nextWorkspace = { ...WORKSPACE, workspaceId: "next-workspace" };
+    const shell = (workspace: Workspace) => <DesktopWorkspaceShell
+      workspace={workspace} workspaces={[EDIT_SHARE, nextWorkspace]}
+      {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />;
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(EDIT_SHARE));
+    await waitFor(() => expect(bridge.refreshSharedView).toHaveBeenCalledOnce());
+    view.rerender(shell(nextWorkspace));
+    await act(async () => { refresh.reject(new Error("This window changed workspaces.")); });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await userEvent.setup().click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).not.toContain("Couldn't refresh the shared view.");
+  });
+
+  it.each(["Collections", "workspace files"] as const)("discards a background %s failure from a retired workspace", async (read) => {
+    const bridge = makeShareBridge();
+    const pending = deferred<never>();
+    if (read === "Collections") bridge.dataset.mockImplementationOnce(() => pending.promise);
+    const nextWorkspace = { ...WORKSPACE, workspaceId: "next-workspace" };
+    const shell = (workspace: Workspace) => <DesktopWorkspaceShell
+      workspace={workspace} workspaces={[EDIT_SHARE, nextWorkspace]}
+      {...shellBootstrapProps(bridge)} onSwitchWorkspace={() => {}} />;
+    vi.stubGlobal("dohcDesktop", bridge);
+    const view = render(shell(EDIT_SHARE));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    await settleShareView();
+    if (read === "Collections") {
+      expect(bridge.dataset).toHaveBeenCalledOnce();
+    } else {
+      const calls = bridge.listWorkspaceFiles.mock.calls.length;
+      bridge.listWorkspaceFiles.mockImplementationOnce(() => pending.promise);
+      act(() => bridge.emitWorkspaceActivity({ workspaceId: EDIT_SHARE.workspaceId }));
+      await waitFor(() => expect(bridge.listWorkspaceFiles).toHaveBeenCalledTimes(calls + 1));
+    }
+    view.rerender(shell(nextWorkspace));
+    await act(async () => { pending.reject(new Error("This window changed workspaces.")); });
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+    await userEvent.setup().click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-center").textContent).not.toContain(`Could not ${read === "Collections" ? "read Collections" : "refresh workspace files"}.`);
+  });
+});
+
 describe("workspace share handoff placement", () => {
   it("uses the existing overlay and dismisses it without a payload or mutation", async () => {
     const bridge = makeBridge(Promise.resolve(null));
@@ -540,9 +694,8 @@ describe("shared view send changes", () => {
   });
 
   // Main refuses the window's calls until it has opened the view there. A
-  // push sent before that read as "could not send your Collection changes"
-  // beside an edit that saved.
-  it("pushes only once main has opened the view in this window", async () => {
+  // read sent before that would leave changes already sent unseen.
+  it("reads changes already sent once main has opened the view in this window", async () => {
     const status = deferred<typeof SHARE_STATUS>();
     const bridge = makeShareBridge();
     let admitted = false;
@@ -552,31 +705,25 @@ describe("shared view send changes", () => {
       return opened;
     });
     bridge.getSyncStatus = vi.fn(() => status.promise);
-    bridge.pushShareDirectWrites.mockImplementation(async () => {
-      if (!admitted) throw new Error("Share changes stopped because this window changed workspaces.");
-      return { status: "pushed", writes: [] };
-    });
     bridge.listMyShareChanges.mockImplementation(async () => {
       if (!admitted) throw new Error("Share changes stopped because this window changed workspaces.");
       return { proposals: [{ proposalId: "proposal-1", state: "open", createdAtMs: 10, files: 1 }] };
     });
     renderShell(bridge, EDIT_SHARE);
     await screen.findByTestId("shared-view-banner");
-    expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
     expect(bridge.listMyShareChanges).not.toHaveBeenCalled();
 
     await act(async () => status.resolve(SHARE_STATUS));
-    await waitFor(() => expect(bridge.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
     expect(await screen.findByTestId("share-changes-state")).toHaveProperty("dataset.state", "open");
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("pushes nothing from a share view that cannot write", async () => {
+  it("listens without pushing from a share view that cannot write", async () => {
     const bridge = makeShareBridge();
     renderShell(bridge, { ...SHARE_VIEW, shareView: { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" } });
     await screen.findByTestId("shared-view-banner");
-    // It does not listen for pushes at all.
-    expect(bridge.onShareDirectWritesPushed).not.toHaveBeenCalled();
+    // A write started before access ended can still report its outcome.
+    expect(bridge.onShareDirectWritesPushed).toHaveBeenCalledOnce();
     expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
   });
 

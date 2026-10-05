@@ -1,4 +1,5 @@
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
+import type { SharedFileUpdate, SharedFileUpdateState } from "../ydoc/ydocWireContract";
 import { createHash, randomUUID } from "node:crypto";
 import {
   DaemonClientCapabilityError,
@@ -184,6 +185,23 @@ export class VersionedLiveAdapter {
   private readonly createId: NonNullable<
     VersionedLiveAdapterOptions["createId"]
   >;
+
+  /** Read only the recorded writes, never unrelated workspace drafts. */
+  async sharedFileUpdateStates(writes: readonly SharedFileUpdate[]): Promise<SharedFileUpdateState[]> {
+    const states: SharedFileUpdateState[] = [];
+    for (let offset = 0; offset < writes.length; offset += 64) {
+      const raw = await this.requester.request("ydoc.ownerDelivery.listDrafts", {
+        after: null, limit: 64, writes: writes.slice(offset, offset + 64) as unknown as JsonValue,
+      }, { workspace: this.workspace });
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw) || !Array.isArray(raw.states) ||
+          raw.states.length !== Math.min(64, writes.length - offset) ||
+          raw.states.some(state => state !== "pending" && state !== "settled" && state !== "not-accepted" && state !== "absent")) {
+        throw new DaemonProtocolError("Invalid owner write status.");
+      }
+      states.push(...raw.states as SharedFileUpdateState[]);
+    }
+    return states;
+  }
 
   constructor(
     client: MinimalDaemonClient,

@@ -192,6 +192,7 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
               check();
               if (result === "retry" || result === "frozen") failures.add(document.binding.currentPath);
               else failures.delete(document.binding.currentPath);
+              if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId});
               setOwnerDeliveryStatus(workspaceId, failures.size || unavailable ? "retrying" : preparing ? "preparing" : "active", reason);
               return {documentCount: documents.length, acknowledged: result === "acknowledged"};
               } catch (error) {
@@ -225,8 +226,11 @@ export function createDesktopEngine<State extends EngineAuthorityState>(
                 if (generation !== ownerDeliveryGeneration || isQuitting() || daemon.currentClient() !== client || binding.client !== source.currentClient()) throw new Error("Owner delivery daemon retired.");
               };
               assertCurrent();
-              return native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
+              const result = await native.runNativeOwnerDeliveryPass({client, workspaceHandle: binding.workspace,
                 document, config, signal, bearer: credentials.bearer, assertCurrent});
+              assertCurrent();
+              if (result === "acknowledged" || result === "frozen") notifyRenderer({workspaceId: document.binding.workspaceId});
+              return result;
             }));
         },
       });

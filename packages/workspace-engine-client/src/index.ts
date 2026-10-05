@@ -2,6 +2,7 @@
 // fakes and fixture helpers live under `@dohc/workspace-engine-client/testing`.
 export type { Event, JsonValue, Request, Response, Retryability } from "./protocol";
 
+export type { SharedFileUpdate, SharedFileUpdateState } from "./ydoc/ydocWireContract";
 export {
   DaemonRefusalError,
   WorkspaceDaemonRequester,

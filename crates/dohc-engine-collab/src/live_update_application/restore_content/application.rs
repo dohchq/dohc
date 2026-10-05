@@ -46,7 +46,7 @@ impl NativeRestoreApplication {
         new_binding.restore_fence_generation = operation.new_fence;
         // A restore is the owner's own operation. It never carries an agent
         // declared for an earlier delivery.
-        if a.agent_declaration.is_some() {
+        if self.admitted.admitted_declaration().is_some() {
             return Err(invalid("a restore admission declares no agent"));
         }
         if a.binding != new_binding
@@ -182,7 +182,7 @@ pub(in crate::live_update_application) fn fence_replay_head_in(
     canonical_ranges(&receipt.admitted.first_seen)?;
     if receipt.fence != *fence
         || !bound
-        || receipt.admitted.accepted.agent_declaration.is_some()
+        || receipt.admitted.admitted_declaration().is_some()
         || receipt.admitted.accepted.binding != new_binding
         || receipt.admitted.accepted.receipt.update_digest != receipt.candidate_digest
         || !matches!(

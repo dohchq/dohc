@@ -26,7 +26,7 @@ import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { registerCollectionAutomationsIpc } from "./ipc/collectionAutomationsIpc";
 import { registerStopAndRestoreIpc } from "./ipc/stopAndRestoreIpc";
 import { createServerRuns } from "./automations/serverRuns";
-import { createPressWindows, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
+import { createPressWindows, refreshSharedButtonInspections, registerAutomationButtonsIpc } from "./ipc/automationButtonsIpc";
 import { RECORD_ID_FRONTMATTER_KEY } from "@dohc/workspace-contracts/collection";
 import { parseCollectionRecordFields } from "@dohc/workspace-contracts/collection-values";
 import type { MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
@@ -218,8 +218,8 @@ import {
   recipientShareNeedsRecheck,
   readReceivedShareListing,
 } from "./workspaces/recipientShareReconciliation";
-import { createShareRosters, rosterAuthorLabel } from "./automations/shareRoster";
-import { listRosterGrants } from "@dohc/automation-executor/roster-listing";
+import { createShareRosters, rosterAuthorLabel, rosterPersonLabel } from "./automations/shareRoster";
+import { listRosterGrants, readStoredRoster } from "@dohc/automation-executor/roster-listing";
 import {
   CollectionAutomations,
   type CollectionAutomationsOptions,
@@ -325,6 +325,7 @@ import {
   mountStoreWorkspaceIdFor,
   shareViewFilesMountProjection,
   shareMountRecordsForId,
+  usableShareMountRecord,
 } from "./workspaces/shareMounts";
 import { createShareMountCommands } from "./workspaces/shareMountCommands";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
@@ -771,6 +772,18 @@ function cloudLogin(): CloudLogin {
 const workspaceFileListings = new WorkspaceFileListingCache();
 
 function notifyRenderer(scope?: WorkspaceActivityScope): void {
+  if (scope) {
+    for (const workspace of listWorkspaces()) {
+      const mounts = storedShareMounts(workspace);
+      const mount = mounts.find(mount => usableShareMountRecord(mounts, mount)
+        && mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId) === scope?.workspaceId);
+      if (mount) {
+        scope = { workspaceId: workspace.workspaceId,
+          ...(scope.paths ? { paths: scope.paths.map(path => `shared-with-me/${mount.label}/${path}`) } : {}) };
+        break;
+      }
+    }
+  }
   const activityEvent = workspaceActivityPayload(scope);
   workspaceFileListings.invalidate(activityEvent);
   invalidateDatasetAddresses(activityEvent);
@@ -870,9 +883,14 @@ const credentialSessionCache =
   new CredentialSessionCache<CloudSessionCredentials>((snapshot, settled) => {
     ownerDeliveryCredentialLifetime.abort();
     ownerDeliveryCredentialLifetime = new AbortController();
-    if (chatShareSessionKey(cachedCredentials) !== chatShareSessionKey(snapshot.credentials)) clearButtonInspections?.();
+    const buttonAccountChanged = chatShareSessionKey(cachedCredentials) !== chatShareSessionKey(snapshot.credentials);
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
+    if (buttonAccountChanged) {
+      refreshSharedButtonInspections(() => clearButtonInspections?.(),
+        activity.listOpenWorkspaceIds().filter(workspaceId => sharedViewOf(workspaceId) !== null),
+        notifyCollectionAutomationsChanged);
+    }
     if (settled) localAuthorship.credentialsSettled(snapshot.credentials?.userId ?? null);
     void ownerDatasetCopies.credentialsChanged(snapshot.credentials ? datasetCopyOwnerKey(snapshot.credentials) : null)
       .catch(error => console.error("Collection copy cleanup failed", error));
@@ -3939,9 +3957,9 @@ function createRelayedPressHostFor(workspaceId: string): RelayedPressHost {
       if (!executor) throw new Error("This workspace was closed.");
       return await executor.relayedClaim({ automationId: press.automationId, collectionPath: press.collectionPath, definitionHash: press.definitionHash, pressId: press.hostPressId });
     },
-    inspect: async (inspectionId) => {
+    inspect: async (inspectionIds, signal) => {
       const executor = collectionAutomationsOf(workspaceId);
-      return executor ? executor.inspectRelayed(inspectionId) : { kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED };
+      return executor ? executor.inspectRelayedBatch(inspectionIds, signal) : inspectionIds.map(() => ({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED }));
     },
     press: async (input, watch) => {
       const executor = collectionAutomationsOf(workspaceId);
@@ -5364,7 +5382,16 @@ function registerIpcHandlers(): void {
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
     withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
-    namedAuthorLabel: (workspaceId, author) => rosterAuthorLabel(findWorkspace(workspaceId)?.shareRoster, author),
+    localPersonName: localUserDisplayName, localPerson,
+    automationPersonName: (workspaceId, userId) => {
+      const workspace = findWorkspace(workspaceId);
+      if (userId === (workspace?.remote?.ownerUserId ?? localUserId())) return null;
+      return rosterPersonLabel(readStoredRoster(workspace?.shareRoster), userId);
+    },
+    namedAuthorLabels: (workspaceId) => {
+      const roster = readStoredRoster(findWorkspace(workspaceId)?.shareRoster);
+      return (author) => rosterAuthorLabel(roster, author);
+    },
     automationAuthor, notifyRenderer,
     // A shared view keeps no runs: its automations run on the owner's computer.
     signedInAccount: () => cachedCredentials?.userId ?? null,
@@ -5822,11 +5849,6 @@ function registerIpcHandlers(): void {
       if (details === null) throw new Error("The workspace engine is not running.");
       return details.schema.fields.flatMap((field) => (field.type === "button" ? [field.name] : []));
     },
-    collectionId: async (operation, collectionPath) => {
-      const details = await withEngineAdapter(operation.workspace, (engine) => engine.getCollection({ collectionPath }));
-      if (details === null) throw new Error("The workspace engine is not running.");
-      return details.objectId;
-    },
     describeDataset: (sender, workspaceId, datasetId) => withRendererWorkspaceOperation(sender, workspaceId,
       "Collection changes stopped because this window changed workspaces.",
       operation => describeAutomationDataset(operation, datasetId, datasetDependencies)),
@@ -5852,8 +5874,9 @@ function registerIpcHandlers(): void {
         .press(shareId, input);
     },
     relayInspect: async (operation, input) => {
+      const marker = operation.workspace.shareView;
       await warmCredentialCache();
-      const credentials = cachedCredentials, marker = operation.workspace.shareView;
+      const credentials = cachedCredentials;
       const shareId = isRecordValue(marker) && typeof marker.shareId === "string" ? marker.shareId : null;
       const relayUrl = isRecordValue(marker) && typeof marker.relayUrl === "string" ? marker.relayUrl : null;
       if (!credentials?.relayUrl || shareId === null || (relayUrl !== null && !relayUrlsMatch(credentials.relayUrl, relayUrl))) {
@@ -5861,9 +5884,9 @@ function registerIpcHandlers(): void {
       }
       return automationPressRelay({ baseUrl: normalizeServerUrl(credentials.relayUrl), token: credentials.token, fetch: relayShareFetch }).inspect(shareId, input);
     },
-    inspectionChanged: operation => {
-      withWorkspaceAttachment({ workspaceId: operation.workspace.workspaceId }, lease => {
-        if (lease.binding.attachmentId === operation.workspace.attachmentId) notifyCollectionAutomationsChanged(operation.workspace.workspaceId);
+    inspectionChanged: (workspaceId, attachmentId) => {
+      withWorkspaceAttachment({ workspaceId }, lease => {
+        if (lease.binding.attachmentId === attachmentId) notifyCollectionAutomationsChanged(workspaceId);
       });
     },
     pressWindows,
@@ -5889,6 +5912,7 @@ function registerIpcHandlers(): void {
         : "dependents-changed",
     sharesChanged: shareRosters.sharesChanged,
     requireEngineCapture: (workspaceId) => requireEngineCapture(workspaceId, "Engine history"),
+    localPerson,
     queuePull: (workspaceId) => activity.queueCloudPull(workspaceId),
     syncNow: (workspaceId) => activity.syncNow(workspaceId),
     deletePath: (event, payload) => workspaceFileMutations.deletePath(event, payload),

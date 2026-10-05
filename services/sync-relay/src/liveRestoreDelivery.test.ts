@@ -57,7 +57,7 @@ it("does not ask again for the fence after failed publication",async()=>{
 type CutReceipt={deliveryId:string;updateDigest:string;journalCursor:number;acceptingHostEpoch:number};
 const declaration={agentId:"trip-agent-hosted",onBehalfOf:null,depth:0};
 const cutReceipt=(cursor:number):CutReceipt=>({deliveryId:`delivery-${cursor}`,updateDigest:"c".repeat(64),journalCursor:cursor,acceptingHostEpoch:1});
-const cutEvent=(cursor:number)=>({metadata:{accepted:{receipt:cutReceipt(cursor),binding,agentDeclaration:declaration}}});
+const cutEvent=(cursor:number)=>({metadata:{accepted:{receipt:cutReceipt(cursor),binding},authorSnapshot:[{kind:"agent",agentId:declaration.agentId,depth:declaration.depth}]}});
 
 // The old cut still holds `events` declared changes; the host refuses the
 // chosen application calls as settlement-required.
