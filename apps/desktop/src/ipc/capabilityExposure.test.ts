@@ -20,16 +20,19 @@ const socketVerbs = cliRequestSchema.options.map(option => option.shape.verb.val
 
 function carriesWorkspaceId(payload: z.core.$ZodType): boolean {
   if (payload instanceof z.ZodObject) return "workspaceId" in payload.shape;
-  if (payload instanceof z.ZodUnion) return payload.options.some(option => carriesWorkspaceId(option));
-  return false;
+  if (payload instanceof z.ZodUnion) return payload.options.map(carriesWorkspaceId).some(Boolean);
+  if (payload instanceof z.ZodPipe) return carriesWorkspaceId(payload.in);
+  if (payload instanceof z.ZodIntersection) return [payload.def.left, payload.def.right].map(carriesWorkspaceId).some(Boolean);
+  throw new Error(`Unhandled operation payload schema "${payload._zod.def.type}". Handle it explicitly in carriesWorkspaceId.`);
 }
 
 function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "scope" | "payload"> & {
   readonly handlerCheck?: { readonly check: string; readonly reason: string };
 }) {
+  const workspacePayload = carriesWorkspaceId(row.payload);
   expect(["device", "workspace"]).toContain(row.scope);
-  if (row.guard === "active-workspace" || carriesWorkspaceId(row.payload)) expect(row.scope, row.channel).toBe("workspace");
-  if (row.guard === "trusted-sender" && (row.scope === "workspace" || carriesWorkspaceId(row.payload))) {
+  if (row.guard === "active-workspace" || workspacePayload) expect(row.scope, row.channel).toBe("workspace");
+  if (row.guard === "trusted-sender" && (row.scope === "workspace" || workspacePayload)) {
     expect(row.handlerCheck?.check, row.channel).toBeTruthy();
     expect(row.handlerCheck?.reason, row.channel).toBeTruthy();
   }
@@ -64,6 +67,37 @@ describe("B1 main inventories (a4be19d5b)", () => {
 });
 
 describe("capability identities and exposure", () => {
+  const workspacePayload = z.object({ workspaceId: z.string() });
+  const devicePayload = z.object({});
+  it.each([
+    ["pipe input", workspacePayload.pipe(workspacePayload), true],
+    ["transform input", workspacePayload.transform(() => ({})), true],
+    ["transform output only", devicePayload.transform(() => ({ workspaceId: "output-only" })), false],
+    ["intersection left", z.intersection(workspacePayload, devicePayload), true],
+    ["intersection right", z.intersection(devicePayload, workspacePayload), true],
+    ["device intersection", z.intersection(devicePayload, devicePayload), false],
+    ["union", z.union([devicePayload, workspacePayload]), true],
+  ] as const)("inspects the %s for a workspace selector", (_name, payload, expected) => {
+    expect(carriesWorkspaceId(payload)).toBe(expected);
+    if (expected) expect(() => assertAdmission({
+      channel: "desktop:wrapped-repro", guard: "trusted-sender", scope: "device", payload,
+    })).toThrow("workspace");
+  });
+
+  it.each([
+    ["lazy", z.lazy(() => workspacePayload)],
+    ["array", z.array(workspacePayload)],
+    ["optional", workspacePayload.optional()],
+    ["transform before parsing", z.preprocess(value => value, workspacePayload)],
+    ["union with an unknown sibling", z.union([workspacePayload, z.lazy(() => devicePayload)])],
+    ["intersection with an unknown sibling", z.intersection(workspacePayload, z.lazy(() => devicePayload))],
+  ] as const)("rejects the unhandled %s payload instead of skipping the pin", (_name, payload) => {
+    expect(() => carriesWorkspaceId(payload)).toThrow("Unhandled operation payload schema");
+    expect(() => assertAdmission({
+      channel: "desktop:unknown-repro", guard: "active-workspace", scope: "workspace", payload,
+    })).toThrow("Unhandled operation payload schema");
+  });
+
   it("rejects a trusted-sender row that disguises its workspace payload as device scope", () => {
     const repro = {
       capabilityId: "file.read", channel: "desktop:repro", guard: "trusted-sender", scope: "device",

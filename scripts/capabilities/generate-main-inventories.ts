@@ -61,6 +61,10 @@ save("generation.json", {
   sourceCommit: BASE, trackedSourcesClean: true, checkout: process.cwd(),
   command: `pnpm --filter @dohc/cli exec tsx ../../scripts/capabilities/generate-main-inventories.ts ${output}`,
   generatorSha256: createHash("sha256").update(readFileSync("scripts/capabilities/generate-main-inventories.ts")).digest("hex"),
+  fixtureSha256: Object.fromEntries([
+    "packages/mcp/src/capabilityExposure.fixture.ts",
+    "services/share-web/src/remoteMcpInventory.fixture.ts",
+  ].map(path => [path, createHash("sha256").update(readFileSync(path)).digest("hex")])),
   files: hashes,
 });
 console.log(JSON.stringify({ sourceCommit: BASE, files: hashes }, null, 2));
