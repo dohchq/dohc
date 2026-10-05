@@ -389,6 +389,34 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it("sends Set batch plans and decodes receipts, fenced states, and final placement", async () => {
+    const key = {claimId: "claim", keySeed: "seed", step: 1, batch: "0"};
+    const plan = {key, versionId: "main", records: [{collectionId: "schema", recordId: "record", binding: null,
+      fields: [{field: "Count", before: 1, after: 2}]}]};
+    const receipt = {key, digest: "digest", versionId: "main", attribution: {actorKind: "automation" as const, depth: 1},
+      records: [{recordId: "record", path: "tasks/one.md", fields: [{state: "changed", field: "Count", before: 1, after: 2, historyId: 1}]}],
+      jobs: ["job"], committedAtMs: 1, writerMs: 7};
+    const requests: Request[] = [];
+    let state: "committed" | "abandoned" | "retired" = "committed";
+    const adapter = new VersionedLiveAdapter({close: () => undefined, sendRequest: async request => {
+      requests.push(request);
+      const result = request.method === WORKSPACE_METHOD.collectionsPrepareSetBatch ? {plan, digest: "digest", open: [false]}
+        : request.method === WORKSPACE_METHOD.collectionsSetFieldsBatch ? receipt
+        : request.method === WORKSPACE_METHOD.collectionsLookupSetBatch ? state === "committed" ? {state, receipt} : {state}
+        : {settled: true};
+      return {id: request.id, result};
+    }}, WORKSPACE, {workspaceId: WORKSPACE});
+    expect(await adapter.prepareSetBatch(plan)).toEqual({plan, digest: "digest", open: [false]});
+    expect(await adapter.setFieldsBatch(plan, "digest", receipt.attribution)).toEqual(receipt);
+    expect(await adapter.lookupSetBatch({key, digest: "digest"})).toEqual({state, receipt});
+    state = "abandoned";
+    expect(await adapter.lookupSetBatch({key, digest: "digest"})).toEqual({state});
+    state = "retired";
+    expect(await adapter.lookupSetBatch({key, digest: "digest"})).toEqual({state});
+    expect(await adapter.waitSetBatches([{key, digest: "digest"}])).toEqual({settled: true});
+    expect(requests[1]!.params).toMatchObject({plan: {key}, digest: "digest", attribution: receipt.attribution});
+  });
+
   it.each(["api", "local-file"] as const)("records %s text without publishing unless explicitly requested", async (origin) => {
     const loopback = new VersionedLoopbackEngine();
     const adapter = new VersionedLiveAdapter({ sendRequest: (request) => loopback.sendRequest(request), close: () => undefined }, WORKSPACE, { workspaceId: WORKSPACE });

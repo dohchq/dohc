@@ -301,6 +301,7 @@ export interface DatasetAutomationHost extends DatasetRunHost, DatasetUndoHost {
 }
 
 export interface CollectionAutomationsOptions {
+  setBatches?: import("./automationSetBatches").AutomationSetBatches;
   resolveRelayedPress?(hostPressId: string): Promise<RelayedPressAuthority>;
   resolveButtonInspection?(inspectionId: string): Promise<RelayButtonAuthority>;
   /** Engine adapter runner; resolves null when the engine is unavailable. */
@@ -3361,6 +3362,7 @@ export class CollectionAutomations {
       }
       const reverse = (host: DatasetUndoHost | null) => undoAutomationRuns({
         withReads: (work) => this.withLiveEngine(work), withRecordWrites: this.options.withUndoWrites,
+        lookupBatch: this.options.setBatches?.lookup,
         trash, collectionPathOf: (id) => this.collectionPathOf(id),
         recordReversal: async write => {
           const holder = newest();
@@ -3405,6 +3407,7 @@ export class CollectionAutomations {
     const { undone, keptFields, undoWrites } = await undoCollectionAutomationRuns({
       withReads: (work) => this.withLiveEngine(work),
       withRecordWrites: this.options.withUndoWrites,
+      lookupBatch: this.options.setBatches?.lookup,
       trash,
       collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
     }, runs, this.runAbort.signal, only);
@@ -5205,6 +5208,7 @@ export class CollectionAutomations {
       },
       withReads: (work) => this.withLiveEngine(work),
       withRecordWrites: this.options.withRecordWrites,
+      setBatches: this.options.setBatches,
       collectionIdOf: (path) => this.collections.get(path) ?? null,
       collectionPathOf: (collectionId) => this.collectionPathOf(collectionId),
       readCode: async (path) => {

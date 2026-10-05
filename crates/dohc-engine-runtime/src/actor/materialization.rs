@@ -955,7 +955,7 @@ const fn materialize_outcome_severity(outcome: PostCommitMaterializeOutcome) -> 
     }
 }
 
-fn reconcile_settlement_attempts(
+pub(super) fn reconcile_settlement_attempts(
     store: &mut EngineStore,
     workspace_id: &str,
     now_ms: i64,

@@ -13,6 +13,18 @@ fn names_person(declared: &Value) -> bool {
     kind.and_then(Value::as_str) == Some("human") || declared.get("onBehalfOf").is_some()
 }
 
+fn author_key(method: &str) -> Option<&'static str> {
+    match method {
+        "capture.setAuthor" => Some("author"),
+        "workspace.open" => Some("captureAuthor"),
+        "ydoc.recordUpdate" | "collections.setFieldsBatch" => Some("attribution"),
+        _ if method.starts_with("versionedText.") || method.starts_with("versionedBinary.") => {
+            Some("author")
+        }
+        _ => None,
+    }
+}
+
 impl EngineService {
     /// Desktop main is the engine's one ordinary caller. It names the person
     /// an edit is by, read from its own account when the edit arrives. A
@@ -22,14 +34,8 @@ impl EngineService {
     pub(super) fn ensure_admissible_author(&self, request: &Request) -> Result<(), WireError> {
         let method = request.method.as_str();
         let capture_author = matches!(method, "capture.setAuthor" | "workspace.open");
-        let key = match method {
-            "capture.setAuthor" => "author",
-            "workspace.open" => "captureAuthor",
-            "ydoc.recordUpdate" => "attribution",
-            _ if method.starts_with("versionedText.") || method.starts_with("versionedBinary.") => {
-                "author"
-            }
-            _ => return Ok(()),
+        let Some(key) = author_key(method) else {
+            return Ok(());
         };
         let Some(declared) = request.params.get(key).filter(|value| !value.is_null()) else {
             return Ok(());
@@ -64,6 +70,10 @@ mod tests {
     fn person_claims() -> Vec<Request> {
         vec![
             request(
+                "collections.setFieldsBatch",
+                json!({"attribution":{"actorKind":"automation","onBehalfOf":"alice","depth":1,"run":{"claimId":"claim","automationName":"Stamp"}}}),
+            ),
+            request(
                 "ydoc.recordUpdate",
                 json!({"actorOriginId":"alice", "attribution":{"actorKind":"human", "onBehalfOf":"alice", "depth":0}}),
             ),
@@ -84,6 +94,41 @@ mod tests {
                 json!({"author":{"kind":"agent", "agentId":"agent", "onBehalfOf":"alice"}}),
             ),
         ]
+    }
+
+    #[test]
+    fn every_rpc_parameter_with_attribution_has_author_admission() {
+        let rpc = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/rpc");
+        let listed = [
+            ("YdocRecordUpdateParams", "ydoc.recordUpdate"),
+            ("SetBatchSubmission", "collections.setFieldsBatch"),
+        ];
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(rpc).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|extension| extension != "rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(path).unwrap();
+            let mut name = None;
+            for line in source.lines() {
+                if let Some(declaration) = line.trim().strip_prefix("struct ") {
+                    name = declaration.split_whitespace().next();
+                }
+                if line.starts_with("    attribution:") {
+                    let name = name.expect("attribution parameter belongs to a struct");
+                    let (_, method) = listed
+                        .iter()
+                        .find(|(parameter, _)| *parameter == name)
+                        .unwrap_or_else(|| {
+                            panic!("list the method that carries attribution in {name}")
+                        });
+                    assert_eq!(author_key(method), Some("attribution"), "{method}");
+                    found.push(name.to_owned());
+                }
+            }
+        }
+        assert_eq!(found.len(), listed.len());
     }
 
     #[test]

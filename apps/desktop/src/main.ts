@@ -139,7 +139,7 @@ import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { createDocumentProjectionWorker } from "./workspaces/documentProjection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { CreateCollectionRecordPayload } from "./ipc/bridgeContract";
-import { collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
+import { attributionFor, collectionRecordWrites, type CollectionRecordEditContext } from "@dohc/automation-executor/collection-record-edits";
 import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHost, type LocalPersonAuthor } from "./workspaces/desktopRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
@@ -4046,7 +4046,32 @@ function createCollectionAutomationsFor(
       return work(collectionRecordWrites(collectionEditContextWith(operation, capture, AbortSignal.any([signal, operation.signal]), person)));
     });
   };
+  const withBatchEngine = async <T>(work: (adapter: Parameters<Parameters<typeof withEngineAdapter>[1]>[0]) => Promise<T>): Promise<T> => {
+    const result = await withEngineAdapter(workspace, work);
+    if (result === null) throw new AutomationRunWait("The workspace engine is unavailable.");
+    return result;
+  };
+  const setBatches: NonNullable<CollectionAutomationsOptions["setBatches"]> = {
+    prepare: plan => withBatchEngine(adapter => adapter.prepareSetBatch(plan)),
+    lookup: reference => withBatchEngine(adapter => adapter.lookupSetBatch(reference)),
+    submit: async (plan, digest, author, signal) => withPhysicalWorkspaceOperation(workspaceId, async operation => {
+      if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
+      signal.throwIfAborted(); operation.signal.throwIfAborted();
+      const capture = activity.engineCaptureFor(workspaceId);
+      if (!capture) throw new AutomationRunWait("The workspace engine is unavailable.");
+      return await capture.withClosedRecordBatch(plan.records.flatMap(record => record.binding ? [record.binding.objectId] : []), () => {
+        signal.throwIfAborted(); operation.signal.throwIfAborted();
+        return withBatchEngine(adapter => adapter.setFieldsBatch(plan, digest, attributionFor(author)));
+      });
+    }),
+    wait: async receipts => withPhysicalWorkspaceOperation(workspaceId, async operation => {
+      if (operation.workspace.attachmentId !== attachmentId) throw new Error("This workspace was closed.");
+      operation.signal.throwIfAborted();
+      await withBatchEngine(adapter => adapter.waitSetBatches(receipts));
+    }),
+  };
   return new CollectionAutomations({
+    setBatches,
     withEngine: (work) => withEngineAdapter(workspace, work),
     // Each write names its author, so Undo writes as the person here the same way.
     withRecordWrites: recordWrites,

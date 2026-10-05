@@ -25,6 +25,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod automation_sets;
 pub mod automations;
 pub mod chats;
 pub mod collections;

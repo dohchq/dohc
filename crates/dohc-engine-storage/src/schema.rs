@@ -68,6 +68,7 @@ const SYNCHRONOUS_NORMAL: i64 = 1;
 /// The tables every valid v2 store must contain. Missing any of these on an
 /// otherwise-v2-stamped database is `state-corrupt`.
 const REQUIRED_TABLES: &[&str] = &[
+    "automation_set_batch_receipts",
     "live_audit_base_publications",
     "live_audit_bases",
     "live_audit_base_conflicts",

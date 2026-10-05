@@ -1,3 +1,4 @@
+import { receiptRuns } from "./automationSetBatches";
 import { rebaseRun } from "./collectionAutomationRun";
 import type { UndoKeptField, UndoWrite } from "./automationRunStore";
 import type { AutomationTargets } from "./automationTargets";
@@ -25,6 +26,7 @@ export async function undoAutomationRuns(
   saveRequest: (request: DatasetUndoRequest) => Promise<void>, signal: AbortSignal,
   codeFiles: readonly string[] = [],
 ): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[]; undoWrites: UndoWrite[] }> {
+  runs = await receiptRuns(runs, documents.lookupBatch);
   if (host !== null && datasetUndoRulesChanged(host, runs)) throw new Error(DATASET_UNDO_RULES_CHANGED);
   const targets = new Map<string, Target>();
   const touch = (key: string, target: Target) => { targets.delete(key); targets.set(key, target); };

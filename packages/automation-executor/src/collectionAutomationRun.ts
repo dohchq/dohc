@@ -136,6 +136,7 @@ export interface CollectionRecordWrites {
 }
 
 export interface CollectionAutomationRunDependencies {
+  setBatches?: import("./automationSetBatches").AutomationSetBatches;
   checkPresser?(): Promise<void>;
   authorizeDataset?(datasetId: string, operationId: string): Promise<import("./buttonPresser").DatasetOperationCeiling>;
   withHost?: import("./datasetAutomationRun").DatasetAutomationRunDependencies["withHost"];

@@ -1,3 +1,4 @@
+import { receiptRuns, type AutomationSetBatches } from "./automationSetBatches";
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -53,6 +54,7 @@ export interface CollectionAutomationUndone {
 }
 
 export interface CollectionAutomationUndoDependencies {
+  lookupBatch?: AutomationSetBatches["lookup"];
   recordReversal?(write: UndoWrite): Promise<void>;
   /** Engine reads; resolves null when the engine is unavailable. */
   withReads<T>(work: (reads: CollectionAutomationReads) => Promise<T>): Promise<T | null>;
@@ -99,10 +101,12 @@ export function documentUndoChanges(runs: readonly StoredRun[]): { added: Map<st
         if (write.kind === "field") wrote(write.recordId, write.path, write.field, { before: write.before, after: write.after, sure: true });
       }
     }
-    const unrecorded = unrecordedEffect(run)?.effect;
+    const position = unrecordedEffect(run);
+    const unrecorded = position?.effect;
     if (unrecorded?.kind === "add" && !run.created.some((created) => created.planned === unrecorded.recordId)) {
       added.set(unrecorded.recordId, `${unrecorded.collectionPath}/${unrecorded.name}.md`);
-    } else if (unrecorded?.kind === "set") {
+    } else if (unrecorded?.kind === "set" && !run.steps.some(step => step.ordinal === position?.ordinal && step.batches?.some(batch =>
+      !batch.abandoned && batch.part <= position.part && position.part < batch.part + batch.count))) {
       for (const { field, before, after } of unrecorded.fields) wrote(unrecorded.target.recordId, unrecorded.target.path, field, { before, after, sure: false });
     }
   }
@@ -167,6 +171,7 @@ export async function undoCollectionAutomationRuns(
   onlyRecordId?: string,
   prepared?: ReturnType<typeof documentUndoChanges>,
 ): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[]; undoWrites: UndoWrite[] }> {
+  if (!prepared) runs = await receiptRuns(runs, dependencies.lookupBatch);
   // Each run's records are found where their Collections are now. A
   // Collection no longer here keeps its paths, where no record is found.
   const { added, records } = prepared ?? documentUndoChanges(runs.map((run) => {

@@ -1,3 +1,4 @@
+import { StoredSetBatchSchema, type StoredSetBatch } from "./automationSetBatches";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readdir, readFile, rename, rm, rmdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -147,6 +148,7 @@ const StepSchema = z.object({
   appendMs: z.number().nonnegative().optional(),
   appendCount: z.number().int().nonnegative().optional(),
   effects: z.array(EffectSchema),
+  batches: z.array(StoredSetBatchSchema).optional(),
   output: OutputSchema.optional(),
   collections: z.array(CollectionRefSchema).optional(),
   destinations: z.array(z.object({ path: z.string(), rules: DatasetRulesSchema.nullable() })).optional(),
@@ -359,6 +361,7 @@ export type DatasetUndoRequest = z.infer<typeof UndoRequestSchema>;
 export type DatasetUndoCall = z.infer<typeof UndoCallSchema>;
 /** One planned step: its effects, on document records or on dataset records, and its result. */
 export interface StoredStep {
+  batches?: StoredSetBatch[];
   /** Step reads and Finds, excluding planning and formula evaluation. */
   findMs?: number;
   /** Planning and formula evaluation, excluding reads. */
@@ -686,6 +689,8 @@ export interface AutomationRunStore {
   supersedeWake(automationId: string, claimId: string, keySeed: string, noticeId: string, supersededBy: string): Promise<void>;
   /** Records one landed effect after the run's saved progress. */
   appendEffect(run: StoredRun, applied: StoredRun["applied"][number]): Promise<void>;
+  appendBatchPlan?(run: StoredRun, batch: StoredSetBatch): Promise<void>;
+  appendBatch?(run: StoredRun, batch: StoredSetBatch, applied: StoredRun["applied"]): Promise<void>;
   /**
    * Records the record an add-record step created, with the id the engine
    * gave it, before its fields are written.
@@ -749,6 +754,8 @@ export interface AutomationRunStore {
 }
 
 type ProgressLine =
+  | {kind: "set-batch-plan"; ordinal: number; batch: StoredSetBatch}
+  | { kind: "set-batch"; key: StoredSetBatch["plan"]["key"]; digest: string; size: number; applied: StoredRun["applied"] }
   | ({ kind: "step" } & StoredStep)
   | ({ kind: "effect" } & StoredRun["applied"][number])
   | ({ kind: "created" } & StoredRun["created"][number])
@@ -757,6 +764,8 @@ type ProgressLine =
   | { kind: "undo-calls"; covers: string[]; calls: DatasetUndoCall[] };
 
 const ProgressLineSchema = z.union([
+  z.object({kind: z.literal("set-batch-plan"), ordinal: z.number().int().nonnegative(), batch: StoredSetBatchSchema}),
+  z.object({ kind: z.literal("set-batch"), key: StoredSetBatchSchema.shape.plan.shape.key, digest: z.string(), size: z.number().int().positive(), applied: z.array(AppliedSchema) }),
   StepSchema.extend({ kind: z.literal("step") }),
   AppliedSchema.extend({ kind: z.literal("effect") }),
   CreatedSchema.extend({ kind: z.literal("created") }),
@@ -765,12 +774,32 @@ const ProgressLineSchema = z.union([
   z.object({ kind: z.literal("undo-calls"), covers: z.array(z.string()), calls: z.array(UndoCallSchema) }),
 ]);
 
+function appliedProgress(run: StoredRun): ProgressLine[] {
+  const lines: ProgressLine[] = [];
+  let offset = 0;
+  for (const step of run.steps) {
+    for (let part = 0; part < step.effects.length && offset + part < run.applied.length;) {
+      const batch = step.batches?.find(batch => !batch.abandoned && batch.part === part);
+      if (batch && offset + part + batch.count <= run.applied.length) {
+        lines.push({ kind: "set-batch", key: batch.plan.key, digest: batch.digest, size: batch.count,
+          applied: run.applied.slice(offset + part, offset + part + batch.count) });
+        part += batch.count;
+      } else {
+        lines.push({ kind: "effect", ...run.applied[offset + part]! });
+        part += 1;
+      }
+    }
+    offset += step.effects.length;
+  }
+  return lines;
+}
+
 function progressText(run: StoredRun): string {
   const lines: ProgressLine[] = [
     ...run.steps.map((step) => ({ kind: "step" as const, ...step })),
     ...run.created.map((created) => ({ kind: "created" as const, ...created })),
     ...run.replans.map((replan) => ({ kind: "replan" as const, ...replan })),
-    ...run.applied.map((applied) => ({ kind: "effect" as const, ...applied })),
+    ...appliedProgress(run),
     ...run.undoRequests.map((request) => ({ kind: "undo-request" as const, ...request })),
     ...(run.undoCovers.length > 0 ? [{ kind: "undo-calls" as const, covers: run.undoCovers, calls: run.undoCalls }] : []),
   ];
@@ -858,6 +887,29 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         for (const named of step.collections ?? []) {
           if (!run.collections.some((known) => known.collectionId === named.collectionId)) run.collections.push(named);
         }
+      } else if (entry.data.kind === "set-batch-plan") {
+        const {batch, ordinal} = entry.data;
+        const step = run.steps.find(step => step.ordinal === ordinal);
+        if (!step || batch.plan.key.claimId !== run.claimId || batch.plan.key.keySeed !== run.keySeed
+          || batch.plan.key.step !== ordinal || batch.count !== batch.plan.records.length
+          || batch.part + batch.count > step.effects.length
+          || step.effects.slice(batch.part, batch.part + batch.count).some(effect => effect.kind !== "set")
+          || step.batches?.some(known => known.plan.key.batch === batch.plan.key.batch)) return null;
+        step.batches = [...(step.batches ?? []), batch];
+      } else if (entry.data.kind === "set-batch") {
+        const line = entry.data;
+        let offset = 0;
+        let matched = false;
+        for (const step of run.steps) {
+          const batch = step.batches?.find(batch => !batch.abandoned && batch.part + offset === run.applied.length);
+          if (batch && batch.plan.key.claimId === line.key.claimId && batch.plan.key.keySeed === line.key.keySeed
+            && batch.plan.key.step === line.key.step && batch.plan.key.batch === line.key.batch
+            && batch.digest === line.digest && batch.count === line.size
+            && line.applied.length === line.size && line.applied.every(applied => applied.ordinal === step.ordinal)) matched = true;
+          offset += step.effects.length;
+        }
+        if (!matched) return null;
+        run.applied.push(...entry.data.applied);
       } else if (entry.data.kind === "effect") {
         const { kind: _kind, ...applied } = entry.data;
         run.applied.push(applied);
@@ -1098,6 +1150,12 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
           await writeDurably(join(folder, `${name}${PROGRESS_SUFFIX}`), progress);
         }
       });
+    },
+    appendBatchPlan(run, batch) {
+      return serial(() => appendLine(run, {kind: "set-batch-plan", ordinal: batch.plan.key.step, batch}));
+    },
+    appendBatch(run, batch, applied) {
+      return serial(() => appendLine(run, { kind: "set-batch", key: batch.plan.key, digest: batch.digest, size: batch.count, applied }));
     },
     appendEffect(run, applied) {
       return serial(() => appendLine(run, { kind: "effect", ...applied }));

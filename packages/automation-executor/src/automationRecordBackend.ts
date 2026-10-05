@@ -70,7 +70,7 @@ import type { AutomationTarget } from "./automationTargets";
 export type RecordRunDependencies = Pick<CollectionAutomationRunDependencies,
   "targets" | "evaluator" | "store" | "nowMs" | "personName" | "chat" | "postNotice" | "recipientVerdicts" | "readMessageBody" | "readCode"
 > & Partial<Pick<CollectionAutomationRunDependencies,
-  "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset"
+  "setBatches" | "withReads" | "withRecordWrites" | "collectionIdOf" | "collectionPathOf" | "checkReach" | "localPersonId" | "checkPresser" | "authorizeDataset"
 >> & Partial<Pick<DatasetAutomationRunDependencies, "withHost" | "cachedRoster">>;
 export type RecordRunInput = Omit<CollectionAutomationRunInput, "claim"> & {
   claim: Pick<AutomationClaim, "automationId" | "claimId" | "run" | "depth" | "createdAtMs">;
@@ -408,6 +408,7 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
     if (fresh.kind !== before.kind || (fresh.kind === "dataset" && before.kind === "dataset" &&
       (fresh.approved.datasetId !== before.approved.datasetId || !await resolves(before.approved)))) throw new Error(RULES_CHANGED_ERROR);
   };
+  const borrowedRecords = new Set<string>();
   const backend: StepBackend = {
     async step(work) {
       await checkNow(true);
@@ -643,6 +644,41 @@ export async function prepareRecordBackend(deps: RecordRunDependencies, input: R
       if (created?.kind === "dataset-created") return { id: String(created.recordId), key: created.recordId, path: datasetRecordKey(created.rules.datasetId, created.tableId, created.recordId) };
       return null;
     },
+    ...(deps.setBatches && source.engineClaim ? {
+      lookupBatch: deps.setBatches.lookup,
+      waitBatches: (run: StoredRun) => deps.setBatches!.wait(run.steps.flatMap(step => (step.batches ?? [])
+        .filter(batch => !batch.abandoned).map(batch => ({ key: batch.plan.key, digest: batch.digest })))),
+      async prepareBatch(run: StoredRun, step: StoredRun["steps"][number], part: number, count: number, key?: string): Promise<import("./automationSetBatches").StoredSetBatch | null> {
+        let effects = step.effects.slice(part, part + count);
+        const borrowed = effects.findIndex(effect => effect.kind === "set" && borrowedRecords.has(effect.target.recordId));
+        if (borrowed === 0) return null;
+        if (borrowed > 0) { count = borrowed; effects = effects.slice(0, borrowed); }
+        const records = effects.map(effect => {
+          if (effect.kind !== "set") throw new Error("Only document Sets belong in a Set batch.");
+          const collectionId = run.collections.find(named => named.path === effect.target.collectionPath)?.collectionId;
+          if (!collectionId) throw new Error(LOST_COLLECTION_ERROR);
+          return { collectionId, recordId: effect.target.recordId, fields: effect.fields, binding: null };
+        });
+        const prepared = await deps.setBatches!.prepare({ key: { claimId: run.claimId, keySeed: run.keySeed, step: step.ordinal, batch: key ?? String(part) }, versionId: "", records });
+        prepared.open.forEach((open, index) => { if (open) borrowedRecords.add(records[index]!.recordId); });
+        const firstOpen = prepared.open.indexOf(true);
+        if (firstOpen === 0) return null;
+        if (firstOpen > 0) return this.prepareBatch!(run, step, part, firstOpen, key);
+        return { part, count, plan: prepared.plan, digest: prepared.digest };
+      },
+      async applyBatch(batch: import("./automationSetBatches").StoredSetBatch, step: StoredRun["steps"][number]) {
+        const effects = step.effects.slice(batch.part, batch.part + batch.count);
+        await authorizeCode(savedCodeTargets({ ordinal: step.ordinal, effects }));
+        await checkNow();
+        const paths = new Set<string>();
+        for (const effect of effects) {
+          if (effect.kind !== "set") throw new Error("Only document Sets belong in a Set batch.");
+          paths.add(effect.target.collectionPath);
+        }
+        for (const path of paths) await verifyTarget(path);
+        return deps.setBatches!.submit(batch.plan, batch.digest, author, signal);
+      },
+    } : {}),
     async apply(run, effect, place, chat) {
       await authorizeCode(savedCodeTargets({ ordinal: place.ordinal, effects: [effect] }));
       const datasetEffect = effect.kind === "dataset-edit" || effect.kind === "dataset-create" || effect.kind === "dataset-action";

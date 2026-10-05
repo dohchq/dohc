@@ -4754,7 +4754,10 @@ pub fn decline_oversized_collection_adoption_in_tx(
     Ok(())
 }
 
-fn active_version_id(conn: &Connection, workspace_id: &str) -> Result<String, crate::DomainError> {
+pub fn active_version_id(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<String, crate::DomainError> {
     conn.query_row(
         "SELECT COALESCE(\
            (SELECT version_id FROM active_versions WHERE workspace_id=?1),\
@@ -5474,7 +5477,7 @@ fn compare_collection_numbers(left: &serde_json::Number, right: &serde_json::Num
     }
 }
 
-fn collection_values_equal(left: &Value, right: &Value) -> bool {
+pub fn collection_values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Number(left), Value::Number(right)) => {
             compare_collection_numbers(left, right) == Ordering::Equal

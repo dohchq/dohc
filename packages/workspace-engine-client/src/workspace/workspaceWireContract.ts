@@ -1,3 +1,6 @@
+import { PreparedSetBatchSchema, SetBatchReceiptSchema, SetBatchLookupSchema, SetBatchWaitSchema,
+  type SetBatchPlan, type SetBatchReference, type SetBatchReceipt, type SetBatchLookup, type PreparedSetBatch } from "./setBatchContract";
+import type { ChangeAttributionWire } from "../ydoc/ydocWireContract";
 import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
@@ -28,6 +31,10 @@ export const WORKSPACE_METHOD = {
   collectionsGet: "collections.get",
   collectionsQuery: "collections.query",
   collectionsGetRecord: "collections.getRecord",
+  collectionsPrepareSetBatch: "collections.prepareSetBatch",
+  collectionsSetFieldsBatch: "collections.setFieldsBatch",
+  collectionsLookupSetBatch: "collections.lookupSetBatch",
+  collectionsWaitSetBatches: "collections.waitSetBatches",
   searchQueryPage: "search.queryPage",
   searchQueryChatMessagesGranular: "search.queryChatMessagesGranular",
   watcherStatus: "watcher.status",
@@ -435,6 +442,10 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetParams;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryParams;
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordParams;
+  [WORKSPACE_METHOD.collectionsPrepareSetBatch]: SetBatchPlan;
+  [WORKSPACE_METHOD.collectionsSetFieldsBatch]: { plan: SetBatchPlan; digest: string; attribution: ChangeAttributionWire };
+  [WORKSPACE_METHOD.collectionsLookupSetBatch]: SetBatchReference;
+  [WORKSPACE_METHOD.collectionsWaitSetBatches]: { receipts: SetBatchReference[] };
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageParams;
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]: SearchQueryChatMessagesGranularParams;
   [WORKSPACE_METHOD.watcherStatus]: WorkspaceEmptyParams;
@@ -473,6 +484,10 @@ type CollectionMethodResultMap = {
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetResult;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResult;
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResult;
+  [WORKSPACE_METHOD.collectionsPrepareSetBatch]: PreparedSetBatch;
+  [WORKSPACE_METHOD.collectionsSetFieldsBatch]: SetBatchReceipt;
+  [WORKSPACE_METHOD.collectionsLookupSetBatch]: SetBatchLookup;
+  [WORKSPACE_METHOD.collectionsWaitSetBatches]: { settled: boolean };
 };
 
 export type WorkspaceMethodResultMap = {
@@ -1233,6 +1248,10 @@ const WorkspaceResultSchemas = {
   [WORKSPACE_METHOD.collectionsGet]: CollectionDetailsSchema,
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResultSchema,
   [WORKSPACE_METHOD.collectionsGetRecord]: CollectionGetRecordResultSchema,
+  [WORKSPACE_METHOD.collectionsPrepareSetBatch]: PreparedSetBatchSchema,
+  [WORKSPACE_METHOD.collectionsSetFieldsBatch]: SetBatchReceiptSchema,
+  [WORKSPACE_METHOD.collectionsLookupSetBatch]: SetBatchLookupSchema,
+  [WORKSPACE_METHOD.collectionsWaitSetBatches]: SetBatchWaitSchema,
   [WORKSPACE_METHOD.searchQueryPage]: SearchQueryPageResultSchema,
   [WORKSPACE_METHOD.searchQueryChatMessagesGranular]:
     GranularChatMessageSearchResponseSchema,
@@ -1509,6 +1528,9 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
     return decodeCollectionGetRecordResultValues(
       decoded as CollectionGetRecordResult,
     ) as WorkspaceMethodResultMap[M];
+  }
+  if (method === WORKSPACE_METHOD.collectionsPrepareSetBatch || method === WORKSPACE_METHOD.collectionsSetFieldsBatch || method === WORKSPACE_METHOD.collectionsLookupSetBatch) {
+    return decodeCollectionValue(decoded as unknown as JsonValue) as unknown as WorkspaceMethodResultMap[M];
   }
   return decoded;
 }

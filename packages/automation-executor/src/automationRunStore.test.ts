@@ -23,6 +23,30 @@ function run(claimId: string, state: "done" | "failed" | null, atMs: number, set
 }
 
 describe("the automation run store", () => {
+  it("keeps receipt keys and batch sizes through appends and whole saves, and refuses mismatched progress", async () => {
+    const root = await createTestScratch("dohc-automation-batch-progress-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("batch-progress", null, 1);
+    const batch = {part: 0, count: 2, digest: "digest", plan: {key: {claimId: saved.claimId, keySeed: saved.keySeed, step: 0, batch: "0"}, versionId: "main",
+      records: [setA, setA].map(effect => ({collectionId: "schema", recordId: effect.target.recordId, fields: effect.fields, binding: null}))}};
+    saved.applied = [];
+    await store.save(saved);
+    saved.steps[0]!.batches = [batch];
+    await store.appendBatchPlan!(saved, batch);
+    const applied = [{ordinal: 0, writes: []}, {ordinal: 0, writes: []}];
+    await store.appendBatch!(saved, batch, applied);
+    const loaded = (await store.runsOf(AUTOMATION, saved.claimId)).runs[0]!;
+    expect(loaded.applied).toEqual(applied);
+    await store.save(loaded);
+    const folder = join(root, ".dohc", "automations", "runs", hashOf(AUTOMATION));
+    const progress = join(folder, (await readdir(folder)).find(file => file.endsWith(".jsonl"))!);
+    const lines = (await readFile(progress, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    expect(lines.filter(line => line.kind === "effect")).toHaveLength(0);
+    expect(lines.find(line => line.kind === "set-batch")).toMatchObject({key: batch.plan.key, size: 2});
+    lines[1].key.batch = "wrong";
+    await writeFile(progress, lines.map(line => JSON.stringify(line)).join("\n") + "\n");
+    expect(await store.runsOf(AUTOMATION, saved.claimId)).toEqual({runs: [], unreadable: true});
+  });
   it("retains terminal acceptance and reversal identities across restart and stale whole saves", async () => {
     const root = await createTestScratch("dohc-automation-settlement-");
     const store = createAutomationRunStore(root, testMetadataDir);

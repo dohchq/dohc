@@ -1,3 +1,5 @@
+import { batchWrites, reconcileSetBatches, type StoredSetBatch } from "./automationSetBatches";
+import type { SetBatchLookup, SetBatchReceipt } from "@dohc/workspace-engine-client";
 import { prepareRecordBackend, type RecordRunDependencies, type RecordRunInput, type RunSource } from "./automationRecordBackend";
 import { AutomationRunWait } from "./automationRunWait";
 import type { AutomationTimeSpent, JsonValue } from "@dohc/app-backend-runtime/automation";
@@ -78,6 +80,10 @@ export interface StepReads {
 
 /** How a run's steps read and write one kind of Collection. */
 export interface StepBackend {
+  prepareBatch?(run: StoredRun, step: StoredStep, part: number, count: number, key?: string): Promise<StoredSetBatch | null>;
+  applyBatch?(batch: StoredSetBatch, step: StoredStep): Promise<SetBatchReceipt>;
+  lookupBatch?(batch: { key: StoredSetBatch["plan"]["key"]; digest: string }): Promise<SetBatchLookup>;
+  waitBatches?(run: StoredRun): Promise<void>;
   /**
    * Runs one step's reads. Null when the Collection's store is not open;
    * "changed" when a record changed between two of the step's reads of it.
@@ -139,11 +145,11 @@ export function unfinishedStep(run: StoredRun): StoredStep | null {
  * The first effect a stopped run had not recorded, with its step, or null.
  * It may have landed before the run stopped; no later effect started.
  */
-export function unrecordedEffect(run: StoredRun): { ordinal: number; effect: StoredStep["effects"][number] } | null {
+export function unrecordedEffect(run: StoredRun): { ordinal: number; part: number; effect: StoredStep["effects"][number] } | null {
   let first = 0;
   for (const step of run.steps) {
     const index = run.applied.length - first;
-    if (index < step.effects.length) return { ordinal: step.ordinal, effect: step.effects[index]! };
+    if (index < step.effects.length) return { ordinal: step.ordinal, part: index, effect: step.effects[index]! };
     first += step.effects.length;
   }
   return null;
@@ -175,7 +181,11 @@ export async function runSteps(
   // A step that failed before anything was saved changed nothing: the claim
   // runs again from the start.
   if (outcome.kind !== "done" && !outcome.saved) return outcome.outcome;
+  if (backend.lookupBatch && run.steps.some(step => step.batches?.length)) {
+    run.applied = (await reconcileSetBatches(run, backend.lookupBatch)).applied;
+  }
   if (outcome.kind === "done") {
+    await backend.waitBatches?.(run);
     run.outcome = { state: "done" };
   } else if (outcome.outcome.kind === "failed") {
     run.outcome = { state: "failed", error: outcome.outcome.error, run: input.claimRun, step: outcome.step };
@@ -221,6 +231,8 @@ async function walkSteps(
   const firstUnrecorded = run.applied.length;
   let reused = 0;
   let effectIndex = 0;
+  // Start conservatively, then use the engine's measured writer occupancy.
+  let batchSize = 4;
   let fieldWrites = run.steps.reduce((count, step) => count + fieldWriteCount(step.effects), 0);
   // Each step and its effects' records, as the run's files will hold them.
   const sizeOf = (step: StoredStep) => 2 * Buffer.byteLength(JSON.stringify(step));
@@ -338,11 +350,91 @@ async function walkSteps(
     // Every message and notice is checked under this roster before it is sent.
     const messages = await checkPlannedMessages(dependencies, { automationId: ctx.claim.automationId, automation, collection: input.collection, roster: input.roster }, [step], ctx.chat);
     if ("outcome" in messages) return messages.outcome;
-    for (const [part, effect] of step.effects.entries()) {
+    for (let part = 0; part < step.effects.length; part += 1) {
+      const effect = step.effects[part]!;
       const index = first + part;
       if (index < run.applied.length) continue;
       if (input.stopped.aborted) return stopped;
       if (input.signal.aborted) return failed(DEADLINE_ERROR, true);
+      if (effect.kind === "set" && backend.prepareBatch && backend.applyBatch) {
+        let batch = step.batches?.find(batch => !batch.abandoned && batch.part === part);
+        if (!batch) {
+          const parent = step.batches?.find(batch => batch.abandoned && batch.part <= part && part < batch.part + batch.count);
+          let count = 0;
+          let assignments = 0;
+          const records = new Set<string>();
+          for (const candidate of step.effects.slice(part, part + batchSize)) {
+            if (candidate.kind !== "set" || records.has(candidate.target.recordId) || assignments + candidate.fields.length > 32) break;
+            if (count > 0 && Buffer.byteLength(JSON.stringify(step.effects.slice(part, part + count + 1))) > 192 * 1024) break;
+            count += 1; assignments += candidate.fields.length; records.add(candidate.target.recordId);
+          }
+          if (parent) count = Math.min(count, Math.ceil(parent.count / 2), parent.part + parent.count - part);
+          const prepared = count === 0 || parent?.count === 1 ? null
+            : await backend.prepareBatch(run, step, part, count, parent ? `${parent.plan.key.batch}/${part - parent.part}` : undefined);
+          if (prepared) {
+            batch = prepared;
+            step.batches = [...(step.batches ?? []), batch];
+            if (store.appendBatchPlan) await store.appendBatchPlan(run, batch);
+            else await store.save(run);
+          }
+        }
+        if (batch) {
+          const writeStarted = dependencies.nowMs();
+          let receipt: SetBatchReceipt;
+          try { receipt = await backend.applyBatch(batch, step); }
+          catch (error) {
+            if (errorText(error).includes("automation-set-batch-open") && backend.lookupBatch) {
+              const fenced = await backend.lookupBatch({key: batch.plan.key, digest: batch.digest});
+              if (fenced.state === "committed") receipt = fenced.receipt;
+              else {
+                if (fenced.state === "retired") return failed("This automation run has left run history.");
+                batch.abandoned = true;
+                await store.save(run);
+                part -= 1;
+                continue;
+              }
+            } else if (error instanceof AutomationRunWait) return { kind: "wait", reason: error.reason };
+            else if ((errorText(error).includes("automation-set-batch-oversized") || errorText(error).includes("automation-set-batch-abandoned")) && backend.lookupBatch) {
+              const fenced = await backend.lookupBatch({ key: batch.plan.key, digest: batch.digest });
+              if (fenced.state === "committed") receipt = fenced.receipt;
+              else {
+                if (fenced.state === "retired") return failed("This automation run has left run history.");
+                batch.abandoned = true;
+                await store.save(run);
+                if (batch.count === 1) { part -= 1; continue; }
+                const split = Math.ceil(batch.count / 2);
+                const children: StoredSetBatch[] = [];
+                for (const [offset, count] of [[0, split], [split, batch.count - split]] as const) {
+                  const child = await backend.prepareBatch(run, step, batch.part + offset, count, `${batch.plan.key.batch}/${offset}`);
+                  if (!child) return { kind: "wait", reason: "held" };
+                  children.push(child);
+                }
+                step.batches = [...(step.batches ?? []), ...children];
+                await store.save(run);
+                part -= 1;
+                continue;
+              }
+            } else {
+              if (input.stopped.aborted) return stopped;
+              return input.signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
+            }
+          }
+          batchSize = Math.max(1, Math.min(8, Math.floor(batch.count * 12 / Math.max(1, receipt.writerMs))));
+          const writes = batchWrites(batch, receipt, step);
+          const writeMs = Math.max(0, dependencies.nowMs() - writeStarted);
+          const landed = writes.map(writes => ({ ordinal: step.ordinal, writes, writeMs: writeMs / batch!.count, writeCount: 1 }));
+          if (!store.appendBatch) throw new Error("The run store cannot record Set batches.");
+          const appendStarted = dependencies.nowMs();
+          await store.appendBatch(run, batch, landed);
+          if (step.appendMs !== undefined && step.appendCount !== undefined) {
+            step.appendMs += Math.max(0, dependencies.nowMs() - appendStarted);
+            step.appendCount += batch.count;
+          }
+          run.applied.push(...landed);
+          part += batch.count - 1;
+          continue;
+        }
+      }
       const mode: EffectMode = fresh ? "fresh" : index === firstUnrecorded ? "may-have-landed" : "resumed";
       let writes: RunWrite[];
       const writeStarted = dependencies.nowMs();

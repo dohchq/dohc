@@ -259,6 +259,33 @@ impl EngineStore {
         Ok(TxnOutcome::Committed(value))
     }
 
+    /// A receipt must survive an OS crash before its caller records progress.
+    pub fn write_full_with<T, E>(
+        &mut self,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        let previous = self.synchronous_setting()?;
+        self.conn
+            .pragma_update(None, "synchronous", 2)
+            .map_err(StorageError::persist)?;
+        let result = self.write_with(faults, f);
+        let restored = self
+            .conn
+            .pragma_update(None, "synchronous", previous)
+            .map_err(StorageError::persist);
+        match result {
+            Err(error) => Err(error),
+            Ok(value) => {
+                restored?;
+                Ok(value)
+            }
+        }
+    }
+
     /// Validate a mutation on a transaction that always rolls back.
     pub fn preview_write<T, E>(
         &mut self,

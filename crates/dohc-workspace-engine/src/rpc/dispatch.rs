@@ -261,7 +261,37 @@ impl EngineService {
                 blob_egress,
             });
         }
+        if matches!(
+            request.method.as_str(),
+            "collections.setFieldsBatch"
+                | "collections.prepareSetBatch"
+                | "collections.lookupSetBatch"
+        ) {
+            let (result, blob_egress) = match request.method.as_str() {
+                "collections.prepareSetBatch" => {
+                    self.collections_prepare_set_batch(&ctx, request.workspace, request.params, id)
+                        .await?
+                }
+                "collections.lookupSetBatch" => {
+                    self.collections_lookup_set_batch(&ctx, request.workspace, request.params, id)
+                        .await?
+                }
+                _ => {
+                    self.collections_set_fields_batch(&ctx, request.workspace, request.params, id)
+                        .await?
+                }
+            };
+            return Ok(ServiceResponse {
+                output_guard: None,
+                response: Response { id, result },
+                blob_egress,
+            });
+        }
         let result = match request.method.as_str() {
+            "collections.waitSetBatches" => {
+                self.collections_wait_set_batches(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "liveApplication.provisionOwner" => {
                 self.ordinary_live_provision(&ctx, request.workspace, request.params)
                     .await?

@@ -82,3 +82,5 @@ export {
   type LiveObjectBinding,
   type OwnerYDocOutboxEntry,
 } from "./ydoc/ownerYDocOutbox";
+
+export type { SetBatchKey, SetBatchBinding, SetBatchPlan, PreparedSetBatch, SetBatchReference, SetBatchReceipt, SetBatchLookup } from "./workspace/setBatchContract";

@@ -548,6 +548,7 @@ export interface WorkspaceEngineCapture {
   // into the entered version. The disk check runs on the capture chain
   // with the version binding, so a switch cannot land between them.
   openRecordSession(path: string): Promise<RecordEditSession>;
+  withClosedRecordBatch<T>(objectIds: readonly string[], work: () => Promise<T>): Promise<T>;
   openYDocSession(input: {
     path: string;
     assertRecordWritable?: () => void;
@@ -5521,6 +5522,12 @@ export function createWorkspaceEngineCapture(
 
     openYDocSession: input => openSession(input),
     openRecordSession: path => openSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined }, true),
+    withClosedRecordBatch: (objectIds, work) => enqueueResult("set closed record batch", () => {
+      if ([...liveYDocSessions.values()].some(entry => entry.session.objectId && objectIds.includes(entry.session.objectId))) {
+        throw new Error("automation-set-batch-open");
+      }
+      return work();
+    }),
 
     settleAndCloseLiveSessionsForPath(pathOrPrefix) {
       // Public seam for destructive ops that DON'T run through the capture chain

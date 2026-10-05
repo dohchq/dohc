@@ -3258,6 +3258,11 @@ pub(crate) fn prune_automation_history_in_tx(
         .map_err(DomainError::sql_corrupt)?;
     let mut retired = Vec::new();
     for (claim_id, automation_id, failures, keeps_key) in &expiring {
+        conn.execute(
+            "DELETE FROM automation_set_batch_receipts WHERE workspace_id=?1 AND claim_id=?2",
+            params![workspace_id, claim_id],
+        )
+        .map_err(DomainError::sql_persist)?;
         if *keeps_key {
             conn.execute(
                 "UPDATE automation_claims \
@@ -3323,6 +3328,11 @@ pub(crate) const EXPIRING_CLAIMS_SQL: &str = "SELECT claim_id, automation_id, \
      WHERE workspace_id = ?1 AND state IN ('done', 'failed') AND expired = 0 \
        AND updated_at_ms < ?2 \
        AND claim_id NOT IN (SELECT value FROM json_each(?3)) \
+       AND NOT EXISTS (SELECT 1 FROM automation_set_batch_receipts receipt, \
+         json_each(json_extract(receipt.receipt_json,'$.jobs')) job \
+         JOIN materialization_jobs materialization ON materialization.job_id=job.value \
+         WHERE receipt.workspace_id=?1 AND receipt.claim_id=automation_claims.claim_id \
+           AND materialization.status='pending') \
        AND NOT (change_kind = 'button' AND EXISTS (SELECT 1 FROM automation_presses p \
          WHERE p.workspace_id = ?1 AND p.claim_id = automation_claims.claim_id)) \
        AND NOT (state = 'failed' AND claim_id = ( \

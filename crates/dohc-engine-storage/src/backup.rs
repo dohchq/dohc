@@ -46,6 +46,7 @@ use std::path::{Path, PathBuf};
 /// The durable tables whose row counts a restore test compares source-vs-copy.
 /// A mismatch means the copy is not a faithful snapshot — the backup fails.
 const COMPARED_TABLES: &[&str] = &[
+    "automation_set_batch_receipts",
     "live_audit_base_publications",
     "live_audit_bases",
     "live_audit_base_conflicts",
@@ -506,6 +507,7 @@ mod tests {
         let dir = ScratchDir::new_named("backup-application-comparison").unwrap();
         let mut store = EngineStore::open(&dir.join("source.db"), 0).unwrap();
         store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO automation_set_batch_receipts(workspace_id,claim_id,key_seed,step,batch,digest,receipt_json,created_at_ms) VALUES('workspace','claim','seed',0,'0','digest',NULL,0)",[]).unwrap();
             let sha = crate::put_binary_blob(tx, &[0, 0]).unwrap();
             tx.execute("INSERT INTO versioned_workspaces VALUES ('workspace','main')",[]).unwrap();
             tx.execute("INSERT INTO live_accepted_updates VALUES ('relay','workspace','main','object',?1,1,1,'delivery','{}',?1,1,2,?1)",[&sha]).unwrap();
@@ -541,6 +543,7 @@ mod tests {
             Ok::<_, StorageError>(())
         }).unwrap();
         for (index, table) in [
+            "automation_set_batch_receipts",
             "live_audit_record_manifests",
             "live_audit_pending_exports",
             "live_audit_settlements",
@@ -598,6 +601,7 @@ mod tests {
     #[test]
     fn backup_compares_live_application_tables() {
         for table in [
+            "automation_set_batch_receipts",
             "live_audit_base_publications",
             "live_audit_bases",
             "live_audit_base_conflicts",

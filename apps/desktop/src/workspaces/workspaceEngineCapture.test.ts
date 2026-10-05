@@ -3281,6 +3281,26 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     };
   }
 
+  it("queues new opens behind a closed-record batch and releases them after refusal", async () => {
+    const root = await createTestScratch("dohc-engine-capture-batch-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "plan.md", text: "main\n"});
+    const opened: string[] = [];
+    const entered = deferred();
+    const release = deferred();
+    const engine = capture(root, {rustEngineSessions: mockLiveSessions(loopback), openRustYDocProviderSession: recordingProvider(opened)});
+    const batch = engine.withClosedRecordBatch(["object"], async () => { entered.resolve(); await release.promise; throw new Error("refused"); });
+    const refused = expect(batch).rejects.toThrow("refused");
+    await entered.promise;
+    const opening = engine.openYDocSession({path: "plan.md", onRemoteUpdate: () => undefined});
+    await engine.listVersions(); await engine.listVersions();
+    expect(opened).toEqual([]);
+    release.resolve(); await refused;
+    const session = await opening;
+    expect(opened).toEqual(["main"]);
+    await session.close();
+  });
+
   it("hydrates a live artifact asset by its workspace-scoped blob after its head is retired", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();

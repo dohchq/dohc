@@ -1022,3 +1022,154 @@ mod tests {
         }
     }
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetBatchSubmission {
+    plan: dohc_engine_domain::automation_sets::SetBatchPlan,
+    digest: String,
+    attribution: dohc_engine_domain::ChangeAttribution,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetBatchReference {
+    key: dohc_engine_domain::automation_sets::SetBatchKey,
+    digest: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetBatchWait {
+    receipts: Vec<SetBatchReference>,
+}
+
+impl EngineService {
+    pub(super) async fn collections_prepare_set_batch(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        mut params: Value,
+        request_id: u64,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        decode_collection_wire_numbers(&mut params)?;
+        let plan = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let (plan, digest, sessions) = Self::read_under_ctx(
+            &cancellation,
+            "collections.prepareSetBatch",
+            open.actor.prepare_set_batch(
+                open.workspace_id.clone(),
+                plan,
+                self.leases.scoped(&open.root),
+            ),
+        )
+        .await?;
+        self.collection_response_with_blob(
+            ctx,
+            &cancellation,
+            request_id,
+            "collections.prepareSetBatch",
+            collection_response_value(json!({"plan":plan,"digest":digest,"open":sessions}))?,
+        )
+        .await
+    }
+    pub(super) async fn collections_lookup_set_batch(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: u64,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        let reference: SetBatchReference = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let receipt = Self::read_under_ctx(
+            &cancellation,
+            "collections.lookupSetBatch",
+            open.actor.lookup_set_batch(
+                open.workspace_id.clone(),
+                reference.key,
+                reference.digest,
+                crate::rpc::request::now_ms()?,
+            ),
+        )
+        .await?;
+        self.collection_response_with_blob(
+            ctx,
+            &cancellation,
+            request_id,
+            "collections.lookupSetBatch",
+            collection_response_value(receipt)?,
+        )
+        .await
+    }
+    pub(super) async fn collections_set_fields_batch(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        mut params: Value,
+        request_id: u64,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        decode_collection_wire_numbers(&mut params)?;
+        let submission: SetBatchSubmission = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let (receipt, claims) = Self::read_under_ctx(
+            &cancellation,
+            "collections.setFieldsBatch",
+            open.actor.set_fields_batch(
+                open.workspace_id.clone(),
+                open.root.clone(),
+                submission.plan,
+                submission.digest,
+                submission.attribution,
+                self.leases.scoped(&open.root),
+                cancellation.token.clone(),
+                crate::rpc::request::now_ms()?,
+                std::sync::Arc::new(self.self_writes.scoped(&open.root)),
+            ),
+        )
+        .await?;
+        crate::events::emit_automation_claimed(&self.events, &open.workspace_id, &claims);
+        self.collection_response_with_blob(
+            ctx,
+            &cancellation,
+            request_id,
+            "collections.setFieldsBatch",
+            collection_response_value(receipt)?,
+        )
+        .await
+    }
+    pub(super) async fn collections_wait_set_batches(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let wait: SetBatchWait = parse(params)?;
+        if wait.receipts.len() > 200 {
+            return Err(WireError::new(
+                ErrorCode::LimitExceeded,
+                "automation-set-batch-wait-oversized",
+            ));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            "collections.waitSetBatches",
+            open.actor.wait_set_batches(
+                open.workspace_id.clone(),
+                open.root.clone(),
+                wait.receipts
+                    .into_iter()
+                    .map(|reference| (reference.key, reference.digest))
+                    .collect(),
+                std::sync::Arc::new(self.self_writes.scoped(&open.root)),
+                crate::rpc::request::now_ms()?,
+            ),
+        )
+        .await?;
+        Ok(json!({"settled":true}))
+    }
+}

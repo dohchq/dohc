@@ -1,3 +1,7 @@
+import { isDeepStrictEqual } from "node:util";
+import { attributionFor } from "./collectionRecordEdits";
+import type { AutomationSetBatches } from "./automationSetBatches";
+import type { SetBatchReceipt, SetBatchLookup } from "@dohc/workspace-engine-client";
 import { afterAll, describe, expect, it } from "vitest";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import { parseAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
@@ -741,5 +745,150 @@ describe("a saved run's Collections", () => {
     const [run] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
     expect(run!.collections).toEqual([{ collectionId: "Tasks", path: "Tasks" }, { collectionId: "Log", path: "Log" }]);
     expect(run!.finishedAtMs).toBe(1_000);
+  });
+});
+
+function batchEngine(space: ReturnType<typeof workspace>, options: { open?: Set<string>; limit?: number; writerMs?: number } = {}) {
+  const receipts = new Map<string, SetBatchLookup>();
+  const submissions: Array<{ key: string; digest: string; count: number }> = [];
+  let changed = 0;
+  let waits = 0;
+  const services: AutomationSetBatches = {
+    async prepare(plan) {
+      const bound = { ...plan, versionId: "main", records: plan.records.map(record => ({ ...record,
+        binding: { objectId: record.recordId, lineageClaimId: null, restoreGeneration: null, schemaSha256: "schema", headSha256: "head" } })) };
+      return { plan: bound, digest: JSON.stringify(bound), open: bound.records.map(record => options.open?.has(record.recordId) ?? false) };
+    },
+    async submit(plan, digest, author) {
+      const key = JSON.stringify(plan.key);
+      submissions.push({ key, digest, count: plan.records.length });
+      const known = receipts.get(key);
+      if (known?.state === "committed") return structuredClone(known.receipt);
+      if (known) throw new Error("automation-set-batch-abandoned");
+      if (options.limit && plan.records.length > options.limit) throw new Error("automation-set-batch-oversized");
+      const receipt: SetBatchReceipt = { key: plan.key, digest, versionId: "main", attribution: attributionFor(author), jobs: [], committedAtMs: 1_000, writerMs: options.writerMs ?? 1,
+        records: plan.records.map(record => {
+          const doc = space.records.get(record.recordId);
+          if (!doc) return { recordId: record.recordId, path: null, fields: [] };
+          return { recordId: record.recordId, path: doc.path, fields: record.fields.map(field => {
+            const current = doc.values[field.field] ?? null;
+            if (isDeepStrictEqual(current, field.after)) return { state: "unchanged" as const, field: field.field };
+            if (!isDeepStrictEqual(current, field.before)) return { state: "kept" as const, field: field.field, current };
+            doc.values[field.field] = field.after;
+            changed += 1;
+            return { state: "changed" as const, field: field.field, before: current, after: field.after, historyId: changed };
+          }) };
+        }) };
+      receipts.set(key, { state: "committed", receipt: structuredClone(receipt) });
+      return receipt;
+    },
+    async lookup(reference) {
+      const key = JSON.stringify(reference.key);
+      const known = receipts.get(key);
+      if (known?.state === "committed" && known.receipt.digest !== reference.digest) throw new Error("digest changed");
+      if (!known) receipts.set(key, { state: "abandoned" });
+      return structuredClone(receipts.get(key)!);
+    },
+    async wait() { waits += 1; },
+  };
+  return { services, receipts, submissions, changed: () => changed, waits: () => waits };
+}
+
+const batchDefinition = () => automation('id: chain\nname: Chain\nwhen: record-added\ndo:\n  - find: record.Project == trigger.record.Project\n    as: team\n  - set: {Count: "=record.Count + 1"}\n    records: team');
+const batchInput = (definition: Automation) => {
+  const signal = new AbortController().signal;
+  return { claim: added(), automation: definition, collection: { path: "Tasks", name: "Tasks" },
+    roster: { kind: "owner" as const, ownerUserId: null, grants: [] }, signal, stopped: signal };
+};
+
+describe("closed document Set batches", () => {
+  it("records one progress line per batch, keeps open records on their borrowed path, and waits once", async () => {
+    const space = workspace([task("rec_t", { Project: "A", Count: 1 }), ...[0,1,2,3,4].map(id => task(`rec_${id}`, { Project: "A", Count: 1 }))]);
+    const store = await scratchStore();
+    const engine = batchEngine(space, { open: new Set(["rec_1"]) });
+    const deps = { ...space.dependencies(store), setBatches: engine.services };
+    await expect(runCollectionAutomation(deps, batchInput(batchDefinition()))).resolves.toEqual({ kind: "done" });
+    expect(engine.submissions.map(submission => submission.count)).toEqual([2,3]);
+    expect(engine.waits()).toBe(1);
+    expect(space.keys.size).toBe(1);
+    const [run] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+    expect(run!.applied).toHaveLength(6);
+    expect(run!.steps[1]!.batches!.map(batch => batch.count)).toEqual([2,3]);
+    const undone = await undoCollectionAutomationRuns({ ...space.undo([]), lookupBatch: engine.services.lookup }, [run!], new AbortController().signal);
+    expect(undone.undone.reverted).toBe(6);
+    expect([...space.records.values()].map(record => record.values.Count)).toEqual([1,1,1,1,1,1]);
+  });
+
+  it("recovers every record of a stopped committed batch inside Undo before any result append", async () => {
+    const space = workspace([task("rec_t", { Project: "A", Count: 1 }), ...[0,1,2].map(id => task(`rec_${id}`, { Project: "A", Count: 1 }))]);
+    const store = await scratchStore();
+    const engine = batchEngine(space);
+    const deps = space.dependencies(store);
+    const started = { ...deps, setBatches: engine.services, store: { ...deps.store, appendBatch: async () => { throw new Crash("Stopped before result append."); } } };
+    await expect(runCollectionAutomation(started, batchInput(batchDefinition()))).rejects.toThrow("Stopped before result append");
+    const [run] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+    expect(run!.applied).toHaveLength(0);
+    expect(engine.changed()).toBe(4);
+    const undone = await undoCollectionAutomationRuns({ ...space.undo([]), lookupBatch: engine.services.lookup }, [run!], new AbortController().signal);
+    expect(undone.undone.reverted).toBe(4);
+    expect(engine.waits()).toBe(0);
+  });
+
+  it("resumes the saved key and digest exactly once after a lost progress append", async () => {
+    const space = workspace([task("rec_t", { Project: "A", Count: 1 }), ...[0,1,2].map(id => task(`rec_${id}`, { Project: "A", Count: 1 }))]);
+    const store = await scratchStore();
+    const engine = batchEngine(space);
+    const deps = { ...space.dependencies(store), setBatches: engine.services };
+    await expect(runCollectionAutomation({ ...deps, store: { ...deps.store, appendBatch: async () => { throw new Crash("append"); } } }, batchInput(batchDefinition()))).rejects.toThrow("append");
+    await expect(runCollectionAutomation(deps, batchInput(batchDefinition()))).resolves.toEqual({ kind: "done" });
+    expect(engine.changed()).toBe(4);
+    expect(engine.submissions).toHaveLength(2);
+    expect(engine.submissions[1]).toEqual(engine.submissions[0]);
+  });
+
+  it("recovers a split interrupted after fencing its parent but before saving children", async () => {
+    const space = workspace([task("rec_t", {Project: "A", Count: 1}), ...[0,1,2].map(id => task(`rec_${id}`, {Project: "A", Count: 1}))]);
+    const store = await scratchStore();
+    const engine = batchEngine(space, {limit: 2});
+    const deps = {...space.dependencies(store), setBatches: engine.services};
+    const interrupted = {...store, save: async (run: StoredRun) => {
+      if (run.steps.some(step => step.batches?.some(batch => batch.abandoned))) throw new Crash("split-save");
+      await store.save(run);
+    }};
+    await expect(runCollectionAutomation({...deps, store: interrupted}, batchInput(batchDefinition()))).rejects.toThrow("split-save");
+    await expect(runCollectionAutomation(deps, batchInput(batchDefinition()))).resolves.toEqual({kind: "done"});
+    expect(engine.changed()).toBe(4);
+    const [saved] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+    const undone = await undoCollectionAutomationRuns({...space.undo([]), lookupBatch: engine.services.lookup}, [saved!], new AbortController().signal);
+    expect(undone.undone.reverted).toBe(4);
+  });
+
+  it("reduces batch size when measured writer slices exceed the budget", async () => {
+    const space = workspace([task("rec_t", {Project: "A", Count: 1}), ...[0,1,2,3,4].map(id => task(`rec_${id}`, {Project: "A", Count: 1}))]);
+    const engine = batchEngine(space, {writerMs: 80});
+    const store = await scratchStore();
+    await expect(runCollectionAutomation({...space.dependencies(store), setBatches: engine.services}, batchInput(batchDefinition()))).resolves.toEqual({kind: "done"});
+    const saved = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs[0];
+    expect(saved!.steps[1]!.batches!.filter(batch => !batch.abandoned).map(batch => batch.count)).toEqual([4, 1, 1]);
+  });
+
+  it("abandons an oversized saved key and persists both sub-batches before sending either", async () => {
+    const space = workspace([task("rec_t", { Project: "A", Count: 1 }), ...[0,1,2].map(id => task(`rec_${id}`, { Project: "A", Count: 1 }))]);
+    const store = await scratchStore();
+    const engine = batchEngine(space, { limit: 2 });
+    const services = { ...engine.services, submit: async (...args: Parameters<AutomationSetBatches["submit"]>) => {
+      if (args[0].key.batch.includes("/")) {
+        const [saved] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+        expect(saved!.steps[1]!.batches!.filter(batch => !batch.abandoned)).toHaveLength(2);
+      }
+      return engine.services.submit(...args);
+    } };
+    await expect(runCollectionAutomation({ ...space.dependencies(store), setBatches: services }, batchInput(batchDefinition()))).resolves.toEqual({ kind: "done" });
+    expect(engine.submissions.map(submission => submission.count)).toEqual([4,2,2]);
+    expect([...engine.receipts.values()].filter(receipt => receipt.state === "abandoned")).toHaveLength(1);
+    expect(engine.changed()).toBe(4);
+    const [run] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+    const undone = await undoCollectionAutomationRuns({ ...space.undo([]), lookupBatch: engine.services.lookup }, [run!], new AbortController().signal);
+    expect(undone.undone.reverted).toBe(4);
   });
 });

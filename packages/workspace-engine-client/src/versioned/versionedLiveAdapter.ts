@@ -1,3 +1,7 @@
+import type { SetBatchPlan, SetBatchReference, SetBatchReceipt, SetBatchLookup, PreparedSetBatch } from "../workspace/setBatchContract";
+import type { ChangeAttributionWire } from "../ydoc/ydocWireContract";
+import type { CollectionValue } from "@dohc/workspace-contracts/collection";
+import { encodeCollectionValue } from "../workspace/workspaceWireContract";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "./engineTextLimits";
 import type { SharedFileUpdate, SharedFileUpdateState } from "../ydoc/ydocWireContract";
 import { createHash, randomUUID } from "node:crypto";
@@ -262,7 +266,10 @@ export class VersionedLiveAdapter {
     }
     if (
       method === WORKSPACE_METHOD.collectionsGet ||
-      method === WORKSPACE_METHOD.collectionsGetRecord
+      method === WORKSPACE_METHOD.collectionsGetRecord ||
+      method === WORKSPACE_METHOD.collectionsSetFieldsBatch ||
+      method === WORKSPACE_METHOD.collectionsPrepareSetBatch ||
+      method === WORKSPACE_METHOD.collectionsLookupSetBatch
     ) {
       return this.collectionRequest(
         method,
@@ -281,7 +288,10 @@ export class VersionedLiveAdapter {
     M extends
       | typeof WORKSPACE_METHOD.collectionsGet
       | typeof WORKSPACE_METHOD.collectionsQuery
-      | typeof WORKSPACE_METHOD.collectionsGetRecord,
+      | typeof WORKSPACE_METHOD.collectionsGetRecord
+      | typeof WORKSPACE_METHOD.collectionsSetFieldsBatch
+      | typeof WORKSPACE_METHOD.collectionsPrepareSetBatch
+      | typeof WORKSPACE_METHOD.collectionsLookupSetBatch,
   >(
     method: M,
     params: JsonValue,
@@ -1204,6 +1214,20 @@ export class VersionedLiveAdapter {
     input: CollectionQueryParams,
   ): Promise<CollectionQueryResult> {
     return this.workspaceRequest(WORKSPACE_METHOD.collectionsQuery, input);
+  }
+
+  async prepareSetBatch(plan: SetBatchPlan): Promise<PreparedSetBatch> {
+    return this.workspaceRequest(WORKSPACE_METHOD.collectionsPrepareSetBatch, encodeCollectionValue(plan as unknown as CollectionValue) as unknown as SetBatchPlan);
+  }
+  async setFieldsBatch(plan: SetBatchPlan, digest: string, attribution: ChangeAttributionWire): Promise<SetBatchReceipt> {
+    return this.workspaceRequest(WORKSPACE_METHOD.collectionsSetFieldsBatch,
+      encodeCollectionValue({ plan, digest, attribution } as unknown as CollectionValue) as unknown as { plan: SetBatchPlan; digest: string; attribution: ChangeAttributionWire });
+  }
+  async lookupSetBatch(reference: SetBatchReference): Promise<SetBatchLookup> {
+    return this.workspaceRequest(WORKSPACE_METHOD.collectionsLookupSetBatch, reference);
+  }
+  async waitSetBatches(receipts: SetBatchReference[]): Promise<{ settled: boolean }> {
+    return this.workspaceRequest(WORKSPACE_METHOD.collectionsWaitSetBatches, { receipts });
   }
 
   async getCollectionRecord(
