@@ -120,12 +120,14 @@ pub fn commit_relay_cursor(
             // Cursor commit is the per-pass level trigger. Re-scan here so an
             // oversized unclaimed base stays visible until it can originate.
             let sharing_declined = if was_enrolled {
-                crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(
+                let declined = crate::enrolment::originate_unclaimed_ydoc_bases_in_tx(
                     tx,
                     workspace_id,
                     leases,
                     now_ms,
-                )?
+                )?;
+                crate::enrolment::export_covered_heads_in_tx(tx, workspace_id, leases)?;
+                declined
             } else {
                 crate::enrolment::backfill_enrolment_window_in_tx(
                     tx,

@@ -14,9 +14,11 @@
 //! `momentId` (which the receiver preserves verbatim, unlike secrets). An
 //! imported coordinate with a pending refusal did not create the matching
 //! domain row, so it is not import provenance. The backfill also excludes
-//! moments whose object has retained or claimed CRDT state, or deferred CRDT
-//! input. A pruned local marker has no such state: its saved artifact history,
-//! including settled Y.Doc projections, remains the source for enrollment.
+//! moments whose object has retained or claimed CRDT state, except its current
+//! head when durable coverage proves it is the lineage's file artifact. Deferred
+//! CRDT input still reserves the path. A pruned local marker has no such state:
+//! its saved artifact history, including settled Y.Doc projections, remains
+//! the source for enrollment.
 //!
 //! A live append stores its path on `ydoc_docs`, so enrollment can originate
 //! the lineage before any settle creates a snapshot. Once a snapshot exists,
@@ -50,6 +52,7 @@ pub(crate) fn backfill_enrolment_window_in_tx(
     crate::live_audit::enrollment::queue_history_in_tx(tx, workspace_id)?;
     let sharing_declined = if !crate::live_audit::enrollment::pending_in_tx(tx, workspace_id)? {
         let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
+        export_covered_heads_in_tx(tx, workspace_id, leases)?;
         backfill_moments_and_conflict_bundles(tx, workspace_id)?;
         declined
     } else {
@@ -66,6 +69,7 @@ pub(crate) fn finish_live_history_enrolment_in_tx(
     now_ms: i64,
 ) -> Result<Vec<SharingDeclined>, SyncError> {
     let declined = originate_unclaimed_ydoc_bases_in_tx(tx, workspace_id, leases, now_ms)?;
+    export_covered_heads_in_tx(tx, workspace_id, leases)?;
     backfill_moments_and_conflict_bundles(tx, workspace_id)?;
     Ok(declined)
 }
@@ -205,6 +209,151 @@ fn backfill_moments_and_conflict_bundles(
     backfill_moments_between(tx, workspace_id, after_moment_order, None)
 }
 
+// Unary + removes the correlated keys' TEXT affinity, allowing SQLite to
+// use all columns of the JSON expression indexes.
+const COVERED_HEADS_SQL: &str = "SELECT s.latest_moment_id,s.version_id,s.object_id,s.blob_sha256,d.content_kind, \
+                     d.head_update_seq,d.head_snapshot_seq FROM snapshots s JOIN ydoc_docs d \
+                     ON d.workspace_id=s.workspace_id AND d.version_id=s.version_id \
+                       AND d.object_id=s.object_id \
+                   JOIN moments h ON h.workspace_id=s.workspace_id \
+                     AND h.version_id=s.version_id AND h.object_id=s.object_id \
+                     AND h.moment_id=s.latest_moment_id \
+                     AND h.payload_after_blob_sha256=s.blob_sha256 AND h.payload_after_path=s.path \
+                   WHERE s.workspace_id=?1 AND s.content_kind='text' \
+                     AND d.lineage_claim_status != 'unclaimed' \
+                     AND d.lineage_parent_claim_id IS NULL AND d.base_origin_id = ( \
+                       SELECT origin_id FROM sync_identity WHERE workspace_id=?1) \
+                     AND (d.export_attempt_moment_id IS NOT s.latest_moment_id \
+                       OR d.export_attempt_update_seq IS NOT d.head_update_seq \
+                       OR d.export_attempt_snapshot_seq IS NOT d.head_snapshot_seq) \
+                     AND ((d.settled_update_seq=d.head_update_seq \
+                       AND d.last_settled_sha=s.blob_sha256) OR ( \
+                       d.last_settled_sha IS NULL AND d.seed_source_sha256=s.blob_sha256 \
+                       AND d.head_update_seq=1 AND d.head_snapshot_seq IN (0,1) \
+                       AND (SELECT COUNT(*) FROM ydoc_updates u \
+                         WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id \
+                           AND u.object_id=d.object_id)=1-d.head_snapshot_seq \
+                       AND EXISTS (SELECT 1 FROM ydoc_snapshots b \
+                         WHERE b.workspace_id=d.workspace_id AND b.version_id=d.version_id \
+                           AND b.object_id=d.object_id AND b.up_to_seq=d.head_snapshot_seq) \
+                       AND NOT EXISTS (SELECT 1 FROM ydoc_snapshots b \
+                         WHERE b.workspace_id=d.workspace_id AND b.version_id=d.version_id \
+                           AND b.object_id=d.object_id AND b.up_to_seq NOT IN (0,1)))) \
+                     AND NOT EXISTS (SELECT 1 FROM live_device_application_bindings b \
+                       WHERE b.workspace_id=d.workspace_id AND b.main_version_id=d.version_id \
+                         AND b.object_id=d.object_id) \
+                     AND NOT EXISTS (SELECT 1 FROM ydoc_owner_bindings b \
+                       WHERE b.workspace_id=d.workspace_id AND b.main_version_id=d.version_id \
+                         AND b.object_id=d.object_id) \
+                     AND NOT EXISTS (SELECT 1 FROM conflicts c \
+                       WHERE c.workspace_id=d.workspace_id AND c.status='open' \
+                         AND (c.target_version_id=d.version_id OR c.source_version_id=d.version_id) \
+                         AND (c.path=s.path OR d.object_id IN \
+                           (c.base_object_id,c.current_object_id,c.incoming_object_id))) \
+                     AND COALESCE((SELECT j.status='conflict' AND j.content_sha256=s.blob_sha256 \
+                       FROM materialization_jobs j \
+                       WHERE j.workspace_id IN (?1,'') AND j.target_path=s.path \
+                       ORDER BY j.created_at_ms DESC,j.rowid DESC LIMIT 1),0)=0 \
+                     AND NOT EXISTS (SELECT 1 FROM replication_log r \
+                       WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
+                         AND json_extract(r.payload_json,'$.versionId')=+s.version_id \
+                         AND json_extract(r.payload_json,'$.objectId')=+s.object_id) \
+                     AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
+                       WHERE p.workspace_id=?1 AND p.moment_id=s.latest_moment_id) \
+                     AND NOT EXISTS (SELECT 1 FROM replication_log r \
+                       WHERE r.workspace_id=?1 AND r.op_kind='moment.append' \
+                         AND json_extract(r.payload_json,'$.momentId')=+s.latest_moment_id \
+                         AND (r.imported=0 OR NOT EXISTS ( \
+                           SELECT 1 FROM replication_pending_refusals p \
+                           WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
+                             AND p.origin_seq=r.origin_seq))) \
+                     AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates u \
+                       WHERE u.workspace_id=d.workspace_id AND u.version_id=d.version_id \
+                         AND u.object_id=d.object_id) \
+                     ORDER BY h.moment_order";
+
+/// Export an object's first file artifact only after this origin has journaled
+/// its base. Durable coverage and the strict peer projection must both agree
+/// with the head; disk materialization is not part of either proof.
+pub(crate) fn export_covered_heads_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    leases: &dyn LeaseProbe,
+) -> Result<(), SyncError> {
+    let candidates = {
+        let mut statement = tx.prepare(COVERED_HEADS_SQL).map_err(SyncError::corrupt)?;
+        statement
+            .query_map([workspace_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SyncError::corrupt)?
+    };
+    for (moment_id, version_id, object_id, sha, kind, update_seq, snapshot_seq) in candidates {
+        let key = DocKey {
+            workspace_id: workspace_id.to_owned(),
+            version_id,
+            object_id,
+        };
+        if leases.is_live(&key) {
+            continue;
+        }
+        // Retry only when the artifact or durable document head changes. Keep
+        // the attempt in this transaction so rollback cannot suppress a retry.
+        tx.execute(
+            "UPDATE ydoc_docs SET export_attempt_moment_id=?4,export_attempt_update_seq=?5, \
+             export_attempt_snapshot_seq=?6 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            params![workspace_id, key.version_id, key.object_id, moment_id, update_seq, snapshot_seq],
+        ).map_err(SyncError::persist)?;
+        let doc = match dohc_engine_collab::load_doc_in(tx, &key) {
+            Ok(doc) => doc,
+            Err(dohc_engine_collab::CollabError::Storage(error)) => return Err(error.into()),
+            Err(_) => continue,
+        };
+        let Ok(kind) = dohc_engine_collab::ContentKind::parse(&kind) else {
+            continue;
+        };
+        let projection = if kind == dohc_engine_collab::ContentKind::Scene {
+            crate::project_ydoc_with_store(tx, &key, &doc, kind)
+        } else {
+            doc.project(kind).map_err(|error| match error {
+                dohc_engine_collab::CollabError::Storage(error) => SyncError::Storage(error),
+                _ => SyncError::InvalidInput {
+                    reason: "export projection is unavailable",
+                },
+            })
+        };
+        let projection = match projection {
+            Ok(projection) => projection,
+            Err(error @ SyncError::Storage(_)) => return Err(error),
+            Err(_) => continue,
+        };
+        let mut projection = projection.content;
+        if kind == dohc_engine_collab::ContentKind::Richdoc
+            && let Some(source) = doc.preserved_markdown_source(&projection)
+        {
+            projection = source;
+        }
+        if dohc_engine_storage::hex_sha256(projection.as_bytes()) == sha {
+            match journal_moment_append_in_tx(tx, workspace_id, &moment_id) {
+                Ok(()) => {}
+                Err(error @ SyncError::Storage(_)) => return Err(error),
+                Err(_) => continue,
+            }
+        }
+    }
+    Ok(())
+}
+
 fn backfill_moments_between(
     tx: &Transaction<'_>,
     workspace_id: &str,
@@ -222,18 +371,23 @@ fn backfill_moments_between(
     // matching `imported=1` row in `replication_log` in the same transaction.
     // A refused coordinate is logged and ACKed too, but its pending refusal
     // still exists while first-position backfill runs. Exclude only a matching
-    // coordinate with no refusal. Retained CRDT state supersedes file moments;
-    // a pruned local cache does not. Deferred input still reserves that CRDT path.
+    // coordinate with no refusal. Retained CRDT state supersedes file history,
+    // so covered heads have their own strict projection proof.
     let moment_ids: Vec<String> = {
         let mut statement = tx
             .prepare(
                 "SELECT m.moment_id FROM moments m \
                  WHERE m.workspace_id=?1 \
-                   AND (m.metadata_origin != 'ydoc' OR EXISTS ( \
+                   AND ((m.metadata_origin != 'ydoc' OR EXISTS ( \
                      SELECT 1 FROM ydoc_docs p \
                      WHERE p.workspace_id=m.workspace_id AND p.version_id=m.version_id \
                        AND p.object_id=m.object_id AND p.lineage_claim_status='unclaimed' \
                        AND p.head_update_seq=0 AND p.head_snapshot_seq=0)) \
+                     AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
+                       WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
+                         AND d.object_id=m.object_id \
+                         AND (d.head_update_seq>0 OR d.head_snapshot_seq>0 \
+                           OR d.lineage_claim_status != 'unclaimed'))) \
                    AND m.moment_order > ?2 \
                    AND (?3 IS NULL OR m.moment_order <= ?3) \
                    AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
@@ -245,11 +399,6 @@ fn backfill_moments_between(
                          SELECT 1 FROM replication_pending_refusals p \
                          WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id \
                            AND p.origin_seq=r.origin_seq))) \
-                   AND NOT EXISTS (SELECT 1 FROM ydoc_docs d \
-                     WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
-                       AND d.object_id=m.object_id \
-                       AND (d.head_update_seq>0 OR d.head_snapshot_seq>0 \
-                         OR d.lineage_claim_status != 'unclaimed')) \
                    AND NOT EXISTS (SELECT 1 FROM ydoc_deferred_updates d \
                      WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
                        AND d.object_id=m.object_id) \
@@ -1767,6 +1916,968 @@ mod tests {
     }
 
     #[test]
+    fn pull_of_a_live_originated_base_does_not_publish_a_blocking_file_moment() {
+        let (_scratch, _, mut source) = open_store();
+        seed_main(&mut source);
+        seed_retained_artifact(&mut source);
+        let key = DocKey::new("ws", "main", "seed-object").expect("key");
+        let leases = dohc_engine_collab::LeaseRegistry::new();
+        let held = leases.acquire(&key).expect("source editor");
+        source
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO sync_relay_push_state VALUES ('ws','local',-1)",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                backfill_enrolment_window_in_tx(tx, "ws", &leases, 100)?;
+                originate_live_ydoc_base_in_tx(tx, &key, 101)
+            })
+            .expect("originate live base");
+        crate::commit_relay_cursor(
+            &mut source,
+            "ws",
+            &crate::RelayCursor {
+                cursor: 1,
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                bootstrap_complete: true,
+                settlement_report_id: None,
+            },
+            &NoFaults,
+            &leases,
+            102,
+        )
+        .expect("source pull cursor");
+
+        let ops =
+            crate::list_replication_ops(&source, "ws", "local", -1, 100).expect("published ops");
+        let (_peer_scratch, _, mut peer) = open_store();
+        seed_main(&mut peer);
+        seed_retained_artifact(&mut peer);
+        peer.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE sync_identity SET origin_id='peer'", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("peer identity");
+        for op in &ops {
+            if let Some(sha) = op.payload["updateBlobSha256"].as_str() {
+                peer.put_binary_blob(
+                    &source
+                        .get_binary_blob(sha)
+                        .expect("source blob")
+                        .expect("base"),
+                )
+                .expect("hydrate base");
+            }
+        }
+        let mut base = ops[0].clone();
+        base.relay_seq = Some(1);
+        crate::apply_replication_envelope(
+            &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("peer receives the base before opening its editor");
+        let client = crate::RelaySyncClient::new(crate::tests::FakeRelay::default());
+        *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            next_cursor: ops.len() as i64,
+            ops,
+            has_more: false,
+        });
+        let peer_leases = dohc_engine_collab::LeaseRegistry::new();
+        let peer_held = peer_leases.acquire(&key).expect("idle peer editor");
+        let outcome = client
+            .pull_chat_workspace(
+                &mut peer,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &peer_leases,
+                103,
+            )
+            .expect("pull while both editors are live");
+        let crate::SyncPassOutcome::Complete {
+            pending_cursor: Some(cursor),
+            ..
+        } = outcome
+        else {
+            panic!("pull cursor");
+        };
+        client
+            .commit_pull_cursor(&mut peer, "ws", &cursor, &NoFaults, &peer_leases, 103)
+            .expect("commit peer pull");
+        assert!(
+            local_ops(&source)
+                .iter()
+                .all(|(kind, _)| kind != "moment.append")
+        );
+        dohc_engine_collab::close_session(&mut source, &key, false, None, &NoFaults, 104)
+            .expect("close compacts the replicated seed");
+        drop(held);
+        sweep(&mut source, 104);
+        assert_eq!(
+            local_ops(&source).len(),
+            2,
+            "released artifact exports once"
+        );
+        let ops =
+            crate::list_replication_ops(&source, "ws", "local", -1, 100).expect("exported ops");
+        *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            next_cursor: ops.len() as i64,
+            ops: ops.into_iter().skip(1).collect(),
+            has_more: false,
+        });
+        let outcome = client
+            .pull_chat_workspace(
+                &mut peer,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &peer_leases,
+                105,
+            )
+            .expect("export must not fail an idle editor's pull");
+        let crate::SyncPassOutcome::Complete {
+            pending_cursor: Some(cursor),
+            ..
+        } = outcome
+        else {
+            panic!("deferred cursor");
+        };
+        client
+            .commit_pull_cursor(&mut peer, "ws", &cursor, &NoFaults, &peer_leases, 105)
+            .expect("commit deferred cursor");
+        let pending: i64 = peer
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM relay_deferred_ops", [], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("deferred file moment");
+        assert_eq!(pending, 0, "an already projected artifact is history only");
+        *client.transport().pull.lock().expect("page") = Some(crate::PullResponse {
+            next_cursor: 2,
+            ops: Vec::new(),
+            has_more: false,
+        });
+        dohc_engine_collab::close_session(&mut peer, &key, false, None, &NoFaults, 106)
+            .expect("peer close");
+        drop(peer_held);
+        client
+            .pull_chat_workspace(
+                &mut peer,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &peer_leases,
+                107,
+            )
+            .expect("deferred file moment applies after close");
+        assert_eq!(
+            crate::read_replication_acked_seq(&peer, "ws", "local").expect("ack"),
+            1
+        );
+    }
+
+    #[test]
+    fn enrollment_exports_a_preserved_seed_head_once_without_changing_history() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_artifact(&mut store);
+
+        assert!(local_ops(&store).is_empty());
+        enroll(&mut store).expect("enroll retained artifact");
+        let ops = local_ops(&store);
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].0, "ydoc.update");
+        assert_eq!(ops[1].0, "moment.append");
+        assert_eq!(ops[1].1["momentId"], "seed-moment");
+        assert_eq!(ops[1].1["payloadAfterPath"], "seed-object.md");
+        let head = VersionedTextStore::new(&mut store)
+            .read_text("ws", "main", "seed-object.md")
+            .expect("read unchanged head")
+            .expect("head exists");
+        assert_eq!(head.latest_moment_id, "seed-moment");
+        assert_eq!(head.text, "original seed bytes\n");
+        assert_eq!(ops[1].1["payloadAfterBlobSha256"], head.blob_sha256);
+
+        store
+            .write_with(&NoFaults, |tx| {
+                backfill_enrolment_window_in_tx(tx, "ws", &crate::NoLiveLeases, 1_001)
+            })
+            .expect("repeat enrollment");
+        assert_eq!(local_ops(&store), ops);
+        let moments: i64 = store
+            .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |r| r.get(0)))
+            .expect("moment count");
+        assert_eq!(moments, 1);
+    }
+
+    fn seed_retained_artifact(store: &mut EngineStore) {
+        seed_retained_artifact_as(store, "original seed bytes\n", ContentKind::Plaintext);
+    }
+
+    fn seed_retained_artifact_as(store: &mut EngineStore, text: &str, kind: ContentKind) {
+        seed_retained_artifact_named(store, "seed-object", "seed-moment", text, kind);
+    }
+
+    fn seed_retained_artifact_named(
+        store: &mut EngineStore,
+        object_id: &str,
+        moment_id: &str,
+        text: &str,
+        kind: ContentKind,
+    ) {
+        write_text(store, "main", object_id, moment_id, text, "capture", 10);
+        let key = DocKey::new("ws", "main", object_id).expect("key");
+        let path = format!("{object_id}.md");
+        let sha = dohc_engine_storage::hex_sha256(text.as_bytes());
+        let doc = Ydoc::wire();
+        let seed = doc
+            .rewrite_content_to_markdown_preserving_source(kind, text)
+            .expect("seed");
+        dohc_engine_collab::record_local_update(
+            store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &seed,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some(&path),
+                    content_kind: kind,
+                    regime: Regime::LocalOnly,
+                }),
+                is_seed: true,
+                seed_source_sha256: Some(&sha),
+                ..Default::default()
+            },
+            &NoFaults,
+            11,
+            |_, _, _| Ok(()),
+        )
+        .expect("retain seed lineage");
+    }
+
+    fn mark_head_settled(store: &mut EngineStore) {
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET settled_update_seq=head_update_seq, \
+                last_settled_sha=(SELECT blob_sha256 FROM snapshots s \
+                    WHERE s.workspace_id=ydoc_docs.workspace_id AND s.version_id=ydoc_docs.version_id \
+                        AND s.object_id=ydoc_docs.object_id)", []).map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        }).expect("record settlement coverage");
+    }
+
+    fn sweep(store: &mut EngineStore, now_ms: i64) {
+        crate::commit_relay_cursor(
+            store,
+            "ws",
+            &crate::RelayCursor {
+                bootstrap_complete: true,
+                cursor: now_ms,
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                settlement_report_id: None,
+            },
+            &NoFaults,
+            &crate::NoLiveLeases,
+            now_ms,
+        )
+        .expect("recurring sweep");
+    }
+
+    #[test]
+    #[ignore = "release cursor sweep measurement"]
+    fn cursor_sweep_many_retained_heads() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_artifact_as(&mut store, "- parent\n  - nested\n", ContentKind::Richdoc);
+        enroll(&mut store).expect("enroll benchmark seed");
+        store.write_with(&NoFaults, |tx| (|| {
+            tx.execute_batch("CREATE TEMP TABLE benchmark_ids AS WITH RECURSIVE ids(n) AS \
+                (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<9999) SELECT n FROM ids;")?;
+            for table in ["file_objects", "moments", "snapshots", "ydoc_docs", "ydoc_updates"] {
+                let columns = tx.prepare(&format!("PRAGMA table_info({table})"))?
+                    .query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let expressions = columns.iter().map(|column| match column.as_str() {
+                    "object_id" => "'bench-'||n".to_owned(),
+                    "moment_id" | "latest_moment_id" => "'bench-moment-'||n".to_owned(),
+                    "moment_order" => "n+1".to_owned(),
+                    "path" | "payload_after_path" => "'bench-'||n||'.md'".to_owned(),
+                    _ => format!("source.{column}"),
+                }).collect::<Vec<_>>().join(",");
+                tx.execute_batch(&format!("INSERT INTO {table} ({}) SELECT {expressions} \
+                    FROM {table} source CROSS JOIN benchmark_ids WHERE source.object_id='seed-object'",
+                    columns.join(",")))?;
+            }
+            tx.execute_batch("INSERT INTO replication_log \
+                (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                SELECT 'ws','other',n,'moment.append',json_object('versionId','main', \
+                    'objectId','other-'||n,'momentId','other-moment-'||n),1,0 FROM benchmark_ids;")?;
+            Ok::<_, rusqlite::Error>(())
+        })().map_err(SyncError::persist)).expect("bulk fixture");
+        // Separate first-use cost from recurring unchanged-head cost.
+        for pass in 0..4 {
+            let start = std::time::Instant::now();
+            sweep(&mut store, 200 + pass);
+            println!(
+                "CURSOR_BENCH documents=10000 moments=10000 journal_moments=9999 pass={pass} elapsed_ms={:.3}",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+
+    #[test]
+    fn leased_head_exports_only_after_its_live_or_closing_base_is_released() {
+        for closing in [false, true] {
+            let (_scratch, _, mut store) = open_store();
+            seed_main(&mut store);
+            seed_retained_artifact(&mut store);
+            let key = DocKey::new("ws", "main", "seed-object").expect("key");
+            let leases = dohc_engine_collab::LeaseRegistry::new();
+            let lease = leases.acquire(&key).expect("lease");
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT INTO sync_relay_push_state VALUES ('ws','local',-1)",
+                        [],
+                    )
+                    .map_err(SyncError::persist)?;
+                    backfill_enrolment_window_in_tx(tx, "ws", &leases, 100)
+                })
+                .expect("enroll leased document");
+            assert!(
+                local_ops(&store).is_empty(),
+                "no file moment before its base"
+            );
+            for _ in 0..2 {
+                store
+                    .write_with(&NoFaults, |tx| {
+                        if closing {
+                            originate_closing_ydoc_base_in_tx(tx, &key, 101)
+                        } else {
+                            originate_live_ydoc_base_in_tx(tx, &key, 101)
+                        }
+                    })
+                    .expect("originate session base");
+            }
+            assert_eq!(local_ops(&store).len(), 1, "only the base while leased");
+            dohc_engine_collab::close_session(&mut store, &key, false, None, &NoFaults, 102)
+                .expect("close compacts the seed");
+            drop(lease);
+            sweep(&mut store, 102);
+            let ops = local_ops(&store);
+            assert_eq!(ops.len(), 2);
+            assert_eq!(ops[0].0, "ydoc.update");
+            assert_eq!(ops[1].0, "moment.append");
+            let (_scratch, _, mut peer) = open_store();
+            seed_main(&mut peer);
+            replay_from_zero(&store, &mut peer, &ops);
+        }
+    }
+
+    #[test]
+    fn export_candidate_query_uses_complete_object_and_moment_indexes() {
+        let (_scratch, _, store) = open_store();
+        let plan = store
+            .read_with(|conn| {
+                conn.prepare(&format!("EXPLAIN QUERY PLAN {COVERED_HEADS_SQL}"))?
+                    .query_map(["ws"], |row| row.get::<_, String>(3))?
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("candidate query plan");
+        assert!(
+            plan.iter().any(|detail| detail.contains(
+                "replication_log_moment_object (workspace_id=? AND <expr>=? AND <expr>=?)"
+            )),
+            "{plan:?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|detail| detail
+                    .contains("replication_log_moment (workspace_id=? AND <expr>=?)")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn candidate_load_kind_and_projection_errors_do_not_abort_cursor_or_other_exports() {
+        for failure in ["load", "kind", "projection", "journal"] {
+            let (_scratch, _, mut store) = open_store();
+            seed_main(&mut store);
+            seed_retained_artifact_as(&mut store, "- parent\n  - nested\n", ContentKind::Richdoc);
+            enroll(&mut store).expect("originate unexportable seed base");
+            let bad_bytes = if failure == "projection" {
+                Ydoc::wire().plaintext_insert(
+                    0,
+                    &"x".repeat(dohc_engine_collab::limits::MAX_PROJECTION_BYTES + 1),
+                )
+            } else {
+                b"invalid Y.Doc".to_vec()
+            };
+            let bad_sha = store
+                .put_binary_blob(&bad_bytes)
+                .expect("bad candidate blob");
+            store.write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE ydoc_docs SET export_attempt_moment_id=NULL", []).map_err(SyncError::persist)?;
+                if failure == "journal" {
+                    tx.execute("UPDATE moments SET author_json='invalid' WHERE moment_id='seed-moment'", [])
+                        .map_err(SyncError::persist)?;
+                    tx.execute("UPDATE ydoc_docs SET content_kind='plaintext'", []).map_err(SyncError::persist)?;
+                    // Preserve matching document coverage so the journal's
+                    // stored-author validation is the failing boundary.
+                    let seed = Ydoc::wire().plaintext_insert(0, "- parent\n  - nested\n");
+                    let sha = dohc_engine_storage::put_binary_blob(tx, &seed).map_err(SyncError::Storage)?;
+                    tx.execute("UPDATE ydoc_updates SET update_blob_sha256=?1", [sha]).map_err(SyncError::persist)?;
+                } else if failure == "kind" {
+                    tx.execute_batch("PRAGMA ignore_check_constraints=ON; UPDATE ydoc_docs SET content_kind='invalid'; PRAGMA ignore_check_constraints=OFF;")
+                        .map_err(SyncError::persist)?;
+                } else {
+                    tx.execute("UPDATE ydoc_updates SET update_blob_sha256=?1", [&bad_sha]).map_err(SyncError::persist)?;
+                    if failure == "projection" {
+                        tx.execute("UPDATE ydoc_docs SET content_kind='plaintext'", []).map_err(SyncError::persist)?;
+                    }
+                }
+                Ok::<_, SyncError>(())
+            }).expect("make failed candidate eligible");
+            seed_retained_artifact_named(
+                &mut store,
+                "healthy",
+                "healthy-moment",
+                "healthy\n",
+                ContentKind::Plaintext,
+            );
+            sweep(&mut store, 101);
+            let ops = local_ops(&store);
+            assert!(
+                ops.iter()
+                    .any(|(kind, payload)| kind == "moment.append"
+                        && payload["objectId"] == "healthy"),
+                "{failure}"
+            );
+            assert!(
+                !ops.iter().any(|(kind, payload)| kind == "moment.append"
+                    && payload["objectId"] == "seed-object"),
+                "{failure}"
+            );
+            assert_eq!(
+                crate::read_relay_cursor(&store, "ws")
+                    .expect("cursor")
+                    .expect("committed cursor")
+                    .cursor,
+                101
+            );
+            sweep(&mut store, 102);
+            assert_eq!(local_ops(&store), ops);
+        }
+    }
+
+    #[test]
+    fn export_storage_failure_rolls_back_the_pull_cursor_and_attempt() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_artifact(&mut store);
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("INSERT INTO sync_relay_push_state VALUES ('ws','local',-1)", [])
+                .map_err(SyncError::persist)?;
+            originate_live_ydoc_base_in_tx(tx, &DocKey::new("ws", "main", "seed-object").unwrap(), 100)?;
+            tx.execute_batch("CREATE TRIGGER fail_export BEFORE INSERT ON replication_log \
+                WHEN NEW.op_kind='moment.append' BEGIN SELECT RAISE(ABORT,'storage write failed'); END;")
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        }).expect("prepare export write failure");
+        let result = crate::commit_relay_cursor(
+            &mut store,
+            "ws",
+            &crate::RelayCursor {
+                cursor: 1,
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                bootstrap_complete: true,
+                settlement_report_id: None,
+            },
+            &NoFaults,
+            &crate::NoLiveLeases,
+            101,
+        );
+        assert!(matches!(result, Err(SyncError::Storage(_))));
+        assert!(
+            crate::read_relay_cursor(&store, "ws")
+                .expect("cursor")
+                .is_none()
+        );
+        let attempted: Option<String> = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT export_attempt_moment_id FROM ydoc_docs",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("attempt");
+        assert!(attempted.is_none());
+        assert_eq!(
+            local_ops(&store).len(),
+            1,
+            "only the committed base remains"
+        );
+    }
+
+    #[test]
+    fn failed_projection_retries_only_after_moment_or_document_head_changes() {
+        let (_scratch, path, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_artifact_as(&mut store, "- parent\n  - nested\n", ContentKind::Richdoc);
+        mark_head_settled(&mut store);
+        enroll(&mut store).expect("enroll unprojectable seed");
+        store.write_with(&NoFaults, |tx| {
+            tx.execute_batch("CREATE TABLE export_attempt_test(count INTEGER NOT NULL); \
+                INSERT INTO export_attempt_test VALUES(0); \
+                CREATE TRIGGER count_export_attempts AFTER UPDATE OF export_attempt_moment_id ON ydoc_docs \
+                BEGIN UPDATE export_attempt_test SET count=count+1; END;")
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        }).expect("observe attempts");
+        sweep(&mut store, 101);
+        let count = |store: &EngineStore| {
+            store
+                .read_with(|conn| {
+                    conn.query_row("SELECT count FROM export_attempt_test", [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                })
+                .expect("attempt count")
+        };
+        assert_eq!(count(&store), 0, "unchanged failed projection is skipped");
+        drop(store);
+        let mut store = EngineStore::open(&path, 102).expect("reopen failed projection cache");
+        sweep(&mut store, 102);
+        assert_eq!(
+            count(&store),
+            0,
+            "restart keeps the failed projection skipped"
+        );
+        write_text(
+            &mut store,
+            "main",
+            "seed-object",
+            "next-moment",
+            "- parent\n  - nested\n",
+            "ydoc",
+            102,
+        );
+        sweep(&mut store, 103);
+        assert_eq!(count(&store), 1, "new moment is retried");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET head_update_seq=2,settled_update_seq=2",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("advance document head");
+        sweep(&mut store, 104);
+        assert_eq!(count(&store), 2, "new document sequence is retried");
+        sweep(&mut store, 105);
+        assert_eq!(count(&store), 2, "unchanged failed head is skipped");
+    }
+
+    #[test]
+    fn retained_scene_with_image_exports_the_hydrated_artifact_after_its_base() {
+        use dohc_engine_domain::WriteBinary;
+        use serde_json::json;
+        use std::collections::BTreeMap;
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        let key = DocKey::new("ws", "main", "scene").expect("scene key");
+        let asset_sha = dohc_engine_storage::hex_sha256(&[1, 2, 3]);
+        let asset_ref =
+            dohc_engine_collab::scene_asset_ref("ws", "main", "scene", &asset_sha, "image/png")
+                .expect("asset ref");
+        VersionedTextStore::new(&mut store)
+            .write_binary(
+                &WriteBinary {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "asset".to_owned(),
+                    path: asset_ref.clone(),
+                    bytes: vec![1, 2, 3],
+                    moment_id: "asset-moment".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("save image");
+        let imported = dohc_engine_collab::import_portable_scene(
+            &json!({
+                "type":"excalidraw", "version":2, "source":"https://excalidraw.com",
+                "elements":[{"id":"image", "type":"image", "version":1, "versionNonce":1,
+                    "isDeleted":false, "index":"a0", "fileId":"image-file"}], "appState":{},
+                "files":{"image-file":{"id":"image-file", "mimeType":"image/png", "created":1,
+                    "dataURL":"data:image/png;base64,AQID"}}
+            })
+            .to_string(),
+        )
+        .expect("import scene");
+        let records = BTreeMap::from([(
+            "image-file".to_owned(),
+            json!({"id":"image-file", "created":1,
+            "mimeType":"image/png", "ref":asset_ref, "sha256":asset_sha})
+            .to_string(),
+        )]);
+        let assets =
+            dohc_engine_collab::encode_scene_asset_records(&records).expect("asset records");
+        let update = dohc_engine_collab::merge_updates(&[imported.initial_update, assets])
+            .expect("scene state");
+        let doc = Ydoc::wire();
+        doc.apply(&update).expect("apply scene");
+        let projection = store
+            .read_with(|conn| crate::project_ydoc_with_store(conn, &key, &doc, ContentKind::Scene))
+            .expect("hydrate scene");
+        assert_ne!(
+            projection.content,
+            doc.project(ContentKind::Scene)
+                .expect("unhydrated projection")
+                .content
+        );
+        write_text(
+            &mut store,
+            "main",
+            "scene",
+            "scene-moment",
+            &projection.content,
+            "capture",
+            11,
+        );
+        let sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &update,
+            dohc_engine_collab::LocalAppend {
+                marker: Some(dohc_engine_collab::MarkerCreation {
+                    path: Some("scene.md"),
+                    content_kind: ContentKind::Scene,
+                    regime: Regime::LocalOnly,
+                }),
+                is_seed: true,
+                seed_source_sha256: Some(&sha),
+                ..Default::default()
+            },
+            &NoFaults,
+            12,
+            |_, _, _| Ok(()),
+        )
+        .expect("retain scene");
+        enroll(&mut store).expect("enroll scene");
+        let ops = local_ops(&store);
+        let base = ops
+            .iter()
+            .position(|(kind, p)| kind == "ydoc.update" && p["objectId"] == "scene")
+            .expect("scene base");
+        let artifact = ops
+            .iter()
+            .position(|(kind, p)| kind == "moment.append" && p["objectId"] == "scene")
+            .expect("scene artifact");
+        assert!(base < artifact);
+        assert_eq!(ops[artifact].1["payloadAfterBlobSha256"], sha);
+        sweep(&mut store, 102);
+        assert_eq!(local_ops(&store), ops);
+    }
+
+    #[test]
+    fn incomplete_bootstrap_does_not_export_an_unclaimed_head() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_artifact(&mut store);
+        crate::commit_relay_cursor(
+            &mut store,
+            "ws",
+            &crate::RelayCursor {
+                bootstrap_complete: false,
+                cursor: 0,
+                replication_epoch: "epoch".to_owned(),
+                stream_identity: "stream".to_owned(),
+                settlement_report_id: None,
+            },
+            &NoFaults,
+            &crate::NoLiveLeases,
+            100,
+        )
+        .expect("partial bootstrap");
+        assert!(local_ops(&store).is_empty());
+        sweep(&mut store, 101);
+        assert_eq!(local_ops(&store).len(), 2);
+    }
+
+    #[test]
+    fn normalizing_richdoc_seed_and_lenient_settle_do_not_export_unprojectable_bytes() {
+        for settled in [false, true] {
+            let (_scratch, _, mut store) = open_store();
+            seed_main(&mut store);
+            let source = "---\nid: rec\n---\n\n- parent\n  - nested\n";
+            seed_retained_artifact_as(&mut store, source, ContentKind::Richdoc);
+            let key = DocKey::new("ws", "main", "seed-object").expect("key");
+            let doc = store
+                .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+                .expect("doc");
+            let projection = doc
+                .project(ContentKind::Richdoc)
+                .expect("projection")
+                .content;
+            assert_ne!(projection, source);
+            assert_eq!(doc.preserved_markdown_source(&projection), None);
+            if settled {
+                let local_projection = store
+                    .read_with(|conn| {
+                        crate::project_ydoc_with_store(conn, &key, &doc, ContentKind::Richdoc)
+                    })
+                    .expect("local projection");
+                assert_eq!(
+                    local_projection.content, source,
+                    "the lenient snapshot fallback keeps the source locally"
+                );
+                mark_head_settled(&mut store);
+            }
+            enroll(&mut store).expect("enroll normalizing seed");
+            sweep(&mut store, 101);
+            let ops = local_ops(&store);
+            assert_eq!(ops.len(), 1, "only the base may be exported");
+            assert_eq!(ops[0].0, "ydoc.update");
+            let (_scratch, _, mut peer) = open_store();
+            seed_main(&mut peer);
+            replay_from_zero(&store, &mut peer, &ops);
+        }
+    }
+
+    #[test]
+    fn busy_enrollment_exports_after_settle_despite_pending_materialization_once() {
+        let (_scratch, _, mut store) = open_store();
+        seed_main(&mut store);
+        seed_retained_artifact(&mut store);
+        let key = DocKey::new("ws", "main", "seed-object").expect("key");
+        let doc = store
+            .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+            .expect("doc");
+        let update = doc.plaintext_insert(0, "edited ");
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &update,
+            dohc_engine_collab::LocalAppend::default(),
+            &NoFaults,
+            12,
+            |_, _, _| Ok(()),
+        )
+        .expect("record unsaved edits");
+        enroll(&mut store).expect("enroll while unsettled");
+        assert_eq!(
+            local_ops(&store).len(),
+            1,
+            "unsettled artifact is not covered"
+        );
+        dohc_engine_collab::settle(&mut store, &key, "seed-object.md", &NoFaults, 101)
+            .expect("settle busy document");
+        write_text(
+            &mut store,
+            "main",
+            "seed-object",
+            "busy-settled",
+            "edited original seed bytes\n",
+            "ydoc",
+            101,
+        );
+        mark_head_settled(&mut store);
+        let pending: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM materialization_jobs WHERE status='pending'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("pending jobs");
+        assert!(pending > 0);
+        sweep(&mut store, 102);
+        let ops = local_ops(&store);
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[1].0, "moment.append");
+        sweep(&mut store, 103);
+        assert_eq!(local_ops(&store), ops);
+        let (_scratch, _, mut peer) = open_store();
+        seed_main(&mut peer);
+        replay_from_zero(&store, &mut peer, &ops);
+        // Later settlements travel through Y.Doc deltas, not enrollment exports.
+        let update = doc.plaintext_insert(0, "later ");
+        let marker = dohc_engine_collab::read_marker(&store, &key)
+            .expect("marker")
+            .expect("claimed");
+        let claim = marker.lineage_claim_id.expect("claim");
+        dohc_engine_collab::record_local_update(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &update,
+            dohc_engine_collab::LocalAppend::default(),
+            &NoFaults,
+            104,
+            |tx, _, sha| {
+                crate::journal_local_op_in_tx(
+                    tx,
+                    "ws",
+                    "ydoc.update",
+                    &crate::ydoc_update_payload(
+                        &key,
+                        "seed-object.md",
+                        ContentKind::Plaintext,
+                        sha,
+                        &claim,
+                        None,
+                        None,
+                        false,
+                    ),
+                    104,
+                )
+                .expect("journal delta");
+                Ok(())
+            },
+        )
+        .expect("journal later delta");
+        write_text(
+            &mut store,
+            "main",
+            "seed-object",
+            "later-head",
+            "later edited original seed bytes\n",
+            "ydoc",
+            105,
+        );
+        mark_head_settled(&mut store);
+        sweep(&mut store, 106);
+        let later_ops = local_ops(&store);
+        assert_eq!(later_ops.len(), 3);
+        assert_eq!(
+            later_ops[2].0, "ydoc.update",
+            "later heads must not add file moments"
+        );
+        let (_scratch, _, mut later_peer) = open_store();
+        seed_main(&mut later_peer);
+        replay_from_zero(&store, &mut later_peer, &later_ops);
+    }
+
+    #[test]
+    fn recurring_export_excludes_a_claim_by_another_origin_or_successor() {
+        for successor in [false, true] {
+            let (_scratch, _, mut store) = open_store();
+            seed_main(&mut store);
+            seed_retained_artifact(&mut store);
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute("UPDATE ydoc_docs SET seed_source_sha256=NULL", [])
+                        .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .expect("defer artifact coverage");
+            enroll(&mut store).expect("originate base without file");
+            let parent = store
+                .put_binary_blob(b"parent lineage")
+                .expect("parent blob");
+            store.write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE ydoc_docs SET seed_source_sha256=(SELECT blob_sha256 FROM snapshots), \
+                    base_origin_id=?1,lineage_parent_claim_id=?2,lineage_epoch_tag=?3",
+                    params![if successor { "local" } else { "peer" }, successor.then_some(&parent), successor.then(|| "e".repeat(64))])
+                    .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            }).expect("another claim");
+            sweep(&mut store, 101);
+            assert_eq!(
+                local_ops(&store).len(),
+                1,
+                "foreign and successor claims must not export"
+            );
+        }
+    }
+
+    #[test]
+    fn enrollment_does_not_export_an_unproved_or_live_bound_retained_head() {
+        for invalidate in [
+            "UPDATE ydoc_docs SET seed_source_sha256=NULL",
+            "UPDATE ydoc_docs SET head_update_seq=2",
+            "UPDATE ydoc_docs SET head_snapshot_seq=1",
+            "UPDATE snapshots SET blob_sha256=(SELECT sha256 FROM blobs WHERE text='rival')",
+            "INSERT INTO live_device_application_bindings VALUES \
+             ('relay','ws','main','seed-object','lineage','seed-object.md','[\"seed-object.md\"]',0,'host',1,'instance','connection',1)",
+            "INSERT INTO replication_log \
+             (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+             VALUES ('ws','peer',0,'moment.append','{\"momentId\":\"seed-moment\"}',12,1)",
+            "INSERT INTO ydoc_deferred_updates \
+             (workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) \
+             VALUES ('ws','main','seed-object','peer',0,12)",
+            "INSERT INTO ydoc_owner_bindings \
+             SELECT 'ws','main','seed-object',update_blob_sha256,'{}','relay',1,0,1,update_blob_sha256,1024,1000 \
+             FROM ydoc_updates WHERE object_id='seed-object'",
+            "INSERT INTO materialization_jobs \
+             (job_id,workspace_id,target_path,content_sha256,preimage_present,target_generation,status,created_at_ms) \
+             SELECT 'conflict','ws',path,blob_sha256,0,1,'conflict',12 FROM snapshots",
+            "INSERT INTO conflicts \
+             (workspace_id,conflict_id,path,target_version_id,source_version_id,created_at_ms,updated_at_ms, \
+              status,chosen_from,metadata_origin,base_exists,base_path,current_exists,current_path, \
+              current_object_id,incoming_exists,incoming_path) \
+             VALUES ('ws','sync-conflict','seed-object.md','main','peer',12,12,'open','current','sync', \
+              0,'seed-object.md',1,'seed-object.md','seed-object',0,'seed-object.md')",
+        ] {
+            let (_scratch, _, mut store) = open_store();
+            seed_main(&mut store);
+            seed_retained_artifact(&mut store);
+            let key = DocKey::new("ws", "main", "seed-object").expect("key");
+            let leases = dohc_engine_collab::LeaseRegistry::new();
+            let _lease = leases.acquire(&key).expect("lease");
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT INTO sync_relay_push_state VALUES ('ws','local',-1)",
+                        [],
+                    )
+                    .map_err(SyncError::persist)?;
+                    backfill_enrolment_window_in_tx(tx, "ws", &leases, 100)
+                })
+                .expect("enroll leased document");
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO blobs(sha256,byte_length,text) VALUES (?1,5,'rival')",
+                        [dohc_engine_storage::hex_sha256(b"rival")],
+                    )
+                    .map_err(SyncError::persist)?;
+                    tx.execute(invalidate, []).map_err(SyncError::persist)?;
+                    originate_live_ydoc_base_in_tx(tx, &key, 101)?;
+                    export_covered_heads_in_tx(tx, "ws", &crate::NoLiveLeases)
+                })
+                .expect("backfill unproved artifact");
+            assert!(
+                local_ops(&store)
+                    .iter()
+                    .all(|(kind, _)| kind != "moment.append"),
+                "{invalidate}"
+            );
+        }
+    }
+
+    #[test]
     fn capture_history_is_superseded_when_the_same_object_gains_a_ydoc_lineage() {
         assert_enrollment_after_live_edit(false);
     }
@@ -1818,6 +2929,21 @@ mod tests {
             "ydoc",
             12,
         );
+        if !close_before_enrollment {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "UPDATE ydoc_docs SET settled_update_seq=head_update_seq, \
+                     last_settled_sha=(SELECT blob_sha256 FROM snapshots s \
+                       WHERE s.workspace_id=ydoc_docs.workspace_id \
+                         AND s.version_id=ydoc_docs.version_id AND s.object_id=ydoc_docs.object_id)",
+                        [],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .expect("record settlement coverage");
+        }
 
         if close_before_enrollment {
             let settled =
@@ -1864,56 +2990,7 @@ mod tests {
         let ops = local_ops(&store);
         let (_peer_scratch, _, mut peer) = open_store();
         seed_main(&mut peer);
-        for (origin_seq, (kind, payload)) in ops.iter().enumerate() {
-            if kind == "ydoc.update" {
-                let sha = payload["updateBlobSha256"]
-                    .as_str()
-                    .expect("Y.Doc blob sha");
-                let bytes = store
-                    .get_binary_blob(sha)
-                    .expect("read Y.Doc blob")
-                    .expect("Y.Doc blob exists");
-                assert_eq!(peer.put_binary_blob(&bytes).expect("copy Y.Doc blob"), sha);
-            } else if kind == "moment.append" {
-                let sha = payload["payloadAfterBlobSha256"]
-                    .as_str()
-                    .expect("moment blob sha");
-                let (byte_length, text): (i64, String) = store
-                    .read_with(|conn| {
-                        conn.query_row(
-                            "SELECT byte_length,text FROM blobs WHERE sha256=?1",
-                            [sha],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
-                        )
-                    })
-                    .expect("read moment blob");
-                peer.write_with(&NoFaults, |tx| {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
-                        params![sha, byte_length, text],
-                    )
-                    .map_err(SyncError::persist)?;
-                    Ok::<_, SyncError>(())
-                })
-                .expect("copy moment blob");
-            }
-            crate::apply_replication_envelope(
-                &mut peer,
-                &mut dohc_engine_collab::WriterDocCache::new(),
-                &crate::ReplicationEnvelope {
-                    workspace_id: "ws".to_owned(),
-                    origin_id: "source".to_owned(),
-                    origin_seq: origin_seq as i64,
-                    relay_seq: (kind == "ydoc.update").then_some(origin_seq as i64 + 1),
-                    op_kind: kind.clone(),
-                    payload: payload.clone(),
-                    recorded_at_ms: 20 + origin_seq as i64,
-                },
-                &NoFaults,
-                &crate::NoLiveLeases,
-            )
-            .expect("clean peer replays backfilled op");
-        }
+        replay_from_zero(&store, &mut peer, &ops);
         let peer_text: String = peer
             .read_with(|conn| {
                 conn.query_row(
@@ -1935,9 +3012,77 @@ mod tests {
             ops.iter()
                 .filter(|(kind, _)| kind == "moment.append")
                 .count(),
-            if close_before_enrollment { 2 } else { 0 },
-            "pruned local documents retain their saved file history; live state supersedes it"
+            if close_before_enrollment { 2 } else { 1 }
         );
+    }
+
+    fn replay_from_zero(
+        store: &EngineStore,
+        peer: &mut EngineStore,
+        ops: &[(String, serde_json::Value)],
+    ) {
+        for (origin_seq, (kind, payload)) in ops.iter().enumerate() {
+            if kind == "ydoc.update" {
+                let sha = payload["updateBlobSha256"]
+                    .as_str()
+                    .expect("Y.Doc blob sha");
+                let bytes = store
+                    .get_binary_blob(sha)
+                    .expect("read Y.Doc blob")
+                    .expect("Y.Doc blob exists");
+                assert_eq!(peer.put_binary_blob(&bytes).expect("copy Y.Doc blob"), sha);
+            } else if kind == "moment.append" {
+                for field in ["payloadBeforeBlobSha256", "payloadAfterBlobSha256"] {
+                    let Some(sha) = payload[field].as_str() else {
+                        continue;
+                    };
+                    let (byte_length, text): (i64, String) = store
+                        .read_with(|conn| {
+                            conn.query_row(
+                                "SELECT byte_length,text FROM blobs WHERE sha256=?1",
+                                [sha],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                        })
+                        .expect("read moment blob");
+                    peer.write_with(&NoFaults, |tx| {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                            params![sha, byte_length, text],
+                        )
+                        .map_err(SyncError::persist)?;
+                        Ok::<_, SyncError>(())
+                    })
+                    .expect("copy moment blob");
+                }
+            }
+            crate::apply_replication_envelope(
+                peer,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &crate::ReplicationEnvelope {
+                    workspace_id: "ws".to_owned(),
+                    origin_id: "source".to_owned(),
+                    origin_seq: origin_seq as i64,
+                    relay_seq: (kind == "ydoc.update").then_some(origin_seq as i64 + 1),
+                    op_kind: kind.clone(),
+                    payload: payload.clone(),
+                    recorded_at_ms: 20 + origin_seq as i64,
+                },
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+            .expect("clean peer replays backfilled op");
+        }
+        let conflicts: i64 = peer
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM conflicts WHERE status='open'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("conflict count");
+        assert_eq!(conflicts, 0, "full sync replay must not open a conflict");
     }
 
     #[test]
@@ -2662,6 +3807,11 @@ mod tests {
             })
             .expect("seed oversized local lineage");
 
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE ydoc_docs SET seed_source_sha256=(SELECT blob_sha256 FROM snapshots WHERE object_id='oversized') WHERE object_id='oversized'", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        }).expect("record oversized seed coverage");
         let cursor = crate::RelayCursor {
             bootstrap_complete: true,
             cursor: 0,
@@ -2683,6 +3833,12 @@ mod tests {
             dohc_engine_storage::TxnOutcome::Crashed { .. } => panic!("no injected crash"),
         };
 
+        assert!(
+            local_ops(&store)
+                .iter()
+                .all(|(kind, _)| kind != "moment.append"),
+            "a declined lineage must not export its file"
+        );
         assert_eq!(declines.len(), 1, "the caller receives the declined base");
         assert_eq!(declines[0].constraint, "MAX_YDOC_UPDATE_BYTES");
         assert!(declines[0].observed_bytes > declines[0].limit_bytes);
