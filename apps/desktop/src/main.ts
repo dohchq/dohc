@@ -1,5 +1,4 @@
-import { resolveEngineFileTargets } from "./workspaces/resolveEngineFiles";
-import type { FileResolveTarget, FileResolution } from "@dohc/workspace-engine-client/daemon";
+import { createEngineFileResolver } from "./workspaces/resolveEngineFiles";
 import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
 import { createDesktopAutomationControls } from "./workspaces/desktopAutomationControls";
 import {parseDohcSiteConfig} from "@dohc/workspace-core";
@@ -2588,11 +2587,7 @@ async function withEngineAdapter<T>(
   );
 }
 
-async function resolveEngineFiles(workspace: EngineWorkspace, targets: readonly FileResolveTarget[]): Promise<readonly FileResolution[]> {
-  const results = await withEngineAdapter(workspace, adapter => resolveEngineFileTargets(adapter, workspace.workspaceId, targets));
-  if (results === null) throw new Error("Workspace engine is unavailable.");
-  return results;
-}
+const resolveEngineFiles = createEngineFileResolver(withEngineAdapter);
 
 // The human author every renderer-sent chat message is attributed to. Main
 // derives it — the renderer never supplies identity. At alpha the desktop's

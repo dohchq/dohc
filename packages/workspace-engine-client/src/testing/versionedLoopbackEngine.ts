@@ -1921,7 +1921,6 @@ export class VersionedLoopbackEngine implements EngineTransport {
       return entry ? { status: "found", objectId: entry[1].objectId, path: entry[0] } : { status: "absent" };
     });
     const result = { versionId, results };
-    if (utf8Length(JSON.stringify(result)) > 48 * 1024) throw new Error("files.resolve exceeds its byte cap");
     return result;
   }
 

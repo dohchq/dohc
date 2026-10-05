@@ -1,4 +1,4 @@
-use super::{VersionedTextStore, validate_identifier};
+use super::{VersionedTextStore, alias_object_id, validate_identifier};
 use crate::DomainError;
 use rusqlite::{OptionalExtension, params};
 
@@ -80,14 +80,8 @@ impl VersionedTextStore<'_> {
                 match path {
                     Some(path) => {
                         // Both directions must agree; a dangling alias or snapshot is corruption.
-                        let alias = self
-                            .object_id_for_path(workspace_id, &version.version_id, &path)
-                            .map_err(|error| match error {
-                                DomainError::InvalidPath { .. } => DomainError::StateCorrupt {
-                                    reason: "file snapshot has an invalid path",
-                                },
-                                other => other,
-                            })?;
+                        let alias =
+                            alias_object_id(conn, workspace_id, &version.version_id, &path)?;
                         if alias != Some(object_id.clone()) {
                             return Err(DomainError::StateCorrupt {
                                 reason: "file snapshot and path alias disagree",

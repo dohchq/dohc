@@ -1,5 +1,4 @@
 use crate::EngineService;
-use crate::rpc::error::map_runtime;
 use crate::rpc::request::{OperationCancellation, parse};
 use dohc_engine_domain::FileResolveTarget;
 use dohc_engine_files::observation::ObservationCursor;
@@ -63,20 +62,18 @@ impl EngineService {
         }
         let open = self.open(workspace.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let (version_id, results) = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => return Err(cancellation.interruption("files.resolve")),
-            result = open.actor.resolve_files(open.workspace_id.clone(), params.version_id,
-                params.targets.into_iter().map(resolve_target).collect(), cancellation.token()) => result.map_err(map_runtime)?,
-        };
-        let response = serde_json::json!({ "versionId": version_id, "results": results });
-        if response.to_string().len() > MAX_RESOLVE_BYTES {
-            return Err(WireError::new(
-                ErrorCode::InvalidParams,
-                "files.resolve exceeds 49152-byte response cap",
-            ));
-        }
-        Ok(response)
+        let (version_id, results) = Self::read_under_ctx(
+            &cancellation,
+            "files.resolve",
+            open.actor.resolve_files(
+                open.workspace_id.clone(),
+                params.version_id,
+                params.targets.into_iter().map(resolve_target).collect(),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(serde_json::json!({ "versionId": version_id, "results": results }))
     }
 
     pub(super) async fn files_changes_since(

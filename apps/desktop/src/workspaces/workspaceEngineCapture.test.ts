@@ -360,7 +360,10 @@ describe("workspaceEngineCapture batch capture", () => {
       rustEngineSessions: mockLiveSessions(loopback, requests),
     });
 
-    const objectId = await engine.fileObjectIdForPath("just-saved.md");
+    const resolve = engine.resolveFileForPath;
+    const file = await resolve("just-saved.md");
+    const objectId = file?.objectId;
+    expect(file?.path).toBe("just-saved.md");
     const relevant = requests
       .map((request) => request.method)
       .filter(
@@ -372,7 +375,7 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(await engine.filePathForObjectId(objectId!)).toBe("just-saved.md");
     expect(requests.filter(request => request.method === VERSIONED_METHOD.textList)).toHaveLength(0);
     expect(requests.filter(request => request.method === VERSIONED_METHOD.textRead || request.method === VERSIONED_METHOD.textReadBlob)).toHaveLength(0);
-    expect(relevant, "remove fileObjectIdForPath's flushCapture call. The read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", "files.resolve"]);
+    expect(relevant, "remove resolveFileForPath's flushCapture call. The read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", "files.resolve"]);
     await engine.stop();
   });
 

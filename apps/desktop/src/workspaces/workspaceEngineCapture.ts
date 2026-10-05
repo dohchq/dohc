@@ -666,6 +666,7 @@ export interface WorkspaceEngineCapture {
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
   fileObjectIdForPath(path: string): Promise<string | null>;
+  resolveFileForPath(path: string): Promise<{ objectId: string; path: string } | null>;
   // Reverse lookup for projections that must name a linked object's current
   // active-version path after renames.
   filePathForObjectId(objectId: string): Promise<string | null>;
@@ -5348,6 +5349,15 @@ export function createWorkspaceEngineCapture(
       }
   }
 
+  async function resolveFileForPath(path: string) {
+    // Drain capture work before resolving a newly saved file.
+    await chain;
+    const engine = await engineStore();
+    await engine.flushCapture?.();
+    const [file] = (await engine.resolveFiles({ workspaceId, targets: [{ path }] })).results;
+    return file?.status === "found" ? file : null;
+  }
+
   return {
     start() {
       pollDaemonCaptureHealth();
@@ -6541,7 +6551,6 @@ export function createWorkspaceEngineCapture(
         }
         const paths = [...new Set([input.path, lastKnownPath, ...(previous ? [previous.path] : [])])];
         const resolved = await engine.resolveFiles({workspaceId, versionId, targets: [{objectId: input.objectId}, ...paths.map(path => ({path}))]});
-        if (resolved.results.some(file => file.status === "invalid")) return {status: "conflict" as const};
         const current = resolved.results[0]?.status === "found" ? resolved.results[0] : undefined;
         const pathPresent = new Map(paths.map((path, index) => [path, resolved.results[index + 1]?.status === "found"]));
         // A completed retry must never remove an object the owner restored later.
@@ -6581,13 +6590,10 @@ export function createWorkspaceEngineCapture(
       });
     },
 
+    resolveFileForPath,
+
     async fileObjectIdForPath(path) {
-      // Drain the chain so a just-captured file is immediately chat-able.
-      await chain;
-      const engine = await engineStore();
-      await engine.flushCapture?.();
-      const [file] = (await engine.resolveFiles({ workspaceId, targets: [{ path }] })).results;
-      return file?.status === "found" ? file.objectId : null;
+      return (await resolveFileForPath(path))?.objectId ?? null;
     },
 
     async filePathForObjectId(objectId) {

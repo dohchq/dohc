@@ -83,7 +83,10 @@ function fixture(kind: ScopeKind = "local") {
       throw new Error(`Unexpected chat store method: ${String(key)}`);
     },
   }) as unknown as DesktopLinkedChatStore;
-  const captureMethods = { fileObjectIdForPath: vi.fn(async () => "object" as string | null) };
+  const captureMethods = {
+    fileObjectIdForPath: vi.fn(async () => "object" as string | null),
+    resolveFileForPath: vi.fn<WorkspaceEngineCapture["resolveFileForPath"]>(async () => ({ objectId: "object", path: "notes/a.md" })),
+  };
   const capture = captureMethods as unknown as WorkspaceEngineCapture;
   const authorities = createWorkspaceAuthorityOwner({
     findWorkspace: id => id === workspace.workspaceId ? workspace : null,
@@ -463,17 +466,19 @@ describe("registered channels and personal chat projections", () => {
 describe("targeted file resolution", () => {
   it("keeps mention attachment identity when a path is reused", async () => {
     const test = fixture();
-    test.captureMethods.fileObjectIdForPath.mockResolvedValue("replacement");
-    test.resolveEngineFiles.mockResolvedValue([{ status: "found", objectId: "replacement", path: "notes/a.md" }]);
+    test.captureMethods.resolveFileForPath.mockResolvedValue({ objectId: "replacement", path: "notes/a.md" });
     const attachment = { attachmentId: "attachment", threadId: test.thread.id, messageId: test.message.id, targetKind: "file" as const, objectId: "object", pathHint: "notes/a.md", createdAtMs: 1 };
     test.storeMethods.listFileMentions.mockResolvedValue([
       { attachment, thread: test.thread, message: test.message },
       { attachment: { ...attachment, attachmentId: "replacement-attachment", objectId: "replacement" }, thread: test.thread, message: test.message },
     ]);
-    expect(await test.invoke(CHANNELS.listChatFileMentions, { workspaceId: "workspace", path: "notes/a.md" })).toMatchObject({ mentions: [
+    expect(await test.invoke(CHANNELS.listChatFileMentions, { workspaceId: "workspace", path: "./notes//a.md" })).toMatchObject({ mentions: [
       { attachment: { objectId: "replacement", pathHint: "notes/a.md" } },
     ] });
-    expect(test.resolveEngineFiles).toHaveBeenCalledWith(test.workspace, [{ path: "notes/a.md" }]);
+    expect(test.captureMethods.resolveFileForPath).toHaveBeenCalledExactlyOnceWith("./notes//a.md");
+    expect(test.storeMethods.listFileMentions).toHaveBeenCalledWith({ workspaceId: "workspace", objectId: "replacement" });
+    expect(test.captureMethods.fileObjectIdForPath).not.toHaveBeenCalled();
+    expect(test.resolveEngineFiles).not.toHaveBeenCalled();
   });
   it("resolves distinct linked file ids and retains display hints for absent objects", async () => {
     const test = fixture();

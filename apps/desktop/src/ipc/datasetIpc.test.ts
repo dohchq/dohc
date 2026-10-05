@@ -96,7 +96,7 @@ it("restores absent source files after recovery so the recovered dataset has an 
   expect(await f.handler("window", request)).toMatchObject({ kind: "recovery-claimed", datasetPath: "data/dataset.json" });
   expect(f.sources.get("data/schema.sql")).toBe("keep existing source");
   const targeted = f.sourceRequests.find(request => request.method === "files.resolve")!;
-  expect(targeted.params).toEqual({ targets: [{ path: "data/schema.sql" }, { path: "data/operations.js" }, { path: "data/dataset.json" }] });
+  expect(targeted.params).toEqual({ versionId: "main", targets: [{ path: "data/schema.sql" }, { path: "data/operations.js" }, { path: "data/dataset.json" }] });
   // Address discovery still lists descriptors; the subsequent source collision check must not list again.
   expect(f.sourceRequests.slice(f.sourceRequests.indexOf(targeted) + 1).filter(request => request.method === "versionedText.list")).toHaveLength(0);
   expect(f.sources.get("data/operations.js")).toBe("approved operations");

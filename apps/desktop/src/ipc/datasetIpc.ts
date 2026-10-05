@@ -150,7 +150,7 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
             const files = { [definition.schemaPath]: approved.schemaSql, [definition.operationsPath]: approved.operationSource,
               [datasetPath]: JSON.stringify(definition, null, 2) + "\n" };
             const paths = Object.keys(files);
-            const existing = await dependencies.withAdapter(operation.workspace, adapter => adapter.resolveFiles({ workspaceId: input.workspaceId, targets: paths.map(path => ({ path })), signal: operation.signal }));
+            const existing = await dependencies.withAdapter(operation.workspace, adapter => adapter.resolveFiles({ workspaceId: input.workspaceId, versionId: "main", targets: paths.map(path => ({ path })), signal: operation.signal }));
             current();
             if (existing.results.some(file => file.status === "invalid")) throw new Error("Collection recovery has an invalid source path.");
             const present = new Set(paths.filter((_path, index) => existing.results[index]?.status === "found"));

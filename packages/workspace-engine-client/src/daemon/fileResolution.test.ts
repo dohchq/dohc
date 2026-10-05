@@ -11,6 +11,20 @@ function fixture() {
 }
 
 describe("files.resolve", () => {
+  it("resolves a full reverse batch with long and CJK paths exceeding the request byte cap in its response", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const files = Array.from({ length: 128 }, (_, index) => ({
+      objectId: `file-${index}`,
+      path: index % 2 === 0 ? `notes/${"a".repeat(270)}/${index}.md` : `笔记/${"文".repeat(180)}/${index}.md`,
+    }));
+    for (const file of files) engine.seedTextFile({ workspace: "ws", ...file, text: "body" });
+    const adapter = new VersionedLiveAdapter({ close() {}, sendRequest: request => engine.sendRequest(request) }, "ws", { workspaceId: "ws" });
+    const result = await adapter.resolveFiles({ workspaceId: "ws", targets: files.map(({ objectId }) => ({ objectId })) });
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeGreaterThan(48 * 1024);
+    expect(result.results).toEqual(files.map(file => ({ status: "found", ...file })));
+    expect(engine.requests.map(request => request.method)).toEqual(["files.resolve"]);
+  });
+
   it("returns ordered text and binary identity, absence, and local invalid results without listing or reading bodies", async () => {
     const { engine, adapter } = fixture();
     expect(await adapter.resolveFiles({ workspaceId: "ws", targets: [

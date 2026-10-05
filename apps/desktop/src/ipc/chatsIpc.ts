@@ -248,15 +248,15 @@ export function registerChatsIpcHandlers<
     const rowsUncovered = await syncWorkspaceSharedChannels(
       workspace.workspaceId,
     );
-    const objectId = await capture.fileObjectIdForPath(input.path);
+    const requestedFile = await capture.resolveFileForPath(input.path);
+    const objectId = requestedFile?.objectId ?? null;
     const store = linkedChatStoreFor(workspace);
     const mentions = await store.listFileMentions({
       workspaceId: workspace.workspaceId,
       ...(objectId ? { objectId } : { pathHint: input.path }),
     });
-    const [requestedFile] = await resolveEngineFiles(workspace, [{ path: input.path }]);
     const pathByObjectId = new Map<string, string>();
-    if (requestedFile?.status === "found" && requestedFile.objectId === objectId) pathByObjectId.set(objectId, requestedFile.path);
+    if (requestedFile) pathByObjectId.set(requestedFile.objectId, requestedFile.path);
     const mentionChannelWireIds = new Map(
       await Promise.all(
         [

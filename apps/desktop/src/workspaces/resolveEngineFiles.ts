@@ -20,8 +20,8 @@ export async function resolveEngineFileTargets(
   const results: FileResolution[] = [];
   let versionId: string | undefined;
   let batch: FileResolveTarget[] = [];
-  const requestBytes = (targets: readonly FileResolveTarget[]) =>
-    Buffer.byteLength(JSON.stringify({ versionId, targets }));
+  const emptyRequestBytes = () => Buffer.byteLength(JSON.stringify({ versionId, targets: [] }));
+  let batchBytes = emptyRequestBytes();
   const flush = async () => {
     if (!batch.length) return;
     const resolved = await adapter.resolveFiles({
@@ -32,17 +32,34 @@ export async function resolveEngineFileTargets(
     versionId = resolved.versionId;
     results.push(...resolved.results);
     batch = [];
+    batchBytes = emptyRequestBytes();
   };
   for (const target of targets) {
+    const targetBytes = Buffer.byteLength(JSON.stringify(target));
     if (batch.length === MAX_FILE_RESOLVE_TARGETS ||
-        requestBytes([...batch, target]) > MAX_FILE_RESOLVE_BYTES) await flush();
+        batchBytes + targetBytes + (batch.length ? 1 : 0) > MAX_FILE_RESOLVE_BYTES) await flush();
     // Hints are display metadata. An oversized hint cannot break other targets.
-    if (requestBytes([target]) > MAX_FILE_RESOLVE_BYTES) {
+    if (batchBytes + targetBytes + (batch.length ? 1 : 0) > MAX_FILE_RESOLVE_BYTES) {
       results.push({ status: "invalid" });
       continue;
     }
+    batchBytes += targetBytes + (batch.length ? 1 : 0);
     batch.push(target);
   }
   await flush();
   return results;
+}
+
+export function createEngineFileResolver<Workspace extends { workspaceId: string }>(
+  withEngineAdapter: <T>(
+    workspace: Workspace,
+    work: (adapter: VersionedLiveAdapter) => Promise<T>,
+  ) => Promise<T | null>,
+): EngineFileResolver<Workspace> {
+  return async (workspace, targets) => {
+    const results = await withEngineAdapter(workspace, adapter =>
+      resolveEngineFileTargets(adapter, workspace.workspaceId, targets));
+    if (results === null) throw new Error("Workspace engine is unavailable.");
+    return results;
+  };
 }
