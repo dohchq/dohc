@@ -1304,7 +1304,7 @@ fn read(sc: &Scratch, rel: &str) -> Option<Vec<u8>> {
 
 /// Every remaining staged original has a retained row; no unknown copy remains.
 fn assert_nothing_displaced(sc: &Scratch, store: &EngineStore) {
-    let mut expected = Vec::new();
+    let mut expected: Vec<String> = Vec::new();
     #[cfg(unix)]
     for row in store.retained_displacements_after(0).expect("retained") {
         assert!(sc.workspace().join(&row.source_path).exists());

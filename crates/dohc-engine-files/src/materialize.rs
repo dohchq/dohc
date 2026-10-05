@@ -1780,6 +1780,17 @@ pub fn cleanup_staging_directory(
     root: &Path,
     directory: &Path,
 ) -> Result<(), MaterializeError> {
+    cleanup_staging_directory_with_sync(store, root, directory, |parent| {
+        sync_parent_dir(Some(parent), DurabilityPolicy::per_os())
+    })
+}
+
+fn cleanup_staging_directory_with_sync(
+    store: &EngineStore,
+    root: &Path,
+    directory: &Path,
+    sync: impl FnOnce(&Path) -> Result<(), MaterializeError>,
+) -> Result<(), MaterializeError> {
     if directory.file_name() != Some(OsStr::new(".dohc-write-displaced")) {
         return Ok(());
     }
@@ -1801,6 +1812,10 @@ pub fn cleanup_staging_directory(
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) if e.kind() == ErrorKind::DirectoryNotEmpty => return Ok(()),
         Err(e) => return Err(MaterializeError::io(&directory, &e)),
+    }
+    // Make removal durable before a later FULL commit can persist forgetting it.
+    if let Some(parent) = directory.parent() {
+        sync(parent)?;
     }
     store.forget_staging_directory(&relative)?;
     Ok(())

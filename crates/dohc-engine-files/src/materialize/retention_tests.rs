@@ -577,3 +577,45 @@ fn releasing_last_sibling_source_removes_directory_and_location_rows() {
     assert!(!root.join(".dohc-write-displaced").exists());
     assert!(store.staging_locations().unwrap().is_empty());
 }
+
+#[test]
+fn sibling_cleanup_syncs_removal_before_forgetting_location() {
+    for fail_sync in [false, true] {
+        let scratch = ScratchDir::new_named("p0-cleanup-sync-order").unwrap();
+        let root = scratch.path();
+        let store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+        let relative = ".dohc-write-displaced";
+        let directory = root.join(relative);
+        std::fs::create_dir(&directory).unwrap();
+        store.remember_staging("settle", relative).unwrap();
+        let mut synced = false;
+        let result = cleanup_staging_directory_with_sync(&store, root, &directory, |parent| {
+            assert_eq!(parent, std::fs::canonicalize(root).unwrap());
+            assert!(!directory.exists(), "remove before sync");
+            assert_eq!(
+                store.staging_location("settle").unwrap().as_deref(),
+                Some(relative),
+                "sync before forget"
+            );
+            synced = true;
+            if fail_sync {
+                return Err(MaterializeError::io(
+                    parent,
+                    &std::io::Error::from(ErrorKind::PermissionDenied),
+                ));
+            }
+            sync_parent_dir(Some(parent), DurabilityPolicy::per_os())
+        });
+        assert!(synced, "cleanup must sync the parent");
+        assert_eq!(result.is_err(), fail_sync);
+        assert_eq!(
+            store.staging_location("settle").unwrap().is_some(),
+            fail_sync
+        );
+        // A retry must sync even when the directory is already absent.
+        if fail_sync {
+            cleanup_staging_directory(&store, root, &directory).unwrap();
+            assert!(store.staging_location("settle").unwrap().is_none());
+        }
+    }
+}
