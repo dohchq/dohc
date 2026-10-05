@@ -15,7 +15,7 @@ import {
 import { Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { CopyField, type CopySecret } from "./ui/CopyButton";
 
-const SYNC_CODE_SECRET: CopySecret = { what: "the sync code", again: "Copy it again from Settings." };
+const SYNC_CODE_SECRET: CopySecret = { what: "the workspace code", again: "Copy it again from Settings." };
 
 const SETUP_GUIDE_URL =
   "https://github.com/dohc-ai/dohc/blob/main/docs/how-to/self-host.md";
