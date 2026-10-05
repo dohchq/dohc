@@ -27,6 +27,7 @@
 pub mod actor;
 pub mod error;
 pub mod identity;
+pub(crate) mod links;
 pub mod search;
 pub mod supervisor;
 

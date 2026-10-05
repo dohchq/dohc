@@ -2896,6 +2896,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE live_device_update_applications DROP COLUMN declared_on_behalf_of; ALTER TABLE live_device_update_applications DROP COLUMN declared_depth; ALTER TABLE live_device_update_applications DROP COLUMN declared_agent_id; ALTER TABLE live_device_update_applications ADD COLUMN admitted_metadata_json TEXT CHECK (admitted_metadata_json IS NULL OR json_valid(admitted_metadata_json)); ALTER TABLE live_audit_events ADD COLUMN canonical_version INTEGER NOT NULL DEFAULT 1 CHECK (canonical_version IN (1,2));",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 30,
+        id: "v2-persisted-links",
+        sql: include_str!("links.sql"),
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -3337,6 +3343,10 @@ mod tests {
             (
                 "v2-live-admitted-metadata-receipts",
                 "384caa34711fd4cc1431c153d3e567f33b4c99e8f5428175f7c76c64f7ef83c3",
+            ),
+            (
+                "v2-persisted-links",
+                "7269f6e8e917cde71f4eb3e7c0ddf0fe99660187f33f2e8cfdebc25976f0fbb9",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
@@ -5197,6 +5207,37 @@ mod tests {
         }];
         let err = run_migrations(&mut conn, tampered, &ctx, &NoFaults).unwrap_err();
         assert_eq!(err.code(), "migration-failed");
+    }
+
+    #[test]
+    fn persisted_links_upgrade_seeds_existing_heads_and_survives_cascades() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-persisted-links");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        conn.execute_batch("INSERT INTO versioned_workspaces VALUES('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES('ws','main','main','Main',1); INSERT INTO file_objects VALUES('ws','a',1); INSERT INTO blobs VALUES('hash',5,'[[b]]'); INSERT INTO path_aliases VALUES('ws','main','a.md','a'); INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES('ws','main','a','a.md','hash',1,'m','test');").unwrap();
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        let pending: i64 = conn
+            .query_row("SELECT COUNT(*) FROM link_pending", [], |r| r.get(0))
+            .expect("persisted queue must exist");
+        assert_eq!(pending, 1);
+        conn.execute("DELETE FROM file_objects WHERE object_id='a'", [])
+            .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM link_pending", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
     }
 
     fn tempdir() -> dohc_test_scratch::ScratchDir {

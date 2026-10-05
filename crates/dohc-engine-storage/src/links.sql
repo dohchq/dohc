@@ -1,0 +1,103 @@
+-- Derived rows deliberately have no foreign keys to authoritative parents.
+-- Cascade delete triggers must be able to leave a durable cleanup obligation.
+CREATE TABLE link_pending (
+    pending_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
+    queued_at_ms INTEGER NOT NULL,
+    retry_after_ms INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(workspace_id, version_id, object_id)
+) STRICT;
+CREATE TABLE link_index_state (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    parser_generation INTEGER NOT NULL,
+    seed_after_object_id TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(workspace_id, version_id)
+) STRICT;
+CREATE TABLE link_sources (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    path TEXT NOT NULL,
+    title TEXT NOT NULL,
+    parser_generation INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('indexed','unindexed')),
+    reason TEXT CHECK(reason IN ('byte-bound','parse-refused')),
+    index_key TEXT NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    drain_latency_ms INTEGER NOT NULL,
+    CHECK((status='indexed' AND reason IS NULL) OR (status='unindexed' AND reason IS NOT NULL)),
+    PRIMARY KEY(workspace_id, version_id, object_id)
+) STRICT;
+CREATE INDEX link_sources_path ON link_sources(workspace_id, version_id, path, object_id);
+CREATE TABLE links (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    index_key TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    literal TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('wikilink','markdown')),
+    fragment TEXT,
+    start_utf16 INTEGER NOT NULL,
+    end_utf16 INTEGER NOT NULL,
+    line INTEGER NOT NULL,
+    snippet TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, version_id, object_id, index_key, ordinal)
+) STRICT;
+CREATE TABLE link_occurrence_keys (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    index_key TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    key_kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, version_id, object_id, index_key, ordinal, key_kind, key)
+) STRICT;
+CREATE INDEX link_occurrence_probe ON link_occurrence_keys(workspace_id, version_id, key_kind, key, object_id, ordinal);
+CREATE TABLE link_target_keys (
+    workspace_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    index_key TEXT NOT NULL,
+    key_kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, version_id, object_id, index_key, key_kind, key)
+) STRICT;
+CREATE INDEX link_target_probe ON link_target_keys(workspace_id, version_id, key_kind, key, object_id);
+
+CREATE TRIGGER link_snapshots_insert AFTER INSERT ON snapshots BEGIN INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(NEW.workspace_id,NEW.version_id,NEW.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; END;
+CREATE TRIGGER link_snapshots_delete AFTER DELETE ON snapshots BEGIN INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(OLD.workspace_id,OLD.version_id,OLD.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; END;
+CREATE TRIGGER link_snapshots_update AFTER UPDATE OF blob_sha256, binary_sha256, path, content_kind ON snapshots WHEN OLD.blob_sha256 IS NOT NEW.blob_sha256 OR OLD.binary_sha256 IS NOT NEW.binary_sha256 OR OLD.path IS NOT NEW.path OR OLD.content_kind IS NOT NEW.content_kind BEGIN INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(OLD.workspace_id,OLD.version_id,OLD.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(NEW.workspace_id,NEW.version_id,NEW.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; END;
+
+CREATE TRIGGER link_fork_base_snapshots_insert AFTER INSERT ON fork_base_snapshots BEGIN INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(NEW.workspace_id,NEW.version_id,NEW.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; END;
+CREATE TRIGGER link_fork_base_snapshots_delete AFTER DELETE ON fork_base_snapshots BEGIN INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(OLD.workspace_id,OLD.version_id,OLD.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; END;
+CREATE TRIGGER link_fork_base_snapshots_update AFTER UPDATE OF blob_sha256, binary_sha256, path, content_kind ON fork_base_snapshots WHEN OLD.blob_sha256 IS NOT NEW.blob_sha256 OR OLD.binary_sha256 IS NOT NEW.binary_sha256 OR OLD.path IS NOT NEW.path OR OLD.content_kind IS NOT NEW.content_kind BEGIN INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(OLD.workspace_id,OLD.version_id,OLD.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(NEW.workspace_id,NEW.version_id,NEW.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; END;
+
+CREATE TRIGGER link_path_aliases_insert AFTER INSERT ON path_aliases BEGIN INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(NEW.workspace_id,NEW.version_id,NEW.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; END;
+CREATE TRIGGER link_path_aliases_delete AFTER DELETE ON path_aliases BEGIN INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(OLD.workspace_id,OLD.version_id,OLD.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; END;
+CREATE TRIGGER link_path_aliases_update AFTER UPDATE OF path, object_id ON path_aliases WHEN OLD.path IS NOT NEW.path OR OLD.object_id IS NOT NEW.object_id BEGIN INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(OLD.workspace_id,OLD.version_id,OLD.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(NEW.workspace_id,NEW.version_id,NEW.object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0; END;
+
+CREATE TRIGGER link_version_delete AFTER DELETE ON versions BEGIN
+ DELETE FROM link_index_state WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id;
+END;
+INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms)
+ SELECT workspace_id,version_id,object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER) FROM snapshots
+ UNION SELECT workspace_id,version_id,object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER) FROM fork_base_snapshots
+ UNION SELECT workspace_id,version_id,object_id,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER) FROM path_aliases;
+INSERT INTO link_index_state(workspace_id,version_id,parser_generation) SELECT workspace_id,version_id,1 FROM versions;
+CREATE TRIGGER link_version_insert AFTER INSERT ON versions BEGIN
+ INSERT INTO link_index_state(workspace_id,version_id,parser_generation) VALUES(NEW.workspace_id,NEW.version_id,1);
+END;
+
+CREATE TABLE link_gc (
+ workspace_id TEXT NOT NULL, version_id TEXT NOT NULL, object_id TEXT NOT NULL, index_key TEXT NOT NULL,
+ PRIMARY KEY(workspace_id,version_id,object_id,index_key)
+) STRICT;
+
+CREATE INDEX link_alias_object ON path_aliases(workspace_id,version_id,object_id,path);

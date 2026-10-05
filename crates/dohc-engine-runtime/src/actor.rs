@@ -61,6 +61,8 @@ pub use ydoc::{
 
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
+pub use crate::links::LinkDrainMetrics;
+use crate::links::{DrainWorker, SharedMetrics};
 use dohc_engine_collab::WriterDocCache;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use std::path::PathBuf;
@@ -181,6 +183,7 @@ pub struct WorkspaceActor {
     state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
     claims: ClaimAnnouncer,
+    link_metrics: SharedMetrics,
 }
 
 impl WorkspaceActor {
@@ -264,6 +267,8 @@ impl WorkspaceActor {
         // context, so the open result must not depend on a tokio runtime.
         let (startup_tx, startup_rx) = std_sync_channel::<Result<bool, StorageError>>(1);
 
+        let link_metrics = SharedMetrics::default();
+        let worker_metrics = Arc::clone(&link_metrics);
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
             .name("dohc-engine-actor".to_owned())
@@ -275,6 +280,7 @@ impl WorkspaceActor {
                     root_token,
                     rx,
                     worker_state,
+                    worker_metrics,
                     startup_tx,
                     writer_lock,
                     work,
@@ -292,6 +298,7 @@ impl WorkspaceActor {
                 state,
                 worker: Some(worker),
                 claims: ClaimAnnouncer::default(),
+                link_metrics,
             }),
             Ok(Err(storage_err)) => {
                 let _ = worker.join();
@@ -311,6 +318,7 @@ impl WorkspaceActor {
             tx: self.tx.clone(),
             state: Arc::clone(&self.state),
             claims: self.claims.clone(),
+            link_metrics: Arc::clone(&self.link_metrics),
         }
     }
 
@@ -388,9 +396,18 @@ pub struct ActorHandle {
     tx: mpsc::Sender<Command>,
     state: Arc<AtomicU8>,
     claims: ClaimAnnouncer,
+    link_metrics: SharedMetrics,
 }
 
 impl ActorHandle {
+    /// Engine diagnostics for the derived index; no store read or drain.
+    pub fn link_drain_metrics(&self) -> LinkDrainMetrics {
+        self.link_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     /// Hear every Group automation claim this workspace's chat writes and
     /// relay passes commit. The latest listener replaces an earlier one.
     pub fn listen_for_automation_claims(&self, listener: AutomationClaimListener) {
@@ -512,6 +529,7 @@ fn worker_main(
     root_token: Option<String>,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
+    link_metrics: SharedMetrics,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
     writer_lock: Option<WriterLock>,
     work_count: Option<Arc<AtomicU64>>,
@@ -576,7 +594,54 @@ fn worker_main(
     // Blocking recv on the tokio channel keeps the SQLite work on this
     // dedicated thread, off the async runtime. `blocking_recv` returns `None`
     // once every sender is dropped.
-    while let Some(cmd) = rx.blocking_recv() {
+    let mut links = if read_only {
+        None
+    } else {
+        match DrainWorker::new(link_metrics) {
+            Ok(worker) => Some(worker),
+            Err(_) => {
+                eprintln!("links parser could not start; pending work retained");
+                None
+            }
+        }
+    };
+    let timer = if links.is_some() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .ok()
+    } else {
+        None
+    };
+    loop {
+        // Serve a queued foreground command before each background slice.
+        // The timer runtime ends before synchronous commands execute.
+        let cmd = match rx.try_recv() {
+            Ok(cmd) => Some(cmd),
+            Err(mpsc::error::TryRecvError::Disconnected) => break,
+            Err(mpsc::error::TryRecvError::Empty) => match (&mut links, &timer) {
+                (Some(worker), Some(timer)) => {
+                    let delay = worker.tick(&mut store);
+                    if delay == std::time::Duration::MAX {
+                        rx.blocking_recv()
+                    } else {
+                        if delay.is_zero() {
+                            continue;
+                        }
+                        timer.block_on(async {
+                            tokio::time::timeout(delay, rx.recv()).await.ok().flatten()
+                        })
+                    }
+                }
+                _ => rx.blocking_recv(),
+            },
+        };
+        let Some(cmd) = cmd else {
+            if rx.is_closed() {
+                break;
+            }
+            continue;
+        };
         // Counted as each command starts, so its caller sees the count by the
         // time its reply arrives.
         if let Some(work) = &work_count {
@@ -605,11 +670,15 @@ fn worker_main(
         if state.load(Ordering::Acquire) == LifecycleState::RecoveryRequired.as_u8() {
             break;
         }
+        if let Some(worker) = links.as_mut() {
+            let _ = worker.tick(&mut store);
+        }
     }
 
     // Normal exit: drop the connection explicitly, then the `_closed_guard`
     // publishes Closed as it falls out of scope (same ordering the guard
     // guarantees on a panic unwind).
+    drop(links);
     drop(store);
 }
 

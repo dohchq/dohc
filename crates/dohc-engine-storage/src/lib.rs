@@ -32,6 +32,7 @@ pub mod diagnostics;
 pub mod error;
 pub mod faults;
 pub mod limits;
+pub mod links;
 pub mod materialize;
 pub mod remote_changes;
 pub mod store;
