@@ -678,7 +678,18 @@ confidentialTest.describe("View link lifecycle", () => {
         "/sync/shares/never-valid/log?since=0&limit=500",
       );
       expect(missingNamedShare.status).toBe(404);
-      expect(namedAfterEnd).toEqual(missingNamedShare);
+      expect(JSON.parse(missingNamedShare.body)).toEqual({
+        ok: false,
+        error: "not found",
+        code: "not_found",
+      });
+      // #1438 explains removal to former recipients while strangers stay opaque.
+      expect(namedAfterEnd.status).toBe(404);
+      expect(JSON.parse(namedAfterEnd.body)).toEqual({
+        ok: false,
+        error: "The owner removed your access.",
+        code: "share_access_removed",
+      });
     } finally {
       await relay?.stop();
       if (desktop) await cleanupDesktopWorkspace(desktop, temp);
