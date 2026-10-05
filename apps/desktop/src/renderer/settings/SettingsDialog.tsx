@@ -1,3 +1,4 @@
+import { desktopPins, settingsNavPin, settingsSectionPin, settingsRowPin } from "../../testPins";
 import { useRequestSequence } from "../useRequestSequence";
 import { StateMark } from "../ui/StateMark";
 import {
@@ -96,7 +97,7 @@ function StatusPill(props: { state: SettingsSaveState }) {
   if (props.state === "idle") return null;
   return (
     <StateMark
-      testId="settings-save-state"
+      testId={desktopPins.settingsSaveState}
       state={props.state}
       shown={props.state}
       title={props.state === "error" ? SETTINGS_SAVE_ERROR_TITLE : undefined}
@@ -558,7 +559,7 @@ export function SettingsDialog(props: {
     if (query.trim() && filteredSections.length === 0) {
       return (
         <div
-          data-testid="settings-empty-search"
+          data-testid={desktopPins.settingsEmptySearch}
           className="flex h-40 items-center justify-center rounded-lg border border-dashed border-line text-sm text-muted"
         >
           {`No settings match "${query}".`}
@@ -569,7 +570,7 @@ export function SettingsDialog(props: {
     switch (activeSection) {
       case "appearance":
         return (
-          <div data-testid="settings-section-appearance">
+          <div data-testid={settingsSectionPin("appearance")}>
             <SettingRow
               title="Theme"
               description="Choose whether dohc follows the system theme or uses an explicit light or dark mode."
@@ -586,7 +587,7 @@ export function SettingsDialog(props: {
                   },
                 })
               }
-              testId="settings-row-theme"
+              testId={settingsRowPin("theme")}
             >
               <SegmentedControl
                 label="Theme"
@@ -612,7 +613,7 @@ export function SettingsDialog(props: {
                 DEFAULT_USER_SETTINGS.appearance.zoomLevel,
               )}
               onReset={() => void stepZoomSetting("reset")}
-              testId="settings-row-zoom"
+              testId={settingsRowPin("zoom")}
             >
               <div className="flex items-center gap-1.5">
                 <button
@@ -643,7 +644,7 @@ export function SettingsDialog(props: {
               description="dohc adjusts it in each theme so labels on it stay readable."
               modified={userSettings.appearance.accentColor !== null}
               onReset={() => void saveAppearance({ accentColor: null })}
-              testId="settings-row-accent"
+              testId={settingsRowPin("accent")}
             >
               <ColorControl
                 label="Accent color"
@@ -657,8 +658,8 @@ export function SettingsDialog(props: {
               description="How this computer shows you in chat. Collaborators see the color their computer picks."
               modified={userSettings.appearance.yourColor !== null}
               onReset={() => void saveAppearance({ yourColor: null })}
-              testId="settings-row-your-color"
-              {...customizeRow("settings-row-your-color")}
+              testId={settingsRowPin("your-color")}
+              {...customizeRow(settingsRowPin("your-color"))}
             >
               <ChatAvatar name={userSettings.profile.preferredName ?? "You"} kind="human" own size="comment" />
               <HueControl
@@ -673,7 +674,7 @@ export function SettingsDialog(props: {
               description="How this computer shows your agent in chat."
               modified={userSettings.appearance.yourAgentColor !== null}
               onReset={() => void saveAppearance({ yourAgentColor: null })}
-              testId="settings-row-your-agent-color"
+              testId={settingsRowPin("your-agent-color")}
             >
               <ChatAvatar name={userSettings.profile.agentName ?? "Agent"} kind="agent" own size="comment" />
               <HueControl
@@ -687,8 +688,8 @@ export function SettingsDialog(props: {
               title="Editor font"
               modified={isModified(userSettings.editor.fontFamily, DEFAULT_USER_SETTINGS.editor.fontFamily)}
               onReset={() => void saveEditor({ fontFamily: DEFAULT_USER_SETTINGS.editor.fontFamily })}
-              testId="settings-row-editor-font"
-              {...customizeRow("settings-row-editor-font")}
+              testId={settingsRowPin("editor-font")}
+              {...customizeRow(settingsRowPin("editor-font"))}
             >
               <SegmentedControl
                 label="Editor font"
@@ -709,7 +710,7 @@ export function SettingsDialog(props: {
               title="Editor text size"
               modified={isModified(userSettings.editor.fontSize, DEFAULT_USER_SETTINGS.editor.fontSize)}
               onReset={() => void saveEditor({ fontSize: DEFAULT_USER_SETTINGS.editor.fontSize })}
-              testId="settings-row-editor-size"
+              testId={settingsRowPin("editor-size")}
             >
               <div className="flex items-center gap-1.5">
                 <button
@@ -751,8 +752,8 @@ export function SettingsDialog(props: {
                   },
                 })
               }
-              testId="settings-row-sidebar"
-              {...customizeRow("settings-row-sidebar")}
+              testId={settingsRowPin("sidebar")}
+              {...customizeRow(settingsRowPin("sidebar"))}
             >
               <SidebarViewsControl
                 sidebar={userSettings.sidebar}
@@ -763,7 +764,7 @@ export function SettingsDialog(props: {
         );
       case "agents":
         return (
-          <div data-testid="settings-section-agents">
+          <div data-testid={settingsSectionPin("agents")}>
             <AgentsMcpSettings
               onError={props.onError}
               workspaceId={props.workspaceId}
@@ -792,7 +793,7 @@ export function SettingsDialog(props: {
         );
       case "cloud":
         return (
-          <div data-testid="settings-section-cloud">
+          <div data-testid={settingsSectionPin("cloud")}>
             <SettingRow
               title="Sync and sharing"
               description="Connect a server, sync this workspace, and manage who you share it with."
@@ -811,7 +812,7 @@ export function SettingsDialog(props: {
               <SettingRow
                 title="Live documents"
                 description="Documents this workspace is editing live. Stopping one keeps the file and its history."
-                testId="settings-row-live-documents"
+                testId={settingsRowPin("live-documents")}
               >
                 <button
                   type="button"
@@ -853,7 +854,7 @@ export function SettingsDialog(props: {
         );
       case "workbench":
         return (
-          <div data-testid="settings-section-workbench">
+          <div data-testid={settingsSectionPin("workbench")}>
             <SettingRow
               title="App previews"
               description="Choose the mode Apps tries first when an app has no preview mode of its own."
@@ -869,7 +870,7 @@ export function SettingsDialog(props: {
                   },
                 })
               }
-              testId="settings-row-site-preview-mode"
+              testId={settingsRowPin("site-preview-mode")}
             >
               <select
                 aria-label="Default app preview mode"
@@ -902,7 +903,7 @@ export function SettingsDialog(props: {
         );
       case "files":
         return (
-          <div data-testid="settings-section-files">
+          <div data-testid={settingsSectionPin("files")}>
             <SettingRow
               title="Attachments"
               description="Where pasted images and files are saved."
@@ -918,7 +919,7 @@ export function SettingsDialog(props: {
                   },
                 })
               }
-              testId="settings-row-attachment-location"
+              testId={settingsRowPin("attachment-location")}
             >
               <select
                 aria-label="Attachment location"
@@ -961,7 +962,7 @@ export function SettingsDialog(props: {
                     },
                   })
                 }
-                testId="settings-row-attachment-folder"
+                testId={settingsRowPin("attachment-folder")}
               >
                 <TextControl
                   label="Attachment folder name"
@@ -992,7 +993,7 @@ export function SettingsDialog(props: {
         );
       case "privacy":
         return (
-          <div data-testid="settings-section-privacy">
+          <div data-testid={settingsSectionPin("privacy")}>
             <SettingRow
               title="Confirm external links"
               description="Ask before dohc opens a link in another app."
@@ -1021,7 +1022,7 @@ export function SettingsDialog(props: {
         );
       case "keyboard":
         return (
-          <div data-testid="settings-section-keyboard">
+          <div data-testid={settingsSectionPin("keyboard")}>
             <SettingRow
               title="Open settings"
               description="Open Settings from the command palette, app menu, Activity Bar, or keyboard shortcut."
@@ -1034,7 +1035,7 @@ export function SettingsDialog(props: {
         );
       case "advanced":
         return (
-          <div data-testid="settings-section-advanced">
+          <div data-testid={settingsSectionPin("advanced")}>
             <ScheduleHostRow
               workspaceId={props.workspaceId}
               {...(props.onError ? { onError: props.onError } : {})}
@@ -1042,7 +1043,7 @@ export function SettingsDialog(props: {
             <SettingRow
               title="Settings file"
               description="Changes apply when you save the file."
-              testId="settings-row-settings-file"
+              testId={settingsRowPin("settings-file")}
               aside={askAgentAside()}
             >
               {settingsFilePath ? (
@@ -1066,7 +1067,7 @@ export function SettingsDialog(props: {
               title="Reset user settings"
               description="Restore local user settings for this desktop install to defaults."
               modified={isModified(userSettings, DEFAULT_USER_SETTINGS)}
-              testId="settings-row-reset-user"
+              testId={settingsRowPin("reset-user")}
             >
               <button
                 type="button"
@@ -1080,7 +1081,7 @@ export function SettingsDialog(props: {
               title="Reset workspace settings"
               description="Restore local settings for this workspace without touching workspace content."
               modified={isModified(workspaceSettings, DEFAULT_WORKSPACE_SETTINGS)}
-              testId="settings-row-reset-workspace"
+              testId={settingsRowPin("reset-workspace")}
             >
               <button
                 type="button"
@@ -1095,7 +1096,7 @@ export function SettingsDialog(props: {
       case "general":
       default:
         return (
-          <div data-testid="settings-section-general">
+          <div data-testid={settingsSectionPin("general")}>
             <SettingRow
               title="Your name"
               description="dohc uses this name for human messages and attributes local-agent work to you. It is display-only; permissions use your verified identity."
@@ -1109,7 +1110,7 @@ export function SettingsDialog(props: {
                   profile: { ...userSettings.profile, preferredName: undefined },
                 })
               }
-              testId="settings-row-preferred-name"
+              testId={settingsRowPin("preferred-name")}
             >
               <PreferredNameControl
                 value={userSettings.profile.preferredName}
@@ -1125,7 +1126,7 @@ export function SettingsDialog(props: {
             <SettingRow
               title="Current workspace"
               description="Settings in the Workspace scope apply only to this registered local folder."
-              testId="settings-row-current-workspace"
+              testId={settingsRowPin("current-workspace")}
             >
               <code className="max-w-sm select-text cursor-text truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink">
                 {props.workspacePath}
@@ -1134,7 +1135,7 @@ export function SettingsDialog(props: {
             <SettingRow
               title="Desktop updates"
               description="Check for a new desktop build and restart when an update is ready."
-              testId="settings-row-desktop-updates"
+              testId={settingsRowPin("desktop-updates")}
             >
               <div className="flex min-w-[260px] flex-col gap-3">
                 <div className="flex min-w-0 items-center gap-2">
@@ -1200,12 +1201,12 @@ export function SettingsDialog(props: {
       aria-modal="true"
       aria-labelledby="settings-title"
       tabIndex={-1}
-      data-testid="settings-dialog"
+      data-testid={desktopPins.settingsDialog}
       data-active-section={activeSection}
       className="dohc-elevated flex h-[min(760px,calc(100vh-48px))] w-[min(1040px,calc(100vw-32px))] overflow-hidden rounded-xl border border-line bg-bg"
     >
       <aside
-        data-testid="settings-sidebar"
+        data-testid={desktopPins.settingsSidebar}
         className="flex w-56 shrink-0 flex-col border-r border-line bg-panel max-[720px]:hidden"
       >
         <div className="border-b border-line p-4">
@@ -1219,7 +1220,7 @@ export function SettingsDialog(props: {
             <button
               key={section.id}
               type="button"
-              data-testid={`settings-nav-${section.id}`}
+              data-testid={settingsNavPin(section.id)}
               aria-current={activeSection === section.id ? "page" : undefined}
               onClick={() => setActiveSection(section.id)}
               className={`flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 ${
@@ -1246,7 +1247,7 @@ export function SettingsDialog(props: {
             />
             <input
               spellCheck={false}
-              data-testid="settings-search"
+              data-testid={desktopPins.settingsSearch}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search settings"
@@ -1289,7 +1290,7 @@ export function SettingsDialog(props: {
             {warnings.map((warning, index) => (
               <div
                 key={`${index}-${warning}`}
-                data-testid="settings-warning"
+                data-testid={desktopPins.settingsWarning}
                 className="flex items-center gap-2 text-[11px] text-warning"
               >
                 <AlertTriangle size={12} aria-hidden />

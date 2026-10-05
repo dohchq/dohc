@@ -1,3 +1,4 @@
+import { activityPin } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -193,7 +194,7 @@ test("a .env is versioned protected: locked history, versions carry it, search f
     expect((await compareRow.textContent()) ?? "").not.toContain(SECRET_VALUE);
 
     // 5. Search: the secret value is unfindable; ordinary text still works.
-    await page.getByTestId("activity-search").click();
+    await page.getByTestId(activityPin("search")).click();
     await expect(page.getByTestId("search-view")).toBeVisible();
     await page.getByTestId("search-input").fill(SECRET_VALUE);
     await expect(page.getByTestId("search-empty-state")).toBeVisible({

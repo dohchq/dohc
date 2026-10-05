@@ -1,3 +1,4 @@
+import { desktopPins } from "../testPins";
 import { DohcMark } from "@dohc/brand";
 import { Check, ChevronsUpDown, PanelLeft, PanelRight, Search } from "lucide-react";
 import { type ReactNode, useId, useRef, useState } from "react";
@@ -97,13 +98,13 @@ export function Titlebar(props: {
 
   return (
     <header
-      data-testid="titlebar"
+      data-testid={desktopPins.titlebar}
       className="titlebar-drag relative flex shrink-0 items-center gap-2 border-b border-line bg-panel"
       style={{ height: TITLEBAR_HEIGHT_PX, paddingLeft: leftInset }}
     >
       {/* Reserve space for centered quick-open. */}
       <div
-        data-testid="titlebar-left-group"
+        data-testid={desktopPins.titlebarLeftGroup}
         className="flex min-w-0 items-center gap-2"
         style={{ maxWidth: `calc(50vw - ${QUICK_OPEN_WIDTH} / 2 - ${leftInset} - 12px)` }}
       >
@@ -216,7 +217,7 @@ export function Titlebar(props: {
       {props.onQuickOpen ? (
         <button
           type="button"
-          data-testid="titlebar-quick-open"
+          data-testid={desktopPins.titlebarQuickOpen}
           onClick={props.onQuickOpen}
           style={{ width: QUICK_OPEN_WIDTH }}
           className="titlebar-no-drag absolute left-1/2 top-1/2 flex h-7 -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
@@ -229,14 +230,14 @@ export function Titlebar(props: {
 
       {props.primarySidebar || props.chatsSidebar ? (
         <div
-          data-testid="titlebar-layout-controls"
+          data-testid={desktopPins.titlebarLayoutControls}
           role="group"
           aria-label="Layout controls"
           className="titlebar-no-drag ml-auto flex shrink-0 items-center gap-0.5"
         >
           {props.primarySidebar ? (
             <LayoutToggle
-              testId="titlebar-primary-sidebar"
+              testId={desktopPins.titlebarPrimarySidebar}
               label="Toggle primary sidebar"
               pressed={props.primarySidebar.visible}
               onClick={props.primarySidebar.onToggle}
@@ -245,7 +246,7 @@ export function Titlebar(props: {
           ) : null}
           {props.chatsSidebar ? (
             <LayoutToggle
-              testId="titlebar-chats-sidebar"
+              testId={desktopPins.titlebarChatsSidebar}
               label="Toggle chats sidebar"
               pressed={props.chatsSidebar.visible}
               onClick={props.chatsSidebar.onToggle}

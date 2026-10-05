@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { editorTabTestId } from "../../testPins";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useRef, useState } from "react";
@@ -93,7 +94,9 @@ describe("EditorTabs strip scrolling", () => {
         onCreateGroupRight={noop}
       />,
     );
-    const tab = screen.getByTestId(testId);
+    const sharedId = editorTabTestId(path);
+    expect(sharedId).toBe(testId);
+    const tab = screen.getByTestId(sharedId);
     fireEvent.keyDown(tab, { key: "Enter" });
     expect(onActivate).toHaveBeenCalledWith("left", path);
   });

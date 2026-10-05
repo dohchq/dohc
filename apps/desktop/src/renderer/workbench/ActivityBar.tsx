@@ -1,3 +1,4 @@
+import { desktopPins, activityPin, activityCountPin } from "../../testPins";
 import {
   Cloud,
   Files,
@@ -76,7 +77,7 @@ function RailButton(props: {
       ) : null}
       {typeof props.count === "number" ? (
         <span
-          data-testid={`${props.testId}-count`}
+          data-testid={activityCountPin(props.testId)}
           className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-ink px-1 text-center text-[10px] font-semibold leading-4 text-bg"
         >
           {/* Clamp at 99+: the right-anchored pill grows leftward, and at
@@ -147,7 +148,7 @@ export function ActivityBar(props: {
   return (
     <nav
       aria-label="Activity bar"
-      data-testid="activity-bar"
+      data-testid={desktopPins.activityBar}
       className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-panel pb-2 pt-1"
     >
       {/* The view list scrolls, so enough pinned apps never push the
@@ -158,7 +159,7 @@ export function ActivityBar(props: {
         {props.views.map((view) => (
           <RailButton
             key={view}
-            testId={`activity-${view}`}
+            testId={activityPin(view)}
             label={LABELS[view]}
             // The rail reflects a collapsed panel: no active mark while hidden.
             active={props.sidebarVisible && props.activeView === view}
@@ -173,7 +174,7 @@ export function ActivityBar(props: {
           return (
             <RailButton
               key={viewId}
-              testId="activity-pinned-app"
+              testId={desktopPins.activityPinnedApp}
               label={app.label}
               active={props.sidebarVisible && props.activeView === viewId}
               onClick={() => props.onSelectView(viewId)}
@@ -196,7 +197,7 @@ export function ActivityBar(props: {
       </div>
       <div className="mt-auto flex flex-col items-center gap-1 border-t border-line pt-2">
         <RailButton
-          testId="activity-cloud"
+          testId={activityPin("cloud")}
           label="Sync and sharing"
           badge={props.hasConflict ? "danger" : undefined}
           onClick={props.onOpenCloud}
@@ -204,7 +205,7 @@ export function ActivityBar(props: {
         />
         {props.notices}
         <RailButton
-          testId="activity-settings"
+          testId={activityPin("settings")}
           label="Open settings"
           onClick={props.onOpenSettings}
           icon={<RailGlyph Icon={Settings} />}

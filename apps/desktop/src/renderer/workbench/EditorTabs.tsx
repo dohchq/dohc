@@ -1,3 +1,4 @@
+import { editorTabTestId } from "../../testPins";
 import { useDismiss } from "../ui/useDismiss";
 import { focusSurface, useFocusSurface } from "../ui/focusReturn";
 import { basenameOf } from "../path";
@@ -14,7 +15,6 @@ import { prefersReducedMotion } from "../reducedMotion";
 import {
   isChatsTabPath,
   chatTabDefaultTitle,
-  editorTabTestId,
   isGraphTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,

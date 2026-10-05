@@ -1,3 +1,4 @@
+import { desktopPins } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -23,7 +24,7 @@ test("Home Like works by keyboard and pointer and persists across reopen in both
     await openWorkspaceFromFirstRun(page, temp);
     await page.emulateMedia({ reducedMotion: "reduce" });
 
-    await page.getByTestId("titlebar-chats-sidebar").click();
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     await page.getByTestId("chats-channel").click();
     await page.getByTestId("chats-new-thread-composer").fill(postBody);
     await page.getByTestId("chats-new-thread-composer").press("Enter");

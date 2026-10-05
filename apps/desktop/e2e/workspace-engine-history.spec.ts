@@ -1,3 +1,4 @@
+import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -38,7 +39,7 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
     // through the daemon's capture.momentRecorded -> workspace-activity
     // refresh chain — the exact seam this spec exists to prove in daemon
     // mode.
-    await page.getByTestId("activity-history").click();
+    await page.getByTestId(activityPin("history")).click();
     await expect(
       page
         .locator(

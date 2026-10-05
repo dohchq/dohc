@@ -1,3 +1,4 @@
+import { desktopPins, chatsPanelTabPin } from "../../testPins";
 import { PanelRight } from "lucide-react";
 import { useRef, type ReactNode } from "react";
 import { useFocusReturn } from "../ui/focusReturn";
@@ -44,13 +45,13 @@ export function ChatsPanel(props: {
       ref={panelRef}
       tabIndex={-1}
       data-focus-surface="panel"
-      data-testid="chats-panel"
+      data-testid={desktopPins.chatsPanel}
       aria-label="Chats"
       className="relative flex shrink-0 flex-col border-l border-line bg-panel"
       style={{ width }}
     >
       <div
-        data-testid="chats-panel-resize"
+        data-testid={desktopPins.chatsPanelResize}
         role="separator"
         tabIndex={0}
         aria-orientation="vertical"
@@ -107,7 +108,7 @@ export function ChatsPanel(props: {
             <button
               key={tab}
               type="button"
-              data-testid={`chats-panel-tab-${tab}`}
+              data-testid={chatsPanelTabPin(tab)}
               aria-pressed={props.tab === tab}
               onClick={() => props.onTabChange(tab)}
               className={`h-7 rounded-md px-3 text-[12px] font-medium transition-colors dohc-focus-visible ${
@@ -124,7 +125,7 @@ export function ChatsPanel(props: {
           {props.actions}
           <button
             type="button"
-            data-testid="chats-panel-collapse"
+            data-testid={desktopPins.chatsPanelCollapse}
             aria-label="Hide chats"
             title="Hide chats"
             onClick={props.onCollapse}

@@ -1,3 +1,4 @@
+import { editorTabTestId } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import type { Locator } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -47,7 +48,7 @@ test("open editors list caps its height and keeps the active row in view", async
 
     for (const name of names) {
       await explorerRow(page, name).click();
-      await expect(page.getByTestId(`tab-${name}`)).toBeVisible();
+      await expect(page.getByTestId(editorTabTestId(name))).toBeVisible();
     }
 
     const list = page.getByTestId("open-editors-list");
@@ -71,7 +72,7 @@ test("open editors list caps its height and keeps the active row in view", async
     // row back into view — without disturbing the sidebar's outer scroll.
     const nav = page.getByTestId("file-tree");
     const navScrollBefore = await nav.evaluate((el) => el.scrollTop);
-    await page.getByTestId(`tab-${names[0]}`).click();
+    await page.getByTestId(editorTabTestId(names[0])).click();
     await expect
       .poll(async () => rowInView(list, names[0]))
       .toBe(true);
