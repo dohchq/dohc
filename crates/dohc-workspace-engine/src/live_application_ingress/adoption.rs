@@ -161,7 +161,6 @@ mod tests {
         struct_coverage["checkpointCoverage"][0]["structRanges"] = adjacent.clone();
         let mut deletion_coverage = v2;
         deletion_coverage["checkpointCoverage"][0]["deletionRanges"] = overlapping.clone();
-        let mut unexpectedly_decoded = Vec::new();
         for (case, event) in [
             ("adjacent firstSeen", metadata(adjacent)),
             ("overlapping firstSeen", metadata(overlapping)),
@@ -172,14 +171,10 @@ mod tests {
             ("adjacent checkpoint structRanges", struct_coverage),
             ("overlapping checkpoint deletionRanges", deletion_coverage),
         ] {
-            match decode(&cut(event), 1, limits.clone()) {
-                Err(error) => assert_eq!(error.message, "invalid-owner-adoption-event", "{case}"),
-                Ok(_) => unexpectedly_decoded.push(case),
-            }
+            let Err(error) = decode(&cut(event), 1, limits.clone()) else {
+                panic!("{case} decoded");
+            };
+            assert_eq!(error.message, "invalid-owner-adoption-event", "{case}");
         }
-        assert!(
-            unexpectedly_decoded.is_empty(),
-            "non-canonical events decoded: {unexpectedly_decoded:?}"
-        );
     }
 }
