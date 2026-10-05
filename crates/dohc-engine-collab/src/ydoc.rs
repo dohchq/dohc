@@ -1169,9 +1169,18 @@ impl Ydoc {
                 })
             }
             ContentKind::Richdoc => {
+                let meta = self.doc.get_or_insert_map(ROOT_META);
+                let missing_schema_version = match meta.get(&self.doc.transact(), "schemaVersion") {
+                    None => true,
+                    Some(Out::Any(Any::Number(1.0))) => false,
+                    _ => {
+                        return Err(CollabError::MalformedUpdate {
+                            reason: "unsupported rich-document schema version".into(),
+                        });
+                    }
+                };
                 let frag = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
                 let map = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
-                let meta = self.doc.get_or_insert_map(ROOT_META);
                 let (frontmatter, prefix, body) = split_markdown_frontmatter(markdown);
                 let uses_crlf = markdown.contains("\r\n");
                 let source = match prefix {
@@ -1182,6 +1191,9 @@ impl Ydoc {
                 let blocks =
                     parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body), reading);
                 self.with_delta(|txn| {
+                    if missing_schema_version {
+                        meta.insert(txn, "schemaVersion", Any::Number(1.0));
+                    }
                     if uses_crlf {
                         meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
                     } else {
@@ -7079,6 +7091,131 @@ mod projection_tests {
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, chosen)
             .expect("richdoc rewrite");
         assert_eq!(doc.project_richdoc().expect("projection"), chosen);
+    }
+
+    #[test]
+    fn engine_seeded_rewrites_carry_schema_version_in_the_same_update() {
+        let mut fixtures = Vec::new();
+        for markdown in ["", "Body", "---\ntitle: Plan\n---\n\nBody"] {
+            let doc = Ydoc::wire();
+            let update = doc
+                .rewrite_content_to_markdown(ContentKind::Richdoc, markdown)
+                .expect("rewrite");
+            fixtures.push(serde_json::json!({ "markdown": markdown, "update": update }));
+        }
+        if let Ok(path) = std::env::var("DOHC_SEEDED_REWRITE_FIXTURE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&fixtures).unwrap()).unwrap();
+        }
+        for fixture in fixtures {
+            let update: Vec<u8> = serde_json::from_value(fixture["update"].clone()).unwrap();
+            let replay = Ydoc::wire();
+            replay
+                .apply(&update)
+                .expect("replay only the returned delta");
+            let meta = replay.doc.get_or_insert_map(ROOT_META);
+            assert_eq!(
+                meta.get(&replay.doc.transact(), "schemaVersion"),
+                Some(Out::Any(Any::Number(1.0)))
+            );
+            replay
+                .validate_public_baseline(&update)
+                .expect("Rust admission");
+            assert_eq!(
+                replay.project_richdoc().unwrap(),
+                fixture["markdown"].as_str().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn engine_seeded_rewrite_preserves_supported_version_and_other_metadata() {
+        let doc = Ydoc::wire();
+        let meta = doc.doc.get_or_insert_map(ROOT_META);
+        {
+            let mut txn = doc.doc.transact_mut();
+            meta.insert(&mut txn, "schemaVersion", Any::Number(1.0));
+            meta.insert(&mut txn, "unrelated", "keep");
+        }
+        let before = doc.encode_full_state();
+        assert_eq!(
+            doc.rewrite_content_to_markdown(ContentKind::Richdoc, "")
+                .unwrap(),
+            [0, 0],
+            "a supported version must not be rewritten"
+        );
+        assert_eq!(doc.encode_full_state(), before);
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Body")
+            .unwrap();
+        assert_eq!(
+            meta.get(&doc.doc.transact(), "unrelated"),
+            Some(Out::Any(Any::from("keep")))
+        );
+    }
+
+    #[test]
+    fn engine_seeded_rewrite_refuses_unsupported_version_without_mutation() {
+        for version in [
+            Any::Number(2.0),
+            Any::Number(0.0),
+            Any::from("1"),
+            Any::Null,
+            Any::Bool(true),
+        ] {
+            for preserve_source in [false, true] {
+                let doc = Ydoc::wire();
+                doc.rewrite_content_to_markdown(
+                    ContentKind::Richdoc,
+                    "---\ntitle: Keep\n---\n\nOriginal",
+                )
+                .unwrap();
+                let meta = doc.doc.get_or_insert_map(ROOT_META);
+                meta.insert(
+                    &mut doc.doc.transact_mut(),
+                    "schemaVersion",
+                    version.clone(),
+                );
+                let before = doc.encode_full_state();
+                let vector = doc.encode_state_vector();
+                let result = if preserve_source {
+                    doc.rewrite_content_to_markdown_preserving_source(
+                        ContentKind::Richdoc,
+                        "Changed",
+                    )
+                } else {
+                    doc.rewrite_content_to_markdown(ContentKind::Richdoc, "Changed")
+                };
+                assert!(result.is_err(), "unsupported {version:?}");
+                assert_eq!(doc.encode_full_state(), before);
+                assert_eq!(doc.encode_state_vector(), vector);
+            }
+        }
+    }
+
+    #[test]
+    fn engine_seeded_cleanup_fixture_passes_rust_admission() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../tests/seeded-doc-fixtures/cleanup.json"))
+                .unwrap();
+        for field in ["seed", "checkpoint", "afterRestart"] {
+            let bytes: Vec<u8> = serde_json::from_value(fixture[field].clone()).unwrap();
+            let doc = Ydoc::wire();
+            doc.apply(&bytes).unwrap();
+            doc.validate_public_baseline(&bytes)
+                .expect("cleanup checkpoint passes Rust admission");
+            let expected = if field == "seed" {
+                serde_json::json!({ "id": fixture["sourceId"], "related": fixture["targetId"] })
+            } else {
+                serde_json::json!({ "id": fixture["sourceId"] })
+            };
+            assert_eq!(doc.frontmatter_json(), expected);
+        }
+    }
+
+    #[test]
+    fn engine_seeded_fix_keeps_inbound_missing_version_invalid() {
+        let incoming = Ydoc::wire();
+        let bytes = incoming.richdoc_append_paragraph("Incoming without schema metadata");
+        assert!(incoming.validate_public_baseline(&bytes).is_err());
     }
 
     /// Binds `source` to the document's current projection, as a crafted
