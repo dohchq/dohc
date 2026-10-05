@@ -6,18 +6,22 @@
 //! [`FilesHandle::notify_overflow`](crate::FilesHandle::notify_overflow) bit;
 //! the dirty-generation model then performs a full bounded rescan.
 //!
-//! No watcher-side floor filter is needed. A `.dohc/engine/engine.db-wal`
-//! notification may mark dirty, but the rescan excludes it through
-//! [`crate::floor`], producing an empty diff rather than a self-generated
-//! capture loop. Symlink notifications are likewise harmless: the scanner uses
+//! Ordinary events strictly below `.dohc/engine` do not enter the debounce
+//! queue: both capture and observation exclude that subtree. Policy files and
+//! ancestor changes still trigger a rescan, as do errors and uncertain events.
+//! Symlink notifications are likewise harmless: the scanner uses
 //! lstat and never descends through a symlink, so only real in-root content can
 //! reach a capture plan.
 
 use crate::reconcile::ReconcileController;
 use crate::{CancellationToken, FilesError, FilesHandle, ReconcileRun};
-use notify::{RecursiveMode, Watcher};
+use notify::event::{
+    AccessKind, AccessMode, CreateKind, DataChange, MetadataKind, ModifyKind, RemoveKind,
+    RenameMode,
+};
+use notify::{EventKind, RecursiveMode, Watcher};
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
@@ -461,6 +465,84 @@ async fn await_ready_with_deadline(
     }
 }
 
+fn engine_storage_event(root: &Path, event: &notify::Event) -> bool {
+    let ordinary = match event.kind {
+        EventKind::Access(AccessKind::Any | AccessKind::Read)
+        | EventKind::Create(CreateKind::Any | CreateKind::File | CreateKind::Folder)
+        | EventKind::Modify(ModifyKind::Any)
+        | EventKind::Modify(ModifyKind::Data(
+            DataChange::Any | DataChange::Size | DataChange::Content,
+        ))
+        | EventKind::Modify(ModifyKind::Metadata(
+            MetadataKind::Any
+            | MetadataKind::AccessTime
+            | MetadataKind::WriteTime
+            | MetadataKind::Permissions
+            | MetadataKind::Ownership
+            | MetadataKind::Extended,
+        ))
+        | EventKind::Modify(ModifyKind::Name(
+            RenameMode::Any | RenameMode::From | RenameMode::To | RenameMode::Both,
+        ))
+        | EventKind::Remove(RemoveKind::Any | RemoveKind::File | RemoveKind::Folder) => true,
+        EventKind::Access(AccessKind::Open(mode) | AccessKind::Close(mode)) => {
+            mode != AccessMode::Other
+        }
+        _ => false,
+    };
+    if !ordinary || event.need_rescan() || event.paths.is_empty() || !root.is_absolute() {
+        return false;
+    }
+    event.paths.iter().all(|path| {
+        let Ok(relative) = path.strip_prefix(root) else {
+            return false;
+        };
+        let mut components = relative.components();
+        for expected in [crate::floor::ENGINE_STORAGE_SEGMENT, "engine"] {
+            let Some(Component::Normal(name)) = components.next() else {
+                return false;
+            };
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            if crate::floor::normalize_segment(name) != expected {
+                return false;
+            }
+        }
+        let Some(Component::Normal(name)) = components.next() else {
+            return false;
+        };
+        name.to_str().is_some()
+            && components.all(
+                |component| matches!(component, Component::Normal(name) if name.to_str().is_some()),
+            )
+    })
+}
+
+fn event_callback(
+    root: PathBuf,
+    dirty: Arc<dyn Fn() + Send + Sync>,
+    tx: SyncSender<ThreadMessage>,
+    state: Arc<WatchState>,
+    backend_error: Arc<AtomicBool>,
+) -> impl FnMut(Result<notify::Event, notify::Error>) + Send {
+    move |event| {
+        if event
+            .as_ref()
+            .is_ok_and(|event| engine_storage_event(&root, event))
+        {
+            return;
+        }
+        if event.is_err() {
+            state.disruptions.fetch_add(1, Ordering::AcqRel);
+            backend_error.store(true, Ordering::Release);
+            dirty();
+        }
+        // A full queue already contains evidence of a relevant change.
+        let _ = tx.try_send(ThreadMessage::Event);
+    }
+}
+
 fn watcher_thread(
     root: PathBuf,
     dirty: Arc<dyn Fn() + Send + Sync>,
@@ -470,8 +552,6 @@ fn watcher_thread(
     ready: tokio::sync::oneshot::Sender<Result<(), FilesError>>,
 ) {
     let config = notify::Config::default().with_follow_symlinks(false);
-    let callback_dirty = dirty.clone();
-    let callback_state = Arc::clone(&state);
     let unavailable = &state.unavailable;
     // Sticky, NON-DROPPABLE backend-error signal. The bounded `callback_tx`
     // event queue can drop a `try_send` under load, so a re-attach request
@@ -480,18 +560,14 @@ fn watcher_thread(
     // would leave a genuinely-dead watch un-reattached. This flag is set by
     // the callback and consumed by the main loop each iteration.
     let backend_error_pending = Arc::new(AtomicBool::new(false));
-    let callback_backend_error = Arc::clone(&backend_error_pending);
     let mut watcher = match notify::RecommendedWatcher::new(
-        move |event: Result<notify::Event, notify::Error>| {
-            if event.is_err() {
-                callback_state.disruptions.fetch_add(1, Ordering::AcqRel);
-                callback_backend_error.store(true, Ordering::Release);
-                callback_dirty();
-            }
-            // A full queue already contains abundant evidence of a change, so
-            // further callbacks coalesce without allocating unbounded memory.
-            let _ = callback_tx.try_send(ThreadMessage::Event);
-        },
+        event_callback(
+            root.clone(),
+            Arc::clone(&dirty),
+            callback_tx,
+            Arc::clone(&state),
+            Arc::clone(&backend_error_pending),
+        ),
         config,
     ) {
         Ok(watcher) => watcher,
@@ -697,6 +773,426 @@ impl WatchedRoot {
             (Some(bound), Some(current)) => bound == current,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod callback_tests {
+    use super::*;
+    use crate::{
+        CaptureError, CaptureOp, CaptureSink, FilesActor, IngestOutcome, IngestReason, ScanBounds,
+        apply_reconcile_plan,
+    };
+    use dohc_engine_storage::NoFaults;
+    use dohc_test_scratch::ScratchDir;
+    use notify::event::Flag;
+
+    fn deliver_messages(
+        messages: &Receiver<ThreadMessage>,
+        debounce: &mut Debounce,
+        now: Instant,
+        dirty: &dyn Fn(),
+    ) -> usize {
+        let mut delivered = 0;
+        for message in messages.try_iter() {
+            assert!(matches!(message, ThreadMessage::Event));
+            delivered += 1;
+            if debounce.event(now) {
+                dirty();
+            }
+        }
+        delivered
+    }
+
+    fn flush_due(debounce: &mut Debounce, now: Instant, dirty: &dyn Fn()) -> bool {
+        if debounce.timeout(now).is_some() {
+            dirty();
+            true
+        } else {
+            false
+        }
+    }
+
+    struct Callback {
+        send: Box<dyn FnMut(Result<notify::Event, notify::Error>) + Send>,
+        messages: Receiver<ThreadMessage>,
+        dirty_calls: Arc<AtomicU64>,
+        state: Arc<WatchState>,
+        backend_error: Arc<AtomicBool>,
+    }
+
+    impl Callback {
+        fn new(root: &Path, capacity: usize) -> Self {
+            let (tx, messages) = mpsc::sync_channel(capacity);
+            let dirty_calls = Arc::new(AtomicU64::new(0));
+            let calls = Arc::clone(&dirty_calls);
+            let state = Arc::new(WatchState::default());
+            let backend_error = Arc::new(AtomicBool::new(false));
+            Self {
+                send: Box::new(event_callback(
+                    root.to_path_buf(),
+                    Arc::new(move || {
+                        calls.fetch_add(1, Ordering::AcqRel);
+                    }),
+                    tx,
+                    Arc::clone(&state),
+                    Arc::clone(&backend_error),
+                )),
+                messages,
+                dirty_calls,
+                state,
+                backend_error,
+            }
+        }
+
+        fn expect_queued(&mut self, event: notify::Event) {
+            (self.send)(Ok(event.clone()));
+            assert!(
+                matches!(self.messages.try_recv(), Ok(ThreadMessage::Event)),
+                "event was dropped: {event:?}"
+            );
+            self.expect_quiet();
+        }
+
+        fn expect_quiet(&self) {
+            assert!(matches!(
+                self.messages.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+            assert_eq!(self.dirty_calls.load(Ordering::Acquire), 0);
+            assert_eq!(self.state.disruptions.load(Ordering::Acquire), 0);
+            assert!(!self.backend_error.load(Ordering::Acquire));
+        }
+    }
+
+    #[test]
+    fn ordinary_engine_descendant_events_never_queue_or_mark_dirty() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        for kind in [
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            EventKind::Create(CreateKind::Any),
+            EventKind::Create(CreateKind::Folder),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            EventKind::Remove(RemoveKind::Any),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            (callback.send)(Ok(notify::Event::new(kind)
+                .add_path(root.join(".dohc/engine/engine.db-wal"))
+                .add_path(root.join(".dohc/engine/blobs/new"))));
+            callback.expect_quiet();
+        }
+    }
+
+    #[test]
+    fn unknown_kinds_empty_paths_and_rescan_flags_still_queue() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        for kind in [
+            EventKind::Any,
+            EventKind::Other,
+            EventKind::Access(AccessKind::Other),
+            EventKind::Access(AccessKind::Open(AccessMode::Other)),
+            EventKind::Create(CreateKind::Other),
+            EventKind::Modify(ModifyKind::Other),
+            EventKind::Modify(ModifyKind::Data(DataChange::Other)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Other)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::Other)),
+            EventKind::Remove(RemoveKind::Other),
+        ] {
+            callback.expect_queued(
+                notify::Event::new(kind).add_path(root.join(".dohc/engine/engine.db")),
+            );
+        }
+        callback.expect_queued(notify::Event::new(EventKind::Modify(ModifyKind::Any)));
+        callback.expect_queued(
+            notify::Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(root.join(".dohc/engine/engine.db"))
+                .set_flag(Flag::Rescan),
+        );
+    }
+
+    #[test]
+    fn ancestors_policies_content_and_unproven_paths_still_queue() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        for path in [
+            root.path().to_path_buf(),
+            root.join(".dohc"),
+            root.join(".dohc/engine"),
+            root.join(".dohc/files.toml"),
+            root.join(".dohc/visibility.toml"),
+            root.join(".dohc/engine-backup/engine.db"),
+            root.join(".dohc/engine/../files.toml"),
+            root.join("nested/.dohc/engine/engine.db"),
+            root.join("notes/a.md"),
+            root.join("data.sqlite-wal"),
+            root.join("notes.md.job.conflict"),
+            root.path()
+                .with_file_name("other-workspace")
+                .join(".dohc/engine/engine.db"),
+            PathBuf::from(".dohc/engine/engine.db"),
+        ] {
+            for kind in [
+                EventKind::Create(CreateKind::Any),
+                EventKind::Modify(ModifyKind::Any),
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::Permissions)),
+                EventKind::Remove(RemoveKind::Any),
+            ] {
+                callback.expect_queued(notify::Event::new(kind).add_path(path.clone()));
+            }
+        }
+        let mut relative_root = Callback::new(Path::new("workspace"), 1);
+        relative_root.expect_queued(
+            notify::Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(PathBuf::from("workspace/.dohc/engine/engine.db")),
+        );
+    }
+
+    #[test]
+    fn mixed_renames_and_atomic_policy_replacements_still_queue() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        let internal = root.join(".dohc/engine/staged");
+        for destination in [
+            root.join("notes/a.md"),
+            root.join(".dohc/files.toml"),
+            root.join(".dohc/visibility.toml"),
+        ] {
+            for paths in [
+                [internal.clone(), destination.clone()],
+                [destination.clone(), internal.clone()],
+            ] {
+                let mut event =
+                    notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)));
+                event.paths.extend(paths);
+                callback.expect_queued(event);
+            }
+            for mode in [RenameMode::From, RenameMode::To] {
+                callback.expect_queued(
+                    notify::Event::new(EventKind::Modify(ModifyKind::Name(mode)))
+                        .add_path(destination.clone()),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn engine_path_matching_uses_the_current_floor() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        for path in [".DOHC/ENGINE/engine.db", ".do\u{200b}hc/engine/engine.db"] {
+            (callback.send)(Ok(
+                notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join(path))
+            ));
+            callback.expect_quiet();
+        }
+        let aliased = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(root.join(".dohc./engine /engine.db"));
+        #[cfg(windows)]
+        {
+            (callback.send)(Ok(aliased));
+            callback.expect_quiet();
+        }
+        #[cfg(not(windows))]
+        callback.expect_queued(aliased);
+    }
+
+    #[test]
+    fn backend_errors_keep_sticky_dirty_and_reattach_evidence_when_queue_is_full() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        (callback.send)(Ok(
+            notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join("a.md"))
+        ));
+        (callback.send)(Err(
+            notify::Error::generic("backend error").add_path(root.join(".dohc/engine/engine.db"))
+        ));
+        assert_eq!(callback.dirty_calls.load(Ordering::Acquire), 1);
+        assert_eq!(callback.state.disruptions.load(Ordering::Acquire), 1);
+        assert!(callback.backend_error.load(Ordering::Acquire));
+        assert!(matches!(
+            callback.messages.try_recv(),
+            Ok(ThreadMessage::Event)
+        ));
+        assert!(matches!(
+            callback.messages.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn internal_noise_does_not_clear_or_delay_a_content_burst() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        let mut debounce = Debounce::default();
+        let first = Instant::now();
+        let calls = Arc::clone(&callback.dirty_calls);
+        let dirty = move || {
+            calls.fetch_add(1, Ordering::AcqRel);
+        };
+        (callback.send)(Ok(
+            notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join("a.md"))
+        ));
+        assert_eq!(
+            deliver_messages(&callback.messages, &mut debounce, first, &dirty),
+            1
+        );
+        for _ in 0..WATCH_EVENT_QUEUE_CAPACITY * 2 {
+            (callback.send)(Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(root.join(".dohc/engine/engine.db-wal"))));
+            assert_eq!(
+                deliver_messages(
+                    &callback.messages,
+                    &mut debounce,
+                    first + WATCH_SETTLE / 2,
+                    &dirty,
+                ),
+                0
+            );
+        }
+        callback.expect_quiet();
+        assert_eq!(debounce.next_deadline(), Some(first + WATCH_SETTLE));
+        assert!(flush_due(&mut debounce, first + WATCH_SETTLE, &dirty));
+        assert_eq!(callback.dirty_calls.load(Ordering::Acquire), 1);
+    }
+
+    struct AcceptAll;
+    impl CaptureSink for AcceptAll {
+        fn ingest(
+            &mut self,
+            _path: &str,
+            size: u64,
+            sha256: &str,
+            _media_type: &str,
+            _reason: IngestReason,
+        ) -> Result<IngestOutcome, CaptureError> {
+            Ok(IngestOutcome::Captured {
+                size,
+                sha256: sha256.to_owned(),
+            })
+        }
+
+        fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {
+            Ok(())
+        }
+    }
+
+    async fn acknowledge(handle: &FilesHandle) -> Vec<CaptureOp> {
+        let ReconcileRun::Completed(plan) = handle
+            .reconcile_if_dirty(CancellationToken::new())
+            .await
+            .unwrap()
+        else {
+            panic!("expected completed reconcile");
+        };
+        let applied = apply_reconcile_plan(&plan, &mut AcceptAll, &NoFaults);
+        let ops = plan.ops.clone();
+        handle.acknowledge_capture(plan, applied).await.unwrap();
+        ops
+    }
+
+    #[tokio::test]
+    async fn internal_callbacks_skip_scanner_work_and_content_edits_still_reconcile() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let actor = FilesActor::spawn_async(root.path().to_owned(), ScanBounds::default())
+            .await
+            .unwrap();
+        let handle = actor.handle();
+        assert!(acknowledge(&handle).await.is_empty());
+        let baseline = handle.stats().await.unwrap();
+        assert!(!baseline.dirty);
+        assert_eq!(baseline.generation.0, 1);
+        assert_eq!(baseline.hashed, 0);
+        let (tx, messages) = mpsc::sync_channel(1);
+        let dirty_handle = handle.clone();
+        let dirty: Arc<dyn Fn() + Send + Sync> = Arc::new(move || dirty_handle.notify_overflow());
+        let mut callback = event_callback(
+            root.path().to_owned(),
+            Arc::clone(&dirty),
+            tx,
+            Arc::new(WatchState::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let internal = root.join(".dohc/engine/engine.db-wal");
+        std::fs::create_dir_all(internal.parent().unwrap()).unwrap();
+        let mut debounce = Debounce::default();
+        let first = Instant::now();
+        for sequence in 0..WATCH_EVENT_QUEUE_CAPACITY * 2 {
+            std::fs::write(&internal, sequence.to_le_bytes()).unwrap();
+            callback(Ok(
+                notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(internal.clone())
+            ));
+            assert_eq!(
+                deliver_messages(&messages, &mut debounce, first, &*dirty),
+                0
+            );
+        }
+        assert_eq!(debounce.next_deadline(), None);
+        assert!(!flush_due(
+            &mut debounce,
+            first + WATCH_HARD_DEADLINE,
+            &*dirty,
+        ));
+        assert!(matches!(
+            messages.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(matches!(
+            handle.reconcile_if_dirty(cancelled).await.unwrap(),
+            ReconcileRun::Converged,
+        ));
+        let after_internal = handle.stats().await.unwrap();
+        assert_eq!(after_internal, baseline);
+
+        let content = root.join("a.md");
+        for (kind, bytes) in [
+            (
+                EventKind::Create(CreateKind::File),
+                Some(b"created".as_slice()),
+            ),
+            (
+                EventKind::Modify(ModifyKind::Any),
+                Some(b"edited content".as_slice()),
+            ),
+            (EventKind::Remove(RemoveKind::File), None),
+        ] {
+            if let Some(bytes) = bytes {
+                std::fs::write(&content, bytes).unwrap();
+            } else {
+                std::fs::remove_file(&content).unwrap();
+            }
+            callback(Ok(notify::Event::new(kind).add_path(content.clone())));
+            let event_at = Instant::now();
+            assert_eq!(
+                deliver_messages(&messages, &mut debounce, event_at, &*dirty),
+                1
+            );
+            assert!(!handle.stats().await.unwrap().dirty);
+            assert!(flush_due(&mut debounce, event_at + WATCH_SETTLE, &*dirty,));
+            let ops = acknowledge(&handle).await;
+            match bytes {
+                Some(_) => assert!(
+                    matches!(ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "a.md")
+                ),
+                None => assert!(
+                    matches!(ops.as_slice(), [CaptureOp::Retire { path }] if path == "a.md")
+                ),
+            }
+        }
+        let after_content = handle.stats().await.unwrap();
+        assert!(!after_content.dirty);
+        assert_eq!(after_content.generation.0, baseline.generation.0 + 3);
+        assert_eq!(after_content.hashed, baseline.hashed + 2);
+        assert_eq!(after_content.tracked, 0);
     }
 }
 
