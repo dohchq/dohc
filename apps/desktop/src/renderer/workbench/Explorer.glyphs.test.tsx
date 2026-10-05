@@ -198,4 +198,23 @@ describe("Explorer kind glyphs", () => {
     expect(editRowGlyph().classList.contains("lucide-file-code")).toBe(true);
     fireEvent.keyDown(rename, { key: "Escape" });
   });
+
+  it.each([
+    // A `.db` the listing does not report as a database stays a plain file.
+    ["cache.db", "file", "lucide-file"],
+    // A file the listing reports as a database stays one whatever its name.
+    ["store.bin", "database", "lucide-database"],
+  ] as const)("keeps the listing's kind while renaming %s until the name changes", async (path, listed, glyph) => {
+    render(<Explorer {...explorerProps({ files: [file(path, listed)] })} />);
+    expect(glyphOf(treeRow(path)).classList.contains(glyph)).toBe(true);
+    fireEvent.click(treeRow(path));
+    fireEvent.keyDown(treeRow(path), { key: "F2" });
+    const rename = await screen.findByTestId("tree-edit-input");
+    expect(editRowGlyph().classList.contains(glyph)).toBe(true);
+    fireEvent.change(rename, { target: { value: "renamed.csv" } });
+    expect(editRowGlyph().classList.contains("lucide-file-spreadsheet")).toBe(true);
+    fireEvent.change(rename, { target: { value: path } });
+    expect(editRowGlyph().classList.contains(glyph)).toBe(true);
+    fireEvent.keyDown(rename, { key: "Escape" });
+  });
 });

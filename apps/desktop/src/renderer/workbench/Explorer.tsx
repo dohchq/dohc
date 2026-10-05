@@ -1481,7 +1481,17 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
             <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
           )
         ) : (
-          <KindGlyph kind={draftFileKind(editValue)} size={GLYPH_SIZE} className={glyphTone(false)} />
+          <KindGlyph
+            kind={
+              // An untouched rename is still the listed file, so the listing
+              // keeps deciding whether it is a database.
+              editing?.mode === "rename" && editValue.trim() === basenameOf(editing.path)
+                ? explorerFileKind(editing.path, fileByPath.get(editing.path)?.kind)
+                : draftFileKind(editValue)
+            }
+            size={GLYPH_SIZE}
+            className={glyphTone(false)}
+          />
         )}
         <input
           spellCheck={false}
