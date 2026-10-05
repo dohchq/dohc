@@ -317,22 +317,31 @@ fn enqueue_operation(
 fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaterializationJob> {
     let present: i64 = row.get(4)?;
     let preimage_sha: Option<String> = row.get(5)?;
-    let preimage = if present != 0 {
-        Preimage::Present(preimage_sha.unwrap_or_default())
-    } else {
-        Preimage::Absent
+    let preimage = match (present, preimage_sha) {
+        (0, None) => Preimage::Absent,
+        (1, Some(sha)) if !sha.is_empty() => Preimage::Present(sha),
+        _ => {
+            return Err(invalid_job_field(
+                4,
+                rusqlite::types::Type::Integer,
+                "invalid materialization preimage",
+            ));
+        }
     };
     let status_raw: String = row.get(7)?;
-    let status = JobStatus::parse(&status_raw).unwrap_or(JobStatus::Conflict);
+    let status = JobStatus::parse(&status_raw).ok_or_else(|| {
+        invalid_job_field(
+            7,
+            rusqlite::types::Type::Text,
+            "unknown materialization status",
+        )
+    })?;
     let operation_raw: String = row.get(9)?;
     let operation = MaterializationOperation::parse(&operation_raw).ok_or_else(|| {
-        rusqlite::Error::FromSqlConversionFailure(
+        invalid_job_field(
             9,
             rusqlite::types::Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "unknown materialization operation",
-            )),
+            "unknown materialization operation",
         )
     })?;
     Ok(MaterializationJob {
@@ -346,6 +355,21 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaterializationJob> {
         status,
         created_at_ms: row.get(8)?,
     })
+}
+
+fn invalid_job_field(
+    index: usize,
+    kind: rusqlite::types::Type,
+    message: &'static str,
+) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        kind,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message,
+        )),
+    )
 }
 
 const JOB_COLUMNS: &str = "job_id, workspace_id, target_path, content_sha256, preimage_present, \
