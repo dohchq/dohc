@@ -1459,7 +1459,12 @@ fn deferred_ydoc_refusal(
 /// The deterministic per-envelope moment id the projection mints. Also the
 /// incoming-side anchor of a base-divergence conflict, so a crash-redelivery
 /// can recount the conflict it opened.
-fn ydoc_apply_moment_id(key: &DocKey, path: &str, origin_id: &str, origin_seq: i64) -> String {
+pub(crate) fn ydoc_apply_moment_id(
+    key: &DocKey,
+    path: &str,
+    origin_id: &str,
+    origin_seq: i64,
+) -> String {
     let fingerprint = format!(
         "{}\0{}\0{}\0{}\0{}\0{}",
         key.workspace_id, key.version_id, key.object_id, path, origin_id, origin_seq

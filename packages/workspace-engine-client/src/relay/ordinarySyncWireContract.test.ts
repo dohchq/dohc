@@ -24,6 +24,20 @@ describe("ordinary native sync contract", () => {
       changedPaths: [change], refusals: [refusal], sharingDeclined: [decline] });
   });
 
+  it.each(["objectId", "versionId", "lineagePruned", "headBlobSha256"] as const)(
+    "rejects sharing declines without %s on every ordinary result", field => {
+      const incomplete: Partial<typeof decline> = { ...decline };
+      delete incomplete[field];
+      for (const [method, result] of [
+        ["sync.push", push], ["sync.pull", pull],
+        ["sync.commitCursor", { committed: true }],
+      ] as const) {
+        expect(() => decodeOrdinarySyncResult(method, { ...result, sharingDeclined: [incomplete] }))
+          .toThrow(ProtocolShapeError);
+      }
+    },
+  );
+
   it.each([
     { fetched: undefined }, { applied: "1" }, { refused: null }, { nextCursor: -1 },
     { skipped: Number.MAX_SAFE_INTEGER + 1 }, { conflictsOpened: 0.5 }, { hasMore: null },
