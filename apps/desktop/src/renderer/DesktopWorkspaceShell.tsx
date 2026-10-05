@@ -3480,14 +3480,14 @@ export function DesktopWorkspaceShell(props: {
     undoForEditor,
   ]);
 
-  const openWorkspaceFolder = useCallback(async () => {
+  const openWorkspaceFolder = useCallback(async function openWorkspaceFolder() {
     try {
       const picked = await bridge().pickWorkspaceRoot();
       if (!picked) return;
       const attached = await bridge().attachWorkspaceFolder({ rootPath: picked });
       props.onSwitchWorkspace(attached);
     } catch (error) {
-      reportShellError("Could not open that workspace folder.", error);
+      reportShellError("Could not open that workspace folder.", error, () => void openWorkspaceFolder());
     }
   }, [props.onSwitchWorkspace, reportShellError]);
 
@@ -4326,8 +4326,10 @@ export function DesktopWorkspaceShell(props: {
         id: error.id,
         ...(error.tone ? { tone: error.tone } : {}),
         message: error.message,
+        ...(error.title ? { title: error.title } : {}),
         details: errorDetails([
           [error.tone === "success" ? "Notice" : "Error", error.message],
+          ...(error.title ? [["Title", error.title] as const] : []),
           ...(error.details ?? []),
           ...reportFacts(),
         ]),

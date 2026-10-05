@@ -53,6 +53,7 @@ export type Notice = {
 export interface WorkspaceErrorNotice {
   tone?: "success";
   id: string;
+  title?: string;
   message: string;
   details: string;
   atMs: number;
@@ -274,7 +275,8 @@ export function WorkspaceErrorToast(props: {
     >
       {error.tone === "success" ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" /> : <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />}
       <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-        {error.message}
+        {error.title ? <span className="block font-medium">{error.title}</span> : null}
+        <span className={error.title ? "block mt-0.5 text-muted" : undefined}>{error.message}</span>
       </span>
       {error.actionLabel && props.onAction ? (
         <button
@@ -785,8 +787,8 @@ export function NoticeCenter(props: {
       next.push({
         id: error.id,
         tone: error.tone ?? "danger",
-        title: error.message,
-        body: "",
+        title: error.title ?? error.message,
+        body: error.title ? error.message : "",
         actions: [
           ...(error.actionLabel && props.onWorkspaceErrorAction
             ? [{
