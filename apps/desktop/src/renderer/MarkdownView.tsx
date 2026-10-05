@@ -1912,6 +1912,7 @@ export function MarkdownView(props: {
           status={
             <StateMark
               testId="markdown-save-state"
+              truncate
               state={engineChipState}
               shown={engine.readOnlyWhileEditing ? "read-only-transition" : engineChipState}
               title={
@@ -2073,7 +2074,7 @@ export function MarkdownView(props: {
                 // always explains it.
                 title={OPENING_TITLE}
                 // Shown only if opening is slow, like the loading lines.
-                className="dohc-reveal-if-slow font-mono text-[11px] text-subtle"
+                className="dohc-reveal-if-slow min-w-0 truncate font-mono text-[11px] text-subtle"
               >
                 Opening…
               </span>
@@ -2083,7 +2084,7 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" state={chipState} shown={chipState} />
+              <StateMark testId="markdown-save-state" truncate state={chipState} shown={chipState} />
             ) : null}
           </>
         }

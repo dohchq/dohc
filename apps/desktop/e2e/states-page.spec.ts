@@ -327,6 +327,21 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       await capture(name, theme, box);
       await closeMenu(page, trigger, menu);
     }
+    // A file header keeps Share and the document's controls inside itself at
+    // any width, and only its save state gives way. The narrow specimen must
+    // really have cut its save state short, or the check proves nothing.
+    for (const theme of THEMES) {
+      const part = page.getByTestId(`states-${theme}`).locator('[data-part="file-header"]');
+      for (const header of await part.locator("header").all()) {
+        const edge = await header.evaluate((el) => el.getBoundingClientRect().right - parseFloat(getComputedStyle(el).paddingRight));
+        const rights = await header.locator("button").evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
+        if (rights.some((right) => right > edge + 0.5)) failures.push(`a file header control (${theme}) runs past its header`);
+      }
+      const label = page.getByTestId(`states-file-header-pending-${theme}`).locator(".truncate");
+      if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
+        failures.push(`the narrow file header's save state (${theme}) is not cut short`);
+      }
+    }
     expect(failures, "every part must equal its baseline").toEqual([]);
     expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());
   });

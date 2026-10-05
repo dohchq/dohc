@@ -17,7 +17,7 @@ import type { ComponentProps, ReactNode } from "react";
 import { bridge } from "./bridge";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
-import { IconButton, SectionLabel } from "./ui/controls";
+import { IconButton } from "./ui/controls";
 import type { SaveState } from "./useAutosavedTextDraft";
 
 // The icon each file view draws for its kind. KindGlyph's header section
@@ -37,19 +37,20 @@ const KIND_ICONS: Record<FileDisplayKind, LucideIcon> = {
 };
 
 // The one header over every file view. It is final on the click frame: the
-// icon and the kind's name come from the path, so loading, ready and failed
-// views of one file draw the same header. `status` (a save state,
-// "Opening…") sits left of the kind, so its words can change width without
-// moving a control. `actions` are the view's controls, right of Share; a view
-// that has controls shows them, disabled, while it loads (DocumentControls).
+// icon comes from the path, and the icon says the kind, so loading, ready and
+// failed views of one file draw the same header. `actions` are the view's
+// controls, right of Share; a view that has controls draws them, disabled,
+// while it loads or when it cannot open (DocumentControls). Share and the
+// controls never shrink. `status` (a save state, "Opening…") sits left of
+// them and gives way first: its words can change width without moving a
+// control, and in a narrow pane it ends in an ellipsis.
 export function ViewHeader(props: {
   path: string;
   onShare?: () => void;
   status?: ReactNode;
   actions?: ReactNode;
 }) {
-  const kind = fileKindForPath(props.path);
-  const Icon = KIND_ICONS[kind.displayKind];
+  const Icon = KIND_ICONS[fileKindForPath(props.path).displayKind];
   // Breadcrumb weighting: the folder path recedes, the file name carries ink.
   const slash = props.path.lastIndexOf("/");
   const dir = slash >= 0 ? props.path.slice(0, slash + 1) : "";
@@ -61,21 +62,19 @@ export function ViewHeader(props: {
         {dir ? <span className="text-subtle">{dir}</span> : null}
         <span className="font-medium text-ink">{leaf}</span>
       </span>
-      <div className="ml-auto flex shrink-0 items-center gap-2">
-        {props.status}
-        <SectionLabel>{kind.name}</SectionLabel>
-        {props.onShare ? (
-          <IconButton
-            data-testid="file-share"
-            aria-label="Share file"
-            title="Share file"
-            onClick={props.onShare}
-          >
-            <Share2 size={13} aria-hidden />
-          </IconButton>
-        ) : null}
-        {props.actions}
-      </div>
+      <div className="ml-auto flex min-w-0 items-center gap-2">{props.status}</div>
+      {props.onShare ? (
+        <IconButton
+          data-testid="file-share"
+          aria-label="Share file"
+          title="Share file"
+          onClick={props.onShare}
+          className="shrink-0"
+        >
+          <Share2 size={13} aria-hidden />
+        </IconButton>
+      ) : null}
+      {props.actions}
     </header>
   );
 }
@@ -109,7 +108,7 @@ export function DocumentControls(props: {
         disabled={toggle.disabled}
         title={toggle.title}
         onClick={toggle.onClick}
-        className="min-w-14 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
       >
         {toggle.label}
       </button>

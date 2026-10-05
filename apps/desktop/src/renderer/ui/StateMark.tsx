@@ -134,26 +134,37 @@ function Mark(props: { kind: StateMarkKind }) {
  * shell keep reading it. `shown` picks the row to draw when it differs from
  * the stored state, such as a disabled editor over a `saved` draft. `title`
  * replaces the row's title when the caller knows more, such as the engine's
- * own save error. */
+ * own save error. `truncate` lets the label end in an ellipsis where room
+ * runs out, such as a narrow file header, and puts the whole label with its
+ * explanation in the label's tooltip. */
 export function StateMark(props: {
   state: string;
   shown: SaveStateKey;
   title?: string;
   testId: string;
   className?: string;
+  truncate?: boolean;
 }) {
   const presentation = SAVE_STATE[props.shown];
+  const title = props.title ?? presentation.title;
   return (
     <span
       data-testid={props.testId}
       data-state={props.state}
-      title={props.title ?? presentation.title}
+      title={title}
       // A 16px line box: the 11px face's default is 16.5px, and a half-pixel
       // chip moves everything under it by half a pixel.
-      className={`inline-flex items-center gap-1.5 font-mono text-[11px] leading-4 ${MARK_TONE[presentation.mark]} ${props.className ?? ""}`}
+      className={`inline-flex items-center gap-1.5 font-mono text-[11px] leading-4 ${MARK_TONE[presentation.mark]} ${props.truncate ? "min-w-0 max-w-full" : ""} ${props.className ?? ""}`}
     >
       <Mark kind={presentation.mark} />
-      {presentation.label}
+      {props.truncate ? (
+        <span className="min-w-0 truncate" title={title ? `${presentation.label}
+${title}` : presentation.label}>
+          {presentation.label}
+        </span>
+      ) : (
+        presentation.label
+      )}
     </span>
   );
 }

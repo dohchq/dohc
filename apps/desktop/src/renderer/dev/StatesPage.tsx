@@ -667,10 +667,11 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="file-header" title="File header" menusAtRest>
-        {/* A document while its text loads, and the same document ready: the
-            kind, Share, the toggle and the menu keep their places. */}
+        {/* One document loading, ready, failed, and ready in a narrow pane:
+            Share, the toggle and the menu keep their places, and only the
+            save state gives way. No box clips them, so an overflow shows. */}
         <Specimen label="loading" className="w-full">
-          <div className="w-full overflow-hidden rounded-lg border border-line bg-bg">
+          <div className="w-full rounded-lg border border-line bg-bg">
             <ViewHeader
               path="trip/plan.md"
               onShare={noop}
@@ -684,11 +685,42 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
         <Specimen label="ready" className="w-full">
-          <div className="w-full overflow-hidden rounded-lg border border-line bg-bg">
+          <div className="w-full rounded-lg border border-line bg-bg">
             <ViewHeader
               path="trip/plan.md"
               onShare={noop}
-              status={<StateMark testId={`states-file-header-state-${theme}`} state="saved" shown="saved" />}
+              status={<StateMark testId={`states-file-header-state-${theme}`} truncate state="saved" shown="saved" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </div>
+        </Specimen>
+        <Specimen label="failed" className="w-full">
+          <div className="w-full rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Edit", disabled: true }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null, disabled: true }}
+                />
+              }
+            />
+          </div>
+        </Specimen>
+        <Specimen label="narrow, pending share">
+          <div data-testid={`states-file-header-narrow-${theme}`} className="w-[400px] rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              status={
+                <StateMark testId={`states-file-header-pending-${theme}`} truncate state="pending-share" shown="pending-share" />
+              }
               actions={
                 <DocumentControls
                   toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}

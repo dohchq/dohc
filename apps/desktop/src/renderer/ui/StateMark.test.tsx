@@ -69,4 +69,20 @@ describe("StateMark", () => {
     render(<StateMark testId="mark" state="error" shown="error" title="The disk is full." />);
     expect(screen.getByTestId("mark").getAttribute("title")).toBe("The disk is full.");
   });
+
+  // A narrow header cuts the label short, so its tooltip carries the whole
+  // label and what it means. The chip's own title stays as it was.
+  it("puts the whole label and its explanation in a truncated label's tooltip", () => {
+    render(<StateMark testId="mark" state="pending-share" shown="pending-share" truncate />);
+    const mark = screen.getByTestId("mark");
+    const label = mark.querySelector(".truncate");
+    expect(label?.textContent).toBe("Saved locally · Pending share");
+    expect(label?.getAttribute("title")).toBe(
+      "Saved locally · Pending share\nYour edits are saved on this device. The shared file update is pending.",
+    );
+    expect(mark.getAttribute("title")).toBe(SAVE_STATE["pending-share"].title);
+    cleanup();
+    render(<StateMark testId="mark" state="saved" shown="saved" truncate />);
+    expect(screen.getByTestId("mark").querySelector(".truncate")?.getAttribute("title")).toBe("Saved");
+  });
 });

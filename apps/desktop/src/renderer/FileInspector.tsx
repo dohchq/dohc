@@ -607,12 +607,31 @@ export const FileInspector = memo(function FileInspector(
     />
   );
 
+  // A document's controls stand where they will be when it opens, from the
+  // click frame: disabled as the opening view's are while it loads, and
+  // disabled when it cannot open, so nothing in the header moves between
+  // loading, ready and failed.
+  const closedDocumentControls = (opening: boolean) =>
+    kind === "markdown" ? (
+      <DocumentControls
+        toggle={{ label: "Edit", disabled: true, title: opening ? OPENING_TITLE : undefined }}
+        menu={{
+          workspaceId: props.workspaceId,
+          reportError: props.onButtonError,
+          suggestedName: filenameStem(props.path),
+          getMarkdown: () => null,
+          disabled: !opening,
+        }}
+      />
+    ) : undefined;
+
   if (notInVersion) {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
         <ViewHeader
           path={props.path}
           onShare={onShareCurrentPath}
+          actions={closedDocumentControls(false)}
         />
         {/* A reopen's set-aside drafts survive this refusal in the
             module store — recovery stays visible right here, not behind a
@@ -640,6 +659,7 @@ export const FileInspector = memo(function FileInspector(
         <ViewHeader
           path={props.path}
           onShare={onShareCurrentPath}
+          actions={closedDocumentControls(false)}
         />
         {recoveryNotices}
         <div
@@ -663,22 +683,7 @@ export const FileInspector = memo(function FileInspector(
         <ViewHeader
           path={props.path}
           onShare={onShareCurrentPath}
-          // A document's controls stand where they will be when it opens,
-          // disabled as the opening view's are, so nothing in the header moves
-          // when the text arrives. A failed read never opens, so it has none.
-          actions={
-            kind === "markdown" && !error ? (
-              <DocumentControls
-                toggle={{ label: "Edit", disabled: true, title: OPENING_TITLE }}
-                menu={{
-                  workspaceId: props.workspaceId,
-                  reportError: props.onButtonError,
-                  suggestedName: filenameStem(props.path),
-                  getMarkdown: () => null,
-                }}
-              />
-            ) : undefined
-          }
+          actions={closedDocumentControls(!error)}
         />
         {engine.engineMayHoldDocument ? (
           // A failed read returns here, before

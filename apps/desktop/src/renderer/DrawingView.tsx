@@ -295,6 +295,7 @@ export function DrawingView({
         status={
           <StateMark
             testId="drawing-save-state"
+            truncate
             state={drawingChipState}
             shown={drawingShown}
             title={drawingChipState === "error" && engine.saveError ? engine.saveError : undefined}

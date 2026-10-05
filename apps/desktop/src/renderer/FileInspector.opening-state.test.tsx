@@ -79,6 +79,7 @@ describe("markdown document opening state", () => {
             available: boolean;
             initialUpdate?: Uint8Array;
             lineageGeneration?: number;
+            documentUnavailable?: boolean;
           }>(
             (resolve) => {
               settle = (available) =>
@@ -171,22 +172,23 @@ describe("markdown document opening state", () => {
     await advanceAutosaveDebounce();
   }
 
-  // The header's right-hand group, read left to right: a save state or
-  // "Opening…" first, then the kind, Share, the toggle and the menu.
+  // The header after its icon and path, read left to right: the status
+  // slot (a save state, "Opening…"), then Share and the document's controls.
   function headerGroup() {
     const header = screen.getByTestId("file-inspector").querySelector("header");
-    const items = [...(header?.lastElementChild?.children ?? [])];
-    const isStatus = (el: Element) => el.matches("[data-testid=markdown-save-state], [data-testid=markdown-open-state]");
-    const firstControl = items.findIndex((el) => !isStatus(el));
+    const [, , status, ...controls] = [...(header?.children ?? [])];
+    const control = (el: Element) => el.querySelector("button") ?? el;
     return {
-      statusFirst: items.every((el, index) => !isStatus(el) || index < firstControl),
-      controls: items.filter((el) => !isStatus(el)).map((el) =>
+      status: [...(status?.children ?? [])].map((el) => el.getAttribute("data-testid")),
+      controls: controls.map((el) =>
         el.tagName === "BUTTON" && !el.getAttribute("aria-label")
           ? "toggle"
           : el.getAttribute("aria-label") ?? el.querySelector("[aria-label]")?.getAttribute("aria-label") ?? el.textContent,
       ),
+      disabled: controls.map((el) => (control(el) as HTMLButtonElement).disabled),
     };
   }
+  const CONTROLS = ["Share file", "toggle", "Document actions"];
 
   it("draws the document's header controls in their places from the click frame to ready", async () => {
     const read = Promise.withResolvers<Awaited<ReturnType<DohcDesktopBridge["readWorkspaceText"]>>>();
@@ -194,23 +196,50 @@ describe("markdown document opening state", () => {
     bridgeMock.readWorkspaceText.mockReturnValueOnce(read.promise);
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" onSharePath={() => undefined} />);
-    const expected = ["Document", "Share file", "toggle", "Document actions"];
 
     // The text has not arrived: the loading view.
     expect(screen.queryByTestId("view-markdown")).toBeNull();
-    expect(headerGroup().controls, "a loading header without the toggle and the menu puts the menu where Share was once the text arrives").toEqual(expected);
+    expect(headerGroup(), "a loading header without the toggle and the menu puts the menu where Share was once the text arrives").toEqual({
+      status: [], controls: CONTROLS, disabled: [false, true, false],
+    });
+    // The header names the file, never its kind in words: the icon says it.
+    expect(screen.getByTestId("file-inspector").querySelector("header")?.textContent).toBe("a.mdEdit");
 
     // The text arrived and the engine open is held: the opening view.
     await act(async () => read.resolve({ text: DOC_MARKDOWN, truncated: false, contentHash: TEST_CONTENT_HASH }));
     await screen.findByTestId("view-markdown");
-    expect(screen.getByTestId("markdown-open-state")).toBeTruthy();
-    expect(headerGroup()).toEqual({ statusFirst: true, controls: expected });
+    expect(headerGroup()).toEqual({ status: ["markdown-open-state"], controls: CONTROLS, disabled: [false, true, false] });
 
     // The session bound: the ready view.
     bind();
     await waitFor(() => expect(screen.getByTestId("markdown-source-toggle")).toBeTruthy());
-    expect(screen.getByTestId("markdown-save-state")).toBeTruthy();
-    expect(headerGroup(), "a save state right of the kind moves Share and the kind whenever its words change").toEqual({ statusFirst: true, controls: expected });
+    expect(headerGroup(), "a save state among the controls moves Share whenever its words change").toEqual({
+      status: ["markdown-save-state"], controls: CONTROLS, disabled: [false, false, false],
+    });
+  });
+
+  it("keeps the document's header controls in their places, disabled, when the read fails", async () => {
+    const { bridgeMock } = makeHeldOpenBridge();
+    bridgeMock.readWorkspaceText.mockRejectedValue(new Error("EACCES"));
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" onSharePath={() => undefined} />);
+    await screen.findByText("Couldn't read this file.");
+    expect(headerGroup(), "a failed read drops the toggle and the menu, and Share moves right").toEqual({
+      status: [], controls: CONTROLS, disabled: [false, true, true],
+    });
+    // A failed read never opens, so the toggle does not promise that it will.
+    expect(screen.getByTestId("file-inspector").querySelector("header button:not([aria-label])")?.getAttribute("title")).toBeNull();
+  });
+
+  it("keeps the document's header controls in their places, disabled, when the file is gone from its path", async () => {
+    const { bridgeMock } = makeHeldOpenBridge();
+    bridgeMock.openEngineYDocSession.mockResolvedValueOnce({ available: false, documentUnavailable: true });
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" onSharePath={() => undefined} />);
+    await screen.findByTestId("file-unavailable");
+    expect(headerGroup(), "the unavailable view drops the toggle and the menu, and Share moves right").toEqual({
+      status: [], controls: CONTROLS, disabled: [false, true, true],
+    });
   });
 
   it("refuses every disk write while the open is held, then takes the keystroke into the bound session", async () => {
