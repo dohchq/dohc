@@ -7,11 +7,13 @@ import type { z } from "zod";
 // methods, the DohcDesktopBridge members, and main's registration all derive
 // from the row, so none can drift from it.
 type OperationRow<Payload extends z.ZodType> = {
-  readonly capabilityId: CapabilityId;
   readonly channel: `desktop:${string}`;
   readonly payload: Payload;
   readonly result?: z.ZodType;
-};
+} & (
+  | { readonly capabilityId: CapabilityId; readonly capabilityIdsByAction?: never }
+  | { readonly capabilityId?: never; readonly capabilityIdsByAction: Readonly<Record<string, CapabilityId>> }
+);
 
 export type OperationDefinition =
   // Any trusted window may call it.
