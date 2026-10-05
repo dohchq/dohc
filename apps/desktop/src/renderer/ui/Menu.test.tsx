@@ -247,6 +247,19 @@ describe("Menu", () => {
     expect(document.activeElement).toBe(forget);
   });
 
+  // A browser sends a still pointer's events to a row that opens under it.
+  it("gives focus to the row under a moving pointer, not to one that opened under a still one", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={items} />);
+    await user.click(screen.getByTestId("row-menu"));
+    const first = screen.getByRole("menuitem", { name: "Rename" });
+    const second = screen.getByRole("menuitem", { name: "Duplicate" });
+    fireEvent.mouseMove(second, { movementX: 0, movementY: 0 });
+    expect(document.activeElement).toBe(first);
+    fireEvent.mouseMove(second, { movementX: 0, movementY: 3 });
+    expect(document.activeElement).toBe(second);
+  });
+
   it("opens from the owner's trigger, named apart from its list", async () => {
     const user = userEvent.setup();
     function Owned() {
@@ -346,7 +359,7 @@ describe("Menu", () => {
       expect(document.activeElement).toBe(input);
 
       await user.keyboard("re draft");
-      await user.hover(screen.getByRole("menuitem", { name: "Remove" }));
+      fireEvent.mouseMove(screen.getByRole("menuitem", { name: "Remove" }), { movementX: 4, movementY: 2 });
       await user.keyboard("{Home}x");
       expect(document.activeElement).toBe(input);
       expect((input as HTMLInputElement).value).toBe("xre draft");

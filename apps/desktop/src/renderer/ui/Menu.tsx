@@ -313,10 +313,14 @@ export function Menu(props: {
                 data-testid={entry.testId}
                 {...entry.data}
                 tabIndex={-1}
-                // Hover and the keyboard share one active row, but a pointer
-                // passing over a row never takes focus from a field.
-                onMouseEnter={(event) => {
-                  if (!typing()) event.currentTarget.focus();
+                // Hover and the keyboard share one active row, but only a
+                // pointer that moves takes focus. A row that opens under a
+                // still pointer leaves focus on the first row, and a field
+                // keeps focus while the pointer crosses the rows.
+                onMouseMove={(event) => {
+                  if ((event.movementX || event.movementY) && !typing() && document.activeElement !== event.currentTarget) {
+                    event.currentTarget.focus();
+                  }
                 }}
                 onClick={() => pick(entry)}
                 className={`${ROW} ${tone}`}
