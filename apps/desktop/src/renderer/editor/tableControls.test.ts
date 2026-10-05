@@ -886,6 +886,28 @@ describe("table controls grips", () => {
     expect(document.activeElement).toBe(grip);
   });
 
+  // A click in an embedded frame, such as an app preview, blurs the window
+  // with focus already in the frame. The grip must not pull it back out.
+  it("leaves focus in an embedded frame that took it as the window blurred", () => {
+    editor = createTableEditor(2, 2);
+    document.body.appendChild(editor.view.dom);
+    const grip = editor.view.dom.querySelector(".dohc-table-grip--col") as HTMLElement;
+    click(grip);
+    const frame = document.createElement("iframe");
+    document.body.appendChild(frame);
+    const focusGrip = vi.spyOn(grip, "focus");
+    Object.defineProperty(document, "activeElement", { configurable: true, get: () => frame });
+    try {
+      window.dispatchEvent(new Event("blur"));
+    } finally {
+      delete (document as { activeElement?: unknown }).activeElement;
+    }
+    expect(document.body.querySelector(".dohc-table-menu")).toBeNull();
+    expect(focusGrip).not.toHaveBeenCalled();
+    focusGrip.mockRestore();
+    frame.remove();
+  });
+
   // jsdom has no layout: a 100px list over 28px rows.
   it("keeps the active row inside the grip menu's view as the keys move it", () => {
     const geometry = [

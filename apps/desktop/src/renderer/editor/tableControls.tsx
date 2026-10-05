@@ -740,16 +740,20 @@ function openGripMenu(
   menu.style.removeProperty("visibility");
   menu.classList.add(MENU_ENTER);
   menu.focus({ preventScroll: true });
-  // Escape is answered above, with focus back on the grip. The window
-  // blurring leaves focus nowhere, so it goes back to the grip too, ready for
-  // the person's return. A press or focus moving elsewhere puts it where
-  // they chose.
+  // Escape is answered above, with focus back on the grip. When the window
+  // loses focus to another window, closing leaves focus on the page, so it
+  // goes back to the grip, ready for the person's return. A click in an
+  // embedded frame blurs the window too, but focus is in the frame then and
+  // stays there, as useFocusReturn leaves it. A press or focus moving
+  // elsewhere puts it where the person chose.
   stopDismiss = listenForDismiss({
     menu,
     trigger: () => anchor,
     onClose: (reason) => {
       close();
-      if (reason === "blur") anchor.focus({ preventScroll: true });
+      if (reason !== "blur") return;
+      const active = anchor.ownerDocument.activeElement;
+      if (active === null || active === anchor.ownerDocument.body) anchor.focus({ preventScroll: true });
     },
   });
   runtime.closeMenu = close;

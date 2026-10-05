@@ -641,6 +641,9 @@ export function BlockMenu({
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
+  // Held directly: the editor can sit in a shadow root, where a document
+  // lookup by id finds nothing.
+  const rowElements = useRef<Array<HTMLButtonElement | null>>([]);
   // Kept after the menu closes: a press on blank space returns focus to the
   // handle when the press ends, which is after the close.
   const trigger = useRef<HTMLElement | null>(null);
@@ -666,7 +669,7 @@ export function BlockMenu({
   useLayoutEffect(() => {
     const list = menuRef.current;
     if (!open || !list) return;
-    const activeRow = list.ownerDocument.getElementById(rowId(active));
+    const activeRow = rowElements.current[active];
     const firstOfSection = active === 0 || active === TURN_INTO_COUNT;
     revealMenuRow(list, activeRow, firstOfSection ? activeRow?.parentElement : activeRow);
   }, [open, active]);
@@ -688,6 +691,9 @@ export function BlockMenu({
       <button
         key={`${entry.kind}-${entry.id}`}
         id={rowId(index)}
+        ref={(element) => {
+          rowElements.current[index] = element;
+        }}
         type="button"
         role="menuitem"
         tabIndex={-1}

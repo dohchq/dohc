@@ -243,6 +243,37 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
     expect(inView(remove)).toBe(true);
   });
 
+  // The site's demo mounts the editor in a shadow root, where a document
+  // lookup by id finds nothing.
+  it("keeps the active row in view inside an embedded editor's shadow root", () => {
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+      const index = Number(/-row-(\d+)$/.exec(this.id)?.[1] ?? Number.NaN);
+      if (!Number.isNaN(index)) return 26 + index * 28 + (index >= 8 ? 22 : 0);
+      if (this.getAttribute("role") === "group") return this.previousElementSibling ? 250 : 4;
+      return 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(28);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(320);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const container = document.createElement("div");
+    host.attachShadow({ mode: "open" }).append(container);
+    render(
+      createElement(BlockMenu, {
+        state: { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below" },
+        onSelect: vi.fn(),
+        onClose: vi.fn(),
+      }),
+      { container },
+    );
+    const menu = container.querySelector<HTMLElement>("[role='menu']")!;
+    const remove = [...menu.querySelectorAll<HTMLElement>("[role='menuitem']")].at(-1)!;
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(menu.getAttribute("aria-activedescendant")).toBe(remove.id);
+    expect(remove.offsetTop).toBeGreaterThanOrEqual(menu.scrollTop);
+    expect(remove.offsetTop + remove.offsetHeight).toBeLessThanOrEqual(menu.scrollTop + menu.clientHeight);
+  });
+
   it("returns focus to the handle when the window loses focus", async () => {
     const handle = document.createElement("button");
     document.body.append(handle);
