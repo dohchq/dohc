@@ -3431,6 +3431,10 @@ mod tests {
                 "v2-ydoc-sharing-declined",
                 "8a42bb97818cd2b4456555336bc1d2819b96e68b66280cf4366d2021bded0c02",
             ),
+            (
+                "v2-ydoc-file-export-lane",
+                "7caa4d6ee7db128cdb9b6b87e2c05b487ce39cb4b5f93ac96b2da5d4bbec7175",
+            ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());
         for (migration, (id, checksum)) in BASELINE_MIGRATIONS.iter().zip(pinned) {
