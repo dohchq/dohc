@@ -1663,8 +1663,10 @@ export function useRelayShareLinkPane(props: {
             <p className="m-0 text-xs leading-relaxed text-muted">
               Copy the link now — dohc doesn't keep a copy.
             </p>
-            {/* Keyed by the link, so a reset link starts with no "Copied". */}
-            <CopyField key={minted.url} getText={() => minted.url}>
+            <CopyField
+              getText={() => minted.url}
+              sensitive={{ again: "Copy the link again from Share on this selection. If Share no longer shows it, reset the link there." }}
+            >
               <code data-testid="share-link-url" title={minted.url}>{minted.url}</code>
             </CopyField>
             <p className="m-0 text-[11px] leading-relaxed text-subtle">

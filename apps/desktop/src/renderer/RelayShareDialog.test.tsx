@@ -8,6 +8,8 @@ import {
   type RelayShareGrantedRow,
 } from "../ipc/bridgeContract";
 import { RelayShareDialog, type RelayShareTarget } from "./RelayShareDialog";
+import { ShellErrorReporter, type ReportShellError } from "./shell/useShellError";
+import { COPY_FAILURE } from "./ui/CopyButton";
 
 const SHARE_CODE = "dohc-share:share-1:http://relay.test";
 const LINK_URL = "https://relay.test/share/link-secret";
@@ -1326,6 +1328,43 @@ describe("RelayShareDialog", () => {
         })),
       }).success,
     ).toBe(false);
+  });
+
+  // The link is a credential: after Reset link, Try again from a failed copy
+  // of the old link must not put the old link on the clipboard.
+  it("never copies a link that Reset link retired when Try again comes later", async () => {
+    const row = readableLink("grant-link-1", { shareId: "share-link-1", dependents: [] });
+    bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [row] });
+    bridgeMock.rotateRelayShareLink.mockResolvedValueOnce({ outcome: "rotated", url: LINK_URL_B });
+    const report = vi.fn<ReportShellError>();
+    const user = userEvent.setup();
+    writeText.mockRejectedValueOnce(new Error("Document is not focused."));
+    render(
+      <ShellErrorReporter.Provider value={report}>
+        <RelayShareDialog workspaceId="ws-1" target={{ kind: "paths", paths: ["docs/plan.md"] }} onClose={() => {}} />
+      </ShellErrorReporter.Provider>,
+    );
+    await showLinkPane(user);
+    await screen.findByTestId("share-link-row-grant-link-1");
+    await user.click(screen.getByRole("button", { name: "Create link" }));
+    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL);
+    await user.click(screen.getByRole("button", { name: "Copy" }));
+    await vi.waitFor(() => expect(report).toHaveBeenCalledWith(COPY_FAILURE, expect.anything(), expect.any(Function)));
+    const retry = report.mock.calls[0]![2]!;
+
+    const linkRow = screen.getByTestId("share-link-row-grant-link-1");
+    await user.click(within(linkRow).getByRole("button", { name: "Reset link" }));
+    await user.click(within(screen.getByTestId("share-link-confirmation")).getByRole("button", { name: "Reset link" }));
+    expect((await screen.findByTestId("share-link-url")).textContent).toBe(LINK_URL_B);
+
+    writeText.mockClear();
+    await act(async () => retry());
+    expect(writeText).not.toHaveBeenCalled();
+    expect(report).toHaveBeenLastCalledWith(
+      expect.stringMatching(/^dohc could not copy to the clipboard\. .*reset the link/u),
+      expect.anything(),
+      null,
+    );
   });
 
   it("resets with the sorted current dependent ids, replaces the URL, and refreshes", async () => {

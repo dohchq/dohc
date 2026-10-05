@@ -681,7 +681,11 @@ export function CloudLogin(props: {
                           choose “Join a synced workspace”, and paste this code.
                         </p>
                         <div className="mt-2">
-                          <CopyField copyTestId="cloud-copy-sync-code" getText={() => syncCode}>
+                          <CopyField
+                            copyTestId="cloud-copy-sync-code"
+                            getText={() => syncCode}
+                            sensitive={{ again: "Copy the code again from Sync and sharing in Settings." }}
+                          >
                             <code data-testid="cloud-sync-code" title={syncCode}>{syncCode}</code>
                           </CopyField>
                         </div>

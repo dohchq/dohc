@@ -6,6 +6,7 @@ import { bridge } from "./bridge";
 import { ipcErrorMessage } from "./ipcError";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 import { CopyField } from "./ui/CopyButton";
+import { COPY_INVITATION_AGAIN, COPY_SHARE_CODE_AGAIN } from "./shareCopyAgain";
 import { useRequestSequence } from "./useRequestSequence";
 
 const ACCESS_OPTIONS: ReadonlyArray<{
@@ -178,8 +179,9 @@ export function EmailShareForm(props: {
               <p className="m-0 text-xs leading-relaxed text-muted">
                 Send this browser invitation to {created.recipientEmail}. The recipient must sign in with the invited account.
               </p>
-              <CopyField key={created.browserInvitationUrl} label="Copy browser invitation"
-                copiedLabel="Browser invitation copied" copyTestId="share-browser-invitation-copy" getText={() => created.browserInvitationUrl ?? null}>
+              <CopyField label="Copy browser invitation" copiedLabel="Browser invitation copied"
+                sensitive={{ again: COPY_INVITATION_AGAIN }} copyTestId="share-browser-invitation-copy"
+                getText={() => created.browserInvitationUrl ?? null}>
                 <code data-testid="share-browser-invitation" data-grant-id={created.grantId} title={created.browserInvitationUrl}>
                   {created.browserInvitationUrl}
                 </code>
@@ -194,7 +196,7 @@ export function EmailShareForm(props: {
             <span className="font-medium text-ink">{created.recipientEmail}</span> —
             they paste it in dohc under “Open a share”.
           </p>
-          <CopyField key={created.shareCode} copyTestId="share-code-copy" getText={() => created.shareCode}>
+          <CopyField copyTestId="share-code-copy" getText={() => created.shareCode} sensitive={{ again: COPY_SHARE_CODE_AGAIN }}>
             <code data-testid="share-code" title={created.shareCode}>{created.shareCode}</code>
           </CopyField>
           <p className="m-0 text-[11px] leading-relaxed text-subtle">

@@ -11,6 +11,7 @@ import { ProposalReviewDialog } from "../workbench/ProposalReviewDialog";
 import { ShareAccessBadge } from "./ShareAccessBadge";
 import { DangerButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
+import { COPY_INVITATION_AGAIN, COPY_SHARE_CODE_AGAIN } from "../shareCopyAgain";
 
 // "Shared by me": the management list for relay share grants. Lives
 // in Settings → Cloud. Calm inventory: what's shared, with whom, and one
@@ -214,13 +215,15 @@ export function SharedByMeList(props: {
             <>
               {share.selector && share.browserInvitationUrl && (
                 <CopyButton testId="shared-by-me-copy-invitation" label="Copy browser invitation"
-                  copiedLabel="Browser invitation copied" getText={() => share.browserInvitationUrl ?? null} />
+                  copiedLabel="Browser invitation copied" sensitive={{ again: COPY_INVITATION_AGAIN }}
+                  getText={() => share.browserInvitationUrl ?? null} />
               )}
               {/* No code to hand out for a row the relay cannot read: the
                   recipient's own open would refuse it. Ending the share
                   stays available — the reverse path must not disappear. */}
               {share.selector ? (
-              <CopyButton testId="shared-by-me-copy" label="Copy code" getText={() => share.shareCode} />
+              <CopyButton testId="shared-by-me-copy" label="Copy code" sensitive={{ again: COPY_SHARE_CODE_AGAIN }}
+                getText={() => share.shareCode} />
               ) : null}
               {/* Ending a share DECLINES whatever the recipient still has
                   waiting. Undo brings the share back, not the declined

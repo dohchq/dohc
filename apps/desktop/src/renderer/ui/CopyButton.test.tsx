@@ -7,6 +7,8 @@ import { deferred } from "../../testing/deferred";
 import { ShellErrorReporter, type ReportShellError } from "../shell/useShellError";
 import { COPY_FAILURE, COPY_FEEDBACK_MS, CopyButton, CopyField, createCopy } from "./CopyButton";
 
+const AGAIN = "Copy the link again from Share on this selection.";
+
 beforeEach(() => {
   vi.useFakeTimers();
   // user-event's setup puts a clipboard stub on navigator for the spies.
@@ -284,6 +286,71 @@ describe("CopyButton after it is gone", () => {
     writeText.mockResolvedValueOnce(undefined);
     await act(async () => report.mock.calls[1]![2]!());
     expect(writeText).toHaveBeenLastCalledWith("error details");
+  });
+
+  // A secret, such as a share link, is never kept: once its button is gone,
+  // Try again cannot copy it, and the notice says where to copy it again.
+  it("files the failure again without Try again when the button closed before the retry", async () => {
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("denied"));
+    const report = vi.fn<ReportShellError>();
+    const getText = vi.fn(() => "secret link");
+    const view = render(
+      withReporter(report, <CopyButton getText={getText} sensitive={{ again: AGAIN }} testId="copy" />),
+    );
+
+    await click(screen.getByTestId("copy"));
+    expect(report).toHaveBeenCalledWith(COPY_FAILURE, new Error("denied"), expect.any(Function));
+    const retry = report.mock.calls[0]![2]!;
+    view.unmount();
+    getText.mockClear();
+    await act(async () => retry());
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(getText).not.toHaveBeenCalled();
+    expect(report).toHaveBeenLastCalledWith(`${COPY_FAILURE} ${AGAIN}`, new Error("denied"), null);
+  });
+
+  it("reports a secret's failure after its button closed with where to copy it again, and no Try again", async () => {
+    const write = deferred();
+    vi.spyOn(navigator.clipboard, "writeText").mockReturnValueOnce(write.promise);
+    const report = vi.fn<ReportShellError>();
+    const view = render(
+      withReporter(report, <CopyButton getText={() => "secret link"} sensitive={{ again: AGAIN }} testId="copy" />),
+    );
+
+    await click(screen.getByTestId("copy"));
+    view.unmount();
+    const refusal = new Error("denied");
+    await act(async () => write.reject(refusal));
+    expect(report).toHaveBeenCalledExactlyOnceWith(`${COPY_FAILURE} ${AGAIN}`, refusal, null);
+  });
+
+  // A field is keyed by its text: a reset link is a new control, so Try
+  // again from the old one never copies the link it replaced.
+  it("copies a secret on Try again only while its field still shows the same value", async () => {
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("denied"));
+    const report = vi.fn<ReportShellError>();
+    const field = (link: string) =>
+      withReporter(report, (
+        <CopyField copyTestId="copy" getText={() => link} sensitive={{ again: AGAIN }}>
+          <code>{link}</code>
+        </CopyField>
+      ));
+    const view = render(field("https://share.example.test/s/old"));
+
+    await click(screen.getByTestId("copy"));
+    const retry = report.mock.calls[0]![2]!;
+    writeText.mockResolvedValue(undefined);
+    await act(async () => retry());
+    expect(writeText).toHaveBeenLastCalledWith("https://share.example.test/s/old");
+
+    writeText.mockRejectedValueOnce(new Error("denied"));
+    await click(screen.getByTestId("copy"));
+    const staleRetry = report.mock.calls.at(-1)![2]!;
+    view.rerender(field("https://share.example.test/s/reset"));
+    writeText.mockClear();
+    await act(async () => staleRetry());
+    expect(writeText).not.toHaveBeenCalled();
+    expect(report).toHaveBeenLastCalledWith(`${COPY_FAILURE} ${AGAIN}`, new Error("denied"), null);
   });
 
   it("files the failure again without Try again when no text was read before the button closed", async () => {
