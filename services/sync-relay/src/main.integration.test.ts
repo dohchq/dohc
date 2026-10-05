@@ -101,6 +101,44 @@ function packageRoot(): string {
   return fileURLToPath(new URL("../", import.meta.url));
 }
 
+const PROJECTION_HANDSHAKE_BOOTSTRAP = `
+// Route coverage uses a fake isolated-engine handshake on every host.
+Object.defineProperty(process, "platform", {value: "linux"});
+const {default: childProcess} = await import("node:child_process");
+const {syncBuiltinESMExports} = await import("node:module");
+const originalSpawn = childProcess.spawn;
+childProcess.spawn = (command, args, options) => {
+  if (command === "/bin/sh" && args?.[1]?.includes("--projection-only")) {
+    return originalSpawn(process.execPath, ["--input-type=module", "--eval", ${JSON.stringify(`
+      const frame = row => {
+        const payload = Buffer.from(JSON.stringify(row));
+        const header = Buffer.alloc(12); header.write("DOP1"); header[4] = 1;
+        header.writeUInt32LE(payload.length, 8); return Buffer.concat([header, payload]);
+      };
+      let pending = Buffer.alloc(0);
+      process.stdin.on("data", bytes => {
+        pending = Buffer.concat([pending, bytes]);
+        while (pending.length >= 12 && pending.length >= 12 + pending.readUInt32LE(8)) {
+          const size = pending.readUInt32LE(8);
+          const row = JSON.parse(pending.subarray(12, 12 + size).toString());
+          pending = pending.subarray(12 + size);
+          if (row.type === "hello") {
+            process.stdout.write(frame({type:"helloAck",protocolVersion:2,sessionGeneration:1,capabilities:["projection-only"],
+              limits:{maxFrameBytes:14680064,maxStringBytes:14680064,maxCollectionLen:16384,maxBatchLen:64,maxJsonDepth:32,maxBlobChunkBytes:262144}}));
+          } else if (row.method === "engine.ping") {
+            process.stdout.write(frame({type:"response",id:row.id,result:{ok:true,mode:"projection-only"}}));
+          } else if (row.method === "ydoc.project" && row.params.contentKind === "plaintext" && row.params.updatesBase64[0] === "AAA=") {
+            process.stdout.write(frame({type:"response",id:row.id,result:{contentBase64:"",sourceStateVectorSha256:"a".repeat(64)}}), () => process.exit(0));
+          } else { throw new Error("Unexpected projection fixture request"); }
+        }
+      });
+    `)}], options);
+  }
+  return originalSpawn(command, args, options);
+};
+syncBuiltinESMExports();
+`;
+
 async function spawnRelay(
   dbPath: string,
   envOverrides: Record<string, string | undefined> = {},
@@ -145,43 +183,7 @@ async function spawnRunningRelay(
         throw new Error("injected pool shutdown failure");
       };
     }
-    if (${bootstrap.projectionHandshake === true}) {
-      // Route coverage uses a fake isolated-engine handshake on every host.
-      Object.defineProperty(process, "platform", {value: "linux"});
-      const {default: childProcess} = await import("node:child_process");
-      const {syncBuiltinESMExports} = await import("node:module");
-      const originalSpawn = childProcess.spawn;
-      childProcess.spawn = (command, args, options) => {
-        if (command === "/bin/sh" && args?.[1]?.includes("--projection-only")) {
-          return originalSpawn(process.execPath, ["--input-type=module", "--eval", ${JSON.stringify(`
-            const frame = row => {
-              const payload = Buffer.from(JSON.stringify(row));
-              const header = Buffer.alloc(12); header.write("DOP1"); header[4] = 1;
-              header.writeUInt32LE(payload.length, 8); return Buffer.concat([header, payload]);
-            };
-            let pending = Buffer.alloc(0);
-            process.stdin.on("data", bytes => {
-              pending = Buffer.concat([pending, bytes]);
-              while (pending.length >= 12 && pending.length >= 12 + pending.readUInt32LE(8)) {
-                const size = pending.readUInt32LE(8);
-                const row = JSON.parse(pending.subarray(12, 12 + size).toString());
-                pending = pending.subarray(12 + size);
-                if (row.type === "hello") {
-                  process.stdout.write(frame({type:"helloAck",protocolVersion:2,sessionGeneration:1,capabilities:["projection-only"],
-                    limits:{maxFrameBytes:14680064,maxStringBytes:14680064,maxCollectionLen:16384,maxBatchLen:64,maxJsonDepth:32,maxBlobChunkBytes:262144}}));
-                } else if (row.method === "engine.ping") {
-                  process.stdout.write(frame({type:"response",id:row.id,result:{ok:true,mode:"projection-only"}}));
-                } else if (row.method === "ydoc.project" && row.params.contentKind === "plaintext" && row.params.updatesBase64[0] === "AAA=") {
-                  process.stdout.write(frame({type:"response",id:row.id,result:{contentBase64:"",sourceStateVectorSha256:"a".repeat(64)}}), () => process.exit(0));
-                } else { throw new Error("Unexpected projection fixture request"); }
-              }
-            });
-          `)}], options);
-        }
-        return originalSpawn(command, args, options);
-      };
-      syncBuiltinESMExports();
-    }
+    ${bootstrap.projectionHandshake ? PROJECTION_HANDSHAKE_BOOTSTRAP : ""}
     await import(${JSON.stringify(mainUrl.href)});`,
   ];
   const child = spawn(process.execPath, childArguments, {
@@ -946,12 +948,17 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
 // and captured stderr instead of a listening URL.
 async function spawnRelayExpectExit(
   envOverrides: Record<string, string | undefined>,
+  bootstrap: { projectionHandshake?: boolean } = {},
 ): Promise<{ code: number | null; stderr: string }> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries({ ...process.env, DOHC_RELAY_DEPLOYMENT_CONFIG: undefined, DOHC_RELAY_SERVICE_HOST_CONFIG: undefined, DOHC_RELAY_DEVICE_DELIVERY_CONFIG: undefined, ...envOverrides })) {
     if (value !== undefined) env[key] = value;
   }
-  const child = spawn(process.execPath, [join(buildDirectory, "main.js")], {
+  const mainPath = join(buildDirectory, "main.js");
+  const args = bootstrap.projectionHandshake
+    ? ["--input-type=module", "--eval", `${PROJECTION_HANDSHAKE_BOOTSTRAP}\nawait import(${JSON.stringify(pathToFileURL(mainPath).href)});`]
+    : [mainPath];
+  const child = spawn(process.execPath, args, {
     cwd: packageRoot(),
     env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -1180,12 +1187,12 @@ describe("sync relay startup guards", () => {
     const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
     initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
     const {code, stderr} = await spawnRelayExpectExit({
-      ...productionEnv, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
+      ...productionEnv, DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
       DOHC_PUBLIC_EDIT_RELEASE: '{"version":1}', DOHC_RELAY_LINK_LIVE: undefined,
       DOHC_RELAY_NAMED_LIVE_CONFIG: undefined,
       DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: JSON.stringify({maxSessions: 4, retentionMs: 60000,
         maxPendingRequests: 2, maxRequestBytes: 1038, maxResponseBytes: 4152, timeoutMs: 1000}),
-    });
+    }, {projectionHandshake: true});
     expect(code).toBe(1);
     expect(stderr).toContain("Public Edit release requires link live routes and the configured service host");
   });
