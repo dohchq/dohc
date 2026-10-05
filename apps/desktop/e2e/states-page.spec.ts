@@ -45,6 +45,7 @@ const PARTS = [
   "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
   "steps", "folder-chip", "hue-control", "color-control", "list-rows", "menu", "document-menu",
   "empty", "loading", "toasts", "notices", "dialog", "menu-radio", "menu-field", "menu-overflow", "menu-danger",
+  "file-header",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and
@@ -279,8 +280,9 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     await cdp.send("DOM.enable");
     await cdp.send("CSS.enable");
     // A menu's rows exist only while it is open, so a part with a menu is
-    // marked after it opens its menu.
-    await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:not(:has([aria-haspopup="menu"]))`);
+    // marked after it opens its menu. A part marked data-menus="rest" holds
+    // menus without being about them, and is captured with them closed.
+    await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:is([data-menus="rest"], :not(:has([aria-haspopup="menu"])))`);
     await waitForStillPage(page);
 
     const seen = new Set<string>();
@@ -307,7 +309,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         }
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
-        const menus = await part.locator("[aria-haspopup='menu']").count();
+        const menus = (await part.getAttribute("data-menus")) === "rest" ? 0 : await part.locator("[aria-haspopup='menu']").count();
         if (menus > 1) throw new Error(`${name} (${theme}) has ${menus} menus; a part opens one`);
         if (menus === 1) menuParts.push({ name, theme, part, box });
         else await capture(name, theme, box);

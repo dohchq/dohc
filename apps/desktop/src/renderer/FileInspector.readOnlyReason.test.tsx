@@ -41,12 +41,12 @@ describe("read-only reason on the text and CSV chips", () => {
   const TOO_LARGE = "This file is too large to edit in dohc.";
 
   for (const [path, testId, label] of [
-    ["notes.txt", "view-text-save-state", "text"],
-    ["main.ts", "view-text-save-state", "text"],
-    ["index.html", "view-text-save-state", "text"],
-    ["config.yaml", "view-text-save-state", "text"],
-    ["config.json", "view-json-save-state", "json"],
-    ["rows.csv", "csv-save-state", "data"],
+    ["notes.txt", "view-text-save-state", "Code or text"],
+    ["main.ts", "view-text-save-state", "Code or text"],
+    ["index.html", "view-text-save-state", "Code or text"],
+    ["config.yaml", "view-text-save-state", "Code or text"],
+    ["config.json", "view-json-save-state", "Code or text"],
+    ["rows.csv", "csv-save-state", "CSV table"],
   ] as const) {
     it(`${path}: a read-only share says so`, async () => {
       bridgeMock.readWorkspaceText.mockResolvedValue({ text: "a,b\n", truncated: false, contentHash: TEST_CONTENT_HASH });

@@ -171,6 +171,48 @@ describe("markdown document opening state", () => {
     await advanceAutosaveDebounce();
   }
 
+  // The header's right-hand group, read left to right: a save state or
+  // "Opening…" first, then the kind, Share, the toggle and the menu.
+  function headerGroup() {
+    const header = screen.getByTestId("file-inspector").querySelector("header");
+    const items = [...(header?.lastElementChild?.children ?? [])];
+    const isStatus = (el: Element) => el.matches("[data-testid=markdown-save-state], [data-testid=markdown-open-state]");
+    const firstControl = items.findIndex((el) => !isStatus(el));
+    return {
+      statusFirst: items.every((el, index) => !isStatus(el) || index < firstControl),
+      controls: items.filter((el) => !isStatus(el)).map((el) =>
+        el.tagName === "BUTTON" && !el.getAttribute("aria-label")
+          ? "toggle"
+          : el.getAttribute("aria-label") ?? el.querySelector("[aria-label]")?.getAttribute("aria-label") ?? el.textContent,
+      ),
+    };
+  }
+
+  it("draws the document's header controls in their places from the click frame to ready", async () => {
+    const read = Promise.withResolvers<Awaited<ReturnType<DohcDesktopBridge["readWorkspaceText"]>>>();
+    const { bridgeMock, bind } = makeHeldOpenBridge();
+    bridgeMock.readWorkspaceText.mockReturnValueOnce(read.promise);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" onSharePath={() => undefined} />);
+    const expected = ["Document", "Share file", "toggle", "Document actions"];
+
+    // The text has not arrived: the loading view.
+    expect(screen.queryByTestId("view-markdown")).toBeNull();
+    expect(headerGroup().controls, "a loading header without the toggle and the menu puts the menu where Share was once the text arrives").toEqual(expected);
+
+    // The text arrived and the engine open is held: the opening view.
+    await act(async () => read.resolve({ text: DOC_MARKDOWN, truncated: false, contentHash: TEST_CONTENT_HASH }));
+    await screen.findByTestId("view-markdown");
+    expect(screen.getByTestId("markdown-open-state")).toBeTruthy();
+    expect(headerGroup()).toEqual({ statusFirst: true, controls: expected });
+
+    // The session bound: the ready view.
+    bind();
+    await waitFor(() => expect(screen.getByTestId("markdown-source-toggle")).toBeTruthy());
+    expect(screen.getByTestId("markdown-save-state")).toBeTruthy();
+    expect(headerGroup(), "a save state right of the kind moves Share and the kind whenever its words change").toEqual({ statusFirst: true, controls: expected });
+  });
+
   it("refuses every disk write while the open is held, then takes the keystroke into the bound session", async () => {
     useAutoAdvancingFakeTimers();
     const user = userEvent.setup();

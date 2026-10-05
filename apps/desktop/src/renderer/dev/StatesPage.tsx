@@ -2,6 +2,7 @@ import { AlertTriangle, Bot, CheckCircle2, MoreHorizontal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { DocumentMenu } from "../DocumentMenu";
+import { DocumentControls, OPENING_TITLE, ViewHeader } from "../fileInspectorUi";
 import { OverlayFrame } from "../Overlay";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
 import { CopyDetailsButton } from "../shell/copyDetails";
@@ -72,10 +73,12 @@ function useWholePixelHeight() {
   return { section, content };
 }
 
-function Section(props: { part: string; title: string; children: ReactNode }) {
+// A part whose subject is not a menu but which holds one, such as a header
+// with its document menu, is captured with its menus closed (`menusAtRest`).
+function Section(props: { part: string; title: string; children: ReactNode; menusAtRest?: boolean }) {
   const { section, content } = useWholePixelHeight();
   return (
-    <section ref={section} data-part={props.part}>
+    <section ref={section} data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined}>
       <div ref={content} className="flex flex-col gap-3">
         <SectionLabel as="h3" className="m-0">
           {props.title}
@@ -659,6 +662,40 @@ function Pane(props: { theme: "light" | "dark" }) {
             data-force-target="[role=menuitem]:nth-child(2)"
           >
             <MenuSpecimen label="More for Research" items={dangerMenuItems} width={176} testId={`states-menu-danger-${theme}`} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="file-header" title="File header" menusAtRest>
+        {/* A document while its text loads, and the same document ready: the
+            kind, Share, the toggle and the menu keep their places. */}
+        <Specimen label="loading" className="w-full">
+          <div className="w-full overflow-hidden rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Edit", disabled: true, title: OPENING_TITLE }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null }}
+                />
+              }
+            />
+          </div>
+        </Specimen>
+        <Specimen label="ready" className="w-full">
+          <div className="w-full overflow-hidden rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              status={<StateMark testId={`states-file-header-state-${theme}`} state="saved" shown="saved" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
           </div>
         </Specimen>
       </Section>
