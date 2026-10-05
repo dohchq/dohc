@@ -838,23 +838,28 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       import { rmSync, readdirSync, readFileSync } from "node:fs";
       import { syncBuiltinESMExports } from "node:module";
       const exec = childProcess.execFileSync;
+      const spawn = childProcess.spawnSync;
       const fault = process.env.FIXTURE_PROVENANCE_FAULT;
       const target = fault.split(":")[1];
       let changed = false;
       let failures = 0;
       childProcess.execFileSync = (command, ...args) => {
         if (command !== "git") throw new Error("Unavailable code tool: " + command);
+        return exec(command, ...args);
+      };
+      childProcess.spawnSync = (command, ...args) => {
+        if (command !== "git") throw new Error("Unavailable code tool: " + command);
         const matches = target === "log-path" ? args[0].includes("--git-path")
           : args[0][0] === target && (target !== "rev-parse" || args[0][1] === "HEAD");
         if (matches && (fault.startsWith("persistent:") || fault.startsWith("transient:") && failures === 0)) {
           failures += 1;
-          throw Object.assign(new Error("git read failed"), {status:128,stderr:"Permission denied: fixture config failure " + failures});
+          return {status:128,stderr:"Permission denied: fixture config failure " + failures};
         }
-        if (fault === "path-recovery" && failures < 3 && args[0].includes("--git-path")) {
+        if (fault === "path-recovery" && failures < 4 && args[0].includes("--git-path")) {
           failures += 1;
-          throw Object.assign(new Error("git read failed"), {status:128,stderr:"Fixture cannot resolve the HEAD log path"});
+          return {status:128,stderr:"Fixture cannot resolve the HEAD log path"};
         }
-        const result = exec(command, ...args);
+        const result = spawn(command, ...args);
         if (!changed && args[0][0] === "reflog") {
           changed = true;
           if (fault === "removed-log") rmSync(".git/logs/HEAD");
@@ -871,11 +876,11 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       const { verify } = await import("./scripts/verification/verify.mjs");
       if (fault === "path-recovery") await assert.rejects(verify(process.argv.slice(1)), /Fixture cannot resolve the HEAD log path/);
       if (fault.startsWith("persistent:")) {
-        await assert.rejects(verify(process.argv.slice(1)), /Permission denied: fixture config failure 3/);
+        await assert.rejects(verify(process.argv.slice(1)), /Permission denied: fixture config failure 4/);
         const directory = readdirSync(".agent-artifacts/verification").sort().at(-1);
         const report = JSON.parse(readFileSync(".agent-artifacts/verification/" + directory + "/result.json"));
         assert.equal(report.verdict, "FAIL");
-        assert.match(report.error, /Permission denied: fixture config failure 3/);
+        assert.match(report.error, /Permission denied: fixture config failure 4/);
         if (target === "rev-list" || target === "reflog") {
           assert.equal(report.provenance.status, "FAIL");
           assert.equal(report.provenance.stamp, "UNATTRIBUTABLE");

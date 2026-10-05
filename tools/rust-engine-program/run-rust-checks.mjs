@@ -151,6 +151,8 @@ function run(cmd) {
 }
 
 const gitReadFailures = [];
+// Match the JS gate: invoke git directly in the checkout that ran each step.
+// Git must be an executable; a Windows installation with only a .cmd shim is unsupported.
 function captureGit(cmd) {
   try { return readGit(cmd.split(" ").slice(1), repoRoot); }
   catch (error) { gitReadFailures.push(error.message); return null; }

@@ -383,12 +383,10 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
     writeFileSync(adapter, `
       import cp from 'node:child_process';
       import {syncBuiltinESMExports} from 'node:module';
-      const exec = cp.execFileSync;
-      cp.execFileSync = (command, args, options) => {
-        if (command !== 'git') return exec(command, args, options);
-        const result = cp.spawnSync('git ' + args.join(' '), {...options, shell:true});
-        if (result.error || result.status !== 0) throw Object.assign(new Error('Stub git failed'), {status:result.status,stderr:result.stderr});
-        return result.stdout;
+      const spawn = cp.spawnSync;
+      cp.spawnSync = (command, args, options) => {
+        if (command !== 'git') return spawn(command, args, options);
+        return spawn('git ' + args.join(' '), {...options, shell:true});
       };
       syncBuiltinESMExports();
     `);
@@ -451,7 +449,7 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
       for (const dir of [junk, broken, stale]) {
         const refused = verify(dir);
         assert.notEqual(refused.status, 0);
-        assert.match(refused.stderr, dir === junk ? /could not answer `git rev-parse HEAD`/ : /git rev-parse HEAD failed after 3 attempts/);
+        assert.match(refused.stderr, dir === junk ? /could not answer `git rev-parse HEAD`/ : /git rev-parse HEAD failed after 4 attempts/);
       }
     } finally {
       for (const dir of [junk, broken, stale]) {
@@ -473,14 +471,14 @@ test("Rust tree reads retry transient errors and retain persistent stderr in the
       writeFileSync(adapter, `
         import cp from 'node:child_process';
         import {syncBuiltinESMExports} from 'node:module';
-        const exec = cp.execFileSync;
+        const spawn = cp.spawnSync;
         let failures = 0;
-        cp.execFileSync = (command, args, options) => {
+        cp.spawnSync = (command, args, options) => {
           if (command === 'git' && args[0] === 'status' && (${persistent} || failures === 0)) {
             failures += 1;
-            throw Object.assign(new Error('git failed'), {status:128,stderr:'Permission denied: scratch config failure ' + failures});
+            return {status:128,stderr:'Permission denied: scratch config failure ' + failures};
           }
-          return exec(command, args, options);
+          return spawn(command, args, options);
         };
         syncBuiltinESMExports();
       `);
@@ -488,8 +486,8 @@ test("Rust tree reads retry transient errors and retain persistent stderr in the
       if (persistent) {
         assert.notEqual(result.code, 0);
         assert.match(result.summary, /tree provenance.*git could not read the worktree status/);
-        assert.match(result.summary, /git status.*failed after 3 attempts/);
-        assert.match(result.summary, /Permission denied: scratch config failure 3/);
+        assert.match(result.summary, /git status.*failed after 4 attempts/);
+        assert.match(result.summary, /Permission denied: scratch config failure 4/);
         assert.match(result.summary, /tree UNATTRIBUTABLE/);
       } else {
         assert.equal(result.code, 0, result.summary);
