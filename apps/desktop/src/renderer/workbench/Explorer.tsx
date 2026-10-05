@@ -1,12 +1,13 @@
+import { FILE_KIND_RECORDS, fileKindForPath, type FileKindRecord } from "@dohc/workspace-contracts/kinds";
 import { useFocusSurface } from "../ui/focusReturn";
 import { DangerButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { KindGlyph } from "../ui/KindGlyph";
 import { basenameOf, dirnameOf } from "../path";
 import {
   ChevronsUp,
   ChevronRight,
   Database,
   FilePlus2,
-  FileText,
   Folder,
   FolderPlus,
   FolderOpen,
@@ -174,16 +175,36 @@ type TreeRenderItem =
 
 type VirtualRange = { start: number; end: number };
 
-// A page emoji stands in for the generic file glyph when the file's
-// frontmatter carries one (Notion-style). Sized to sit on the same baseline
-// as the 13px lucide glyphs it replaces.
-function PageIconGlyph({ icon }: { icon: string }) {
+// The listing, not the file name, says whether a file is a database: the kind
+// registry matches `.db` by extension alone.
+function explorerFileKind(path: string, listed: WorkspaceFileEntry["kind"] | null | undefined): FileKindRecord {
+  if (listed === "database") return FILE_KIND_RECORDS.database;
+  const kind = fileKindForPath(path);
+  return kind.displayKind === "database" ? FILE_KIND_RECORDS.binary : kind;
+}
+
+// The emoji box for each glyph size, so it sits on the glyph's baseline.
+const PAGE_ICON_BOX = {
+  13: "size-[13px] text-[12px]",
+  15: "size-[15px] text-[13px]",
+} as const;
+
+// A page's `icon` frontmatter emoji stands in for its kind glyph
+// (Notion-style). The kind's name still labels it.
+function FileGlyph(props: {
+  kind: FileKindRecord;
+  icon: string | undefined;
+  size: keyof typeof PAGE_ICON_BOX;
+  className?: string;
+}) {
+  if (!props.icon) return <KindGlyph kind={props.kind} size={props.size} className={props.className} />;
   return (
     <span
-      aria-hidden
-      className="grid size-[13px] shrink-0 place-items-center text-[12px] leading-none"
+      role="img"
+      aria-label={props.kind.name}
+      className={`grid shrink-0 place-items-center leading-none ${PAGE_ICON_BOX[props.size]}`}
     >
-      {icon}
+      {props.icon}
     </span>
   );
 }
@@ -221,11 +242,6 @@ function resolveTypedPath(value: string, contextDir: string): string {
   return contextDir ? `${contextDir}/${trimmed}` : trimmed;
 }
 
-function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
-  if (kind === "database") return <Database size={13} aria-hidden className="shrink-0" />;
-  return <FileText size={13} aria-hidden className="shrink-0" />;
-}
-
 export function editorTitle(path: string, label?: string): string {
   if (parseTransactionalCollectionTabPath(path)) return label ?? "Collection";
   if (isChatsTabPath(path)) return label ?? chatTabDefaultTitle(path);
@@ -249,7 +265,7 @@ function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] 
     }
     return <LayoutGrid size={13} aria-hidden className="shrink-0" />;
   }
-  return <FileKindIcon kind={props.kind ?? "file"} />;
+  return <KindGlyph kind={explorerFileKind(props.path, props.kind)} size={13} />;
 }
 
 function SectionActionButton(props: {
@@ -333,6 +349,8 @@ export const TreeRow = memo(function TreeRow(props: {
   onRowDragEnd: () => void;
 }) {
   const { row } = props;
+  // The glyph is ink on a row with the selected fill, subtle otherwise.
+  const glyphClass = props.selected || props.active ? "text-ink" : "text-subtle";
   const dropClass =
     props.dropPreview?.kind === "blocked"
       ? props.dropPreview.role === "target"
@@ -422,19 +440,20 @@ export const TreeRow = memo(function TreeRow(props: {
               />
             </span>
             {row.isExpanded ? (
-              <FolderOpen size={13} aria-hidden className="shrink-0" />
+              <FolderOpen size={15} aria-hidden className={`shrink-0 ${glyphClass}`} />
             ) : (
-              <Folder size={13} aria-hidden className="shrink-0" />
+              <Folder size={15} aria-hidden className={`shrink-0 ${glyphClass}`} />
             )}
           </>
         ) : (
           <>
             <span aria-hidden className="w-3 shrink-0" />
-            {row.icon ? (
-              <PageIconGlyph icon={row.icon} />
-            ) : (
-              <FileKindIcon kind={row.kind ?? "file"} />
-            )}
+            <FileGlyph
+              kind={explorerFileKind(row.fullPath, row.kind)}
+              icon={row.icon}
+              size={15}
+              className={glyphClass}
+            />
           </>
         )}
         <span className="min-w-0 flex-1 truncate">{basenameOf(row.fullPath)}</span>
@@ -606,15 +625,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     return map;
   }, [projected.files]);
 
-  // Same icon rule as TreeRow (a page icon when set, otherwise the kind glyph),
-  // driven by the memoized lookup so pinned rows don't rescan projected.files.
+  // Same glyph rule as TreeRow, driven by the memoized lookup so pinned rows
+  // don't rescan projected.files.
   function fileGlyph(path: string) {
     const file = fileByPath.get(path);
-    return file?.icon ? (
-      <PageIconGlyph icon={file.icon} />
-    ) : (
-      <FileKindIcon kind={file?.kind ?? "file"} />
-    );
+    return <FileGlyph kind={explorerFileKind(path, file?.kind)} icon={file?.icon} size={13} />;
   }
 
   const expandedSet = useMemo(
@@ -1462,12 +1477,21 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         )}
         {isFolderEdit ? (
           folderEditExpanded ? (
-            <FolderOpen size={13} aria-hidden className="shrink-0 text-muted" />
+            <FolderOpen size={15} aria-hidden className="shrink-0 text-subtle" />
           ) : (
-            <Folder size={13} aria-hidden className="shrink-0 text-muted" />
+            <Folder size={15} aria-hidden className="shrink-0 text-subtle" />
           )
         ) : (
-          <FileText size={13} aria-hidden className="shrink-0 text-muted" />
+          // A new file without an extension becomes Markdown.
+          <KindGlyph
+            kind={
+              editing?.mode === "rename"
+                ? explorerFileKind(editing.path, fileByPath.get(editing.path)?.kind)
+                : FILE_KIND_RECORDS.markdown
+            }
+            size={15}
+            className="text-subtle"
+          />
         )}
         <input
           spellCheck={false}
