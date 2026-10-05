@@ -8,8 +8,9 @@ import { createWorkspaceAuthorityOwner } from "./workspaceAuthorityOwner";
 
 interface State { readonly attachmentId: symbol }
 const events: readonly WatcherEvent[] = [
-  { path: "notes/first.md", operation: "update", sha256: "new", previousSha256: "old" },
-  { path: "notes/renamed.md", fromPath: "notes/before.md", operation: "rename" },
+  { path: "notes/first.md", operation: "update" },
+  { path: "notes/before.md", operation: "delete" },
+  { path: "notes/renamed.md", operation: "update" },
 ];
 
 afterEach(() => vi.restoreAllMocks());
@@ -99,7 +100,7 @@ describe("desktop workspace callbacks", () => {
     test.callbacks.onWatcherBatch(replacement, events);
     test.callbacks.createRelayOnChange(replacement)();
     expect(test.handleWatcherEvents).toHaveBeenCalledOnce();
-    expect(test.notifyRenderer).toHaveBeenCalledWith({ workspaceId: original.workspaceId });
+    expect(test.notifyRenderer).toHaveBeenCalledWith({ workspaceId: original.workspaceId, pathSetChanged: false });
     expect(test.scanWorkspace).toHaveBeenCalledExactlyOnceWith(original.workspaceId);
     await test.authorities.invalidate(replacement.workspaceId);
     expect(test.disposed).toEqual([original.attachmentId, replacement.attachmentId]);

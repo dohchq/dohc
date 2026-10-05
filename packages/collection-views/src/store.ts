@@ -90,7 +90,7 @@ export function createCollectionStore(
   // latest request may write state, so a slow response can never clobber a
   // newer one.
   let requestToken = 0;
-  let loadingMore = false;
+  let loadingMore: symbol | null = null;
 
   let state: CollectionStoreState = {
     status: "idle",
@@ -112,7 +112,10 @@ export function createCollectionStore(
     cursor: CollectionQueryCursor | null,
   ): Promise<void> {
     const token = ++requestToken;
-    if (!cursor) setState({ status: "loading", query });
+    if (!cursor) {
+      loadingMore = null;
+      setState({ status: "loading", query });
+    }
     try {
       const result = await executor({ collectionPath, ...query, ...(cursor ? { cursor } : {}) });
       if (token !== requestToken) return;
@@ -145,9 +148,10 @@ export function createCollectionStore(
       if (loadingMore || !state.nextCursor || state.status !== "ready") {
         return Promise.resolve();
       }
-      loadingMore = true;
+      const pageRequest = Symbol("page-request");
+      loadingMore = pageRequest;
       return run(state.query, state.nextCursor).finally(() => {
-        loadingMore = false;
+        if (loadingMore === pageRequest) loadingMore = null;
       });
     },
   };

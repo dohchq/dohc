@@ -10,6 +10,38 @@ import { CHANNELS } from "./channels";
 export interface WorkspaceActivityScope {
   workspaceId: string;
   paths?: readonly string[];
+  pathSetChanged?: boolean;
+}
+
+/** Independent capture and observation wakes share one bounded IPC window. */
+export function coalesceWorkspaceActivity(send: (scope?: WorkspaceActivityScope) => void, delayMs = 100) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let global = false;
+  const pending = new Map<string, { paths: Set<string> | null; pathSetChanged: boolean | undefined }>();
+  const flush = () => {
+    timer = undefined;
+    const scopes = [...pending]; pending.clear();
+    if (global) { global = false; send(); return; }
+    for (const [workspaceId, entry] of scopes) send({ workspaceId,
+      ...(entry.paths?.size ? { paths: [...entry.paths] } : {}),
+      ...(entry.pathSetChanged !== undefined ? { pathSetChanged: entry.pathSetChanged } : {}) });
+  };
+  return (scope?: WorkspaceActivityScope): void => {
+    if (!scope) global = true;
+    else {
+      let entry = pending.get(scope.workspaceId);
+      if (!entry) { entry = { paths: new Set(), pathSetChanged: scope.pathSetChanged }; pending.set(scope.workspaceId, entry); }
+      else if (entry.pathSetChanged !== undefined) {
+        entry.pathSetChanged = scope.pathSetChanged === undefined ? undefined : entry.pathSetChanged || scope.pathSetChanged;
+      }
+      if (!scope.paths?.length) entry.paths = null;
+      if (entry.paths && scope.paths) for (const path of scope.paths) {
+        entry.paths.add(path);
+        if (entry.paths.size > MAX_ACTIVITY_EVENT_PATHS) { entry.paths = null; break; }
+      }
+    }
+    if (!timer) { timer = setTimeout(flush, delayMs); timer.unref?.(); }
+  };
 }
 
 interface ActivityWindow {
@@ -27,7 +59,8 @@ export function workspaceActivityPayload(
     scope.paths && scope.paths.length > 0 && scope.paths.length <= MAX_ACTIVITY_EVENT_PATHS
       ? [...scope.paths]
       : undefined;
-  return { workspaceId: scope.workspaceId, ...(paths ? { paths } : {}) };
+  return { workspaceId: scope.workspaceId, ...(paths ? { paths } : {}),
+    ...(scope.pathSetChanged !== undefined ? { pathSetChanged: scope.pathSetChanged } : {}) };
 }
 
 // One send decision for the workspace-activity channel: a scoped event

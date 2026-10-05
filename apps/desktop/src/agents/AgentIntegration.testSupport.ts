@@ -1,4 +1,4 @@
-import type { ActiveAgentRun } from "../workspaces/workspaceWatcher";
+import type { ActiveAgentRun } from "./activeAgentRun";
 import {
   AgentIntegrationState,
   createAgentIntegration,

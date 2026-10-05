@@ -1,6 +1,6 @@
 import type { EngineStoreRefusal } from "@dohc/workspace-engine-client";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
-import type { ActiveAgentRun } from "./workspaceWatcher";
+import type { ActiveAgentRun } from "../agents/activeAgentRun";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import {
   createWorkspaceActivity,
@@ -10,13 +10,16 @@ import {
 } from "./workspaceActivity";
 
 type TestActivityWorkspace = CreatedWorkspace & { attachmentId?: symbol };
+export const idleObservation: WorkspaceActivityOptions["observationFor"] = () => ({
+  ready: Promise.resolve(), stop: async () => {}, pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {},
+});
 
 /** Test-only registry adapter for the single-attachment activity service. */
 export function createInMemoryWorkspaceActivity(
   notify: (scope?: { workspaceId: string }) => void,
-  options: WorkspaceActivityOptions = {},
+  options: Partial<WorkspaceActivityOptions> = {},
 ) {
-  const service = createWorkspaceActivity(notify, options);
+  const service = createWorkspaceActivity(notify, { observationFor: idleObservation, ...options });
   const authorities = new Map<
     string,
     { workspace: ActivityWorkspace; state: WorkspaceActivityState }

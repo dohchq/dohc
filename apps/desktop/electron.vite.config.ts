@@ -52,6 +52,7 @@ export const mainBuildEntries = {
     "src/workspaces/workspaceDatabaseThread.ts",
   "document-projection-worker":
     "src/workspaces/documentProjectionThread.ts",
+  "workspace-files-worker": "src/workspaces/workspaceFilesThread.ts",
 };
 
 function effectFree(surface: "preload" | "renderer"): Plugin {

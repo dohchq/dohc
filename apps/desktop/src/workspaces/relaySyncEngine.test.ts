@@ -60,7 +60,7 @@ function capture(): WorkspaceEngineCapture {
         await task(async () => undefined),
     ),
     start: vi.fn(),
-    captureBatch: vi.fn(),
+    observeFileEvents: vi.fn(),
     registerExpectedEngineEvents: vi.fn(() => () => {}),
     listVersions: vi.fn(),
     createVersion: vi.fn(),

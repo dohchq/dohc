@@ -42,7 +42,7 @@ interface PendingActivity {
 // The daemon's bounded capture payload (crates/dohc-workspace-engine
 // moment_recorded_payload). Read leniently: this is telemetry for scoping a
 // repaint, and a shape drift must degrade to the global ping, never drop it.
-function scopeOf(payload: unknown): { workspaceId: string; paths: string[] | null } | null {
+export function scopeOf(payload: unknown): { workspaceId: string; paths: string[] | null } | null {
   if (typeof payload !== "object" || payload === null) return null;
   const record = payload as Record<string, unknown>;
   if (typeof record.workspaceId !== "string" || record.workspaceId.length === 0) {

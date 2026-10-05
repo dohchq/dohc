@@ -2,7 +2,7 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { resolveWorkspaceMetadataDir } from "../workspaces/workspaceMetadata";
-import type { ActiveAgentRun } from "../workspaces/workspaceWatcher";
+import type { ActiveAgentRun } from "./activeAgentRun";
 
 // Local agent integration. Two local-only concepts live here:
 //

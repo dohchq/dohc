@@ -153,7 +153,7 @@ function rememberIcon(absolutePath: string, entry: IconCacheEntry): void {
 // Cache-checked wrapper around readMarkdownIcon. Never throws — a stat
 // failure (e.g. a TOCTOU delete mid-walk) is treated as "no icon", matching
 // readMarkdownIcon's own failure-tolerant contract.
-async function getMarkdownListingMetadata(
+export async function getMarkdownListingMetadata(
   absolutePath: string,
   includeIcon: boolean,
 ): Promise<IconCacheEntry | undefined> {
@@ -182,6 +182,22 @@ async function getMarkdownListingMetadata(
   };
   if (includeIcon) rememberIcon(absolutePath, entry);
   return entry;
+}
+
+/** Refresh the same non-symlink paths admitted by the file listing. */
+export async function getWorkspaceListingMetadata(rootPath: string, path: string): Promise<IconCacheEntry | undefined> {
+  const validated = validateUserReadPath(path, { platform: process.platform });
+  if (!validated.ok || hasEngineIgnoredSegment(path, process.platform)) return undefined;
+  try {
+    let absolute = rootPath;
+    const segments = path.split("/");
+    for (let index = 0; index < segments.length; index += 1) {
+      absolute = join(absolute, segments[index]!);
+      const entry = await lstat(absolute);
+      if (entry.isSymbolicLink() || (index < segments.length - 1 ? !entry.isDirectory() : !entry.isFile())) return undefined;
+    }
+    return await getMarkdownListingMetadata(absolute, /\.(md|markdown)$/i.test(path));
+  } catch { return undefined; }
 }
 
 // Both queues are process-wide: overlapping forced listings still stay at a

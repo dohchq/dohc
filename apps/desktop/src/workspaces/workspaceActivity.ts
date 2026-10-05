@@ -10,11 +10,9 @@ import type {
   WorkspaceEngineCapture,
   WorkspaceEngineCaptureFailure,
 } from "./workspaceEngineCapture";
-import {
-  startWorkspaceWatch,
-  type ActiveAgentRun,
-  type WorkspaceWatchHandle,
-} from "./workspaceWatcher";
+import type { ActiveAgentRun } from "../agents/activeAgentRun";
+import type { WorkspaceObservationCallbacks, WorkspaceObservationHandle } from "./workspaceFileObservation";
+import type { WorkspaceActivityScope } from "../ipc/workspaceActivityBroadcast";
 
 // The legacy.dohc/history read/write surface is
 // gone from this layer — the engine capture is a workspace's only history.
@@ -26,7 +24,7 @@ export interface ActivityWorkspace extends CreatedWorkspace {
 
 interface WatchedWorkspace {
   workspace: ActivityWorkspace;
-  handle: WorkspaceWatchHandle;
+  handle: WorkspaceObservationHandle;
   inFlight: boolean;
   lastSyncedAtMs: number | null;
   engine: CloudSyncEngine | null;
@@ -38,6 +36,7 @@ interface WatchedWorkspace {
   // True when building the recorder threw: the cause is a failure,
   // not a capability, and the notice states which.
   historyRecordingUnavailable: boolean;
+  fileObservationUnavailable: boolean;
   // True when this workspace is a shared view: no recorder by design.
   // Same rule as above — the cause travels with the decision so no consumer
   // has to guess it.
@@ -73,6 +72,8 @@ export class WorkspaceActivityState {
 }
 
 export interface WorkspaceActivityOptions {
+  observationFor: (workspace: ActivityWorkspace, callbacks: WorkspaceObservationCallbacks) => WorkspaceObservationHandle;
+  onObservationResync?: (workspace: ActivityWorkspace) => Promise<void>;
   // Live facts main owns: whether this workspace has cloud sync enabled
   // (registry remote identity) and whether a cloud session exists right now.
   cloudStateFor?: (workspaceId: string) => { enabled: boolean; connected: boolean;
@@ -141,6 +142,14 @@ export async function closeWorkspaceActivityAndRelay(options: {
   }
 }
 
+export async function settleYDocsAfterFileObservation(
+  drains: readonly Promise<unknown>[],
+  settleYDocs: () => Promise<void>,
+): Promise<void> {
+  await Promise.allSettled(drains);
+  await settleYDocs();
+}
+
 // Owns the live file-watch → engine-capture pipeline per workspace, the
 // optional cloud sync engine riding on it, and the derived sync status. The
 // desktop layer opens a workspace once; subsequent status reads are served
@@ -149,8 +158,8 @@ export function createWorkspaceActivity(
   // Scoped when the push concerns one workspace (main delivers it only to
   // windows with that workspace active); scope-free for the two pushes below
   // that change every synced workspace at once.
-  notify: (scope?: { workspaceId: string; paths?: readonly string[] }) => void,
-  options: WorkspaceActivityOptions = {},
+  notify: (scope?: WorkspaceActivityScope) => void,
+  options: WorkspaceActivityOptions,
 ) {
   function statusFor(
     workspace: ActivityWorkspace,
@@ -191,7 +200,7 @@ export function createWorkspaceActivity(
       conflictCount,
       ...(snap?.claimingIdentity ? { claimingIdentity: true } : {}),
       ...(snap?.updateRequired ? { updateRequired: snap.updateRequired } : {}),
-      historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
+      historyRecordingUnavailable: (w?.historyRecordingUnavailable ?? false) || (w?.fileObservationUnavailable ?? false),
       historyShareView: w?.historyShareView ?? false,
       atomicPlacementUnavailable: w?.atomicPlacementUnavailable ?? false,
       recoveryUnavailable: w?.recoveryUnavailable ?? false,
@@ -277,10 +286,11 @@ export function createWorkspaceActivity(
         workspace,
         inFlight: false,
         lastSyncedAtMs: null,
-        handle: { stop: async () => {}, ready: Promise.resolve() },
+        handle: { stop: async () => {}, ready: Promise.resolve(), pulledPaths: async () => {}, pullStarting: () => {}, pullFinished: () => {} },
         engine: null,
         capture: null,
         historyRecordingUnavailable: false,
+        fileObservationUnavailable: false,
         historyShareView: false,
         historyCaptureFailure: null,
         historyCaptureDetail: null,
@@ -335,19 +345,41 @@ export function createWorkspaceActivity(
       if (state.entry !== entry) {
         return statusFor(workspace, state);
       }
-      entry.handle = startWorkspaceWatch(workspace, {
-        // Non-null from the first batch; null records nothing.
-        engineCapture: () => entry.capture,
-        onSettledBatch: (events) => options.onWatcherBatch?.(workspace, events),
-        onRecorded: (events) => {
+      entry.handle = options.observationFor(workspace, {
+        facts(facts) {
+          if (state.entry !== entry && state.entry !== null) return;
+          const events: WatcherEvent[] = facts.map(fact => ({ path: fact.path,
+            operation: fact.kind === "disappeared" ? "delete" : "update" }));
+          // Deletion suppression happens before any queued work or close.
+          entry.capture?.observeFileEvents(events);
+          if (state.entry !== entry) return;
+          options.onWatcherBatch?.(workspace, events);
+          notify({ workspaceId: workspace.workspaceId, paths: facts.map(fact => fact.path),
+            pathSetChanged: facts.some(fact => fact.kind !== "changed") });
+        },
+        async resync() {
+          if (state.entry !== entry && state.entry !== null) return;
+          await entry.capture?.resyncFileObservation();
+          if (state.entry !== entry) return;
+          void options.onObservationResync?.(workspace).catch(error =>
+            console.error(`[desktop] reload file consumers for ${workspace.workspaceId}:`, error));
+          notify({ workspaceId: workspace.workspaceId });
+        },
+        captured(paths) {
+          if (state.entry !== entry) return;
           entry.inFlight = false;
           entry.lastSyncedAtMs = Date.now();
-          // Every settled local batch queues a (debounced) cloud push.
           entry.engine?.queueSync();
-          notify({
-            workspaceId: workspace.workspaceId,
-            paths: events.map((event) => event.path),
-          });
+          notify({ workspaceId: workspace.workspaceId, paths, pathSetChanged: false });
+        },
+        pulled(paths) {
+          if (state.entry !== entry) return;
+          options.onWatcherBatch?.(workspace, paths.map(path => ({ path, operation: "update" })));
+        },
+        degraded(unavailable) {
+          if (state.entry !== entry || entry.fileObservationUnavailable === unavailable) return;
+          entry.fileObservationUnavailable = unavailable;
+          notify({ workspaceId: workspace.workspaceId });
         },
       });
       // Startup reconciliation claims its capture-chain slot here, in the same
@@ -357,13 +389,23 @@ export function createWorkspaceActivity(
       // baseline they landed on. The pass runs in the background — closed-period
       // edits become engine moments without blocking the open.
       entry.capture?.start();
-      // Don't report the workspace open until the watcher's initial scan is
-      // done — a write made right after openWorkspace resolves is guaranteed
-      // observed. Bounded so a pathological scan can't hang the renderer.
-      await Promise.race([
-        entry.handle.ready,
-        new Promise<void>((resolve) => setTimeout(resolve, 5000)),
-      ]);
+      // Data-ready means the engine's observation baseline exists.
+      let readyTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          entry.handle.ready,
+          new Promise<void>(resolve => {
+            readyTimer = setTimeout(() => {
+              entry.fileObservationUnavailable = true;
+              notify({ workspaceId: workspace.workspaceId });
+              resolve();
+            }, 5_000);
+          }),
+        ]);
+      } finally {
+        if (readyTimer) clearTimeout(readyTimer);
+      }
+      if (state.entry !== entry) return statusFor(workspace, state);
       const engine = options.engineFor?.(workspace, entry.capture) ?? null;
       if (engine) {
         entry.engine = engine;
@@ -432,7 +474,11 @@ export function createWorkspaceActivity(
     }
     state.entry = null;
     const stopped = await Promise.allSettled([
-      Promise.resolve().then(() => entry.handle.stop()),
+      Promise.resolve().then(() => entry.handle.stop()).catch(async error => {
+        entry.capture?.observationDrainFailed();
+        await entry.capture?.resyncFileObservation();
+        throw error;
+      }),
       Promise.resolve().then(() => entry.engine?.stop()),
     ]);
     const liveSessionsRetired = await Promise.allSettled([
@@ -543,6 +589,22 @@ export function createWorkspaceActivity(
   // change. No-op when the workspace has no engine.
   function queueCloudPull(state: WorkspaceActivityState): void {
     state.entry?.engine?.queuePull();
+  }
+
+  function pullStarting(state: WorkspaceActivityState): void { state.entry?.handle.pullStarting(); }
+  function pullFinished(state: WorkspaceActivityState): void { state.entry?.handle.pullFinished(); }
+  function handlePulledPaths(state: WorkspaceActivityState, paths: readonly string[]): Promise<void> {
+    return state.entry?.handle.pulledPaths(paths) ?? Promise.resolve();
+  }
+  async function drainObservations(state: WorkspaceActivityState): Promise<void> {
+    const entry = state.entry;
+    if (!entry) return;
+    try { await entry.handle.stop(); }
+    catch (error) {
+      entry.capture?.observationDrainFailed();
+      await entry.capture?.resyncFileObservation();
+      throw error;
+    }
   }
 
   // Sets (or clears) the active agent run for an open workspace. The engine
@@ -674,15 +736,7 @@ export function createWorkspaceActivity(
   // enqueues the last batch, then capture.stop() awaits the capture chain so
   // the last engine record is durably written too.
   async function stop(state: WorkspaceActivityState): Promise<void> {
-    const entry = state.entry;
-    state.entry = null;
-    state.preservedStatus = null;
-    if (!entry) return;
-    await Promise.all([
-      entry.handle.stop(),
-      entry.engine?.stop() ?? Promise.resolve(),
-    ]);
-    await (entry.capture?.stop() ?? Promise.resolve());
+    if (state.entry) await close(state.entry.workspace, state, { notify: false });
   }
 
   return {
@@ -699,6 +753,10 @@ export function createWorkspaceActivity(
     retryCloudSync,
     syncNow,
     queueCloudPull,
+    pullStarting,
+    pullFinished,
+    handlePulledPaths,
+    drainObservations,
     setAgentRun,
     claimAgentRun,
     clearAgentRun,

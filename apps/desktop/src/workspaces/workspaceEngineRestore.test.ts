@@ -63,7 +63,7 @@ describe("engine history reads", () => {
     engine.start();
     await engine.flush();
     await write(root, "a.md", "second\n");
-    engine.captureBatch([{ path: "a.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "a.md", operation: "update" }]);
     await engine.flush();
 
     const page = await engine.listMoments();
@@ -100,7 +100,7 @@ describe("engine history reads", () => {
     await engine.flush();
     await engine.createVersion("Draft");
     await write(root, "plan.md", "draft body\n");
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
     await engine.flush();
 
     const draftPage = await engine.listMoments();
@@ -124,7 +124,7 @@ describe("engine restore", () => {
     engine.start();
     await engine.flush();
     await write(root, "doc.md", "edited\n");
-    engine.captureBatch([{ path: "doc.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "doc.md", operation: "update" }]);
     await engine.flush();
 
     const page = await engine.listMoments();
@@ -146,7 +146,7 @@ describe("engine restore", () => {
 
     // The watcher's observation of our own materialized write consumes the
     // registered expected event instead of re-capturing a duplicate moment.
-    engine.captureBatch([{ path: "doc.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "doc.md", operation: "update" }]);
     await engine.flush();
     expect((await engine.listMoments()).moments.length).toBe(after.moments.length);
     await engine.stop();
@@ -160,7 +160,7 @@ describe("engine restore", () => {
     engine.start();
     await engine.flush();
     await write(root, "doc.md", "edited\n");
-    engine.captureBatch([{ path: "doc.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "doc.md", operation: "update" }]);
     await engine.flush();
     const editMomentId = (await engine.listMoments()).moments[0].id;
 
@@ -219,7 +219,7 @@ describe("engine restore", () => {
     engine.start();
     await engine.flush();
     await write(root, "doc.md", "edited\n");
-    engine.captureBatch([{ path: "doc.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "doc.md", operation: "update" }]);
     await engine.flush();
     const editMomentId = (await engine.listMoments()).moments[0].id;
 
@@ -242,7 +242,7 @@ describe("engine restore", () => {
     engine.start();
     await engine.flush();
     await write(root, "new.md", "created\n");
-    engine.captureBatch([{ path: "new.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "new.md", operation: "update" }]);
     await engine.flush();
     const createMomentId = (await engine.listMoments()).moments[0].id;
 
@@ -269,7 +269,7 @@ describe("engine restore", () => {
     engine.start();
     await engine.flush();
     await write(root, "doc.md", "edited\n");
-    engine.captureBatch([{ path: "doc.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "doc.md", operation: "update" }]);
     await engine.flush();
     const edit = (await engine.listMoments()).moments[0]!;
     const objectId = (await engine.fileObjectIdForPath("doc.md"))!;
@@ -298,7 +298,7 @@ describe("engine restore", () => {
     engine.start();
     await engine.flush();
     await write(root, "ideas/collection.yaml", "name: Ideas\n");
-    engine.captureBatch([{ path: "ideas/collection.yaml", operation: "update" }]);
+    engine.observeFileEvents([{ path: "ideas/collection.yaml", operation: "update" }]);
     await engine.flush();
     const created = (await engine.listMoments()).moments[0]!;
 
@@ -322,7 +322,7 @@ describe("engine restore", () => {
     engine.start();
     await engine.flush();
     await write(root, "doc.md", "edited\n");
-    engine.captureBatch([{ path: "doc.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "doc.md", operation: "update" }]);
     await engine.flush();
     const editMomentId = (await engine.listMoments()).moments[0].id;
 
@@ -423,7 +423,7 @@ describe("stable object ids for the linked-chat rail", () => {
     // The watcher's observation of the move consumes the registered expected
     // events instead of retiring the object and creating a fresh one.
     const before = (await engine.listMoments()).moments.length;
-    engine.captureBatch([
+    engine.observeFileEvents([
       { path: "before.md", operation: "delete" },
       { path: "after.md", operation: "update" },
     ]);
@@ -468,7 +468,7 @@ describe("stable object ids for the linked-chat rail", () => {
 
     // Secret destination: the engine never records a rename into it.
     await write(root, "tracked.md", "body\n");
-    engine.captureBatch([{ path: "tracked.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "tracked.md", operation: "update" }]);
     await engine.flush();
     const before = (await engine.listMoments()).moments.length;
     const finishSecret = await engine.beginFileRename("tracked.md", ".env");

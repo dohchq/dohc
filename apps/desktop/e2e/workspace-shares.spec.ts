@@ -1005,6 +1005,22 @@ test("mount side: add a share into a workspace and open it beside local files", 
     // The mounted file opens read-only with the granter's content.
     await explorerRow(page, "shared-with-me/e2e-granter/docs/brief.md").click();
     await expect(page.getByText("The lighthouse memo.")).toBeVisible();
+    // The mount has capture disabled. An external projection write still
+    // refreshes the host's shared view without making it canonical content.
+    const mountPath = "shared-with-me/e2e-granter/docs/brief.md";
+    await page.evaluate(({ workspaceId, path }) => {
+      const api = (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop;
+      Reflect.set(window, "mountObservationSeen", false);
+      const off = api.onWorkspaceActivity(event => {
+        if (event.workspaceId === workspaceId && event.paths?.includes(path)) {
+          Reflect.set(window, "mountObservationSeen", true);
+          off();
+        }
+      });
+    }, { workspaceId: hostWorkspaceId, path: mountPath });
+    await writeFile(join(temp.rootPath, mountPath), "External projection edit, never canonical.\n");
+    await expect.poll(() => page.evaluate(() => Reflect.get(window, "mountObservationSeen")), { timeout: 60_000 }).toBe(true);
+    await expect(page.getByText("The lighthouse memo.")).toBeVisible();
   } finally {
     await relay?.stop();
     if (desktop) await cleanupDesktopWorkspace(desktop, temp);
