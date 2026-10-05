@@ -34,7 +34,7 @@ import {
 // Spec 1 (grant side): the app user shares a file by email from the
 //   explorer context menu, gets a copyable share code, manages it under
 //   Settings → Sync and sharing, and ends it — after which the recipient's relay
-//   access is a byte-identical 404.
+//   access returns 404 with the removed-recipient explanation (#1438).
 // Spec 2 (receive side, the full loop): grant → open the share in the app
 //   → browse/search the read-only view → granter edits → refresh sees it →
 //   revoke → refresh surfaces "this share was ended" honestly.
@@ -263,7 +263,11 @@ test("grant side: share a file by email from the explorer, copy the code, and en
       `/sync/shares/${shareId}/log?since=0`,
     );
     expect(revokedFetch.status).toBe(404);
-    expect(revokedFetch.body).toBe(missingFetch.body);
+    expect(JSON.parse(revokedFetch.body)).toEqual({
+      ok: false,
+      error: "The owner removed your access.",
+      code: "share_access_removed",
+    });
   } finally {
     // Stop the relay child before removing the temp tree it holds open, or
     // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
@@ -591,7 +595,12 @@ confidentialTest.describe("View link lifecycle", () => {
         neverValidCredential,
         "/sync/link/share",
       );
-      expect(neverValidRead.status).toBe(401);
+      // #1422 normalizes unverified link refusals to the same opaque 404.
+      expect(neverValidRead.status).toBe(404);
+      expect(JSON.parse(neverValidRead.body)).toEqual({
+        ok: false,
+        error: "not found",
+      });
       const oldCapabilityAfterReset = await readViewLink(
         relay.baseUrl,
         oldCapability,
