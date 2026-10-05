@@ -889,21 +889,33 @@ fn apply_moment_append(
             // write is a suppressed self-write, so no capture apply indexes
             // it later: a bound record's index must ride this transaction.
             if let Some(text) = after_text.as_deref() {
-                // A write without parseable frontmatter must still clear the
-                // index. Mirror the ydoc lane: `Ydoc::frontmatter_json`
-                // projects an absent frontmatter map as an empty object.
-                // The prior snapshot's text is the before state, so a file
-                // edit derives the same per-field history and facts a
-                // frontmatter-map edit does; the author was written against
-                // its own head, so its authored pair is the applied pair.
+                // Moment-only edits diff the prior file snapshot. Audited owner
+                // settlements use the field index the live feed has advanced.
+                // Unparseable frontmatter must still clear the index.
                 let empty = || serde_json::Value::Object(serde_json::Map::new());
-                let before_frontmatter = local
-                    .as_ref()
-                    .filter(|snapshot| snapshot.kind == ContentKind::Text)
-                    .and_then(|snapshot| {
-                        dohc_engine_domain::collections::markdown_frontmatter_json(&snapshot.text)
-                    })
-                    .unwrap_or_else(empty);
+                let before_frontmatter = if owner_settlement_committed {
+                    // Accepted frames advance the field index before the file.
+                    // Diff that index so only changes not indexed by the feed
+                    // (such as an enrolled restore checkpoint) get history.
+                    dohc_engine_domain::collections::indexed_collection_record_frontmatter_in_tx(
+                        tx,
+                        &envelope.workspace_id,
+                        &payload.version_id,
+                        &payload.object_id,
+                    )
+                    .map_err(crate::ydoc_apply::map_domain_hard_error)?
+                    .unwrap_or_else(empty)
+                } else {
+                    local
+                        .as_ref()
+                        .filter(|snapshot| snapshot.kind == ContentKind::Text)
+                        .and_then(|snapshot| {
+                            dohc_engine_domain::collections::markdown_frontmatter_json(
+                                &snapshot.text,
+                            )
+                        })
+                        .unwrap_or_else(empty)
+                };
                 let (frontmatter, provenance) =
                     dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
                         text,

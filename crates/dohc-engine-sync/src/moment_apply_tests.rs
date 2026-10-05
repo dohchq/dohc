@@ -419,16 +419,172 @@ fn owner_binding_read_failure_does_not_acknowledge_moment() {
 }
 
 #[test]
-fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pending_draft() {
-    observed_owner_settlement_scenario(false);
+fn moment_only_record_write_and_undo_each_keep_their_field_history() {
+    let (_scratch, mut store) = test_store();
+    seed_text_moment(
+        &mut store,
+        "schema",
+        "tasks/collection.yaml",
+        "fields: {}\n",
+        "schema",
+        None,
+        true,
+    );
+    let initial_text = "# Task\n";
+    seed_text_moment(
+        &mut store,
+        "record",
+        "tasks/task.md",
+        initial_text,
+        "initial",
+        None,
+        true,
+    );
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")
+        })
+        .unwrap();
+    let record_id: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT record_id FROM collection_records WHERE object_id='record'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    let written = format!("---\nid: {record_id}\nFinished on: 2026-10-05\n---\n# Task\n");
+    let undone = format!("---\nid: {record_id}\nFinished on: null\n---\n# Task\n");
+    hydrate_texts(&mut store, &[&written, &undone]);
+    let write = envelope(
+        "peer",
+        0,
+        "ws",
+        present_text_payload(
+            "written",
+            "record",
+            "write",
+            "tasks/task.md",
+            "tasks/task.md",
+            initial_text,
+            "initial",
+            &written,
+        ),
+    );
+    let undo = envelope(
+        "peer",
+        1,
+        "ws",
+        present_text_payload(
+            "undone",
+            "record",
+            "write",
+            "tasks/task.md",
+            "tasks/task.md",
+            &written,
+            "written",
+            &undone,
+        ),
+    );
+    for op in [&write, &undo] {
+        let result =
+            crate::apply_moment_envelope_detailed(&mut store, op, &NoFaults, &NoLiveLeases)
+                .unwrap();
+        let ApplyDisposition::Applied(result) = result.primary else {
+            panic!("moment-only field change must apply")
+        };
+        let facts = result.record_facts.unwrap();
+        assert_eq!(facts.source, Some(("peer".into(), op.origin_seq)));
+        assert_eq!(facts.fields.len(), 1);
+        assert_eq!(facts.fields[0].field_name, "Finished on");
+    }
+    let history = store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT previous_value_json,next_value_json,source_origin_id,source_origin_seq \
+             FROM collection_field_history WHERE record_id=?1 ORDER BY history_id",
+            )?;
+            stmt.query_map([&record_id], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+    assert_eq!(
+        history,
+        vec![
+            (None, Some("\"2026-10-05\"".into()), "peer".into(), 0),
+            (
+                Some("\"2026-10-05\"".into()),
+                Some("null".into()),
+                "peer".into(),
+                1
+            ),
+        ]
+    );
+    assert_eq!(store.table_row_count("ydoc_updates").unwrap(), 0);
+    assert_eq!(
+        apply_moment_envelope(&mut store, &undo, &NoFaults).unwrap(),
+        ApplyOutcome::new(ApplyDisposition::Skipped)
+    );
+    assert_eq!(
+        store.table_row_count("collection_field_history").unwrap(),
+        2
+    );
 }
 
 #[test]
-fn observed_owner_settlement_completes_only_its_matching_collection_adoption() {
-    observed_owner_settlement_scenario(true);
+fn observed_owner_imports_old_settlements_without_rewinding_accepted_state_or_pending_draft() {
+    observed_owner_settlement_scenario(OwnerSettlementFields::NoCollection);
 }
 
-fn observed_owner_settlement_scenario(with_collection: bool) {
+#[test]
+fn observed_owner_settlement_keeps_one_history_row_for_an_accepted_field_write() {
+    observed_owner_settlement_scenario(OwnerSettlementFields::Write);
+}
+
+#[test]
+fn observed_owner_settlement_completes_adoption_without_reindexing_field_changes() {
+    observed_owner_settlement_scenario(OwnerSettlementFields::Undo);
+}
+
+#[test]
+fn observed_owner_settlements_keep_both_changes_when_a_field_returns_to_its_initial_value() {
+    observed_owner_settlement_scenario(OwnerSettlementFields::TwoChanges(["A", "B", "A"]));
+}
+
+#[test]
+fn observed_owner_settlements_keep_two_changes_to_one_field_between_settlements() {
+    observed_owner_settlement_scenario(OwnerSettlementFields::TwoChanges(["A", "B", "C"]));
+}
+
+#[test]
+fn observed_owner_first_enrollment_records_a_checkpoint_field_change_once() {
+    observed_owner_settlement_scenario(OwnerSettlementFields::Enrollment);
+}
+
+enum OwnerSettlementFields {
+    NoCollection,
+    Write,
+    Undo,
+    TwoChanges([&'static str; 3]),
+    Enrollment,
+}
+
+fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
+    let with_collection = !matches!(fields, OwnerSettlementFields::NoCollection);
+    let undo_field = matches!(fields, OwnerSettlementFields::Undo);
+    let enroll_field_change = matches!(fields, OwnerSettlementFields::Enrollment);
+    let field_values = match fields {
+        OwnerSettlementFields::TwoChanges(values) => Some(values),
+        _ => None,
+    };
     use dohc_engine_collab::live_object_binding::LiveObjectBinding;
     use dohc_engine_collab::owner_outbox::{
         OwnerOutboxLimits,
@@ -443,8 +599,16 @@ fn observed_owner_settlement_scenario(with_collection: bool) {
         "../../dohc-engine-collab/tests/owner-source/owner-source-seed.json"
     ))
     .unwrap();
-    let original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
-    let initial_text = fixture["markdown"].as_str().unwrap();
+    let mut original: Vec<u8> = serde_json::from_value(fixture["bytes"].clone()).unwrap();
+    let mut initial_text = fixture["markdown"].as_str().unwrap().to_owned();
+    if let Some(values) = field_values {
+        let initial = Ydoc::wire();
+        initial.apply(&original).unwrap();
+        initial.frontmatter_set("Finished on", values[0]).unwrap();
+        original = initial.encode_full_state();
+        initial_text = initial.project(YdocContentKind::Richdoc).unwrap().content;
+    }
+    let initial_text = initial_text.as_str();
     let initial_moment = format!("moment-ydoc-{}", "a".repeat(64));
     seed_text_moment(
         &mut store,
@@ -547,11 +711,24 @@ fn observed_owner_settlement_scenario(with_collection: bool) {
             max_pending_age_ms: 60_000,
         },
     };
-    store
-        .write_with(&NoFaults, |tx| {
-            install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)
-        })
-        .unwrap();
+    if enroll_field_change {
+        doc.frontmatter_set("Finished on", "2026-10-05").unwrap();
+        let enrolled = enroll_restore(&mut store, &observed.binding, &doc, 0, &observed.limits);
+        observed.revision = enrolled.revision;
+        observed.native_head_sequence = enrolled.native_head_sequence;
+        store.read_with(|conn| {
+            let row = conn.query_row("SELECT previous_value_json,next_value_json,source_origin_id,source_origin_seq FROM collection_field_history WHERE field_name='Finished on'", [], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<i64>>(3)?)))?;
+            assert_eq!(row, (None, Some("\"2026-10-05\"".into()), None, None));
+            assert_eq!(conn.query_row("SELECT count(*) FROM collection_field_history WHERE field_name='Finished on'", [], |row| row.get::<_, i64>(0))?, 1);
+            Ok::<_, rusqlite::Error>(())
+        }).unwrap();
+    } else {
+        store
+            .write_with(&NoFaults, |tx| {
+                install_observed_binding_in_tx(tx, "ws", &observed, &checkpoint)
+            })
+            .unwrap();
+    }
     let mut texts = Vec::new();
     for (index, text) in ["first accepted edit", "second accepted edit"]
         .iter()
@@ -562,6 +739,19 @@ fn observed_owner_settlement_scenario(with_collection: bool) {
             if let Some(record_id) = &record_id {
                 doc.frontmatter_set("id", record_id).unwrap();
             }
+        }
+        if with_collection && (index == 0 || undo_field || field_values.is_some()) {
+            doc.frontmatter_set_value(
+                "Finished on",
+                if let Some(values) = field_values {
+                    json!(values[index + 1])
+                } else if index == 0 {
+                    json!("2026-10-05")
+                } else {
+                    Value::Null
+                },
+            )
+            .unwrap();
         }
         doc.richdoc_append_paragraph(text);
         let update = doc.diff(&before).unwrap();
@@ -590,6 +780,47 @@ fn observed_owner_settlement_scenario(with_collection: bool) {
         observed.native_head_sequence = result.native_head_sequence;
         observed.accepted_cursor = result.accepted_cursor;
         texts.push(doc.project(YdocContentKind::Richdoc).unwrap().content);
+    }
+    let field_history = |store: &EngineStore| {
+        store.read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT history_id,previous_value_json,next_value_json,source_origin_id,source_origin_seq \
+                 FROM collection_field_history WHERE workspace_id='ws' AND version_id='main' \
+                   AND field_name='Finished on' ORDER BY history_id",
+            )?;
+            stmt.query_map([], |row| Ok((
+                row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            )))?.collect::<Result<Vec<_>, _>>()
+        }).unwrap()
+    };
+    let accepted_history = field_history(&store);
+    if with_collection {
+        assert_eq!(
+            accepted_history.len(),
+            if undo_field || field_values.is_some() {
+                2
+            } else {
+                1
+            }
+        );
+        if let Some(values) = field_values {
+            for (index, row) in accepted_history.iter().enumerate() {
+                assert_eq!(row.1, Some(serde_json::to_string(values[index]).unwrap()));
+                assert_eq!(
+                    row.2,
+                    Some(serde_json::to_string(values[index + 1]).unwrap())
+                );
+            }
+        } else {
+            assert_eq!(accepted_history[0].1, None);
+            assert_eq!(accepted_history[0].2.as_deref(), Some("\"2026-10-05\""));
+        }
+        if undo_field {
+            assert_eq!(accepted_history[1].1.as_deref(), Some("\"2026-10-05\""));
+            assert_eq!(accepted_history[1].2.as_deref(), Some("null"));
+        }
     }
     let accepted_bytes = doc.encode_full_state();
     let pending_update = doc.richdoc_append_paragraph("private pending owner edit");
@@ -677,6 +908,7 @@ fn observed_owner_settlement_scenario(with_collection: bool) {
         0
     );
     assert_eq!(snapshot(&store, "object"), before);
+    assert_eq!(field_history(&store), accepted_history);
     store
         .read_with(|conn| {
             conn.execute(
@@ -692,6 +924,7 @@ fn observed_owner_settlement_scenario(with_collection: bool) {
     );
     assert_eq!(snapshot(&store, "object"), before);
     if with_collection {
+        assert_eq!(field_history(&store), accepted_history);
         assert_eq!(adoption_state(&store, "object"), "pending-lossless");
     }
     assert_eq!(
@@ -732,10 +965,14 @@ fn observed_owner_settlement_scenario(with_collection: bool) {
         ApplyDisposition::Refused(_)
     ));
     assert_eq!(snapshot(&store, "object"), before);
-    assert_eq!(
-        crate::apply_moment_envelope(&mut store, &latest, &NoFaults, &crate::AlwaysLive).unwrap(),
-        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    let latest_result =
+        crate::apply_moment_envelope_detailed(&mut store, &latest, &NoFaults, &crate::AlwaysLive)
+            .unwrap();
+    assert!(
+        matches!(latest_result.primary, ApplyDisposition::Applied(ref result)
+        if result.conflicts_opened == 0 && result.record_facts.is_none())
     );
+    assert_eq!(field_history(&store), accepted_history);
     if with_collection {
         assert_eq!(adoption_state(&store, "object"), "adopted");
         assert_eq!(
@@ -775,6 +1012,130 @@ fn observed_owner_settlement_scenario(with_collection: bool) {
         ApplyOutcome::new(ApplyDisposition::Skipped)
     );
     if with_collection {
+        // Enrollment records the restore before a later accepted field edit
+        // can advance the index and make the restore settlement history-only.
+        let restored = store
+            .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+            .unwrap();
+        restored
+            .frontmatter_set("Finished on", "2026-11-01")
+            .unwrap();
+        let restored_text = restored.project(YdocContentKind::Richdoc).unwrap().content;
+        let restored_binding = dohc_engine_collab::live_object_binding::LiveObjectBinding {
+            restore_fence_generation: 1,
+            ..observed.binding.clone()
+        };
+        let advanced = enroll_restore(
+            &mut store,
+            &restored_binding,
+            &restored,
+            3,
+            &observed.limits,
+        );
+        let restored_history = field_history(&store);
+        assert_eq!(restored_history.len(), accepted_history.len() + 1);
+        let before_frame = restored.encode_state_vector();
+        restored.frontmatter_set("Status", "Done").unwrap();
+        let latest_restored_text = restored.project(YdocContentKind::Richdoc).unwrap().content;
+        store
+            .write_with(&NoFaults, |tx| {
+                apply_frame_in_tx(
+                    tx,
+                    "ws",
+                    &OwnerAcceptedFrameInput {
+                        binding: restored_binding.clone(),
+                        relay_database_namespace: "relay".into(),
+                        expected_revision: advanced.revision,
+                        expected_native_head_sequence: advanced.native_head_sequence,
+                        previous_accepted_cursor: advanced.accepted_cursor,
+                        journal_cursor: 4,
+                        update_bytes: restored.diff(&before_frame).unwrap(),
+                    },
+                    6,
+                )
+            })
+            .unwrap();
+        assert_eq!(field_history(&store), restored_history);
+        hydrate_texts(&mut store, &[&restored_text]);
+        let restored_id = format!("moment-ydoc-{}", "e".repeat(64));
+        retain_restore_audit(
+            &store,
+            &restored_binding,
+            "relay",
+            &restored_id,
+            &restored_text,
+            3,
+        );
+        let restore = envelope(
+            "restore-host",
+            0,
+            "ws",
+            present_text_payload(
+                &restored_id,
+                "object",
+                "write",
+                "tasks/owner.md",
+                "tasks/owner.md",
+                &texts[1],
+                &latest_id,
+                &restored_text,
+            ),
+        );
+        let result = crate::apply_moment_envelope_detailed(
+            &mut store,
+            &restore,
+            &NoFaults,
+            &crate::AlwaysLive,
+        )
+        .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Applied(ref result)
+            if result.record_facts.is_none())
+        );
+        hydrate_texts(&mut store, &[&latest_restored_text]);
+        let latest_restored_id = format!("moment-ydoc-{}", "1".repeat(64));
+        retain_restore_audit(
+            &store,
+            &restored_binding,
+            "relay",
+            &latest_restored_id,
+            &latest_restored_text,
+            4,
+        );
+        let latest_restore = envelope(
+            "restore-host",
+            1,
+            "ws",
+            present_text_payload(
+                &latest_restored_id,
+                "object",
+                "write",
+                "tasks/owner.md",
+                "tasks/owner.md",
+                &restored_text,
+                &restored_id,
+                &latest_restored_text,
+            ),
+        );
+        assert!(matches!(
+            apply_moment_envelope(&mut store, &latest_restore, &NoFaults)
+                .unwrap()
+                .primary,
+            ApplyDisposition::Applied(_)
+        ));
+        let history = field_history(&store);
+        assert_eq!(history, restored_history);
+        assert_eq!(history.len(), accepted_history.len() + 1);
+        let last = history.last().unwrap();
+        assert_eq!(last.1, accepted_history.last().unwrap().2);
+        assert_eq!(last.2.as_deref(), Some("\"2026-11-01\""));
+        assert_eq!(last.3, None);
+        assert_eq!(last.4, None);
+        let status_history = store.read_with(|conn| {
+            let mut stmt = conn.prepare("SELECT previous_value_json,next_value_json FROM collection_field_history WHERE field_name='Status' ORDER BY history_id")?;
+            stmt.query_map([], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)))?.collect::<Result<Vec<_>, _>>()
+        }).unwrap();
+        assert_eq!(status_history, vec![(None, Some("\"Done\"".into()))]);
         return;
     }
     let renamed = envelope(
