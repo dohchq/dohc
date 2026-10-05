@@ -96,15 +96,9 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn every_rpc_parameter_with_attribution_has_author_admission() {
-        let rpc = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/rpc");
-        let listed = [
-            ("YdocRecordUpdateParams", "ydoc.recordUpdate"),
-            ("SetBatchSubmission", "collections.setFieldsBatch"),
-        ];
+    fn attributed_parameters(root: &std::path::Path) -> Vec<String> {
         let mut found = Vec::new();
-        let mut pending = vec![rpc];
+        let mut pending = vec![root.to_owned()];
         while let Some(path) = pending.pop() {
             if path.is_dir() {
                 pending.extend(
@@ -118,31 +112,57 @@ mod tests {
                 continue;
             }
             let source = std::fs::read_to_string(path).unwrap();
-            let mut name = None;
+            let mut parameter = None;
             for line in source.lines() {
-                if let Some(declaration) = line
-                    .trim()
-                    .split_once("struct ")
-                    .map(|(_, declaration)| declaration)
+                let line = line.trim();
+                if let Some((visibility, declaration)) = line.split_once("struct ")
+                    && (visibility.is_empty() || visibility.starts_with("pub"))
                 {
-                    name = declaration
+                    parameter = declaration
                         .split(|c: char| c.is_whitespace() || c == '{' || c == '<')
                         .next();
                 }
-                if line.split_whitespace().any(|token| token == "attribution:") {
-                    let name = name.expect("attribution parameter belongs to a struct");
-                    let (_, method) = listed
-                        .iter()
-                        .find(|(parameter, _)| *parameter == name)
-                        .unwrap_or_else(|| {
-                            panic!("list the method that carries attribution in {name}")
-                        });
-                    assert_eq!(author_key(method), Some("attribution"), "{method}");
+                if line.starts_with('}') {
+                    parameter = None;
+                }
+                if let Some(name) = parameter
+                    && line.split_whitespace().any(|token| token == "attribution:")
+                {
                     found.push(name.to_owned());
+                }
+                if line.ends_with('}') {
+                    parameter = None;
                 }
             }
         }
+        found
+    }
+
+    #[test]
+    fn every_rpc_parameter_with_attribution_has_author_admission() {
+        let rpc = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/rpc");
+        let listed = [
+            ("YdocRecordUpdateParams", "ydoc.recordUpdate"),
+            ("SetBatchSubmission", "collections.setFieldsBatch"),
+        ];
+        let found = attributed_parameters(&rpc);
+        for name in &found {
+            let (_, method) = listed
+                .iter()
+                .find(|(parameter, _)| *parameter == name)
+                .unwrap_or_else(|| panic!("list the method that carries attribution in {name}"));
+            assert_eq!(author_key(method), Some("attribution"), "{method}");
+        }
         assert_eq!(found.len(), listed.len());
+    }
+
+    #[test]
+    fn attribution_listing_handles_nested_visibility_and_ignores_struct_literals() {
+        let scratch = dohc_engine_testkit::ScratchDir::new().unwrap();
+        let nested = scratch.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("params.rs"), "pub(super) struct Qualified {\n    pub(crate) attribution: Author,\n}\nfn facts() {\n    let facts = Facts {\n        attribution: None,\n    };\n}\n").unwrap();
+        assert_eq!(attributed_parameters(scratch.path()), vec!["Qualified"]);
     }
 
     #[test]
