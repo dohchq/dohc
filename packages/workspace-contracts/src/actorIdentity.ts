@@ -51,7 +51,7 @@ export type ActorKey = ActorOwnerKey | (ActorKeyBrand & (
 export type ActorOrigin = "renderer" | "cli" | "automation" | "unknown";
 
 /**
- * local: renderer admission, or an own-store History human matching this installation.
+ * local: renderer admission, or an installation History human with renderer or unknown origin.
  * relay-verified: chat owner verification or a relay-stamped author in the own store.
  * owner-asserted: human participation, agent name, automation kind, or received History claim.
  * inferred: an issuerless historical identity, never verified self.
@@ -118,7 +118,7 @@ export function deriveLocalActor(input: {
   readonly origin: ActorOrigin;
 }): ActorRef {
   const ownerKey = localOwner(input.identity);
-  const origin = input.origin ?? "unknown";
+  const origin = input.origin;
   switch (input.author.kind) {
     case "human":
       return { key: ownerKey, displayName: input.displayName, origin, assurance: origin === "renderer" ? "local" : "owner-asserted" };
@@ -182,7 +182,9 @@ type MomentActorContext = {
 /**
  * Projects admitted moment authors without rewriting moments.
  * own-store means this workspace's own store, never a received share. Moments record no device.
- * Match both this installation and the current account. An installation human is local self.
+ * Match both this installation and the current account. Installation humans are local self
+ * only with renderer or unknown origin. Moments record no origin, so unknown is normal.
+ * CLI and automation origins are owner-asserted, even when they match this installation.
  * An account human is at most owner-asserted, even when it names the current account.
  * Own-store automation keys retain the workspace and definition ID; assurance is owner-asserted.
  * An absent automation owner stays null. Received named/link authors are also owner-asserted.
@@ -217,7 +219,11 @@ export function deriveMomentActor(author: MomentAuthor, context: MomentActorCont
     }
     if (ownerKey && ownerKey.kind !== "legacy-human") {
       return author.kind === "human"
-        ? { key: ownerKey, displayName, origin, assurance: ownerKey.kind === "installation" ? "local" : "owner-asserted" }
+        ? {
+            key: ownerKey, displayName, origin,
+            assurance: ownerKey.kind === "installation" && (origin === "renderer" || origin === "unknown")
+              ? "local" : "owner-asserted",
+          }
         : {
             key: branded({ kind: "agent" as const, ownerKey, claimedName: canonicalClaimedName(author.agentId) }),
             displayName, origin, assurance: "owner-asserted",
@@ -300,14 +306,21 @@ function decodeActorKey(value: unknown): ActorKey | null {
   }
 }
 
-/** Local storage only. Canonical field order includes nested owners and normalized issuers. */
+// The property list fixes field order for every variant, including nested owner objects.
+const actorKeyFields = [
+  "kind", "issuer", "userId", "installationId", "identityKind", "humanId",
+  "ownerKey", "claimedName", "workspaceId", "automationId", "grantId", "principalId",
+];
+
+/** Local storage only. Branded keys already carry normalized issuers; serialization does not parse them again. */
 export function serializeActorKey(key: ActorKey): string {
-  const canonical = decodeActorKey(key);
-  if (!canonical) throw new TypeError("Invalid ActorKey.");
-  return JSON.stringify(canonical);
+  return JSON.stringify(key, actorKeyFields);
 }
 
-/** Restore the display-key brand, never authority or assurance. Malformed input returns null. */
+/**
+ * Only for keys this device serialized into its own local store column, never keys received from elsewhere.
+ * Restore the display-key brand, never authority or assurance. Malformed input returns null.
+ */
 export function parseActorKey(serialized: string): ActorKey | null {
   try {
     return decodeActorKey(JSON.parse(serialized));

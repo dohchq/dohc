@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { MomentAuthor } from "./engine";
 import {
   actorHueInput,
@@ -206,6 +206,19 @@ it("recognizes own-store installation moments while signed in", () => {
   expect(actor.key).toEqual({ kind: "installation", installationId: identity.installationId });
 });
 
+it.each([
+  ["renderer", "local"],
+  ["unknown", "local"],
+  [undefined, "local"],
+  ["cli", "owner-asserted"],
+  ["automation", "owner-asserted"],
+] as const)("rates installation History origin %s as %s", (origin, assurance) => {
+  const actor = deriveMomentActor({ kind: "human", humanId: identity.installationId }, {
+    ...local, source: "own-store", origin,
+  }, "Alice");
+  expect(actor.assurance).toBe(assurance);
+});
+
 it("does not rate synced own-store account moments as local", () => {
   expect(deriveMomentActor({ kind: "human", humanId: "alice" }, { ...local, source: "own-store" }, "Alice").assurance).toBe("owner-asserted");
 });
@@ -281,6 +294,27 @@ describe("ActorKey storage", () => {
     { kind: "public", grantId: "grant", principalId: "pseudonym" },
     { kind: "automation", automationId: "collection:tasks#notify", depth: 1 },
   ];
+
+  it("serializes and compares normalized keys without parsing URLs", () => {
+    const actor = deriveLocalActor({ ...local, author: { kind: "agent", claimedName: "Opus" }, displayName: "Agent" });
+    const copy = parseActorKey(serializeActorKey(actor.key));
+    if (copy === null) throw new Error("Expected a restored key");
+    const OriginalURL = globalThis.URL;
+    let urlParses = 0;
+    vi.stubGlobal("URL", class extends OriginalURL {
+      constructor(url: string | URL, base?: string | URL) {
+        super(url, base);
+        urlParses += 1;
+      }
+    });
+    try {
+      expect(serializeActorKey(copy)).toBe(serializeActorKey(actor.key));
+      expect(actorKeysEqual(copy, actor.key)).toBe(true);
+      expect(urlParses).toBe(0);
+    } finally {
+      vi.stubGlobal("URL", OriginalURL);
+    }
+  });
 
   it("round-trips every variant and restores keys accepted by the typed equality helper", () => {
     const keys = [
