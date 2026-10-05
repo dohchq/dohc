@@ -41,7 +41,7 @@ function hostWith(relay: Omit<PressTransport, "inspections" | "answerInspection"
     },
     transport: async () => ({ inspections: () => [], answerInspection: async () => undefined, ...relay }),
     heldClaim: async () => null,
-    inspect: async () => ({ kind: "unchecked", reason: "not ready" }),
+    inspect: async ids => ids.map(() => ({ kind: "unchecked", reason: "not ready" })),
     press: async () => ({ pressed: { busy: true }, field: null }),
     notifyFailure: async () => undefined,
     onError: () => undefined,
@@ -263,7 +263,7 @@ describe("relay polling lifetime", () => {
   it("finishes a started inspection after stop without inspecting or pressing the next request", async () => {
     const started = channel<void>();
     const answered = channel<void>();
-    const inspection = Promise.withResolvers<{ kind: "unchecked"; reason: string }>();
+    const inspection = Promise.withResolvers<Array<{ kind: "unchecked"; reason: string }>>();
     const inspect = vi.fn(() => { started.send(); return inspection.promise; });
     const answerInspection = vi.fn(async () => { answered.send(); });
     const accept = vi.fn(async () => []);
@@ -275,7 +275,7 @@ describe("relay polling lifetime", () => {
     host.start();
     await started.next();
     host.stop();
-    inspection.resolve({ kind: "unchecked", reason: "not ready" });
+    inspection.resolve([{ kind: "unchecked", reason: "not ready" }]);
     await answered.next();
     await setImmediate();
     expect(inspect).toHaveBeenCalledTimes(1);

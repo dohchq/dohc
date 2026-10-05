@@ -7,6 +7,7 @@ import {
 } from "@dohc/workspace-contracts/relay";
 import { createAutomationPressRateLimiters, isAutomationPressPath, pruneAutomationPresses } from "./automationPressRoutes";
 import { BUTTON_INSPECTION_HOST_LIVE_MS } from "./automationButtonInspections";
+import { SHARED_BUTTON_DENIED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_MOVED } from "@dohc/automation-executor/button-presser";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import {
@@ -112,7 +113,7 @@ async function expectCode(response: Response, status: number, code: string): Pro
 describe("relayed Button presses", () => {
   it("answers unchecked immediately for a sleeping host and a stale parked poll", async () => {
     const r = await relay(); await host(r);
-    const inspect = () => r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({ targets: [{ automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }] })));
+    const inspect = () => r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({ targets: [{ automationId: "mark-packed", collectionPath: "trip/packing", definitionHash: HASH }] })));
     expect(await (await inspect()).json()).toMatchObject({ inspections: [{ kind: "unchecked" }] });
     const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" };
     const release = r.storage.parkButtonInspectionHost(scope);
@@ -129,7 +130,7 @@ describe("relayed Button presses", () => {
     expect((await press(r)).status).toBe(200);
     expect(await list(r)).toHaveLength(1);
     const inspection = r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({
-      targets: [{ automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }],
+      targets: [{ automationId: "mark-packed", collectionPath: "trip/packing", definitionHash: HASH }],
     })));
     await vi.waitFor(() => expect(r.storage.listButtonInspections(scope)).toHaveLength(1));
     const response = await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-presses?installId=laptop`));
@@ -140,6 +141,23 @@ describe("relayed Button presses", () => {
       inspection: { kind: "ready", automationId: AUTOMATION, definitionHash: HASH, irreversible: [] },
     })))).status).toBe(200);
     expect(await (await inspection).json()).toMatchObject({ inspections: [{ kind: "ready" }] });
+  });
+  it.each([SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, "private host diagnostic"])("forwards only a public inspection reason: %s", async reason => {
+    const r = await relay(); await host(r);
+    const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" };
+    const release = r.storage.parkButtonInspectionHost(scope);
+    try {
+      const inspection = r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({
+        targets: [{ automationId: "mark-packed", collectionPath: "trip/packing", definitionHash: HASH }],
+      })));
+      await vi.waitFor(() => expect(r.storage.listButtonInspections(scope)).toHaveLength(1));
+      const inspectionId = r.storage.listButtonInspections(scope)[0]!.inspectionId;
+      expect((await r.h(request(OWNER, `/sync/${WORKSPACE}/automation-presses/inspection-answer`, jsonBody({
+        installId: "laptop", generation: 1, inspectionId, inspection: { kind: "denied", reason },
+      })))).status).toBe(200);
+      expect(await (await inspection).json()).toMatchObject({ inspections: [{ kind: "denied",
+        reason: reason === "private host diagnostic" ? SHARED_BUTTON_DENIED : reason }] });
+    } finally { release(); }
   });
   it("keeps a released poll live briefly, then answers unchecked without queuing", async () => {
     const r = await relay(); await host(r);
@@ -165,7 +183,7 @@ describe("relayed Button presses", () => {
     const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" };
     const release = r.storage.parkButtonInspectionHost(scope);
     const signal = new AbortController().signal;
-    const result = r.storage.inspectAutomationButton({ target: { automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH },
+    const result = r.storage.inspectAutomationButton({ target: { automationId: "mark-packed", collectionPath: "trip/packing", definitionHash: HASH },
       source: { workspaceId: WORKSPACE, shareId: r.shareId, grantId: r.grantId, grantGeneration: 1, userId: RECIPIENT }, id: "query", signal, wake: () => {} });
     expect(() => r.storage.answerButtonInspection({ ...scope, generation: 1, inspectionId: "query" }, { kind: "ready", automationId: "collection:other#button", definitionHash: HASH, irreversible: [] })).toThrow();
     await expect(result).resolves.toMatchObject({ kind: "unchecked" });
@@ -225,7 +243,7 @@ describe("relayed Button presses", () => {
     const release = r.storage.parkButtonInspectionHost({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" });
     for (let index = 0; index < 24; index++) {
       const reply = r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({ targets: [{
-        automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }] })));
+        automationId: "mark-packed", collectionPath: "trip/packing", definitionHash: HASH }] })));
       const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" };
       await vi.waitFor(() => expect(r.storage.listButtonInspections(scope)).toHaveLength(1));
       const query = r.storage.listButtonInspections(scope)[0]!;
@@ -272,7 +290,7 @@ describe("relayed Button presses", () => {
     const r = await relay(); await host(r);
     const release = r.storage.parkButtonInspectionHost({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" });
     const inspection = r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({ targets: [{
-      automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }] })));
+      automationId: "mark-packed", collectionPath: "trip/packing", definitionHash: HASH }] })));
     await vi.waitFor(() => expect(r.storage.listButtonInspections({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" })).toHaveLength(1));
     const [query] = r.storage.listButtonInspections({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" });
     const scope = { workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop", generation: 1, inspectionId: query!.inspectionId };
@@ -285,7 +303,7 @@ describe("relayed Button presses", () => {
     expect(await (await inspection).json()).toMatchObject({ inspections: [{ kind: "unchecked" }] });
     expect(() => r.storage.resolveButtonInspection(scope)).toThrow();
     const next = r.h(request(RECIPIENT, `/sync/shares/${r.shareId}/automation-presses?inspect=true`, jsonBody({ targets: [{
-      automationId: AUTOMATION, collectionPath: "trip/packing", definitionHash: HASH }] })));
+      automationId: "mark-packed", collectionPath: "trip/packing", definitionHash: HASH }] })));
     await vi.waitFor(() => expect(r.storage.listButtonInspections({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" })).toHaveLength(1));
     const [pending] = r.storage.listButtonInspections({ workspaceId: WORKSPACE, ownerUserId: OWNER, installId: "laptop" });
     r.storage.revokeShare(r.shareId, ++clock);

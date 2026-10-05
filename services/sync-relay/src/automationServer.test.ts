@@ -89,7 +89,7 @@ function fakeExecutor(
     releaseGroupSubscriptions: async () => ({ handover: groups(at(10, 30), "message-on-server"), watchedGeneration: 3 }),
     reachHandover: async () => reach("held", 9),
     relayedClaim: async () => null,
-    inspectRelayed: async () => ({ kind: "unchecked", reason: "Host unavailable" }),
+    inspectRelayedBatch: async ids => ids.map(() => ({ kind: "unchecked", reason: "Host unavailable" })),
     pressRelayed: async (input, watch) => {
       pressed.push({ pressId: input.pressId, pressedBy: input.pressedBy });
       watch(`claim-${input.pressId}`, null);

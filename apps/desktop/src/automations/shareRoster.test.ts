@@ -18,6 +18,7 @@ import {
   createShareRosters,
   reachRosterFor,
   rosterAuthorLabel,
+  rosterPersonLabel,
   SHARE_ROSTER_FRESH_MS,
   SHARE_ROSTER_REFRESH_MS,
 } from "./shareRoster";
@@ -826,6 +827,20 @@ describe("a direct write's author in History", () => {
   const grant = (grantId: string, recipientUserId: string | null, recipientEmail: string | null, access: "view" | "edit") =>
     ({ grantId, recipientUserId, recipientEmail, selector: { paths: ["trip"], versionId: null }, access }) as ListedGrant;
   const roster = { version: 1, grants: [grant("g-1", "ana", "ana@example.com", "edit"), grant("g-2", "ben", "ben@example.com", "view")], links: [], formerGrants: [], endedGrants: [] };
+
+  it("names a Button presser by active, former, then ended grants, with no opaque-id fallback", () => {
+    const listing = { ...roster,
+      formerGrants: [{ grant: grant("old", "ana", "old@example.com", "edit"), automationsGeneration: 1 },
+        { grant: grant("former", "cy", "cy@example.com", "edit"), automationsGeneration: 1 }],
+      endedGrants: [{ grantId: "ended", recipientUserId: "cy", recipientEmail: "older@example.com" },
+        { grantId: "last", recipientUserId: "dee", recipientEmail: "dee@example.com" }],
+    };
+    expect(rosterPersonLabel(listing, "ana")).toBe("ana@example.com");
+    expect(rosterPersonLabel(listing, "cy")).toBe("cy@example.com");
+    expect(rosterPersonLabel(listing, "dee")).toBe("dee@example.com");
+    expect(rosterPersonLabel(listing, "unknown-id")).toBe("Someone you shared with");
+    expect(rosterPersonLabel(null, "ana")).toBe("Someone you shared with");
+  });
 
   it("names the person and the level of the grant they wrote through", () => {
     expect(labelFrom(roster, { userId: "ana", grantId: "g-1" })).toBe("ana@example.com (Edit)");

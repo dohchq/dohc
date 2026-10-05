@@ -699,6 +699,7 @@ const RecordHistoryAuthor = z.discriminatedUnion("kind", [
     automationId: z.string().min(1).max(4096),
     // The automation's name when it ran, or its name now for a change recorded without its run.
     name: z.string().min(1).max(4096),
+    person: z.string().min(1).max(4096).optional(),
     // The run that made the change, or null for a change recorded without it.
     run: z.object({ claimId: z.string().min(1).max(256), location: RecordHistoryRunLocation }).nullable(),
   }),

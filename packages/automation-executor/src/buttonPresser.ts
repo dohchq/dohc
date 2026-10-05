@@ -7,6 +7,8 @@ import { AutomationRunWait } from "./automationRunWait";
 export { AutomationRunWait };
 
 export const SHARED_BUTTON_DENIED = "This button cannot use the requested Collection or operations.";
+export const SHARED_BUTTON_MOVED = "This Collection moved. Its files will update here soon.";
+export const SHARED_BUTTON_FIELD_CHANGED = "This field is no longer a Button. The Collection's files will update here soon.";
 export const SHARED_BUTTON_FAILED = "This button did not finish. Check its automation, then press it again.";
 export const SHARED_BUTTON_UNCHECKED = "dohc cannot check this button now. Try again when its host is available.";
 

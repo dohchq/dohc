@@ -372,8 +372,14 @@ export function rosterAuthorLabel(
   if (grant?.recipientEmail && (grant.recipientUserId === null || grant.recipientUserId === author.userId)) {
     return `${grant.recipientEmail} (${ACCESS_WORDS[grant.access]})`;
   }
+  return rosterPersonLabel(listing, author.userId);
+}
+
+/** A Button presser's name, including people whose grants have ended. */
+export function rosterPersonLabel(listing: RosterListing | null, userId: string): string {
+  if (listing === null || listing.grants === null) return "Someone you shared with";
   const email = [...listing.grants, ...listing.formerGrants.map((former) => former.grant), ...listing.endedGrants].find(
-    (candidate) => candidate.recipientUserId === author.userId && candidate.recipientEmail !== null,
+    (candidate) => candidate.recipientUserId === userId && candidate.recipientEmail !== null,
   )?.recipientEmail;
   return email ?? "Someone you shared with";
 }

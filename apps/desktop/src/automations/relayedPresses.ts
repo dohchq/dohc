@@ -74,8 +74,7 @@ export function automationPressRelay(relay: SyncRelayConnection) {
         }, "Button access", { 403: () => new Error(SHARED_BUTTON_DENIED), 404: () => new Error(SHARED_BUTTON_DENIED) });
         const parsed = z.array(inspectionSchema).length(targets.length).safeParse(answer.inspections);
         if (!parsed.success) return targets.map(() => ({ kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED }));
-        return parsed.data.map(result => result.kind === "ready" ? result : { kind: result.kind,
-          reason: result.kind === "denied" ? SHARED_BUTTON_DENIED : SHARED_BUTTON_UNCHECKED });
+        return parsed.data;
       } catch (error) { return targets.map(() => error instanceof Error && error.message === SHARED_BUTTON_DENIED
         ? { kind: "denied", reason: SHARED_BUTTON_DENIED } : { kind: "unchecked", reason: SHARED_BUTTON_UNCHECKED }); }
     },
