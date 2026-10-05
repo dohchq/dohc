@@ -91,7 +91,7 @@ it.each([{coverage: []}, {coverage: [{author: {kind: "human", humanId: "owner", 
       expect(original.cut.suffix[0]!.metadata.checkpointCoverage).toBeUndefined();
       f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET checkpoint_coverage_json=? WHERE delivery_id='suffix'")
         .run(JSON.stringify(coverage)));
-      expect(() => f.storage.readLiveUpdateJournalCut({document})).toThrow();
+      expect(() => f.storage.readLiveUpdateJournalCut({document})).toThrow("live update journal is damaged");
       f.write(db => db.prepare("UPDATE sync_relay_live_update_journal SET checkpoint_coverage_json=NULL WHERE delivery_id='suffix'").run());
       expect(f.storage.readLiveUpdateJournalCut({document})).toEqual(original);
     } finally {f.close();}
