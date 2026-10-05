@@ -549,7 +549,7 @@ describe("the document open's capture-chain hold", () => {
   it("sits beyond the measured healthy open on a busy chain", async () => {
     // AGENTS.md, measure limits that reject work: the deadline only ever
     // interrupts transport-retry waiting, but the honest floor is still the
-    // healthy open itself. Eight opens, each queued behind a captureBatch of
+    // healthy open itself. Eight opens, each queued behind a observeFileEvents of
     // three files (the chain traffic a busy workspace produces), through the
     // real chain + loopback RPCs with an instant provider stub. Real daemon
     // RPC latency is governed separately by WORKSPACE_OPEN_DEADLINE_MS, which
@@ -567,7 +567,7 @@ describe("the document open's capture-chain hold", () => {
       for (let file = 0; file < 3; file += 1) {
         await write(root, `busy-${file}.md`, `round ${round} file ${file}\n`);
       }
-      engine.captureBatch([
+      engine.observeFileEvents([
         { path: "busy-0.md", operation: "update" },
         { path: "busy-1.md", operation: "update" },
         { path: "busy-2.md", operation: "update" },

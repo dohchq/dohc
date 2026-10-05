@@ -24,6 +24,7 @@ export interface DesktopWorkspaceReadsDependencies {
     ) => Result | Promise<Result>,
   ): Promise<Result>;
   isRecordValue(value: unknown): value is Record<string, unknown>;
+  listDiskFiles?: typeof listFiles;
 }
 
 export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsDependencies) {
@@ -110,7 +111,7 @@ export function createDesktopWorkspaceReads(dependencies: DesktopWorkspaceReadsD
       );
     }
     const mounts = storedShareMounts(workspace);
-    const disk = await listFiles(workspace.rootPath, {
+    const disk = await (dependencies.listDiskFiles ?? listFiles)(workspace.rootPath, {
       includeContentIdentity: true,
       // Mounted shares need the complete disk listing for their canonical
       // overlay, including malformed registry records that must fail closed.

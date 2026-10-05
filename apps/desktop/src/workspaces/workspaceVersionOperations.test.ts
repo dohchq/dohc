@@ -624,15 +624,15 @@ async function openDivergedTextConflict(incomingText: string | null = "draft\n")
   await engine.createVersion("Draft");
   if (incomingText === null) {
     await rm(join(root, "plan.md"));
-    engine.captureBatch([{ path: "plan.md", operation: "delete" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "delete" }]);
   } else {
     await write(root, "plan.md", incomingText);
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
   }
   await engine.flush();
   await engine.switchVersion("main");
   await write(root, "plan.md", "current\n");
-  engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+  engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
   await engine.flush();
 
   const draftId = await versionIdByName(engine, "Draft");
@@ -661,7 +661,7 @@ describe("active-version capture routing", () => {
     expect(snapshot.activeVersionId).not.toBe("main");
 
     await write(root, "plan.md", "draft text\n");
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
     await engine.stop();
 
     // The chain opens the daemon workspace and creates the version over the
@@ -689,7 +689,7 @@ describe("active-version capture routing", () => {
     // Enqueue an edit batch and the switch back to Main without awaiting in
     // between: the batch runs first ON THE CHAIN and must land in Draft.
     await write(root, "plan.md", "draft text\n");
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
     const switched = await engine.switchVersion("main");
     await engine.stop();
 
@@ -762,7 +762,7 @@ describe("switchVersion", () => {
     await write(root, "draft-only.md", "only in draft\n");
     const draftLogoBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0x02]);
     await writeBytes(root, "logo.png", draftLogoBytes);
-    // The switch itself captures unsettled disk edits — no captureBatch here.
+    // The switch itself captures unsettled disk edits — no observeFileEvents here.
     const toMain = await engine.switchVersion("main");
     expect(toMain.activeVersionId).toBe("main");
     expect(await readText(root, "plan.md")).toBe("v1 text\n");
@@ -871,7 +871,7 @@ describe("mergeVersionIntoMain", () => {
 
     // The merge's own disk write must not re-capture.
     const momentsBefore = (await readDaemonMoments(loopback)).length;
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
     await engine.stop();
     expect(await readDaemonMoments(loopback)).toHaveLength(momentsBefore);
   });
@@ -926,7 +926,7 @@ describe("mergeVersionIntoMain", () => {
     await write(root, "plan.md", "draft line\n");
     await engine.switchVersion("main");
     await write(root, "plan.md", "main line\n");
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
     await engine.flush();
 
     const draftId = await versionIdByName(engine, "Draft");
@@ -965,7 +965,7 @@ describe("mergeVersionIntoMain", () => {
     const draftId = await versionIdByName(engine, "Draft");
     await engine.switchVersion("main");
     await write(root, "plan.md", "current line\n");
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
     await engine.flush();
     // Settled directly in the store: the capture path caps its own writes at
     // the in-band limit, and this body has to be past the ROW cap.
@@ -1019,7 +1019,7 @@ describe("mergeVersionIntoMain", () => {
     const draftId = await versionIdByName(engine, "Draft");
     await engine.switchVersion("main");
     await write(root, "plan.md", "current line\n");
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
     await engine.flush();
     loopback.seedSettledText(WORKSPACE_ID, draftId, "plan.md", incomingBody);
     expect((await engine.mergeVersionIntoMain(draftId)).conflictCount).toBe(1);
@@ -1052,7 +1052,7 @@ describe("mergeVersionIntoMain", () => {
     for (const path of ["a.md", "b.md", "c.md"]) {
       await write(root, path, `main ${path}\n`);
     }
-    engine.captureBatch([
+    engine.observeFileEvents([
       { path: "a.md", operation: "update" },
       { path: "b.md", operation: "update" },
       { path: "c.md", operation: "update" },
@@ -1095,7 +1095,7 @@ describe("mergeVersionIntoMain", () => {
 
     // Resolution disk writes never re-capture.
     const momentsBefore = (await readDaemonMoments(loopback)).length;
-    engine.captureBatch([
+    engine.observeFileEvents([
       { path: "b.md", operation: "update" },
       { path: "c.md", operation: "update" },
     ]);
@@ -1115,7 +1115,7 @@ describe("mergeVersionIntoMain", () => {
     await engine.flush();
     await engine.createVersion("Draft");
     await writeBytes(root, "logo.png", draftBytes);
-    engine.captureBatch([{ path: "logo.png", operation: "create" }]);
+    engine.observeFileEvents([{ path: "logo.png", operation: "update" }]);
     await engine.flush();
     await engine.switchVersion("main");
     expect(existsSync(join(root, "logo.png"))).toBe(false);
@@ -1140,11 +1140,11 @@ describe("mergeVersionIntoMain", () => {
     await engine.flush();
     await engine.createVersion("Draft");
     await writeBytes(root, "logo.png", draftBytes);
-    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    engine.observeFileEvents([{ path: "logo.png", operation: "update" }]);
     await engine.flush();
     await engine.switchVersion("main");
     await writeBytes(root, "logo.png", mainBytes);
-    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    engine.observeFileEvents([{ path: "logo.png", operation: "update" }]);
     await engine.flush();
 
     const draftId = await versionIdByName(engine, "Draft");
@@ -1178,11 +1178,11 @@ describe("mergeVersionIntoMain", () => {
     await engine.flush();
     await engine.createVersion("Draft");
     await writeBytes(root, "logo.png", draftBytes);
-    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    engine.observeFileEvents([{ path: "logo.png", operation: "update" }]);
     await engine.flush();
     await engine.switchVersion("main");
     await writeBytes(root, "logo.png", mainBytes);
-    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    engine.observeFileEvents([{ path: "logo.png", operation: "update" }]);
     await engine.flush();
 
     const draftId = await versionIdByName(engine, "Draft");
@@ -1212,11 +1212,11 @@ describe("mergeVersionIntoMain", () => {
     await engine.flush();
     await engine.createVersion("Draft");
     await writeBytes(root, "logo.png", draftBytes);
-    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    engine.observeFileEvents([{ path: "logo.png", operation: "update" }]);
     await engine.flush();
     await engine.switchVersion("main");
     await writeBytes(root, "logo.png", mainBytes);
-    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    engine.observeFileEvents([{ path: "logo.png", operation: "update" }]);
     await engine.flush();
 
     const draftId = await versionIdByName(engine, "Draft");
@@ -1258,7 +1258,7 @@ describe("mergeVersionIntoMain", () => {
   it("rejects a stale target and keeps its conflict open", async () => {
     const { root, engine, conflict } = await openDivergedTextConflict();
     await write(root, "plan.md", "newer current\n");
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
     await engine.flush();
 
     await expect(
@@ -1323,7 +1323,7 @@ describe("mergeVersionIntoMain", () => {
     const draftId = await versionIdByName(engine, "Draft");
     await engine.switchVersion("main");
     await write(root, "plan.md", "current\n");
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
     await engine.flush();
     loopback.seedSettledText(WORKSPACE_ID, draftId, "plan.md", incoming);
 
@@ -1457,7 +1457,7 @@ describe("mergeVersionIntoMain", () => {
     await write(root, "plan.md", "draft\n");
     await engine.switchVersion("main");
     await write(root, "plan.md", "main\n");
-    engine.captureBatch([{ path: "plan.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
     await engine.flush();
 
     const draftId = await versionIdByName(engine, "Draft");
@@ -1498,7 +1498,7 @@ describe("restoreFileToBeforeMoment", () => {
     engine.start();
     await engine.flush();
     await writeBytes(root, "logo.png", after);
-    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    engine.observeFileEvents([{ path: "logo.png", operation: "update" }]);
     await engine.flush();
 
     const page = await engine.listMoments({ limit: 10 });
@@ -1537,7 +1537,7 @@ describe("switch scale coverage", () => {
       );
     }
     // Settle the draft edits so the measured switch is the steady-state cost.
-    engine.captureBatch(
+    engine.observeFileEvents(
       Array.from({ length: 20 }, (_, index) => ({
         path: `corpus/dir-${(index * 10) % 10}/file-${String(index * 10).padStart(3, "0")}.md`,
         operation: "update" as const,

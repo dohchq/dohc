@@ -8,7 +8,7 @@ use dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES;
 use dohc_engine_collab::live_update_application::{
     AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, AdmittedNativeHistoryReconstruction,
     LiveApplicationBootstrap, LiveUpdateStructRange, NativeHistoryReconstruction,
-    RelayAcceptedLiveUpdate, parse_admitted_metadata,
+    RelayAcceptedLiveUpdate,
 };
 use dohc_engine_protocol::error::{ErrorCode, WireError};
 use dohc_engine_protocol::limits::MAX_WIRE_INTEGER;

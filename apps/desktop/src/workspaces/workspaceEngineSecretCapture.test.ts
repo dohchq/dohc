@@ -128,7 +128,7 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     );
 
     // Same content again: no second moment (content-equality no-op).
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
     let page = await engine.listMoments();
     let protectedMoments = page.moments.filter((moment) => moment.protected);
@@ -146,14 +146,14 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
 
     // Real change: one more metadata-only moment.
     await write(root, ".env", ENV_B);
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
     page = await engine.listMoments();
     expect(page.moments.filter((moment) => moment.protected)).toHaveLength(2);
 
     // Deletion retires the protected state with a moment.
     await rm(join(root, ".env"));
-    engine.captureBatch([{ path: ".env", operation: "delete" }]);
+    engine.observeFileEvents([{ path: ".env", operation: "delete" }]);
     await engine.flush();
     page = await engine.listMoments();
     protectedMoments = page.moments.filter((moment) => moment.protected);
@@ -179,7 +179,7 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     // Back on Main, gain a secret.
     await engine.switchVersion("main");
     await write(root, ".env", ENV_A);
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
 
     await engine.switchVersion(experimentId);
@@ -209,7 +209,7 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
     await engine.flush();
     const created = await engine.createVersion("Experiment");
     await write(root, ".env", ENV_B);
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
 
     const page = await engine.compareVersions(created.activeVersionId);
@@ -254,7 +254,7 @@ describe("the stand-down marker cleanup must never touch secret paths", () => {
     const trackedReadFile = vi.mocked(fsPromises.readFile);
     trackedReadFile.mockClear();
     await write(root, ".env", ENV_B);
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
 
     const envReads = trackedReadFile.mock.calls.filter(
@@ -276,7 +276,7 @@ describe("secret version operations through the desktop daemon path", () => {
     await engine.flush();
     const created = await engine.createVersion("Experiment");
     await write(root, ".env", ENV_B);
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
 
     // Merge while Main is active so the merged secret must land on disk.
@@ -303,7 +303,7 @@ describe("secret version operations through the desktop daemon path", () => {
     engine.start();
     await engine.flush();
     await write(root, ".env", ENV_B);
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
 
     const page = await engine.listMoments();
@@ -317,7 +317,7 @@ describe("secret version operations through the desktop daemon path", () => {
     expect(await readText(root, ".env")).toBe(ENV_A);
 
     // The materialized write consumes its expected event: no re-capture.
-    engine.captureBatch([{ path: ".env", operation: "update" }]);
+    engine.observeFileEvents([{ path: ".env", operation: "update" }]);
     await engine.flush();
     const after = await engine.listMoments();
     expect(after.moments[0].id).toBe(result.restoredMomentId);

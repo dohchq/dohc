@@ -171,7 +171,6 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     await liveSource.chats.ensureGeneralChannel({ workspaceId });
     expect((await sourceRelay.push()).pushed).toBeGreaterThan(0);
     await writeFile(join(sourceRoot, path), base);
-    capture.captureBatch([{ path, operation: "update" }]);
     await waitForPathMoments(capture, path, 1);
     expect((await sourceRelay.push()).pushed).toBeGreaterThan(0);
 
@@ -210,7 +209,6 @@ test("offline edits reach the Electron conflict review and its resolution surviv
       })
       .toBeGreaterThan(appMomentsBeforeEdit);
     await writeFile(join(sourceRoot, path), peerEdit);
-    capture.captureBatch([{ path, operation: "update" }]);
     await waitForPathMoments(capture, path, 2);
 
     // The same relay data returns on the same address. The source pushes its
@@ -582,10 +580,6 @@ test("protected join preserves a failed folder, then restores exact secret and b
     expect((await sourceRelay.push()).pushed).toBeGreaterThan(0);
     await writeFile(join(sourceRoot, secretPath), secretBytes);
     await writeFile(join(sourceRoot, binaryPath), binaryBytes);
-    sourceCapture.captureBatch([
-      { path: secretPath, operation: "update" },
-      { path: binaryPath, operation: "update" },
-    ]);
     await Promise.all([
       waitForPathMoments(sourceCapture, secretPath, 1),
       waitForPathMoments(sourceCapture, binaryPath, 1),

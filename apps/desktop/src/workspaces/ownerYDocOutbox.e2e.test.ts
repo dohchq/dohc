@@ -189,7 +189,7 @@ it.skipIf(engine.missing)("reads an owner queue larger than a daemon control fra
   });
   try {
     await lifecycle.start();
-    capture.captureBatch([{ path: "owner.md", operation: "update" }]);
+    capture.observeFileEvents([{ path: "owner.md", operation: "update" }]);
     await capture.flush();
     const main = (await capture.listVersions()).versions.find((version) => version.kind === "main");
     const objectId = await capture.fileObjectIdForPath("owner.md");
@@ -361,7 +361,7 @@ it.skipIf(engine.missing)("acknowledges an in-flight receipt after a concurrent 
   });
   try {
     await lifecycle.start();
-    capture.captureBatch([{ path: "owner.md", operation: "update" }]);
+    capture.observeFileEvents([{ path: "owner.md", operation: "update" }]);
     await capture.flush();
     const main = (await capture.listVersions()).versions.find((version) => version.kind === "main");
     const objectId = await capture.fileObjectIdForPath("owner.md");
@@ -472,7 +472,7 @@ it.skipIf(engine.missing)(
     });
 
     try {
-      capture.captureBatch([{ path, operation: "update" }]);
+      capture.observeFileEvents([{ path, operation: "update" }]);
       await capture.flush();
       const versions = await capture.listVersions();
       const mainVersion = versions.versions.find((version) => version.kind === "main");

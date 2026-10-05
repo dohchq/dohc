@@ -1568,7 +1568,7 @@ describe("rebuildEngineStore", () => {
           start: () => {
             probe = sessions.run(workspace, async () => "probed");
           },
-          captureBatch: vi.fn(),
+          observeFileEvents: vi.fn(),
           settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
           stop: vi.fn(async () => undefined),
         } as never,
@@ -1630,7 +1630,7 @@ describe("rebuildEngineStore", () => {
           start: () => {
             probe = sessions.run(workspace, async () => "probed");
           },
-          captureBatch: vi.fn(),
+          observeFileEvents: vi.fn(),
           settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
           stop: vi.fn(async () => undefined),
         } as never,

@@ -117,7 +117,7 @@ it.skipIf(!process.env.DOHC_OWNER_DESKTOP_PROOF_BINARY).each([{standalone: false
       }
       throw new Error("Ordinary publication exceeded its 16-pass proof budget.");
     };
-    capture.captureBatch([{path: "docs/a.md",operation: "update"}]); await capture.flush();
+    capture.observeFileEvents([{path: "docs/a.md",operation: "update"}]); await capture.flush();
     expect(await syncRequest("sync.claim")).toMatchObject({claimed: true});
     expect(await publish()).toBeGreaterThan(0);
     const dbPath = join(workspaceRoot,".dohc/engine/engine.db");

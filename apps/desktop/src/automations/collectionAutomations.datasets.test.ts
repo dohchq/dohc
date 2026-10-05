@@ -183,7 +183,7 @@ describe("named shared document Buttons on the desktop host", () => {
     const f = await sharedButtonWorld("      - find: 'true'\n        collection: Budget\n        operation: invoices.list\n        as: matches");
     f.grant("g-recipient", "user-recipient", [LIST]);
     await f.moveDocuments("Moved");
-    f.executor.handleWatcherEvents([{ operation: "delete", path: "Log/collection.yaml" }, { operation: "create", path: "Moved/collection.yaml" }]);
+    f.executor.handleWatcherEvents([{ operation: "delete", path: "Log/collection.yaml" }, { operation: "update", path: "Moved/collection.yaml" }]);
     await f.executor.idle();
     await vi.waitFor(async () => expect(await f.executor.inspectRelayed(f.input.pressId)).toEqual({ kind: "denied", reason: "This Collection moved. Its files will update here soon." }));
     await f.executor.dispose();

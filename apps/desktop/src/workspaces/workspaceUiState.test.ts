@@ -9,7 +9,6 @@ import {
   writeUiStateFile,
 } from "./workspaceUiState";
 import type { WorkspaceUiState } from "../ipc/bridgeContract";
-import { startWorkspaceWatch } from "./workspaceWatcher";
 
 import { createTestScratch } from "./testTemp";
 vi.mock("node:fs/promises", async () => {
@@ -136,57 +135,5 @@ describe("ui-state file store", () => {
     await symlink(outsideState, join(root, ".dohc", "ui-state.json"));
 
     expect(await readUiStateFile(root)).toBeNull();
-  });
-});
-
-// The invariant this file exists for: ui-state writes land under.dohc, which
-// the watcher ignores at any depth — persisting workbench chrome state must
-// never produce a history record (feedback loop, timeline noise, sync upload).
-// The engine capture is the only recorder, so the
-// assertion is against what the watcher enqueues into it.
-describe("ui-state writes never reach history", () => {
-  it("the watcher enqueues the user file but nothing for ui-state.json", async () => {
-    const root = await createTestScratch("dohc-ui-state-");
-    const workspace = {
-      workspaceId: "ws-ui-state-test",
-      rootPath: root,
-      kind: "personal",
-      mode: "local-first",
-    } as CreatedWorkspace;
-
-    const capturedPaths: string[] = [];
-    let recorded = 0;
-    let resolveFirst: (() => void) | null = null;
-    const firstRecord = new Promise<void>((resolve) => {
-      resolveFirst = resolve;
-    });
-    const handle = startWorkspaceWatch(workspace, {
-      settleMs: 60,
-      engineCapture: () => ({
-        captureBatch: (events) => {
-          capturedPaths.push(...events.map((event) => event.path));
-        },
-      }),
-      onRecorded: () => {
-        recorded += 1;
-        resolveFirst?.();
-      },
-    });
-    await handle.ready;
-
-    // Interleave a ui-state write with a real user write in the same window.
-    await writeUiStateFile(root, STATE);
-    await writeFile(join(root, "notes.md"), "# Notes\n");
-    await firstRecord;
-
-    // A ui-state-ONLY write afterwards must not settle into a record.
-    await writeUiStateFile(root, { ...STATE, sidebarWidth: 400 });
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await handle.stop();
-
-    expect(recorded).toBe(1);
-    expect(capturedPaths).toContain("notes.md");
-    expect(capturedPaths.some((path) => path.includes(".dohc"))).toBe(false);
-    expect(capturedPaths.some((path) => path.includes("ui-state"))).toBe(false);
   });
 });

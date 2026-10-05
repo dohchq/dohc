@@ -343,6 +343,7 @@ import {
 } from "./workspaces/workspaceSecretEnrollmentState";
 import {
   closeWorkspaceActivityAndRelay,
+  settleYDocsAfterFileObservation,
   createWorkspaceActivity,
   WorkspaceActivityState,
 } from "./workspaces/workspaceActivity";
@@ -353,13 +354,16 @@ import { onWorkspaceCaptureSettled } from "./workspaces/captureActivityBridge";
 import {createServerOwnerConnection} from "./workspaces/serverOwnerConnection";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
-import type { ActiveAgentRun } from "./workspaces/workspaceWatcher";
+import type { ActiveAgentRun } from "./agents/activeAgentRun";
+import { startWorkspaceFileObservation } from "./workspaces/workspaceFileObservation";
+import { createWorkspaceFilesWorker } from "./workspaces/workspaceFilesWorker";
 import {
   createRustEngineDaemon,
   defaultEngineBinaryPath,
 } from "@dohc/workspace-engine-client/daemon";
 import {
   broadcastWorkspaceActivity,
+  coalesceWorkspaceActivity,
   workspaceActivityPayload,
   type WorkspaceActivityScope,
 } from "./ipc/workspaceActivityBroadcast";
@@ -432,6 +436,7 @@ import {
 } from "./workspaces/shareViewFiles";
 import {
   resolveRegisteredShareViewFilesTarget,
+  shareMountRegistryIsPresent,
   storedShareMounts,
 } from "./workspaces/shareViewFilesTarget";
 import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepair";
@@ -537,6 +542,7 @@ const {
   listOwnedWorkspaceFilesFor,
   ownedWorkspaceReadsFor,
 } = createDesktopWorkspaceReads({
+  listDiskFiles: (rootPath, scope) => workspaceFilesWorker.list(rootPath, scope),
   withPhysicalWorkspaceOperation,
   isRecordValue,
   get desktopEngine(): DesktopWorkspaceReadsDependencies["desktopEngine"] {
@@ -721,6 +727,7 @@ const {
   withWorkspaceAttachmentAsync,
   createRelayOnChange,
   onWatcherBatch,
+  onObservationResync,
 } = createDesktopWorkspaceCallbacks<DesktopWorkspaceAuthorityState>({
   findWorkspace,
   requireWorkspaceAuthority,
@@ -769,9 +776,24 @@ function cloudLogin(): CloudLogin {
 // workspace B never refetches its world for workspace A's activity. Only a
 // genuinely cross-workspace event (logout, registry change, daemon
 // relaunch) broadcasts scope-free.
-const workspaceFileListings = new WorkspaceFileListingCache();
+const workspaceFilesWorker = createWorkspaceFilesWorker();
+const workspaceFileListings = new WorkspaceFileListingCache(process.platform, async (workspaceId, attachmentId, paths) => {
+  const lease = requireWorkspaceAuthority(workspaceId);
+  try {
+    if (lease.binding.attachmentId !== attachmentId) return [];
+    const workspace = canonicalWorkspaceFor(lease);
+    const diskPaths = sharedViewOf(workspaceId) ? [] : paths.filter(path =>
+      !shareMountRegistryIsPresent(workspace) || !path.startsWith("shared-with-me/"));
+    const result = await workspaceFilesWorker.metadata(lease.binding.canonicalRootPath, diskPaths);
+    lease.assertCurrent();
+    return result.files;
+  } finally { lease.release(); }
+});
 
-function notifyRenderer(scope?: WorkspaceActivityScope): void {
+const notifyRendererCoalesced = coalesceWorkspaceActivity(sendRendererActivity);
+function notifyRenderer(scope?: WorkspaceActivityScope): void { notifyRendererCoalesced(scope); }
+
+function sendRendererActivity(scope?: WorkspaceActivityScope): void {
   if (scope) {
     for (const workspace of listWorkspaces()) {
       const mounts = storedShareMounts(workspace);
@@ -779,6 +801,7 @@ function notifyRenderer(scope?: WorkspaceActivityScope): void {
         && mountStoreWorkspaceIdFor(workspace.workspaceId, mount.shareId) === scope?.workspaceId);
       if (mount) {
         scope = { workspaceId: workspace.workspaceId,
+          ...(scope.pathSetChanged !== undefined ? { pathSetChanged: scope.pathSetChanged } : {}),
           ...(scope.paths ? { paths: scope.paths.map(path => `shared-with-me/${mount.label}/${path}`) } : {}) };
         break;
       }
@@ -1983,13 +2006,16 @@ function engineForWorkspace(
       push: () => daemonRelay.push(),
       // Each page's files, once written, go to the Collection automation
       // executor: a pull need not leave a watcher batch.
-      pull: (materializePage) =>
-        daemonRelay.pull(async (changed) => {
+      pull: async (materializePage) => {
+        try { return await daemonRelay.pull(async (changed) => {
           await materializePage(changed);
-          collectionAutomationsOf(workspace.workspaceId)?.handlePulledPaths(
-            changed.map((change) => change.path),
-          );
-        }),
+          await withWorkspaceAttachmentAsync(workspace, lease => workspaceActivity.handlePulledPaths(
+            lease.state.activity, changed.map(change => change.path))).catch(error =>
+              console.error(`[desktop] reload pulled file consumers for ${workspace.workspaceId}:`, error));
+        }); } finally {
+          withWorkspaceAttachment(workspace, lease => workspaceActivity.pullFinished(lease.state.activity));
+        }
+      },
       recoverOrigin: () => daemonRelay.recoverOrigin(),
     },
     capture,
@@ -2020,7 +2046,10 @@ function engineForWorkspace(
       );
     },
     // Recorded durably before each pull request goes out.
-    pullStarting: () => shareRosters.pullStarting(workspace.workspaceId),
+    pullStarting: () => {
+      withWorkspaceAttachment(workspace, lease => workspaceActivity.pullStarting(lease.state.activity));
+      return shareRosters.pullStarting(workspace.workspaceId);
+    },
     countOpenConflicts: async () => await capture.countOpenConflicts(),
     // Another device's edits reach this one, and a document open here, while
     // nobody touches this desktop: the relay answers a held read when the log
@@ -2061,6 +2090,20 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       testCaptureSeams(),
     ),
   onWatcherBatch,
+  onObservationResync,
+  observationFor: (workspace, callbacks) => {
+    const daemon = desktopEngine.daemon;
+    if (!daemon) throw new Error("Workspace file observation requires the engine daemon.");
+    return startWorkspaceFileObservation({ ...workspace,
+      ...(sharedViewOf(workspace.workspaceId) ? { captureMode: "none" as const } : {}),
+    }, requireEngineSessions(), daemon, {
+      ...callbacks,
+      facts(facts) {
+        workspaceFileListings.observe(workspace.workspaceId, workspace.attachmentId, facts);
+        callbacks.facts(facts);
+      },
+    });
+  },
 });
 
 function withWorkspaceActivityState<Result>(
@@ -5061,7 +5104,11 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     },
     stopSearch: () => workspaceSearchOwner.dispose(),
     stopSitePreviews: stopAllSitePreviews,
-    settleYDocs: closeAllEngineYDocSessions,
+    settleYDocs: () => settleYDocsAfterFileObservation(
+      workspaceAuthorities.workspaceIds().map(workspaceId =>
+        workspaceAuthorities.withAuthority(workspaceId, lease => workspaceActivity.drainObservations(lease.state.activity))),
+      closeAllEngineYDocSessions,
+    ),
     stopAgentIntegration: () => agentIntegration.stopAll(),
     closeWorkspaces: async () => {
       await workspaceAuthorities.close();
@@ -5070,7 +5117,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       await ownerDatasetCopies.closeAll();
       await namedDatasetPages.close();
     },
-    disposeDatabase: () => workspaceDatabaseWorker.dispose(),
+    disposeDatabase: async () => { await workspaceFilesWorker.dispose(); await workspaceDatabaseWorker.dispose(); },
     closeRelay: closeAllRelayTransportWorkspaces,
     stopEngine: async () => { await desktopEngine.daemon?.stop(); },
   },

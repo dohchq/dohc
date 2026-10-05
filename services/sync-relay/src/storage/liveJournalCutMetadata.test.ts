@@ -28,7 +28,7 @@ it("keeps repeated stored snapshots independent and validates changed bytes on t
   } finally {f.close();}
 });
 
-it("refuses corrupted stored snapshots, nonempty seed coverage and deletion ranges", () => {
+it("refuses corrupted stored snapshots, nonempty seed coverage, deletion ranges and checkpoint coverage", () => {
   const f = registered({deployment: true});
   try {
     for (let index = 0; index < 2; index++) {
@@ -44,10 +44,12 @@ it("refuses corrupted stored snapshots, nonempty seed coverage and deletion rang
       ["author_snapshot_json", JSON.stringify([{kind: "agent", agentId: "agent"}, {kind: "human", humanId: "owner", humanName: "Owner"}])],
       ["seed_first_seen_json", JSON.stringify([{clientId: 999, startClock: 0, endClock: 1}])],
       ["first_seen_deletes_json", JSON.stringify([{clientId: 999, startClock: -1, endClock: 1}])],
+      ["checkpoint_coverage_json", JSON.stringify([{author: {kind: "human", humanId: "owner", humanName: "Owner"},
+        structRanges: [{clientId: 999, startClock: 5, endClock: 6}, {clientId: 999, startClock: 0, endClock: 1}], deletionRanges: []}])],
     ] as const) {
       f.write(db => db.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE delivery_id='corrupt-1'`).run(damaged));
       expect(() => f.storage.readLiveUpdateJournalCut({document})).toThrow();
-      f.write(db => db.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE delivery_id='corrupt-1'`).run(original[column] as string));
+      f.write(db => db.prepare(`UPDATE sync_relay_live_update_journal SET ${column}=? WHERE delivery_id='corrupt-1'`).run(original[column] as string | null));
       expect(f.storage.readLiveUpdateJournalCut({document}).kind).toBe("cut");
     }
   } finally {f.close();}

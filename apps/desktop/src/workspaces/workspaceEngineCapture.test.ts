@@ -43,7 +43,6 @@ import {
   type Response,
 } from "@dohc/workspace-engine-client";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
-import { startWorkspaceWatch } from "./workspaceWatcher";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {
   createCaptureLiveStores,
@@ -301,7 +300,7 @@ describe("workspaceEngineCapture batch capture", () => {
 
     engine.start();
     await engine.flush();
-    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    engine.observeFileEvents([{ path: "note.md", operation: "update" }]);
     await engine.flush();
     expect(
       loopback.requests.some(
@@ -2706,35 +2705,6 @@ describe("assertGeneratedMarkdownPath host-unsafe rejection (materialize boundar
     expect(() => assertGeneratedMarkdownPath("notes/plan.txt", "linux")).toThrow(
       /safe visible Markdown path/,
     );
-  });
-});
-
-describe("workspaceEngineCapture recorder", () => {
-  it("records nothing without an engine capture", async () => {
-    const root = await createTestScratch("dohc-engine-capture-");
-    const workspace: CreatedWorkspace = {
-      workspaceId: "no-recorder",
-      rootPath: root,
-      kind: "personal",
-      mode: defaultWorkspaceMode("personal"),
-    };
-    let resolveRecorded: (() => void) | null = null;
-    const recorded = new Promise<void>((resolve) => {
-      resolveRecorded = resolve;
-    });
-    const handle = startWorkspaceWatch(workspace, {
-      settleMs: 60,
-      onRecorded: () => resolveRecorded?.(),
-    });
-    await handle.ready;
-    await write(root, "notes.md", "# Notes\n");
-    // The batch still settles (UI refresh / cloud queue), but no history of
-    // any kind is written: no legacy change sets, no engine store.
-    await recorded;
-    await handle.stop();
-
-    expect(existsSync(join(root, ".dohc", "history"))).toBe(false);
-    expect(existsSync(join(root, ".dohc", "engine", "engine.db"))).toBe(false);
   });
 });
 

@@ -8,7 +8,9 @@ import {
   type ActivityWorkspace,
   type WorkspaceCaptureHooks,
 } from "./workspaceActivity";
-import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
+import { createInMemoryWorkspaceActivity as createWorkspaceActivity, idleObservation } from "./workspaceActivity.testSupport";
+import type { WorkspaceObservationCallbacks } from "./workspaceFileObservation";
+import { observeWorkspaceFiles } from "./workspaceFileObservation";
 import type { CloudSyncFailure } from "./relaySyncEngine";
 import { captureForWorkspace } from "./engineCaptureGate";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -52,11 +54,89 @@ function workspace(): ActivityWorkspace {
 }
 
 describe("workspaceActivity capture hooks", () => {
+  it("attaches observation after capture fails and queues sync only for capture announcements", async () => {
+    let observation!: WorkspaceObservationCallbacks;
+    const queueSync = vi.fn();
+    const activity = createWorkspaceActivity(vi.fn(), {
+      observationFor: (w, callbacks) => { observation = callbacks; return idleObservation(w, callbacks); },
+      captureFor: () => { throw new Error("capture failed"); },
+      engineFor: () => ({ start: async () => {}, stop: async () => {}, queueSync, snapshot: () => ({}) }) as never,
+    });
+    const status = await activity.open(workspace());
+    expect(status.historyRecordingUnavailable).toBe(true);
+    observation.facts([{ path: "note.md", kind: "changed" }]);
+    expect(queueSync).not.toHaveBeenCalled();
+    observation.captured();
+    expect(queueSync).toHaveBeenCalledOnce();
+    await activity.stopAll();
+  });
+
+  it.each([false, true])("drains and resyncs failed observation before closing live sessions (%s)", async fails => {
+    const steps: string[] = [];
+    const drainFailed = vi.fn(() => { steps.push("unconfirmed"); });
+    const activity = createWorkspaceActivity(vi.fn(), {
+      observationFor: () => ({ ...idleObservation(workspace(), {} as never), stop: async () => {
+        steps.push("drain");
+        if (fails) throw new Error("drain failed");
+      } }),
+      captureFor: () => ({ shareView: false, capture: {
+        start: () => {}, observationDrainFailed: drainFailed,
+        resyncFileObservation: async () => { steps.push("resync"); },
+        settleAndCloseAllLiveSessions: async () => { steps.push("sessions"); },
+        stop: async () => { steps.push("capture"); },
+      } as never }),
+    });
+    await activity.open(workspace());
+    const closed = activity.close("activity-test");
+    if (fails) await expect(closed).rejects.toThrow("drain failed"); else await closed;
+    expect(steps).toEqual(fails ? ["drain", "unconfirmed", "resync", "sessions", "capture"] : ["drain", "sessions", "capture"]);
+  });
+
+  it("bounds an unavailable observation baseline and exposes the history-off notice state", async () => {
+    vi.useFakeTimers();
+    try {
+      const notify = vi.fn();
+      const activity = createWorkspaceActivity(notify, {
+        observationFor: () => ({ ...idleObservation(workspace(), {} as never), ready: new Promise(() => {}) }),
+      });
+      const opening = activity.open(workspace());
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(notify).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect((await opening).historyRecordingUnavailable).toBe(true);
+      expect(notify).toHaveBeenCalledWith({ workspaceId: "activity-test" });
+      await activity.stopAll();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("opens a known degraded feed without waiting for the timeout", async () => {
+    const activity = createWorkspaceActivity(vi.fn(), {
+      observationFor: (_workspace, callbacks) => observeWorkspaceFiles({
+        callbacks, subscribe: () => () => {}, onError: vi.fn(),
+        read: async () => ({ cursor: { generation: "degraded", revision: 0 }, ready: false, degraded: true, resync: false, facts: [] }),
+      }),
+    });
+    expect((await activity.open(workspace())).historyRecordingUnavailable).toBe(true);
+    await activity.stopAll();
+  });
+
+  it("close releases an open waiting on readiness", async () => {
+    const read = vi.fn(async () => ({ cursor: { generation: "starting", revision: 0 }, ready: false, resync: false, facts: [] }));
+    const activity = createWorkspaceActivity(vi.fn(), {
+      observationFor: (_workspace, callbacks) => observeWorkspaceFiles({ callbacks, read,
+        subscribe: () => () => {}, onError: vi.fn() }),
+    });
+    const opening = activity.open(workspace());
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+    expect(await activity.close("activity-test")).toBe(true);
+    await opening;
+  });
   it("keeps an old attachment close from stopping its successor", async () => {
     const successorRoot = await createTestScratch("dohc-activity-successor-");
     const oldCaptureStop = vi.fn(async () => undefined);
     const successorCaptureStop = vi.fn(async () => undefined);
     const activity = createPhysicalWorkspaceActivity(() => {}, {
+      observationFor: idleObservation,
       captureFor: (candidate) => ({
         shareView: false,
         capture: {
@@ -91,22 +171,28 @@ describe("workspaceActivity capture hooks", () => {
     }
   });
 
-  it("publishes settled watcher paths with the workspace activity", async () => {
+  it("publishes observation paths with the workspace activity", async () => {
     const notify = vi.fn();
+    let observation!: WorkspaceObservationCallbacks;
     const activity = createWorkspaceActivity(notify, {
+      observationFor: (_workspace, callbacks) => { observation = callbacks; return idleObservation(_workspace, callbacks); },
       captureFor: () => ({ capture: null, shareView: false }),
     });
     await activity.open(workspace());
     notify.mockClear();
 
     await writeFile(join(root, "changed.md"), "changed");
+    observation.facts([{ path: "changed.md", kind: "appeared" }]);
 
     await vi.waitFor(() => {
       expect(notify).toHaveBeenCalledWith({
         workspaceId: "activity-test",
         paths: ["changed.md"],
+        pathSetChanged: true,
       });
     });
+    observation.captured(["changed.md"]);
+    expect(notify).toHaveBeenLastCalledWith({ workspaceId: "activity-test", paths: ["changed.md"], pathSetChanged: false });
     await activity.stopAll();
   });
 
@@ -434,7 +520,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         return {
           capture: {
             start: vi.fn(),
-            captureBatch: vi.fn(),
+            observeFileEvents: vi.fn(),
             settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
             stop: captureBuilds === 1 ? firstCaptureStop : secondCaptureStop,
           } as never,
@@ -495,7 +581,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           return {
             capture: {
               start: vi.fn(),
-              captureBatch: vi.fn(),
+              observeFileEvents: vi.fn(),
               settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
               stop: vi.fn(async () => undefined),
             } as never,
@@ -556,7 +642,7 @@ describe("workspaceActivity cloud sync nudge", () => {
               resolve({
                 capture: {
                   start: vi.fn(),
-                  captureBatch: vi.fn(),
+                  observeFileEvents: vi.fn(),
                   settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
                   stop: vi.fn(async () => undefined),
                 } as never,
@@ -567,7 +653,7 @@ describe("workspaceActivity cloud sync nudge", () => {
         return {
           capture: {
             start: vi.fn(),
-            captureBatch: vi.fn(),
+            observeFileEvents: vi.fn(),
             settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
             stop: vi.fn(async () => undefined),
           } as never,
@@ -602,7 +688,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       captureFor: () => ({
         capture: {
           start: vi.fn(),
-          captureBatch: vi.fn(),
+          observeFileEvents: vi.fn(),
           settleAndCloseAllLiveSessions: retireLiveSessions,
           stop: vi.fn(async () => undefined),
         } as never,
@@ -666,7 +752,7 @@ describe("workspaceActivity cloud sync nudge", () => {
       captureFor: () => ({
         capture: {
           start: vi.fn(),
-          captureBatch: vi.fn(),
+          observeFileEvents: vi.fn(),
           settleAndCloseAllLiveSessions: retireLiveSessions,
           stop: captureStop,
         } as never,
@@ -754,7 +840,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           shareView: false,
           capture: {
             start: vi.fn(),
-            captureBatch: vi.fn(),
+            observeFileEvents: vi.fn(),
             settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
             stop: vi.fn(async () => undefined),
           } as never,
@@ -785,7 +871,7 @@ describe("workspaceActivity cloud sync nudge", () => {
           shareView: false,
           capture: {
             start: vi.fn(),
-            captureBatch: vi.fn(),
+            observeFileEvents: vi.fn(),
             settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
             stop: vi.fn(async () => undefined),
           } as never,

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { broadcastWorkspaceActivity } from "./workspaceActivityBroadcast";
+import { broadcastWorkspaceActivity, coalesceWorkspaceActivity } from "./workspaceActivityBroadcast";
 import { CHANNELS } from "./channels";
 
 function fakeWindow(id: number) {
@@ -7,6 +7,36 @@ function fakeWindow(id: number) {
 }
 
 describe("broadcastWorkspaceActivity", () => {
+  it.each([true, false])("keeps pathless activity broad in either order (broad first: %s)", async captureFirst => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn();
+      const notify = coalesceWorkspaceActivity(send);
+      const capture = { workspaceId: "ws-a", pathSetChanged: false };
+      const observation = { ...capture, paths: ["note.md"] };
+      notify(captureFirst ? capture : observation);
+      notify(captureFirst ? observation : capture);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(send).toHaveBeenCalledExactlyOnceWith(capture);
+      notify({ ...capture, paths: Array.from({ length: 40 }, (_, n) => `${n}.md`) });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(send).toHaveBeenLastCalledWith(capture);
+    } finally { vi.useRealTimers(); }
+  });
+  it.each([true, false])("coalesces capture path hints in either order (capture first: %s)", async captureFirst => {
+    vi.useFakeTimers();
+    try {
+      const send = vi.fn();
+      const notify = coalesceWorkspaceActivity(send);
+      const capture = { workspaceId: "ws-a", pathSetChanged: false, paths: ["captured.md"] };
+      const observation = { ...capture, paths: ["observed.md"] };
+      notify(captureFirst ? capture : observation);
+      notify(captureFirst ? observation : capture);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(send).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-a", pathSetChanged: false,
+        paths: captureFirst ? ["captured.md", "observed.md"] : ["observed.md", "captured.md"] });
+    } finally { vi.useRealTimers(); }
+  });
   it("delivers a scoped event only to windows with that workspace active", () => {
     const onA = fakeWindow(1);
     const onB = fakeWindow(2);
