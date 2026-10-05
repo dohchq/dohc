@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 
+// Allow the helper's 120 s listening wait, 15 s shutdown guard, and scratch cleanup.
+// A loaded relay must report its own readiness or startup failure before the test ends.
 it("starts an isolated desktop E2E relay with inherited device-delivery configuration", async () => {
   const root = await mkdtemp(join(tmpdir(), "dohc-desktop-relay-env-"));
   vi.stubEnv("DOHC_RELAY_DEVICE_DELIVERY_CONFIG", "inherited-device-delivery-must-not-open.json");
@@ -22,4 +24,4 @@ it("starts an isolated desktop E2E relay with inherited device-delivery configur
     await relay?.stop();
     await rm(root, { recursive: true, force: true });
   }
-}, 30_000);
+}, 180_000);
