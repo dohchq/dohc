@@ -1114,7 +1114,7 @@ impl EngineService {
         let submission: SetBatchSubmission = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let (receipt, claims) = Self::read_under_ctx(
+        let (receipt, claims, records) = Self::read_under_ctx(
             &cancellation,
             "collections.setFieldsBatch",
             open.actor.set_fields_batch(
@@ -1130,6 +1130,9 @@ impl EngineService {
             ),
         )
         .await?;
+        for facts in &records {
+            crate::events::emit_record_events(&self.events, &open.workspace_id, facts);
+        }
         crate::events::emit_automation_claimed(&self.events, &open.workspace_id, &claims);
         self.collection_response_with_blob(
             ctx,

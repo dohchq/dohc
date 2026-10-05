@@ -144,7 +144,14 @@ impl ActorHandle {
         token: CancellationToken,
         now_ms: i64,
         self_writes: Arc<dyn SelfWriteRecorder>,
-    ) -> Result<(SetBatchReceipt, Vec<dohc_engine_domain::AutomationClaim>), RuntimeError> {
+    ) -> Result<
+        (
+            SetBatchReceipt,
+            Vec<dohc_engine_domain::AutomationClaim>,
+            Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+        ),
+        RuntimeError,
+    > {
         self.run(move |store, cache| {
             set_fields_batch_on_store(
                 store,
@@ -232,13 +239,20 @@ fn set_fields_batch_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     self_writes: &dyn SelfWriteRecorder,
-) -> Result<(SetBatchReceipt, Vec<dohc_engine_domain::AutomationClaim>), RuntimeError> {
+) -> Result<
+    (
+        SetBatchReceipt,
+        Vec<dohc_engine_domain::AutomationClaim>,
+        Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    ),
+    RuntimeError,
+> {
     // Replay precedes person, version, and binding checks. It grants no new write.
     if let Some(found) =
         store.read_with(|conn| read_set_receipt_in_tx(conn, workspace_id, &plan.key, digest))?
     {
         return match found {
-            SetBatchLookup::Committed { receipt } => Ok((receipt, Vec::new())),
+            SetBatchLookup::Committed { receipt } => Ok((receipt, Vec::new(), Vec::new())),
             SetBatchLookup::Abandoned => Err(invalid("automation-set-batch-abandoned")),
             SetBatchLookup::Retired => Err(invalid("automation-set-batch-retired")),
         };
@@ -305,6 +319,7 @@ fn set_fields_batch_on_store(
         let mut receipt = SetBatchReceipt { key: plan.key.clone(), digest: digest.to_owned(), version_id: plan.version_id.clone(),
             attribution: attribution.clone(), records: Vec::new(), jobs: Vec::new(), committed_at_ms: now_ms, writer_ms: 0.0 };
         let mut claims = Vec::new();
+        let mut facts = Vec::new();
         let mut state_bytes = 0;
         for record in &plan.records {
             if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
@@ -355,6 +370,7 @@ fn set_fields_batch_on_store(
                 let (_, new_claims) = journal_ydoc_append_in_tx(tx, &key, &path, ContentKind::Richdoc, &update,
                     Some(automation_id.clone()), Some(attribution.clone()), None, true, now_ms, &mut appended, &dohc_engine_storage::hex_sha256(&update))?;
                 claims.extend(new_claims);
+                facts.extend(appended.record_facts);
                 for field in &mut fields {
                     if let SetBatchFieldOutcome::Changed { field, history_id, .. } = field {
                         *history_id = tx.query_row("SELECT max(history_id) FROM collection_field_history WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3 AND field_name=?4",
@@ -374,7 +390,7 @@ fn set_fields_batch_on_store(
         receipt.writer_ms = started.elapsed().as_secs_f64() * 1000.0;
         save_set_receipt_in_tx(tx, workspace_id, &receipt)?;
         if token.is_cancelled() { return Err(RuntimeError::Cancelled); }
-        Ok::<_, RuntimeError>((receipt, claims))
+        Ok::<_, RuntimeError>((receipt, claims, facts))
     });
     // This path never mutates cache entries speculatively. Remove only its own stale bases.
     for record in &plan.records {
@@ -530,7 +546,7 @@ mod tests {
             faults,
             &(),
         )
-        .map(|(receipt, _)| receipt)
+        .map(|(receipt, _, _)| receipt)
     }
     fn changes(store: &EngineStore) -> i64 {
         store
@@ -754,6 +770,37 @@ mod tests {
         assert_eq!(receipt.records.len(), 4);
         assert_eq!(changes(&store), 8);
         assert_eq!(store.synchronous_setting().unwrap(), 1);
+    }
+
+    #[test]
+    fn committed_batches_publish_record_facts_and_replays_do_not() {
+        let (scratch, mut store, plan) = fixture(4);
+        let mut apply = || {
+            set_fields_batch_on_store(
+                &mut store,
+                &mut WriterDocCache::new(),
+                WS,
+                scratch.path(),
+                &plan,
+                &plan.digest().unwrap(),
+                author(),
+                &LeaseRegistry::new(),
+                &CancellationToken::new(),
+                2,
+                &NoFaults,
+                &(),
+            )
+            .unwrap()
+        };
+        let (first, _, facts) = apply();
+        assert_eq!(facts.len(), 4);
+        assert!(facts.iter().all(
+            |record| record.fields.len() == 2 && record.attribution.as_ref() == Some(&author())
+        ));
+        let (replayed, claims, facts) = apply();
+        assert_eq!(first, replayed);
+        assert!(claims.is_empty());
+        assert!(facts.is_empty());
     }
 
     #[test]
