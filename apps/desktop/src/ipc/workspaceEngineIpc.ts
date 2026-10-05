@@ -275,6 +275,7 @@ export function createWorkspaceEngineIpc<
       return readHistory(event, input.workspaceId, (history) => listEngineMomentsForIpc(
         () =>
           history.listMoments({
+            ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
             ...(input.limit !== undefined ? { limit: input.limit } : {}),
             ...(input.beforeMomentOrder !== undefined
               ? { beforeMomentOrder: input.beforeMomentOrder }

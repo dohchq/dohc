@@ -1548,6 +1548,7 @@ export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 
 export const ListEngineMomentsPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  objectId: OPAQUE_ID.optional(),
   limit: z.number().int().min(1).max(500).optional(),
   beforeMomentOrder: z.number().int().nonnegative().optional(),
 });
