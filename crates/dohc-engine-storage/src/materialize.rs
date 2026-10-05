@@ -627,16 +627,7 @@ pub(crate) fn open_displacements(
     if specs.is_empty() {
         return Ok(Vec::new());
     }
-    const SYNCHRONOUS_FULL: i64 = 2;
-    let session: i64 = conn
-        .pragma_query_value(None, "synchronous", |row| row.get(0))
-        .map_err(StorageError::corrupt)?;
-    conn.pragma_update(None, "synchronous", SYNCHRONOUS_FULL)
-        .map_err(StorageError::persist)?;
-    let inserted = (|| {
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(StorageError::persist)?;
+    with_full_commit(conn, |tx| {
         let mut ids = Vec::with_capacity(specs.len());
         for spec in specs {
             tx.execute(
@@ -657,15 +648,8 @@ pub(crate) fn open_displacements(
             .map_err(StorageError::persist)?;
             ids.push(tx.last_insert_rowid());
         }
-        tx.commit().map_err(StorageError::persist)?;
-        Ok::<_, StorageError>(ids)
-    })();
-    let restored = conn
-        .pragma_update(None, "synchronous", session)
-        .map_err(StorageError::persist);
-    let displacement_id = inserted?;
-    restored?;
-    Ok(displacement_id)
+        Ok(ids)
+    })
 }
 
 /// Record a staged file that stays where it is as a `kept` row, in an
@@ -915,15 +899,15 @@ pub(crate) fn with_full_commit<T>(
 }
 
 pub(crate) fn retain(conn: &Connection, row: &RetainedDisplacement) -> Result<i64, StorageError> {
-    with_full_commit(conn, |tx| {
-        tx.execute("INSERT INTO materialization_retained(job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(source_path) DO NOTHING",rusqlite::params![row.job_id,row.workspace_id,row.target_path,row.source_path,row.device,row.inode,row.digest,row.size,row.mtime,row.ctime,row.changed_at_ms]).map_err(StorageError::persist)?;
-        tx.query_row(
-            "SELECT displacement_id FROM materialization_retained WHERE source_path=?1",
-            [&row.source_path],
-            |r| r.get(0),
-        )
-        .map_err(StorageError::corrupt)
-    })
+    // A lost row is reconstructed from the staged name during recovery.
+    // Keep the ordinary NORMAL commit off the per-save fsync path.
+    conn.execute("INSERT INTO materialization_retained(job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(source_path) DO NOTHING",rusqlite::params![row.job_id,row.workspace_id,row.target_path,row.source_path,row.device,row.inode,row.digest,row.size,row.mtime,row.ctime,row.changed_at_ms]).map_err(StorageError::persist)?;
+    conn.query_row(
+        "SELECT displacement_id FROM materialization_retained WHERE source_path=?1",
+        [&row.source_path],
+        |r| r.get(0),
+    )
+    .map_err(StorageError::corrupt)
 }
 
 pub(crate) fn record_retained_read(
@@ -938,8 +922,10 @@ pub(crate) fn record_retained_read(
             reason: "retained read bytes do not match the bounded digest",
         });
     }
+    // A read version can be overwritten before recovery or source release.
+    // FULL keeps those exact bytes even when the staged inode later changes.
     with_full_commit(conn, |tx| {
-        let updated=tx.execute("UPDATE materialization_retained SET digest=?2,size=?3,mtime=?4,ctime=?5,changed_at_ms=?6 WHERE displacement_id=?1 AND digest=?7 AND changed_at_ms=?8",rusqlite::params![old.displacement_id,new.digest,new.size,new.mtime,new.ctime,now_ms,old.digest,old.changed_at_ms]).map_err(StorageError::persist)?;
+        let updated=tx.execute("UPDATE materialization_retained SET digest=?2,size=?3,mtime=?4,ctime=?5,changed_at_ms=?6,device=?9,inode=?10 WHERE displacement_id=?1 AND digest=?7 AND changed_at_ms=?8",rusqlite::params![old.displacement_id,new.digest,new.size,new.mtime,new.ctime,now_ms,old.digest,old.changed_at_ms,new.device,new.inode]).map_err(StorageError::persist)?;
         if updated == 1 && new.digest != old.digest {
             tx.execute("INSERT OR IGNORE INTO materialization_displacement_reads(workspace_id,displacement_id,job_id,target_path,sha256,bytes,observed_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![old.workspace_id,format!("retained:{}",old.displacement_id),old.job_id,old.target_path,new.digest,bytes,now_ms]).map_err(StorageError::persist)?;
         }

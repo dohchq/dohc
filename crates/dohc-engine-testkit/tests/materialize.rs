@@ -754,6 +754,21 @@ fn delete_job_replays_after_remove_before_complete() {
     .expect("replay");
     assert_eq!(recovered[0].outcome, JobOutcome::AlreadyMaterialized);
     assert!(!sc.target("a.md").exists());
+    #[cfg(unix)]
+    {
+        let rows = store.retained_displacements_after(0).expect("retained");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            std::fs::read(sc.workspace().join(&rows[0].source_path)).unwrap(),
+            old
+        );
+        assert_eq!(
+            displaced_files(&sc).len(),
+            1,
+            "the original remains reachable during Q"
+        );
+    }
+    #[cfg(not(unix))]
     assert!(displaced_files(&sc).is_empty(), "the deleted copy is gone");
     assert!(
         store
@@ -1287,9 +1302,22 @@ fn read(sc: &Scratch, rel: &str) -> Option<Vec<u8>> {
     std::fs::read(sc.target(rel)).ok()
 }
 
-/// Nothing is left in staging and no displacement row remains.
+/// Every remaining staged original has a retained row; no unknown copy remains.
 fn assert_nothing_displaced(sc: &Scratch, store: &EngineStore) {
-    assert!(displaced_files(sc).is_empty(), "{:?}", displaced_files(sc));
+    let mut expected = Vec::new();
+    #[cfg(unix)]
+    for row in store.retained_displacements_after(0).expect("retained") {
+        assert!(sc.workspace().join(&row.source_path).exists());
+        assert!(
+            store.holds_content(&row.digest).unwrap(),
+            "known baseline is recoverable"
+        );
+        expected.push(staged(row.source_path.rsplit('/').next().unwrap()));
+    }
+    expected.sort();
+    let mut actual = displaced_files(sc);
+    actual.sort();
+    assert_eq!(actual, expected);
     assert!(
         store
             .list_unsettled_displacements()

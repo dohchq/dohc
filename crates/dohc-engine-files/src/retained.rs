@@ -61,6 +61,8 @@ pub(super) fn retain_known(
 pub enum Inspection {
     Missing,
     Keep,
+    /// Keep the complete source through the kept-copy API; do not read a prefix.
+    Oversized,
     Changed {
         current: RetainedDisplacement,
         bytes: Vec<u8>,
@@ -121,10 +123,13 @@ pub fn inspect(
         .map_err(|e| MaterializeError::io(&path, &e))?;
     let initial = stamp(&meta);
     let (device, inode, size, mtime, ctime) = initial.clone();
-    if device != row.device || inode != row.inode || !meta.is_file() {
-        return Ok(Inspection::Keep);
+    if !meta.is_file() {
+        return Err(MaterializeError::BlockedTarget);
     }
-    if meta.nlink() > 1 {
+    // The descriptor was reopened by path. Device numbers can change on remount;
+    // compare content instead of treating the old identity as an eternal fence.
+    let identity_changed = device != row.device || inode != row.inode;
+    if !identity_changed && meta.nlink() > 1 {
         return Ok(Inspection::Release(Release {
             path,
             file,
@@ -134,10 +139,16 @@ pub fn inspect(
     let quiet = now_ms.saturating_sub(row.changed_at_ms) >= QUIET_PERIOD_MS;
     let changed = (size, mtime.as_str(), ctime.as_str())
         != (row.size, row.mtime.as_str(), row.ctime.as_str());
-    if !quiet && !changed {
+    if !identity_changed && !quiet && !changed {
         return Ok(Inspection::Keep);
     }
     if meta.len() > MAX_MATERIALIZE_BYTES as u64 {
+        return Ok(Inspection::Oversized);
+    }
+    #[cfg(target_os = "linux")]
+    let lease_checked = !identity_changed && !changed;
+    #[cfg(target_os = "linux")]
+    if lease_checked && writer_present(&file, &path)? {
         return Ok(Inspection::Keep);
     }
     let mut bytes = Vec::new();
@@ -146,12 +157,12 @@ pub fn inspect(
         .read_to_end(&mut bytes)
         .map_err(|e| MaterializeError::io(&path, &e))?;
     if bytes.len() > MAX_MATERIALIZE_BYTES {
-        return Ok(Inspection::Keep);
+        return Ok(Inspection::Oversized);
     }
     let digest = hex_sha256(&bytes);
     // Even an unstable read is kept. Its new clock forces another comparison.
     if digest != row.digest
-        || changed
+        || (!identity_changed && changed)
         || stamp(
             &file
                 .metadata()
@@ -159,16 +170,19 @@ pub fn inspect(
         ) != initial
     {
         let mut current = row.clone();
+        current.device = device;
+        current.inode = inode;
         current.digest = digest;
         current.size = size;
         current.mtime = mtime;
         current.ctime = ctime;
         return Ok(Inspection::Changed { current, bytes });
     }
+    if identity_changed && !quiet {
+        return Ok(Inspection::Keep);
+    }
     #[cfg(target_os = "linux")]
-    if dohc_linux_files::probe(&file).map_err(|e| MaterializeError::io(&path, &e))?
-        == dohc_linux_files::LeaseProbe::WriterPresent
-    {
+    if !lease_checked && writer_present(&file, &path)? {
         return Ok(Inspection::Keep);
     }
     Ok(Inspection::Release(Release {
@@ -176,4 +190,12 @@ pub fn inspect(
         file,
         stamp: initial,
     }))
+}
+
+#[cfg(target_os = "linux")]
+fn writer_present(file: &std::fs::File, path: &Path) -> Result<bool, MaterializeError> {
+    Ok(
+        dohc_linux_files::probe(file).map_err(|e| MaterializeError::io(path, &e))?
+            == dohc_linux_files::LeaseProbe::WriterPresent,
+    )
 }

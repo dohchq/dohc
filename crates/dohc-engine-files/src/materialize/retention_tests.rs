@@ -54,11 +54,18 @@ fn sweep(store: &EngineStore, root: &Path, now: i64) {
                 Inspection::Release(token) => {
                     assert!(token.remove().unwrap());
                     store.release_retained(row.displacement_id).unwrap();
+                    cleanup_staging_directory(
+                        store,
+                        root,
+                        root.join(&row.source_path).parent().unwrap(),
+                    )
+                    .unwrap();
                 }
                 Inspection::Changed { current, bytes } => store
                     .record_retained_read(&row, &current, &bytes, now)
                     .unwrap(),
                 Inspection::Missing => store.release_retained(row.displacement_id).unwrap(),
+                Inspection::Oversized => store.keep_oversized_retained(&row, now).unwrap(),
                 Inspection::Keep => {}
             }
         }
@@ -234,10 +241,16 @@ fn p0_cross_volume_stages_beside_target() {
         JobOutcome::Completed
     );
     assert_eq!(replacer.0.load(Ordering::Relaxed), 2);
+    #[cfg(unix)]
     assert_eq!(
         store.staging_location("settle").unwrap().as_deref(),
         Some(".dohc-write-displaced")
     );
+    #[cfg(not(unix))]
+    {
+        assert!(store.staging_location("settle").unwrap().is_none());
+        assert!(!root.join(".dohc-write-displaced").exists());
+    }
     assert_eq!(std::fs::read(root.join("notes.md")).unwrap(), b"after");
     recover_displacements(&store, root, Some("ws"), &options(1000, &StdReplacer)).unwrap();
 }
@@ -373,4 +386,194 @@ fn p0_cross_volume_delete_retains_the_original_on_its_volume() {
         std::fs::read(root.join(row.source_path)).unwrap(),
         b"before"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn remounted_identity_compares_digest_and_never_keeps_forever() {
+    use crate::retained::{Inspection, inspect};
+    let scratch = ScratchDir::new_named("p0-remount").unwrap();
+    let root = scratch.path();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    std::fs::write(root.join("notes.md"), b"before").unwrap();
+    let j = job(&mut store, "remount", "notes.md", b"before", b"after", 1);
+    materialize_one(&store, root, &j, &options(0, &StdReplacer)).unwrap();
+    store
+        .read_with(|c| {
+            c.execute(
+                "UPDATE materialization_retained SET device='changed-device'",
+                [],
+            )
+        })
+        .unwrap();
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    assert!(matches!(
+        inspect(root, &row, 30_000).unwrap(),
+        Inspection::Release(_)
+    ));
+    let source = root.join(&row.source_path);
+    std::fs::write(&source, b"outside after mount").unwrap();
+    match inspect(root, &row, 30_001).unwrap() {
+        Inspection::Changed { current, bytes } => {
+            assert_eq!(bytes, b"outside after mount");
+            assert_ne!(current.device, row.device);
+            store
+                .record_retained_read(&row, &current, &bytes, 30_001)
+                .unwrap();
+        }
+        _ => panic!("changed identity must preserve changed bytes"),
+    }
+    let current = store.retained_displacements_after(0).unwrap().remove(0);
+    assert_ne!(current.device, row.device);
+    sweep(&store, root, 60_001);
+    assert!(!source.exists());
+    let observed: Vec<u8> = store
+        .read_with(|c| {
+            c.query_row(
+                "SELECT bytes FROM materialization_displacement_reads",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(observed, b"outside after mount");
+}
+#[cfg(unix)]
+#[test]
+fn oversized_retained_source_becomes_a_recoverable_kept_copy() {
+    use crate::retained::{Inspection, inspect};
+    let scratch = ScratchDir::new_named("p0-retained-large").unwrap();
+    let root = scratch.path();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    std::fs::write(root.join("notes.md"), b"before").unwrap();
+    let j = job(&mut store, "large", "notes.md", b"before", b"after", 1);
+    materialize_one(&store, root, &j, &options(0, &StdReplacer)).unwrap();
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    let source = root.join(&row.source_path);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_len(MAX_MATERIALIZE_BYTES as u64 + 1)
+        .unwrap();
+    assert!(matches!(
+        inspect(root, &row, 1).unwrap(),
+        Inspection::Oversized
+    ));
+    store.keep_oversized_retained(&row, 1).unwrap();
+    store.keep_oversized_retained(&row, 2).unwrap(); // idempotent retry
+    assert!(store.retained_displacements_after(0).unwrap().is_empty());
+    recover_displacements(&store, root, Some("ws"), &options(2, &StdReplacer)).unwrap();
+    let kept = store.list_kept_displacements("ws").unwrap();
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].displaced_sha256.is_none());
+    assert_eq!(
+        std::fs::metadata(&source).unwrap().len(),
+        MAX_MATERIALIZE_BYTES as u64 + 1
+    );
+    assert!(matches!(
+        save_kept_displacement(
+            &store,
+            root,
+            "ws",
+            kept[0].displacement_id,
+            &options(3, &StdReplacer)
+        )
+        .unwrap(),
+        KeptCopySave::Saved(_)
+    ));
+    assert_eq!(
+        std::fs::metadata(root.join("notes (kept copy).md"))
+            .unwrap()
+            .len(),
+        MAX_MATERIALIZE_BYTES as u64 + 1
+    );
+}
+#[cfg(unix)]
+#[test]
+fn recovery_reconstructs_a_lost_normal_retained_row() {
+    let scratch = ScratchDir::new_named("p0-lost-retained-row").unwrap();
+    let root = scratch.path();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    std::fs::write(root.join("notes.md"), b"before").unwrap();
+    let j = job(&mut store, "lost", "notes.md", b"before", b"after", 1);
+    materialize_one(&store, root, &j, &options(0, &StdReplacer)).unwrap();
+    let row = store.retained_displacements_after(0).unwrap().remove(0);
+    store.release_retained(row.displacement_id).unwrap();
+    recover_displacements(&store, root, Some("ws"), &options(1, &StdReplacer)).unwrap();
+    assert_eq!(store.retained_displacements_after(0).unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read(root.join(row.source_path)).unwrap(),
+        b"before"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn recovery_skips_bad_locations_and_keeps_the_whole_sweep_failure() {
+    for symlink in [true, false] {
+        let scratch = ScratchDir::new_named("p0-bad-location").unwrap();
+        let outside = ScratchDir::new_named("p0-outside-location").unwrap();
+        let root = scratch.path();
+        let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+        if symlink {
+            std::os::unix::fs::symlink(outside.path(), root.join("a-bad")).unwrap();
+        } else {
+            std::fs::write(root.join("a-bad"), b"not a directory").unwrap();
+        }
+        store
+            .remember_staging("bad-location", "a-bad/.dohc-write-displaced")
+            .unwrap();
+        std::fs::create_dir_all(root.join("z-good/.dohc-write-displaced")).unwrap();
+        for (id, path, directory) in [
+            ("default", "default.md", STAGING_DIR),
+            ("sibling", "z-good/notes.md", "z-good/.dohc-write-displaced"),
+        ] {
+            let j = job(&mut store, id, path, b"before", b"after", 1);
+            if id == "sibling" {
+                store.remember_staging(id, directory).unwrap();
+            }
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+            std::fs::write(
+                root.join(directory).join(staged_name(&j.job_id, 0)),
+                b"outside",
+            )
+            .unwrap();
+        }
+        recover_displacements(&store, root, Some("ws"), &options(1, &StdReplacer)).unwrap();
+        assert_eq!(std::fs::read(root.join("default.md")).unwrap(), b"outside");
+        assert_eq!(
+            std::fs::read(root.join("z-good/notes.md")).unwrap(),
+            b"outside"
+        );
+        assert!(
+            workspace_recovery_unavailable(root),
+            "later healthy directory hid the failure"
+        );
+        assert!(!root.join("z-good/.dohc-write-displaced").exists());
+        assert!(store.staging_location("sibling").unwrap().is_none());
+        std::fs::remove_file(root.join("a-bad")).unwrap();
+        std::fs::create_dir(root.join("a-bad")).unwrap();
+        recover_displacements(&store, root, Some("ws"), &options(2, &StdReplacer)).unwrap();
+        assert!(!workspace_recovery_unavailable(root));
+    }
+}
+#[cfg(unix)]
+#[test]
+fn releasing_last_sibling_source_removes_directory_and_location_rows() {
+    let scratch = ScratchDir::new_named("p0-empty-sibling").unwrap();
+    let root = scratch.path();
+    let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+    std::fs::write(root.join("notes.md"), b"before").unwrap();
+    let j = job(&mut store, "empty", "notes.md", b"before", b"after", 1);
+    materialize_one(
+        &store,
+        root,
+        &j,
+        &options(0, &CrossVolume(AtomicUsize::new(0))),
+    )
+    .unwrap();
+    assert!(root.join(".dohc-write-displaced").exists());
+    sweep(&store, root, 30_000);
+    assert!(!root.join(".dohc-write-displaced").exists());
+    assert!(store.staging_locations().unwrap().is_empty());
 }

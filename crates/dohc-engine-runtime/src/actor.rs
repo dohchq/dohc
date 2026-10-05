@@ -379,6 +379,8 @@ impl WorkspaceActor {
         #[cfg(unix)]
         if let Some(retention) = &mut self.retention {
             retention.stop();
+            // Finish an in-flight changed read while the writer can still commit it.
+            retention.join();
         }
         match self.close_permit.take() {
             // Reserved slot: instant, fair, FIFO-respecting delivery.
@@ -391,10 +393,6 @@ impl WorkspaceActor {
             None => {
                 let _ = self.tx.try_send(Command::Close);
             }
-        }
-        #[cfg(unix)]
-        if let Some(retention) = &mut self.retention {
-            retention.join();
         }
         match worker.join() {
             Ok(()) => Ok(()),

@@ -168,3 +168,58 @@ fn p0_real_cross_volume_save_uses_sibling_staging() {
     std::fs::remove_file(root.join(&rel)).unwrap();
     std::fs::remove_dir(root.join(&parent)).unwrap();
 }
+
+#[test]
+#[ignore = "requested save-latency comparison, run in the owned Linux container"]
+fn p0_measure_save_latency() {
+    let mut samples = Vec::new();
+    for round in 0..4 {
+        let scratch = ScratchDir::new_named("p0-latency-sample").unwrap();
+        let root = scratch.path();
+        let mut store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+        let mut before = vec![0; 64 * 1024];
+        std::fs::write(root.join("notes.md"), &before).unwrap();
+        for n in 0..200 {
+            let after = vec![(n % 251 + 1) as u8; 64 * 1024];
+            let before_sha = store.put_binary_blob(&before).unwrap();
+            let after_sha = store.put_binary_blob(&after).unwrap();
+            let id = format!("sample-{round}-{n}");
+            store
+                .write_with(&NoFaults, |tx| {
+                    enqueue_job(
+                        tx,
+                        &MaterializationJobSpec {
+                            job_id: id.clone(),
+                            workspace_id: "ws".into(),
+                            target_path: "notes.md".into(),
+                            content_sha256: after_sha,
+                            preimage: Preimage::Present(before_sha),
+                            target_generation: n + 1,
+                            now_ms: n,
+                        },
+                    )
+                })
+                .unwrap();
+            let job = store.load_materialization_job(&id).unwrap().unwrap();
+            let mut opts = options(&StdReplacer);
+            opts.policy = DurabilityPolicy::per_os();
+            let start = std::time::Instant::now();
+            assert_eq!(
+                materialize_one(&store, root, &job, &opts).unwrap(),
+                JobOutcome::Completed
+            );
+            if n >= 25 {
+                samples.push(start.elapsed().as_micros());
+            }
+            before = after;
+        }
+    }
+    samples.sort();
+    println!(
+        "save-latency label={} policy=per_os bytes=65536 samples={} median_us={} p95_us={}",
+        std::env::var("R1_LATENCY_LABEL").unwrap_or_default(),
+        samples.len(),
+        samples[samples.len() / 2],
+        samples[samples.len() * 95 / 100]
+    );
+}
