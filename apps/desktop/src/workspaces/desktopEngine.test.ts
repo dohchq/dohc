@@ -701,8 +701,9 @@ describe("server owner peer lifecycle", () => {
       f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(ownerDeliveryMock.pass).toHaveBeenCalledTimes(2));
       expect(changed).toHaveBeenCalledTimes(2);
-      ownerDeliveryMock.pass.mockResolvedValue("empty"); f.engine.retryOwnerDelivery("owner");
+      ownerDeliveryMock.pass.mockResolvedValueOnce("acknowledged").mockResolvedValue("empty"); f.engine.retryOwnerDelivery("owner");
       await vi.waitFor(() => expect(f.engine.ownerLiveDeliveryStatus("owner")).toBe("active"));
+      expect(f.dependencies.notifyRenderer).toHaveBeenCalledWith({workspaceId: "owner"});
       expect(changed).toHaveBeenCalledTimes(3);
       credentials.abort(); expect(f.engine.ownerLiveDeliveryStatus("owner")).toBeUndefined();
     } finally {await f.close(); ownerDeliveryMock.pass.mockReset();}

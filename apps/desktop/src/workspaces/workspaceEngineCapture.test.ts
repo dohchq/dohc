@@ -447,7 +447,7 @@ describe("workspaceEngineCapture batch capture", () => {
       settleNow: async () => { throw new YdocOwnerDraftPendingError({
         binding: { workspaceId: WORKSPACE_ID, mainVersionId: "main", objectId,
           lineageClaimId: "a".repeat(64), currentPath: path, selectorPaths: [path], restoreFenceGeneration: 0 },
-        relayDatabaseNamespace: "relay", revision: 1, acceptedCursor: 0, nativeHeadSequence: 1,
+        relayDatabaseNamespace: "relay", revision: 1, acceptedCursor: 0, nativeHeadSequence: 1, nativeUnsettled: false,
         outboxId: "outbox", pendingBytes: 20, state: "active",
       }); },
     }));

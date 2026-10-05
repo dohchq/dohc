@@ -38,7 +38,7 @@ describe("private owner delivery transport", () => {
     const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge(); await transport.ready();
     const state = scenario === "active" || scenario === "sealed" || scenario === "quarantined" ? scenario : null;
-    const descriptor = { ...target, revision: 1, acceptedCursor: 0, nativeHeadSequence: 2, outboxId: state === null ? null : "outbox", pendingBytes: scenario === "absent bytes" ? 1 : 0, state };
+    const descriptor = { ...target, revision: 1, acceptedCursor: 0, nativeHeadSequence: 2, nativeUnsettled: false, outboxId: state === null ? null : "outbox", pendingBytes: scenario === "absent bytes" ? 1 : 0, state };
     const draft = scenario === "extra" ? { ...descriptor, extra: true }
       : scenario === "binding extra" ? { ...descriptor, binding: { ...descriptor.binding, extra: true } } : descriptor;
     const next = { mainVersionId: "main", objectId: scenario === "cursor mismatch" ? "other" : "object", lineageClaimId: target.binding.lineageClaimId };
@@ -52,7 +52,7 @@ describe("private owner delivery transport", () => {
   it.each(["valid", "binding mismatch", "revision mismatch"])("preserves open-draft request comparisons: %s", async (scenario) => {
     const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge(); await transport.ready();
-    const draft = { ...target, binding: { ...target.binding, objectId: scenario === "binding mismatch" ? "other" : "object" }, revision: scenario === "revision mismatch" ? 2 : 1, acceptedCursor: 0, nativeHeadSequence: 2, outboxId: null, pendingBytes: 0, state: null };
+    const draft = { ...target, binding: { ...target.binding, objectId: scenario === "binding mismatch" ? "other" : "object" }, revision: scenario === "revision mismatch" ? 2 : 1, acceptedCursor: 0, nativeHeadSequence: 2, nativeUnsettled: false, outboxId: null, pendingBytes: 0, state: null };
     peer.onEnvelope = e => {
       if (e.type !== "request") return;
       const bytes = Buffer.from([0, 0]), digest = createHash("sha256").update(bytes).digest("hex");
@@ -69,7 +69,7 @@ describe("private owner delivery transport", () => {
   it.each(["valid", "binding mismatch", "namespace mismatch"])("preserves observed-enrollment target comparisons: %s", async (scenario) => {
     const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge(); await transport.ready();
-    const draft = { ...target, binding: { ...target.binding, objectId: scenario === "binding mismatch" ? "other" : "object" }, relayDatabaseNamespace: scenario === "namespace mismatch" ? "other" : "relay", revision: 1, acceptedCursor: 0, nativeHeadSequence: 2, outboxId: null, pendingBytes: 0, state: null };
+    const draft = { ...target, binding: { ...target.binding, objectId: scenario === "binding mismatch" ? "other" : "object" }, relayDatabaseNamespace: scenario === "namespace mismatch" ? "other" : "relay", revision: 1, acceptedCursor: 0, nativeHeadSequence: 2, nativeUnsettled: false, outboxId: null, pendingBytes: 0, state: null };
     peer.onEnvelope = e => { if (e.type === "request") peer.send({ type: "response", id: e.id, result: { status: "observed", draft } }); };
     try {
       const pending = transport.ownerYDocPrepareEnrollment(request, target);
@@ -80,7 +80,7 @@ describe("private owner delivery transport", () => {
   it.each(["binding", "namespace", "cursor", "revision"])("preserves enrollment %s comparisons after upload", async (scenario) => {
     const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge(); await transport.ready();
-    const draft = { ...target, binding: { ...target.binding, objectId: scenario === "binding" ? "other" : "object" }, relayDatabaseNamespace: scenario === "namespace" ? "other" : "relay", revision: scenario === "revision" ? 2 : 1, acceptedCursor: scenario === "cursor" ? 8 : 9, nativeHeadSequence: 3, outboxId: null, pendingBytes: 0, state: null };
+    const draft = { ...target, binding: { ...target.binding, objectId: scenario === "binding" ? "other" : "object" }, relayDatabaseNamespace: scenario === "namespace" ? "other" : "relay", revision: scenario === "revision" ? 2 : 1, acceptedCursor: scenario === "cursor" ? 8 : 9, nativeHeadSequence: 3, nativeUnsettled: false, outboxId: null, pendingBytes: 0, state: null };
     let wireId = 0;
     peer.onEnvelope = e => { if (e.type === "request") wireId = e.id; };
     peer.onBlobChunk = frame => { if (frame.fin) peer.send({ type: "response", id: wireId, result: { draft } }); };
@@ -121,7 +121,7 @@ describe("private owner delivery transport", () => {
   it("discovers durable drafts, opens their binary state and appends without a caller base", async () => {
     const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
     peer.acknowledge();await transport.ready();
-    const descriptor={...target,revision:1,acceptedCursor:0,nativeHeadSequence:2,outboxId:null,pendingBytes:0,state:null};
+    const descriptor={...target,revision:1,acceptedCursor:0,nativeHeadSequence:2, nativeUnsettled: false,outboxId:null,pendingBytes:0,state:null};
     let wireId=0,digest="";
     peer.onEnvelope=e=>{
       if(e.type!=="request")return;
@@ -142,7 +142,7 @@ describe("private owner delivery transport", () => {
   it("captures native state and enrolls an exact binary host cut without caller limits", async () => {
     const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
     peer.acknowledge(); await transport.ready();
-    const captured={nativeHeadSequence:2,localStateDigest:"ab".repeat(32)}, draft={...target,revision:1,acceptedCursor:9,nativeHeadSequence:3,outboxId:"pending",pendingBytes:2,state:"active"};
+    const captured={nativeHeadSequence:2,localStateDigest:"ab".repeat(32)}, draft={...target,revision:1,acceptedCursor:9,nativeHeadSequence:3, nativeUnsettled: false,outboxId:"pending",pendingBytes:2,state:"active"};
     let wireId=0;const chunks:Buffer[]=[];
     peer.onEnvelope=e=>{if(e.type!=="request")return;
       if(e.method==="ydoc.ownerDelivery.prepareEnrollment") {expect(e.params).toEqual(target);peer.send({type:"response",id:e.id,result:{status:"capture",captured}});}

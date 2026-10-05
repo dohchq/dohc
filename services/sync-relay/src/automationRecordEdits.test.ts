@@ -31,6 +31,7 @@ function replicaEngine(options: {
   const records = new Map<string, string>();
   const engine: ReplicaRecordEngine = {
     adapter: {
+      sharedFileUpdateStates: async writes => writes.map(() => "absent"),
       getActiveVersion: async () => {
         options.beforeVersion?.();
         return MAIN;

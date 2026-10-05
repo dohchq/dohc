@@ -15,7 +15,7 @@ import type {AutomationReplica} from "./automationReplicas";
 
 /** The engine calls a replica's record writes make. */
 export interface ReplicaRecordEngine {
-  readonly adapter: Pick<VersionedLiveAdapter, "getActiveVersion" | "readTextFile" | "writeTextFile" | "getCollectionRecord">;
+  readonly adapter: Pick<VersionedLiveAdapter, "getActiveVersion" | "readTextFile" | "writeTextFile" | "getCollectionRecord" | "sharedFileUpdateStates">;
   openSession(input: {versionId: string; path: string; expectedObjectId?: string}): Promise<EngineYdocProviderSession>;
 }
 
@@ -181,10 +181,10 @@ async function recordSession(provider: EngineYdocProviderSession, path: string, 
       signal.throwIfAborted();
       return await provider.settleNow(options);
     },
-    async close() {
+    async close(options) {
       await chain;
       if (stopped()) await provider.evict();
-      else await provider.close();
+      else await provider.close(options);
     },
   };
 }

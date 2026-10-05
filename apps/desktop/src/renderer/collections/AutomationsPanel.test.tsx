@@ -23,6 +23,7 @@ import type { FieldDefinition } from "@dohc/workspace-contracts";
 import { parseAutomationsFile, writeAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { findProblems, formulaProblems } from "@dohc/automation-executor/automation-plan";
 import { automationCount, AutomationsPanel, resetKeptAutomationDraftsForTests, useCollectionAutomations, type AutomationFocus } from "./AutomationsPanel";
+import { AutomationRuns } from "./AutomationRuns";
 import type { Automation, ValidAutomationSummary } from "./automationSentence";
 import type { AutomationDatasetTable, AutomationTable } from "./automationDraft";
 import { START_OVER_SENTENCE } from "./useAutomationRetry";
@@ -148,6 +149,7 @@ function makeBridge(file: ListCollectionAutomationsResult, runs: Run[] = [], opt
         missingFiles: [] as string[],
       };
     }),
+    onWorkspaceActivity: vi.fn((_listener: (event: { workspaceId?: string }) => void) => () => undefined),
     onAutomationRunsChanged: vi.fn((listener: (event: { workspaceId: string }) => void) => {
       failureListeners.push(listener);
       return () => undefined;
@@ -2784,6 +2786,51 @@ describe("an automation's runs", () => {
     expect(within(row).queryByRole("button", { name: "Undo" })).toBeNull();
     await userEvent.click(within(row).getByRole("button", { name: "Show 1 change" }));
     expect(row.textContent).toContain("Sent a message to Trip");
+  });
+
+  it("keeps Undo available for a locally saved run and clears its pending note after settlement", async () => {
+    const saved = run({ trigger: {kind: "button", recordId: "rec_1", by: "human", sharedAuthor: null, depth: 0}, sharedSettlementPending: true,
+      writes: [{kind: "field", recordId: "rec_1", path: "Tasks/Plan.md", field: "Note", before: "a", after: "b"}] });
+    const {bridge} = makeBridge(read([summary(stamp)]), [saved]);
+    bridge.undoCollectionAutomationRun.mockResolvedValueOnce({...NOTHING_UNDONE, reverted: 1});
+    const onNotice = vi.fn();
+    const props = {workspaceId: "ws-1", automationId: "collection:Tasks#stamp", refreshKey: 0, onRetry: vi.fn(), onError: vi.fn(), onNotice};
+    render(<AutomationRuns {...props} />);
+    const row = await screen.findByTestId("automation-run-atc_1");
+    expect(within(row).getByRole("status").textContent).toContain("Saved on this computer. The shared host has not accepted this update yet.");
+    expect(within(row).queryByRole("button", {name: "Try again"})).toBeNull();
+    await userEvent.click(within(row).getByRole("button", {name: "Undo"}));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith("Undid 1 change."));
+    bridge.listCollectionAutomationRuns.mockResolvedValue({status: "listed", runs: [{...saved, sharedSettlementPending: false, undone: true}], next: null});
+    act(() => bridge.onWorkspaceActivity.mock.calls[0]![0]({workspaceId: "ws-1"}));
+    await waitFor(() => expect(within(row).queryByRole("status")).toBeNull());
+    expect(props.onError).not.toHaveBeenCalled();
+  });
+
+  it("reports a pending reversal and keeps Undo available after host refusal", async () => {
+    const pending = run({undoSettlementPending: true, undone: true,
+      reversals: [{recordId: "rec_1", path: "Tasks/Plan.md", field: "Note", state: "pending"}],
+      writes: [{kind: "field", recordId: "rec_1", path: "Tasks/Plan.md", field: "Note", before: "a", after: "b", sharedFileUpdateState: "settled"}]});
+    const {bridge} = makeBridge(read([summary(stamp)]), [pending]);
+    const draft = {outboxId: "outbox", appendKey: "reverse/Note", nativeHeadSequence: 2,
+      binding: {workspaceId: "ws-1", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+        currentPath: "Tasks/Plan.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0}};
+    bridge.undoCollectionAutomationRun.mockResolvedValueOnce({...NOTHING_UNDONE, sharedReversals: [{recordId: "rec_1", field: "Note", draft, state: "pending"}]});
+    const onNotice = vi.fn();
+    const onError = vi.fn();
+    render(<AutomationRuns workspaceId="ws-1" automationId="collection:Tasks#stamp" refreshKey={0} onRetry={vi.fn()} onError={onError} onNotice={onNotice} />);
+    const row = await screen.findByTestId("automation-run-atc_1");
+    expect(within(row).getByRole("status").textContent).toContain("Reversal saved on this computer.");
+    await userEvent.click(within(row).getByRole("button", {name: "Show 1 change"}));
+    expect(row.textContent).toContain("Note: a → b · Accepted by the shared host");
+    expect(row.textContent).toContain("Undo · Plan · Note · Awaiting the shared host");
+    expect(within(row).queryByRole("button", {name: "Undo"})).toBeNull();
+    expect(row.textContent).not.toContain("Reopen History");
+    bridge.listCollectionAutomationRuns.mockResolvedValue({status: "listed", runs: [{...pending, undone: false, undoSettlementPending: false, undoSettlementNotAccepted: true}], next: null});
+    act(() => bridge.onWorkspaceActivity.mock.calls[0]![0]({workspaceId: "ws-1"}));
+    await waitFor(() => expect(within(row).getByRole("status").textContent).toContain("Try Undo again."));
+    expect(within(row).getByRole("button", {name: "Undo"})).toBeTruthy();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("shows what a run changed and says what Undo skipped", async () => {

@@ -330,6 +330,7 @@ impl EngineService {
         struct Params {
             after: Option<OwnerDraftCursor>,
             limit: usize,
+            writes: Option<Vec<dohc_engine_collab::owner_outbox::draft::OwnerDraftWrite>>,
         }
         let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
         let guard = self.owner_delivery_guard(
@@ -339,6 +340,31 @@ impl EngineService {
             self.reserve_owner_delivery()?,
         )?;
         let cancellation = OperationCancellation::new(&ctx);
+        if let Some(writes) = params.writes {
+            let states = guard
+                .open
+                .actor
+                .owner_ydoc_write_states(
+                    guard.open.workspace_id.clone(),
+                    writes,
+                    cancellation.token(),
+                    guard.reservation.clone(),
+                )
+                .await
+                .map_err(map_runtime)?
+                .map_err(map_owner_outbox)?;
+            if !guard.is_current() {
+                return Err(workspace_unavailable());
+            }
+            return Ok(ServiceResponse {
+                response: Response {
+                    id: request.id,
+                    result: json!({"states": states}),
+                },
+                blob_egress: None,
+                output_guard: Some(guard),
+            });
+        }
         let rows = guard
             .open
             .actor

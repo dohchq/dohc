@@ -1,8 +1,10 @@
 import { posix } from "node:path";
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
-import type { StoredRun, UndoKeptField } from "./automationRunStore";
+import type { StoredRun, UndoKeptField, UndoWrite } from "./automationRunStore";
+import { sharedFileUpdateKey, sharedReversalsOf } from "./automationRunStore";
 import { unrecordedEffect } from "./automationStepRun";
 import { rebaseRun, type CollectionAutomationReads, type CollectionRecordWrites } from "./collectionAutomationRun";
 
@@ -25,6 +27,7 @@ class RecordConflictError extends Error {
 
 /** What an Undo did, for the sentence its notice shows. */
 export interface CollectionAutomationUndone {
+  sharedReversals?: Array<UndoWrite & { state: "pending" | "not-accepted" }>;
   /** Fields written back to their value before the run. */
   reverted: number;
   /** Records the run added, moved to the trash. */
@@ -50,6 +53,7 @@ export interface CollectionAutomationUndone {
 }
 
 export interface CollectionAutomationUndoDependencies {
+  recordReversal?(write: UndoWrite): Promise<void>;
   /** Engine reads; resolves null when the engine is unavailable. */
   withReads<T>(work: (reads: CollectionAutomationReads) => Promise<T>): Promise<T | null>;
   withRecordWrites<T>(signal: AbortSignal, work: (writes: CollectionRecordWrites) => Promise<T>): Promise<T>;
@@ -162,7 +166,7 @@ export async function undoCollectionAutomationRuns(
   only?: ReadonlyArray<{ recordId: string; field: string }>,
   onlyRecordId?: string,
   prepared?: ReturnType<typeof documentUndoChanges>,
-): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[] }> {
+): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[]; undoWrites: UndoWrite[] }> {
   // Each run's records are found where their Collections are now. A
   // Collection no longer here keeps its paths, where no record is found.
   const { added, records } = prepared ?? documentUndoChanges(runs.map((run) => {
@@ -174,12 +178,22 @@ export async function undoCollectionAutomationRuns(
     reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0,
   };
   const keptFields: UndoKeptField[] = [];
+  const undoWrites = [...new Map(runs.flatMap(run => run.undoWrites ?? []).map(write =>
+    [JSON.stringify([write.recordId, write.field]), write])).values()]
+    .filter(write => onlyRecordId === undefined || write.recordId === onlyRecordId);
+  const refusedReversals = sharedReversalsOf(runs).filter(write => write.state === "not-accepted");
+  const refusedFields = new Set(refusedReversals.map(write => JSON.stringify([write.recordId, write.field])));
+  const recordedFields = new Set(undoWrites.map(write => JSON.stringify([write.recordId, write.field])));
   const tried = only ? new Set(only.map(({ recordId, field }) => JSON.stringify([recordId, field]))) : null;
   for (const record of records.values()) {
     if (onlyRecordId !== undefined && record.recordId !== onlyRecordId) continue;
     // A record the run added goes to the trash whole.
     if (added.has(record.recordId) && tried === null) continue;
-    const fields = [...record.fields].map(([field, writes]) => ({ field, ...wayBack(writes) })).filter(({ field, from }) => from.length > 0 && (tried === null || tried.has(JSON.stringify([record.recordId, field]))));
+    const fields = [...record.fields].map(([field, writes]) => ({ field, ...wayBack(writes) })).filter(({ field, from }) => {
+      const key = JSON.stringify([record.recordId, field]);
+      return from.length > 0 && (tried === null || tried.has(key)) &&
+        (!recordedFields.has(key) || refusedFields.has(key));
+    });
     if (fields.length === 0) continue;
     const found = await locate(dependencies, record.path, record.recordId);
     if (found === null) {
@@ -200,6 +214,11 @@ export async function undoCollectionAutomationRuns(
             recordPath: path,
             fields: Object.fromEntries(pending.map(({ field, to }) => [field, to])),
             expectedBefore: Object.fromEntries(pending.map(({ field, from, attempt }) => [field, from[attempt]])),
+            idempotencyKeyPrefix: `automation-undo/${createHash("sha256").update(JSON.stringify([
+              runs.map(run => JSON.stringify([run.automationId, run.claimId, run.keySeed])).sort(), record.recordId,
+              refusedReversals.filter(write => write.recordId === record.recordId)
+                .map(write => JSON.stringify([write.field, sharedFileUpdateKey(write.draft)])).sort(),
+            ])).digest("hex")}`,
             author: PERSON,
           }),
         );
@@ -210,7 +229,17 @@ export async function undoCollectionAutomationRuns(
         if (now?.conflicted) throw new RecordConflictError(now.path);
         throw error;
       }
-      undone.reverted += Object.keys(result.replaced).length;
+      for (const field of new Set([...Object.keys(result.replaced), ...Object.keys(result.sharedFileUpdates ?? {})])) {
+        const draft = result.sharedFileUpdates?.[field];
+        if (!draft && Object.hasOwn(result.replaced, field)) undone.reverted += 1;
+        const prior = undoWrites.findIndex(write => write.recordId === record.recordId && write.field === field);
+        if (prior >= 0) undoWrites.splice(prior, 1);
+        if (draft) {
+          const write = { recordId: record.recordId, field, draft };
+          await dependencies.recordReversal?.(write);
+          undoWrites.push(write);
+        }
+      }
       const next: typeof pending = [];
       for (const entry of pending) {
         if (!Object.hasOwn(result.kept, entry.field)) continue;
@@ -228,7 +257,7 @@ export async function undoCollectionAutomationRuns(
       pending = next;
     }
   }
-  if (tried !== null) return { undone, keptFields };
+  if (tried !== null) return { undone, keptFields, undoWrites };
   for (const [recordId, path] of added) {
     if (onlyRecordId !== undefined && recordId !== onlyRecordId) continue;
     const current = await locate(dependencies, path, recordId);
@@ -236,5 +265,5 @@ export async function undoCollectionAutomationRuns(
     await dependencies.trash(current.path);
     undone.removed += 1;
   }
-  return { undone, keptFields };
+  return { undone, keptFields, undoWrites };
 }

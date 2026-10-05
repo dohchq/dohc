@@ -421,6 +421,12 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
       {result.runsUndone > 0 ? (
         <p className="m-0 text-[13px] text-muted">Undid {plural(result.runsUndone, "run", "runs")} of {words.automations}.</p>
       ) : null}
+        {result.sharedReversals?.some(write => write.state === "pending") ? (
+          <p className="m-0 text-[13px] text-muted">Reversals saved on this computer. The shared host has not accepted them yet.</p>
+        ) : null}
+        {result.sharedReversals?.some(write => write.state === "not-accepted") ? (
+          <p className="m-0 text-[13px] text-muted">Reversals saved on this computer. The shared host did not accept them. Try Undo again in Run History.</p>
+        ) : null}
       {result.unfinished !== null && result.wroteAutomations ? (
         <p className="m-0 text-[13px] text-ink">
           dohc has not finished undoing runs{result.runsUndone > 0 ? "" : ` of ${words.automations}`}.

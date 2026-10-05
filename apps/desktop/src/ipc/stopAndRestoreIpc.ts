@@ -153,18 +153,19 @@ export function registerStopAndRestoreIpc<
     definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
     undoHere: (again: boolean) => ReturnType<CollectionAutomations["undoRunsOf"]>,
   ): Promise<UndoneRuns> {
-    const counts = { undone: 0, left: 0, missing: 0, otherKept: 0, errorMessage: null };
+    const counts = { undone: 0, left: 0, missing: 0, otherKept: 0, errorMessage: null, sharedReversals: [] as NonNullable<UndoneRuns["sharedReversals"]> };
     // The fields each computer's runs still keep, by identity: one kept on both appears once.
     const kept = keptByTarget.get(target) ?? { server: [], here: [], latest: "here" as const };
     keptByTarget.set(target, kept);
     const total = (): UndoneRuns => ({ ...counts, keptFields: knownKept(target) });
-    const add = (host: "server" | "here", pass: { undone: number; left: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; errorMessage: string | null }, again: boolean) => {
+    const add = (host: "server" | "here", pass: UndoneRuns, again: boolean) => {
       if (!again) {
         counts.undone += pass.undone;
         counts.left += pass.left;
       }
       counts.missing += pass.missing;
       counts.otherKept += pass.otherKept;
+      counts.sharedReversals.push(...(pass.sharedReversals ?? []));
       if (pass.errorMessage !== null) throw new UndoRunsStopped(pass.errorMessage, total());
       kept[host] = pass.keptFields;
       kept.latest = host;

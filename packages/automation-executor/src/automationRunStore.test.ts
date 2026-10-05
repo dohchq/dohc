@@ -23,6 +23,25 @@ function run(claimId: string, state: "done" | "failed" | null, atMs: number, set
 }
 
 describe("the automation run store", () => {
+  it("retains terminal acceptance and reversal identities across restart and stale whole saves", async () => {
+    const root = await createTestScratch("dohc-automation-settlement-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    const saved = run("settlement", "done", 1);
+    const draft = {outboxId: "outbox", appendKey: "write/A", nativeHeadSequence: 3,
+      binding: {workspaceId: "workspace", mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+        currentPath: "Tasks/a.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 1}};
+    await store.save(saved);
+    const sharedSettlements = [{draft, state: "settled" as const}];
+    await store.updateState(saved, {sharedSettlements});
+    await store.save({...saved, sharedSettlements: [{draft, state: "not-accepted"}]});
+    const undoWrites = [{recordId: "rec_a", field: "A", draft: {...draft, appendKey: "undo/A"}}];
+    await store.updateState(saved, {undoWrites});
+    const restarted = createAutomationRunStore(root, testMetadataDir);
+    const loaded = (await restarted.runsOf(AUTOMATION, "settlement")).runs[0]!;
+    expect(loaded).toMatchObject({sharedSettlements, undoWrites});
+    await restarted.updateState(loaded, {sharedSettlements: [{draft: undoWrites[0]!.draft, state: "not-accepted"}]});
+    expect((await restarted.runsOf(AUTOMATION, "settlement")).runs[0]?.sharedSettlements).toHaveLength(2);
+  });
   it("saves version 9 and refuses version 8 kept fields without a compatibility reader", async () => {
     const root = await createTestScratch("dohc-automation-runs-");
     const store = createAutomationRunStore(root, testMetadataDir);

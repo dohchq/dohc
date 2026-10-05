@@ -1127,7 +1127,7 @@ it.each([
   const session = await capture.openYDocSession({path: PATH, onRemoteUpdate: () => undefined, onSaveState: value => states.push(value)});
   settleRefusal = new YdocOwnerDraftPendingError({
     binding: {workspaceId: WORKSPACE_ID, mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64), currentPath: PATH, selectorPaths: [PATH], restoreFenceGeneration: 0},
-    relayDatabaseNamespace: "relay", revision: 1, acceptedCursor, nativeHeadSequence: 1,
+    relayDatabaseNamespace: "relay", revision: 1, acceptedCursor, nativeHeadSequence: 1, nativeUnsettled: false,
     outboxId: state === null ? null : "outbox", pendingBytes, state,
   });
   await expect(session.settleNow()).rejects.toBe(settleRefusal);

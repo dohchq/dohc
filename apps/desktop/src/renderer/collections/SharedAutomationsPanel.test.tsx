@@ -58,6 +58,7 @@ function makeBridge(first: ListCollectionAutomationsResult) {
     }),
     // The owner's panel stands in while the list loads; a shared one reads no runs.
     listCollectionAutomationRuns: vi.fn(async () => ({ status: "listed" as const, runs: [], next: null })),
+    onWorkspaceActivity: vi.fn(() => () => undefined),
     onAutomationRunsChanged: vi.fn(() => () => undefined),
     onAutomationHoldsChanged: vi.fn(() => () => undefined),
     readScheduleHost: vi.fn(async () => ({ kind: "this-computer" as const })),
