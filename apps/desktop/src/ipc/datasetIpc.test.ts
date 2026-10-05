@@ -397,3 +397,11 @@ it("flushes and retries a missing address once after an agent moves its folder",
   await expect(f.handler("agent", { ...request, datasetPath: "absent/dataset.json" })).rejects.toThrow("Collection reference broken");
   expect(f.flushSourceCapture).toHaveBeenCalledTimes(2);
 });
+
+
+it.each(["approve","approveMigration"])("refuses automation and received-share %s authority before calling a host", async action => {
+  const f=fixture(), input={action,workspaceId:"workspace",preparationId:datasetId,revisionSha256:f.revision.revisionSha256,...(action==="approveMigration"?{approvalDigest:"a".repeat(64)}:{})};
+  await expect(f.handler("agent",input,{depth:1})).rejects.toThrow("Automations cannot approve");
+  f.workspace.shareView={};
+  await expect(f.handler("agent",input,{depth:0})).rejects.toThrow("original workspace");
+});

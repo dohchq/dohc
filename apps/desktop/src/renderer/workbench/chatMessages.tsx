@@ -5,6 +5,7 @@ import { LegendList, type LegendListRef, type OnViewableItemsChanged } from "@le
 import { formatChatDay, formatChatTime, formatClock, sameChatDay } from "../time";
 import { ChatAvatar } from "./ChatAvatar";
 import { basenameOf } from "../path";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { Database, File, FileText, Image, SmilePlus, Send } from "lucide-react";
 import {
   memo,
@@ -819,9 +820,11 @@ export const ChatMessageList = memo(function ChatMessageList(props: {
   }, [props, candidates, reactionsByMessage, isOwn]);
   if (props.loading || props.messages.length === 0) {
     return <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
-      <p className={`m-0 text-center text-[11px] text-subtle ${props.loading ? "" : "pt-4"}`}>
-        {props.loading ? "Loading..." : props.emptyLabel}
-      </p>
+      {props.loading ? (
+        <SkeletonRows label="Loading..." className="pt-1" />
+      ) : (
+        <p className="m-0 pt-4 text-center text-[11px] text-subtle">{props.emptyLabel}</p>
+      )}
     </div>;
   }
   return <div className="relative flex min-h-0 flex-1 flex-col">

@@ -44,7 +44,8 @@ const THEMES = ["light", "dark"] as const;
 const PARTS = [
   "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
   "steps", "folder-chip", "hue-control", "color-control", "list-rows", "menu", "document-menu",
-  "empty", "loading", "toasts", "notices", "dialog", "editor-groups",
+  "empty", "loading", "toasts", "notices", "dialog", "menu-radio", "menu-field", "menu-overflow", "menu-danger",
+  "editor-groups", "editor-groups-empty",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and
@@ -171,11 +172,14 @@ async function forceMarkedStates(cdp: Cdp, scope: string): Promise<void> {
 // on a row, and no pointer press reaches the listeners that close a menu.
 // Focus then leaves the menu for the page: a menu closes when focus moves to
 // another element, not when it goes to the page, and the row the part marks
-// is drawn by a forced :focus rather than by the keyboard's focus ring.
+// is drawn by a forced :focus rather than by the keyboard's focus ring. A
+// menu paints hover only once a pointer has moved over it, so the list is
+// told one has, without a pointer that would land on a row.
 async function openMenu(page: Page, trigger: Locator, menu: Locator): Promise<void> {
   await trigger.focus();
   await page.keyboard.press("Enter");
   await expect(menu).toBeVisible();
+  await menu.dispatchEvent("mousemove", { movementX: 1, movementY: 0 });
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 }
 

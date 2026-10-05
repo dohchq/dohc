@@ -1,5 +1,5 @@
-import { AlertTriangle, CheckCircle2, MoreHorizontal } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { AlertTriangle, Bot, CheckCircle2, MoreHorizontal } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { DocumentMenu } from "../DocumentMenu";
 import { OverlayFrame } from "../Overlay";
@@ -8,8 +8,10 @@ import { CopyDetailsButton } from "../shell/copyDetails";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
 import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
@@ -19,7 +21,6 @@ import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
 import { EditorTabs } from "../workbench/EditorTabs";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
-import { PanelLoading } from "../workbench/PanelLoading";
 import { closeStatesPage } from "./statesRoute";
 
 // Every shared part in every state, light beside dark, on one development
@@ -127,8 +128,32 @@ function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs
         onCreateGroupRight={noop}
         onCloseGroup={noop}
       />
-      <div className="h-8 bg-bg" />
+      {/* Tall enough to hold the tab list, which the capture opens, and its
+          shadow. */}
+      <div className="h-28 bg-bg" />
     </>
+  );
+}
+
+// A split of two groups where one has tabs and the other none. A strip with
+// tabs carries the tab-list menu, and a part opens one menu, so each part
+// holds one strip with tabs.
+function EditorGroupsSpecimen(props: { activeHasTabs: boolean }) {
+  const tabbed = { tabs: ["plan.md", "notes.md"], active: "plan.md" };
+  const empty = { tabs: [], active: null };
+  const [first, second] = props.activeHasTabs ? [tabbed, empty] : [empty, tabbed];
+  return (
+    <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
+      <EditorGroupLayout
+        groups={[
+          { id: "first", size: 1, content: <EditorGroupSpecimen groupId="first" groupNumber={1} {...first} /> },
+          { id: "second", size: 1, content: <EditorGroupSpecimen groupId="second" groupNumber={2} {...second} /> },
+        ]}
+        activeGroupId="first"
+        onFocusGroup={noop}
+        onResizeGroups={noop}
+      />
+    </div>
   );
 }
 
@@ -257,6 +282,58 @@ const menuItems = [
 ];
 
 const avatarSizes = ["post", "comment", "strip"] as const;
+
+// A shell menu as its owner holds it: the open state here, the rows given.
+function MenuSpecimen(props: { label: string; items: readonly MenuEntry[]; width: number; testId: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Menu
+      label={props.label}
+      testId={props.testId}
+      open={open}
+      onOpenChange={setOpen}
+      items={props.items}
+      width={props.width}
+      closeOnPick={false}
+    />
+  );
+}
+
+const versionRows: MenuEntry[] = [
+  { id: "main", label: "Main", checked: true, onSelect: noop },
+  { id: "draft", label: "Draft two", checked: false, onSelect: noop },
+  MENU_SEPARATOR,
+];
+const radioMenuItems: MenuEntry[] = [
+  ...versionRows,
+  { id: "try", label: "Try in a version…", icon: <Bot size={14} aria-hidden />, onSelect: noop },
+  { id: "compare", label: "Compare with Main", onSelect: noop },
+  { id: "merge", label: "Merge into Main…", disabled: true, onSelect: noop },
+];
+const fieldMenuItems: MenuEntry[] = [
+  ...versionRows,
+  {
+    id: "new",
+    field: {
+      label: "New version name",
+      value: "Draft three",
+      onChange: noop,
+      onSubmit: noop,
+      onCancel: noop,
+      hint: "Press Enter to create and start working in it.",
+    },
+  },
+];
+const overflowMenuItems: MenuEntry[] = [
+  { id: "plan", label: "plan.md", current: true, onSelect: noop },
+  { id: "long", label: "quarterly-planning-notes-for-the-whole-team.md", onSelect: noop },
+  { id: "notes", label: "notes.md", onSelect: noop },
+  { id: "budget", label: "budget.csv", onSelect: noop },
+];
+const dangerMenuItems: MenuEntry[] = [
+  { id: "reveal", label: "Reveal in folder", onSelect: noop },
+  { id: "forget", label: "Forget", danger: true, onSelect: noop },
+];
 
 function Pane(props: { theme: "light" | "dark" }) {
   const { theme } = props;
@@ -510,14 +587,14 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       {/* Both menus are opened by the capture, one at a time, and their
           boxes are tall enough for the open menu and its shadow. A menu's
-          first row takes keyboard focus when it opens; forcing focus there
-          draws the same row the same way whether or not focus has since
-          moved on. */}
+          first row takes keyboard focus when it opens; forcing focus and
+          focus-visible there draws the row as a keyboard user sees it,
+          whether or not focus has since moved on. */}
       <Section part="menu" title="Menu">
         <Specimen label="rows: keyboard-active, hover, rest, disabled">
           <div
             className="flex h-56 w-56 items-start justify-end"
-            data-force-state="focus"
+            data-force-state="focus focus-visible"
             data-force-target="[role=menuitem]:nth-child(1)"
           >
             <div data-force-state="hover" data-force-target="[role=menuitem]:nth-child(2)">
@@ -530,7 +607,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="document-menu" title="Document menu">
         <div
           className="flex h-64 w-56 items-start justify-end"
-          data-force-state="focus"
+          data-force-state="focus focus-visible"
           data-force-target="[role=menuitem]:nth-child(1)"
         >
           <DocumentMenu workspaceId="states" suggestedName="states" getMarkdown={() => null} />
@@ -546,9 +623,16 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="loading" title="Loading">
-        <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
-          <PanelLoading label="files" />
-        </div>
+        <Specimen label="list">
+          <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
+            <SkeletonRows layout="panel" label="Loading files..." />
+          </div>
+        </Specimen>
+        <Specimen label="editor">
+          <div className="flex h-40 w-96 flex-col rounded-lg border border-line bg-bg">
+            <SkeletonRows layout="document" label="Loading…" className="pt-12" />
+          </div>
+        </Specimen>
       </Section>
 
       <Section part="toasts" title="Toasts">
@@ -578,45 +662,70 @@ function Pane(props: { theme: "light" | "dark" }) {
         <DialogSpecimen theme={theme} />
       </Section>
 
-      {/* After the dialog, so the parts above keep their places. */}
-      <Section part="editor-groups" title="Editor groups">
-        <Specimen label="split: the active group, then an inactive one">
-          <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
-            <EditorGroupLayout
-              groups={[
-                {
-                  id: "left",
-                  size: 1,
-                  content: <EditorGroupSpecimen groupId="left" groupNumber={1} tabs={["plan.md", "notes.md"]} active="plan.md" />,
-                },
-                {
-                  id: "right",
-                  size: 1,
-                  content: <EditorGroupSpecimen groupId="right" groupNumber={2} tabs={["budget.md", "ideas.md"]} active="budget.md" />,
-                },
-              ]}
-              activeGroupId="left"
-              onFocusGroup={noop}
-              onResizeGroups={noop}
+      {/* The shell's menus, one part each, after the dialog so the parts
+          above keep their places. */}
+      <Section part="menu-radio" title="Menu with radio rows">
+        <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled">
+          <div
+            className="flex h-64 w-64 items-start justify-end"
+            data-force-state="focus focus-visible"
+            data-force-target="[role=menuitemradio]:nth-child(1)"
+          >
+            <div data-force-state="hover" data-force-target="[role=menuitemradio]:nth-child(2)">
+              <MenuSpecimen label="Versions" items={radioMenuItems} width={208} testId={`states-menu-radio-${theme}`} />
+            </div>
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="menu-field" title="Menu with a name field">
+        <Specimen label="field: focus, hint">
+          <div className="flex h-48 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
+            <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="menu-overflow" title="Overflow menu">
+        <Specimen label="current; long name: keyboard-active; rest">
+          <div
+            className="flex h-56 w-72 items-start justify-end"
+            data-force-state="focus focus-visible"
+            data-force-target="[role=menuitem]:nth-child(2)"
+          >
+            <MenuSpecimen
+              label="Tabs in editor group 1"
+              items={overflowMenuItems}
+              width={240}
+              testId={`states-menu-overflow-${theme}`}
             />
           </div>
         </Specimen>
-        <Specimen label="split: an empty active group, then one with tabs">
-          <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
-            <EditorGroupLayout
-              groups={[
-                { id: "empty", size: 1, content: <EditorGroupSpecimen groupId="empty" groupNumber={1} tabs={[]} active={null} /> },
-                {
-                  id: "full",
-                  size: 1,
-                  content: <EditorGroupSpecimen groupId="full" groupNumber={2} tabs={["budget.md"]} active="budget.md" />,
-                },
-              ]}
-              activeGroupId="empty"
-              onFocusGroup={noop}
-              onResizeGroups={noop}
-            />
+      </Section>
+
+      <Section part="menu-danger" title="Menu with a destructive row">
+        <Specimen label="rest; destructive: keyboard-active">
+          <div
+            className="flex h-36 w-56 items-start justify-end"
+            data-force-state="focus focus-visible"
+            data-force-target="[role=menuitem]:nth-child(2)"
+          >
+            <MenuSpecimen label="More for Research" items={dangerMenuItems} width={176} testId={`states-menu-danger-${theme}`} />
           </div>
+        </Specimen>
+      </Section>
+
+      {/* After the menus, so the parts above keep their places. The capture
+          opens each part's tab list. */}
+      <Section part="editor-groups" title="Editor groups">
+        <Specimen label="split: the active group with tabs, then an empty one">
+          <EditorGroupsSpecimen activeHasTabs />
+        </Specimen>
+      </Section>
+
+      <Section part="editor-groups-empty" title="Editor groups, empty active group">
+        <Specimen label="split: an empty active group, then one with tabs">
+          <EditorGroupsSpecimen activeHasTabs={false} />
         </Specimen>
       </Section>
     </section>

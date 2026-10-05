@@ -974,16 +974,25 @@ it("returns from the tab overflow menu on selection and Escape", async () => {
   await waitFor(() => expect(document.activeElement).toBe(trigger));
 });
 
-it("returns from the tab overflow menu after a pointer click on its backdrop", async () => {
+it("returns from the tab overflow menu after a pointer click on blank space", async () => {
   const user = userEvent.setup();
   render(<KeyboardTabs focusableSurface={false} />);
   const trigger = screen.getByTestId("tabs-overflow");
   await user.click(trigger);
   screen.getByRole("menuitem", { name: "b.md" }).focus();
-  const backdrop = screen.getByTestId("tabs-overflow-menu").previousElementSibling!;
-  await user.pointer({ target: backdrop, keys: "[MouseLeft>]" });
-  expect(document.activeElement).toBe(document.body);
-  await user.pointer({ keys: "[/MouseLeft]" });
+  await user.pointer({ target: document.body, keys: "[MouseLeft>]" });
   expect(screen.queryByTestId("tabs-overflow-menu")).toBeNull();
-  await waitFor(() => expect(document.activeElement).toBe(trigger));
+  // A browser's press on blank space takes focus to the page after the close.
+  trigger.blur();
+  await user.pointer({ keys: "[/MouseLeft]" });
+  expect(document.activeElement).toBe(trigger);
+});
+
+it("closes the tab overflow menu on a press on a tab, which takes focus", async () => {
+  const user = userEvent.setup();
+  render(<KeyboardTabs />);
+  await user.click(screen.getByTestId("tabs-overflow"));
+  await user.click(screen.getByTestId("tab-c.md"));
+  expect(screen.queryByTestId("tabs-overflow-menu")).toBeNull();
+  expect(document.activeElement).toBe(screen.getByTestId("tab-c.md"));
 });

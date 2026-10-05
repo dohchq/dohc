@@ -1,5 +1,5 @@
-import { useDismiss } from "../ui/useDismiss";
 import { focusSurface, useFocusSurface } from "../ui/focusReturn";
+import { Menu } from "../ui/Menu";
 import { basenameOf } from "../path";
 import { ChevronDown, Columns2, X } from "lucide-react";
 import {
@@ -699,8 +699,6 @@ export const EditorTabs = memo(function EditorTabs(props: {
   // starts at the pane's left edge, so a tab's offsetLeft is its content
   // position and offsetLeft minus scrollLeft its distance from that edge.
   const frameRef = useRef<HTMLDivElement | null>(null);
-  const listTrigger = useRef<HTMLButtonElement>(null);
-  useDismiss({ open: listOpen, container: frameRef, trigger: listTrigger, onClose: () => setListOpen(false) });
   useFocusSurface(frameRef, () => frameRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'));
   useLayoutEffect(() => {
     const focused = document.activeElement;
@@ -1022,53 +1020,35 @@ export const EditorTabs = memo(function EditorTabs(props: {
         />
       </div>
       {/* Overflow affordance: every open tab, reachable even when the strip
-          scrolls. Lives outside the scroller so the menu is never clipped. */}
+          scrolls. The list is placed against the window, so the strip's
+          scroller cannot clip it. */}
       {!empty ? (
-        <button
-          type="button"
-          data-testid="tabs-overflow"
-          aria-label={`All tabs in editor group ${props.groupNumber}`}
-          title={`All tabs in editor group ${props.groupNumber}`}
-          ref={listTrigger}
-          aria-expanded={listOpen}
-          onClick={() => setListOpen((open) => !open)}
-          className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:text-ink"
-        >
-          <ChevronDown size={14} aria-hidden />
-        </button>
-      ) : null}
-      {listOpen ? (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setListOpen(false)} />
-          <div
-            data-testid="tabs-overflow-menu"
-            role="menu"
-            aria-label={`Tabs in editor group ${props.groupNumber}`}
-            className="dohc-popover dohc-pop-in absolute right-1 top-full z-20 mt-1 max-h-72 w-60 overflow-y-auto rounded-lg border border-line bg-panel py-1"
-          >
-            {props.tabs.map((tab) => (
-              <button
-                key={tab.path}
-                type="button"
-                role="menuitem"
-                title={tab.path}
-                onClick={() => {
-                  setListOpen(false);
-                  props.onActivate(props.groupId, tab.path);
-                }}
-                className={`flex h-7 w-full items-center px-3 text-left text-[13px] ${
-                  tab.path === props.activeTab
-                    ? "text-ink"
-                    : "text-muted hover:bg-hover hover:text-ink"
-                }`}
-              >
-                <span className="truncate">
-                  {fileName(tab.path, props.tabLabels?.get(tab.path))}
-                </span>
-              </button>
-            ))}
-          </div>
-        </>
+        <Menu
+          label={`Tabs in editor group ${props.groupNumber}`}
+          menuTestId="tabs-overflow-menu"
+          open={listOpen}
+          onOpenChange={setListOpen}
+          width={240}
+          trigger={(trigger) => (
+            <button
+              {...trigger}
+              type="button"
+              data-testid="tabs-overflow"
+              aria-label={`All tabs in editor group ${props.groupNumber}`}
+              title={`All tabs in editor group ${props.groupNumber}`}
+              className="grid w-7 shrink-0 place-items-center border-b border-line text-subtle hover:text-ink"
+            >
+              <ChevronDown size={14} aria-hidden />
+            </button>
+          )}
+          items={props.tabs.map((tab) => ({
+            id: tab.path,
+            label: fileName(tab.path, props.tabLabels?.get(tab.path)),
+            title: tab.path,
+            current: tab.path === props.activeTab,
+            onSelect: () => props.onActivate(props.groupId, tab.path),
+          }))}
+        />
       ) : null}
     </div>
   );

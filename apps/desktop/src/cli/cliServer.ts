@@ -261,7 +261,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // `agent` is the agent this socket's write is, or null for the person.
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
-  appPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
+  appPublication?(request: OwnerAppPublicationRequest, agent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null): Promise<OwnerAppPublicationResult>;
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
   readOnly: boolean;
@@ -2141,7 +2141,7 @@ async function dispatch(
       case "appPublication": {
         const input = request.args.request;
         rebased = { ...request, args: { ...request.args, request: "appRoot" in input
-          ? { ...input, appRoot: paths.rebase(input.appRoot, "read") } : input } };
+          ? { ...input, appRoot: paths.rebase(input.appRoot, "read"), ...(input.action === "createLink" && input.paths ? {paths:input.paths.map(path=>paths.rebase(path,"read"))} : {}) } : input } };
         break;
       }
       case "fileChats":
@@ -2235,11 +2235,19 @@ async function dispatchWorkspace(
   switch (request.verb) {
     case "appPublication": {
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.appPublication) throw new CliCommandError("App publication requires the owning workspace.");
-      return context.appPublication(request.args.request);
+      if (options.agentRunDepth(context.workspaceId) > 0) throw new CliCommandError("Automations cannot use app publication.");
+      const agent = writeActor(request.args.actor, context, options) === "agent"
+        ? {kind:"agent" as const,label:"agentLabel" in request.args.request ? request.args.request.agentLabel ?? null : null,labelSource:"agent-declared" as const} : null;
+      return context.appPublication(request.args.request, agent);
     }
     case "dataset": {
       if (request.args.request.action === "export" && !request.args.request.savePath) throw new CliCommandError("Collection export requires an explicit savePath.");
       if (request.args.request.workspaceId !== context.workspaceId || context.readOnly || !context.dataset) throw new CliCommandError("Collections require the owning workspace.");
+      if (request.args.request.action === "approve" || request.args.request.action === "approveMigration") {
+        const invocationAgent = datasetAgent(request.args.actor, context, options);
+        return context.dataset(request.args.request, invocationAgent
+          ? {...invocationAgent,approvalAgent:{kind:"agent",label:request.args.request.agentLabel ?? null,labelSource:"agent-declared"}} : null);
+      }
       return context.dataset(request.args.request, datasetAgent(request.args.actor, context, options));
     }
     case "ownerAppResponses": {

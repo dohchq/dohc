@@ -16,7 +16,7 @@ import {
 import { EngineMomentSource, engineMomentSummary } from "./EngineHistory";
 import { parseMomentDiffTabPath } from "./workbenchState";
 import { hasBlockingModal } from "../modalFocus";
-import { PanelLoading } from "./PanelLoading";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { ipcErrorMessage } from "../ipcError";
 
 function isEditableShortcutTarget(target: EventTarget | null) {
@@ -214,7 +214,7 @@ export function EngineMomentDiffPage({
     );
   }
   if (state.status === "loading") {
-    return <PanelLoading label="history diff" />;
+    return <SkeletonRows layout="panel" label="Loading history diff..." />;
   }
   if (!moment || !prepared) {
     return (

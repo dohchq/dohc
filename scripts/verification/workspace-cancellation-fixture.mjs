@@ -10,6 +10,7 @@ export async function runCanonicalCancellationFixture(root, sourceRoot) {
   put('package.json','{"type":"module"}');
   for(const file of ['verify.mjs','js-tests.mjs','selection.mjs','process.mjs','cancellation.mjs','timing.mjs'])
     put(`scripts/verification/${file}`,readFileSync(join(sourceRoot,'scripts/verification',file)));
+  put('tools/rust-engine-program/git-read.mjs',readFileSync(join(sourceRoot,'tools/rust-engine-program/git-read.mjs')));
   put('apps/desktop/package.json','{}');
   put('pnpm-workspace.yaml','fixture workspace');
   put('.github/workflows/pr-checks.yml','fixture workflow');

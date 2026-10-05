@@ -1,3 +1,4 @@
+import { PublicationAgent } from "./appPublication";
 import { z } from "zod";
 import { CreationPartial } from "./creation";
 import { APP_BACKEND_UPLOAD_BYTES, parseAppBackendFile, parseAppBackendJson } from "@dohc/security-contract/app-backend";
@@ -118,14 +119,14 @@ export const DatasetRequest = z.discriminatedUnion("action", [
   z.object({ ...pinned, action: z.literal("prepareRelationChoices"), tableId: identity, fieldId: identity, labelFieldId: identity }).strict(),
   z.object({ ...workspace, action: z.literal("create"), definition }).strict(),
   z.object({ ...workspace, action: z.literal("prepare"), descriptorPath: z.string().min(1).max(1024) }).strict(),
-  z.object({ ...workspace, action: z.literal("approve"), preparationId: identity, revisionSha256: sha256 }).strict(),
+  z.object({ ...workspace, action: z.literal("approve"), agentLabel: z.string().min(1).max(160).optional(), preparationId: identity, revisionSha256: sha256 }).strict(),
   z.object({ ...workspace, action: z.literal("discard"), preparationId: identity }).strict(),
   z.object({ ...selection, action: z.literal("historyRevision"), revisionSha256: sha256 }).strict(),
   z.object({ ...pinned, action: z.literal("prepareHistoryRestore"), targetRevisionSha256: sha256, changedRevisionSha256: sha256 }).strict(),
   z.object({ ...selection, action: z.literal("prepareMigration"), migrationPath: z.string().min(1).max(1024) }).strict(),
   z.object({ ...workspace, action: z.literal("migrationPreviewPage"), preparationId: identity, after: z.string().min(1).max(1024).optional(), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ ...pinned, action: z.literal("prepareSchemaChange"), change: DatasetSchemaChange }).strict(),
-  z.object({ ...workspace, action: z.literal("approveMigration"), preparationId: identity, revisionSha256: sha256, approvalDigest: sha256 }).strict(),
+  z.object({ ...workspace, action: z.literal("approveMigration"), agentLabel: z.string().min(1).max(160).optional(), preparationId: identity, revisionSha256: sha256, approvalDigest: sha256 }).strict(),
   z.object({ ...workspace, action: z.literal("discardMigration"), preparationId: identity }).strict(),
   z.object({ ...selection, action: z.literal("invoke"), operationId: identity, revision: z.number().int().positive(), revisionSha256: sha256,
     input: json, idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/) }).strict(),
@@ -149,13 +150,14 @@ export type DatasetInvocationResult = z.infer<typeof DatasetInvocationResult>;
 const DatasetHistoryUndo = z.object({ operationId: identity, revision: z.number().int().positive(), revisionSha256: sha256,
   recordId: z.union([z.string().min(1).max(512), z.number().int().safe()]), expectedVersion: z.number().int().positive().safe(),
   fields: z.array(z.object({ fieldId: identity, name: z.string().min(1).max(128), value: json }).strict()).min(1).max(128) }).strict();
-export const DatasetHistoryRevision = z.object({ revision, schemaSql: z.string().max(256 * 1024), operationSource: z.string().max(256 * 1024) }).strict();
+export const DatasetHistoryRevision = z.object({ approvalAgent: PublicationAgent.nullable().optional(), revision, schemaSql: z.string().max(256 * 1024), operationSource: z.string().max(256 * 1024) }).strict();
 export type DatasetHistoryRevision = z.infer<typeof DatasetHistoryRevision>;
 export const DatasetHistoryPage = z.object({ datasetId: identity, headRevision: z.number().int().nonnegative(),
   entries: z.array(z.object({ revision: z.number().int().positive(), operation: z.string().min(1).max(64), callerReference: sha256.nullable(),
     recordedAtMs: z.number().int().min(0).max(8_640_000_000_000_000).nullable(), approvedRevisionHash: sha256, changesetBytes: z.number().int().nonnegative(), attachmentCount: z.number().int().nonnegative(), undo: DatasetHistoryUndo.optional(),
     // The automation that made the change. The desktop adds its name from the Collection's automations.yaml.
     automation: z.object({ automationId: z.string().min(1).max(1024), depth: z.number().int().min(1).max(4), name: z.string().min(1).max(120).optional() }).strict().optional(),
+    approvalAgent: PublicationAgent.nullable().optional(),
     schema: z.object({ previousRevisionHash: sha256, revisionHash: sha256 }).strict().optional() }).strict()).max(100),
   nextBeforeRevision: z.number().int().positive().nullable() }).strict();
 export type DatasetHistoryPage = z.infer<typeof DatasetHistoryPage>;
