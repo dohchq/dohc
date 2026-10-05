@@ -29,6 +29,7 @@ import { bridge } from "./bridge";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
 import { SecondaryButton } from "./ui/controls";
 import { MoreMenu } from "./ui/MoreMenu";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { CollectionCustomizeDialog, documentCollectionFiles } from "./collections/CollectionCustomizeDialog";
 import { FieldsDialog } from "./collections/FieldsDialog";
 import { ViewsDialog } from "./collections/ViewsDialog";
@@ -513,11 +514,7 @@ export function CollectionPage({
     (state.status === "loading" || state.status === "idle") &&
     state.collection === null;
   if (details === null || neverLoaded) {
-    return (
-      <div className="flex min-h-0 flex-1 items-center justify-center px-4 text-xs text-subtle">
-        Loading collection...
-      </div>
-    );
+    return <SkeletonRows layout="panel" label="Loading collection..." />;
   }
 
   const schema = details.schema;

@@ -9,6 +9,7 @@ import type {
   ListFileChatsResponse,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import {
   ChatComposer,
   ChatMessageList,
@@ -402,11 +403,7 @@ export function LinkedChatsPanel(props: {
   }
 
   if (threadsState.status === "loading") {
-    return (
-      <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
-        Loading Chats...
-      </div>
-    );
+    return <SkeletonRows layout="panel" label="Loading Chats..." />;
   }
 
   if (threadsState.status === "unavailable") {

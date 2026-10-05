@@ -5,7 +5,7 @@ import { ErrorBoundary } from "../ErrorBoundary";
 import type { CustomizePart } from "../settings/customize";
 import { MoreMenu } from "../ui/MoreMenu";
 import type { RelayShareTarget } from "../RelayShareDialog";
-import { PanelLoading } from "../workbench/PanelLoading";
+import { SkeletonRows } from "../ui/SkeletonRows";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
 // chunk resolved, and every character typed in that gap went to whatever the
 // user clicked to open the panel — queries arrived with their first letters
@@ -147,7 +147,7 @@ export function ShellSidePanel(props: {
       ) : wb.activeView === "search" ? (
         <SearchView search={search} onOpenResult={openSearchResult} />
       ) : wb.activeView === "graph" ? (
-        <Suspense fallback={<PanelLoading label="graph" />}>
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading graph..." />}>
           <LazyGraphView
             workspaceId={workspaceId}
             activePath={activeDocumentPath}
@@ -159,7 +159,7 @@ export function ShellSidePanel(props: {
           />
         </Suspense>
       ) : wb.activeView === "sites" ? (
-        <Suspense fallback={<PanelLoading label="apps" />}>
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading apps..." />}>
           <LazyAppsView
             workspaceId={workspaceId}
             pinnedApps={pinnedRoots}
@@ -176,7 +176,7 @@ export function ShellSidePanel(props: {
       ) : selectedAppRoot !== null ? (
         // The same sealed preview an app's tab runs: a sandboxed frame
         // on a dohc loopback server, with no dohc bridge.
-        <Suspense fallback={<PanelLoading label="app" />}>
+        <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
           <LazySitePreviewPage
             key={selectedAppRoot}
             variant="panel"

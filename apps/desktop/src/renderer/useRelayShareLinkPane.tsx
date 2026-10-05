@@ -22,6 +22,7 @@ import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
 import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 import { SegmentedControl } from "./ui/SegmentedControl";
+import { SkeletonRows } from "./ui/SkeletonRows";
 
 type LinkAccess = "view" | "comment" | "edit";
 
@@ -1789,9 +1790,7 @@ export function useRelayShareLinkPane(props: {
             Links
           </SectionLabel>
 
-          {linksLoading ? (
-            <p className="m-0 text-xs text-muted">Loading links…</p>
-          ) : null}
+          {linksLoading ? <SkeletonRows rows={2} label="Loading links…" /> : null}
 
           {linksError ? (
             <div className="flex items-center justify-between gap-3">
@@ -1968,9 +1967,7 @@ export function useRelayShareLinkPane(props: {
                           ) : null}
                         </div>
 
-                        {ownerDiscussion.loading ? (
-                          <p className="m-0 text-xs text-muted">Loading comments…</p>
-                        ) : null}
+                        {ownerDiscussion.loading ? <SkeletonRows rows={2} label="Loading comments…" /> : null}
 
                         {ownerDiscussion.loadError ? (
                           <div className="flex items-center justify-between gap-3">

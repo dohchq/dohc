@@ -14,6 +14,7 @@ import {
 import { needsBuiltArtifact, presentBuildOutput } from "@dohc/workspace-core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconButton, SecondaryButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { useDismiss } from "./ui/useDismiss";
 import type {
   SitePackageInfo,
@@ -781,9 +782,7 @@ export function SitePreviewPage(props: {
       </header>
 
       {load.status === "loading" ? (
-        <div className="flex flex-1 items-center justify-center text-sm text-subtle">
-          Loading app…
-        </div>
+        <SkeletonRows layout="panel" label="Loading app…" />
       ) : load.status === "missing" ? (
         <EmptyState
           title="App not detected"

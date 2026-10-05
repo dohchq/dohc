@@ -10,6 +10,7 @@ import { CopyButton } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
 import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
@@ -17,7 +18,6 @@ import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
-import { PanelLoading } from "../workbench/PanelLoading";
 import { closeStatesPage } from "./statesRoute";
 
 // Every shared part in every state, light beside dark, on one development
@@ -518,9 +518,16 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="loading" title="Loading">
-        <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
-          <PanelLoading label="files" />
-        </div>
+        <Specimen label="list">
+          <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
+            <SkeletonRows layout="panel" label="Loading files..." />
+          </div>
+        </Specimen>
+        <Specimen label="editor">
+          <div className="flex h-40 w-96 flex-col rounded-lg border border-line bg-bg">
+            <SkeletonRows layout="document" label="Loading…" className="pt-12" />
+          </div>
+        </Specimen>
       </Section>
 
       <Section part="toasts" title="Toasts">
