@@ -255,8 +255,8 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     await row.getByTestId("shared-by-me-revoke").click();
     await expect(row).toContainText("Ended — was shared with");
 
-    // Revocation is live: the recipient's next fetch is the byte-identical
-    // generic 404.
+    // Revocation is live: the recipient's next fetch returns 404 with the
+    // owner-removed explanation (#1438).
     const revokedFetch = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,
@@ -268,6 +268,13 @@ test("grant side: share a file by email from the explorer, copy the code, and en
       error: "The owner removed your access.",
       code: "share_access_removed",
     });
+    const strangerAfterRemoval = await relayJson(
+      relay.baseUrl,
+      "test:e2e-stranger",
+      `/sync/shares/${shareId}/log?since=0`,
+    );
+    expect(strangerAfterRemoval.status).toBe(404);
+    expect(strangerAfterRemoval.body).toBe(missingFetch.body);
   } finally {
     // Stop the relay child before removing the temp tree it holds open, or
     // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
@@ -690,6 +697,18 @@ confidentialTest.describe("View link lifecycle", () => {
         error: "The owner removed your access.",
         code: "share_access_removed",
       });
+      const strangerAfterRemoval = await relayJson(
+        relay.baseUrl,
+        "test:e2e-stranger",
+        `/sync/shares/${shareId}/log?since=0&limit=500`,
+      );
+      const missingFetch = await relayJson(
+        relay.baseUrl,
+        "test:e2e-stranger",
+        "/sync/shares/never-valid/log?since=0&limit=500",
+      );
+      expect(strangerAfterRemoval.status).toBe(404);
+      expect(strangerAfterRemoval.body).toBe(missingFetch.body);
     } finally {
       await relay?.stop();
       if (desktop) await cleanupDesktopWorkspace(desktop, temp);
