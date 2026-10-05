@@ -1,5 +1,6 @@
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
+import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import { PublicationAgent } from "@dohc/cli/app-publication";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
@@ -1576,7 +1577,7 @@ type ListEngineMomentsUpdatingResult = z.infer<
 >;
 // The workspace's rules for which files History tracks and who sees them,
 // and the folder that holds them.
-export const WorkspacePolicyPath = z.enum([".dohc", ".dohc/files.toml", ".dohc/visibility.toml"]);
+export const WorkspacePolicyPath = z.enum(WORKSPACE_POLICY_PATHS);
 export type WorkspacePolicyPath = z.infer<typeof WorkspacePolicyPath>;
 
 // History hides everything while those rules cannot be read. `unreadable`
@@ -4878,6 +4879,8 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
       z.object({ path: PATH_STRING, reason: z.literal("changed-since") }).strict(),
       z.object({ path: PATH_STRING, reason: z.literal("folder-in-use") }).strict(),
       z.object({ path: PATH_STRING, reason: z.literal("restore-refused"), detail: z.string().max(2_000) }).strict(),
+      // History's rules could not be read, so restoring the file was refused.
+      z.object({ path: PATH_STRING, reason: z.literal("rules-unreadable"), unreadable: z.array(WorkspacePolicyPath).min(1) }).strict(),
     ])),
     // Runs of the person's automations undone, and those Undo could not undo.
     runsUndone: z.number().int().nonnegative(),
@@ -4915,6 +4918,7 @@ export const UndoStopAndRestoreResult = z.object({
       receipt: z.object({ path: PATH_STRING, restoredMomentId: OPAQUE_ID }).strict(),
     }).strict(),
     z.object({ momentId: OPAQUE_ID, kind: z.literal("refused"), detail: z.string().max(2_000) }).strict(),
+    z.object({ momentId: OPAQUE_ID, kind: z.literal("rules-unreadable"), unreadable: z.array(WorkspacePolicyPath).min(1) }).strict(),
   ])),
 }).strict();
 export type UndoStopAndRestoreResult = z.infer<typeof UndoStopAndRestoreResult>;

@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
+import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import type { KeptAutomationField } from "@dohc/automation-executor/collection-automations";
 import type { SharedReversalsSchema } from "@dohc/workspace-contracts/shared-file-settlement";
 import type { z } from "zod";
@@ -37,7 +38,8 @@ export interface DirectWriteFile {
 export type ReviewFile =
   | { path: string; reason: "changed-since" }
   | { path: string; reason: "folder-in-use" }
-  | { path: string; reason: "restore-refused"; detail: string };
+  | { path: string; reason: "restore-refused"; detail: string }
+  | { path: string; reason: "rules-unreadable"; unreadable: WorkspacePolicyPath[] };
 
 export interface RestoreReceipt {
   path: string;
@@ -62,6 +64,8 @@ export interface StopAndRestoreDependencies {
     | { kind: "changed" }
     | { kind: "folder-in-use" }
     | { kind: "refused"; detail: string }
+    // History's rules could not be read; `unreadable` names what to fix.
+    | { kind: "rules-unreadable"; unreadable: WorkspacePolicyPath[] }
   >;
   /** The names in a workspace folder, or none when it is gone. */
   folderEntries(path: string): Promise<string[]>;
@@ -293,6 +297,10 @@ export async function restoreDirectWrites(
       if (result.kind === "refused") {
         // History refuses some files, such as a shared live document.
         review.set(entry.last.path, { path: entry.last.path, reason: "restore-refused", detail: result.detail.slice(0, 500) });
+        continue;
+      }
+      if (result.kind === "rules-unreadable") {
+        review.set(entry.last.path, { path: entry.last.path, reason: "rules-unreadable", unreadable: result.unreadable });
         continue;
       }
       restored.push(result.receipt);

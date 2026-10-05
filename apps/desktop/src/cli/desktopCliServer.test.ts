@@ -232,7 +232,7 @@ describe("desktop CLI workspace context", () => {
     expect(f.capture.listMoments).toHaveBeenCalledWith({ limit: 4 });
     await context.listMoments({ limit: 4, objectId: "object-plan" });
     expect(f.capture.listMoments).toHaveBeenLastCalledWith({ limit: 4, objectId: "object-plan" });
-    const detail = { id: "detail", versionId: "main", path: "notes.md", payload: { before: null, after: { path: "notes.md", text: "" } } } as unknown as Exclude<Awaited<ReturnType<typeof context.readMoment>>, "untracked" | null>;
+    const detail = { id: "detail", versionId: "main", path: "notes.md", payload: { before: null, after: { path: "notes.md", text: "" } } } as unknown as VersionedTextMoment;
     f.capture.readMoment.mockResolvedValueOnce({ protected: false, moment: detail })
       .mockResolvedValueOnce({ protected: true, moment: { id: "secret" } } as never).mockResolvedValueOnce(null);
     expect(await context.readMoment("visible")).toBe(detail);
@@ -313,8 +313,14 @@ describe("desktop CLI workspace context", () => {
       // A policy file dohc cannot read hides all history, as it blocks search.
       await writeFile(join(root, ".dohc", "files.toml"), "[[rule]\n");
       expect(await mcp("moments", {})).toMatchObject({ changes: [], count: 0 });
-      // Unreadable rules hide every change, which says nothing about this change's file.
-      expect(await mcp("moment", { id: "notes" })).toEqual({ ok: false, reason: "change not found: notes" });
+      // Unreadable rules hide every change, so the answer names the rules
+      // file and nothing about the change.
+      const unreadable = { ok: false, status: "policy-unreadable", unreadable: [".dohc/files.toml"],
+        reason: "History is hidden because dohc can't read .dohc/files.toml" };
+      expect(await mcp("moment", { id: "notes" })).toEqual(unreadable);
+      expect(await mcp("moment", { id: "no-such-change" })).toEqual(unreadable);
+      expect(await cli("history", "show", "notes")).toEqual({ exitCode: 1, stdout: "",
+        stderr: "dohc: History is hidden because dohc can't read .dohc/files.toml\n" });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

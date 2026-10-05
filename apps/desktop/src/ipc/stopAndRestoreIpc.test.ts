@@ -222,8 +222,8 @@ describe("stop and restore in main", () => {
   });
 
   it.each([CHANNELS.stopAndRestore, CHANNELS.undoStopAndRestore])("reports unreadable policy for every file in %s", async channel => {
-    // dohc's words, never the TOML parser's.
-    const unreadable = "It can't read .dohc/files.toml. Fix the file, then try again.";
+    // The files dohc can't read, never the TOML parser's text.
+    const unreadable = [".dohc/files.toml"];
     const f = await capturedFiles(["notes/a.md", "docs/b.md"]);
     try {
       await f.writePolicy("[[rule] invalid");
@@ -231,8 +231,8 @@ describe("stop and restore in main", () => {
         ? { target: { kind: "person", userId: "user_ana" } }
         : { restoredMomentIds: f.files.map(file => file.momentId) });
       expect(result).toMatchObject(channel === CHANNELS.stopAndRestore
-        ? { restored: [], review: [{ path: "docs/b.md", reason: "restore-refused", detail: unreadable }, { path: "notes/a.md", reason: "restore-refused", detail: unreadable }], unfinished: null }
-        : { files: [{ kind: "refused", detail: unreadable }, { kind: "refused", detail: unreadable }] });
+        ? { restored: [], review: [{ path: "docs/b.md", reason: "rules-unreadable", unreadable }, { path: "notes/a.md", reason: "rules-unreadable", unreadable }], unfinished: null }
+        : { files: [{ kind: "rules-unreadable", unreadable }, { kind: "rules-unreadable", unreadable }] });
       expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("shared edit");
       expect(await readFile(join(f.rootPath, "docs/b.md"), "utf8")).toBe("shared edit");
     } finally { await f.engineCapture.stop(); }

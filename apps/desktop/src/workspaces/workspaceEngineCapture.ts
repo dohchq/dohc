@@ -1,7 +1,7 @@
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { errorMessage } from "./workspaceError";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
-import type { WorkspacePolicyPath } from "../ipc/bridgeContract";
+import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   validateUserMaterializePath,

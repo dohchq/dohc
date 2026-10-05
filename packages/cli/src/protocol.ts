@@ -3,6 +3,7 @@ import {
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
 import { CreationPartial } from "./creation";
 import { DatasetRequest, DatasetResult } from "./dataset";
@@ -697,7 +698,7 @@ const momentsResultSchema = z
     cursorMs: z.number(),
   })
   .strict();
-const momentResultSchema = z.discriminatedUnion("ok", [
+const momentResultSchema = z.union([
   z
     .object({
       ok: z.literal(true),
@@ -708,9 +709,17 @@ const momentResultSchema = z.discriminatedUnion("ok", [
       }).strict(),
     })
     .strict(),
-  // `untracked`: History has the change, but its rules no longer track a
-  // file it touched. Neither its path nor its contents are sent.
-  z.object({ ok: z.literal(false), status: z.literal("untracked").optional(), reason: z.string().min(1) }).strict(),
+  z.object({ ok: z.literal(false), reason: z.string().min(1) }).strict(),
+  // History has the change, but its rules no longer track a file it touched.
+  z.object({ ok: z.literal(false), status: z.literal("untracked"), reason: z.string().min(1) }).strict(),
+  // dohc can't read those rules, so History hides every change.
+  // `unreadable` names what to fix. Neither sends a change's path or contents.
+  z.object({
+    ok: z.literal(false),
+    status: z.literal("policy-unreadable"),
+    unreadable: z.array(z.enum(WORKSPACE_POLICY_PATHS)).min(1),
+    reason: z.string().min(1),
+  }).strict(),
 ]);
 
 const rawChannelIdSchema = z.string().regex(/^channel-/u);

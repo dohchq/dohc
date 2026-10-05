@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { EngineMomentDiffPage } from "./EngineMomentDiffPage";
-import { HistoryHiddenState, historyHiddenWords } from "./HistoryPolicyStates";
+import { HistoryHiddenState, historyHiddenWords, restoreRulesUnreadableWords } from "./HistoryPolicyStates";
 import { momentDiffTabPath } from "./workbenchState";
 
 const noop = () => {};
@@ -31,6 +31,13 @@ describe("History hidden by its rules", () => {
     );
     expect(historyHiddenWords([".dohc"])).toBe(
       "dohc can't read this workspace's .dohc folder, so History is hidden. Fix the folder, then try again.",
+    );
+    // A Stop and restore row already names its file.
+    expect(restoreRulesUnreadableWords([".dohc/visibility.toml"])).toBe(
+      "dohc could not restore this file because it can't read .dohc/visibility.toml. Fix the file, then try again.",
+    );
+    expect(restoreRulesUnreadableWords([".dohc"])).toBe(
+      "dohc could not restore this file because it can't read this workspace's .dohc folder. Fix the folder, then try again.",
     );
   });
 

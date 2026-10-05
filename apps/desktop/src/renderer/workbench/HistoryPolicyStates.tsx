@@ -8,12 +8,22 @@ import { EmptyState, SecondaryButton } from "../ui/controls";
 // the surface that shows History, so it is drawn there, beside the control
 // that reads again once the person has changed the rules.
 
-export function historyHiddenWords(unreadable: readonly WorkspacePolicyPath[]): string {
+// What dohc can't read, and what the person fixes.
+function unreadableWords(unreadable: readonly WorkspacePolicyPath[]): { what: string; fix: string } {
   const files = unreadable.filter((path) => path !== ".dohc");
-  if (files.length === 0) {
-    return "dohc can't read this workspace's .dohc folder, so History is hidden. Fix the folder, then try again.";
-  }
-  return `dohc can't read ${files.join(" and ")}, so History is hidden. Fix the ${files.length > 1 ? "files" : "file"}, then try again.`;
+  if (files.length === 0) return { what: "this workspace's .dohc folder", fix: "Fix the folder" };
+  return { what: files.join(" and "), fix: files.length > 1 ? "Fix the files" : "Fix the file" };
+}
+
+export function historyHiddenWords(unreadable: readonly WorkspacePolicyPath[]): string {
+  const { what, fix } = unreadableWords(unreadable);
+  return `dohc can't read ${what}, so History is hidden. ${fix}, then try again.`;
+}
+
+// A Stop and restore row, which already names the file it is about.
+export function restoreRulesUnreadableWords(unreadable: readonly WorkspacePolicyPath[]): string {
+  const { what, fix } = unreadableWords(unreadable);
+  return `dohc could not restore this file because it can't read ${what}. ${fix}, then try again.`;
 }
 
 // A side panel or a whole tab: the words keep a readable width in both.

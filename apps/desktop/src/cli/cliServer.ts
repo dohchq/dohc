@@ -1,6 +1,7 @@
 import { creationPartialMessage } from "@dohc/cli/creation";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import { SHARED_AUTOMATION_HISTORY_REASON } from "@dohc/workspace-contracts/automation-controls";
+import type { WorkspacePolicyPath } from "@dohc/security-contract/effective-policy";
 import { readThreadDispatchState } from "../agents/threadDispatchState";
 import {
   CLI_PROTOCOL_VERSION,
@@ -257,6 +258,10 @@ export interface CliButtonsPort {
   ): Promise<{ result: NamedPressResult; waiting: PressWaitReason | null }>;
 }
 
+export type HistoryReadRefusal =
+  | { status: "untracked" }
+  | { status: "policy-unreadable"; unreadable: WorkspacePolicyPath[] };
+
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // `agent` is the agent this socket's write is, or null for the person.
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
@@ -268,9 +273,9 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   fileObjectIdForPath(path: string): Promise<string | null>;
   filePathForObjectId(objectId: string): Promise<string | null>;
   listMoments(input: { limit: number; objectId?: string }): Promise<VersionedTextMomentSummary[]>;
-  // "untracked": History has the change, but its rules no longer track a
-  // file it touched, so neither its path nor its contents may be read.
-  readMoment(momentId: string): Promise<VersionedTextMoment | "untracked" | null>;
+  // A refusal says why History hides a change, never its path or contents:
+  // its rules no longer track a file it touched, or dohc can't read them.
+  readMoment(momentId: string): Promise<VersionedTextMoment | HistoryReadRefusal | null>;
   daemonReads: {
     queryChatMessagesGranular(input: {
       query: string;
@@ -2298,12 +2303,19 @@ async function dispatchWorkspace(
 
     case "moment": {
       const moment = await context.readMoment(request.args.id);
-      if (moment === "untracked") {
-        return {
-          ok: false as const,
-          status: "untracked" as const,
-          reason: `change ${request.args.id} is hidden because History no longer tracks its file`,
-        };
+      if (moment && "status" in moment) {
+        return moment.status === "untracked"
+          ? {
+              ok: false as const,
+              status: "untracked" as const,
+              reason: `change ${request.args.id} is hidden because History no longer tracks its file`,
+            }
+          : {
+              ok: false as const,
+              status: "policy-unreadable" as const,
+              unreadable: moment.unreadable,
+              reason: `History is hidden because dohc can't read ${moment.unreadable.join(" and ")}`,
+            };
       }
       if (!moment) {
         return {

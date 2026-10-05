@@ -8,6 +8,7 @@ import {
   type FilesPolicyRule,
   type PolicyParseResult,
   type VisibilityPolicyRule,
+  type WorkspacePolicyPath,
 } from "@dohc/security-contract/effective-policy";
 import {
   type SearchVisibility,
@@ -16,7 +17,6 @@ import {
 } from "@dohc/workspace-contracts/engine";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { WorkspacePolicyPath } from "../ipc/bridgeContract";
 import { MAX_WORKSPACE_SETTINGS_FILE_BYTES } from "./workspaceSettingsFile";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 

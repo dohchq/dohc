@@ -106,7 +106,7 @@ Read one history entry by id: a workspace-engine moment with its full before/aft
 
 - `id`: `string`. Required.
 
-Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } } | { ok: false, status?: "untracked", reason }`.
+Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } } | { ok: false, reason } | { ok: false, status: "untracked", reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_files`
 
