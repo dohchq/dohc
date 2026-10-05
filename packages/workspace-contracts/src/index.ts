@@ -1,3 +1,4 @@
+export * from "./actorIdentity";
 export * from "./chatMentions";
 export * from "./collection";
 export * from "./collectionData";
