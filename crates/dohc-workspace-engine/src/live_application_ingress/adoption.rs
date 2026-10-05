@@ -32,24 +32,11 @@ fn field<'a>(bytes: &mut &'a [u8]) -> Result<&'a [u8], WireError> {
 }
 
 /// Length-delimited metadata, original baseline, and ordered metadata/update pairs.
+/// Events are committed relay records, so they must arrive canonical; nothing is repaired.
 pub(super) fn decode(
-    bytes: &[u8],
-    max_events: usize,
-    outbox_limits: dohc_engine_collab::OwnerOutboxLimits,
-) -> Result<OwnerAdoptionCut, WireError> {
-    decode_with(bytes, max_events, outbox_limits, |bytes| {
-        parse_admitted_metadata(
-            serde_json::from_slice(bytes).map_err(|_| invalid("invalid-owner-adoption-event"))?,
-        )
-        .map_err(|_| invalid("invalid-owner-adoption-event"))
-    })
-}
-
-fn decode_with(
     mut bytes: &[u8],
     max_events: usize,
     outbox_limits: dohc_engine_collab::OwnerOutboxLimits,
-    metadata: impl Fn(&[u8]) -> Result<AdmittedLiveUpdateMetadata, WireError>,
 ) -> Result<OwnerAdoptionCut, WireError> {
     let header = field(&mut bytes)?;
     if header.len() > MAX_HEADER_BYTES {
@@ -79,18 +66,77 @@ fn decode_with(
         outbox_limits,
     };
     for _ in 0..header.event_count {
-        let metadata = metadata(field(&mut bytes)?)?;
+        let metadata: serde_json::Value = serde_json::from_slice(field(&mut bytes)?)
+            .map_err(|_| invalid("invalid-owner-adoption-event"))?;
         let update = field(&mut bytes)?;
         if update.len() > MAX_YDOC_UPDATE_BYTES {
             return Err(invalid("owner-adoption-update-limit"));
         }
-        cut.events.push(AdmittedLiveUpdate {
-            metadata,
-            update_bytes: update.to_vec(),
-        });
+        cut.events.push(
+            AdmittedLiveUpdate::from_committed_metadata(metadata, update.to_vec())
+                .map_err(|_| invalid("invalid-owner-adoption-event"))?,
+        );
     }
     if !bytes.is_empty() {
         return Err(invalid("owner-adoption-trailing-bytes"));
     }
     Ok(cut)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_storage::hex_sha256;
+    use serde_json::{Value, json};
+
+    fn cut(first_seen: Value) -> Vec<u8> {
+        let update = b"update".to_vec();
+        let metadata = json!({
+            "accepted": {
+                "receipt": {"deliveryId": "delivery", "updateDigest": hex_sha256(&update), "journalCursor": 1, "acceptingHostEpoch": 1},
+                "binding": {"workspaceId": "w", "mainVersionId": "main", "objectId": "o", "lineageClaimId": "l",
+                    "currentPath": "a.md", "selectorPaths": ["a.md"], "restoreFenceGeneration": 0},
+                "authority": {"principalKind": "owner", "principalId": "owner", "grantId": null, "grantGeneration": null},
+                "receivedAtMs": 0,
+            },
+            "firstSeen": first_seen,
+        });
+        let header = json!({
+            "relayDatabaseNamespace": "relay", "adoptionId": "adoption", "sourceMomentId": "moment",
+            "sourceDigest": "0".repeat(64), "sourceByteLength": 0, "baselineMomentRelaySequence": 0,
+            "baselineRegisteredAtMs": 0, "expectedLocalSequence": 0, "terminalReceipt": null, "eventCount": 1,
+        });
+        let mut bytes = Vec::new();
+        for field in [
+            serde_json::to_vec(&header).unwrap(),
+            vec![0, 0],
+            serde_json::to_vec(&metadata).unwrap(),
+            update,
+        ] {
+            bytes.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&field);
+        }
+        bytes
+    }
+
+    #[test]
+    fn events_must_arrive_canonical() {
+        let limits = dohc_engine_collab::OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 60_000,
+        };
+        let canonical = json!([{"clientId": 7, "startClock": 0, "endClock": 3}, {"clientId": 7, "startClock": 5, "endClock": 10}]);
+        let decoded = decode(&cut(canonical.clone()), 1, limits.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&decoded.events[0].metadata.first_seen).unwrap(), canonical);
+        for ranges in [
+            json!([{"clientId": 7, "startClock": 0, "endClock": 3}, {"clientId": 7, "startClock": 3, "endClock": 10}]),
+            json!([{"clientId": 7, "startClock": 0, "endClock": 6}, {"clientId": 7, "startClock": 5, "endClock": 10}]),
+            json!([{"clientId": 7, "startClock": 5, "endClock": 10}, {"clientId": 7, "startClock": 0, "endClock": 3}]),
+        ] {
+            let Err(error) = decode(&cut(ranges), 1, limits.clone()) else {
+                panic!("non-canonical ranges decoded");
+            };
+            assert_eq!(error.message, "invalid-owner-adoption-event");
+        }
+    }
 }
