@@ -58,6 +58,9 @@ async fn received_share_handles_refuse_local_automation_claims_and_execution() {
         "automations.claimSchedule",
         "automations.runNow",
         "automations.settle",
+        "collections.setFieldsBatch",
+        "collections.prepareSetBatch",
+        "collections.lookupSetBatch",
     ] {
         assert_eq!(
             call_error(&transport, &handle, &mut id, method, json!({}))

@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { attributionFor } from "./collectionRecordEdits";
-import type { AutomationSetBatches } from "./automationSetBatches";
+import { reconcileSetBatches, type AutomationSetBatches } from "./automationSetBatches";
 import type { SetBatchReceipt, SetBatchLookup } from "@dohc/workspace-engine-client";
 import { afterAll, describe, expect, it } from "vitest";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
@@ -756,7 +756,7 @@ function batchEngine(space: ReturnType<typeof workspace>, options: { open?: Set<
   const services: AutomationSetBatches = {
     async prepare(plan) {
       const bound = { ...plan, versionId: "main", records: plan.records.map(record => ({ ...record,
-        binding: { objectId: record.recordId, lineageClaimId: null, restoreGeneration: null, schemaSha256: "schema", headSha256: "head" } })) };
+        binding: { objectId: record.recordId, lineageClaimId: null, restoreGeneration: null, schemaSha256: "schema" } })) };
       return { plan: bound, digest: JSON.stringify(bound), open: bound.records.map(record => options.open?.has(record.recordId) ?? false) };
     },
     async submit(plan, digest, author) {
@@ -802,6 +802,70 @@ const batchInput = (definition: Automation) => {
 };
 
 describe("closed document Set batches", () => {
+  for (const refusal of ["open", "oversized", "abandoned", "key-reused"] as const) {
+    it(`keeps derived ${refusal} refusals readable and undoable`, async () => {
+      const space = workspace([task("rec_t", {Project: "A", Count: 1}), ...[0,1,2].map(id => task(`rec_${id}`, {Project: "A", Count: 1}))]);
+      const store = await scratchStore();
+      const engine = batchEngine(space, {limit: 2});
+      const keys = new Set<string>();
+      const services = {...engine.services, submit: async (...args: Parameters<AutomationSetBatches["submit"]>) => {
+        const key = args[0].key.batch;
+        expect(keys.has(key)).toBe(false);
+        keys.add(key);
+        if (key.includes("/")) throw new Error(`automation-set-batch-${refusal}`);
+        return engine.services.submit(...args);
+      }};
+      await expect(runCollectionAutomation({...space.dependencies(store), setBatches: services}, batchInput(batchDefinition()))).resolves.toEqual({kind: "done"});
+      const result = await store.runsOf("collection:Tasks#chain", "atc_one");
+      expect(result.unreadable).toBe(false);
+      const [run] = result.runs;
+      expect(run!.applied).toHaveLength(4);
+      const undone = await undoCollectionAutomationRuns({...space.undo([]), lookupBatch: engine.services.lookup}, [run!], new AbortController().signal);
+      expect(undone.undone.reverted).toBe(4);
+      expect([...space.records.values()].map(record => record.values.Count)).toEqual([1,1,1,1]);
+    });
+  }
+
+  it("abandons fenced and reused keys before retry or Undo", async () => {
+    const space = workspace([task("rec_t", {Project: "A", Count: 1}), task("rec_0", {Project: "A", Count: 1})]);
+    const store = await scratchStore();
+    const engine = batchEngine(space);
+    let lookups = 0;
+    const services = {...engine.services, lookup: async (...args: Parameters<AutomationSetBatches["lookup"]>) => {
+      lookups += 1;
+      return engine.services.lookup(...args);
+    }};
+    await expect(runCollectionAutomation({...space.dependencies(store), setBatches: services}, batchInput(batchDefinition()))).resolves.toEqual({kind: "done"});
+    expect(lookups).toBe(0);
+    const [run] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+    const absent = await reconcileSetBatches(run!, async () => ({state: "abandoned"}));
+    expect(absent.steps[1]!.batches![0]!.abandoned).toBe(true);
+    const recovered = await reconcileSetBatches(run!, async () => { throw new Error("automation-set-batch-key-reused"); });
+    expect(recovered.steps[1]!.batches![0]!.abandoned).toBe(true);
+    const undone = await undoCollectionAutomationRuns({...space.undo([]), lookupBatch: engine.services.lookup}, [recovered], new AbortController().signal);
+    expect(undone.undone.reverted).toBe(2);
+  });
+
+  it("places committed batches before recording a failed run", async () => {
+    const space = workspace([task("rec_t", {Project: "A", Count: 1}), ...[0,1,2,3,4].map(id => task(`rec_${id}`, {Project: "A", Count: 1}))]);
+    const store = await scratchStore();
+    const engine = batchEngine(space);
+    let submissions = 0;
+    const services = {...engine.services, submit: async (...args: Parameters<AutomationSetBatches["submit"]>) => {
+      if (++submissions === 2) throw new Error("write refused");
+      return engine.services.submit(...args);
+    }, wait: async (...args: Parameters<AutomationSetBatches["wait"]>) => {
+      const [saved] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+      expect(saved!.outcome).toBeNull();
+      await engine.services.wait(...args);
+    }};
+    await expect(runCollectionAutomation({...space.dependencies(store), setBatches: services}, batchInput(batchDefinition()))).resolves.toMatchObject({kind: "failed", error: "write refused"});
+    expect(engine.waits()).toBe(1);
+    const [run] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
+    expect(run!.outcome?.state).toBe("failed");
+    expect(run!.steps[1]!.batches![1]!.abandoned).toBe(true);
+  });
+
   it("records one progress line per batch, keeps open records on their borrowed path, and waits once", async () => {
     const space = workspace([task("rec_t", { Project: "A", Count: 1 }), ...[0,1,2,3,4].map(id => task(`rec_${id}`, { Project: "A", Count: 1 }))]);
     const store = await scratchStore();
@@ -869,7 +933,7 @@ describe("closed document Set batches", () => {
     }};
     await expect(runCollectionAutomation({...deps, store: interrupted}, batchInput(batchDefinition()))).rejects.toThrow("split-save");
     await expect(runCollectionAutomation(deps, batchInput(batchDefinition()))).resolves.toEqual({kind: "done"});
-    expect(engine.changed()).toBe(4);
+    expect([...space.records.values()].map(record => record.values.Count)).toEqual([2,2,2,2]);
     const [saved] = (await store.runsOf("collection:Tasks#chain", "atc_one")).runs;
     const undone = await undoCollectionAutomationRuns({...space.undo([]), lookupBatch: engine.services.lookup}, [saved!], new AbortController().signal);
     expect(undone.undone.reverted).toBe(4);
@@ -884,7 +948,7 @@ describe("closed document Set batches", () => {
     expect(saved!.steps[1]!.batches!.filter(batch => !batch.abandoned).map(batch => batch.count)).toEqual([4, 1, 1]);
   });
 
-  it("includes commit and submission time when sizing the next batch", async () => {
+  it("excludes fixed submission costs when sizing the next batch", async () => {
     const space = workspace([task("rec_t", {Project: "A", Count: 1}), ...[0,1,2,3,4].map(id => task(`rec_${id}`, {Project: "A", Count: 1}))]);
     const engine = batchEngine(space, {writerMs: 1});
     const store = await scratchStore();
@@ -895,7 +959,7 @@ describe("closed document Set batches", () => {
       return receipt;
     }};
     await expect(runCollectionAutomation({...space.dependencies(store), nowMs: () => now, setBatches: services}, batchInput(batchDefinition()))).resolves.toEqual({kind: "done"});
-    expect(engine.submissions.map(submission => submission.count)).toEqual([4, 1, 1]);
+    expect(engine.submissions.map(submission => submission.count)).toEqual([4, 2]);
   });
 
   it("abandons an oversized saved key and persists both sub-batches before sending either", async () => {
