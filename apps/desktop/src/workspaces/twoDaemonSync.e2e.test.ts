@@ -13,7 +13,7 @@ import * as Y from "yjs";
 import { parseFrontmatter, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
-import { DaemonRefusalError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, VersionedLiveAdapter, WorkspaceDaemonRequester, YdocLiveAdapter, type AutomationClaim } from "@dohc/workspace-engine-client";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
@@ -414,10 +414,7 @@ it.skipIf(engine.missing)(
         privateOwnerHost: { configPath: nativeConfigPath, client: profile.nativeClient },
       });
       owner = await openOwner();
-      let relay = owner.relay.bind({ ...owner.workspace, relay: connection });
-      await relay.claim();
       await owner.chats.ensureGeneralChannel({ workspaceId });
-      await relay.push();
       const adapterOf = (source: NonNullable<typeof owner>) => source.sessions.run(source.workspace,
         async ({ client, workspace }) => new VersionedLiveAdapter(client, workspace, { workspaceId }));
       let adapter = await adapterOf(owner);
@@ -432,18 +429,44 @@ it.skipIf(engine.missing)(
       }
       await expect.poll(async () => (await adapter.listPendingCollectionAdoptions()).adoptions.length,
         { timeout: REAL_DAEMON_DEADLINE_MS }).toBe(2);
+      capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
+      await expect.poll(async () => {
+        await capture!.flush();
+        return (await adapter.listPendingCollectionAdoptions()).adoptions;
+      }, { timeout: REAL_DAEMON_DEADLINE_MS }).toEqual([]);
+      // Background adoption establishes the bindings without an editor open.
+      // Close the covered local-only lineages through the engine's prune path.
+      await owner.sessions.run(owner.workspace, async ({ workspace }) => {
+        const ydocs = new YdocLiveAdapter(owner!.nativeClient());
+        try {
+          for (const filePath of [path, "tasks/target.md"]) {
+            const session = await ydocs.openSession({ workspace, versionId: "main", path: filePath,
+              contentKind: "richdoc", seedAbsentLineage: false });
+            try { expect(session.lineage).toBe("existing"); } finally { await session.close(); }
+          }
+        } finally { ydocs.dispose(); }
+      });
+      await capture.stop();
+      capture = undefined;
       await owner.close();
       owner = undefined;
-      // Restore artifact-only bindings, as when a seed-only lineage is pruned.
-      // No editor has opened either record and no Y.Doc bytes are fabricated.
-      const db = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH));
+      const db = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
       try {
+        expect(db.prepare("SELECT record_id,file_path,adoption_state FROM collection_records WHERE workspace_id=? ORDER BY file_path")
+          .all(workspaceId)).toEqual([
+            { record_id: sourceId, file_path: path, adoption_state: "adopted" },
+            { record_id: targetId, file_path: "tasks/target.md", adoption_state: "adopted" },
+          ]);
         expect(db.prepare("SELECT COUNT(*) AS count FROM ydoc_updates").get()).toEqual({ count: 0 });
-        expect(db.prepare("UPDATE collection_records SET adoption_state='adopted' WHERE workspace_id=?")
-          .run(workspaceId).changes).toBe(2);
+        expect(db.prepare("SELECT path,regime,head_update_seq,head_snapshot_seq FROM ydoc_docs WHERE workspace_id=? AND path IN (?,?) ORDER BY path")
+          .all(workspaceId, path, "tasks/target.md")).toEqual([
+            { path, regime: "local-only", head_update_seq: 0, head_snapshot_seq: 0 },
+            { path: "tasks/target.md", regime: "local-only", head_update_seq: 0, head_snapshot_seq: 0 },
+          ]);
       } finally { db.close(); }
       owner = await openOwner();
-      relay = owner.relay.bind({ ...owner.workspace, relay: connection });
+      const relay = owner.relay.bind({ ...owner.workspace, relay: connection });
+      await relay.claim();
       await relay.push();
       adapter = await adapterOf(owner);
       await expect.poll(async () => {
@@ -498,22 +521,7 @@ it.skipIf(engine.missing)(
       capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
       await capture.runRelaySync(page => relay.pull(page));
       await relay.push();
-      const assertRecipient = async () => {
-        const headers = { authorization: "Bearer test:relation-recipient" };
-        const digest = createHash("sha256").update(cleared).digest("hex");
-        await expect.poll(async () => {
-          await capture!.runRelaySync(page => relay.pull(page));
-          await relay.push();
-          const log = await fetch(`${proxy.origin}/sync/shares/${shareId}/log?since=0&limit=500`, { headers });
-          expect(log.status).toBe(200);
-          return log.json();
-        }, { timeout: 120_000 }).toMatchObject({ ops: expect.arrayContaining([
-          expect.objectContaining({ opKind: "moment.append", payload: expect.objectContaining({ payloadAfterBlobSha256: digest }) }),
-        ]) });
-        const blob = await fetch(`${proxy.origin}/sync/shares/${shareId}/blobs/${digest}`, { headers });
-        expect(blob.status).toBe(200);
-        expect(await blob.text()).toBe(cleared);
-        await recipient!.capture.runRelaySync(page => recipient!.relay.pull(page));
+      const assertRecipientState = async () => {
         const markdown = await readFile(join(rootB, path), "utf8");
         expect(markdown).toBe(cleared);
         expect(parseFrontmatter(markdown, false).meta).toEqual({ id: sourceId, title: "Keep" });
@@ -531,9 +539,28 @@ it.skipIf(engine.missing)(
         expect(await recipient!.refusalNotices()).toEqual({ notices: [] });
         expect(await recipient!.capture.countOpenConflicts()).toBe(0);
       };
+      const assertRecipient = async () => {
+        const headers = { authorization: "Bearer test:relation-recipient" };
+        const digest = createHash("sha256").update(cleared).digest("hex");
+        await expect.poll(async () => {
+          await capture!.runRelaySync(page => relay.pull(page));
+          await relay.push();
+          const log = await fetch(`${proxy.origin}/sync/shares/${shareId}/log?since=0&limit=500`, { headers });
+          expect(log.status).toBe(200);
+          return log.json();
+        }, { timeout: 120_000 }).toMatchObject({ ops: expect.arrayContaining([
+          expect.objectContaining({ opKind: "moment.append", payload: expect.objectContaining({ payloadAfterBlobSha256: digest }) }),
+        ]) });
+        const blob = await fetch(`${proxy.origin}/sync/shares/${shareId}/blobs/${digest}`, { headers });
+        expect(blob.status).toBe(200);
+        expect(await blob.text()).toBe(cleared);
+        await recipient!.capture.runRelaySync(page => recipient!.relay.pull(page));
+        await assertRecipientState();
+      };
       await assertRecipient();
       await recipient.close();
       recipient = await openLiveDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      await assertRecipientState();
       await assertRecipient();
     } finally {
       await recipient?.close();
