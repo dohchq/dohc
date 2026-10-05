@@ -1281,3 +1281,47 @@ fn lane_first_contact_push_selects_once_with_or_without_a_pending_origin() {
         );
     }
 }
+
+#[test]
+fn lane_first_local_export_uses_the_imported_state_as_its_bootstrap_preimage() {
+    let (_owner_scratch, _, mut original) = owner();
+    write(&mut original, "doc", "a", "doc.md", "A", "api", 10);
+    original
+        .write_with(&NoFaults, |tx| journal_moment_append_in_tx(tx, "ws", "a"))
+        .unwrap();
+    let (_peer_scratch, _, mut peer) = open_store();
+    seed_replication_version(&mut peer, "main", "main");
+    adopt_join_identity(
+        &mut peer,
+        "ws",
+        "recipient",
+        "epoch-1",
+        "stream-1",
+        1,
+        &NoFaults,
+    )
+    .unwrap();
+    peer.write_with(&NoFaults, |tx| {
+        tx.execute(
+            "INSERT INTO sync_relay_push_state VALUES ('ws','recipient',-1)",
+            [],
+        )
+        .map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    })
+    .unwrap();
+    hydrate(&original, &mut peer);
+    apply(&mut peer, &exports(&original)[0]);
+    write(&mut peer, "doc", "b", "doc.md", "B", "ydoc", 20);
+    lane(&mut peer, "doc");
+    drain(&mut peer);
+    let selected = exports(&peer);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].payload["momentId"], "b");
+    assert_eq!(selected[0].payload["beforePresent"], "present");
+    assert_eq!(selected[0].payload["beforeLatestMomentId"], "a");
+    hydrate(&peer, &mut original);
+    apply(&mut original, &selected[0]);
+    assert_eq!(count(&original, "conflicts"), 0);
+    assert_eq!(count(&original, "moments"), 2);
+}

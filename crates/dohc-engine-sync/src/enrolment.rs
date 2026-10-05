@@ -564,7 +564,7 @@ pub(crate) fn journal_file_version_in_tx(
         }
         crate::outbound::PortableBefore::published(&last)
     } else {
-        let first: String = tx.query_row("SELECT moment_id FROM moments WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 ORDER BY moment_order LIMIT 1", params![key.workspace_id,key.version_id,key.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
+        let first: String = tx.query_row("SELECT m.moment_id FROM moments m WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND r.imported=1 AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)) ORDER BY m.moment_order LIMIT 1", params![key.workspace_id,key.version_id,key.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
         let (bootstrap, _) =
             crate::outbound::moment_append_payload_in_tx(tx, &key.workspace_id, &first)?;
         crate::outbound::PortableBefore::bootstrap(&bootstrap)
