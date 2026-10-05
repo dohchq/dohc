@@ -1521,7 +1521,7 @@ describe("workspaceEngineCapture batch capture", () => {
       } as unknown as CaptureVersionedTextStore;
       const engine = capture(root, {
         store,
-        openRustYDocProviderSession: async input => ({ path: input.path, evict }) as EngineYdocProviderSession,
+        openRustYDocProviderSession: async input => ({ path: input.path, evict }) as unknown as EngineYdocProviderSession,
       });
       await engine.flush();
       pending = true;
