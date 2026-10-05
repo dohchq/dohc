@@ -5,7 +5,8 @@ import { build, preview, type PreviewServer } from "vite";
 import { createTestScratch, removeTestScratch } from "../src/workspaces/testTemp";
 
 // The production restore review and notice toast in Chromium, at window sizes
-// people use. A notice toast that is open must not block the review's action.
+// people use. The toast sits above the review and takes clicks there, and an
+// open toast must not block the review's action: the review scrolls clear of it.
 const viewports = {
   minimum: { width: 840, height: 620 },
   default: { width: 1280, height: 800 },
@@ -104,6 +105,64 @@ test.describe("shared restore review with a notice toast", () => {
       await expect(page.getByLabel("Restore result")).toHaveText("restored");
     });
   }
+
+  for (const setup of cases.filter((candidate) => candidate.viewport === "minimum")) {
+    test(`the toast is on top of the open review and takes a click in ${setup.theme}`, async ({ page }) => {
+      const { dialog } = await openReview(page, setup, false);
+      const toast = page.getByTestId("workspace-shell-error");
+      // What a pointer at the toast's middle hits is the toast, not the review or its scrim.
+      expect(await toast.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        return element.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+      })).toBe(true);
+      await page.screenshot({ path: test.info().outputPath(`toast-over-review-${setup.theme}.png`) });
+      // An ordinary click: Playwright refuses when another element receives it.
+      await toast.getByRole("button", { name: "Try again" }).click({ timeout: 2_000 });
+      await expect(page.getByLabel("Toast retries")).toHaveText("1");
+      await expect(dialog).toBeVisible();
+      // Closing it leaves the trap whole: the next Tab lands in the review.
+      await toast.getByRole("button", { name: "Dismiss workspace error" }).click({ timeout: 2_000 });
+      await expect(toast).toHaveCount(0);
+      await page.keyboard.press("Tab");
+      await expect(dialog.locator(":focus")).toHaveCount(1);
+    });
+  }
+
+  test("F6 reaches the toast from the review and comes back, and Tab never leaves the two", async ({ page }) => {
+    const { dialog, restore } = await openReview(page, cases[1], false);
+    await page.keyboard.press("Shift+Tab");
+    await expect(restore).toBeFocused();
+    await page.keyboard.press("F6");
+    const toasts = page.getByTestId("notice-toasts");
+    const retry = toasts.getByRole("button", { name: "Try again" });
+    await expect(retry).toBeFocused();
+    await page.screenshot({ path: test.info().outputPath("toast-keyboard-focus-dark.png") });
+    // Tab cycles the toast's own controls; it does not reach the page behind.
+    for (let step = 0; step < 4; step += 1) {
+      await page.keyboard.press("Tab");
+      await expect(toasts.locator(":focus")).toHaveCount(1);
+    }
+    await retry.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByLabel("Toast retries")).toHaveText("1");
+    // Escape from the toast goes back to where F6 left the review, and the
+    // review stays open. F6 goes there and back again.
+    await page.keyboard.press("Escape");
+    await expect(restore).toBeFocused();
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("F6");
+    await expect(retry).toBeFocused();
+    await page.keyboard.press("F6");
+    await expect(restore).toBeFocused();
+    // Closing the focused toast from the keyboard leaves the trap whole: the
+    // next Tab lands in the review, not on the page behind it.
+    await page.keyboard.press("F6");
+    await toasts.getByRole("button", { name: "Dismiss workspace error" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(toasts.getByTestId("workspace-shell-error")).toHaveCount(0);
+    await page.keyboard.press("Tab");
+    await expect(dialog.locator(":focus")).toHaveCount(1);
+  });
 
   test("the keyboard stays in the restore review while a toast is open", async ({ page }) => {
     // Retry leaves the review, so focus starts outside its controls.

@@ -8,7 +8,7 @@ import {
 } from "react";
 import { useFocusReturn } from "./ui/focusReturn";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./overlayStack";
-import { trapModalTabKey } from "./modalFocus";
+import { switchModalRegion, trapModalTabKey } from "./modalFocus";
 
 type PanelProps = Omit<HTMLAttributes<HTMLDivElement>, "children" | "onClick" | "tabIndex"> & {
   "data-testid"?: string;
@@ -16,6 +16,11 @@ type PanelProps = Omit<HTMLAttributes<HTMLDivElement>, "children" | "onClick" | 
 
 // The backdrop and panel alone, without the keyboard and stack behavior.
 // Overlay adds that; the states page renders this to show the scrim.
+//
+// Toasts sit above the dialog. A standard dialog scrolls with room below it
+// for them (NoticeCenter sets --dohc-toast-room), so its last actions can
+// scroll clear of an open toast. The room adds scroll extent only, so the
+// dialog does not move when a toast arrives.
 export function OverlayFrame(props: {
   appearance?: "standard" | "warning";
   panelRef: RefObject<HTMLDivElement | null>;
@@ -28,7 +33,7 @@ export function OverlayFrame(props: {
       data-dohc-modal="true"
       className={props.appearance === "warning"
         ? "fixed inset-0 z-50 grid place-items-center bg-scrim"
-        : "fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-scrim p-4 pt-24"}
+        : "fixed inset-0 z-30 flex items-start justify-center overflow-auto bg-scrim px-4 pt-24 pb-[calc(var(--dohc-toast-room,0px)+1rem)]"}
       onClick={props.onBackdropClick}
     >
       <div
@@ -79,6 +84,7 @@ export function Overlay(props: {
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
       if (!isTopOverlay(idRef.current)) return;
+      if (switchModalRegion(event, panelRef.current)) return;
       if (event.key === "Escape") {
         // One Escape closes one surface: a menu open inside the dialog takes
         // this one, and the next reaches the dialog.

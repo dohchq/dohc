@@ -527,6 +527,41 @@ describe("notice center", () => {
     expect(onRebuildEngineStore).not.toHaveBeenCalled();
   });
 
+  // A toast sits above an open dialog. When the toast that holds focus goes
+  // away, focus goes to the dialog, not to the Notices button behind it.
+  it("hands focus to an open dialog when the focused toast goes away", async () => {
+    const error = {
+      id: "shell-error-1",
+      message: "Could not refresh history. The engine did not answer.",
+      details: "Error: Could not refresh history.",
+      atMs: 1_000,
+      canRetry: true,
+      seen: false,
+    };
+    const props = (seen: boolean) => ({
+      workspaceErrors: [{ ...error, seen }],
+      onRetryWorkspaceError: vi.fn(),
+      onHideWorkspaceError: vi.fn(),
+    });
+    const { rerender } = render(
+      <>
+        {noticeElement(props(false))}
+        <div data-dohc-modal="true"><div tabIndex={-1} data-testid="dialog-panel" /></div>
+      </>,
+    );
+    const stack = screen.getByTestId("notice-toasts");
+    expect(stack.hasAttribute("data-dohc-toasts")).toBe(true);
+    within(stack).getByRole("button", { name: "Try again" }).focus();
+
+    rerender(
+      <>
+        {noticeElement(props(true))}
+        <div data-dohc-modal="true"><div tabIndex={-1} data-testid="dialog-panel" /></div>
+      </>,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("dialog-panel")));
+  });
+
   // A workspace error arrives as a toast in the corner and stays as a row in
   // Notices. Try again and Copy ride with it; closing the toast keeps the row.
   it("shows a workspace error as a toast and a notice with retry and copy", async () => {

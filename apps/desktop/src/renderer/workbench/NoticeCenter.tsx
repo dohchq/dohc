@@ -1,7 +1,8 @@
 import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
+import { topModalPanel } from "../modalFocus";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   ENGINE_STORE_UPDATE_NEXT_STEP,
@@ -237,12 +238,14 @@ const OWNER_LIVE_REFUSALS_BODY =
 // Corner hosts need room above the bell; rail hosts use the bottom-right corner.
 export type NoticeHostPlacement = "rail" | "corner";
 
-// Toasts share the Notices panel's layer, below workbench modals and their
-// scrim, so they cannot cover a review's actions. Their rows stay in Notices.
+// Toasts sit above every dialog and its scrim (z-30, warning z-50), so a
+// failure in a dialog is seen where it happens. A dialog keeps its actions
+// clear of them with scroll room (Overlay), and F6 reaches them from the
+// dialog's focus trap (modalFocus). Their rows stay in Notices.
 const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
-  rail: "fixed bottom-3 right-3 z-20 flex flex-col items-end gap-2",
+  rail: "fixed bottom-3 right-3 z-60 flex flex-col items-end gap-2",
   // The corner toggle is 36px tall on an 8px inset; 56px clears it with a gap.
-  corner: "fixed bottom-14 right-3 z-20 flex flex-col items-end gap-2",
+  corner: "fixed bottom-14 right-3 z-60 flex flex-col items-end gap-2",
 };
 
 const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
@@ -480,7 +483,27 @@ export function NoticeCenter(props: {
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastsRef = useRef<HTMLDivElement>(null);
   useFocusReturn(open, centerRef, () => toggleRef.current);
-  useFocusSurface(toastsRef, () => toggleRef.current);
+  // A toast removed under focus hands it to the open dialog, if there is one:
+  // the toggle sits behind the dialog, outside its focus trap.
+  useFocusSurface(toastsRef, () => topModalPanel() ?? toggleRef.current);
+  // How far the toasts reach up from the window's bottom edge: the room an
+  // open dialog leaves below its content (Overlay). None while none show.
+  useLayoutEffect(() => {
+    const stack = toastsRef.current;
+    if (!stack) return;
+    const root = document.documentElement;
+    const measure = () => {
+      const room = stack.offsetHeight > 0 ? Math.ceil(window.innerHeight - stack.getBoundingClientRect().top) : 0;
+      root.style.setProperty("--dohc-toast-room", `${room}px`);
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(stack);
+    return () => {
+      observer?.disconnect();
+      root.style.removeProperty("--dohc-toast-room");
+    };
+  }, [open]);
   useFocusSurface(centerRef, () => centerRef.current);
   useEffect(() => {
     if (open) centerRef.current?.focus({ preventScroll: true });
@@ -1182,7 +1205,7 @@ export function NoticeCenter(props: {
           Notices hides it — every row is in the panel, and a toast must never
           sit over it. */}
       {open ? null : (
-        <div ref={toastsRef} data-testid="notice-toasts" className={TOAST_STACK_CLASS[host]}>
+        <div ref={toastsRef} data-testid="notice-toasts" data-dohc-toasts className={TOAST_STACK_CLASS[host]}>
           {errorToast ? (
             <WorkspaceErrorToast
               error={errorToast}

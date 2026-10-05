@@ -55,15 +55,17 @@ let status = { operationId: "restore", document: documentKey, path, phase: "nati
   },
 };
 
-const workspaceErrors: WorkspaceErrorNotice[] = [{
+const workspaceError: WorkspaceErrorNotice = {
   id: "share-refresh", message: "dohc could not refresh who can edit notes/launch-plan.md. Check your connection, then try again.",
   details: "Notice: Sharing refresh failed", atMs: 1_788_922_800_000, canRetry: true, seen: false,
-}];
+};
 const ignore = () => {};
 
 function SharedRestoreFixture() {
   const [open, setOpen] = useState(false);
   const [restored, setRestored] = useState(false);
+  const [retries, setRetries] = useState(0);
+  const [toastClosed, setToastClosed] = useState(false);
   return (
     <main className="flex h-screen bg-bg text-ink">
       <nav className="flex w-12 flex-col items-center justify-end border-r border-line bg-panel-2 pb-2">
@@ -77,15 +79,16 @@ function SharedRestoreFixture() {
           onOpenConflicts={ignore}
           onRefreshShareView={ignore}
           onRebuildEngineStore={ignore}
-          workspaceErrors={workspaceErrors}
-          onRetryWorkspaceError={ignore}
-          onHideWorkspaceError={ignore}
+          workspaceErrors={[{ ...workspaceError, seen: toastClosed }]}
+          onRetryWorkspaceError={() => setRetries((count) => count + 1)}
+          onHideWorkspaceError={() => setToastClosed(true)}
           onDismissWorkspaceError={ignore}
         />
       </nav>
       <section className="flex-1 p-6">
         <button type="button" onClick={() => setOpen(true)}>Open restore review</button>
         <output aria-label="Restore result">{restored ? "restored" : ""}</output>
+        <output aria-label="Toast retries">{retries}</output>
       </section>
       {open ? (
         <OwnerRestoreDialog
