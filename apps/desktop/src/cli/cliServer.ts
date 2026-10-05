@@ -258,9 +258,19 @@ export interface CliButtonsPort {
   ): Promise<{ result: NamedPressResult; waiting: PressWaitReason | null }>;
 }
 
-export type HistoryReadRefusal =
-  | { status: "untracked" }
-  | { status: "policy-unreadable"; unreadable: WorkspacePolicyPath[] };
+// dohc can't read the workspace's History rules, so every History answer is
+// this one, naming the files and nothing about any change.
+export type HistoryPolicyRefusal = { status: "policy-unreadable"; unreadable: WorkspacePolicyPath[] };
+export type HistoryReadRefusal = { status: "untracked" } | HistoryPolicyRefusal;
+
+function historyPolicyUnreadable(refusal: HistoryPolicyRefusal) {
+  return {
+    ok: false as const,
+    status: "policy-unreadable" as const,
+    unreadable: refusal.unreadable,
+    reason: `History is hidden because dohc can't read ${refusal.unreadable.join(" and ")}`,
+  };
+}
 
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   // `agent` is the agent this socket's write is, or null for the person.
@@ -272,7 +282,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   readOnly: boolean;
   fileObjectIdForPath(path: string): Promise<string | null>;
   filePathForObjectId(objectId: string): Promise<string | null>;
-  listMoments(input: { limit: number; objectId?: string }): Promise<VersionedTextMomentSummary[]>;
+  listMoments(input: { limit: number; objectId?: string }): Promise<VersionedTextMomentSummary[] | HistoryPolicyRefusal>;
   // A refusal says why History hides a change, never its path or contents:
   // its rules no longer track a file it touched, or dohc can't read them.
   readMoment(momentId: string): Promise<VersionedTextMoment | HistoryReadRefusal | null>;
@@ -2279,6 +2289,8 @@ async function dispatchWorkspace(
         limit: LIST_MOMENTS_HARD_LIMIT,
         ...(objectId ? { objectId } : {}),
       });
+      // An empty list would say this workspace has no History.
+      if (!Array.isArray(moments)) return historyPolicyUnreadable(moments);
       const selectedMoments = sinceMs === undefined
         ? moments
         : moments.filter((moment) => moment.recordedAtMs > sinceMs);
@@ -2310,12 +2322,7 @@ async function dispatchWorkspace(
               status: "untracked" as const,
               reason: `change ${request.args.id} is hidden because History no longer tracks its file`,
             }
-          : {
-              ok: false as const,
-              status: "policy-unreadable" as const,
-              unreadable: moment.unreadable,
-              reason: `History is hidden because dohc can't read ${moment.unreadable.join(" and ")}`,
-            };
+          : historyPolicyUnreadable(moment);
       }
       if (!moment) {
         return {

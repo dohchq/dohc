@@ -898,7 +898,7 @@ describe("CLI socket server", () => {
         files: [{ path: "primary.md", operation: "write" }],
       }],
     });
-    expect(moments.changes[0]).not.toHaveProperty("summary");
+    expect("changes" in moments && moments.changes[0]).not.toHaveProperty("summary");
     const moment = await invoke("moment", {
       cwd: workspaceRoot,
       actor: "agent",
@@ -1160,7 +1160,7 @@ describe("CLI socket server", () => {
       cwd: scopedRoot,
       actor: "agent",
     });
-    expect(moments.changes.map((change) => change.path)).toEqual(["scoped.md"]);
+    expect("changes" in moments && moments.changes.map((change) => change.path)).toEqual(["scoped.md"]);
     await expect(invoke("moment", {
       cwd: scopedRoot,
       actor: "agent",

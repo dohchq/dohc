@@ -689,15 +689,28 @@ const rawMomentPayloadSnapshotSchema = z
   })
   .strict();
 
-const momentsResultSchema = z
-  .object({
-    changes: z.array(rawMomentSummarySchema),
-    count: z.number().int().nonnegative(),
-    totalAvailable: z.number().int().nonnegative(),
-    hasMore: z.boolean(),
-    cursorMs: z.number(),
-  })
-  .strict();
+// dohc can't read the workspace's History rules, so History hides every
+// change. `unreadable` names what to fix; no change's id, path or contents
+// are sent.
+const historyPolicyUnreadableSchema = z.object({
+  ok: z.literal(false),
+  status: z.literal("policy-unreadable"),
+  unreadable: z.array(z.enum(WORKSPACE_POLICY_PATHS)).min(1),
+  reason: z.string().min(1),
+}).strict();
+
+const momentsResultSchema = z.union([
+  z
+    .object({
+      changes: z.array(rawMomentSummarySchema),
+      count: z.number().int().nonnegative(),
+      totalAvailable: z.number().int().nonnegative(),
+      hasMore: z.boolean(),
+      cursorMs: z.number(),
+    })
+    .strict(),
+  historyPolicyUnreadableSchema,
+]);
 const momentResultSchema = z.union([
   z
     .object({
@@ -711,15 +724,9 @@ const momentResultSchema = z.union([
     .strict(),
   z.object({ ok: z.literal(false), reason: z.string().min(1) }).strict(),
   // History has the change, but its rules no longer track a file it touched.
+  // No path or contents are sent.
   z.object({ ok: z.literal(false), status: z.literal("untracked"), reason: z.string().min(1) }).strict(),
-  // dohc can't read those rules, so History hides every change.
-  // `unreadable` names what to fix. Neither sends a change's path or contents.
-  z.object({
-    ok: z.literal(false),
-    status: z.literal("policy-unreadable"),
-    unreadable: z.array(z.enum(WORKSPACE_POLICY_PATHS)).min(1),
-    reason: z.string().min(1),
-  }).strict(),
+  historyPolicyUnreadableSchema,
 ]);
 
 const rawChannelIdSchema = z.string().regex(/^channel-/u);

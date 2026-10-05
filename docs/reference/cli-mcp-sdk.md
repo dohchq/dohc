@@ -78,7 +78,7 @@ List workspace history, newest first: workspace-engine moments (the recorder for
 - `includeFiles`: `boolean`
 - `path`: `string`
 
-Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
+Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_kept_copies`
 

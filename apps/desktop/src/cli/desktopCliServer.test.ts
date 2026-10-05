@@ -312,11 +312,14 @@ describe("desktop CLI workspace context", () => {
 
       // A policy file dohc cannot read hides all history, as it blocks search.
       await writeFile(join(root, ".dohc", "files.toml"), "[[rule]\n");
-      expect(await mcp("moments", {})).toMatchObject({ changes: [], count: 0 });
       // Unreadable rules hide every change, so the answer names the rules
-      // file and nothing about the change.
+      // file and no change. An empty list would say there is no History.
       const unreadable = { ok: false, status: "policy-unreadable", unreadable: [".dohc/files.toml"],
         reason: "History is hidden because dohc can't read .dohc/files.toml" };
+      expect(await mcp("moments", {})).toEqual(unreadable);
+      expect(await mcp("moments", { includeFiles: true })).toEqual(unreadable);
+      expect(await cli("history", "list")).toEqual({ exitCode: 1, stdout: "",
+        stderr: "dohc: History is hidden because dohc can't read .dohc/files.toml\n" });
       expect(await mcp("moment", { id: "notes" })).toEqual(unreadable);
       expect(await mcp("moment", { id: "no-such-change" })).toEqual(unreadable);
       expect(await cli("history", "show", "notes")).toEqual({ exitCode: 1, stdout: "",
