@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { WriteSchema } from "@dohc/automation-executor/automation-run-store";
-import { AutomationControlsTargetShape } from "../ipc/bridgeContract";
+import { AutomationControlsTargetShape, KeptAutomationFieldShape } from "../ipc/bridgeContract";
 import type { DatasetUndoConfirmed } from "@dohc/automation-executor/dataset-automation-undo";
 import type {
+  KeptAutomationField,
   CollectionAutomationHold,
   CollectionAutomationRetry,
   CollectionAutomationRun,
@@ -135,9 +136,9 @@ export function createServerRuns(send: (workspaceId: string, request: ServerRequ
       workspaceId: string,
       definitions: ReadonlyArray<{ collectionPath: string; id: string; definitionHash: string }>,
       again: boolean,
-    ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: string[]; otherKept: number; errorMessage: string | null }> {
+    ): Promise<{ undone: number; left: number; reverted: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; errorMessage: string | null }> {
       const answer = await ask(workspaceId, { method: "POST", action: "restore", body: { definitions, again } },
-        z.object({ undone: Count, left: Count, reverted: Count, missing: Count, keptFields: z.array(z.string().regex(/^[a-f0-9]{32}$/)), otherKept: Count, errorMessage: z.string().nullable() }));
+        z.object({ undone: Count, left: Count, reverted: Count, missing: Count, keptFields: z.array(KeptAutomationFieldShape), otherKept: Count, errorMessage: z.string().nullable() }));
       return answer ?? { undone: 0, left: 0, reverted: 0, missing: 0, keptFields: [], otherKept: 0, errorMessage: null };
     },
     /** The steps the server holds until a current editor allows them. */

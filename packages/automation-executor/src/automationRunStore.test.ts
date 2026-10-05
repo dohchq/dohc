@@ -14,7 +14,7 @@ const setA = { kind: "set" as const, target: { recordId: "rec_a", collectionPath
 
 function run(claimId: string, state: "done" | "failed" | null, atMs: number, settled = state === "done"): StoredRun {
   return {
-    version: 8, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
+    version: 9, claimId, automationId: AUTOMATION, definitionHash: "0123456789abcdef", keySeed: "0123456789abcdef",
     startedAtMs: atMs, finishedAtMs: state === null ? null : atMs, steps: [{ ordinal: 0, effects: [setA, setA] }],
     applied: [{ ordinal: 0, writes: [{ kind: "field", recordId: "rec_a", path: "Tasks/a.md", field: "__proto__", before: 1, after: 2 }] }],
     created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null, superseded: false, undo: null, undoKept: [], settled,
@@ -23,6 +23,21 @@ function run(claimId: string, state: "done" | "failed" | null, atMs: number, set
 }
 
 describe("the automation run store", () => {
+  it("saves version 9 and refuses version 8 kept fields without a compatibility reader", async () => {
+    const root = await createTestScratch("dohc-automation-runs-");
+    const store = createAutomationRunStore(root, testMetadataDir);
+    await store.save({ ...run("atc_one", "done", 1), undoKept: [{ recordId: "rec_a", field: "A", path: "Tasks/a.md", fieldName: "A", datasetRecordId: null }] });
+    const folder = join(root, ".dohc", "automations", "runs", hashOf(AUTOMATION));
+    const headerName = (await readdir(folder)).find((file) => file.endsWith(".json"))!;
+    const headerPath = join(folder, headerName);
+    const header = JSON.parse(await readFile(headerPath, "utf8"));
+    expect(header.version).toBe(9);
+    header.version = 8;
+    header.undoKept = [{ recordId: "rec_a", field: "A" }];
+    await writeFile(headerPath, JSON.stringify(header));
+    await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toEqual({ runs: [], unreadable: true });
+  });
+
   it("preserves timing on appended progress lines across restart and whole saves", async () => {
     const root = await createTestScratch("dohc-automation-timing-");
     const store = createAutomationRunStore(root, testMetadataDir);
@@ -79,11 +94,11 @@ describe("the automation run store", () => {
     expect(await store.runsOf(AUTOMATION, "atc_one")).toEqual({ runs: [], unreadable: true });
   });
 
-  it("preserves progress when saving kept fields in v8 history", async () => {
+  it("preserves progress when saving kept fields in v9 history", async () => {
     const store = createAutomationRunStore(await createTestScratch("dohc-automation-runs-"), testMetadataDir);
     const saved = run("atc_one", "done", 1);
     await store.save(saved);
-    const undoKept = [{ recordId: "rec_a", field: "__proto__" }];
+    const undoKept = [{ recordId: "rec_a", field: "__proto__", path: "Tasks/one.md", fieldName: "__proto__", datasetRecordId: null }];
     await store.updateState(saved, { undo: "done", undoKept });
     expect((await store.runsOf(AUTOMATION, "atc_one")).runs).toEqual([{ ...saved, undo: "done", undoKept }]);
   });
@@ -256,7 +271,7 @@ describe("the automation run store", () => {
     const files = await readdir(join(folder, automationFolder!));
     const planOf = (claimId: string) => join(folder, automationFolder!, files.find((file) => file.endsWith(".json") && file.startsWith(hashOf(claimId)))!);
     const text = await readFile(planOf("atc_older"), "utf8");
-    await writeFile(planOf("atc_older"), text.replace('"version":8', '"version":7'));
+    await writeFile(planOf("atc_older"), text.replace('"version":9', '"version":8'));
     await writeFile(planOf("atc_damaged"), "{ torn");
     const later = Date.now() + 31 * 24 * 60 * 60 * 1000;
     await expect(store.expire(Date.now(), async () => "gone", null)).resolves.toBeNull();
@@ -453,8 +468,8 @@ describe("the automation run store", () => {
     const progress = (await readdir(files)).find((file) => file.endsWith(".progress.jsonl"))!;
     const text = await readFile(join(files, header), "utf8");
 
-    // The previous format did not require the fields kept by Undo.
-    await writeFile(join(files, header), text.replace('"version":8', '"version":7'));
+    // The previous format did not require locations for the fields kept by Undo.
+    await writeFile(join(files, header), text.replace('"version":9', '"version":8'));
     await expect(store.runsOf(AUTOMATION, "atc_one")).resolves.toMatchObject({ runs: [], unreadable: true });
     await writeFile(join(files, header), text);
     await rm(join(files, progress));

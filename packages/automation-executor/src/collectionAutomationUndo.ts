@@ -2,7 +2,7 @@ import { posix } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
-import type { StoredRun } from "./automationRunStore";
+import type { StoredRun, UndoKeptField } from "./automationRunStore";
 import { unrecordedEffect } from "./automationStepRun";
 import { rebaseRun, type CollectionAutomationReads, type CollectionRecordWrites } from "./collectionAutomationRun";
 
@@ -162,7 +162,7 @@ export async function undoCollectionAutomationRuns(
   only?: ReadonlyArray<{ recordId: string; field: string }>,
   onlyRecordId?: string,
   prepared?: ReturnType<typeof documentUndoChanges>,
-): Promise<{ undone: CollectionAutomationUndone; keptFields: Array<{ recordId: string; field: string }> }> {
+): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[] }> {
   // Each run's records are found where their Collections are now. A
   // Collection no longer here keeps its paths, where no record is found.
   const { added, records } = prepared ?? documentUndoChanges(runs.map((run) => {
@@ -173,7 +173,7 @@ export async function undoCollectionAutomationRuns(
   const undone: CollectionAutomationUndone = {
     reverted: 0, removed: 0, deleted: 0, kept: 0, keptChanged: 0, gone: 0, changedSince: 0, missing: 0, irreversible: 0, actions: 0, actionsReversed: 0,
   };
-  const keptFields: Array<{ recordId: string; field: string }> = [];
+  const keptFields: UndoKeptField[] = [];
   const tried = only ? new Set(only.map(({ recordId, field }) => JSON.stringify([recordId, field]))) : null;
   for (const record of records.values()) {
     if (onlyRecordId !== undefined && record.recordId !== onlyRecordId) continue;
@@ -219,7 +219,11 @@ export async function undoCollectionAutomationRuns(
         if (isDeepStrictEqual(current, entry.to)) continue;
         const again = entry.from.findIndex((candidate, index) => index > entry.attempt && isDeepStrictEqual(candidate, current));
         if (again >= 0) next.push({ ...entry, attempt: again });
-        else { undone.changedSince += 1; keptFields.push({ recordId: record.recordId, field: entry.field }); }
+        else {
+          undone.changedSince += 1;
+          // Document field names are also their identity; datasets use separate field ids.
+          keptFields.push({ recordId: record.recordId, field: entry.field, path, fieldName: entry.field, datasetRecordId: null });
+        }
       }
       pending = next;
     }

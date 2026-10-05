@@ -116,13 +116,13 @@ export function useStopAndRestore(workspaceId: string) {
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
 /** The changes runs kept other than fields; `runChangesKept` includes both field counts. */
-const otherKept = (result: Restored): number => result.runChangesKept - result.fieldsKept - result.fieldsMissing;
+const otherKept = (result: Restored): number => result.runChangesKept - result.keptFields.length - result.fieldsMissing;
 
 // The owner's links in pages of 1,000; the dialog reads this many at most.
 const MAX_LINK_PAGES = 5;
 
 export function StopAndRestoreDialog({
-  workspaceId, target: first, start, receipts, onRetry, onClose, onBeforeRestore, onRestored, onOpenFile, onError, onSettled,
+  workspaceId, target: first, start, receipts, onRetry, onClose, onBeforeRestore, onRestored, onOpenFile, onOpenCollection, onError, onSettled,
 }: {
   workspaceId: string;
   /** The person or link History showed, picked first, with History's label until the relay lists it. */
@@ -136,6 +136,7 @@ export function StopAndRestoreDialog({
   onBeforeRestore(): Promise<() => void>;
   onRestored(): void;
   onOpenFile(path: string): void;
+  onOpenCollection(path: string): void;
   /**
    * The shell's toast and Notices row, with Try again. Each person or link
    * has one row, `identity`, which a newer failure replaces.
@@ -252,7 +253,7 @@ export function StopAndRestoreDialog({
     const outcome = {
       result: {
         ...result, restored: receipts.get(workspaceId, chosen.target), runsUndone: totals.runsUndone, fieldsMissing: totals.fieldsMissing,
-        runChangesKept: totals.otherKept + result.fieldsKept + totals.fieldsMissing,
+        runChangesKept: totals.otherKept + result.keptFields.length + totals.fieldsMissing,
         ...(earlier === null ? {} : {
           review: [...new Map([...earlier.review, ...result.review].map((file) => [file.path, file])).values()]
             .sort((left, right) => left.path.localeCompare(right.path)),
@@ -289,7 +290,7 @@ export function StopAndRestoreDialog({
         : {
             status: "restored" as const, restored, review: [], runsLeft: 0, runsUndone: runs.runsUndone, fieldsMissing: runs.fieldsMissing,
             runChangesKept: runs.otherKept + runs.fieldsMissing,
-            fieldsKept: 0, wroteAutomations: false, sendsMessages: false, unfinished: null,
+            keptFields: [], wroteAutomations: false, sendsMessages: false, unfinished: null,
           },
       undone: true,
     };
@@ -329,7 +330,7 @@ export function StopAndRestoreDialog({
         {state.kind === "working" ? <p className="text-[12px] text-muted">Stopping access and restoring files…</p> : null}
         {state.kind === "waiting" ? <p className="text-[13px] text-muted">{words.waiting}</p> : null}
       </div>
-      {state.kind === "done" ? <Outcome words={words} result={state.result} undone={state.undone} onOpenFile={onOpenFile} /> : null}
+      {state.kind === "done" ? <Outcome words={words} result={state.result} undone={state.undone} onOpenFile={onOpenFile} onOpenCollection={onOpenCollection} /> : null}
       <div className="mt-4 flex justify-end gap-2">
         <SecondaryButton onClick={onClose}>{state.kind === "choose" ? "Cancel" : "Close"}</SecondaryButton>
         {state.kind === "done" && !state.undone && state.result.restored.length > 0 ? (
@@ -401,14 +402,15 @@ async function editLinks(workspaceId: string): Promise<StopTarget[]> {
   return links;
 }
 
-function Outcome({ words, result, undone, onOpenFile }: {
+function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
   words: Words;
   result: Restored;
   undone: boolean;
   onOpenFile(path: string): void;
+  onOpenCollection(path: string): void;
 }) {
   const files = plural(result.restored.length, "file", "files");
-  const fields = result.fieldsKept + result.fieldsMissing;
+  const fields = result.keptFields.length + result.fieldsMissing;
   const other = otherKept(result);
   return (
     <div className="mt-3 space-y-3" data-testid="stop-and-restore-outcome">
@@ -430,9 +432,9 @@ function Outcome({ words, result, undone, onOpenFile }: {
           dohc could not undo {plural(result.runsLeft, "run", "runs")} of {words.automations}. Undo each from its Collection's run history.
         </p>
       ) : null}
-      {result.fieldsKept > 0 ? (
+      {result.keptFields.length > 0 ? (
         <p className="m-0 text-[13px] text-muted">
-          {plural(result.fieldsKept, "field", "fields")} kept a later value. Restore them from each record's History.
+          {plural(result.keptFields.length, "field", "fields")} kept a later value.
         </p>
       ) : null}
       {result.fieldsMissing > 0 ? (
@@ -453,10 +455,36 @@ function Outcome({ words, result, undone, onOpenFile }: {
           Runs on your other computers are not undone here. Undo them from the run history on each computer.
         </p>
       ) : null}
-      {result.review.length > 0 ? (
+      {result.review.length > 0 || result.keptFields.length > 0 ? (
         <div>
-          <p className="m-0 text-[13px] text-muted">dohc left these files as they are. Check them:</p>
+          <p className="m-0 text-[13px] text-muted">dohc left these changes as they are. Check them:</p>
           <ul className="mt-1 max-h-48 list-none space-y-1 overflow-auto p-0">
+            {result.keptFields.map((kept) => (
+              <li key={`field:${kept.id}`}>
+                {kept.path !== null ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (kept.path !== null) {
+                        if (kept.recordId !== null) onOpenCollection(kept.path);
+                        else onOpenFile(kept.path);
+                      }
+                    }}
+                    className="max-w-full truncate rounded-md px-1 text-left font-mono text-[12px] text-ink hover:bg-hover"
+                  >
+                    {kept.path}
+                  </button>
+                ) : null}
+                <p className="m-0 px-1 text-[13px] text-ink">{kept.recordId === null ? kept.field : `Record ${kept.recordId} · ${kept.field}`}</p>
+                <p className="m-0 px-1 text-[12px] text-muted">
+                  {kept.recordId !== null
+                    ? "Check previous values in Collection History. Edit this record to restore the field."
+                    : kept.path === null
+                      ? "Find this record in its Collection to restore the field."
+                      : "Restore it from this record's History."}
+                </p>
+              </li>
+            ))}
             {result.review.map((file) => (
               <li key={file.path}>
                 <button

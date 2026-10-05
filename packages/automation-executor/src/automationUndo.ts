@@ -1,4 +1,5 @@
 import { rebaseRun } from "./collectionAutomationRun";
+import type { UndoKeptField } from "./automationRunStore";
 import type { AutomationTargets } from "./automationTargets";
 import type { ReachStep } from "./automationReach";
 
@@ -23,7 +24,7 @@ export async function undoAutomationRuns(
   documents: CollectionAutomationUndoDependencies, host: DatasetUndoHost | null, collection: import("./automationReach").ReachCollection, rosterNow: () => Promise<import("./automationReach").ReachRoster>, claimId: string, runs: readonly StoredRun[],
   saveRequest: (request: DatasetUndoRequest) => Promise<void>, signal: AbortSignal,
   codeFiles: readonly string[] = [],
-): Promise<{ undone: CollectionAutomationUndone; keptFields: Array<{ recordId: string; field: string }> }> {
+): Promise<{ undone: CollectionAutomationUndone; keptFields: UndoKeptField[] }> {
   if (host !== null && datasetUndoRulesChanged(host, runs)) throw new Error(DATASET_UNDO_RULES_CHANGED);
   const targets = new Map<string, Target>();
   const touch = (key: string, target: Target) => { targets.delete(key); targets.set(key, target); };
@@ -57,7 +58,7 @@ export async function undoAutomationRuns(
   }));
   const datasetChanges = host === null ? [] : datasetUndoChanges(host, runs);
   const result = empty();
-  const keptFields: Array<{ recordId: string; field: string }> = [];
+  const keptFields: UndoKeptField[] = [];
   const accumulate = (next: CollectionAutomationUndone) => { for (const key of Object.keys(result) as Array<keyof CollectionAutomationUndone>) result[key] += next[key]; };
   const ordered = [...targets.values()].reverse();
   const actions = new Map<string, Array<Extract<Target, { kind: "action" }>>>();

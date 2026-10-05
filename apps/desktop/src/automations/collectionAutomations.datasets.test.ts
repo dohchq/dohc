@@ -1454,7 +1454,7 @@ describe("Collection automations on a dataset", () => {
       { collectionPath: "Budget", id: "close-paid", definitionHash: definitionHash(summary.automations[0].automation) },
     ], async () => { throw new Error("Nothing moves to the trash."); });
     expect(result).toMatchObject({ undone: 1, left: 0, reverted: 0, missing: 0, otherKept: 0, errorMessage: null });
-    expect(result.keptFields).toHaveLength(1);
+    expect(result.keptFields).toEqual([{ id: expect.stringMatching(/^[a-f0-9]{32}$/), path: "Budget", recordId: invoice, field: "Status" }]);
     expect(result.keptFields.length + result.missing + result.otherKept).toBe(1);
     expect((await f.record(invoice))?.values[STATUS]).toBe("Changed later");
     await f.executor.dispose();
@@ -2242,7 +2242,7 @@ describe("dataset automation claims in both ledgers", () => {
     const store = createAutomationRunStore(f.root, resolveWorkspaceMetadataDir);
     const old = Date.now() - 31 * 24 * 60 * 60 * 1000;
     const saved = (claimId: string, outcome: StoredRun["outcome"], rest: Partial<StoredRun> = {}): StoredRun => ({
-      version: 8, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
+      version: 9, claimId, automationId: AUTOMATION, definitionHash: "h", keySeed: "h-1", startedAtMs: old, finishedAtMs: old, steps: [],
       applied: [], created: [], replans: [], undoRequests: [], undoCalls: [], undoCovers: [], readableFields: null, collections: [], rules: null,
       superseded: false, undo: null, undoKept: [], settled: outcome?.state === "done", outcome, ...rest,
     });

@@ -2,7 +2,7 @@ import { rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { isNormalizedRelativePath } from "@dohc/workspace-contracts/collection-values";
-import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
+import type { CollectionAutomations, KeptAutomationField } from "@dohc/automation-executor/collection-automations";
 import type { ServerRuns } from "../automations/serverRuns";
 import {
   LiveDocumentMutationError,
@@ -131,10 +131,12 @@ export function registerStopAndRestoreIpc<
   // Per workspace and person or link, the fields each computer's runs kept at
   // its last pass that finished. A try that stops before a computer's pass
   // finishes keeps that computer's earlier fields instead of counting none.
-  const keptByTarget = new Map<string, { server: string[]; here: string[] }>();
-  const knownKept = (target: string): number => {
+  const keptByTarget = new Map<string, { server: KeptAutomationField[]; here: KeptAutomationField[]; latest: "server" | "here" }>();
+  const knownKept = (target: string): KeptAutomationField[] => {
     const kept = keptByTarget.get(target);
-    return kept ? new Set([...kept.server, ...kept.here]).size : 0;
+    if (!kept) return [];
+    const earlier = kept.latest === "here" ? kept.server : kept.here;
+    return [...new Map([...earlier, ...kept[kept.latest]].map((field) => [field.id, field])).values()];
   };
 
   /**
@@ -152,11 +154,11 @@ export function registerStopAndRestoreIpc<
     undoHere: (again: boolean) => ReturnType<CollectionAutomations["undoRunsOf"]>,
   ): Promise<UndoneRuns> {
     const counts = { undone: 0, left: 0, missing: 0, otherKept: 0, errorMessage: null };
-    // The fields each computer's runs still keep, by hash: one kept on both counts once.
-    const kept = keptByTarget.get(target) ?? { server: [], here: [] };
+    // The fields each computer's runs still keep, by identity: one kept on both appears once.
+    const kept = keptByTarget.get(target) ?? { server: [], here: [], latest: "here" as const };
     keptByTarget.set(target, kept);
-    const total = (): UndoneRuns => ({ ...counts, kept: new Set([...kept.server, ...kept.here]).size });
-    const add = (host: "server" | "here", pass: { undone: number; left: number; missing: number; keptFields: string[]; otherKept: number; errorMessage: string | null }, again: boolean) => {
+    const total = (): UndoneRuns => ({ ...counts, keptFields: knownKept(target) });
+    const add = (host: "server" | "here", pass: { undone: number; left: number; missing: number; keptFields: KeptAutomationField[]; otherKept: number; errorMessage: string | null }, again: boolean) => {
       if (!again) {
         counts.undone += pass.undone;
         counts.left += pass.left;
@@ -165,6 +167,7 @@ export function registerStopAndRestoreIpc<
       counts.otherKept += pass.otherKept;
       if (pass.errorMessage !== null) throw new UndoRunsStopped(pass.errorMessage, total());
       kept[host] = pass.keptFields;
+      kept.latest = host;
     };
     try {
       for (let pass = 0; pass < UNDO_PASSES; pass += 1) {
@@ -180,7 +183,9 @@ export function registerStopAndRestoreIpc<
       }
     } catch (error) {
       // What it undid before it stopped is reported with why it stopped.
-      throw new UndoRunsStopped(error instanceof Error ? error.message : String(error), total());
+      throw new UndoRunsStopped(error instanceof z.ZodError
+        ? "Your server runs a different version of dohc. Update it, then try again."
+        : error instanceof Error ? error.message : String(error), total());
     }
     return total();
   }
@@ -270,12 +275,12 @@ export function registerStopAndRestoreIpc<
         const outcome = await restoreGrantWrites(grantIds);
         if (outcome.status !== "restored" || outcome.unfinished?.step !== "files") return outcome;
         const kept = knownKept(target);
-        return { ...outcome, fieldsKept: kept, runChangesKept: outcome.runChangesKept + kept };
+        return { ...outcome, keptFields: kept, runChangesKept: outcome.runChangesKept + kept.length };
       } catch (error) {
         const kept = knownKept(target);
         return StopAndRestoreResult.parse({
-          status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, runChangesKept: kept,
-          wroteAutomations: false, sendsMessages: false, fieldsKept: kept, fieldsMissing: 0,
+          status: "restored", restored: [], review: [], runsUndone: 0, runsLeft: 0, runChangesKept: kept.length,
+          wroteAutomations: false, sendsMessages: false, keptFields: kept, fieldsMissing: 0,
           unfinished: {
             step: "files",
             message: error instanceof z.ZodError ? "dohc could not read the relay's list of their changes."
