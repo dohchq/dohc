@@ -5356,6 +5356,7 @@ export function DesktopWorkspaceShell(props: {
                 <CopyButton
                   testId="workspace-update-copy-details"
                   label="Copy"
+                  pinName
                   iconOnly
                   getText={() => storeDetailsText}
                 />
@@ -5396,6 +5397,7 @@ export function DesktopWorkspaceShell(props: {
             </PrimaryButton>
             <CopyButton
               label="Copy details"
+              pinName
               getText={() =>
                 errorDetails([
                   ["Error", "Couldn't open this workspace"],

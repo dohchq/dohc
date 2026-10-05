@@ -241,22 +241,22 @@ function CopySpecimens(props: { theme: "light" | "dark"; form: "icon" | "words" 
   const iconOnly = form === "icon";
   return (
     <Specimen label={`${iconOnly ? "icon only" : "with words"}: rest, hover, focus-visible, copied, failed`}>
-      <CopyButton iconOnly={iconOnly} label="Copy details" getText={() => RELAY_ERROR} />
+      <CopyButton iconOnly={iconOnly} label="Copy details" pinName getText={() => RELAY_ERROR} />
       <span data-force-state="hover" data-force-target="button">
-        <CopyButton iconOnly={iconOnly} label="Copy details" getText={() => RELAY_ERROR} />
+        <CopyButton iconOnly={iconOnly} label="Copy details" pinName getText={() => RELAY_ERROR} />
       </span>
       <span data-force-state="focus-visible" data-force-target="button">
-        <CopyButton iconOnly={iconOnly} label="Copy details" getText={() => RELAY_ERROR} />
+        <CopyButton iconOnly={iconOnly} label="Copy details" pinName getText={() => RELAY_ERROR} />
       </span>
       <CopyButton
         iconOnly={iconOnly}
-        label="Copy details"
+        label="Copy details" pinName
         getText={() => RELAY_ERROR}
         testId={`states-copy-${form}-copied-${theme}`}
       />
       <CopyButton
         iconOnly={iconOnly}
-        label="Copy details"
+        label="Copy details" pinName
         getText={failToCopy}
         testId={`states-copy-${form}-failed-${theme}`}
       />

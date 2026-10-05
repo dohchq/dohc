@@ -350,6 +350,7 @@ function RunChip(props: { run: ChatRunRecord }) {
                   iconOnly
                   testId="chats-run-copy-log"
                   label="Copy log path"
+                  pinName
                   getText={() => props.run.logPath ?? null}
                 />
               ) : null}

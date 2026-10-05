@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { deferred } from "../../testing/deferred";
 import { ShellErrorReporter, type ReportShellError } from "../shell/useShellError";
-import { COPY_FAILURE, COPY_FEEDBACK_MS, CopyButton, CopyField } from "./CopyButton";
+import { COPY_FAILURE, COPY_FEEDBACK_MS, CopyButton, CopyField, createCopy } from "./CopyButton";
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -128,12 +128,12 @@ describe("CopyButton feedback", () => {
     expect(screen.getByRole("status").textContent).toBe("");
   });
 
-  it("keeps a given name and says the answer in its tooltip and words", async () => {
+  it("keeps a pinned name and says the answer in its tooltip and words", async () => {
     vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
     render(
       <>
-        <CopyButton iconOnly label="Copy details" getText={() => "facts"} testId="icon" />
-        <CopyButton label="Copy details" getText={() => "facts"} testId="words" />
+        <CopyButton iconOnly pinName label="Copy details" getText={() => "facts"} testId="icon" />
+        <CopyButton pinName label="Copy details" getText={() => "facts"} testId="words" />
         <CopyButton iconOnly getText={() => "facts"} testId="unnamed" />
       </>,
     );
@@ -149,8 +149,40 @@ describe("CopyButton feedback", () => {
     expect(screen.getAllByRole("button", { name: "Copy details" })).toEqual([icon, words]);
     expect(icon.getAttribute("title")).toBe("Copied");
     expect(words.textContent).toBe("Copied");
-    // Without a given name, the name is the answer.
+    // Without a pinned name, the name is the answer.
     expect(unnamed.getAttribute("aria-label")).toBe("Copied");
+  });
+
+  it("names itself by what it says, in its own words for copied", async () => {
+    vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    render(
+      <>
+        <CopyButton label="Copy code" getText={() => "code"} testId="code" />
+        <CopyButton
+          label="Copy browser invitation"
+          copiedLabel="Browser invitation copied"
+          getText={() => "https://share.example.test"}
+          testId="invitation"
+        />
+      </>,
+    );
+    expect(screen.getByRole("button", { name: "Copy code" })).toBe(screen.getByTestId("code"));
+    expect(screen.getByRole("button", { name: "Copy browser invitation" })).toBe(screen.getByTestId("invitation"));
+
+    await click(screen.getByTestId("code"));
+    await click(screen.getByTestId("invitation"));
+    expect(screen.getByRole("button", { name: "Copied" })).toBe(screen.getByTestId("code"));
+    expect(screen.getByRole("button", { name: "Browser invitation copied" })).toBe(screen.getByTestId("invitation"));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(screen.getAllByRole("status").map((region) => region.textContent)).toEqual(["Copied", "Browser invitation copied"]);
+  });
+
+  it("writes in the same task as the click when the text is at hand", () => {
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    const copy = createCopy({ getText: () => "now", report: () => null, show: () => undefined });
+    void copy.copy();
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("now");
+    copy.dispose();
   });
 });
 
@@ -213,9 +245,9 @@ describe("CopyButton after it is gone", () => {
     expect(report).not.toHaveBeenCalled();
   });
 
-  it("reports a write that fails after the button closed, with no Try again", async () => {
+  it("reports a write that fails after the button closed, and Try again copies the text that failed", async () => {
     const write = deferred();
-    vi.spyOn(navigator.clipboard, "writeText").mockReturnValueOnce(write.promise);
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockReturnValueOnce(write.promise);
     const report = vi.fn<ReportShellError>();
     const view = render(withReporter(report, <CopyButton getText={() => "details"} testId="copy" />));
 
@@ -223,20 +255,49 @@ describe("CopyButton after it is gone", () => {
     view.unmount();
     const refusal = new Error("denied");
     await act(async () => write.reject(refusal));
-    expect(report).toHaveBeenCalledExactlyOnceWith(COPY_FAILURE, refusal, null);
+    expect(report).toHaveBeenCalledExactlyOnceWith(COPY_FAILURE, refusal, expect.any(Function));
+    writeText.mockResolvedValueOnce(undefined);
+    await act(async () => report.mock.calls[0]![2]!());
+    expect(writeText).toHaveBeenLastCalledWith("details");
   });
 
-  it("files the failure again without Try again when the button closed before the retry", async () => {
+  // The failure's own toast can replace the toast the button sat in, so the
+  // button is gone by the time the person presses Try again.
+  it("copies the text that failed when Try again comes after the button closed", async () => {
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockRejectedValueOnce(new Error("denied"));
     const report = vi.fn<ReportShellError>();
-    const view = render(withReporter(report, <CopyButton getText={() => "secret link"} testId="copy" />));
+    const view = render(withReporter(report, <CopyButton getText={() => "error details"} testId="copy" />));
+
+    await click(screen.getByTestId("copy"));
+    const retry = report.mock.calls[0]![2]!;
+    view.unmount();
+    writeText.mockResolvedValueOnce(undefined);
+    await act(async () => retry());
+    expect(writeText).toHaveBeenLastCalledWith("error details");
+    expect(report).toHaveBeenCalledTimes(1);
+
+    // A second refusal files again, with the same text behind its Try again.
+    const again = new Error("still denied");
+    writeText.mockRejectedValueOnce(again);
+    await act(async () => retry());
+    expect(report).toHaveBeenLastCalledWith(COPY_FAILURE, again, expect.any(Function));
+    writeText.mockResolvedValueOnce(undefined);
+    await act(async () => report.mock.calls[1]![2]!());
+    expect(writeText).toHaveBeenLastCalledWith("error details");
+  });
+
+  it("files the failure again without Try again when no text was read before the button closed", async () => {
+    const writeText = vi.spyOn(navigator.clipboard, "writeText");
+    const report = vi.fn<ReportShellError>();
+    const unreadable = new Error("projection failed");
+    const view = render(withReporter(report, <CopyButton getText={() => Promise.reject(unreadable)} testId="copy" />));
 
     await click(screen.getByTestId("copy"));
     const retry = report.mock.calls[0]![2]!;
     view.unmount();
     await act(async () => retry());
-    expect(writeText).toHaveBeenCalledTimes(1);
-    expect(report).toHaveBeenLastCalledWith(COPY_FAILURE, new Error("denied"), null);
+    expect(writeText).not.toHaveBeenCalled();
+    expect(report).toHaveBeenLastCalledWith(COPY_FAILURE, unreadable, null);
   });
 
   it("succeeds silently after the button closed", async () => {

@@ -9,6 +9,7 @@ import type { CollectionValue } from "@dohc/workspace-contracts";
 import { useEngineDoc } from "../collab/useEngineDoc";
 import { SecondaryButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
+import { ShellErrorReporter } from "../shell/useShellError";
 import { addSelectOption } from "./schemaAuthoring";
 import { rewriteCollectionSchema } from "./schemaWrite";
 
@@ -827,6 +828,10 @@ function CollectionWriteFailureRow({
   failure: CollectionWriteFailure;
 }) {
   const paused = useCollectionWritesPaused(failure.workspaceId);
+  // This host sits outside every notice owner, and the row's other way out
+  // is a Discard that cannot be undone. A refused copy keeps its instruction
+  // until the next copy starts.
+  const [copyRefused, setCopyRefused] = useState(false);
   const lineage = useCollectionWriteLineage(failure.workspaceId);
   const stale = failure.lineage !== lineage;
   const recoverOnly = stale || failure.superseded || failure.recoveryOnly;
@@ -866,7 +871,11 @@ function CollectionWriteFailureRow({
         >
           Retry
         </SecondaryButton>
-        <CopyButton testId="collection-write-copy" label="Copy value" getText={() => recoveryText} />
+        <span className="contents" onClickCapture={() => setCopyRefused(false)}>
+          <ShellErrorReporter.Provider value={() => setCopyRefused(true)}>
+            <CopyButton testId="collection-write-copy" label="Copy value" pinName getText={() => recoveryText} />
+          </ShellErrorReporter.Provider>
+        </span>
         <SecondaryButton
           data-testid="collection-write-discard"
           onClick={() => discardCollectionFieldWrite(failure.id)}
@@ -874,6 +883,11 @@ function CollectionWriteFailureRow({
           Discard unsaved change
         </SecondaryButton>
       </div>
+      {copyRefused ? (
+        <span data-testid="collection-write-copy-refused" className="text-[12px] text-muted">
+          Could not copy. Select the value above to copy it.
+        </span>
+      ) : null}
     </div>
   );
 }

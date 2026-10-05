@@ -199,10 +199,14 @@ describe("SharedByMeList", () => {
     render(<SharedByMeList workspaceId="ws-1" />);
     await screen.findByTestId("shared-by-me-row");
     expect(screen.queryByTestId("shared-by-me-copy-invitation")).toBeNull();
-    await user.click(screen.getByTestId("shared-by-me-copy"));
+    const copy = screen.getByTestId("shared-by-me-copy");
+    expect(screen.getByRole("button", { name: "Copy code" })).toBe(copy);
+    await user.click(copy);
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe("dohc-share:share-1:http://relay.test"),
     );
+    // The name says what happened, as the words do.
+    expect(await screen.findByRole("button", { name: "Copied" })).toBe(copy);
   });
 
   it("copies the exact named invitation for a remote workspace row", async () => {
@@ -210,8 +214,11 @@ describe("SharedByMeList", () => {
     bridgeMock.listRelayShares.mockResolvedValue({granted: [{...ACTIVE_SHARE, access: "edit", browserInvitationUrl: invitation}]});
     const user = userEvent.setup(); render(<SharedByMeList workspaceId="ws-1"/>);
     await screen.findByTestId("shared-by-me-row");
-    await user.click(screen.getByTestId("shared-by-me-copy-invitation"));
+    const copyInvitation = screen.getByTestId("shared-by-me-copy-invitation");
+    expect(screen.getByRole("button", { name: "Copy browser invitation" })).toBe(copyInvitation);
+    await user.click(copyInvitation);
     await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(invitation));
+    expect(await screen.findByRole("button", { name: "Browser invitation copied" })).toBe(copyInvitation);
     expect(screen.getByTestId("shared-by-me-row").getAttribute("data-grant-id")).toBe("grant-1");
     expect(screen.getByTestId("shared-by-me-copy")).toBeTruthy();
   });

@@ -615,6 +615,7 @@ export function LiveDocumentsDialog({
                   </SecondaryButton>
                   <CopyButton
                     iconOnly
+                    pinName
                     label={`Copy details for ${refusalLabel(row)}`}
                     testId={`live-refusal-copy-${row.shareId}`}
                     getText={() => refusalDetails(row, workspaceId)}

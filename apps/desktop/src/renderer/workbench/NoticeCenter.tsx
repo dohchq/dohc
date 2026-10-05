@@ -300,6 +300,7 @@ export function WorkspaceErrorToast(props: {
       <CopyButton
         key={error.id}
         iconOnly
+        pinName
         label={error.tone === "success" ? "Copy notice details" : "Copy error details"}
         testId="workspace-shell-error-copy"
         getText={() => error.details}
@@ -358,6 +359,7 @@ export function LocalNoticeRow(props: {
           {notice.copyText !== undefined ? (
             <CopyButton
               iconOnly
+              pinName
               label={notice.copyLabel ?? "Copy error details"}
               testId={`notice-${notice.id}-copy`}
               getText={() => notice.copyText ?? ""}
@@ -1219,6 +1221,7 @@ export function NoticeCenter(props: {
                 <CopyButton
                   key={sentToastKey}
                   iconOnly
+                  pinName
                   label="Copy error details"
                   testId="sent-notice-toast-copy"
                   getText={() => failureDetails(sentToast.notice)}
@@ -1273,6 +1276,7 @@ export function NoticeCenter(props: {
               <CopyButton
                 key={liveDeliveryKey}
                 iconOnly
+                pinName
                 label="Copy live editing details"
                 testId="owner-live-delivery-toast-copy"
                 getText={() => liveDeliveryDetails}
@@ -1311,6 +1315,7 @@ export function NoticeCenter(props: {
               <CopyButton
                 key={refusalsKey}
                 iconOnly
+                pinName
                 label="Copy share details"
                 testId="owner-live-refusals-toast-copy"
                 getText={() => refusalsDetails}
@@ -1349,6 +1354,7 @@ export function NoticeCenter(props: {
               <CopyButton
                 key={crashReport.revision}
                 iconOnly
+                pinName
                 label="Copy report"
                 testId="crash-report-toast-copy"
                 getText={() => crashReport.text}
@@ -1601,6 +1607,7 @@ export function NoticeCenter(props: {
                                 <span className={`${openNotice || runNow || retry ? "" : "ml-auto "}flex shrink-0`}>
                                   <CopyButton
                                     iconOnly
+                                    pinName
                                     label="Copy error details"
                                     testId={`sent-notice-${notice.noticeId}-copy`}
                                     getText={() => failureDetails(notice)}

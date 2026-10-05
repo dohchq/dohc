@@ -158,8 +158,11 @@ describe("EmailShareForm", () => {
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
     await user.click(screen.getByTestId("share-create"));
     expect((await screen.findByTestId("share-browser-invitation")).getAttribute("data-grant-id")).toBe("exact-grant");
-    await user.click(screen.getByTestId("share-browser-invitation-copy"));
+    const copyInvitation = screen.getByTestId("share-browser-invitation-copy");
+    expect(screen.getByRole("button", { name: "Copy browser invitation" })).toBe(copyInvitation);
+    await user.click(copyInvitation);
     await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(invitation));
+    expect(await screen.findByRole("button", { name: "Browser invitation copied" })).toBe(copyInvitation);
     expect(screen.getByTestId("share-code").textContent).toBe(SHARE_CODE);
     expect(screen.getByText(/sign in with the invited account/)).toBeTruthy();
   });

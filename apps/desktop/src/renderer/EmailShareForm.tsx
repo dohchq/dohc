@@ -179,7 +179,7 @@ export function EmailShareForm(props: {
                 Send this browser invitation to {created.recipientEmail}. The recipient must sign in with the invited account.
               </p>
               <CopyField key={created.browserInvitationUrl} label="Copy browser invitation"
-                copyTestId="share-browser-invitation-copy" getText={() => created.browserInvitationUrl ?? null}>
+                copiedLabel="Browser invitation copied" copyTestId="share-browser-invitation-copy" getText={() => created.browserInvitationUrl ?? null}>
                 <code data-testid="share-browser-invitation" data-grant-id={created.grantId} title={created.browserInvitationUrl}>
                   {created.browserInvitationUrl}
                 </code>

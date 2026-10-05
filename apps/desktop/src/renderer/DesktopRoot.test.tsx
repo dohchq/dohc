@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DesktopRoot } from "./DesktopRoot";
+import { COPY_FAILURE } from "./ui/CopyButton";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { ObserverStub } from "./DesktopWorkspaceShell.testSupport";
 import type { ReactionStore } from "./workbench/reactionStore";
@@ -540,6 +541,39 @@ describe("registry read failure", () => {
     fireEvent.click(screen.getByRole("button", { name: "Copy" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
     expect(writeText.mock.calls[0]![0]).toContain("dohc-workspaces.json");
+  });
+
+  // No workspace shell exists yet, so the screen owns its notices: a copy the
+  // clipboard refuses still arrives as a toast with Try again.
+  it("reports a refused copy of the technical details as a toast", async () => {
+    const writeText = vi.fn(async (_text: string) => {
+      throw new Error("Document is not focused.");
+    });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    vi.stubGlobal("dohcDesktop", {
+      windowRole: "workspace",
+      platform: "win32",
+      getWorkspaceRegistry: vi.fn(async () => {
+        throw new Error("Error invoking remote method 'desktop:get-workspace-registry': Error [EACCES]: EACCES: permission denied");
+      }),
+      getUserSettings: vi.fn(async () => ({ settings: DEFAULT_USER_SETTINGS, source: "default" as const })),
+      onUserSettingsChanged: vi.fn(() => () => undefined),
+      onWorkspaceActivity: vi.fn(() => () => undefined),
+      onWorkspaceActivated: vi.fn(() => () => undefined),
+      onShareHandoffStatus: vi.fn(() => () => undefined),
+      getShareHandoffStatus: vi.fn(async () => ({ status: "idle" as const })),
+      dismissShareHandoff: vi.fn(async () => undefined),
+      getUpdateState: () => new Promise(() => {}),
+      onUpdateState: () => () => {},
+      ...noticeBridge(),
+    });
+    render(<DesktopRoot />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Show technical details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(COPY_FAILURE);
+    expect(within(toast).getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 });
 

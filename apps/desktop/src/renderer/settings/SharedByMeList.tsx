@@ -214,7 +214,7 @@ export function SharedByMeList(props: {
             <>
               {share.selector && share.browserInvitationUrl && (
                 <CopyButton testId="shared-by-me-copy-invitation" label="Copy browser invitation"
-                  getText={() => share.browserInvitationUrl ?? null} />
+                  copiedLabel="Browser invitation copied" getText={() => share.browserInvitationUrl ?? null} />
               )}
               {/* No code to hand out for a row the relay cannot read: the
                   recipient's own open would refuse it. Ending the share

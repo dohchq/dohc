@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, type ReactNode } from "react";
 import { bridge } from "../bridge";
 import {
   NoticeCenter,
@@ -102,6 +102,27 @@ export function useConnectionNotices() {
 }
 
 const NOOP = () => undefined;
+
+/**
+ * A notice owner for a screen with none above it, such as the one dohc shows
+ * when it cannot read its workspace list. A copy that fails there still
+ * reaches a toast and a Notices row, with Try again.
+ */
+export function StandaloneNotices(props: { children: ReactNode }) {
+  const own = useConnectionNotices();
+  return (
+    <ShellErrorReporter.Provider value={own.reportError}>
+      {props.children}
+      <ConnectionNotices
+        notices={own.notices}
+        reportError={own.reportError}
+        onRetry={own.retryNotice}
+        onHide={own.hideNotice}
+        onDismiss={own.dismissNotice}
+      />
+    </ShellErrorReporter.Provider>
+  );
+}
 
 /**
  * The shell's notice center, docked bottom-right of a surface that has no
