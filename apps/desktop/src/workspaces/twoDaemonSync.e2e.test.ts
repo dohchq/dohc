@@ -1414,6 +1414,62 @@ interface OpenEditor {
   doc: Y.Doc;
 }
 
+it.skipIf(engine.missing).each([false, true])(
+  "imports a covered artifact without blocking an open editor (peer typed first: %s)",
+  async (peerTypedFirst) => {
+    const workspaceId = `two-daemon-covered-artifact-${peerTypedFirst}`;
+    const token = `test:${workspaceId}`;
+    const path = "notes/shared.txt";
+    const seed = "saved before artifact export\n";
+    const rootA = await createTestScratch("dohc-covered-artifact-a-");
+    const rootB = await createTestScratch("dohc-covered-artifact-b-");
+    const relayRoot = await createTestScratch("dohc-covered-artifact-relay-");
+    const relay = await spawnSyncRelay({ dbPath: join(relayRoot, "relay.sqlite"), compiledMain: compiledRelayMain });
+    let daemonA: LiveDaemonCapture | null = null;
+    let daemonB: LiveDaemonCapture | null = null;
+    try {
+      const connection = { baseUrl: relay.baseUrl, token };
+      daemonA = await openLiveDaemonCapture({ workspaceId, rootPath: rootA, relay: connection });
+      await daemonA.relay.claim();
+      const sourceSession = await openIndependentPlaintextLineage(daemonA, rootA, path, seed);
+      const sourceMoment = (await daemonA.capture.listMoments({ limit: 100 })).moments.find((moment) => moment.path === path)!;
+      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
+      await pullAndExpect(daemonB, rootB, path, seed);
+      const peerEditor = await openEditor(daemonB, path);
+      try {
+        if (peerTypedFirst) await typeAtEnd(peerEditor, "peer before artifact\n");
+        await sourceSession.close({ settle: false });
+        await daemonA.capture.runRelaySync((page) => daemonA!.relay.pull(page));
+        const sourceEditor = await openEditor(daemonA, path);
+        try {
+          await typeAtEnd(sourceEditor, "origin after artifact\n");
+          expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+          await daemonB.capture.runRelaySync((page) => daemonB!.relay.pull(page));
+          await vi.waitFor(() => expect(shown(peerEditor)).toContain("origin after artifact\n"), {
+            timeout: REAL_DAEMON_DEADLINE_MS,
+          });
+          if (peerTypedFirst) expect(shown(peerEditor)).toContain("peer before artifact\n");
+          expect((await daemonB.capture.listMoments({ limit: 100 })).moments.filter((moment) => moment.id === sourceMoment.id)).toHaveLength(1);
+          await typeAtEnd(peerEditor, "peer after artifact\n");
+          expect(await daemonB.capture.countOpenConflicts()).toBe(0);
+        } finally {
+          await sourceEditor.session.close();
+        }
+      } finally {
+        await peerEditor.session.close();
+      }
+      await daemonB.capture.runRelaySync((page) => daemonB!.relay.pull(page));
+      expect(await daemonB.capture.countOpenConflicts()).toBe(0);
+      expect(await readFile(join(rootB, path), "utf8")).toContain("peer after artifact\n");
+    } finally {
+      await Promise.allSettled([daemonB?.close(), daemonA?.close()]);
+      await relay.stop();
+    }
+  },
+  90_000,
+);
+
 async function openEditor(daemon: LiveDaemonCapture, path: string): Promise<OpenEditor> {
   const doc = new Y.Doc();
   const session = await daemon.capture.openYDocSession({

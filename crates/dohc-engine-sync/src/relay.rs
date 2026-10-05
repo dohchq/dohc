@@ -1376,7 +1376,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             );
             match routed {
                 Err(SyncError::RetryableState { reason }) => {
-                    if op.op_kind == "conflict.resolve" && reason == "ydoc-session-live" {
+                    if matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
+                        && reason == "ydoc-session-live"
+                    {
                         durable_origins.insert(op.origin_id.clone());
                     }
                     deferred_origins.insert(op.origin_id.clone());
@@ -1419,7 +1421,9 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 );
                 match routed {
                     Err(SyncError::RetryableState { reason }) => {
-                        if op.op_kind == "conflict.resolve" && reason == "ydoc-session-live" {
+                        if matches!(op.op_kind.as_str(), "conflict.resolve" | "moment.append")
+                            && reason == "ydoc-session-live"
+                        {
                             durable_origins.insert(op.origin_id.clone());
                         }
                         still_deferred_origins.insert(op.origin_id.clone());

@@ -3059,6 +3059,16 @@ mod successor_validation_tests {
         SuccessorIdentity, SuccessorIdentityInput,
     };
 
+    #[test]
+    fn document_load_sql_failure_keeps_corrupt_lineage_classification() {
+        let conn = rusqlite::Connection::open_in_memory().expect("connection");
+        let key = DocKey::new("ws", "main", "object").expect("key");
+        assert!(matches!(
+            load_doc_in(&conn, &key),
+            Err(CollabError::Corrupt { .. })
+        ));
+    }
+
     fn canonical_image_scene(key: &DocKey) -> String {
         let source = serde_json::to_string(&json!({
             "type": "excalidraw",

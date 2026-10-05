@@ -149,7 +149,7 @@ pub(crate) fn drain_and_claim(
                 // Re-run native binding, settlement digest and cursor checks.
                 // The envelope was ACKed on enqueue, so bypass coordinate dedup.
                 tx.execute_batch("SAVEPOINT owner_settlement_replay").map_err(SyncError::persist)?;
-                match apply_moment_append(tx, &envelope, &payload, search_policy.as_ref(), MomentApplyMode::Ordinary) {
+                match apply_moment_append(tx, &envelope, &payload, search_policy.as_ref(), MomentApplyMode::Ordinary, false) {
                     Ok(result) => {
                         tx.execute_batch("RELEASE owner_settlement_replay").map_err(SyncError::persist)?;
                         let facts_json = result.record_facts.as_ref().map(serde_json::to_string).transpose().map_err(SyncError::corrupt)?;
