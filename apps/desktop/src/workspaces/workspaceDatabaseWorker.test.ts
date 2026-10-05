@@ -71,6 +71,24 @@ function owner(
 }
 
 describe("database import worker", () => {
+  it.each(['json', 'jsonl'])('preserves declared strings through the %s import worker', async format => {
+    const worker = owner();
+    const row = { id: 'a', zip: '02134', flag: 'true', empty: '' };
+    const result = await worker.importData({ name: `data.${format}`, mediaType: 'application/json', tableName: 'rows',
+      body: JSON.stringify(format === 'json' ? [row] : row) });
+    const snapshot = await worker.readBytes({ bytes: result.bytes, path: 'import.sqlite' });
+    expect(snapshot.tables[0]?.rows).toEqual([{ __dohc_rowid: 1, ...row }]);
+  });
+
+  it('rejects malformed CSV and stays usable for a later import', async () => {
+    const worker = owner();
+    await expect(worker.importData({ ...IMPORT_SOURCE, body: 'id,note\na,first,discarded' }))
+      .rejects.toThrow('Import row contains more cells than its header.');
+    await expect(worker.importData({ ...IMPORT_SOURCE, body: 'id,note\na,"unfinished' }))
+      .rejects.toThrow('CSV field has an unfinished quote.');
+    await expect(worker.importData(IMPORT_SOURCE)).resolves.toMatchObject({ rowCount: 2 });
+  });
+
   it("materializes complete rows and normalized schema without returning a duplicate snapshot", async () => {
     const worker = owner();
     const result = await worker.importData(IMPORT_SOURCE);

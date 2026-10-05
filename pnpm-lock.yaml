@@ -1026,10 +1026,6 @@ importers:
         version: 4.1.11(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)(yaml@2.9.0))
 
   services/sqlite-worker:
-    dependencies:
-      '@dohc/workspace-core':
-        specifier: workspace:*
-        version: link:../../packages/workspace-core
     devDependencies:
       '@types/node':
         specifier: ^24.13.3

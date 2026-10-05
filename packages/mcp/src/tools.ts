@@ -1748,7 +1748,7 @@ export async function importData(
   const body = await readFile(sourceRel.absolute, "utf8");
   const { createSqliteEngine } = await import("@dohc/sqlite-worker");
   const engine = await createSqliteEngine();
-  const result = await engine.importData({
+  const result = await engine.materializeImport({
     name: args.sourcePath,
     mediaType: mediaTypeForPath(args.sourcePath) ?? "text/plain",
     body,
@@ -1757,7 +1757,7 @@ export async function importData(
   if (!result.ok) return { ok: false as const, reason: `${result.code}: ${result.message}` };
 
   const written = await requestCli(ctx, "fileWrite", {
-    files: [{ path: dbRel.normalized, contentBase64: result.bytesBase64, createOnly: true }],
+    files: [{ path: dbRel.normalized, contentBase64: result.bytes.toString('base64'), createOnly: true }],
     agent, requestId: randomUUID(),
   });
   if (!written.ok) return written;
