@@ -32,7 +32,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { arch, platform } from "node:os";
 import { RUST_ARCH, RUST_OS } from "../tools/rust-engine-program/native-target.mjs";
 import { requireCiPassVerdict } from "../tools/rust-engine-program/require-ci-pass-verdict.mjs";
@@ -379,10 +379,24 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
     // checkout's commit.
     writeFileSync(log, `${runGate(stub).evidence}\n`);
 
+    const adapter = join(dirname(log), "git-stub.mjs");
+    writeFileSync(adapter, `
+      import cp from 'node:child_process';
+      import {syncBuiltinESMExports} from 'node:module';
+      const exec = cp.execFileSync;
+      cp.execFileSync = (command, args, options) => {
+        if (command !== 'git') return exec(command, args, options);
+        const result = cp.spawnSync('git ' + args.join(' '), {...options, shell:true});
+        if (result.error || result.status !== 0) throw Object.assign(new Error('Stub git failed'), {status:result.status,stderr:result.stderr});
+        return result.stdout;
+      };
+      syncBuiltinESMExports();
+    `);
+
     const verify = (pathDir) =>
       spawnSync(
         process.execPath,
-        ["tools/rust-engine-program/require-ci-pass-verdict.mjs", log],
+        [...(pathDir && platform() === "win32" ? ["--import", pathToFileURL(adapter).href] : []), "tools/rust-engine-program/require-ci-pass-verdict.mjs", log],
         { cwd: repoRoot, encoding: "utf8", env: withPath(pathDir) },
       );
 
@@ -437,7 +451,7 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
       for (const dir of [junk, broken, stale]) {
         const refused = verify(dir);
         assert.notEqual(refused.status, 0);
-        assert.match(refused.stderr, /could not answer `git rev-parse HEAD`/);
+        assert.match(refused.stderr, dir === junk ? /could not answer `git rev-parse HEAD`/ : /git rev-parse HEAD failed after 3 attempts/);
       }
     } finally {
       for (const dir of [junk, broken, stale]) {
@@ -447,6 +461,44 @@ test("the verifier asks git which commit this checkout is, and refuses when it c
   } finally {
     rmSync(stub, { recursive: true, force: true });
     rmSync(dirname(log), { recursive: true, force: true });
+  }
+});
+
+test("Rust tree reads retry transient errors and retain persistent stderr in the failed summary", () => {
+  const stub = stubToolchain();
+  const root = mkdtempSync(join(tmpdir(), "dohc-git-gate-"));
+  try {
+    const adapter = join(root, "git-failure.mjs");
+    for (const persistent of [false, true]) {
+      writeFileSync(adapter, `
+        import cp from 'node:child_process';
+        import {syncBuiltinESMExports} from 'node:module';
+        const exec = cp.execFileSync;
+        let failures = 0;
+        cp.execFileSync = (command, args, options) => {
+          if (command === 'git' && args[0] === 'status' && (${persistent} || failures === 0)) {
+            failures += 1;
+            throw Object.assign(new Error('git failed'), {status:128,stderr:'Permission denied: scratch config failure ' + failures});
+          }
+          return exec(command, args, options);
+        };
+        syncBuiltinESMExports();
+      `);
+      const result = runGate(stub, {NODE_OPTIONS: `--import=${pathToFileURL(adapter).href}`});
+      if (persistent) {
+        assert.notEqual(result.code, 0);
+        assert.match(result.summary, /tree provenance.*git could not read the worktree status/);
+        assert.match(result.summary, /git status.*failed after 3 attempts/);
+        assert.match(result.summary, /Permission denied: scratch config failure 3/);
+        assert.match(result.summary, /tree UNATTRIBUTABLE/);
+      } else {
+        assert.equal(result.code, 0, result.summary);
+        assert.match(result.summary, /PASS tree provenance/);
+      }
+    }
+  } finally {
+    rmSync(stub, {recursive:true,force:true});
+    rmSync(root, {recursive:true,force:true});
   }
 });
 

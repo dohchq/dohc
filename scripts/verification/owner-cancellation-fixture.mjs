@@ -21,6 +21,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
   put("scripts/verification/doctor.mjs", "export const doctor=()=>({checks:[]});");
   put("tools/rust-engine-program/tree-provenance.mjs", "export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
+  put("tools/rust-engine-program/git-read.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/git-read.mjs")));
   if (kind === "verify") put("scripts/verification/build.mjs", `
     import {existsSync} from 'node:fs';
     import {interruptDuringSync} from './process.mjs';

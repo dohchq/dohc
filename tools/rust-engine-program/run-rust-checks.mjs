@@ -54,6 +54,7 @@ import {
   readTreeState,
 } from "./tree-provenance.mjs";
 import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
+import { readGit } from "./git-read.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
@@ -149,15 +150,10 @@ function run(cmd) {
   return { ok: res.status === 0, code: res.status, durationMs };
 }
 
-// The steps' own shell, so the provenance is read exactly where they ran.
+const gitReadFailures = [];
 function captureGit(cmd) {
-  const res = spawnSync(cmd, {
-    cwd: repoRoot,
-    shell: true,
-    encoding: "utf8",
-  });
-  if (res.error || res.status !== 0) return null;
-  return res.stdout;
+  try { return readGit(cmd.split(" ").slice(1), repoRoot); }
+  catch (error) { gitReadFailures.push(error.message); return null; }
 }
 
 function toolAvailable(probe) {
@@ -353,7 +349,7 @@ if (provenance.status === "FAIL") failed = true;
 results.unshift({
   name: "tree provenance",
   status: provenance.status,
-  reason: provenance.reason,
+  reason: [provenance.reason, ...gitReadFailures].filter(Boolean).join("\n") || undefined,
 });
 
 // The stamp comes from the judgement, not from the opening reading: a run the
