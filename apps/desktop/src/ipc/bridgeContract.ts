@@ -1,4 +1,5 @@
 import { nameByteLength } from "@dohc/workspace-contracts/names";
+import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
@@ -1496,6 +1497,13 @@ const EngineMomentAuthor = z.discriminatedUnion("kind", [
   }).strict(),
 ]);
 
+// An identifier the relay accepted a shared change under: a live document's
+// collaborator or Edit link, or a direct write's.
+const SHARED_AUTHOR_ID = z.string().min(1).refine(
+  (value) => new TextEncoder().encode(value).byteLength <= LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
+  "Shared author identifiers are at most 512 UTF-8 bytes.",
+);
+
 export const EngineMomentRecord = z.object({
   id: OPAQUE_ID,
   versionId: OPAQUE_ID,
@@ -1516,7 +1524,7 @@ export const EngineMomentRecord = z.object({
   // (ADR 0013): main names them from the owner's share roster. The user id
   // picks them for Stop and restore.
   namedAuthor: z.object({
-    userId: z.string().min(1).max(256),
+    userId: SHARED_AUTHOR_ID,
     label: z.string().min(1).max(400),
   }).strict().optional(),
   // Present when an Edit share link wrote the moment directly (ADR 0013).
@@ -1524,9 +1532,9 @@ export const EngineMomentRecord = z.object({
   // used it; neither names a person.
   linkAuthor: z.object({
     kind: z.literal("link"),
-    grantId: z.string().min(1).max(500),
+    grantId: SHARED_AUTHOR_ID,
     grantGeneration: z.number().int().positive(),
-    principalId: z.string().min(1).max(500),
+    principalId: SHARED_AUTHOR_ID,
   }).strict().optional(),
   // Present when more than one author wrote the moment: how each reads, in
   // the order of `authors`. The singleton author fields stay absent then.

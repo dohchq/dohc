@@ -8,6 +8,7 @@ import {
 import {
   CompareWorkspaceVersionsResult,
   EngineMomentDetailRecord,
+  EngineMomentRecord,
   ENGINE_TEXT_MAX_CHARS,
   ListWorkspaceVersionConflictsResult,
   WorkspaceVersionConflict,
@@ -162,6 +163,36 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     expect(record.authors).toEqual(detail.moment.authors);
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
   });
+  // A live document's settlement can name one collaborator or one Edit link
+  // by any identifier the relay accepts: up to 512 UTF-8 bytes, here all
+  // quotes, at the largest generation. History keeps it whole.
+  it("keeps a sole shared author with the longest live identifiers", async () => {
+    const id = "\"".repeat(512);
+    for (const [author, field] of [
+      [{kind: "named", userId: id, grantId: id, grantGeneration: Number.MAX_SAFE_INTEGER}, {namedAuthor: {userId: id, label: "ana@example.com (Edit)"}}],
+      [{kind: "link", grantId: id, grantGeneration: Number.MAX_SAFE_INTEGER, principalId: id},
+        {linkAuthor: {kind: "link", grantId: id, grantGeneration: Number.MAX_SAFE_INTEGER, principalId: id}}],
+    ] as const) {
+      const detail = detailWith({before: null, after: textSide("new")});
+      if (detail.protected) throw new Error("Expected a plaintext moment");
+      detail.moment.authors = [author];
+      const shortNames = {...names, named: () => "ana@example.com (Edit)"};
+      const record = engineMomentDetailForIpc(detail, shortNames);
+      expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+      expect(record).toMatchObject(field);
+      const page = await listEngineMomentsForIpc(async () => ({
+        moments: [{...detail.moment, momentOrder: 1, protected: false}],
+        nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      }), shortNames);
+      if (!("moments" in page)) throw new Error("Expected ready history");
+      expect(page.moments[0]).toMatchObject(field);
+    }
+    // One byte past the live bound is not an identifier the relay accepts.
+    const record = engineMomentDetailForIpc(detailWith({before: null, after: textSide("new")}), names);
+    expect(EngineMomentRecord.omit({momentOrder: true}).safeParse({...record,
+      linkAuthor: {kind: "link", grantId: "é".repeat(257), grantGeneration: 1, principalId: "holder"}}).success).toBe(false);
+  });
+
   it("preserves the public author without invoking the agent name resolver", () => {
     const detail = detailWith({before: textSide("old"), after: textSide("new")});
     if (detail.protected) throw new Error("Expected a plaintext moment");
