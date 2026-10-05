@@ -622,14 +622,21 @@ fn worker_main(
             Err(mpsc::error::TryRecvError::Empty) => match (&mut links, &timer) {
                 (Some(worker), Some(timer)) => {
                     let delay = worker.tick(&mut store);
-                    if delay == std::time::Duration::MAX {
+                    let parser_pending = worker.waiting_for_parser();
+                    if delay == std::time::Duration::MAX && !parser_pending {
                         rx.blocking_recv()
                     } else {
                         if delay.is_zero() {
                             continue;
                         }
                         timer.block_on(async {
-                            tokio::time::timeout(delay, rx.recv()).await.ok().flatten()
+                            tokio::select! {
+                                biased;
+                                cmd = rx.recv() => cmd,
+                                () = worker.parser_finished(), if parser_pending => None,
+                                () = async { tokio::time::sleep(delay).await },
+                                    if delay != std::time::Duration::MAX => None,
+                            }
                         })
                     }
                 }

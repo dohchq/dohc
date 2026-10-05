@@ -13,19 +13,22 @@ use std::time::{Duration, Instant};
 pub struct LinkDrainMetrics {
     pub actor_batches: u64,
     pub max_actor_us: u64,
+    pub total_actor_us: u64,
     pub over_budget_batches: u64,
     pub certified_sources: u64,
     pub max_settle_to_index_ms: u64,
     pub over_settle_budget_sources: u64,
 }
 pub type SharedMetrics = Arc<Mutex<LinkDrainMetrics>>;
+type ParserResult = (Work, Result<Staged, StorageError>);
 
 // One owned parser thread, one in-flight document, no SQLite connection.
 // Results use a separate channel so actor shutdown never waits for command
 // queue capacity. Dropping this owner closes and joins the parser.
 pub struct DrainWorker {
     jobs: Option<mpsc::SyncSender<(Work, Option<Head>)>>,
-    results: mpsc::Receiver<(Work, Result<Staged, StorageError>)>,
+    results: tokio::sync::mpsc::UnboundedReceiver<ParserResult>,
+    ready_result: Option<ParserResult>,
     thread: Option<JoinHandle<()>>,
     parsing: bool,
     staged: Option<Staged>,
@@ -39,7 +42,7 @@ pub struct DrainWorker {
 impl DrainWorker {
     pub fn new(metrics: SharedMetrics) -> std::io::Result<Self> {
         let (jobs, jobs_rx) = mpsc::sync_channel::<(Work, Option<Head>)>(1);
-        let (results_tx, results) = mpsc::channel();
+        let (results_tx, results) = tokio::sync::mpsc::unbounded_channel();
         let thread = std::thread::Builder::new()
             .name("dohc-link-parser".into())
             .spawn(move || {
@@ -53,6 +56,7 @@ impl DrainWorker {
         Ok(Self {
             jobs: Some(jobs),
             results,
+            ready_result: None,
             thread: Some(thread),
             parsing: false,
             staged: None,
@@ -63,6 +67,17 @@ impl DrainWorker {
             #[cfg(test)]
             phase: "prepare",
         })
+    }
+    pub fn waiting_for_parser(&self) -> bool {
+        self.parsing
+    }
+    // recv is cancellation-safe when a foreground command wins the actor wait.
+    // Keep the result for the next tick so SQLite work stays outside the wait.
+    pub async fn parser_finished(&mut self) {
+        self.ready_result = self.results.recv().await;
+        if self.ready_result.is_none() {
+            self.parsing = false;
+        }
     }
     // Called between foreground commands. Immediate work returns zero delay;
     // idle and transient failures wait without monopolizing the actor.
@@ -85,6 +100,7 @@ impl DrainWorker {
         let us = began.elapsed().as_micros().min(u64::MAX as u128) as u64;
         m.actor_batches += 1;
         m.max_actor_us = m.max_actor_us.max(us);
+        m.total_actor_us = m.total_actor_us.saturating_add(us);
         m.over_budget_batches += u64::from(us > ACTOR_SLICE_BUDGET.as_micros() as u64);
         #[cfg(test)]
         super::tests::report_slow_tick(Duration::from_micros(us), self.phase);
@@ -94,7 +110,11 @@ impl DrainWorker {
         if Instant::now() < self.retry_at {
             return Duration::from_millis(10);
         }
-        if let Ok((w, result)) = self.results.try_recv() {
+        if let Some((w, result)) = self
+            .ready_result
+            .take()
+            .or_else(|| self.results.try_recv().ok())
+        {
             self.parsing = false;
             match result {
                 Ok(staged) => self.staged = Some(staged),
@@ -150,7 +170,7 @@ impl DrainWorker {
             return Ok(Duration::ZERO);
         }
         if self.parsing {
-            return Ok(Duration::from_millis(1));
+            return Ok(Duration::MAX);
         }
         if let Some(job) = prepare(store)? {
             if self.jobs.as_ref().is_some_and(|tx| tx.send(job).is_ok()) {
@@ -160,7 +180,7 @@ impl DrainWorker {
                     reason: "link parser stopped",
                 });
             }
-            Ok(Duration::from_millis(1))
+            Ok(Duration::MAX)
         } else {
             // Obsolete generations are invisible to readers. Drain pending
             // sources first; cleanup runs only with no parse or staging active.

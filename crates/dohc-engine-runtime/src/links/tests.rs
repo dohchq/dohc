@@ -403,6 +403,53 @@ fn parser_generation_reseeds_without_rescanning_certified_bodies_on_reopen() {
     assert_eq!(key, reopened);
 }
 #[test]
+fn thousand_note_backlog_wakes_on_parser_completion() {
+    const NOTES: u64 = 1000;
+    let scratch = ScratchDir::new().unwrap();
+    let db = engine_db_path(&scratch).unwrap();
+    let mut s = open(&db);
+    for n in 0..NOTES {
+        write(
+            &mut s,
+            &format!("note-{n}"),
+            &format!("note-{n}.md"),
+            "[[target]]",
+            n as i64 + 2,
+        );
+    }
+    assert_eq!(count(&s, "link_pending"), NOTES as i64);
+    drop(s);
+    let observer = EngineStore::open_read_only(&db).unwrap();
+    let supervisor = crate::WorkspaceSupervisor::new();
+    let began = Instant::now();
+    let actor = supervisor.open(&db, 1).unwrap().actor;
+    let deadline = began + Duration::from_secs(120);
+    while actor.link_drain_metrics().certified_sources != NOTES
+        || count(&observer, "link_pending") != 0
+    {
+        assert!(Instant::now() < deadline, "backlog drain deadline");
+        std::thread::yield_now();
+    }
+    let elapsed = began.elapsed();
+    let metrics = actor.link_drain_metrics();
+    let ticks = Duration::from_micros(metrics.total_actor_us);
+    eprintln!(
+        "1000-note actor backlog: elapsed_ms={} summed_tick_ms={} elapsed_to_tick_ratio={:.2} metrics={metrics:?}",
+        elapsed.as_millis(),
+        ticks.as_millis(),
+        elapsed.as_secs_f64() / ticks.as_secs_f64()
+    );
+    drop(observer);
+    supervisor.close(&db).unwrap();
+    // Allow parser work, actor startup, and shared-host scheduling noise.
+    // A timer tick per document dominates this allowance on Windows.
+    assert!(
+        elapsed <= ticks * 3 + Duration::from_millis(250),
+        "parser completion must wake the actor: elapsed={elapsed:?}, ticks={ticks:?}"
+    );
+}
+
+#[test]
 fn writable_actor_drains_mount_store_and_read_only_actor_leaves_queue() {
     use crate::WorkspaceSupervisor;
     let scratch = ScratchDir::new().unwrap();
