@@ -124,6 +124,11 @@ export function EngineMomentDiffPage({
   // The change the page has an answer for. Reading it again keeps that
   // answer on screen until the new one arrives.
   const answeredFor = useRef<string | null>(null);
+  // A restore request from the shell is settled only by a read issued after
+  // it arrived: History's rules may hide the change since the page last read.
+  // "taken" waits for the shell to clear the request.
+  const restoreRequest = useRef<{ after: number } | "taken" | null>(null);
+  const [requestAnswered, setRequestAnswered] = useState(0);
 
   useEffect(() => () => {
     liveToken.current += 1;
@@ -141,6 +146,8 @@ export function EngineMomentDiffPage({
       .then((result) => {
         if (read !== readToken.current) return;
         answeredFor.current = key;
+        const request = restoreRequest.current;
+        if (request !== null && request !== "taken") setRequestAnswered(read);
         if ("status" in result) {
           // The tab no longer names the file, so it shows only that a change exists.
           onPathResolved(momentId, null);
@@ -160,13 +167,18 @@ export function EngineMomentDiffPage({
       })
       .catch(() => {
         if (read !== readToken.current) return;
-        // A failed re-read leaves the last answer on screen.
+        // A failed re-read leaves the last answer on screen, which cannot
+        // settle a restore request.
+        if (restoreRequest.current !== null && restoreRequest.current !== "taken") {
+          restoreRequest.current = "taken";
+          onRestoreRequestTaken();
+        }
         setState((current) => (current.status === "loading" ? { status: "error" } : current));
       });
     return () => {
       readToken.current += 1;
     };
-  }, [historyAnswer, momentId, onPathResolved, readAttempt, workspaceId]);
+  }, [historyAnswer, momentId, onPathResolved, onRestoreRequestTaken, readAttempt, workspaceId]);
   useEffect(() => {
     setRestoreState({ status: "idle" });
     setConfirmRestoreOpen(false);
@@ -250,15 +262,26 @@ export function EngineMomentDiffPage({
   }, [moment, restoreBusy, runRestore, undoMomentId]);
 
   // The shell asked for this change's confirm dialog, from a failed
-  // restore's Try again. The request is taken once this change has an
-  // answer, whether or not the change can still be restored. Until then the
-  // page may still show the change its tab showed before.
+  // restore's Try again. The page reads the change again first, and the
+  // request is taken on that answer: the dialog opens only if History still
+  // shows the change and it can be restored.
   useEffect(() => {
-    if (!restoreRequested || state.status === "loading") return;
-    if (answeredFor.current !== `${workspaceId}\0${momentId}`) return;
+    if (!restoreRequested) {
+      restoreRequest.current = null;
+      return;
+    }
+    const request = restoreRequest.current;
+    if (request === "taken") return;
+    if (request === null) {
+      restoreRequest.current = { after: readToken.current };
+      setReadAttempt((attempt) => attempt + 1);
+      return;
+    }
+    if (requestAnswered <= request.after) return;
+    restoreRequest.current = "taken";
     if (state.status === "ready" && canRestore && !restoreBusy) setConfirmRestoreOpen(true);
     onRestoreRequestTaken();
-  }, [canRestore, momentId, onRestoreRequestTaken, restoreBusy, restoreRequested, state, workspaceId]);
+  }, [canRestore, onRestoreRequestTaken, requestAnswered, restoreBusy, restoreRequested, state]);
 
   useEffect(() => {
     if (!undoMomentId || restoreBusy || !moment) {

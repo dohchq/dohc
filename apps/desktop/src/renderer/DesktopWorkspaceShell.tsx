@@ -957,6 +957,7 @@ export function DesktopWorkspaceShell(props: {
   const {
     tabLabels: knownTabLabels,
     rememberMomentDiffPath,
+    resolveMomentDiffPath,
   } = useTabTitles(workspaceId);
   const anyTabDirty = dirtyPaths.size > 0;
   const activeDocumentPath = isVirtualTabPath(focusedTabPath)
@@ -4993,7 +4994,7 @@ export function DesktopWorkspaceShell(props: {
                   readOnly={!!shareView}
                   onBeforeRestore={beginLineageOperation}
                   onOpenFile={openFile}
-                  onPathResolved={rememberMomentDiffPath}
+                  onPathResolved={resolveMomentDiffPath}
                   registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
                   onRestored={refreshAfterHistoryRestore}
                   onStopAndRestore={stopAndRestore.open}

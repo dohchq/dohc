@@ -191,7 +191,8 @@ describe("a History diff the rules hide", () => {
     const restore = vi.fn()
       .mockRejectedValueOnce(refused)
       .mockResolvedValue({ restored: "text", restoredMomentId: "restore-1" });
-    const page = renderPage(vi.fn().mockResolvedValue({ moment: moment() }), restore);
+    const read = vi.fn().mockResolvedValue({ moment: moment() });
+    const page = renderPage(read, restore);
     await screen.findByTestId("engine-diff-lines");
     fireEvent.click(screen.getByTestId("engine-diff-restore-file"));
     await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-confirm-restore")); });
@@ -206,9 +207,11 @@ describe("a History diff the rules hide", () => {
     expect(page.onReopenRestore).toHaveBeenCalledWith("m-1", "notes/plan.md");
     expect(restore).toHaveBeenCalledOnce();
 
-    // The shell's request opens the confirm dialog, and the page takes it once.
+    // The shell's request reads the change again, then opens the confirm
+    // dialog, and the page takes it once.
     page.update({ restoreRequested: true });
     expect(await screen.findByTestId("engine-diff-restore-confirm")).toBeTruthy();
+    expect(read).toHaveBeenCalledTimes(2);
     expect(page.onRestoreRequestTaken).toHaveBeenCalledOnce();
     page.update({ restoreRequested: false });
     await act(async () => { fireEvent.click(screen.getByTestId("engine-diff-confirm-restore")); });
@@ -218,6 +221,34 @@ describe("a History diff the rules hide", () => {
       "Restored the earlier state. Undo restore is available here.",
     );
     expect(screen.getByTestId("engine-diff-undo-restore")).toBeTruthy();
+  });
+
+  it("settles a restore request on a fresh read, which can find the change hidden", async () => {
+    const read = vi.fn()
+      .mockResolvedValueOnce({ moment: moment() })
+      .mockResolvedValue({ status: "untracked", moment: null });
+    const page = renderPage(read);
+    await screen.findByTestId("engine-diff-lines");
+
+    // The page still shows the diff from its last read when the request comes.
+    page.update({ restoreRequested: true });
+    expect(await screen.findByTestId("engine-diff-untracked")).toBeTruthy();
+    await waitFor(() => expect(page.onRestoreRequestTaken).toHaveBeenCalledOnce());
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("engine-diff-restore-confirm")).toBeNull();
+    expect(page.onPathResolved).toHaveBeenLastCalledWith("m-1", null);
+  });
+
+  it("drops a restore request whose fresh read fails, instead of asking on an old answer", async () => {
+    const read = vi.fn()
+      .mockResolvedValueOnce({ moment: moment() })
+      .mockRejectedValue(new Error("dohc is busy."));
+    const page = renderPage(read);
+    await screen.findByTestId("engine-diff-lines");
+    page.update({ restoreRequested: true });
+    await waitFor(() => expect(page.onRestoreRequestTaken).toHaveBeenCalledOnce());
+    expect(screen.getByTestId("engine-diff-lines")).toBeTruthy();
+    expect(screen.queryByTestId("engine-diff-restore-confirm")).toBeNull();
   });
 
   it("holds a restore request until its own change has an answer", async () => {
