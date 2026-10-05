@@ -16,7 +16,7 @@ import type { PendingFileUndo } from "./fileEditorUndo";
 import { CsvView } from "./CsvView";
 import { ImageView } from "./ImageView";
 import { extensionOf } from "./path";
-import { classifyForView } from "./fileViewKind";
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { DraftFlush } from "./useAutosavedTextDraft";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -362,13 +362,9 @@ export const FileInspector = memo(function FileInspector(
     props.engineVersionKey,
   );
   const localBuffer = useRetainedLocalDocument(key);
-  const kind = classifyForView(props.path);
-  const isText =
-    kind === "markdown" ||
-    kind === "drawing" ||
-    kind === "csv" ||
-    kind === "json" ||
-    kind === "text";
+  const fileKind = fileKindForPath(props.path);
+  const kind = fileKind.displayKind;
+  const isText = fileKind.opens.content === "text";
   const localBufferSnapshot = useSyncExternalStore(
     localBuffer.subscribe,
     localBuffer.getSnapshot,
@@ -705,7 +701,7 @@ export const FileInspector = memo(function FileInspector(
     );
   }
 
-  switch (kind) {
+  switch (fileKind.opens.view) {
     case "markdown":
       // MarkdownView renders the ViewHeader itself: the edit toggle and save
       // state live IN the document header (one bar, not two).

@@ -1,3 +1,4 @@
+import { classifyForView } from "../fileViewKind";
 import { basenameOf } from "../path";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import type { WikilinkFile } from "../editor/wikilinkPlugin";
@@ -23,7 +24,7 @@ export function indexFileListing(
     presentPaths.add(file.path);
     graphPaths.push(file.path);
 
-    const isMarkdown = /\.(md|markdown)$/i.test(file.path);
+    const isMarkdown = classifyForView(file.path) === "markdown";
     if (isMarkdown) {
       hasMarkdownPath = true;
       if (file.kind === "file") {
