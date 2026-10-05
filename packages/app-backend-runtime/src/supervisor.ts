@@ -102,7 +102,7 @@ export interface DatasetSupervisorOptions {
   nowMs?: () => number;
   /** Maximum journal events between successful materialization caches. */
   materializationEvents?: number;
-  /** Save each completed replay chunk once its elapsed time reaches this threshold. */
+  /** Minimum replay interval between checkpoints; a costly checkpoint extends it to four times its duration. */
   replayCacheMs?: number;
   /**
    * Longest wait before reopening a dataset whose last reopen or replay ran out of time or CPU. The wait keeps one
@@ -482,7 +482,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   async function reopenAndReplay(lane: Lane, input: DatasetAccess, target: DatasetCursor, reopen: { admitted: boolean }): Promise<Worker> {
     const worker = lane.worker ?? await openWorker(lane, input, reopen);
     if (worker.cursor.revision > target.revision) throw new Error("This Collection's saved records are newer than its history.");
-    let replayStart = performance.now();
+    let replayStart = performance.now(), checkpointIntervalMs = replayCacheMs;
     while (!sameCursor(worker.cursor, target)) {
       const page = options.journal.events({ scope: input.scope, after: worker.cursor, limit: 64, authorize: () => standing(input) });
       if (!page.events.length) throw new Error("This Collection's history is incomplete.");
@@ -492,11 +492,13 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       const applied=await worker.runtime.applyBatch(page.events.map(event=>({...event.cursor,previousDigest:event.previousDigest,changeset:event.changeset,changesetSha256:event.changesetSha256})),replayCacheMs);
       worker.cursor=page.events.find(event=>event.cursor.revision===applied.revision)!.cursor;
       standing(input);
-      // The journal certifies historical cursors. Install this complete prefix
-      // before another chunk can fail and discard the disposable worker.
-      if (performance.now() - replayStart >= replayCacheMs) {
+      // Keep worker batches bounded while amortizing costly checkpoint copies
+      // across completed batches. The journal certifies each saved prefix.
+      if (performance.now() - replayStart >= checkpointIntervalMs) {
+        const checkpointStart=performance.now();
         await maintainMaterialization(lane, true);
         replayStart=performance.now();
+        checkpointIntervalMs=Math.max(replayCacheMs,4*(replayStart-checkpointStart));
       }
     }
     return worker;

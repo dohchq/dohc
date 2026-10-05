@@ -443,6 +443,8 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
   // Replaying the swap row by row breaks the UNIQUE index, so the worker rebuilds the dataset.
   await f.invoke({swap:true},{idempotencyKey:"swap"});
   await f.supervisor.close();
+  const time=vi.spyOn(performance,'now').mockReturnValue(0);
+  cleanups.push(async()=>{time.mockRestore();});
   const opened:number[]=[],replayed:number[]=[],steps:string[]=[],batches=new Map<number,number[]>();
   const launch=launcher((command,controls)=>{
     if(command.command.kind==="open")opened.push(command.command.input.cursor.revision);
@@ -903,6 +905,9 @@ it("checkpoints a hostile 64-swap replay before each later worker failure and re
   const f=await fixture({schemaSql:swapSchema,source:swapSource});
   for(let index=0;index<64;index++)await f.invoke({swap:true},{idempotencyKey:String(index)});
   await f.supervisor.close();
+  // Faults stay at saved boundaries; adaptive checkpoint cost has its own test.
+  const time=vi.spyOn(performance,'now').mockReturnValue(0);
+  cleanups.push(async()=>{time.mockRestore();});
   const saved:number[]=[],applied:number[]=[],pids:number[]=[];
   const journal={...f.journal,cacheMaterialization(input:Parameters<DatasetJournal['cacheMaterialization']>[0]){
     const result=f.journal.cacheMaterialization(input);saved.push(result.cursor.revision);return result;
@@ -955,6 +960,8 @@ it("retains an earlier recovery checkpoint when a later chunk cannot be sealed",
   const f=await fixture();
   for(let index=1;index<=3;index++)await f.invoke({id:String(index),value:'saved'},{idempotencyKey:String(index)});
   await f.supervisor.close();
+  const time=vi.spyOn(performance,'now').mockReturnValue(0);
+  cleanups.push(async()=>{time.mockRestore();});
   let seals=0,broken=true,clock=0;
   const applied:number[]=[],commands=new Map<number,number>();
   const launch=launcher((request,controls)=>{
@@ -1011,4 +1018,39 @@ it("measures benign 64-event recovery including a fully installed checkpoint",as
     const measurement=JSON.stringify({scenario:'benign-64-recovery',totalMs,checkpointMs,snapshotMs:snapshots[0],checkpointBytes:cached.byteLength,batches,includes:'open, replay, foreign-key check, snapshot, hashing, staging, verification, installation, read',cacheEligibility:'host clock advanced 1000 ms; worker and measured wall clock unchanged'});
     if(process.env.DOHC_RECOVERY_MEASUREMENT_PATH)await writeFile(process.env.DOHC_RECOVERY_MEASUREMENT_PATH,measurement+'\n');
   }finally{time.mockRestore();await supervisor.close();}
+});
+
+
+it.each([{nextCost:50,saved:[1,9,11]},{nextCost:20,saved:[1,9,10,11]},{nextCost:100,saved:[1,9]}])("spaces recovery checkpoints by the last cost with a $nextCost ms next checkpoint",async({nextCost,saved:expected})=>{
+  const f=await fixture();
+  for(let index=1;index<=11;index++)await f.invoke({id:String(index),value:'saved'},{idempotencyKey:String(index)});
+  await f.supervisor.close();
+  let elapsed=0,seals=0;
+  const saved:number[]=[],pending=new Set<number>();
+  const time=vi.spyOn(performance,'now').mockImplementation(()=>elapsed);
+  cleanups.push(async()=>{time.mockRestore();});
+  const launch=launcher((request,controls)=>{
+    if(request.command.kind==='applyBatch')pending.add(request.id);
+    controls.deliver();
+  },message=>{const reply=message as {id:number;ok?:boolean};if(reply.ok&&pending.delete(reply.id))elapsed+=100;});
+  const journal={...f.journal,
+    events(input:Parameters<DatasetJournal['events']>[0]){return f.journal.events({...input,limit:1});},
+    async sealMaterializationCheckpoint(input:Parameters<DatasetJournal['sealMaterializationCheckpoint']>[0]){
+      const value=await f.journal.sealMaterializationCheckpoint(input);
+      elapsed+=++seals===1 ? 200 : nextCost;
+      return value;
+    },
+    cacheMaterialization(input:Parameters<DatasetJournal['cacheMaterialization']>[0]){
+      const value=f.journal.cacheMaterialization(input);saved.push(value.cursor.revision);return value;
+    },
+  };
+  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},replayCacheMs:100,
+    maintenanceStorage:{authorize(){},account(){}}});
+  cleanups.push(()=>supervisor.close());
+  const result=await supervisor.invoke({scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize});
+  expect(result.revision).toBe(11);expect(result.result).toHaveLength(11);
+  // First cache at 100 ms; after a 200 ms checkpoint, wait 800 ms of replay.
+  // A cheaper next checkpoint lowers the interval, bounded by replayCacheMs;
+  // a costly next checkpoint leaves the cheap final tail uncached.
+  expect(saved).toEqual(expected);
 });
