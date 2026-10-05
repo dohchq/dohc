@@ -79,6 +79,15 @@ describe("listing from the relay", () => {
     expect(get).toHaveBeenCalledTimes(50);
   });
 
+  it("refuses granted pages with rows outside the requested workspace", async () => {
+    const get = relay({
+      "/sync/shares?workspaceId=ws-trip": {status: 200, body: {granted: [row()], nextCursor: "c-1"}},
+      "/sync/shares?workspaceId=ws-trip&cursor=c-1": {status: 200, body: {granted: [row({workspaceId: "ws-other"})]}},
+    });
+    expect(await listRosterGrants(WORKSPACE, get)).toEqual(unusable);
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
   it("reports no answer, and names what to do", async () => {
     const cases: Array<[Page, string]> = [
       [new TypeError("fetch failed"), "Check your connection, then try again."],
@@ -174,7 +183,16 @@ describe("Group scope on the saved roster", () => {
     if (roster.kind !== "owner") throw new Error("expected an owner roster");
     expect(roster.grants[0]?.files).toBeNull();
     expect(roster.grants[0]?.channel).toBeNull();
-    expect(roster.formerEditors).toEqual([]);
+    expect(roster.formerEditors).toEqual(automationsGeneration === null ? [] : [{
+      grantId: "g-1", generation: 2, holder: "person", recipientEmail: "ana@dohc.test",
+      files: {paths: ["Trip"], versionId: null},
+    }]);
+    expect(checkAutomationReach(roster, {
+      id: "a", collection: {path: "Trip", name: "Trip"}, codeFiles: [],
+      steps: [{kind: "change-records", collection: {path: "Budget", name: "Budget"}}],
+    })).toEqual([automationsGeneration === null ? {allowed: true} : {
+      allowed: true, formerStops: [{evidence: "g-1#2", name: "ana@dohc.test"}],
+    }]);
     if (answer.listing.grants === null) throw new Error("expected grants");
     expect(answer.listing.grants[0]?.selector).toEqual({kind: "group", channelWireId: "wire-trip", paths: ["Trip"], versionId: null});
   });

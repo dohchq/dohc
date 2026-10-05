@@ -61,7 +61,6 @@ const ListedLinkSchema = z.object({
 // A recorded automation write requires stored file paths. Group paths
 // remain historical scope when its channel no longer serves files.
 function declaresFilePaths(grant: z.infer<typeof GrantSchema>): boolean {
-  // Historical writes name the stored scope, even when a Group no longer serves it.
   return grant.selector.kind !== "chat" && grant.selector.paths.length > 0;
 }
 export type ListedLink = z.infer<typeof ListedLinkSchema>;
@@ -166,24 +165,22 @@ const GrantedPage = z.object({ granted: z.array(z.unknown()), nextCursor: z.stri
 
 const LinkPage = z.object({ links: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() });
 
-// The owner's grants on this workspace from GET /sync/shares. Rows for other
-// workspaces are skipped before anything else is read, so their damage cannot
-// hide this workspace's grants. A revoked grant that wrote automations
-// directly stays as a former editor. Any other revoked grant that names a
-// person stays only as an ended grant, so History can still name them.
+// The parsed granted rows for the requested workspace.
+// Every row must belong to the requested workspace. A revoked grant that
+// wrote automations stays as a former editor. Other revoked named grants
+// stay only for History.
 function grantedListing(
   workspaceId: string,
-  shares: unknown,
+  rows: readonly unknown[],
 ): { grants: ListedGrant[]; formerGrants: FormerGrant[]; endedGrants: EndedGrant[] } | Extract<RosterListing, { grants: null }> {
-  const listing = z.object({ granted: z.array(z.unknown()) }).safeParse(shares);
-  if (!listing.success) return { grants: null, problem: { kind: "unusable-listing" } };
   const grants: ListedGrant[] = [];
   const formerGrants: FormerGrant[] = [];
   const endedGrants: EndedGrant[] = [];
-  for (const row of listing.data.granted) {
+  for (const row of rows) {
     const where = RowWorkspace.safeParse(row);
-    if (!where.success) return { grants: null, problem: { kind: "unusable-listing" } };
-    if (where.data.workspaceId !== workspaceId) continue;
+    if (!where.success || where.data.workspaceId !== workspaceId) {
+      return { grants: null, problem: { kind: "unusable-listing" } };
+    }
     // A relay from before grants reported their automations writes.
     if (row !== null && typeof row === "object" && !("automationsGeneration" in row)) {
       return { grants: null, problem: { kind: "outdated-server" } };
@@ -298,7 +295,7 @@ export async function listRosterGrants(
     if (!shares.ok) return shares.answer;
     const body = GrantedPage.safeParse(shares.body);
     if (!body.success) return UNUSABLE_ROSTER;
-    const granted = grantedListing(workspaceId, body.data);
+    const granted = grantedListing(workspaceId, body.data.granted);
     if (granted.grants === null) return answered(granted);
     grants.push(...granted.grants);
     formerGrants.push(...granted.formerGrants);
@@ -358,17 +355,17 @@ export function ownerRoster(ownerUserId: string, listing: unknown, next: string)
 }
 
 // A grant that wrote automations directly, as the former editor it was: the
-// files it covered, read as Edit.
+// stored file paths it covered, even when a Group no longer serves them.
 function formerEditorOf(
   grant: ListedGrant | ListedLink["grant"],
   generation: number,
   holder: FormerEditor["holder"],
 ): FormerEditor[] {
-  const { files } = rosterGrantOf(grant);
-  if (files === null) return [];
+  if (grant.selector.kind === "chat") return [];
+  const {paths, versionId} = grant.selector;
   return [{
     grantId: grant.grantId, generation, holder, recipientEmail: grant.recipientEmail,
-    files: { paths: files.paths, versionId: files.versionId },
+    files: {paths, versionId},
   }];
 }
 

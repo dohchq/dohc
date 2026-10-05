@@ -231,7 +231,6 @@ export function createShareSummaries(
       ...labels(share.shareId),
       sharerName: null,
       selector,
-      ...groupFileScope(share.workspaceId, selector, grant.access),
       ...(selector
         ? {}
         : { damaged: true as const, ...storedSelectorKind(share.selectorJson) }),
