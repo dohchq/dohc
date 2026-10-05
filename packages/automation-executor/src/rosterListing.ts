@@ -7,9 +7,9 @@ import {
 } from "@dohc/security-contract/share-selector";
 import type { FormerEditor, ReachRoster, RosterGrant, RosterProblem } from "./automationReach";
 
-// 50 pages of 1,000 share links. Past this the listing is not one dohc can
+// 50 pages of 1,000 grants or share links. Past this the listing is not one dohc can
 // check.
-const MAX_LINK_PAGES = 50;
+const MAX_INVENTORY_PAGES = 50;
 
 const ID = z.string().min(1).max(256);
 const PATHS = z.array(z.string().refine(isShareablePath)).max(MAX_SHARE_PATHS);
@@ -28,6 +28,7 @@ const GroupGrant = z.object({
   ...BASE,
   selector: z.object({ kind: z.literal("group"), channelWireId: ID, paths: PATHS.min(1), versionId: z.null() }),
   access: CHAT_ACCESS,
+  fileScope: z.enum(["served", "not-served"]),
 });
 const ChatGrant = z.object({
   ...BASE,
@@ -55,20 +56,20 @@ const ListedLinkSchema = z.object({
   grant: GrantSchema.refine((grant) => grant.recipientUserId === null && grant.recipientEmail === null),
   ended: z.boolean(),
   automationsGeneration: GENERATION.nullable(),
-}).refine((link) => link.automationsGeneration === null || coversFiles(link.grant));
+}).refine((link) => link.automationsGeneration === null || declaresFilePaths(link.grant));
 
-// A grant that wrote automations covered files by path. One that says it
-// wrote them and covers none, such as a chat grant, is damaged: read as
-// covering nothing, it would hold nothing.
-function coversFiles(grant: z.infer<typeof GrantSchema>): boolean {
-  return (rosterGrantOf(grant).files?.paths.length ?? 0) > 0;
+// A recorded automation write requires stored file paths. Group paths
+// remain historical scope when its channel no longer serves files.
+function declaresFilePaths(grant: z.infer<typeof GrantSchema>): boolean {
+  // Historical writes name the stored scope, even when a Group no longer serves it.
+  return grant.selector.kind !== "chat" && grant.selector.paths.length > 0;
 }
 export type ListedLink = z.infer<typeof ListedLinkSchema>;
 
 // A named grant that wrote a Collection's automations.yaml directly (ADR
 // 0013) and can no longer edit files: revoked, or narrowed below Edit.
 const FormerGrantSchema = z.object({ grant: ListedGrantSchema, automationsGeneration: GENERATION })
-  .refine((former) => coversFiles(former.grant));
+  .refine((former) => declaresFilePaths(former.grant));
 export type FormerGrant = z.infer<typeof FormerGrantSchema>;
 
 // A person's grant that was revoked without writing automations. Only
@@ -139,6 +140,7 @@ function rosterGrantOf(grant: ListedGrant): RosterGrant {
   const canPost = grant.access === "read-write";
   const channel = { wireId: grant.selector.channelWireId, canPost };
   if (isGroupGrant(grant)) {
+    if (grant.fileScope === "not-served") return {...recipient, files: null, channel: null};
     return { ...recipient, files: { paths: grant.selector.paths, versionId: null, access: canPost ? "edit" : "view" }, channel };
   }
   return { ...recipient, files: null, channel };
@@ -159,6 +161,8 @@ const LinkRow = z.object({
   automationsGeneration: GENERATION.nullable(),
   dependents: z.array(z.object({ grantId: z.unknown(), recipientUserId: z.unknown(), recipientEmail: z.unknown(), access: z.unknown() })),
 });
+
+const GrantedPage = z.object({ granted: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() });
 
 const LinkPage = z.object({ links: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() });
 
@@ -194,7 +198,7 @@ function grantedListing(
       continue;
     }
     const grant = ListedGrantSchema.safeParse(row);
-    if (!state.success || !grant.success || (generation !== null && !coversFiles(grant.data))) {
+    if (!state.success || !grant.success || (generation !== null && !declaresFilePaths(grant.data))) {
       const email = RecipientEmail.safeParse(row);
       return { grants: null, problem: { kind: "damaged-share", recipientEmail: email.success ? email.data.recipientEmail : null } };
     }
@@ -282,16 +286,33 @@ export async function listRosterGrants(
     return { ok: true, body: response.body };
   }
 
-  const shares = await read("/sync/shares");
-  if (!shares.ok) return shares.answer;
-  const granted = grantedListing(workspaceId, shares.body);
-  if (granted.grants === null) return answered(granted);
-  const { grants, formerGrants, endedGrants } = granted;
+  const grants: ListedGrant[] = [];
+  const formerGrants: FormerGrant[] = [];
+  const endedGrants: EndedGrant[] = [];
+  const grantedCursors = new Set<string>();
+  let grantedCursor: string | undefined;
+  for (let page = 0; ; page += 1) {
+    if (page === MAX_INVENTORY_PAGES) return UNUSABLE_ROSTER;
+    const query = `?workspaceId=${encodeURIComponent(workspaceId)}${grantedCursor === undefined ? "" : `&cursor=${encodeURIComponent(grantedCursor)}`}`;
+    const shares = await read(`/sync/shares${query}`);
+    if (!shares.ok) return shares.answer;
+    const body = GrantedPage.safeParse(shares.body);
+    if (!body.success) return UNUSABLE_ROSTER;
+    const granted = grantedListing(workspaceId, body.data);
+    if (granted.grants === null) return answered(granted);
+    grants.push(...granted.grants);
+    formerGrants.push(...granted.formerGrants);
+    endedGrants.push(...granted.endedGrants);
+    grantedCursor = body.data.nextCursor;
+    if (grantedCursor === undefined) break;
+    if (grantedCursors.has(grantedCursor)) return UNUSABLE_ROSTER;
+    grantedCursors.add(grantedCursor);
+  }
   const links: ListedLink[] = [];
   const cursors = new Set<string>();
   let cursor: string | undefined;
   for (let page = 0; ; page += 1) {
-    if (page === MAX_LINK_PAGES) return UNUSABLE_ROSTER;
+    if (page === MAX_INVENTORY_PAGES) return UNUSABLE_ROSTER;
     const query = cursor === undefined ? "" : `?cursor=${encodeURIComponent(cursor)}`;
     const answer = await read(`/sync/${encodeURIComponent(workspaceId)}/shares/links${query}`);
     if (!answer.ok) return answer.answer;

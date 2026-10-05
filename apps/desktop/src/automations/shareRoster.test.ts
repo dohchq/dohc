@@ -74,7 +74,7 @@ function relay(pages: Record<string, Page>) {
 // The listing for one /sync/shares body and one page of links.
 async function listed(shares: unknown, links: unknown[] = []): Promise<RosterListing> {
   const answer = await listRosterGrants(WORKSPACE, relay({
-    "/sync/shares": { status: 200, body: shares },
+    "/sync/shares?workspaceId=ws-trip": { status: 200, body: shares },
     "/sync/ws-trip/shares/links": { status: 200, body: { ok: true, links } },
   }));
   if (answer.kind !== "answered") throw new Error("the relay answered every request");
@@ -92,8 +92,8 @@ describe("roster from the relay's listings", () => {
         row({ grantId: "g-revoked", revokedAtMs: 9 }),
         row({ grantId: "g-link", principalKind: "link", recipientUserId: null, recipientEmail: null }),
         row({ grantId: "g-4", principalKind: "email", recipientUserId: null, recipientEmail: "cai@dohc.test", access: "view" }),
-        row({ grantId: "g-3", selector: group, access: "read-write" }),
-        row({ grantId: "g-2", selector: group, access: "read-only" }),
+        row({ grantId: "g-3", selector: group, access: "read-write", fileScope: "served" }),
+        row({ grantId: "g-2", selector: group, access: "read-only", fileScope: "served" }),
         row({ grantId: "g-1", selector: { kind: "chat", channelWireId: "wire-family" }, access: "read-write" }),
         row({ grantId: "g-6", selector: { paths: [], versionId: "v-1" }, access: "edit" }),
       ],

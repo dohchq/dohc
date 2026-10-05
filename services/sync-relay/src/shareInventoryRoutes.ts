@@ -1,5 +1,5 @@
 import {normalizeShareLabel} from "@dohc/security-contract/share-labels";
-import {readJsonObject} from "./requestInputs";
+import {parseWorkspaceId, readJsonObject} from "./requestInputs";
 import { jsonResponse } from "@dohc/service-http";
 import type {PublicEditRelease} from "@dohc/security-contract";
 import { badRequest, notFound, relayError } from "./errors";
@@ -7,7 +7,7 @@ import { cursorCodec } from "./requestInputs";
 import { resolveReceivedShareAuthority, selectorTargetsBlockedChannel, type AuthorizedShareAction } from "./shareAuthorization";
 import { parseStoredAnyShareSelectorJson } from "./shareFilter";
 import type { createShareSummaries } from "./shareSummaries";
-import type { SyncRelayIndependentGrantInventoryCursor, SyncRelayLinkInventoryCursor, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
+import type { SyncRelayGrantedInventoryCursor, SyncRelayIndependentGrantInventoryCursor, SyncRelayLinkInventoryCursor, SyncRelayShareWithGrantRow, SyncRelayStorage } from "./storage";
 
 export type ShareInventoryRoute =
   | { route: "shares-list" }
@@ -16,6 +16,7 @@ export type ShareInventoryRoute =
 export function createShareInventoryRoutes(
   storage: Pick<SyncRelayStorage,
     | "listSharesGrantedBy"
+    | "listSharesGrantedPage"
     | "listSharesReceivedBy"
     | "listRemovedSharesForRecipient"
     | "getShare"
@@ -45,6 +46,22 @@ export function createShareInventoryRoutes(
     actor: { userId: string },
   ): Promise<Response> {
     if (route.route === "shares-list" && request.method === "GET") {
+      const url = new URL(request.url);
+      if (url.searchParams.getAll("workspaceId").length > 1 || url.searchParams.getAll("cursor").length > 1) {
+        throw badRequest("inventory coordinates are invalid");
+      }
+      if (url.searchParams.has("workspaceId")) {
+        const workspaceId = parseWorkspaceId(url.searchParams.get("workspaceId"));
+        if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
+        const cursor = grantedInventoryCursor.decode(url.searchParams.get("cursor"));
+        const page = storage.listSharesGrantedPage(actor.userId, workspaceId, cursor);
+        const granted = await Promise.all(page.granted.map(grantedShareSummary));
+        if (!storage.workspaceIsOwnedBy(workspaceId, actor.userId)) throw notFound();
+        return jsonResponse({ok: true, granted,
+          ...(page.nextCursor ? {nextCursor: grantedInventoryCursor.encode(page.nextCursor)} : {}),
+        });
+      }
+      if (url.searchParams.has("cursor")) throw badRequest("workspaceId is required for granted pages");
       await claimPendingShares(actor.userId);
       const granted = await Promise.all(
         storage
@@ -216,3 +233,5 @@ const independentGrantInventoryCursor = cursorCodec<SyncRelayIndependentGrantInv
   { shareId: "id", grantCreatedAtMs: "ms", grantId: "id" },
   "independentGrantCursor",
 );
+
+const grantedInventoryCursor = cursorCodec<SyncRelayGrantedInventoryCursor>({grantId: "id"}, "cursor");
