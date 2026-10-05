@@ -4895,6 +4895,7 @@ export const UndoStopAndRestorePayload = z.object({
 }).strict();
 export type UndoStopAndRestorePayload = z.infer<typeof UndoStopAndRestorePayload>;
 export const UndoStopAndRestoreResult = z.object({
+  errorMessage: z.string().max(2_000).nullable(),
   // Outcomes identify the submitted restore moment, newest first.
   files: z.array(z.discriminatedUnion("kind", [
     z.object({ momentId: OPAQUE_ID, kind: z.literal("restored"),

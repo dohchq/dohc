@@ -244,7 +244,7 @@ describe("stop and restore in main", () => {
       await f.writePolicy('[[rule]]\npath = "notes/**"\ntracked = false\n');
       const before = await f.store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 });
       await expect(f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: result.restored.map(row => row.restoredMomentId) }))
-        .resolves.toEqual({ files: [{ momentId: result.restored[0]!.restoredMomentId, kind: "refused", detail: "This history moment is no longer available." }] });
+        .resolves.toEqual({ files: [{ momentId: result.restored[0]!.restoredMomentId, kind: "refused", detail: "This history moment is no longer available." }], errorMessage: null });
       expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("owner original");
       expect(await f.store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).toEqual(before);
     } finally { await f.engineCapture.stop(); }
@@ -641,6 +641,18 @@ describe("stop and restore in main", () => {
     const f = fixture({ links: [[link({ grantId: "grant-other" })]] });
     await expect(f.call(CHANNELS.stopAndRestore, byLink)).rejects.toThrow("dohc found no share link of this workspace with this id.");
     expect(f.calls.filter((call) => call.method === "POST")).toEqual([]);
+  });
+
+  it("returns completed Undo outcomes when an unexpected error stops later restores", async () => {
+    const f = fixture();
+    f.capture.restoreFileToBeforeMoment.mockImplementationOnce(async momentId => ({
+      restored: "text", restoredMomentId: `undo-${momentId}`, path: SCHEMA,
+    })).mockRejectedValueOnce(new Error("The workspace engine is not running."));
+    await expect(f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: ["old", "middle", "new"] })).resolves.toEqual({
+      files: [{ momentId: "new", kind: "restored", receipt: { path: SCHEMA, restoredMomentId: "undo-new" } }],
+      errorMessage: "The workspace engine is not running.",
+    });
+    expect(f.capture.restoreFileToBeforeMoment.mock.calls).toEqual([["new", OWNER], ["middle", OWNER]]);
   });
 
   it("undoes the restores newest first", async () => {

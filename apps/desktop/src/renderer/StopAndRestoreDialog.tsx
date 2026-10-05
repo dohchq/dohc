@@ -277,12 +277,10 @@ export function StopAndRestoreDialog({
     const restored = receipts.get(workspaceId, chosen.target);
     const result = restored.length > 0
       ? await bridge().undoStopAndRestore({ workspaceId, restoredMomentIds: restored.map((file) => file.restoredMomentId) })
-      : { files: [] };
+      : { files: [], errorMessage: null };
     const completed = new Set(result.files.flatMap(file => file.kind === "restored" ? [file.momentId] : []));
     receipts.set(workspaceId, chosen.target, restored.filter(file => !completed.has(file.restoredMomentId)));
     onRestored();
-    // The row's Try again would restore the files again without asking.
-    onSettled(identity);
     const last = receipts.shown(workspaceId, chosen.target);
     const runs = receipts.runs(workspaceId, chosen.target);
     const putBack = [...(last?.undone ? last.result.restored : []), ...restored.filter(file => completed.has(file.restoredMomentId))];
@@ -306,6 +304,12 @@ export function StopAndRestoreDialog({
       undone: true,
     };
     receipts.show(workspaceId, chosen.target, outcome);
+    if (result.errorMessage !== null) {
+      onError("dohc could not undo the restore.", new Error(result.errorMessage), () => onRetry(workspaceId, chosen, "undo"), identity);
+    } else {
+      // Remove the retry notice after Undo finishes.
+      onSettled(identity);
+    }
     if (request.isCurrent(token)) setState((current) => ({ kind: "done", targets: listedTargets(current), ...outcome }));
   });
 

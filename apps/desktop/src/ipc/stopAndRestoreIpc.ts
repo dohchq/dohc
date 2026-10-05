@@ -367,7 +367,9 @@ export function registerStopAndRestoreIpc<
               files.push({ momentId, kind: "refused", detail: error.message.slice(0, 500) });
             }
           }
-          return UndoStopAndRestoreResult.parse({ files });
+          return UndoStopAndRestoreResult.parse({ files, errorMessage: null });
+        } catch (error) {
+          return UndoStopAndRestoreResult.parse({ files, errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) });
         } finally {
           dependencies.notifyRenderer({ workspaceId: operation.workspace.workspaceId });
         }
