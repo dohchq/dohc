@@ -2297,6 +2297,9 @@ fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) 
     let lines: Vec<&str> = body.split('\n').collect();
     let mut blocks = Vec::new();
     let mut index = 0usize;
+    // Find fence closers once; repeated unclosed openers must not rescan the body.
+    let mut closers: Option<Vec<usize>> = None;
+    let mut next_closer = 0usize;
     while index < lines.len() {
         let line = lines[index];
         if line.is_empty() {
@@ -2304,23 +2307,17 @@ fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) 
             continue;
         }
         if let Some(fence_language) = line.strip_prefix("```") {
-            let mut content = Vec::new();
-            let mut cursor = index + 1;
-            let mut closed = false;
-            while cursor < lines.len() {
-                if lines[cursor] == "```" {
-                    closed = true;
-                    break;
-                }
-                content.push(lines[cursor]);
-                cursor += 1;
+            let closers = closers
+                .get_or_insert_with(|| (0..lines.len()).filter(|&at| lines[at] == "```").collect());
+            while closers.get(next_closer).is_some_and(|&at| at <= index) {
+                next_closer += 1;
             }
-            if closed {
+            if let Some(&closer) = closers.get(next_closer) {
                 blocks.push(MdBlock::CodeBlock {
                     language: fence_language.to_string(),
-                    content: content.join("\n"),
+                    content: lines[index + 1..closer].join("\n"),
                 });
-                index = cursor + 1;
+                index = closer + 1;
                 continue;
             }
             // An unclosed fence is not a code block: fall through to text.
@@ -8415,5 +8412,76 @@ mod owner_source_public_limits {
                 canonical
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fence_projection_tests {
+    use super::*;
+    /// The fold before fences were found in one pass, reduced to the lines
+    /// the test alphabet holds: blanks, paragraphs and fences.
+    fn forward_scan_blocks(lines: &[&str]) -> Vec<MdBlock> {
+        let mut blocks = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let line = lines[index];
+            if line.is_empty() {
+                index += 1;
+                continue;
+            }
+            if let Some(language) = line.strip_prefix("```") {
+                if let Some(offset) = lines[index + 1..].iter().position(|next| *next == "```") {
+                    let closer = index + 1 + offset;
+                    blocks.push(MdBlock::CodeBlock {
+                        language: language.to_owned(),
+                        content: lines[index + 1..closer].join("\n"),
+                    });
+                    index = closer + 1;
+                    continue;
+                }
+            }
+            let start = index;
+            index += 1;
+            while index < lines.len()
+                && !lines[index].is_empty()
+                && !lines[index].starts_with("```")
+            {
+                index += 1;
+            }
+            blocks.push(MdBlock::Paragraph(lines[start..index].join("\n")));
+        }
+        blocks
+    }
+
+    #[test]
+    fn fences_close_where_a_forward_scan_closes_them() {
+        const ALPHABET: [&str; 4] = ["```", "```x", "a", ""];
+        for length in 1..=7_u32 {
+            for mut code in 0..ALPHABET.len().pow(length) {
+                let mut lines = Vec::new();
+                for _ in 0..length {
+                    lines.push(ALPHABET[code % ALPHABET.len()]);
+                    code /= ALPHABET.len();
+                }
+                let body = lines.join("\n");
+                for reading in [MarkdownReading::Projection, MarkdownReading::Source] {
+                    assert_eq!(
+                        parse_markdown_blocks(&body, reading),
+                        forward_scan_blocks(&lines),
+                        "{body:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unclosed_fences_remain_paragraphs() {
+        let openers = 16_000;
+        let blocks = parse_markdown_blocks(&"```x\n".repeat(openers), MarkdownReading::Projection);
+        assert_eq!(blocks.len(), openers);
+        assert!(blocks
+            .iter()
+            .all(|block| *block == MdBlock::Paragraph("```x".to_owned())));
     }
 }

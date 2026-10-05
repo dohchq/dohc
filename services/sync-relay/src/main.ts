@@ -36,6 +36,7 @@ import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-contr
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
+import { startEngineProjection } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
@@ -241,6 +242,13 @@ const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay
 const deploymentConfig = process.env.DOHC_RELAY_DEPLOYMENT_CONFIG;
 if (!isDevOrTest && !deploymentConfig) fatal("FATAL: DOHC_RELAY_DEPLOYMENT_CONFIG must name an initialized deployment outside development/test.");
 if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined) fatal("FATAL: The deployment config owns the relay database path. Remove SYNC_RELAY_DB_PATH.");
+const projectionExecutable = process.env.DOHC_RELAY_ENGINE_EXECUTABLE;
+const projectionOptIn = process.env.DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION;
+if (projectionOptIn !== undefined && !["0", "1"].includes(projectionOptIn)) fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION must be 0 or 1.");
+if (!isDevOrTest && !projectionExecutable) fatal("FATAL: Document sharing requires DOHC_RELAY_ENGINE_EXECUTABLE outside development/test.");
+const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
+  allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
+    `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`)) : undefined;
 const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
 const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
 const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
@@ -647,6 +655,7 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    await documentProjection?.close();
     await ownerAdmissionRun?.close();
     await automations?.close();
     await selfHost?.close();
