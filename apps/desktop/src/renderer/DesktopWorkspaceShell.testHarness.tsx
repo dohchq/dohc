@@ -17,6 +17,7 @@ import type {
   ReadCrashReportResult,
   ListCollectionAutomationRunsResult,
   ListCollectionAutomationsResult,
+  ListAutomationButtonsResult,
   FindAutomationCollectionPayload,
   FindAutomationCollectionResult,
   ResolveAutomationControlsPayload,
@@ -635,7 +636,7 @@ function makeBaseBridge(
     revealAutomationHolds: vi.fn(async () => undefined),
     onAutomationRunSettled: vi.fn(() => () => undefined),
     onAutomationRunWaiting: vi.fn(() => () => undefined),
-    listAutomationButtons: vi.fn(async () => ({ buttons: [] })),
+    listAutomationButtons: vi.fn(async (): Promise<ListAutomationButtonsResult> => ({ buttons: [] })),
     listRecordButtons: vi.fn(async () => ({ record: null })),
     onAutomationHoldsChanged: vi.fn(() => () => undefined),
     onCollectionAutomationsChanged: vi.fn(() => () => undefined),
@@ -875,14 +876,17 @@ export function sourceEditorText(editor: HTMLElement): string {
   ).join("\n");
 }
 
-export function shellBootstrapProps(bridge: ReturnType<typeof makeBridge>) {
+export function shellBootstrapProps(bridge: ReturnType<typeof makeBridge>, onRegistry?: (workspaces: Workspace[]) => void) {
   return {
     userSettings: {
       settings: DEFAULT_USER_SETTINGS,
       source: "default" as const,
     },
-    refreshWorkspaceRegistry: async () =>
-      (await bridge.getWorkspaceRegistry()).workspaces as Workspace[],
+    refreshWorkspaceRegistry: async () => {
+      const workspaces = (await bridge.getWorkspaceRegistry()).workspaces as Workspace[];
+      onRegistry?.(workspaces);
+      return workspaces;
+    },
   };
 }
 

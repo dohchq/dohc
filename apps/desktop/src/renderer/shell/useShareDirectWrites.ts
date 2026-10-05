@@ -43,13 +43,12 @@ export function useShareDirectWrites(input: {
   const pushOnOpen = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
-    if (!input.enabled) return;
     const workspaceId = input.workspaceId;
     let disposed = false;
-    const isCurrent = () => !disposed && latest.current.enabled && latest.current.workspaceId === workspaceId;
+    const isCurrent = () => !disposed && latest.current.workspaceId === workspaceId;
 
     const push = async (): Promise<void> => {
-      if (!isCurrent() || !latest.current.ready) return;
+      if (!isCurrent() || !latest.current.enabled || !latest.current.ready) return;
       let result: PushShareDirectWritesResult;
       try {
         result = await bridge().pushShareDirectWrites({ workspaceId });
@@ -140,7 +139,7 @@ export function useShareDirectWrites(input: {
       pushOnOpen.current = null;
       unsubscribe();
     };
-  }, [input.enabled, input.workspaceId]);
+  }, [input.workspaceId]);
 
   useEffect(() => {
     // Anything a closed view left unsent goes once this workspace is ready.
