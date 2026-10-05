@@ -91,14 +91,14 @@ export function topModalPanel(): HTMLElement | null {
   return panels[panels.length - 1] ?? null;
 }
 
-// Where focus goes back to from a toast: the control F6 left from, in the
-// dialog F6 left last, or else that dialog itself. That dialog counts while
-// it is open and inside the Overlay on top, or there is no Overlay: a newer
-// Overlay opened over it takes focus instead.
+// Where focus goes back to from a toast: the control F6 left from in the
+// Overlay on top, or else that Overlay's panel. With no Overlay open, the
+// bare dialog F6 left last, such as the icon picker, while it is open. An
+// Overlay's handler sees F6 first and stops it, so a dialog inside an
+// Overlay is reached through the Overlay's panel.
 export function modalReturnTarget(): HTMLElement | null {
   const left = leftLast?.deref();
-  const top = topModalPanel();
-  const dialog = left?.isConnected && (!top || top.contains(left)) ? left : top;
+  const dialog = topModalPanel() ?? (left?.isConnected ? left : null);
   if (!dialog) return null;
   const back = leftAt.get(dialog);
   return back?.isConnected && dialog.contains(back) ? back : dialog;
