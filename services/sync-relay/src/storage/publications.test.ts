@@ -385,7 +385,7 @@ it("recovers owner publications in bounded pages without leaking another owner o
   ids.sort();
   const first = await (await f.http("w/app-publications?appRoot=app")).json();
   expect(first.publications).toHaveLength(25);expect(first.nextCursor).toBe(ids[24]);
-  expect(first.publications[0]).toEqual({publicationId: ids[0], authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "app", collectionCapability: null, datasetCapability: null, linkCurrent: true, manifestUnavailable: false,
+  expect(first.publications[0]).toEqual({approvalProvenance:expect.objectContaining({agent:null,selector:{paths:["app","shared"],versionId:null}}),publicationId: ids[0], authorityRevision: 1, shareId: "s", grantId: "g", appRoot: "app", collectionCapability: null, datasetCapability: null, linkCurrent: true, manifestUnavailable: false,
     sourceRevision: expect.stringMatching(/^[0-9a-f]{64}$/), active: true});
   const last = await (await f.http(`w/app-publications?appRoot=app&cursor=${first.nextCursor}`)).json();
   expect(last.publications.map((p: {publicationId: string}) => p.publicationId)).toEqual(ids.slice(25));expect(last.nextCursor).toBeNull();
@@ -408,7 +408,7 @@ it("retains damaged owner rows for withdrawal and refuses their manifests generi
   const page = f.storage.listAppPublications({workspaceId: "w", ownerUserId: "owner", limits, appRoot: "app"});
   expect(page.publications).toHaveLength(2);
   const damaged = page.publications.find(row => row.publicationId === f.published.publicationId)!;
-  expect(damaged).toEqual({publicationId: f.published.publicationId, authorityRevision: 1, shareId: "s", grantId: "g", active: true, collectionCapability: null, datasetCapability: null, linkCurrent: true, manifestUnavailable: true});
+  expect(damaged).toEqual({approvalProvenance:f.published.approvalProvenance,publicationId: f.published.publicationId, authorityRevision: 1, shareId: "s", grantId: "g", active: true, collectionCapability: null, datasetCapability: null, linkCurrent: true, manifestUnavailable: true});
   expect(page.publications.find(row => row.publicationId === other.publicationId)).toMatchObject({collectionCapability: null, datasetCapability: null, linkCurrent: true, manifestUnavailable: false, appRoot: "app"});
   const refused = await f.http();expect(refused.status).toBe(404);expect(await refused.json()).toEqual({ok: false, error: "not found"});
   expect(f.storage.withdrawAppPublication({workspaceId: "w", publicationId: damaged.publicationId, ownerUserId: "owner", expectedAuthorityRevision: damaged.authorityRevision}).active).toBe(false);
@@ -512,3 +512,34 @@ it("reports changed link generations, retains withdrawal, and permits fresh publ
   expect(current.publicationId).not.toBe(original.publicationId);
   expect(list().find(row => row.publicationId === current.publicationId)).toMatchObject({active: true, linkCurrent: true});
 });
+
+
+it("records the approving agent with exact immutable source and exposure facts across restart", () => {
+  const f=fixture(), input=request(), agent={kind:"agent" as const,label:"Builder",labelSource:"agent-declared" as const};
+  const published=f.storage.publishAppPublication({...input,agent});
+  const expected={agent,selector:{paths:["app","shared"],versionId:null},access:"view",sourceRevision:input.candidate.sourceRevision,candidateDigest:digest(JSON.stringify(input.candidate)),capabilities:input.candidate.capabilities};
+  expect(published.approvalProvenance).toEqual(expected);
+  f.restart();
+  expect(f.storage.readAppPublication({...owner,publicationId:published.publicationId,limits}).approvalProvenance).toEqual(expected);
+  expect(f.storage.publishAppPublication({...input,agent:{...agent,label:"Retry"}}).approvalProvenance).toEqual(expected);
+  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_publication_approvals").get()!.n).toBe(1);
+});
+
+it("rejects person claims and preserves unknown CLI attribution", async () => {
+  const f=httpFixture();await f.upload();
+  expect((await f.http("w/app-publications",{...f.body,agent:{kind:"person",label:"Owner"}})).status).toBe(400);
+  const agent={kind:"agent",label:null,labelSource:"agent-declared"};
+  const result=await f.http("w/app-publications",{...f.body,agent});
+  expect(result.status).toBe(200);
+  expect((await result.json()).approvalProvenance.agent).toEqual(agent);
+  expect((await f.http("w/app-publications",{...f.body,agent},"reader")).status).toBe(404);
+});
+
+ it("records each republication approval without replacing earlier provenance", () => {
+  const f=fixture(), agent={kind:"agent" as const,label:"First",labelSource:"agent-declared" as const};
+  const p=f.storage.publishAppPublication({...request(),agent});
+  f.storage.withdrawAppPublication({...owner,publicationId:p.publicationId,expectedAuthorityRevision:1});
+  const next=f.storage.reactivateAppPublication({...owner,publicationId:p.publicationId,expectedAuthorityRevision:2,limits,agent:{...agent,label:"Second"}});
+  expect(next.approvalProvenance?.agent?.label).toBe("Second");
+  expect(f.raw.prepare("SELECT COUNT(*) n FROM sync_relay_app_publication_approvals").get()!.n).toBe(2);
+ });

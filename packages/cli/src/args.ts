@@ -773,6 +773,7 @@ const publicationFromList: readonly CliFieldSource[] = [
 ];
 
 const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
+  createLink: { summary: "Create a scoped app link at View access by default.", notes: ["Reuse operationId for retries. A link URL is a bearer credential at its stated access level, usable by anyone holding it."] },
   listLocal: { summary: "List an app's publications on this computer." },
   prepareLocal: {
     summary: "Prepare an app to open on this computer.",

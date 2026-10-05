@@ -1,6 +1,7 @@
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
+import { PublicationAgent } from "@dohc/cli/app-publication";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
@@ -3643,6 +3644,7 @@ const RelayShareLinkRowBase = z.object({
   revokedAtMs: z.number().int().nonnegative().nullable(),
   lastUsedAtMs: z.number().int().nonnegative().nullable(),
   urlIssuedAtMs: z.number().int().nonnegative().nullable(),
+  creationProvenance: z.object({ agent: PublicationAgent.nullable(), selector: z.unknown(), access: z.string(), subjectName: z.string().nullable() }).optional(),
   dependents: z.array(RelayShareLinkDependent).max(1000),
 });
 

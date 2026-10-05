@@ -1,3 +1,5 @@
+import { parseApprovalAgent, type ApprovalAgent } from "@dohc/security-contract/approval-provenance";
+import { z } from "zod";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import { parseAppPublicationCandidate, parseAppCollectionCapability, APP_PUBLICATION_MAX_BLOB_BYTES, APP_PUBLICATION_MAX_REQUEST_BYTES, type AppPublicationCandidate } from "@dohc/security-contract/app-publication";
 import { createHash, randomUUID } from "node:crypto";
@@ -36,12 +38,17 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
   type Prepared = Awaited<ReturnType<typeof prepareOwnerAppPublication>>;
   const pending = new Map<string, { prepared: Prepared; input: Extract<OwnerAppPublicationRequest, { action: "prepare" }>;
     callerKey: string; scope: string; signal: AbortSignal; generation: number; candidateDigest: string; createdAt: number; clear(): void;
+    access: "view" | "comment" | "edit";
     reactivation?: { publicationId: string; authorityRevision: number } }>();
+  const createdLinks = new Map<string, {url: string; grantGeneration: number; callerKey: string; scope: string; signal: AbortSignal; generation: number; createdAt: number; operationId: string; workspaceId: string; clear(): void}>();
   const preparing = new Map<string, symbol>();
+  let creatingLinks = 0;
+  const bearerWarning = (access: string) => `This URL is a bearer credential at ${access} access, usable by anyone who holds it.`;
   const clearExpired = () => {
     for (const entry of pending.values()) if (entry.signal.aborted || Date.now() - entry.createdAt > 10 * 60_000) entry.clear();
   };
-  return async (caller: Caller, raw: unknown) => {
+  return async (caller: Caller, raw: unknown, attribution?: ApprovalAgent | null) => {
+    const agent = parseApprovalAgent(attribution);
     const input = OwnerAppPublicationRequest.parse(raw);
     const callerKey = dependencies.callerKey(caller);
     return dependencies.withWorkspaceOperation(caller, input.workspaceId, async operation => {
@@ -59,8 +66,52 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
       const resolveDatasetRevision = (binding: AppDatasetBinding) => session.run(() => dependencies.resolveDatasetRevision
         ? dependencies.resolveDatasetRevision(operation.workspace, binding, operation.signal)
         : resolveRemoteDatasetRevision(remoteData, binding));
+      const currentGrant = async (shareId: string, grantId: string) => {
+        let grant;
+        let cursor: string | undefined;
+        const seen = new Set<string>();
+        do {
+        const page = RelayShareLinkListResponse.parse(await session.run(() => dependencies.relayJson(remote.credentials,
+          `/sync/${encodeURIComponent(input.workspaceId)}/shares/links${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal: operation.signal })));
+        grant = page.links.find(row => row.shareId === shareId && row.grantId === grantId);
+        if (grant) break;
+        cursor = page.nextCursor;
+        if (cursor && seen.has(cursor)) throw new Error("The app link listing changed. Try again.");
+        if (cursor) seen.add(cursor);
+        } while (cursor);
+        if (!grant) throw new Error("This app link is unavailable. Choose an active link.");
+        return grant;
+      };
       clearExpired();
-      const remember = async (prepared: Prepared, selection: Extract<OwnerAppPublicationRequest, { action: "prepare" }>, reactivation?: { publicationId: string; authorityRevision: number }) => {
+      for (const link of createdLinks.values()) if (link.signal.aborted || Date.now() - link.createdAt > 10 * 60_000) link.clear();
+      if (input.action === "createLink") {
+        if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw new Error("Choose an app in your workspace.");
+        const paths = input.paths ?? [input.appRoot];
+        if (paths.some(path => !isShareablePath(path) || isSharedWithMePath(path))) throw new Error("Choose shareable paths in your workspace.");
+        if (createdLinks.size + creatingLinks >= 8 && ![...createdLinks.values()].some(link => link.operationId === input.operationId && link.workspaceId === input.workspaceId)) throw new Error("Too many app links await publication. Finish another publication first.");
+        creatingLinks++;
+        try {
+          const raw = await session.run(() => dependencies.relayJson(remote.credentials,
+            `/sync/${encodeURIComponent(input.workspaceId)}/shares/links`, {method:"POST",signal:operation.signal,
+              body:JSON.stringify({paths,access:input.access,operationId:input.operationId,agent})}));
+          operation.signal.throwIfAborted();
+          const row = z.object({ok:z.literal(true),workspaceId:z.string(),shareId:z.string().min(1),grantId:z.string().min(1),access:z.enum(["view","comment","edit"]),
+            selector:z.object({paths:z.array(z.string()),versionId:z.null()}),generation:z.number().int().positive().optional(),url:z.string().url().max(4096).optional(),urlUnavailable:z.literal(true).optional()}).parse(raw);
+          if (row.workspaceId !== input.workspaceId || row.access !== input.access || JSON.stringify([...row.selector.paths].sort()) !== JSON.stringify([...new Set(paths)].sort())) throw new Error("The app link selection changed.");
+          const facts = {shareId:row.shareId,grantId:row.grantId,selector:row.selector,access:row.access,bearerWarning:bearerWarning(row.access)};
+          if (!row.url) {
+            if (!row.urlUnavailable) throw new Error("The app link result is unavailable.");
+            return OwnerAppPublicationResult.parse({kind:"urlUnavailable",...facts});
+          }
+          if (!row.generation) throw new Error("The app link generation is unavailable.");
+          const clear = () => { createdLinks.delete(row.grantId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };
+          const expiry = setTimeout(clear, 10 * 60_000); expiry.unref();
+          createdLinks.set(row.grantId,{url:row.url,grantGeneration:row.generation,callerKey,scope:operation.scope ?? callerKey,signal:operation.signal,generation:remote.credentialGeneration,createdAt:Date.now(),operationId:input.operationId,workspaceId:input.workspaceId,clear});
+          operation.signal.addEventListener("abort",clear,{once:true});
+          return OwnerAppPublicationResult.parse({kind:"linkCreated",...facts,url:row.url});
+        } finally { creatingLinks--; }
+      }
+      const remember = async (prepared: Prepared, selection: Extract<OwnerAppPublicationRequest, { action: "prepare" }>, reactivation?: { publicationId: string; authorityRevision: number }, access: "view" | "comment" | "edit" = "view", selector?: {paths:string[];versionId:string|null}) => {
         session.assertCurrent(); operation.signal.throwIfAborted();
         const candidate = prepared.candidate;
         const capabilities = await Promise.all(candidate.capabilities.map(async capability => {
@@ -83,10 +134,10 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         const clear = () => { pending.delete(approvalId); operation.signal.removeEventListener("abort", clear); clearTimeout(expiry); };
         const expiry = setTimeout(clear, 10 * 60_000); expiry.unref();
         pending.set(approvalId, { prepared, input: selection, candidateDigest, callerKey, signal: operation.signal,
-          scope: operation.scope ?? callerKey, generation: remote.credentialGeneration, createdAt: Date.now(), clear, reactivation });
+          scope: operation.scope ?? callerKey, generation: remote.credentialGeneration, createdAt: Date.now(), clear, reactivation, access });
         operation.signal.addEventListener("abort", clear, { once: true });
         return OwnerAppPublicationResult.parse({ kind: "prepared", approvalId, candidateDigest, appRoot: candidate.appRoot,
-          versionId: candidate.versionId, sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path), capabilities, externalNetwork: true });
+          versionId: candidate.versionId, sourceRevision: candidate.sourceRevision, sourcePaths: candidate.inputs.map(file => file.path), capabilities, externalNetwork: true, ...(selector ? {audience:{shareId:selection.shareId,grantId:selection.grantId,selector,access}} : {}) });
       };
       if (input.action === "reviewReactivation") {
         if (preparing.has(callerKey)) throw new Error("This caller is already preparing an app. Wait for it to finish.");
@@ -101,7 +152,9 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         if (dataset) verifyAppDatasetCapability(dataset, await resolveDatasetRevision(dataset));
         const selection = OwnerAppPublicationRequest.parse({ action: "prepare", workspaceId: input.workspaceId, appRoot: candidate.appRoot, shareId: row.owner.shareId, grantId: row.owner.grantId });
         if (selection.action !== "prepare") throw new Error("Invalid publication selection.");
-        return await remember({ candidate, files: [], generation: row.owner.generation! }, selection, { publicationId: input.publicationId, authorityRevision: row.authorityRevision! });
+        const grant = await currentGrant(selection.shareId, selection.grantId);
+        if (grant.generation !== row.owner.generation || !["view", "comment", "edit"].includes(grant.access)) throw new Error("The app link changed. Prepare the app again.");
+        return await remember({ candidate, files: [], generation: row.owner.generation! }, selection, { publicationId: input.publicationId, authorityRevision: row.authorityRevision! }, grant.access as "view" | "comment" | "edit", grant.selector ?? undefined);
       }
       if (input.action === "list") {
         if (!isShareablePath(input.appRoot) || isSharedWithMePath(input.appRoot)) throw new Error("Choose an app in your workspace.");
@@ -159,10 +212,20 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
             ? resolveAppDatasetCapability(binding, revision) : verifyAppDatasetCapability(dataset, revision);
         }
         const finishPublication = async (publicationId: unknown, authorityRevision: unknown) => {
+          const address = (authorityRevision: number) => {
+            const appQuery = `?app=${String(publicationId)}`;
+            const link = createdLinks.get(entry.input.grantId);
+            link?.clear();
+            if (link && link.callerKey === callerKey && link.scope === (operation.scope ?? callerKey) && link.signal === operation.signal && link.generation === remote.credentialGeneration && link.grantGeneration === prepared.generation) {
+              const url = new URL(link.url); url.searchParams.set("app",String(publicationId));
+              return OwnerAppPublicationResult.parse({...published,authorityRevision,appQuery,url:url.href,access:entry.access,bearerWarning:bearerWarning(entry.access)});
+            }
+            return OwnerAppPublicationResult.parse({...published,authorityRevision,appQuery,urlUnavailable:{grantId:entry.input.grantId},access:entry.access,bearerWarning:bearerWarning(entry.access)});
+          };
           const published = OwnerAppPublicationResult.parse({ kind: "published", publicationId, authorityRevision });
           if (published.kind !== "published") throw new Error("Invalid publication result.");
           const capability = candidate.capabilities[0];
-          if (!capability) return published;
+          if (!capability) return address(published.authorityRevision);
           if (capability.kind === "dataset") {
             try {
               const raw = await session.run(() => dependencies.relayJson(remote.credentials,
@@ -171,7 +234,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
               const activated = raw as { publicationId?: unknown; authorityRevision?: unknown; datasetId?: unknown } | null;
               if (!activated || activated.publicationId !== published.publicationId || activated.authorityRevision !== published.authorityRevision ||
                 activated.datasetId !== capability.datasetId) throw new Error("Collection access could not be confirmed.");
-              return published;
+              return address(published.authorityRevision);
             } catch (error) {
               operation.signal.throwIfAborted(); session.assertCurrent();
               if (error instanceof Error && error.name === "AbortError") throw error;
@@ -185,7 +248,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
           const approval = raw as { publicationId?: unknown; authorityRevision?: unknown; capability?: unknown } | null;
           if (!approval || approval.publicationId !== published.publicationId || approval.authorityRevision !== published.authorityRevision + 1 ||
               JSON.stringify(parseAppCollectionCapability(approval.capability)) !== JSON.stringify(capability)) throw new Error("Collection approval changed.");
-          return OwnerAppPublicationResult.parse({ kind: "published", publicationId: published.publicationId, authorityRevision: approval.authorityRevision });
+          return address(Number(approval.authorityRevision));
           } catch (error) {
             operation.signal.throwIfAborted();
             session.assertCurrent();
@@ -197,7 +260,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         if (entry.reactivation) {
           const raw = await session.run(() => dependencies.relayJson(remote.credentials,
             `/sync/${encodeURIComponent(input.workspaceId)}/app-publications/${entry.reactivation!.publicationId}/reactivate`, { method: "POST", signal: operation.signal,
-              body: JSON.stringify({ expectedAuthorityRevision: entry.reactivation!.authorityRevision }) }));
+              body: JSON.stringify({ expectedAuthorityRevision: entry.reactivation!.authorityRevision, agent }) }));
           const row = raw as { publicationId?: string; active?: boolean; authorityRevision?: number; owner?: { workspaceId?: string; shareId?: string; grantId?: string; generation?: number } } | null;
           if (!row || row.publicationId !== entry.reactivation.publicationId || row.active !== true || row.owner?.workspaceId !== input.workspaceId || row.owner.shareId !== entry.input.shareId || row.owner.grantId !== entry.input.grantId || row.owner.generation !== prepared.generation) throw new Error("dohc could not confirm that this app was republished. Refresh the publication list.");
           return finishPublication(row.publicationId, row.authorityRevision);
@@ -207,7 +270,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         }
         const rawResult = await session.run(() => dependencies.relayJson(remote.credentials,
           `/sync/${encodeURIComponent(input.workspaceId)}/app-publications`, { method: "POST", signal: operation.signal,
-            body: JSON.stringify({ shareId: entry.input.shareId, grantId: entry.input.grantId, expectedGrantGeneration: prepared.generation, candidate }) }));
+            body: JSON.stringify({ shareId: entry.input.shareId, grantId: entry.input.grantId, expectedGrantGeneration: prepared.generation, candidate, agent }) }));
         if (!rawResult || typeof rawResult !== "object") throw new Error("dohc could not read the publication result.");
         const row = rawResult as Record<string, unknown>;
         const owner = row.owner as Record<string, unknown> | undefined;
@@ -227,19 +290,7 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
         if (preparing.get(callerKey) !== preparation) throw new Error("A newer app preparation replaced this one.");
       };
       try {
-      let grant;
-      let cursor: string | undefined;
-      const seen = new Set<string>();
-      do {
-        const page = RelayShareLinkListResponse.parse(await session.run(() => dependencies.relayJson(remote.credentials,
-          `/sync/${encodeURIComponent(input.workspaceId)}/shares/links${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal: operation.signal })));
-        grant = page.links.find(row => row.shareId === input.shareId && row.grantId === input.grantId);
-        if (grant) break;
-        cursor = page.nextCursor;
-        if (cursor && seen.has(cursor)) throw new Error("The app link listing changed. Try again.");
-        if (cursor) seen.add(cursor);
-      } while (cursor);
-      if (!grant) throw new Error("This app link is unavailable. Choose an active link.");
+      const grant = await currentGrant(input.shareId, input.grantId);
       await session.run(() => dependencies.flushCapture(operation.workspace));
       const prepared = await session.run(() => dependencies.withAdapter(operation.workspace, adapter => prepareOwnerAppPublication(input, grant!, {
         adapter, signal: operation.signal, assertCurrent: assertPreparing, compile: dependencies.compile, resolveDatasetRevision,
@@ -247,11 +298,12 @@ export function createOwnerAppPublicationHandler<Caller, Workspace extends { wor
       if (!prepared) throw new Error("dohc could not capture this app. Restart dohc and try again.");
       const { candidate } = prepared;
       assertPreparing();
-      const publishEnvelopeBytes = Buffer.byteLength(JSON.stringify({ shareId: input.shareId, grantId: input.grantId, expectedGrantGeneration: prepared.generation, candidate }), "utf8");
+      const publishEnvelopeBytes = Buffer.byteLength(JSON.stringify({ shareId: input.shareId, grantId: input.grantId, expectedGrantGeneration: prepared.generation, candidate, agent }), "utf8");
       if (publishEnvelopeBytes > APP_PUBLICATION_MAX_REQUEST_BYTES || prepared.files.some(file => file.byteLength > APP_PUBLICATION_MAX_BLOB_BYTES)) {
         throw new Error("This app exceeds the supported publication size. Choose a smaller build.");
       }
-      return await remember(prepared, input);
+      if (!["view","comment","edit"].includes(grant.access)) throw new Error("This app link access is unavailable.");
+      return await remember(prepared, input, undefined, grant.access as "view" | "comment" | "edit", grant.selector ?? undefined);
       } finally {
         if (preparing.get(callerKey) === preparation) preparing.delete(callerKey);
       }

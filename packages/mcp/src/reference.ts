@@ -83,6 +83,7 @@ export const DATASET_RESULTS: Record<DatasetAction, DatasetKind[]> = {
 // apps/desktop/src/ipc/ownerAppPublicationIpc.ts and
 // localOwnerAppPublication.ts answer with.
 export const APP_RESULTS: Record<AppAction, AppKind[]> = {
+  createLink: ["linkCreated", "urlUnavailable"],
   listLocal: ["localListed"],
   prepareLocal: ["prepared"],
   launchLocal: ["localLaunched"],

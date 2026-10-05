@@ -690,3 +690,21 @@ it("exposes immutable approved rule history only through the owner route", async
   expect((await f.http(`${path}&revisionSha256=${revision.revisionSha256}`)).status).toBe(400);
 
 });
+
+it("records owner-only agent approvals through activation and migration routes", async () => {
+  const f=await httpFixture(), approvalAgent={kind:"agent",label:"Builder",labelSource:"agent-declared"};
+  const activation={revision,schemaSql,operationSource,approvalAgent};
+  for(const user of ["helper","stranger"]) expect((await f.http(`${f.path}/activate`,activation,{authorization:`Bearer ${user}`})).status).toBe(404);
+  expect((await f.http(`${f.path}/activate`,{...activation,approvalAgent:{kind:"person",label:"Owner"}})).status).toBe(400);
+  expect((await f.http(`${f.path}/activate`,activation)).status).toBe(200);
+  const artifacts=await (await f.http(`${f.path}/artifacts`)).json();
+  const next=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
+  const prepared=await f.http(`${f.path}/prepare-migration`,{revision:next,schemaSql,operationSource,expected:artifacts.cursor,migrationSql:"SELECT 1;"});
+  expect(prepared.status).toBe(200);const candidate=await prepared.json();
+  const approval={candidateId:candidate.candidateId,checkpointSha256:candidate.checkpointSha256,approvalAgent};
+  for(const user of ["helper","stranger"]) expect((await f.http(`${f.path}/approve-migration`,approval,{authorization:`Bearer ${user}`})).status).toBe(404);
+  expect((await f.http(`${f.path}/approve-migration`,approval)).status).toBe(200);
+  const history=await (await f.http(`${f.path}/history`)).json();
+  expect(history.entries[0].approvalAgent).toEqual(approvalAgent);
+  expect(f.storage.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_approval_provenance").get()!.n).toBe(2);
+});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OwnerAppPublicationResult } from "./appPublication";
+import { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "./appPublication";
 import { parseCliArguments } from "./args";
 
 const capability = { kind: "collection-create", collectionPath: "responses", schemaSha256: "a".repeat(64),
@@ -46,4 +46,15 @@ describe("owner publication review contract", () => {
   ])("refuses malformed collection capabilities", invalid => {
     expect(OwnerAppPublicationResult.safeParse({ ...prepared, capabilities: [invalid] }).success).toBe(false);
   });
+});
+
+
+it("creates only an explicitly scoped retryable link, defaulting to View", () => {
+  expect(OwnerAppPublicationRequest.parse({action:"createLink", workspaceId:"w", appRoot:"app", operationId:"00000000-0000-4000-8000-000000000001"})).toMatchObject({access:"view"});
+  for (const paths of [[], [""], ["app"]]) {
+    const result = OwnerAppPublicationRequest.safeParse({action:"createLink", workspaceId:"w", appRoot:"app", operationId:"00000000-0000-4000-8000-000000000001",paths});
+    expect(result.success).toBe(paths.length === 1 && paths[0] === "app");
+  }
+  expect(OwnerAppPublicationRequest.safeParse({action:"rotateLink",workspaceId:"w"}).success).toBe(false);
+  expect(OwnerAppPublicationRequest.safeParse({action:"createLink",workspaceId:"w",appRoot:"app"}).success).toBe(false);
 });
