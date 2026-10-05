@@ -194,9 +194,30 @@ fn parsed_moment_author(value: Value) -> Value {
                 .is_some_and(|v| !v.is_empty() && v.len() <= MAX_AUTHOR_FIELD_BYTES)
         })
     };
+    // A field of a relay-admitted live author snapshot, within its admission bound.
+    let snapshot_text = |key: &str| {
+        object.get(key).and_then(Value::as_str).is_some_and(|v| {
+            !v.is_empty()
+                && v.len() <= MAX_AUTHOR_FIELD_BYTES
+                && !v.bytes().any(|b| b.is_ascii_control())
+        })
+    };
     let principal_ok = object
         .get("onBehalfOf")
         .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()));
+    // A snapshot names an account holder or a link's public principal with
+    // the name the relay stored for them.
+    let snapshot_fields = match object.get("kind").and_then(Value::as_str) {
+        Some("human") if object.contains_key("humanName") => Some(["humanId", "humanName"]),
+        Some("link") if object.contains_key("publicPrincipalId") => {
+            Some(["publicPrincipalId", "label"])
+        }
+        _ => None,
+    };
+    if let Some(fields) = snapshot_fields {
+        let valid = object.len() == 3 && fields.into_iter().all(|field| snapshot_text(field));
+        return if valid { value } else { corrupt() };
+    }
     if object.get("kind").and_then(Value::as_str) == Some("public") {
         let valid = object.len() == 3 && bounded_ids(&["principalId", "grantId"]);
         return if valid { value } else { corrupt() };
@@ -253,11 +274,16 @@ fn parsed_moment_author(value: Value) -> Value {
         Some(Value::String(v)) => !v.is_empty(),
         Some(_) => false,
     };
-    if kind_ok && nonempty("agentId") && principal_ok && run_ok {
+    let name_ok = !object.contains_key("agentName") || snapshot_text("agentName");
+    if kind_ok && nonempty("agentId") && principal_ok && run_ok && name_ok {
         let mut author = json!({
             "kind": "agent",
             "agentId": object["agentId"],
         });
+        // The name a live author snapshot declared for its agent.
+        if let Some(name) = object.get("agentName") {
+            author["agentName"] = name.clone();
+        }
         if let Some(principal) = object.get("onBehalfOf") {
             author["onBehalfOf"] = principal.clone();
         }
@@ -497,6 +523,54 @@ mod relay_author_tests {
             assert_eq!(
                 parsed_moment_author(&malformed.to_string()),
                 json!({"corrupt":true})
+            );
+        }
+    }
+
+    /// A hosted agent's live edit settles with the relay-admitted account
+    /// holder beside the declared agent, and a link holder's with its public
+    /// principal. History reads every field back.
+    #[test]
+    fn preserves_live_author_snapshots_and_refuses_malformed_ones() {
+        let human = json!({"kind":"human", "humanId":"owner", "humanName":"Sam 🐈"});
+        let agent = json!({"kind":"agent", "agentId":"writer", "agentName":"Writer", "onBehalfOf":"owner", "depth":1});
+        let link = json!({"kind":"link", "publicPrincipalId":"public_1", "label":"Anonymous"});
+        assert_eq!(
+            parsed_moment_authors(&json!([human, agent, link]).to_string()),
+            json!([human, agent, link])
+        );
+        let longest = "\"".repeat(MAX_AUTHOR_FIELD_BYTES);
+        for author in [
+            json!({"kind":"human", "humanId":longest, "humanName":longest}),
+            json!({"kind":"link", "publicPrincipalId":longest, "label":longest}),
+            json!({"kind":"agent", "agentId":"writer", "agentName":longest}),
+        ] {
+            assert_eq!(parsed_moment_author(&author.to_string()), author);
+        }
+        let over = format!("{}x", "é".repeat(MAX_AUTHOR_FIELD_BYTES / 2));
+        for malformed in [
+            json!({"kind":"human", "humanId":"owner", "humanName":""}),
+            json!({"kind":"human", "humanId":"", "humanName":"Sam"}),
+            json!({"kind":"human", "humanId":"owner", "humanName":over}),
+            json!({"kind":"human", "humanId":over, "humanName":"Sam"}),
+            json!({"kind":"human", "humanId":"owner", "humanName":"Sam\n"}),
+            json!({"kind":"human", "humanId":"owner", "humanName":42}),
+            json!({"kind":"human", "humanId":"owner", "humanName":"Sam", "onBehalfOf":"owner"}),
+            json!({"kind":"link", "publicPrincipalId":"public_1"}),
+            json!({"kind":"link", "publicPrincipalId":"public_1", "label":""}),
+            json!({"kind":"link", "publicPrincipalId":over, "label":"Anonymous"}),
+            json!({"kind":"link", "publicPrincipalId":"public_1", "label":over}),
+            json!({"kind":"link", "publicPrincipalId":"public_1", "label":"Anonymous", "grantId":"grant"}),
+            json!({"kind":"link", "grantId":"grant", "grantGeneration":2, "principalId":"holder", "publicPrincipalId":"public_1"}),
+            json!({"kind":"agent", "agentId":"writer", "agentName":""}),
+            json!({"kind":"agent", "agentId":"writer", "agentName":over}),
+            json!({"kind":"agent", "agentId":"writer", "agentName":"Writer\u{7f}"}),
+            json!({"kind":"agent", "agentId":"writer", "agentName":null}),
+        ] {
+            assert_eq!(
+                parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true}),
+                "{malformed}"
             );
         }
     }

@@ -729,6 +729,29 @@ describe("workspace engine IPC registrations", () => {
     expect(listed.moments.map(engineMomentSourceLabel)).toEqual(["Ice", "Restore"]);
   });
 
+  it("names a hosted agent's live edit by the account holder and agent its author snapshot admitted", async () => {
+    const h = await harness();
+    const settled = (id: string, authors: NonNullable<Awaited<ReturnType<WorkspaceEngineCapture["listMoments"]>>["moments"][number]["authors"]>) => ({
+      id, versionId: "main", path: "notes/a.md", recordedAtMs: 1, operation: "write" as const,
+      metadata: { origin: "local-file" as const }, protected: false as const, momentOrder: 0, authors,
+    });
+    const owner = { kind: "human" as const, humanId: "person-local", humanName: "Owner Account" };
+    h.capture.listMoments.mockResolvedValue({
+      moments: [
+        settled("hosted", [owner, { kind: "agent", agentId: "writer", onBehalfOf: "person-local" }]),
+        settled("named", [owner, { kind: "agent", agentId: "writer", agentName: "Trip helper", onBehalfOf: "person-local" }]),
+        settled("account", [owner]),
+        settled("link", [{ kind: "link", publicPrincipalId: "public_1", label: "Anonymous" }]),
+      ],
+      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+    });
+    const listed = (await h.invoke(CHANNELS.listEngineMoments)) as { moments: EngineMomentRecord[] };
+    expect(listed.moments.map(engineMomentSourceLabel)).toEqual([
+      "Owner Account, writer", "Owner Account, Trip helper", "Owner Account", "Link holder Anonymous",
+    ]);
+    expect(listed.moments.map((moment) => moment.authors?.length)).toEqual([2, 2, 1, 1]);
+  });
+
   it("notifies after a restore and before parsing its result", async () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ restored: "text", restoredMomentId: "restored", path: "notes/a.md" });

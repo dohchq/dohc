@@ -1461,10 +1461,19 @@ export type RebuildEngineStoreResult = z.infer<typeof RebuildEngineStoreResult>;
 
 const MOMENT_TEXT = engineStoredText("moment body");
 
-const EngineMomentAuthor = z.discriminatedUnion("kind", [
+// An identifier the relay accepted a shared change under: a live document's
+// collaborator or Edit link, or a direct write's. A live author snapshot's
+// names have the same bound.
+const SHARED_AUTHOR_ID = z.string().min(1).refine(
+  (value) => new TextEncoder().encode(value).byteLength <= LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
+  "Shared author identifiers are at most 512 UTF-8 bytes.",
+);
+
+const EngineMomentAuthor = z.union([
   z.object({
     kind: z.literal("agent"),
     agentId: z.string().min(1),
+    agentName: SHARED_AUTHOR_ID.optional(),
     onBehalfOf: z.string().min(1).optional(),
     agentRunId: z.string().min(1).optional(),
     depth: z.number().int().positive().optional(),
@@ -1473,6 +1482,11 @@ const EngineMomentAuthor = z.discriminatedUnion("kind", [
     kind: z.literal("human"),
     humanId: z.string().min(1),
     onBehalfOf: z.string().min(1).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("human"),
+    humanId: SHARED_AUTHOR_ID,
+    humanName: SHARED_AUTHOR_ID,
   }).strict(),
   z.object({
     kind: z.literal("public"),
@@ -1492,19 +1506,17 @@ const EngineMomentAuthor = z.discriminatedUnion("kind", [
     principalId: z.string().min(1),
   }).strict(),
   z.object({
+    kind: z.literal("link"),
+    publicPrincipalId: SHARED_AUTHOR_ID,
+    label: SHARED_AUTHOR_ID,
+  }).strict(),
+  z.object({
     kind: z.literal("automation"),
     automationId: z.string().min(1),
     onBehalfOf: z.string().min(1).optional(),
     depth: z.number().int().nonnegative(),
   }).strict(),
 ]);
-
-// An identifier the relay accepted a shared change under: a live document's
-// collaborator or Edit link, or a direct write's.
-const SHARED_AUTHOR_ID = z.string().min(1).refine(
-  (value) => new TextEncoder().encode(value).byteLength <= LIVE_UPDATE_IDENTIFIER_MAX_BYTES,
-  "Shared author identifiers are at most 512 UTF-8 bytes.",
-);
 
 export const EngineMomentRecord = z.object({
   id: OPAQUE_ID,
@@ -1515,11 +1527,15 @@ export const EngineMomentRecord = z.object({
   origin: z.enum(["api", "local-file", "restore", "sync", "unknown", "ydoc"]),
   authors: z.array(EngineMomentAuthor).min(1).optional(),
   // Present only when a dohc-tracked agent run authored the moment; main
-  // resolves the configured agent name for local runs.
-  agentAuthorName: z.string().min(1).max(500).optional(),
+  // resolves the configured agent name for local runs. A live author
+  // snapshot's agent reads as the name it declared.
+  agentAuthorName: z.string().min(1).max(LIVE_UPDATE_IDENTIFIER_MAX_BYTES).optional(),
   // Present when this computer's person authored the moment: main names them
   // as the account settled here now, or this installation when signed out.
   personAuthorName: z.string().min(1).max(500).optional(),
+  // Present when a live edit's relay-admitted author snapshot names its one
+  // author: the account holder's name, or the link holder's label.
+  liveAuthorName: z.string().min(1).max(4096).optional(),
   publicAuthor: z.object({kind: z.literal("public"), principalId: z.string().min(1).max(500), grantId: z.string().min(1).max(500)}).strict().optional(),
   // Present when a Collection automation authored the moment: its name as
   // this computer's automations.yaml has it, and the Collection it belongs to.

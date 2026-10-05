@@ -1539,6 +1539,11 @@ describe("createCaptureLiveStores", () => {
     { method, author: { kind: "agent", agentId: "agent" } as const },
     { method, author: { kind: "automation", automationId: "collection:Tasks#stamp", depth: 4 } as const },
     { method, author: { kind: "human", humanId: "ada", onBehalfOf: "ada" } as const },
+    // A live author snapshot: the relay-admitted account holder or link holder, and a declared agent.
+    { method, author: { kind: "human", humanId: "owner", humanName: "Owner" } as const },
+    { method, author: { kind: "human", humanId: LONGEST_LIVE_ID, humanName: LONGEST_LIVE_ID } as const },
+    { method, author: { kind: "link", publicPrincipalId: LONGEST_LIVE_ID, label: LONGEST_LIVE_ID } as const },
+    { method, author: { kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1 } as const },
   ]))(
     "keeps $author.kind authorship returned by $method",
     async ({ method, author }) => {

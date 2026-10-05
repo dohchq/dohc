@@ -248,6 +248,64 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
     expect(() => EngineMomentDetailRecord.parse({...record, linkAuthor: {...author, userId: "ana"}})).toThrow();
   });
+  // A hosted agent's live edit settles with the account holder the relay
+  // admitted beside the agent they declared.
+  it("names each author of a live author snapshot as the relay admitted them", async () => {
+    const owner = {kind: "human", humanId: "owner", humanName: "Owner"} as const;
+    for (const [agent, labels] of [
+      [{kind: "agent", agentId: "writer", onBehalfOf: "owner"}, ["Owner", "owner"]],
+      [{kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1}, ["Owner", "Writer"]],
+    ] as const) {
+      const detail = detailWith({before: null, after: textSide("new")});
+      if (detail.protected) throw new Error("Expected a plaintext moment");
+      detail.moment.authors = [owner, agent];
+      const person = vi.fn(names.person);
+      const record = engineMomentDetailForIpc(detail, {...names, person});
+      expect(record.authors).toEqual([owner, agent]);
+      expect(record.authorLabels).toEqual(labels);
+      expect(person).not.toHaveBeenCalled();
+      expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+      const page = await listEngineMomentsForIpc(async () => ({
+        moments: [{...detail.moment, momentOrder: 1, protected: false}],
+        nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+      }), names);
+      if (!("moments" in page)) throw new Error("Expected ready history");
+      expect(page.moments[0]).toMatchObject({authors: [owner, agent], authorLabels: labels});
+    }
+  });
+  it("names a sole snapshot author without making a link holder a direct writer", () => {
+    const id = "\"".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES);
+    for (const [author, field] of [
+      [{kind: "human", humanId: "owner", humanName: "Owner"}, {liveAuthorName: "Owner"}],
+      [{kind: "link", publicPrincipalId: "public_1", label: "Anonymous"}, {liveAuthorName: "Link holder Anonymous"}],
+      [{kind: "human", humanId: id, humanName: id}, {liveAuthorName: id}],
+      [{kind: "link", publicPrincipalId: id, label: id}, {liveAuthorName: `Link holder ${id}`}],
+      [{kind: "agent", agentId: "writer", agentName: id}, {agentAuthorName: id}],
+    ] as const) {
+      const detail = detailWith({before: null, after: textSide("new")});
+      if (detail.protected) throw new Error("Expected a plaintext moment");
+      detail.moment.authors = [author];
+      const record = engineMomentDetailForIpc({...detail, moment: {...detail.moment, metadata: {origin: "sync"}}}, names);
+      expect(record).toMatchObject({...field, authors: [author]});
+      expect(record).not.toHaveProperty("linkAuthor");
+      expect(record).not.toHaveProperty("personAuthorName");
+      expect(EngineMomentDetailRecord.parse(record)).toEqual(record);
+    }
+    // Snapshot fields keep the live bound and their exact shape.
+    const over = `${"é".repeat(LIVE_UPDATE_IDENTIFIER_MAX_BYTES / 2)}x`;
+    const record = engineMomentDetailForIpc(detailWith({before: null, after: textSide("new")}), names);
+    for (const author of [
+      {kind: "human", humanId: "owner", humanName: over},
+      {kind: "human", humanId: over, humanName: "Owner"},
+      {kind: "human", humanId: "owner", humanName: ""},
+      {kind: "human", humanId: "owner", humanName: "Owner", onBehalfOf: "owner"},
+      {kind: "link", publicPrincipalId: "public_1", label: over},
+      {kind: "link", publicPrincipalId: "public_1", label: "Anonymous", grantId: "grant"},
+      {kind: "agent", agentId: "writer", agentName: over},
+    ]) {
+      expect(EngineMomentRecord.omit({momentOrder: true}).safeParse({...record, authors: [author]}).success, JSON.stringify(author)).toBe(false);
+    }
+  });
   it("keeps the plain text moment shape (no binary side fields)", () => {
     const record = engineMomentDetailForIpc(
       detailWith({ before: textSide("v1\n"), after: textSide("v2\n") }),

@@ -54,6 +54,27 @@ describe("versioned result decoder rejection", () => {
     })).toThrow(ProtocolShapeError);
   });
 
+  it("keeps a live author snapshot's account holder, declared agent, and link holder", () => {
+    const authors = [
+      { kind: "human", humanId: "owner", humanName: "Owner" },
+      { kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1 },
+      { kind: "link", publicPrincipalId: "public_1", label: "Anonymous" },
+      { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder" },
+    ];
+    expect(decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors })?.authors).toEqual(authors);
+    for (const author of [
+      { kind: "human", humanId: "owner", humanName: "Owner", onBehalfOf: "owner" },
+      { kind: "human", humanId: "owner", humanName: 1 },
+      { kind: "link", publicPrincipalId: "public_1" },
+      { kind: "link", publicPrincipalId: "public_1", label: "Anonymous", grantId: "grant" },
+      { kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder", label: "Ana" },
+      { kind: "agent", agentId: "writer", agentName: null },
+    ]) {
+      expect(() => decodeVersionedResult(VERSIONED_METHOD.momentsGet, { ...validMoment, authors: [author] }), JSON.stringify(author))
+        .toThrow(ProtocolShapeError);
+    }
+  });
+
   it("reports the wrong-typed nested write field path", () => {
     // The snapshot and moment stubs are complete so validation reaches the
     // one wrong-typed field this test pins: object.createdAtMs.

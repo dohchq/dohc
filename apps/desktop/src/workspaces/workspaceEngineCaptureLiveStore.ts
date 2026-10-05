@@ -265,6 +265,9 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
       "Engine moment contains corrupt author provenance.",
     );
   }
+  if (author.kind === "human" && "humanName" in author) {
+    return { kind: "human", humanId: author.humanId, humanName: author.humanName };
+  }
   if (author.kind === "human") {
     return {
       kind: "human",
@@ -275,6 +278,9 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
   if (author.kind === "public") return { kind: "public", principalId: author.principalId, grantId: author.grantId };
   if (author.kind === "named") {
     return { kind: "named", userId: author.userId, grantId: author.grantId, grantGeneration: author.grantGeneration };
+  }
+  if (author.kind === "link" && "publicPrincipalId" in author) {
+    return { kind: "link", publicPrincipalId: author.publicPrincipalId, label: author.label };
   }
   if (author.kind === "link") {
     return { kind: "link", grantId: author.grantId, grantGeneration: author.grantGeneration, principalId: author.principalId };
@@ -290,6 +296,7 @@ function authorFromWire(author: NonNullable<MomentRecord["authors"]>[number]): M
   return {
     kind: "agent",
     agentId: author.agentId,
+    ...(author.agentName !== undefined ? { agentName: author.agentName } : {}),
     ...(author.onBehalfOf !== undefined ? { onBehalfOf: author.onBehalfOf } : {}),
     ...(author.agentRunId !== undefined
       ? { agentRunId: author.agentRunId }

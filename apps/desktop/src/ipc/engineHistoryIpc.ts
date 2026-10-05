@@ -32,14 +32,21 @@ export interface EngineMomentAuthorNames {
   named(author: Extract<MomentAuthor, {kind: "named"}>): string;
 }
 
+// A live author snapshot's account holder or link holder, as the relay
+// admitted them.
+function isSnapshotPerson(author: MomentAuthor): boolean {
+  return (author.kind === "human" && "humanName" in author) || (author.kind === "link" && "publicPrincipalId" in author);
+}
+
 // How one of several authors reads. A moment one author wrote keeps the
-// singleton fields below instead.
+// singleton fields below instead. A snapshot reads as the name its agent
+// declared and the relay stored for its account or link holder.
 function authorLabel(author: MomentAuthor, names: EngineMomentAuthorNames): string {
   switch (author.kind) {
-    case "agent": return names.agent(author) ?? "Agent";
-    case "human": return names.person(author) ?? "Another person";
+    case "agent": return author.agentName ?? names.agent(author) ?? "Agent";
+    case "human": return "humanName" in author ? author.humanName : names.person(author) ?? "Another person";
     case "named": return names.named(author);
-    case "link": return `Edit link · holder ${author.principalId.slice(0, 8)}`;
+    case "link": return "publicPrincipalId" in author ? `Link holder ${author.label}` : `Edit link · holder ${author.principalId.slice(0, 8)}`;
     case "public": return `Link holder ${author.principalId}`;
     case "automation": {
       const automation = names.automation(author.automationId);
@@ -83,8 +90,9 @@ function engineMomentBaseForIpc(
 ) {
   // Keep every author in IPC. Existing display fields name singleton authors.
   const author = moment.authors?.length === 1 ? moment.authors[0] : undefined;
-  const agentAuthorName = author?.kind === "agent" ? names.agent(author) : undefined;
-  const personAuthorName = author?.kind === "human" ? names.person(author) : undefined;
+  const agentAuthorName = author?.kind === "agent" ? author.agentName ?? names.agent(author) : undefined;
+  const personAuthorName = author?.kind === "human" && !("humanName" in author) ? names.person(author) : undefined;
+  const liveAuthorName = author !== undefined && isSnapshotPerson(author) ? authorLabel(author, names) : undefined;
   return {
     id: moment.id,
     versionId: moment.versionId,
@@ -97,8 +105,11 @@ function engineMomentBaseForIpc(
       ? { agentAuthorName }
       : {}),
     ...(personAuthorName !== undefined ? { personAuthorName } : {}),
+    ...(liveAuthorName !== undefined ? { liveAuthorName } : {}),
     ...(author?.kind === "public" ? { publicAuthor: author } : {}),
-    ...(author?.kind === "link" ? { linkAuthor: author } : {}),
+    // Only a grant's Edit link wrote directly; a snapshot's link holder never
+    // offers Stop and restore.
+    ...(author?.kind === "link" && "grantId" in author ? { linkAuthor: author } : {}),
     ...automationAuthorOf(author, names),
     ...(author?.kind === "named"
       ? { namedAuthor: { userId: author.userId, label: names.named(author) } }

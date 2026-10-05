@@ -50,6 +50,19 @@ describe("moment author results", () => {
     expect(() => parseCliResult("moments", momentsResult([]))).toThrow();
   });
 
+  it("keeps a live author snapshot's account holder, declared agent, and link holder", () => {
+    const result = momentsResult([
+      { kind: "human", humanId: "owner", humanName: "Owner" },
+      { kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner" },
+      { kind: "link", publicPrincipalId: "public_1", label: "Anonymous" },
+    ]);
+    expect(parseCliResult("moments", result)).toEqual(result);
+    for (const author of [
+      { kind: "human", humanId: "owner", humanName: "Owner", onBehalfOf: "owner" },
+      { kind: "link", publicPrincipalId: "public_1", label: "Anonymous", grantId: "grant" },
+    ]) expect(() => parseCliResult("moments", momentsResult([author]))).toThrow();
+  });
+
   it("refuses a link author that claims a person", () => {
     expect(() => parseCliResult("moments", momentsResult([{ kind: "link", grantId: "grant", grantGeneration: 2, principalId: "holder", userId: "user_ana" }]))).toThrow();
   });

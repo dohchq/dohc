@@ -629,6 +629,8 @@ const BinaryWriteSnapshotWireSchema = mutableStruct({
 const AgentAuthorSchema = mutableStruct({
   kind: Schema.Literal("agent"),
   agentId: Schema.String,
+  // The name a live author snapshot declared for its agent.
+  agentName: Schema.optionalKey(Schema.String),
   onBehalfOf: Schema.optionalKey(Schema.String),
   agentRunId: Schema.optionalKey(Schema.String),
   // Named only past 0, by a run an automation started.
@@ -662,6 +664,18 @@ const HumanAuthorSchema = mutableStruct({
   humanId: Schema.String,
   onBehalfOf: Schema.optionalKey(Schema.String),
 });
+// A relay-admitted live author snapshot names the account holder or the
+// link's public principal with the name the relay stored for them.
+const SnapshotHumanAuthorSchema = mutableStruct({
+  kind: Schema.Literal("human"),
+  humanId: Schema.String,
+  humanName: Schema.String,
+});
+const SnapshotLinkAuthorSchema = mutableStruct({
+  kind: Schema.Literal("link"),
+  publicPrincipalId: Schema.String,
+  label: Schema.String,
+});
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
 const MomentAuthorsSchema = Schema.NullOr(
   Schema.mutable(Schema.Array(
@@ -672,6 +686,8 @@ const MomentAuthorsSchema = Schema.NullOr(
       NamedAuthorSchema,
       LinkAuthorSchema,
       AutomationAuthorSchema,
+      SnapshotHumanAuthorSchema,
+      SnapshotLinkAuthorSchema,
       CorruptAuthorSchema,
     ]),
   )),

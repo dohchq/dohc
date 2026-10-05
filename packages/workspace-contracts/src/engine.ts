@@ -124,6 +124,8 @@ export interface MomentMetadata extends Omit<ActorNeutralWriteMetadata, "origin"
 interface AgentMomentAuthor {
   kind: "agent";
   agentId: string;
+  // The name a live author snapshot declared for its agent.
+  agentName?: string;
   onBehalfOf?: string;
   agentRunId?: string;
   // An agent run an automation started writes at its chain depth, so the
@@ -158,6 +160,21 @@ interface LinkMomentAuthor {
   principalId: string;
 }
 
+// A live edit's relay-admitted author snapshot names the signed-in account
+// holder, or the Edit link's public principal, with the name the relay
+// stored for them.
+interface SnapshotHumanMomentAuthor {
+  kind: "human";
+  humanId: string;
+  humanName: string;
+}
+
+interface SnapshotLinkMomentAuthor {
+  kind: "link";
+  publicPrincipalId: string;
+  label: string;
+}
+
 /**
  * An automation writing a file. The depth is its trigger's chain depth plus
  * one, so the claims its write causes carry the chain onward and stop at the
@@ -176,13 +193,15 @@ export type MomentAuthor =
   | PublicMomentAuthor
   | NamedMomentAuthor
   | LinkMomentAuthor
-  | AutomationMomentAuthor;
+  | AutomationMomentAuthor
+  | SnapshotHumanMomentAuthor
+  | SnapshotLinkMomentAuthor;
 
 // A person's own write names them, as desktop main reads them. A local agent
 // write names the person the agent works for. An automation names its run's
 // person, and none when its run has none.
 export type MomentWriteAuthor =
-  | (AgentMomentAuthor & { onBehalfOf: string })
+  | (Omit<AgentMomentAuthor, "agentName"> & { onBehalfOf: string })
   | Omit<HumanMomentAuthor, "onBehalfOf">
   | AutomationMomentAuthor;
 

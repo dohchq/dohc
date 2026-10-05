@@ -79,6 +79,11 @@ describe("engineMomentSourceLabel", () => {
       authorLabels: ["You", "trip-agent", "ana@example.com (Edit)", "ben@example.com (Edit)", "Edit link · holder 3f9a2c1d"] })))
       .toBe("You, trip-agent, ana@example.com (Edit) and 2 more");
   });
+  it("names the account or link holder a live edit's author snapshot admitted", () => {
+    expect(engineMomentSourceLabel(moment({ id: "account", origin: "local-file", liveAuthorName: "Owner" }))).toBe("Owner");
+    expect(engineMomentSourceLabel(moment({ id: "link", origin: "local-file", liveAuthorName: "Link holder Anonymous" })))
+      .toBe("Link holder Anonymous");
+  });
   it("labels a public principal without inventing an agent identity", () => {
     expect(engineMomentSourceLabel(moment({id: "public", publicAuthor: {kind: "public", principalId: "holder-2", grantId: "grant-1"}}))).toBe("Link holder holder-2");
   });

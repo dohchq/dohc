@@ -10,6 +10,9 @@ const RELAY_AUTHORS = [
   {kind: "public", principalId: "forged", grantId: "grant"},
   {kind: "named", userId: "forged", grantId: "grant", grantGeneration: 1},
   {kind: "link", grantId: "grant", grantGeneration: 1, principalId: "forged"},
+  // A live author snapshot's account or link holder is the relay's to admit.
+  {kind: "human", humanId: "forged", humanName: "Forged"},
+  {kind: "link", publicPrincipalId: "forged", label: "Forged"},
   // A kind this relay does not know yet is refused, not passed through.
   {kind: "future", grantId: "grant"},
   "link",
@@ -58,5 +61,18 @@ describe("client log provenance", () => {
       }
     }
     expect(storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100})).toEqual({rows: [], nextCursor: 0, hasMore: false});
+  });
+  it("stores an owner's hosted agent settlement once its people are left out", async () => {
+    const storage = await testStorage();
+    const handler = testHandler(storage);
+    await claimWorkspace(handler, "owner", "workspace");
+    // What the engine publishes for a settled [account holder, declared agent] snapshot.
+    const authors = [{kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 0}];
+    const response = await handler(request("owner", "/sync/workspace/log", jsonBody({originId: "device", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload: {authors}}]})));
+    expect(response.status).toBe(200);
+    const [row, ...rest] = storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100}).rows;
+    expect(rest).toEqual([]);
+    expect(row?.opKind).toBe("moment.append");
+    expect(JSON.parse(row!.payloadJson)).toEqual({authors});
   });
 });

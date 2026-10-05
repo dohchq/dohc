@@ -8,9 +8,11 @@ fn queued_author_repair_omits_people_and_shared_authors() {
     let named = json!({"kind":"named","userId":"ana","grantId":"grant","grantGeneration":2});
     let link = json!({"kind":"link","grantId":"grant","grantGeneration":2,"principalId":"holder"});
     let public = json!({"kind":"public","principalId":"holder","grantId":"grant"});
-    // A relay-admitted snapshot names these; they stay.
+    // A relay-admitted live author snapshot names these. The relay refuses
+    // them from a client too.
     let snapshot_human = json!({"kind":"human","humanId":"person","humanName":"Person"});
     let snapshot_link = json!({"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"});
+    let declared = json!({"kind":"agent","agentId":"writer","agentName":"Writer","onBehalfOf":"person","depth":0});
     let agent =
         json!({"kind":"agent","agentId":"agent","onBehalfOf":"owner","agentRunId":"run","depth":3});
     let automation =
@@ -24,10 +26,10 @@ fn queued_author_repair_omits_people_and_shared_authors() {
         (json!([human, named, link, public]), None),
         (json!([human, agent]), Some(json!([agent]))),
         (json!([agent, named, link]), Some(json!([agent]))),
-        (
-            json!([snapshot_human, named, snapshot_link, link]),
-            Some(json!([snapshot_human, snapshot_link])),
-        ),
+        (json!([snapshot_human, named, snapshot_link, link]), None),
+        // A hosted agent's live edit keeps only its declared agent.
+        (json!([snapshot_human, declared]), Some(json!([declared]))),
+        (json!([snapshot_link, declared]), Some(json!([declared]))),
         // An unknown kind is not this repair's to judge; validation refuses it.
         (
             json!([named, {"kind":"other"}]),
@@ -101,6 +103,10 @@ fn queued_human_and_shared_authors_are_durably_repaired_before_push_and_echo() {
         // edit from. This computer keeps it; the wire does not carry it.
         json!([{"kind":"named","userId":"ana","grantId":"grant","grantGeneration":1}]),
         json!([{"kind":"agent","agentId":"agent","onBehalfOf":"owner"},{"kind":"link","grantId":"grant","grantGeneration":1,"principalId":"holder"}]),
+        // An enrolled owner's hosted agent edit settles with the relay-admitted
+        // account holder beside the declared agent.
+        json!([{"kind":"human","humanId":"owner","humanName":"Owner"},{"kind":"agent","agentId":"writer","onBehalfOf":"owner","depth":0}]),
+        json!([{"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"},{"kind":"agent","agentId":"writer","agentName":"Writer"}]),
     ] {
         let (_scratch, path, mut engine) = open_store();
         let original_authors = authors.clone();
@@ -117,6 +123,15 @@ fn queued_human_and_shared_authors_are_durably_repaired_before_push_and_echo() {
         let first = client.transport().pushes.lock().unwrap()[0].ops.clone();
         let repaired = &first[1].payload;
         assert_eq!(repaired, &expected);
+        // The relay's log routes take only a client's own agents and automations.
+        assert!(
+            repaired
+                .get("authors")
+                .and_then(serde_json::Value::as_array)
+                .is_none_or(|authors| authors
+                    .iter()
+                    .all(|author| matches!(author["kind"].as_str(), Some("agent" | "automation"))))
+        );
         drop(engine);
         let mut engine = EngineStore::open(&path, 2002).unwrap();
         let stored = list_replication_ops(&engine, "ws", "local", 0, 10).unwrap();
@@ -253,6 +268,8 @@ fn new_moment_payload_omits_installation_delegation_without_changing_history() {
     let (_scratch, _path, mut engine) = open_store();
     let authors = json!([
         {"kind":"human","humanId":"local:123"},
+        {"kind":"human","humanId":"owner","humanName":"Owner"},
+        {"kind":"link","publicPrincipalId":"public_1","label":"Anonymous"},
         {"kind":"agent","agentId":"agent","onBehalfOf":"local:123","depth":2},
         {"kind":"automation","automationId":"rule","onBehalfOf":"local:123","depth":3},
         {"kind":"agent","agentId":"account-agent","onBehalfOf":"account"}

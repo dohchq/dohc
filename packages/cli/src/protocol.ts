@@ -620,10 +620,11 @@ const exportResultSchema = z
   })
   .strict();
 
-const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
+const rawMomentAuthorSchema = z.union([
   z.object({
     kind: z.literal("agent"),
     agentId: z.string().min(1),
+    agentName: z.string().min(1).optional(),
     onBehalfOf: z.string().min(1).optional(),
     agentRunId: z.string().min(1).optional(),
     // Named only past 0, by a run an automation started.
@@ -633,6 +634,17 @@ const rawMomentAuthorSchema = z.discriminatedUnion("kind", [
     kind: z.literal("human"),
     humanId: z.string().min(1),
     onBehalfOf: z.string().min(1).optional(),
+  }).strict(),
+  // A live author snapshot's account holder or link holder, as the relay admitted them.
+  z.object({
+    kind: z.literal("human"),
+    humanId: z.string().min(1),
+    humanName: z.string().min(1),
+  }).strict(),
+  z.object({
+    kind: z.literal("link"),
+    publicPrincipalId: z.string().min(1),
+    label: z.string().min(1),
   }).strict(),
   z.object({
     kind: z.literal("public"),
