@@ -9,11 +9,13 @@ import { preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts }
 
 vi.mock("node:fs/promises", async importOriginal => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return {...actual, writeFile: vi.fn(actual.writeFile)};
+  return {...actual, writeFile: vi.fn(actual.writeFile), readFile: vi.fn(actual.readFile), rm: vi.fn(actual.rm)};
 });
 const directories: string[] = [];
 afterEach(async () => {
-  vi.mocked(writeFile).mockClear();
+  vi.mocked(writeFile).mockReset();
+  vi.mocked(readFile).mockReset();
+  vi.mocked(rm).mockReset();
   for (const directory of directories.splice(0)) await rm(directory, {recursive: true, force: true});
 });
 
@@ -57,7 +59,6 @@ it.each(["plaintext", "richdoc"] as const)("preserves faithful %s text and exact
   } finally { doc.destroy(); }
 });
 
-
 it("writes sensitive recovery records with owner-only permissions", async () => {
   const directory = await mkdtemp(join(tmpdir(), "dohc-private-recovery-")); directories.push(directory);
   await preserveLiveDraft(directory, "workspace", {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])});
@@ -95,4 +96,97 @@ it("removes all draft records only for the workspace removed from dohc", async (
   await removeWorkspaceLiveDrafts(directory, "removed");
   expect(await readdir(directory)).toEqual(names);
   await removeWorkspaceLiveDrafts(join(directory, "absent"), "removed");
+});
+
+it("forgets matching drafts despite a malformed record and removes interrupted temporary writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-forget-malformed-")); directories.push(directory);
+  const draft = {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])};
+  const malformed = `${"0".repeat(64)}.json`;
+  await writeFile(join(directory, malformed), "{");
+  await writeFile(join(directory, `${"1".repeat(64)}.interrupted.tmp`), '{"text":"partial private text');
+  await preserveLiveDraft(directory, "removed", draft);
+  await preserveLiveDraft(directory, "kept", draft);
+  await removeWorkspaceLiveDrafts(directory, "removed");
+  const names = await readdir(directory);
+  expect(names).toContain(malformed);
+  expect(names).toHaveLength(2);
+  const kept = names.find(name => name !== malformed)!;
+  expect(JSON.parse(await readFile(join(directory, kept), "utf8"))).toMatchObject({workspaceId: "kept"});
+});
+
+it.each(["read", "delete"] as const)("two concurrent forgets tolerate a record that vanishes before %s", async phase => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-forget-concurrent-")); directories.push(directory);
+  const draft = {path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0])};
+  await preserveLiveDraft(directory, "first", draft);
+  await preserveLiveDraft(directory, "second", draft);
+  await preserveLiveDraft(directory, "kept", draft);
+  const names = await readdir(directory);
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  let resume!: () => void;
+  let reached!: () => void;
+  const paused = new Promise<void>(resolve => { reached = resolve; });
+  const continued = new Promise<void>(resolve => { resume = resolve; });
+  const firstName = (await Promise.all(names.map(async name => ({
+    name, record: JSON.parse(await readFile(join(directory, name), "utf8")),
+  })))).find(entry => entry.record.workspaceId === "first")!.name;
+  const firstPath = join(directory, firstName);
+  let blocked = false;
+  if (phase === "read") {
+    vi.mocked(readFile).mockImplementation(async (path, options) => {
+      if (path === firstPath && !blocked) {
+        blocked = true;
+        reached();
+        await continued;
+      }
+      return actual.readFile(path, options);
+    });
+  } else {
+    vi.mocked(rm).mockImplementation(async (path, options) => {
+      if (path === firstPath && !blocked) {
+        blocked = true;
+        reached();
+        await continued;
+      }
+      return actual.rm(path, options);
+    });
+  }
+  const pausedForget = removeWorkspaceLiveDrafts(directory, phase === "read" ? "second" : "first");
+  await paused;
+  try { await removeWorkspaceLiveDrafts(directory, "first"); }
+  finally { resume(); }
+  await pausedForget;
+  if (phase === "delete") await removeWorkspaceLiveDrafts(directory, "second");
+  const remaining = await readdir(directory);
+  expect(remaining).toHaveLength(1);
+  expect(JSON.parse(await readFile(join(directory, remaining[0]!), "utf8"))).toMatchObject({workspaceId: "kept"});
+});
+
+it("removes leftover temporary drafts without interrupting another workspace's preservation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-forget-writing-")); directories.push(directory);
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  const leftover = join(directory, "interrupted.tmp");
+  await writeFile(leftover, "private text from an interrupted write");
+  let resume!: () => void;
+  let reached!: () => void;
+  const paused = new Promise<void>(resolve => { reached = resolve; });
+  const continued = new Promise<void>(resolve => { resume = resolve; });
+  vi.mocked(writeFile).mockImplementationOnce(async (path, content, options) => {
+    await actual.writeFile(path, content, options);
+    reached();
+    await continued;
+  });
+  const preserving = preserveLiveDraft(directory, "kept", {
+    path: "a.md", objectId: "object", remoteWorkspaceId: "owner", update: new Uint8Array([0, 0]),
+  });
+  await paused;
+  try {
+    await removeWorkspaceLiveDrafts(directory, "removed");
+    expect(await readdir(directory)).toHaveLength(1);
+    await expect(readFile(leftover)).rejects.toMatchObject({code: "ENOENT"});
+  } finally { resume(); }
+  await preserving;
+  const names = await readdir(directory);
+  expect(names).toHaveLength(1);
+  expect(names[0]).toMatch(/\.json$/);
+  expect(JSON.parse(await readFile(join(directory, names[0]!), "utf8"))).toMatchObject({workspaceId: "kept"});
 });

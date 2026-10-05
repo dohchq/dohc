@@ -4980,6 +4980,15 @@ async function syncStatusWithOwnedProjection(
   };
 }
 
+// Main and the test runner share the OS monotonic clock, including across processes.
+if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) {
+  app.prependOnceListener("will-quit", () => {
+    if (process.env.DOHC_TEST_QUIT_TIMING === "1") {
+      console.log(`DOHC_TEST_WILL_QUIT:${process.hrtime.bigint()}`);
+    }
+  });
+}
+
 const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, DesktopUserSettingsResult>({
   app,
   runtime: process,

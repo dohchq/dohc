@@ -151,13 +151,26 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
 });
 
 async function quitDesktop(desktop: Awaited<ReturnType<typeof launchDesktopApp>>) {
-  const startedAt = performance.now();
-  const exited = new Promise<{ durationMs: number; exitCode: number | null }>(resolve =>
-    desktop.app.process().once("exit", exitCode => resolve({durationMs: performance.now() - startedAt, exitCode})));
-  await desktop.app.evaluate(({app}) => {app.quit();});
-  const duration = await exited;
+  const startedAt = process.hrtime.bigint();
+  const exited = new Promise<{ exitedAt: bigint; exitCode: number | null }>(resolve =>
+    desktop.app.process().once("exit", exitCode => resolve({exitedAt: process.hrtime.bigint(), exitCode})));
+  const streamsClosed = new Promise<void>(resolve => desktop.app.process().once("close", () => resolve()));
+  await desktop.app.evaluate(({app}) => {
+    process.env.DOHC_TEST_QUIT_TIMING = "1";
+    app.quit();
+  });
+  const {exitedAt, exitCode} = await exited;
+  // Child-process close follows stdout drain, so the main-process mark is complete.
+  await streamsClosed;
+  const output = desktop.logs.filter(entry => entry.source === "main" && entry.level === "stdout").map(entry => entry.text).join("");
+  const marks = [...output.matchAll(/DOHC_TEST_WILL_QUIT:(\d+)/g)];
+  expect(marks).toHaveLength(1);
+  const willQuitToExitMs = Number(exitedAt - BigInt(marks[0]![1]!)) / 1e6;
   await test.info().attach("quit-duration", {
-    body: JSON.stringify({...duration, budgetMs: 6000}), contentType: "application/json",
+    body: JSON.stringify({
+      requestToExitMs: Number(exitedAt - startedAt) / 1e6, willQuitToExitMs, exitCode,
+      budgetMs: 6000, budgetStartsAt: "will-quit", budgetMarginMs: 6000 - willQuitToExitMs,
+    }), contentType: "application/json",
   });
   await desktop.close();
 }

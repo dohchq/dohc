@@ -15,6 +15,8 @@ export type LiveDraft = {
   { contentKind: "scene"; text?: never; remoteWorkspaceId?: never }
 );
 
+const activeTemporaryDrafts = new Set<string>();
+
 /** Exact CRDT recovery complements the renderer's user-visible set-aside text. */
 export async function preserveLiveDraft(directory: string, workspaceId: string, draft: LiveDraft): Promise<void> {
   if (classifyEngineFilePathForRead(draft.path, process.platform).kind !== "tracked") throw new Error("This path cannot enter draft recovery.");
@@ -24,11 +26,13 @@ export async function preserveLiveDraft(directory: string, workspaceId: string, 
   const digest = createHash("sha256").update(content).digest("hex");
   await mkdir(directory, { recursive: true });
   const temporary = join(directory, `${digest}.${randomUUID()}.tmp`);
+  activeTemporaryDrafts.add(temporary);
   try {
     await writeFile(temporary, content, { encoding: "utf8", flag: "wx", flush: true, mode: 0o600 });
     await rename(temporary, join(directory, `${digest}.json`));
   } finally {
     await rm(temporary, { force: true }).catch(() => {});
+    activeTemporaryDrafts.delete(temporary);
   }
 }
 
@@ -57,11 +61,22 @@ export async function removeWorkspaceLiveDrafts(directory: string, workspaceId: 
     throw error;
   });
   for (const name of names) {
-    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
     const path = join(directory, name);
-    const record: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (name.endsWith(".tmp")) {
+      // Interrupted writes cannot identify their workspace; leave current writes alone.
+      if (!activeTemporaryDrafts.has(path)) await rm(path, { force: true });
+      continue;
+    }
+    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+    let record: unknown;
+    try {
+      record = JSON.parse(await readFile(path, "utf8"));
+    } catch (error) {
+      if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
     if (typeof record === "object" && record !== null && "workspaceId" in record && record.workspaceId === workspaceId) {
-      await rm(path);
+      await rm(path, { force: true });
     }
   }
 }
