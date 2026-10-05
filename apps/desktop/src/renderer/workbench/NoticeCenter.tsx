@@ -234,12 +234,12 @@ const OWNER_LIVE_REFUSALS_TITLE = "Some shares could not start live editing";
 const OWNER_LIVE_REFUSALS_BODY =
   "Open Live documents to see which files are affected and try again.";
 
-// Saved versions still reach recipients; only live editing with others stays local.
+// An oversized unclaimed lineage cannot share changes made in dohc.
 type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
-const SHARING_DECLINED_TITLE = "Too large to edit live with others";
+const SHARING_DECLINED_TITLE = "Too large to share your edits";
 function sharingDeclinedBody(declined: SharingDeclined): string {
   const fileName = declined.path.split("/").pop() ?? declined.path;
-  return `People you share ${fileName} with get each saved version, not your live edits. Make it smaller, then open it again to edit live together.`;
+  return `People you share ${fileName} with don't get the changes you make to it in dohc. Make it smaller, then open it again.`;
 }
 function sharingDeclinedDetails(workspaceId: string, declined: SharingDeclined): string {
   return errorDetails([

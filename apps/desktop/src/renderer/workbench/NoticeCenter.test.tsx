@@ -390,23 +390,27 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-center")).toBeNull();
   });
 
-  // The saved file still syncs; only live editing stays here. Sync cannot
+  // Changes made in dohc stay local in this state. Sync cannot
   // clear the refusal, so the notice offers the document, never Try again.
-  it("says saved versions reach others while live edits stay local, and offers to open it", async () => {
+  it("says dohc edits do not reach others and offers to open the document", async () => {
     const onOpenSharingDeclined = vi.fn();
     const user = userEvent.setup();
     renderNotices({ syncStatus: declinedStatus(declined()), onOpenSharingDeclined });
 
     await user.click(screen.getByTestId("notice-center-toggle"));
     const notice = screen.getByTestId("notice-sharing-declined-main:object-1");
-    expect(notice.textContent).toContain("Too large to edit live with others");
+    expect(notice.textContent).toContain("Too large to share your edits");
     expect(notice.textContent).toContain(
-      'People you share large.md with get each saved version, not your live edits. Make it smaller, then open it again to edit live together.',
+      "People you share large.md with don't get the changes you make to it in dohc. Make it smaller, then open it again.",
     );
     expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
 
     await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
     const copied = await navigator.clipboard.readText();
+    expect(copied).toContain("Notice: Too large to share your edits");
+    expect(copied).toContain(
+      "Detail: People you share large.md with don't get the changes you make to it in dohc. Make it smaller, then open it again.",
+    );
     expect(copied).toContain("File: notes/large.md");
     expect(copied).toContain("Size: 280001 bytes");
     expect(copied).toContain("Limit: 262144 bytes");
@@ -420,12 +424,12 @@ describe("notice center", () => {
     expect(screen.queryByTestId("sharing-declined-toast")).toBeNull();
   });
 
-  it("gives the same collaborative editing recovery for a closed document", async () => {
+  it("gives the same sharing recovery for a closed document", async () => {
     renderNotices({ syncStatus: declinedStatus(declined({ lineagePruned: true })) });
 
     const toast = screen.getByTestId("sharing-declined-toast");
     expect(toast.textContent).toContain(
-      'Too large to edit live with others. People you share large.md with get each saved version, not your live edits. Make it smaller, then open it again to edit live together.',
+      "Too large to share your edits. People you share large.md with don't get the changes you make to it in dohc. Make it smaller, then open it again.",
     );
   });
 
