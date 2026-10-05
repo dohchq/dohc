@@ -70,6 +70,7 @@ function noticeElement(props: Partial<Parameters<typeof NoticeCenter>[0]> = {}) 
       {...(props.onDismissWorkspaceError ? { onDismissWorkspaceError: props.onDismissWorkspaceError } : {})}
       {...(props.onRetryLiveDelivery ? { onRetryLiveDelivery: props.onRetryLiveDelivery } : {})}
       {...(props.onOpenLiveDocuments ? { onOpenLiveDocuments: props.onOpenLiveDocuments } : {})}
+      {...(props.onOpenSharingDeclined ? { onOpenSharingDeclined: props.onOpenSharingDeclined } : {})}
       {...(props.automationHolds ? { automationHolds: props.automationHolds } : {})}
       {...(props.onAllowAutomationHold ? { onAllowAutomationHold: props.onAllowAutomationHold } : {})}
       {...(props.automationHoldsUnreadable ? { automationHoldsUnreadable: props.automationHoldsUnreadable } : {})}
@@ -111,6 +112,34 @@ function liveDeliveryStatus(
     historyShareView: false,
     ownerLiveDelivery,
     ...(ownerLiveDeliveryReason ? { ownerLiveDeliveryReason } : {}),
+  };
+}
+
+type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
+
+function declined(overrides: Partial<SharingDeclined> = {}): SharingDeclined {
+  return {
+    path: "notes/large.md",
+    objectId: "object-1",
+    versionId: "main",
+    lineagePruned: false,
+    headBlobSha256: "a".repeat(64),
+    constraint: "MAX_YDOC_UPDATE_BYTES",
+    limitBytes: 262_144,
+    observedBytes: 280_001,
+    ...overrides,
+  };
+}
+
+function declinedStatus(...sharingDeclined: SharingDeclined[]): SyncStatusResult {
+  return {
+    state: "synced",
+    pendingChangeCount: 0,
+    lastSyncedAtMs: null,
+    liveSessionsGeneration: 0,
+    historyRecordingUnavailable: false,
+    historyShareView: false,
+    sharingDeclined,
   };
 }
 
@@ -361,37 +390,95 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-center")).toBeNull();
   });
 
-  it("keeps a clear notice for each file that is too large to sync", async () => {
-    renderNotices({
-      syncStatus: {
-        state: "synced",
-        pendingChangeCount: 0,
-        lastSyncedAtMs: null,
-        liveSessionsGeneration: 0,
-        historyRecordingUnavailable: false,
-        historyShareView: false,
-        sharingDeclined: [
-          {
-            path: "notes/large.md",
-            constraint: "MAX_YDOC_UPDATE_BYTES",
-            limitBytes: 262_144,
-            observedBytes: 280_001,
-          },
-        ],
-      },
-    });
+  // The saved file still syncs; only live editing stays here. Sync cannot
+  // clear the refusal, so the notice offers the document, never Try again.
+  it("says a document too large for live editing still syncs, and offers to open it", async () => {
+    const onOpenSharingDeclined = vi.fn();
+    const user = userEvent.setup();
+    renderNotices({ syncStatus: declinedStatus(declined()), onOpenSharingDeclined });
 
-    await userEvent.click(screen.getByTestId("notice-center-toggle"));
-
-    const notice = screen.getByTestId(
-      "notice-sharing-declined-notes/large.md",
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    const notice = screen.getByTestId("notice-sharing-declined-object-1");
+    expect(notice.textContent).toContain("Too large for live editing");
+    expect(notice.textContent).toContain(
+      '"notes/large.md" is saved and syncs. Close and reopen it to start live editing. If it is still too large, make it smaller, then close and reopen it.',
     );
-    expect(notice.textContent).toContain("File is too large to sync");
-    expect(notice.textContent).toContain("notes/large.md");
-    expect(notice.textContent).toContain("280,001 bytes");
-    expect(notice.textContent).toContain("262,144 bytes");
-    expect(notice.textContent).toContain("Your edit is saved on this machine.");
-    expect(notice.textContent).toContain("Reduce the file to sync it.");
+    expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
+
+    await user.click(within(notice).getByRole("button", { name: "Copy error details" }));
+    const copied = await navigator.clipboard.readText();
+    expect(copied).toContain("File: notes/large.md");
+    expect(copied).toContain("Size: 280001 bytes");
+    expect(copied).toContain("Limit: 262144 bytes");
+    expect(copied).toContain("Object id: object-1");
+    expect(copied).toContain("Version id: main");
+    expect(copied).toContain(`Saved file sha256: ${"a".repeat(64)}`);
+
+    await user.click(within(notice).getByRole("button", { name: "Open document" }));
+    expect(onOpenSharingDeclined).toHaveBeenCalledWith("object-1");
+    // Opening it from the row ends the announcement too.
+    expect(screen.queryByTestId("sharing-declined-toast")).toBeNull();
+  });
+
+  it("tells a person to open a closed document first", async () => {
+    renderNotices({ syncStatus: declinedStatus(declined({ lineagePruned: true })) });
+
+    const toast = screen.getByTestId("sharing-declined-toast");
+    expect(toast.textContent).toContain(
+      'Too large for live editing. "notes/large.md" is saved and syncs. Open it to start live editing. If it is still too large, make it smaller, then close and reopen it.',
+    );
+  });
+
+  it("opens the document from its toast and keeps the row", async () => {
+    const onOpenSharingDeclined = vi.fn();
+    const user = userEvent.setup();
+    renderNotices({ syncStatus: declinedStatus(declined()), onOpenSharingDeclined });
+
+    await user.click(screen.getByTestId("sharing-declined-toast-open"));
+    expect(onOpenSharingDeclined).toHaveBeenCalledWith("object-1");
+    expect(screen.queryByTestId("sharing-declined-toast")).toBeNull();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-sharing-declined-object-1")).toBeTruthy();
+  });
+
+  it("closes the toast without removing the row", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderNotices({ syncStatus: declinedStatus(declined()) });
+
+    await user.click(screen.getByRole("button", { name: "Close notice for notes/large.md" }));
+    rerender(noticeElement({ syncStatus: declinedStatus(declined()) }));
+    expect(screen.queryByTestId("sharing-declined-toast")).toBeNull();
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-sharing-declined-object-1")).toBeTruthy();
+  });
+
+  // The row belongs to the document, not its path: a rename keeps the
+  // dismissal, and a refusal after a new save is news.
+  it("keeps a dismissal across a rename and announces a refusal after a new save", async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderNotices({ syncStatus: declinedStatus(declined()) });
+
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(screen.getByTestId("notice-sharing-declined-object-1-dismiss"));
+    expect(screen.queryByTestId("notice-sharing-declined-object-1")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.queryByTestId("sharing-declined-toast")).toBeNull();
+
+    rerender(noticeElement({ syncStatus: declinedStatus(declined({ path: "notes/renamed.md" })) }));
+    expect(screen.queryByTestId("sharing-declined-toast")).toBeNull();
+
+    rerender(
+      noticeElement({
+        syncStatus: declinedStatus(
+          declined({ path: "notes/renamed.md", headBlobSha256: "b".repeat(64) }),
+        ),
+      }),
+    );
+    expect(screen.getByTestId("sharing-declined-toast").textContent).toContain("notes/renamed.md");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    expect(screen.getByTestId("notice-sharing-declined-object-1")).toBeTruthy();
   });
 
   it("collects conflict, agent, and update notices in one popover", async () => {

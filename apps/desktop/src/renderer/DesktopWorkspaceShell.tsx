@@ -1358,6 +1358,9 @@ export function DesktopWorkspaceShell(props: {
   // Bumped after an engine version operation or a main-process live-session
   // retirement so mounted editors release their old session before reopening.
   const [versionEpoch, setVersionEpoch] = useState(0);
+  // For a lookup that must not act on a version a later switch replaced.
+  const versionEpochRef = useRef(versionEpoch);
+  versionEpochRef.current = versionEpoch;
   const engineRebuildReturnFocusRef = useRef<HTMLButtonElement | null>(null);
   const engineRebuildOpen = engineRebuild !== null;
   useEffect(() => {
@@ -2032,6 +2035,69 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [openFile],
+  );
+  // A document too large for live editing. The folder holds only the active
+  // version's files, so it opens only when the refusal names that version;
+  // otherwise the notice names the version to switch to. The path comes from
+  // the newest status once the lookup answers, so a rename still lands on it
+  // and a refusal that has cleared opens nothing. A newer open, a version
+  // change, or another workspace drops the answer.
+  const openSharingDeclined = useCallback(
+    (objectId: string) => {
+      const declinedNow = () =>
+        syncStatusLane
+          .latest()
+          ?.sharingDeclined?.find((entry) => entry.objectId === objectId);
+      const open = (): void => {
+        if (!declinedNow()) return;
+        const targetGroupId = wbRef.current.activeEditorGroup;
+        const requestSequence = invalidateDeferredFileOpen(targetGroupId);
+        const epoch = versionEpochRef.current;
+        const isCurrentRequest = () =>
+          fileOpenRequests.current.workspaceId === workspaceId &&
+          fileOpenRequests.current.sequenceByGroup.get(targetGroupId) ===
+            requestSequence &&
+          versionEpochRef.current === epoch;
+        void bridge()
+          .listWorkspaceVersions({ workspaceId })
+          .then(({ versions, activeVersionId }) => {
+            if (!isCurrentRequest()) return;
+            const declined = declinedNow();
+            if (!declined) return;
+            if (declined.versionId === activeVersionId) {
+              openFile(declined.path);
+              return;
+            }
+            const version = versions.find(({ id }) => id === declined.versionId);
+            reportShellFailure({
+              message: version
+                ? `"${declined.path}" is in the version "${version.name}". Switch to that version to open it.`
+                : `"${declined.path}" is not in the version you have open.`,
+              details: [
+                ["File", declined.path],
+                ["Version id", declined.versionId],
+                ["Active version id", activeVersionId],
+              ],
+            });
+          })
+          .catch((error: unknown) => {
+            if (!isCurrentRequest()) return;
+            reportShellFailure({
+              message: "dohc could not open this document.",
+              cause: error,
+              retry: open,
+            });
+          });
+      };
+      open();
+    },
+    [
+      invalidateDeferredFileOpen,
+      openFile,
+      reportShellFailure,
+      syncStatusLane,
+      workspaceId,
+    ],
   );
   // Opens an app of this workspace in its tab, as Apps does.
   const openAppTab = useCallback(
@@ -4753,6 +4819,7 @@ export function DesktopWorkspaceShell(props: {
               onHideWorkspaceError={hideWorkspaceError}
               onDismissWorkspaceError={dismissWorkspaceError}
               onRetryLiveDelivery={retryLiveDelivery}
+              onOpenSharingDeclined={openSharingDeclined}
               {...(shareView
                 ? {}
                 : {
