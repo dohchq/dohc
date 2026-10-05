@@ -607,6 +607,7 @@ function captureAuthor(author: MomentWriteAuthor): AgentAuthor {
 export function createCaptureLiveStores(
   workspace: AttachedEngineWorkspace | ShareMountEngineWorkspace,
   sessions: EngineWorkspaceSessions,
+  captureWaitSignal?: AbortSignal,
 ): CaptureLiveStores {
   const adapters = new WeakMap<object, Map<string, VersionedLiveAdapter>>();
   if (workspace.shareMount !== true) {
@@ -1361,6 +1362,7 @@ export function createCaptureLiveStores(
     },
 
     async flushCapture() {
+      captureWaitSignal?.throwIfAborted();
       // `settled: false` is not an error. The daemon documents it as "state
       // not comparable" — a layer down, a teardown race, or a workspace under
       // continuous mutation — and expects the caller to poll. Every Rust-side
@@ -1393,7 +1395,9 @@ export function createCaptureLiveStores(
         !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS;
         attempt += 1
       ) {
-        await delay(FLUSH_SETTLE_POLL_MS);
+        captureWaitSignal?.throwIfAborted();
+        await delay(FLUSH_SETTLE_POLL_MS, undefined, { signal: captureWaitSignal });
+        captureWaitSignal?.throwIfAborted();
         outcome = await runRead(async (adapter) => await adapter.flushCapture());
       }
       if (!outcome.settled) {

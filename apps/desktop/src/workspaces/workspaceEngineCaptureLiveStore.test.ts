@@ -38,6 +38,7 @@ const OVER_CAP_SHA256 = createHash("sha256")
 function createCaptureLiveStores(
   workspace: EngineWorkspace,
   sessions: EngineWorkspaceSessions,
+  signal?: AbortSignal,
 ) {
   return createAttachedCaptureLiveStores(
     {
@@ -47,6 +48,7 @@ function createCaptureLiveStores(
         Symbol(`test-workspace-attachment:${workspace.workspaceId}`),
     },
     sessions,
+    signal,
   );
 }
 
@@ -371,6 +373,31 @@ describe("createCaptureLiveStores", () => {
     );
 
     await expect(store.flushCapture?.()).rejects.toThrow("did not settle");
+  });
+
+  it("cancels capture polling between attempts and rejects a flush after shutdown", async () => {
+    const controller = new AbortController();
+    const requests: Request[] = [];
+    const client = clientFor(async request => {
+      requests.push(request);
+      if (request.method === WORKSPACE_METHOD.watcherStatus) {
+        controller.abort();
+        return { id: request.id, result: {
+          running: true, degraded: false, terminal: false, phase: "ready",
+          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
+        } };
+      }
+      return { id: request.id, result: { settled: false, running: true, degraded: false } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client), controller.signal,
+    );
+    await expect(store.flushCapture?.()).rejects.toMatchObject({ name: "AbortError" });
+    await expect(store.flushCapture?.()).rejects.toBe(controller.signal.reason);
+    expect(requests.map(request => request.method)).toEqual([
+      WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
+    ]);
   });
 
   it("classifies an unsettled initial capture before bounded settle polling", async () => {

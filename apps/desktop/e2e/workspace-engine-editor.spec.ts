@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -202,6 +202,60 @@ test("an external edit to an open document remains recoverable after overlapping
     await quitDesktop(desktop);
     desktop = await launchDesktopApp({workspace: temp});
     await openWorkspaceFromFirstRun(desktop.page, temp);
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+    await expect(desktop.page.getByTestId("markdown-editor")).toContainText(human);
+    await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
+    expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
+    await desktop.page.getByTestId("markdown-source-toggle").click();
+    await desktop.page.getByTestId("markdown-source-copy").click();
+    await expect.poll(() => desktop!.app.evaluate(({clipboard}) => clipboard.readText())).toContain(human);
+    await quitDesktop(desktop);
+  } finally {await cleanupDesktopWorkspace(desktop, temp);}
+});
+
+test("kept typing survives capture before the renderer reopens after restart", async () => {
+  test.setTimeout(120_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const external = "External agent wrote this straight to disk while the editor was open.";
+  const human = "Human continued typing in the open document.";
+  const path = "notes/rich.md";
+  try {
+    await writeWorkspaceFiles(temp, [{path, contents: "# Rich\n\nBase paragraph.\n"}]);
+    desktop = await launchDesktopApp({workspace: temp});
+    const {page} = desktop;
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, path);
+    await openEngineDoc(page, path);
+    await expect(page.getByTestId("markdown-editor")).toContainText("Base paragraph.");
+    await writeWorkspaceFiles(temp, [{path, contents: `# Rich\n\n${external}\n`}]);
+    // The live lease defers capture. Settlement must preserve the outside bytes.
+    await page.getByTestId("markdown-editor").click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.type(human);
+    await expect(page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");
+    expect(await readFile(join(temp.rootPath, path), "utf8")).toContain(external);
+    await expect(page.getByTestId("markdown-editor")).toContainText(human);
+    await quitDesktop(desktop);
+    // Workbench state lives in the workspace, independently of the Electron profile.
+    // Remove only this test's reopen intent so capture has no renderer lease.
+    await rm(join(temp.rootPath, ".dohc", "ui-state.json"), { force: true });
+    desktop = await launchDesktopApp({workspace: { ...temp, baseDir: join(temp.baseDir, "fresh-profile") }});
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    await expect(desktop.page.getByTestId("markdown-editor")).toHaveCount(0);
+    // This existing read runs capture.flush before looking up the file. A
+    // kept dirty lineage may refuse convergence; either outcome proves the
+    // capture attempt completed before an editor can hold the document lease.
+    const captureOutcome = await desktop.page.evaluate(async ({ workspaceId, path }) => {
+      const api = (window as unknown as { dohcDesktop: {
+        listChatFileMentions(input: { workspaceId: string; path: string }): Promise<unknown>;
+      } }).dohcDesktop;
+      try { await api.listChatFileMentions({ workspaceId, path }); return null; }
+      catch (error) { return error instanceof Error ? error.message : String(error); }
+    }, { workspaceId: workspace.workspaceId, path });
+    if (captureOutcome !== null) expect(captureOutcome).toContain("did not settle");
+    await expect(desktop.page.getByTestId("markdown-editor")).toHaveCount(0);
+    await openEngineDoc(desktop.page, path);
     await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
     await expect(desktop.page.getByTestId("markdown-editor")).toContainText(human);
     await expect(desktop.page.getByTestId("markdown-save-state")).toHaveAttribute("data-state", "error");

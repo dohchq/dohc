@@ -470,6 +470,8 @@ type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
 };
 
 export interface WorkspaceEngineCapture {
+  // Cancel convergence waits before producers and live sessions drain.
+  beginShutdown(): void;
   // Starts the daemon capture health poll on the capture chain.
   start(): void;
   // Enqueues a settled watcher batch for engine capture. Synchronous and
@@ -756,6 +758,7 @@ export interface WorkspaceEngineCaptureOptions {
   settleDebounceMs?: number;
   openSettleGate?: () => Promise<void>;
   onError?: (context: string, error: unknown) => void;
+  preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc }) => Promise<void>;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
   // reconciliation passes). With the engine as the workspace's sole
   // recorder, a persistently failing store means history capture fails
@@ -1656,6 +1659,7 @@ export function createWorkspaceEngineCapture(
     liveStores ??= createCaptureLiveStores(
       { workspaceId, rootPath, attachmentId },
       options.rustEngineSessions,
+      captureWaitAbort.signal,
     );
     return liveStores;
   }
@@ -2443,6 +2447,12 @@ export function createWorkspaceEngineCapture(
               }
               retired.destroy();
             },
+            preserveUnsentState: options.preserveUnsentState ? async doc => {
+              if (!sessionObjectId || opened === null) throw new Error("Y.Doc recovery has no object identity.");
+              await options.preserveUnsentState!({
+                path: input.path, objectId: sessionObjectId, contentKind: opened.contentKind, doc,
+              });
+            } : undefined,
             onLocalEditError: requestReconnect,
             onLocalUpdateAcknowledged: (id) => {
               for (const record of pendingRecords) {
@@ -3368,7 +3378,7 @@ export function createWorkspaceEngineCapture(
   // on shutdown.
   let chain: Promise<void> = Promise.resolve();
   function enqueue(context: string, task: () => Promise<void>): void {
-    if (stopped) return;
+    if (stopped || captureWaitAbort.signal.aborted) return;
     chain = chain.then(async () => {
       try {
         await task();
@@ -5706,7 +5716,12 @@ export function createWorkspaceEngineCapture(
       });
     },
 
+    beginShutdown() {
+      captureWaitAbort.abort();
+    },
+
     settleAndCloseAllLiveSessions() {
+      captureWaitAbort.abort();
       return enqueueResult("close live sessions for workspace close", () =>
         settleAndCloseLiveYDocSessions(
           () => true,
@@ -7243,6 +7258,9 @@ export function createWorkspaceEngineCapture(
     },
 
     flush() {
+      if (captureWaitAbort.signal.aborted) {
+        return Promise.reject(captureWaitAbort.signal.reason);
+      }
       return enqueueResult("flush capture", async () => {
         const engine = await engineStore();
         await drainPendingCollectionAdoptions(engine);
@@ -7265,7 +7283,6 @@ export function createWorkspaceEngineCapture(
         if (store) {
           try {
             await drainPendingCollectionAdoptions(store);
-            await store.flushCapture?.();
           } catch (error) {
             // A refused store was never opened, so nothing is pending in
             // it. Failing the stop here would block the move-aside rebuild,

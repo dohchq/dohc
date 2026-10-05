@@ -2740,7 +2740,7 @@ describe("YdocLiveAdapter", () => {
     ]);
   });
 
-  it("evicts after a terminal resend failure instead of wedging on it", async () => {
+  it.each(["saved", "refused", "unavailable"] as const)("sets aside unsent text before terminal eviction: %s", async recovery => {
     const engine = seedPlaintextEngine();
     const busy = new DaemonRefusalError(
       {
@@ -2755,6 +2755,17 @@ describe("YdocLiveAdapter", () => {
       new Error("daemon response"),
     );
     let records = 0;
+    const evictions: string[] = [];
+    let beginHandoff!: () => void;
+    let completeHandoff!: () => void;
+    const handoffStarted = new Promise<void>(resolve => { beginHandoff = resolve; });
+    const handoffCompleted = new Promise<void>(resolve => { completeHandoff = resolve; });
+    const preserveUnsentState = vi.fn(async (doc: Y.Doc) => {
+      evictions.push(doc.getText("plainText").toString());
+      beginHandoff();
+      if (recovery === "refused") throw new Error("draft storage refused");
+      await handoffCompleted;
+    });
     const transport: EngineTransport = {
       ...forwardYdocBlobEgress(engine),
       onEvent: (handler) => engine.onEvent(handler),
@@ -2763,6 +2774,7 @@ describe("YdocLiveAdapter", () => {
           records += 1;
           throw records <= 2 ? busy : terminal;
         }
+        if (request.method === YDOC_METHOD.evict) evictions.push("evict");
         return engine.sendRequest(request);
       },
     };
@@ -2774,6 +2786,7 @@ describe("YdocLiveAdapter", () => {
       contentKind: "plaintext",
       onRemoteUpdate: () => undefined,
       onSettleError: () => undefined,
+      preserveUnsentState: recovery === "unavailable" ? undefined : preserveUnsentState,
       scheduleSettle: () => () => undefined,
     });
     await provider
@@ -2784,7 +2797,19 @@ describe("YdocLiveAdapter", () => {
       )
       .catch(() => undefined);
 
-    await expect(provider.evict()).resolves.toBeUndefined();
+    const completeText = provider.doc.getText("plainText").toString();
+    expect(completeText).toContain("typed against a terminal engine");
+    if (recovery === "saved") {
+      const evicting = provider.evict();
+      await handoffStarted;
+      expect(evictions).toEqual([completeText]);
+      completeHandoff();
+      await expect(evicting).resolves.toBeUndefined();
+      expect(evictions).toEqual([completeText, "evict"]);
+    } else {
+      await expect(provider.evict()).rejects.toThrow(recovery === "refused" ? "draft storage refused" : "conflict-stale-target");
+      expect(evictions).not.toContain("evict");
+    }
   });
 
   it("releases an orphan that is holding nothing of the user's", async () => {

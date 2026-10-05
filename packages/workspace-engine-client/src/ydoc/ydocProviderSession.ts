@@ -89,6 +89,8 @@ export interface EngineYdocProviderSessionOptions {
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
   onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[]) => void;
   onSessionError?: (error: unknown) => void;
+  // Complete a durable set-aside handoff before terminal eviction drops unsent state.
+  preserveUnsentState?: (doc: Y.Doc) => Promise<void>;
   // A settle is going to the engine now, identified by `token`. Every
   // outcome below echoes the same token, so a caller pairs start to outcome
   // by identity. The chain belongs to one provider generation; a caller can
@@ -595,16 +597,13 @@ export async function openEngineYdocProviderSession(
       } catch (error) {
         resendError = error;
       }
-      // Evicting while the engine is still behind discards the only copy: the
-      // doc holding the text goes away with the session. Refuse only for a
-      // TRANSIENT failure, the one class a retry can clear — a terminal
-      // refusal cannot be waited out, and wedging the entry forever holding a
-      // lease nobody can release is worse than reporting the loss.
-      if (session.missingLocalState && isTransientEngineRefusal(resendError)) {
-        closeError = resendError;
-        throw resendError;
-      }
       try {
+        if (session.missingLocalState) {
+          if (isTransientEngineRefusal(resendError) || !options.preserveUnsentState) {
+            throw resendError;
+          }
+          await options.preserveUnsentState(session.doc);
+        }
         await session.evict();
       } catch (error) {
         closeError = error;

@@ -1390,7 +1390,36 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it("closes both daemon stores when the final capture flush rejects", async () => {
+  it("cancels an unsettled flush before queued session retirement and refuses later flushes", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const polling = deferred<void>();
+    let settled = true;
+    const sessions = mockLiveSessions(loopback, requests, () => {
+      if (!settled) polling.resolve();
+      return { settled, running: true, degraded: !settled };
+    });
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+    const engine = capture(root, { rustEngineSessions: sessions });
+    await engine.createVersion("Draft");
+    requests.length = 0;
+    settled = false;
+    const flushing = engine.flush().catch((error: unknown) => error);
+    await polling.promise;
+    engine.beginShutdown();
+    const lateFlush = engine.flush().catch((error: unknown) => error);
+    expect(await lateFlush).toMatchObject({ name: "AbortError" });
+    const retiring = engine.settleAndCloseAllLiveSessions();
+    expect(await flushing).toMatchObject({ name: "AbortError" });
+    expect(await lateFlush).toMatchObject({ name: "AbortError" });
+    await retiring;
+    await engine.stop();
+    expect(requests.filter(request => request.method === "capture.flush")).toHaveLength(1);
+    expect(closeWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes both daemon stores without restarting convergence when capture is unsettled", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     let settled = true;
@@ -1407,14 +1436,11 @@ describe("workspaceEngineCapture batch capture", () => {
     // createVersion opens both the text and secret daemon adapters.
     await engine.createVersion("Draft");
     settled = false;
-    const outcome = await engine.stop().catch((error: unknown) => error);
-
-    expect(outcome).toBeInstanceOf(Error);
-    expect((outcome as Error).message).toContain("did not settle");
-    expect(closeWorkspace, "await the final flush outside try/finally. Its rejection skips both adapter closes, so this count is zero.").toHaveBeenCalledTimes(2);
+    await expect(engine.stop()).resolves.toBeUndefined();
+    expect(closeWorkspace).toHaveBeenCalledTimes(2);
   });
 
-  it("flushes daemon capture before closing production workspace stores", async () => {
+  it("closes production workspace stores without starting another capture flush", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
     const loopback = new VersionedLoopbackEngine();
@@ -1433,7 +1459,7 @@ describe("workspaceEngineCapture batch capture", () => {
         .filter(
           (method) => method === "capture.flush" || method === "workspace.close",
         ),
-    ).toEqual(["capture.flush", "workspace.close"]);
+    ).toEqual(["workspace.close"]);
   });
 
   it("mutation proof: installs remote updates buffered during the initial Y.Doc open", async () => {

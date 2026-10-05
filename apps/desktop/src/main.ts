@@ -5,7 +5,7 @@ import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh}
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
-import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
+import { preserveLiveDraft, preserveUnsentLiveDraft } from "./workspaces/liveDraftRecovery";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
   createDesktopWorkspaceCallbacks,
@@ -2096,7 +2096,12 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       },
       hooks,
       requireEngineSessions(),
-      testCaptureSeams(),
+      {
+        ...testCaptureSeams(),
+        preserveUnsentState: draft => preserveUnsentLiveDraft(
+          join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft,
+        ),
+      },
     ),
   onWatcherBatch,
   onObservationResync,
@@ -4403,7 +4408,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       selector: value?.grantedSelector, ended: value?.ended === true});
     const pinned = identity(marker);
     return createNamedDesktopLiveCapture({ shareId: marker.shareId, selector: marker.grantedSelector,
-      preserveDraft: draft => preserveNamedLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft),
+      preserveDraft: draft => preserveLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft),
       credentials: {relayUrl: credentials.relayUrl, token: credentials.token, userId: credentials.userId,
         signal: ownerDeliveryCredentialLifetime.signal},
       // The attachment, not the root's spelling: the registry keeps the root
@@ -5108,6 +5113,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     }),
     beginEngineShutdown: () => {
       automationScheduler.dispose();
+      for (const workspaceId of workspaceAuthorities.workspaceIds()) {
+        activity.engineCaptureFor(workspaceId)?.beginShutdown();
+      }
       desktopEngine.sessions?.beginShutdown();
       desktopChatBookmarks.stop();
     },
