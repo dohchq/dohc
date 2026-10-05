@@ -120,10 +120,9 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
     }
     // Stored facts include leased and pruned lineages; reading them never claims a base.
     for declined in crate::ydoc_origination::current_sharing_declines_in_tx(tx, workspace_id)? {
-        if let Some(existing) = sharing_declined
-            .iter_mut()
-            .find(|item| item.object_id == declined.object_id)
-        {
+        if let Some(existing) = sharing_declined.iter_mut().find(|item| {
+            item.version_id == declined.version_id && item.object_id == declined.object_id
+        }) {
             *existing = declined;
         } else {
             sharing_declined.push(declined);

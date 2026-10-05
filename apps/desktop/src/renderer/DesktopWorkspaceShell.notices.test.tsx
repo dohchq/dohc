@@ -2239,4 +2239,39 @@ describe("documents too large for live editing", () => {
     );
     expect(screen.queryByTestId("tab-notes/large.md")).toBeNull();
   });
+
+  it("opens the selected version when an object has two declines", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const status = {
+      ...SYNC_STATUS,
+      sharingDeclined: [
+        ...declinedIn("main").sharingDeclined!,
+        ...declinedIn("draft").sharingDeclined!,
+      ],
+    };
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        { id: "main", name: "Main", kind: "main" as const, createdAtMs: 0, canMergeIntoMain: false },
+        { id: "draft", name: "Draft", kind: "named" as const, createdAtMs: 1, canMergeIntoMain: true },
+      ],
+      activeVersionId: "main",
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("sharing-declined-toast-open");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByTestId("notice-sharing-declined-draft:object-1"))
+      .getByRole("button", { name: "Open document" }));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      '"notes/large.md" is in the version "Draft". Switch to that version to open it.',
+    );
+    expect(screen.queryByTestId("tab-notes/large.md")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByTestId("notice-sharing-declined-main:object-1"))
+      .getByRole("button", { name: "Open document" }));
+    expect(await screen.findByTestId("tab-notes/large.md")).toBeTruthy();
+  });
 });

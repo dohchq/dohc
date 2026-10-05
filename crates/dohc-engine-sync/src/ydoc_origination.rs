@@ -170,9 +170,6 @@ pub fn originate_ydoc_base_in_tx(
     else {
         return Ok(BaseOrigination::NothingToDo);
     };
-    if dohc_engine_domain::validate_plaintext_storable_path(path).is_err() {
-        return Ok(BaseOrigination::NothingToDo);
-    }
     if marker.lineage_claim_status.has_claimed_base() {
         return Ok(BaseOrigination::NothingToDo);
     }

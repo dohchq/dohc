@@ -4879,7 +4879,7 @@ fn push_sharing_declined_once(
 ) {
     if let Some(existing) = declines
         .iter_mut()
-        .find(|item| item.object_id == declined.object_id)
+        .find(|item| item.version_id == declined.version_id && item.object_id == declined.object_id)
     {
         *existing = declined;
     } else {
@@ -5014,6 +5014,24 @@ mod sharing_decline_tests {
         push_sharing_declined_once(&mut declines, original);
         push_sharing_declined_once(&mut declines, renamed.clone());
         assert_eq!(declines, [renamed]);
+    }
+
+    #[test]
+    fn sharing_declines_keep_the_same_object_in_distinct_versions() {
+        let main = decline("notes/large.md");
+        let draft = crate::SharingDeclined {
+            version_id: "draft".to_owned(),
+            ..main.clone()
+        };
+        let renamed_draft = crate::SharingDeclined {
+            path: "notes/renamed.md".to_owned(),
+            ..draft.clone()
+        };
+        let mut declines = Vec::new();
+        push_sharing_declined_once(&mut declines, main.clone());
+        push_sharing_declined_once(&mut declines, draft);
+        push_sharing_declined_once(&mut declines, renamed_draft.clone());
+        assert_eq!(declines, [main, renamed_draft]);
     }
 
     #[test]

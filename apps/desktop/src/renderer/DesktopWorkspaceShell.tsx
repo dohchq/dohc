@@ -2043,11 +2043,13 @@ export function DesktopWorkspaceShell(props: {
   // and a refusal that has cleared opens nothing. A newer open, a version
   // change, or another workspace drops the answer.
   const openSharingDeclined = useCallback(
-    (objectId: string) => {
+    (versionId: string, objectId: string) => {
       const declinedNow = () =>
         syncStatusLane
           .latest()
-          ?.sharingDeclined?.find((entry) => entry.objectId === objectId);
+          ?.sharingDeclined?.find((entry) =>
+            entry.versionId === versionId && entry.objectId === objectId,
+          );
       const open = (): void => {
         if (!declinedNow()) return;
         const targetGroupId = wbRef.current.activeEditorGroup;

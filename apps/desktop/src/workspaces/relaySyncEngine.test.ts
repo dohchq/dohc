@@ -506,6 +506,20 @@ describe("relaySyncEngine", () => {
     await sync.stop();
   });
 
+  it("keeps the same object's sharing declines in separate versions", async () => {
+    const main = { objectId: "same-object", versionId: "main", lineagePruned: true, headBlobSha256: null,
+      path: "large.md", constraint: "MAX_YDOC_UPDATE_BYTES", limitBytes: 20, observedBytes: 21 };
+    const draft = { ...main, versionId: "draft" };
+    pushMock.mockResolvedValueOnce({ pushed: 0, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [main, draft] });
+    const result = pullResult();
+    result.sharingDeclined = [{ ...draft, path: "renamed.md" }];
+    pullMock.mockResolvedValueOnce(result);
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    expect(sync.snapshot().sharingDeclined).toEqual([main, ...result.sharingDeclined]);
+    await sync.stop();
+  });
+
   it("keeps every sharing decline in the workspace snapshot", async () => {
     const result = pullResult();
     result.sharingDeclined = [

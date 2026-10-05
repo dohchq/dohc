@@ -326,7 +326,12 @@ pub(super) fn sharing_declined_json(
 ) -> Vec<Value> {
     declines
         .into_iter()
-        .map(|declined| (declined.object_id.clone(), declined))
+        .map(|declined| {
+            (
+                (declined.version_id.clone(), declined.object_id.clone()),
+                declined,
+            )
+        })
         .collect::<std::collections::BTreeMap<_, _>>()
         .into_values()
         .map(|declined| {
@@ -1629,6 +1634,34 @@ mod tests {
             first, second,
             "cross-device entropy must participate in the recovered coordinate"
         );
+    }
+
+    #[test]
+    fn sharing_declined_json_keeps_distinct_versions_of_an_object() {
+        let main = dohc_engine_sync::SharingDeclined {
+            object_id: "object-1".to_owned(),
+            version_id: "main".to_owned(),
+            lineage_pruned: false,
+            head_blob_sha256: None,
+            path: "notes/large.md".to_owned(),
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limit_bytes: 20,
+            observed_bytes: 21,
+        };
+        let draft = dohc_engine_sync::SharingDeclined {
+            version_id: "draft".to_owned(),
+            ..main.clone()
+        };
+        let renamed_draft = dohc_engine_sync::SharingDeclined {
+            path: "notes/renamed.md".to_owned(),
+            ..draft.clone()
+        };
+        let values = super::sharing_declined_json(vec![main, draft, renamed_draft]);
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["versionId"], "draft");
+        assert_eq!(values[0]["path"], "notes/renamed.md");
+        assert_eq!(values[1]["versionId"], "main");
+        assert_eq!(values[1]["path"], "notes/large.md");
     }
 
     #[test]

@@ -719,7 +719,9 @@ export class EngineRelayClient {
       source: readonly SharingDeclined[],
     ): void => {
       for (const declined of source) {
-        const index = target.findIndex((item) => item.objectId === declined.objectId);
+        const index = target.findIndex((item) =>
+          item.versionId === declined.versionId && item.objectId === declined.objectId,
+        );
         if (index >= 0) target[index] = declined;
         else if (target.length < MAX_REPORTED_REFUSALS) target.push(declined);
       }

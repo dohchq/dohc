@@ -234,17 +234,12 @@ const OWNER_LIVE_REFUSALS_TITLE = "Some shares could not start live editing";
 const OWNER_LIVE_REFUSALS_BODY =
   "Open Live documents to see which files are affected and try again.";
 
-// A document too large to share for live editing. Its saved Markdown still
-// syncs; only live editing stays here. Sync cannot clear this: reopening
-// rebuilds the document from its saved text, so reopening is the way out,
-// after making it smaller if the text itself is too large.
+// Saved versions still reach recipients; only live editing with others stays local.
 type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
-const SHARING_DECLINED_TITLE = "Too large for live editing";
+const SHARING_DECLINED_TITLE = "Too large to edit live with others";
 function sharingDeclinedBody(declined: SharingDeclined): string {
-  const start = declined.lineagePruned
-    ? "Open it to start live editing."
-    : "Close and reopen it to start live editing.";
-  return `"${declined.path}" is saved and syncs. ${start} If it is still too large, make it smaller, then close and reopen it.`;
+  const fileName = declined.path.split("/").pop() ?? declined.path;
+  return `People you share ${fileName} with get each saved version, not your live edits. Make it smaller, then open it again to edit live together.`;
 }
 function sharingDeclinedDetails(workspaceId: string, declined: SharingDeclined): string {
   return errorDetails([
@@ -458,9 +453,8 @@ export function NoticeCenter(props: {
   // that repeats itself changes nothing here.
   onRetryLiveDelivery?: () => void;
   onOpenLiveDocuments?: () => void;
-  // Opens a document too large for live editing, by object. The shell opens
-  // it only in the version the refusal names.
-  onOpenSharingDeclined?: (objectId: string) => void;
+  // Opens the refused document by version and object.
+  onOpenSharingDeclined?: (versionId: string, objectId: string) => void;
   // Changes a share recipient sent to this workspace, awaiting the granter.
   // One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
@@ -999,7 +993,7 @@ export function NoticeCenter(props: {
 
     for (const declined of sharingDeclined) {
       next.push({
-        id: `sharing-declined-${declined.objectId}`,
+        id: `sharing-declined-${encodeURIComponent(declined.versionId)}:${encodeURIComponent(declined.objectId)}`,
         tone: "warning",
         title: SHARING_DECLINED_TITLE,
         body: sharingDeclinedBody(declined),
@@ -1009,7 +1003,7 @@ export function NoticeCenter(props: {
                 label: "Open document",
                 onClick: () => {
                   closeDecline(declined);
-                  onOpenSharingDeclined(declined.objectId);
+                  onOpenSharingDeclined(declined.versionId, declined.objectId);
                 },
               }],
             }
@@ -1419,7 +1413,7 @@ export function NoticeCenter(props: {
                   data-testid="sharing-declined-toast-open"
                   onClick={() => {
                     closeDecline(declineToast);
-                    onOpenSharingDeclined(declineToast.objectId);
+                    onOpenSharingDeclined(declineToast.versionId, declineToast.objectId);
                   }}
                   className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
                 >

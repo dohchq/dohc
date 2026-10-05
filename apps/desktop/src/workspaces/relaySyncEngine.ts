@@ -433,11 +433,11 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       }
     }
     passSharingDeclined.push(...(pullResult.sharingDeclined ?? []));
-    const declinedByObject = new Map<string, SharingDeclined>();
+    const declinedByVersionAndObject = new Map<string, SharingDeclined>();
     for (const declined of passSharingDeclined) {
-      declinedByObject.set(declined.objectId, declined);
+      declinedByVersionAndObject.set(JSON.stringify([declined.versionId, declined.objectId]), declined);
     }
-    const nextSharingDeclined = [...declinedByObject.values()].sort((a, b) =>
+    const nextSharingDeclined = [...declinedByVersionAndObject.values()].sort((a, b) =>
       a.path.localeCompare(b.path),
     );
     conflictCount = options.countOpenConflicts
