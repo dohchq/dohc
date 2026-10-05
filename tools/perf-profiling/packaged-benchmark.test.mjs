@@ -1,3 +1,5 @@
+import './go-to-index-fixture.test.mjs';
+import './go-to-packaged-fixture.test.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
