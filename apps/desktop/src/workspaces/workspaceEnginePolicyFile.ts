@@ -12,6 +12,7 @@ import {
 import {
   type SearchVisibility,
   type TextFileSnapshot,
+  type VersionedTextMoment,
 } from "@dohc/workspace-contracts/engine";
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -92,6 +93,14 @@ export function historyPathAdmission(
       visibilityPolicy: policy.visibilityPolicy,
     }).tracked;
   };
+}
+
+export function historyMomentPathsAdmitted(
+  admitted: (path: string) => boolean,
+  moment: Pick<VersionedTextMoment, "path" | "payload">,
+): boolean {
+  return [moment.path, moment.payload.after.path, ...(moment.payload.before ? [moment.payload.before.path] : [])]
+    .every(admitted);
 }
 
 // Whether files.toml leaves every file under `directory` out of History, so

@@ -1573,9 +1573,16 @@ const ListEngineMomentsUpdatingResult = z.object({
 type ListEngineMomentsUpdatingResult = z.infer<
   typeof ListEngineMomentsUpdatingResult
 >;
+export const HistoryPolicyUnreadableResult = z.object({
+  status: z.literal("policy-unreadable"),
+  policyErrors: z.array(z.string()).min(1),
+});
+export type HistoryPolicyUnreadableResult = z.infer<typeof HistoryPolicyUnreadableResult>;
+
 export const ListEngineMomentsResponse = z.union([
   ListEngineMomentsResult,
   ListEngineMomentsUpdatingResult,
+  HistoryPolicyUnreadableResult,
 ]);
 export type ListEngineMomentsResponse = z.infer<
   typeof ListEngineMomentsResponse
@@ -1612,9 +1619,10 @@ export const EngineMomentDetailRecord = EngineMomentRecord.omit({
 });
 export type EngineMomentDetailRecord = z.infer<typeof EngineMomentDetailRecord>;
 
-export const ReadEngineMomentResult = z.object({
-  moment: EngineMomentDetailRecord.nullable(),
-});
+export const ReadEngineMomentResult = z.union([
+  HistoryPolicyUnreadableResult.extend({ moment: z.null() }),
+  z.object({ moment: EngineMomentDetailRecord.nullable() }),
+]);
 export type ReadEngineMomentResult = z.infer<typeof ReadEngineMomentResult>;
 
 export const RestoreEngineMomentFilePayload = ReadEngineMomentPayload;

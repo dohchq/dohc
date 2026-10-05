@@ -1,5 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { readWorkspaceEnginePolicy, type WorkspaceEnginePolicySnapshot } from "../workspaces/workspaceEnginePolicyFile";
 import type { VersionedLiveAdapter } from "@dohc/workspace-engine-client";
 import type { CollectionGetRecordResult } from "@dohc/workspace-contracts";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
@@ -41,8 +45,8 @@ const descriptor = { id: "image", mimeType: "image/png", created: 1, ref: "asset
 type SharedHistoryStore = Pick<ReturnType<ReturnType<typeof createReceivedShareEngineAccess>["storeFor"]>, "listHistoryPage" | "getMoment">;
 
 /** `sharedStore` makes the renderer's workspace a received share view backed by that store. */
-async function harness(sharedStore?: SharedHistoryStore) {
-  const workspace: RegistryEntry = { workspaceId: "workspace", rootPath: "C:/alias", kind: "personal", mode: "local-first",
+async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
+  const workspace: RegistryEntry = { workspaceId: "workspace", rootPath: policyRoot ?? "C:/alias", kind: "personal", mode: "local-first",
     ...(sharedStore ? { shareView: {} as NonNullable<RegistryEntry["shareView"]> } : {}) };
   // Open and writable, but not the workspace this renderer shows.
   const other: RegistryEntry = { workspaceId: "other", rootPath: "C:/other", kind: "personal", mode: "local-first" };
@@ -50,7 +54,7 @@ async function harness(sharedStore?: SharedHistoryStore) {
   const events: string[] = [];
   const authority = createWorkspaceAuthorityOwner({
     findWorkspace: (id) => id === workspace.workspaceId ? workspace : id === other.workspaceId ? other : null,
-    canonicalizeRoot: (root) => root === other.rootPath ? "C:/other-canonical" : "C:/canonical",
+    canonicalizeRoot: (root) => root === other.rootPath ? "C:/other-canonical" : policyRoot ?? "C:/canonical",
     createState: (): State => ({ operationLanes: new Map(), lastEngineStoreRebuildResult: null }),
   });
   const canonicalWorkspaceFor = vi.fn((lease: WorkspaceAuthorityLease<RegistryEntry, State>) => {
@@ -172,7 +176,10 @@ async function harness(sharedStore?: SharedHistoryStore) {
     const reply = await relay(workspaceId, request);
     return reply && { ...reply, asker: { account, current: () => session.generation === generation } };
   });
+  const readPolicy = vi.fn<(rootPath: string) => Promise<WorkspaceEnginePolicySnapshot>>(async () => ({ filesPolicy: null, visibilityPolicy: null, errors: [] }));
+  if (policyRoot) readPolicy.mockImplementation(readWorkspaceEnginePolicy);
   const registrations = createWorkspaceEngineIpc({
+    readWorkspaceEnginePolicy: readPolicy,
     localPersonId: () => "person-local",
     localPersonName: () => "Ice",
     // Read from main's own account, as the sign-in stands when the request arrives.
@@ -211,7 +218,7 @@ async function harness(sharedStore?: SharedHistoryStore) {
     adapter, capture, requireEngineCapture, getStatus, hasAgentRun, closeActivity, probe, move, reopen,
     notify, writable, requireWorkspace, displayName, syncProjection, canonicalWorkspaceFor, requireSessions,
     events, handlers, invoke, routed, retryOwnerLiveDelivery, retryCloudSync, automationRunOnThisComputer, relay, setMissingAdapter: () => { missingAdapter = true; },
-    storeWorkspaces,
+    storeWorkspaces, readPolicy,
     sent,
     signIn: (account: string | null) => { session.account = account; session.generation += 1; },
     /** A credential load begins: no account is known until it reads the store. Resolves the load with its account. */
@@ -616,6 +623,7 @@ describe("workspace engine IPC registrations", () => {
       payload: { before: null, after: { path: "notes/a.md", contentKind: "text", sha256: "a".repeat(64), byteLength: 4, text: "body" } },
     });
     const h = await harness({ listHistoryPage, getMoment } as unknown as SharedHistoryStore);
+    h.readPolicy.mockRejectedValue(new Error("Receiver policy must not gate imported history."));
     h.requireEngineCapture.mockRejectedValue(new Error("dohc could not start Engine history for this workspace."));
     await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 5 })).resolves.toMatchObject({
       moments: [{ id: "shared", agentAuthorName: "trip-agent-hosted" }], protectedTruncated: false,
@@ -628,6 +636,7 @@ describe("workspace engine IPC registrations", () => {
     });
     // A guessed ID outside the imported share has no row in its store.
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "hidden-moment" })).resolves.toEqual({ moment: null });
+    expect(h.readPolicy).not.toHaveBeenCalled();
     // Restore still needs a capture, which a shared view never has.
     await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "shared" })).rejects.toThrow("Engine history");
     expect(h.requireEngineCapture).toHaveBeenCalledOnce();
@@ -712,6 +721,7 @@ describe("workspace engine IPC registrations", () => {
 
   it("restores as the person signed in here, never one the renderer names, and History names them", async () => {
     const h = await harness();
+    h.capture.readMoment.mockResolvedValue(historyDetail());
     await h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "moment",
       author: { kind: "human", humanId: "mallory" } });
     expect(h.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("moment", { kind: "human", humanId: "person-local" });
@@ -731,6 +741,7 @@ describe("workspace engine IPC registrations", () => {
 
   it("notifies after a restore and before parsing its result", async () => {
     const h = await harness();
+    h.capture.readMoment.mockResolvedValue(historyDetail());
     await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ restored: "text", restoredMomentId: "restored", path: "notes/a.md" });
     expect(h.events).toEqual(["restore", "notify"]);
     h.capture.restoreFileToBeforeMoment.mockResolvedValue({ restored: "text", restoredMomentId: "", path: "notes/a.md" });
@@ -889,5 +900,114 @@ describe("registered engine Y.Doc ownership", () => {
     expect(h.provider.readArtifactAsset).not.toHaveBeenCalled();
     await h.invoke(CHANNELS.engineYDocClose, { sessionId: openPayload.sessionId });
     h.provider.doc.destroy();
+  });
+});
+
+const policyRoots: string[] = [];
+afterEach(async () => {
+  await Promise.all(policyRoots.splice(0).map(path => rm(path, { recursive: true, force: true })));
+});
+async function policyWorkspace() {
+  const path = await mkdtemp(join(tmpdir(), "dohc-history-policy-"));
+  policyRoots.push(path);
+  await mkdir(join(path, ".dohc"));
+  return path;
+}
+function historyDetail(path = "notes/a.md", beforePath: string | null = null, afterPath = path) {
+  return { protected: false as const, moment: {
+    id: "moment", workspaceId: "workspace", versionId: "main", objectId: "object",
+    path, recordedAtMs: 1, operation: beforePath && beforePath !== path ? "rename" as const : "write" as const,
+    metadata: { origin: "local-file" as const, summary: "Saved latest edits" },
+    payload: { before: beforePath ? { path: beforePath, contentKind: "text" as const, sha256: "b".repeat(64), byteLength: 3, text: "old" } : null,
+      after: { path: afterPath, contentKind: "text" as const, sha256: "a".repeat(64), byteLength: 4, text: "body" } },
+  } };
+}
+function historyPage(path = "notes/a.md") {
+  return { moments: [{ ...historyDetail(path).moment, protected: false, momentOrder: 10 }],
+    nextBeforeMomentOrder: 8, latestMomentOrder: 10, activeVersionId: "main", protectedTruncated: false };
+}
+
+describe("owner History path policy", () => {
+  it("retires captured list, detail and restore after exclusion, including a reopened window", async () => {
+    const path = await policyWorkspace();
+    for (let pass = 0; pass < 2; pass += 1) {
+      const h = await harness(undefined, path);
+      h.capture.listMoments.mockResolvedValue(historyPage());
+      h.capture.readMoment.mockResolvedValue(historyDetail());
+      if (pass === 0) {
+        await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [{ path: "notes/a.md" }] });
+        await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toMatchObject({ moment: { afterText: "body" } });
+        await writeFile(join(path, ".dohc", "files.toml"), '[[rule]]\npath = "notes/**"\ntracked = false\n');
+      }
+      h.readPolicy.mockClear();
+      await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toEqual({ ...historyPage(), moments: [] });
+      expect(h.readPolicy).toHaveBeenCalledExactlyOnceWith(path);
+      await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ moment: null });
+      await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "moment" })).rejects.toThrow("This history moment is no longer available.");
+      expect(h.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+      expect(h.notify).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(["moment", "before", "after"])("admits the %s path before returning a guessed detail", async side => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [] });
+    h.capture.readMoment.mockResolvedValue(historyDetail(side === "moment" ? "private/a.md" : "notes/a.md",
+      side === "before" ? "private/a.md" : "notes/a.md", side === "after" ? "private/a.md" : "notes/a.md"));
+    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "guessed" })).resolves.toEqual({ moment: null });
+  });
+
+  it.each(["moment", "before", "after"])("admits the %s path before restoring a guessed detail", async side => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [] });
+    h.capture.readMoment.mockResolvedValue(historyDetail(side === "moment" ? "private/a.md" : "notes/a.md",
+      side === "before" ? "private/a.md" : "notes/a.md", side === "after" ? "private/a.md" : "notes/a.md"));
+    await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "guessed" })).rejects.toThrow("This history moment is no longer available.");
+    expect(h.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+    expect(h.notify).not.toHaveBeenCalled();
+  });
+
+  it.each([".env", ".dohc/internal.md", "notes//a.md"])("keeps ordinary %s rows behind CLI path admission", async path => {
+    const h = await harness();
+    h.capture.listMoments.mockResolvedValue(historyPage(path));
+    h.capture.readMoment.mockResolvedValue(historyDetail(path));
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextBeforeMomentOrder: 8, latestMomentOrder: 10 });
+    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ moment: null });
+  });
+
+  it("keeps protected activity, its metadata-only detail and its reverse path", async () => {
+    const h = await harness();
+    const protectedMoment = { id: "secret", workspaceId: "workspace", versionId: "main", path: ".env", recordedAtMs: 1,
+      momentOrder: 10, protected: true as const, operation: "write" as const, metadata: { origin: "local-file" as const } };
+    h.capture.listMoments.mockResolvedValue({ ...historyPage(), moments: [{ ...protectedMoment, protected: true, momentOrder: 10 }] });
+    h.capture.readMoment.mockResolvedValue({ protected: true, moment: protectedMoment });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [{ id: "secret", protected: true }] });
+    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "secret" })).resolves.toMatchObject({ moment: { protected: true, beforeText: null, afterText: null } });
+    await h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "secret" });
+    expect(h.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("secret", { kind: "human", humanId: "person-local" });
+  });
+
+  it("fails closed with typed policy state for malformed files.toml, including protected activity", async () => {
+    const path = await policyWorkspace();
+    await writeFile(join(path, ".dohc", "files.toml"), "[[rules] invalid");
+    const h = await harness(undefined, path);
+    const protectedMoment = { id: "secret", workspaceId: "workspace", versionId: "main", path: ".env", recordedAtMs: 1,
+      momentOrder: 10, protected: true as const, operation: "write" as const, metadata: { origin: "local-file" as const } };
+    h.capture.listMoments.mockResolvedValue({ ...historyPage(), moments: [...historyPage().moments, protectedMoment] });
+    h.capture.readMoment.mockResolvedValue({ protected: true, moment: protectedMoment });
+    const blocked = { status: "policy-unreadable", policyErrors: expect.arrayContaining([expect.stringContaining("files.toml")]) };
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toEqual(blocked);
+    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ ...blocked, moment: null });
+    await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "moment" })).rejects.toThrow("files.toml");
+    expect(h.capture.listMoments).not.toHaveBeenCalled();
+    expect(h.capture.readMoment).not.toHaveBeenCalled();
+    expect(h.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+  });
+
+  it("refuses unknown restore ids without writing or notifying", async () => {
+    const h = await harness();
+    await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "unknown" })).rejects.toThrow("This history moment is no longer available.");
+    expect(h.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+    expect(h.notify).not.toHaveBeenCalled();
   });
 });
