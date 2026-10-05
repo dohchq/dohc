@@ -149,6 +149,7 @@ const OwnerDraftSchema = mutableStruct({
   binding: LiveObjectBindingSchema,
   relayDatabaseNamespace: LiveIdentifierSchema, revision: PositiveSafeIntegerSchema,
   acceptedCursor: NonnegativeSafeIntegerSchema, nativeHeadSequence: NonnegativeSafeIntegerSchema,
+  nativeUnsettled: Schema.Boolean,
   outboxId: Schema.NullOr(LiveIdentifierSchema), pendingBytes: NonnegativeSafeIntegerSchema,
   state: Schema.NullOr(Schema.Literals(["active", "sealed", "quarantined"])),
 }).check(Schema.makeFilter((draft) =>
@@ -157,6 +158,15 @@ const OwnerDraftSchema = mutableStruct({
     : draft.state !== null || "A draft parent must have a state.",
 ));
 export type YdocOwnerDraft = typeof OwnerDraftSchema.Type;
+
+/** The particular locally committed write, independent of its current path. */
+export interface SharedFileUpdate {
+  outboxId: string | null;
+  binding: YdocOwnerDraft["binding"];
+  nativeHeadSequence: number;
+  appendKey: string;
+}
+export type SharedFileUpdateState = "pending" | "settled" | "not-accepted" | "absent";
 
 export function decodeOwnerYDocDraftDescriptor(value: unknown): YdocOwnerDraft {
   const decoded = Schema.decodeUnknownResult(OwnerDraftSchema)(value, { onExcessProperty: "error" });

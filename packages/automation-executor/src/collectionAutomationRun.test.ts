@@ -41,6 +41,18 @@ type Doc = { id: string; path: string; collection: string; values: Record<string
 
 class Crash extends Error {}
 
+it("records a refused field write as a failed run without completed writes", async () => {
+  const space = workspace([task("rec_t", {})]);
+  const store = await scratchStore();
+  const dependencies = space.dependencies(store);
+  dependencies.withRecordWrites = async () => { throw new Error("The engine refused this write."); };
+  const signal = new AbortController().signal;
+  await expect(runCollectionAutomation(dependencies, {claim: added(), automation: automation("id: chain\nname: Chain\nwhen: record-added\ndo: [{set: {Note: saved}}]"),
+    collection: {path: "Tasks", name: "Tasks"}, roster: {kind: "owner", ownerUserId: null, grants: []}, signal, stopped: signal}))
+    .resolves.toMatchObject({kind: "failed", error: "The engine refused this write."});
+  expect((await store.runsOf("collection:Tasks#chain", "atc_one")).runs[0]?.applied).toEqual([]);
+});
+
 type Fault = { at: number; when: "before" | "mid" | "after" };
 
 /**

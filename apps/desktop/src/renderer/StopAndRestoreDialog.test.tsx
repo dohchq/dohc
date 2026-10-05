@@ -8,6 +8,21 @@ const KEPT = { id: "f".repeat(32), path: "trip/Tasks/Untitled.md", field: "Finis
 const WORKSPACE = "workspace";
 const ANA = { target: { kind: "person", userId: "user_ana" }, label: "ana@example.com (Edit)" } as const;
 const LINK = { target: { kind: "link", grantId: "grant-link" }, label: "Edit link" } as const;
+
+it.each(["pending", "not-accepted"] as const)("reports %s shared reversals with the matching run count", async state => {
+  const draft = {outboxId: "outbox", appendKey: "reverse/Status", nativeHeadSequence: 2,
+    binding: {workspaceId: WORKSPACE, mainVersionId: "main", objectId: "object", lineageClaimId: "a".repeat(64),
+      currentPath: "trip/task.md", selectorPaths: ["trip"], restoreFenceGeneration: 0}};
+  fixture([{status: "restored", restored: [], review: [], runsUndone: state === "pending" ? 1 : 0, runsLeft: state === "pending" ? 0 : 1, keptFields: [], fieldsMissing: 0,
+    runChangesKept: 0, wroteAutomations: true, sendsMessages: false, unfinished: null,
+    sharedReversals: [{recordId: "record", field: "Status", draft, state}]}]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText(state === "pending"
+    ? "Reversals saved on this computer. The shared host has not accepted them yet."
+    : "Reversals saved on this computer. The shared host did not accept them. Try Undo again in Run History.")).toBeTruthy();
+  expect(screen.queryByText(/^Undid 1 run/) !== null).toBe(state === "pending");
+  expect(screen.queryByText(/^dohc could not undo/) !== null).toBe(state === "not-accepted");
+});
 const row = (overrides: Record<string, unknown>) => ({
   shareId: "share", workspaceId: WORKSPACE, grantId: "grant", recipientUserId: "user_ana", recipientEmail: "ana@example.com",
   access: "edit", revokedAtMs: null, generation: 1, createdAtMs: 1, shareCode: "code", selector: { paths: ["trip"], versionId: null },

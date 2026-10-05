@@ -2,6 +2,8 @@ import { posix } from "node:path";
 import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import type { KeptAutomationField } from "@dohc/automation-executor/collection-automations";
+import type { SharedReversalsSchema } from "@dohc/workspace-contracts/shared-file-settlement";
+import type { z } from "zod";
 import { definitionHash } from "@dohc/automation-executor/automation-plan";
 import { sendsMessages } from "@dohc/automation-executor/collection-automation-run";
 
@@ -72,6 +74,7 @@ export interface StopAndRestoreDependencies {
 }
 
 export interface UndoneRuns {
+  sharedReversals?: z.infer<typeof SharedReversalsSchema>;
   undone: number;
   left: number;
   keptFields: KeptAutomationField[];
@@ -95,6 +98,7 @@ export type StopAndRestoreOutcome =
       review: ReviewFile[];
       runsUndone: number;
       runsLeft: number;
+      sharedReversals?: z.infer<typeof SharedReversalsSchema>;
       /** Changes the undone runs made that stay as they are. */
       runChangesKept: number;
       /** They wrote automations; this computer undoes only the runs it holds. */
@@ -261,6 +265,7 @@ export async function restoreDirectWrites(
   const done = (message: string | null) => ({
     ...outcome(), runsUndone: runs.undone, runsLeft: runs.left, runChangesKept: runs.keptFields.length + runs.missing + runs.otherKept,
     keptFields: runs.keptFields, fieldsMissing: runs.missing,
+    ...(runs.sharedReversals?.length ? { sharedReversals: runs.sharedReversals } : {}),
     wroteAutomations: definitions.length > 0 || protectedAutomations, sendsMessages: messages,
     unfinished: message === null ? null : { step, message },
   });

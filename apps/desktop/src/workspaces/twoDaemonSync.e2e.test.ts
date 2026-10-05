@@ -12,7 +12,15 @@ import * as Y from "yjs";
 import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
-import { VersionedLiveAdapter, WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";
+import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
+import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
+import { createAutomationRunStore } from "@dohc/automation-executor/automation-run-store";
+import { createAutomationFormulaEvaluator } from "@dohc/automation-executor/automation-evaluator-host";
+import { runCollectionAutomation } from "@dohc/automation-executor/collection-automation-run";
+import { undoCollectionAutomationRuns } from "../../../../packages/automation-executor/src/collectionAutomationUndo";
+import { createAutomationTargets } from "../../../../packages/automation-executor/src/automationTargets";
+import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
@@ -492,6 +500,82 @@ it.skipIf(engine.missing).each([
     else expect(markdown).toBe(`---\nid: ${pending.recordId}\n---\n\n${beforeAdoption}`);
     await capture.flush();
     expect((await adapter.listPendingCollectionAdoptions()).adoptions).toEqual([]);
+    if (hasId) {
+      await delivery.stop();
+      delivery = undefined;
+      const formula = createAutomationFormulaEvaluator();
+      try {
+        const parsed = parseAutomationsFile("version: 1\nautomations:\n  - id: finish\n    name: Finish\n    when: {button: Finish}\n    do: [{set: {Name: Automation}}]\n");
+        if (parsed.status !== "read" || parsed.entries[0]?.status !== "valid") throw new Error("Invalid test automation");
+        const automation = parsed.entries[0].automation;
+        const collectionId = (await adapter.listCollections()).collections.find(entry => entry.path === "tasks")!.objectId;
+        const claim: AutomationClaim = {
+          claimId: "atc_pending", automationId: `collection:${collectionId}#finish`, trigger: { key: "pending-button" },
+          recordId, collectionPath: "tasks", depth: 0, state: "running", attempts: 1, run: 1,
+          createdAtMs: Date.now(), updatedAtMs: Date.now(),
+          change: { kind: "button", authorOriginId: null, actorKind: "human", onBehalfOf: "local-person", sharedAuthor: null, liveCursor: null, fields: [], fieldsOmitted: 0 },
+        };
+        const store = createAutomationRunStore(rootA, resolveWorkspaceMetadataDir);
+        const signal = new AbortController().signal;
+        const edits = (signal: AbortSignal) => collectionRecordWrites(desktopRecordEditContext({
+          capture: capture!, workspaceRoot: rootA, person: {kind: "human", humanId: "local-person"},
+          withAdapter: work => work(adapter), signal,
+          onCaptureSettled: () => () => undefined,
+        }));
+        const dependencies = {
+          withReads: async <T,>(work: (engine: VersionedLiveAdapter) => Promise<T>) => work(adapter),
+          withRecordWrites: async <T,>(signal: AbortSignal, work: (writes: ReturnType<typeof edits>) => Promise<T>) => work(edits(signal)),
+          collectionIdOf: () => collectionId, collectionPathOf: () => "tasks",
+          targets: createAutomationTargets({ isCollection: path => path === "tasks", readText: async () => null,
+            readSchemaFields: async () => new Set(["Name"]), withHost: async () => null }),
+          readCode: async () => null, personName: () => "Owner", evaluator: formula.forWorkspace(workspaceId), store, nowMs: Date.now,
+          chat: { directory: async () => null, write: async () => { throw new Error("No chat in this test"); } },
+          postNotice: async () => { throw new Error("No notices in this test"); }, readMessageBody: async () => null, recipientVerdicts: async () => [],
+        };
+        await expect(runCollectionAutomation(dependencies, { claim, automation, collection: {path: "tasks", name: "Tasks"},
+          roster: {kind: "owner", ownerUserId: "local-person", grants: []}, signal, stopped: signal })).resolves.toMatchObject({kind: "done"});
+        const runs = (await store.runsOf(claim.automationId, claim.claimId)).runs;
+        expect(runs[0]!.applied.flatMap(entry => entry.writes)).toMatchObject([
+          {kind: "field", recordId, path, field: "Name", before: "Manual", after: "Automation", sharedFileUpdate: {appendKey: expect.any(String)}},
+        ]);
+        const write = runs[0]!.applied.flatMap(entry => entry.writes).find(write => write.kind === "field");
+        if (write?.kind !== "field" || !write.sharedFileUpdate) throw new Error("Missing recorded draft");
+        expect(await adapter.sharedFileUpdateStates([write.sharedFileUpdate])).toEqual(["pending"]);
+        // Both run Undo and Stop and restore use this document reversal.
+        // A journaled reversal is pending until its own receipt arrives.
+        const undo = {...dependencies, trash: async () => { throw new Error("No added records"); }};
+        const reversal = await undoCollectionAutomationRuns(undo, runs, signal);
+        expect(reversal).toMatchObject({undone: {reverted: 0}, undoWrites: [{draft: {appendKey: expect.any(String)}}]});
+        await expect(undoCollectionAutomationRuns(undo, runs, signal)).resolves.toMatchObject({undone: {reverted: 0}});
+        expect(session.doc.getMap("frontmatter").get("Name")).toBe("Manual");
+        expect(await adapter.sharedFileUpdateStates(reversal.undoWrites.map(write => write.draft))).toEqual(["pending"]);
+        // Host acknowledgement alone leaves the accepted native lineage dirty.
+        await expect.poll(() => pass(signal), {timeout: 120_000}).toBe("empty");
+        await expect.poll(async () => {
+          try { return await adapter.sharedFileUpdateStates(reversal.undoWrites.map(write => write.draft)); }
+          catch (error) {
+            if (error instanceof DaemonRefusalError && error.wireCode === "OVERLOADED" &&
+                error.message === "live-settlement-capacity") return null;
+            throw error;
+          }
+        }, {timeout: REAL_DAEMON_DEADLINE_MS}).toEqual(["settled"]);
+        await expect.poll(async () => {
+          await pass(signal);
+          await capture!.runRelaySync(materializePage => relay.pull(materializePage));
+          await capture!.flush();
+          return readFile(join(rootA, path), "utf8");
+        }, {timeout: 120_000}).toBe(markdown).catch(error => {
+          const db = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), {readOnly: true});
+          try {
+            throw new Error(JSON.stringify({
+              markers: db.prepare("SELECT head_update_seq,settled_update_seq,last_settled_sha,settle_prior_update_seq,path FROM ydoc_docs").all(),
+              snapshots: db.prepare("SELECT path,blob_sha256 FROM snapshots").all(),
+              materializations: db.prepare("SELECT target_path,status,content_sha256 FROM materialization_jobs").all(),
+            }), {cause: error});
+          } finally {db.close();}
+        });
+      } finally { await formula.close(); }
+    }
     await relay.push();
     peer = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: relayConnection});
     await pullAndExpect(peer, rootB, path, markdown);

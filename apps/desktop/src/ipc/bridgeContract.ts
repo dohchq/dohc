@@ -12,6 +12,7 @@ import {
   WORKSPACE_MODES,
 } from "@dohc/workspace-core";
 import { z } from "zod";
+import { SharedReversalsSchema } from "@dohc/workspace-contracts/shared-file-settlement";
 import type { AgentToolsResult } from "../agents/agentToolCatalog";
 import type { Automation, AutomationDiagnostic } from "@dohc/workspace-contracts/automations";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
@@ -4858,6 +4859,7 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
     ])),
     // Runs of the person's automations undone, and those Undo could not undo.
     runsUndone: z.number().int().nonnegative(),
+    sharedReversals: SharedReversalsSchema.optional(),
     runsLeft: z.number().int().nonnegative(),
     // Changes the undone runs made that stay as they are.
     runChangesKept: z.number().int().nonnegative(),

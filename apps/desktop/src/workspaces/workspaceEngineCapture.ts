@@ -5345,7 +5345,7 @@ export function createWorkspaceEngineCapture(
             ...applyOptions, idempotencyKey: applyOptions.idempotencyKey ?? createId(),
           }),
           settleNow: opts => publicSession.settleNow(opts),
-          close: () => publicSession.close(),
+          close: opts => publicSession.close(opts),
         } satisfies RecordEditSession;
         return publicSession;
       }

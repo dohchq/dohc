@@ -269,6 +269,29 @@ impl ActorHandle {
         .await
     }
 
+    pub async fn owner_ydoc_write_states(
+        &self,
+        workspace_id: String,
+        writes: Vec<dohc_engine_collab::owner_outbox::draft::OwnerDraftWrite>,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<Result<Vec<String>, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(store.read_with(|conn| {
+                dohc_engine_collab::owner_outbox::draft::write_states_in(
+                    conn,
+                    &workspace_id,
+                    &writes,
+                )
+            }))
+        })
+        .await
+    }
+
     pub async fn owner_ydoc_list_drafts(
         &self,
         workspace_id: String,

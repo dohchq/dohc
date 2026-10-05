@@ -253,7 +253,7 @@ it("keeps owner draft durability distinct from native settlement and preserves i
   let accepted = false;
   const descriptor = () => ({
     binding: {workspaceId:"workspace",mainVersionId:VERSION,objectId,lineageClaimId:"a".repeat(64),currentPath:path,selectorPaths:[path],restoreFenceGeneration:0},
-    relayDatabaseNamespace:"relay",revision,acceptedCursor:accepted ? 1 : 0,nativeHeadSequence:1,
+    relayDatabaseNamespace:"relay",revision,acceptedCursor:accepted ? 1 : 0,nativeHeadSequence:1, nativeUnsettled: false,
     outboxId:"outbox",pendingBytes:accepted ? 0 : 20,state:"active",
   });
   const transport: EngineTransport = {

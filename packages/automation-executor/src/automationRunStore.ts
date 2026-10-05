@@ -6,6 +6,10 @@ import type { JsonValue } from "@dohc/app-backend-runtime/automation";
 import type { AutomationChangeKind } from "@dohc/workspace-engine-client";
 import type { PlannedEffect, StepOutput } from "./automationPlan";
 import { StoredReachVerdictSchema, type StoredReachVerdict } from "./reachVerdicts";
+import { SharedFileUpdateSchema, UndoWriteSchema, type UndoWrite } from "@dohc/workspace-contracts/shared-file-settlement";
+import { sharedFileUpdateKey } from "./sharedFileSettlement";
+export { sharedFileUpdateKey } from "./sharedFileSettlement";
+export type { UndoWrite } from "@dohc/workspace-contracts/shared-file-settlement";
 
 // This computer's record of each Collection automation run, under
 // <workspace>/.dohc/automations. Claims are local to the computer that ran
@@ -147,9 +151,23 @@ const StepSchema = z.object({
   collections: z.array(CollectionRefSchema).optional(),
   destinations: z.array(z.object({ path: z.string(), rules: DatasetRulesSchema.nullable() })).optional(),
 });
+const SettlementSchema = z.object({ draft: SharedFileUpdateSchema, state: z.enum(["settled", "not-accepted", "absent"]) });
+export function sharedReversalsOf(runs: readonly StoredRun[]): NonNullable<import("./collectionAutomationUndo").CollectionAutomationUndone["sharedReversals"]> {
+  const statuses = new Map(runs.flatMap(run => run.sharedSettlements ?? []).map(status => [sharedFileUpdateKey(status.draft), status.state]));
+  return recordedReversalsOf(runs)
+    .flatMap(write => {
+      const state = statuses.get(sharedFileUpdateKey(write.draft));
+      return state === "settled" || state === "absent" ? [] : [{ ...write, state: state ?? "pending" }];
+    });
+}
+export function recordedReversalsOf(runs: readonly StoredRun[]): UndoWrite[] {
+  return [...new Map(runs.flatMap(run => run.undoWrites ?? []).map(write => [JSON.stringify([write.recordId, write.field]), write])).values()];
+}
 export const WriteSchema = z.union([
   z.object({
     kind: z.literal("field"),
+    sharedFileUpdate: SharedFileUpdateSchema.optional(),
+    sharedFileUpdateState: z.enum(["pending", "settled", "not-accepted", "absent"]).optional(),
     recordId: z.string(),
     path: z.string(),
     field: z.string(),
@@ -295,6 +313,8 @@ const StoredRunSchema = z.object({
   superseded: z.boolean(),
   undo: z.enum(["started", "done"]).nullable(),
   undoKept: z.array(z.object({ recordId: z.string(), field: z.string(), path: z.string().nullable(), fieldName: z.string(), datasetRecordId: DatasetRecordIdSchema.nullable() })),
+  sharedSettlements: z.array(SettlementSchema).optional(),
+  undoWrites: z.array(UndoWriteSchema).optional(),
   settled: z.boolean(),
   outcome: z.union([
     z.object({ state: z.literal("done") }),
@@ -427,6 +447,8 @@ export interface StoredRun {
    * Stop and restore try them again.
    */
   undoKept: UndoKeptField[];
+  sharedSettlements?: Array<z.infer<typeof SettlementSchema>>;
+  undoWrites?: UndoWrite[];
   /** The engine accepted this run's claim as done, so nothing will resume it. */
   settled: boolean;
   /**
@@ -660,7 +682,7 @@ export interface AutomationRunStore {
    * its header, so the settle and an Undo never overwrite each other's state
    * with a copy read before it. Throws when the saved run cannot be read.
    */
-  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoKept">>): Promise<void>;
+  updateState(run: StoredRun, state: Partial<Pick<StoredRun, "settled" | "undo" | "undoKept" | "sharedSettlements" | "undoWrites">>): Promise<void>;
   supersedeWake(automationId: string, claimId: string, keySeed: string, noticeId: string, supersededBy: string): Promise<void>;
   /** Records one landed effect after the run's saved progress. */
   appendEffect(run: StoredRun, applied: StoredRun["applied"][number]): Promise<void>;
@@ -1008,11 +1030,15 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
     },
     save(run) {
       return serial(async () => {
-        const plan = `${JSON.stringify(header(run))}\n`;
-        const progress = progressText(run);
-        if (Buffer.byteLength(plan) > MAX_RUN_FILE_BYTES || Buffer.byteLength(progress) > MAX_RUN_FILE_BYTES) throw tooLarge();
         const folder = await runsFolder(run.automationId);
         const name = runName(run.claimId, run.keySeed);
+        const previous = HeaderSchema.safeParse(await readJson(join(folder, `${name}${HEADER_SUFFIX}`)));
+        const terminal = new Map([...(run.sharedSettlements ?? []), ...(previous.success ? previous.data.sharedSettlements ?? [] : [])]
+          .map(status => [sharedFileUpdateKey(status.draft), status]));
+        const saved = terminal.size > 0 ? { ...run, sharedSettlements: [...terminal.values()] } : run;
+        const plan = `${JSON.stringify(header(saved))}\n`;
+        const progress = progressText(run);
+        if (Buffer.byteLength(plan) > MAX_RUN_FILE_BYTES || Buffer.byteLength(progress) > MAX_RUN_FILE_BYTES) throw tooLarge();
         if (expiring?.folder === hashName(run.automationId)) {
           const group = expiring.groups.get(hashName(run.claimId));
           if (group === undefined) {
@@ -1044,6 +1070,9 @@ export function createAutomationRunStore(rootPath: string, resolveMetadataDir: M
         const saved = await readRun(folder, name, run.automationId);
         if (saved === null) throw new Error("dohc could not read this run's saved changes in .dohc/automations.");
         const next = { ...saved, ...state };
+        if (state.sharedSettlements) next.sharedSettlements = [...new Map([
+          ...state.sharedSettlements, ...(saved.sharedSettlements ?? []),
+        ].map(status => [sharedFileUpdateKey(status.draft), status])).values()];
         // As a save does: an Undo that starts is listed before its run says so, and leaves the list after.
         if (next.undo === "started") await noteUndo(next, name);
         await writeDurably(join(folder, `${name}${HEADER_SUFFIX}`), `${JSON.stringify(header(next))}\n`);

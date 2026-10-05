@@ -68,7 +68,7 @@ it("awaits an interrupted native read before releasing the pass", async () => {
 
 it("requests a complete host checkpoint before discovering the enrolled outbox", async () => {
   const captured={nativeHeadSequence:2,localStateDigest:"c".repeat(64)};
-  const draft={binding,relayDatabaseNamespace:"namespace",revision:1,acceptedCursor:7,nativeHeadSequence:3,outboxId:"enrolled",pendingBytes:2,state:"active"};
+  const draft={binding,relayDatabaseNamespace:"namespace",revision:1,acceptedCursor:7,nativeHeadSequence:3, nativeUnsettled: false,outboxId:"enrolled",pendingBytes:2,state:"active"};
   const client={ownerYDocPrepareEnrollment:vi.fn().mockResolvedValueOnce({status:"capture",captured}).mockResolvedValue({status:"observed",draft}),
     ownerYDocEnroll:vi.fn().mockResolvedValue(draft),ownerYDocReadState:vi.fn()};
   mock.authority.mockImplementation(async () => {
