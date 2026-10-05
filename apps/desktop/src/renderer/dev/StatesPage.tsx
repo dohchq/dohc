@@ -109,7 +109,7 @@ const noop = () => undefined;
 const NO_RECOVERY: ReadonlySet<string> = new Set();
 
 // One group's strip over a strip of paper, as the shell lays a group out.
-function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs: string[]; active: string }) {
+function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs: string[]; active: string | null }) {
   return (
     <>
       <EditorTabs
@@ -596,6 +596,23 @@ function Pane(props: { theme: "light" | "dark" }) {
                 },
               ]}
               activeGroupId="left"
+              onFocusGroup={noop}
+              onResizeGroups={noop}
+            />
+          </div>
+        </Specimen>
+        <Specimen label="split: an empty active group, then one with tabs">
+          <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
+            <EditorGroupLayout
+              groups={[
+                { id: "empty", size: 1, content: <EditorGroupSpecimen groupId="empty" groupNumber={1} tabs={[]} active={null} /> },
+                {
+                  id: "full",
+                  size: 1,
+                  content: <EditorGroupSpecimen groupId="full" groupNumber={2} tabs={["budget.md"]} active="budget.md" />,
+                },
+              ]}
+              activeGroupId="empty"
               onFocusGroup={noop}
               onResizeGroups={noop}
             />

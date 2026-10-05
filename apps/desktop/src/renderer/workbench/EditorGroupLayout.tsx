@@ -75,8 +75,8 @@ export function EditorGroupLayout(props: {
     <div
       ref={layoutRef}
       data-testid="editor-group-layout"
-      // A split marks which group takes opened files on that group's active
-      // tab (EditorTabs). One group needs no mark.
+      // A split marks which group takes opened files along that group's tab
+      // strip (EditorTabs). One group needs no mark.
       data-split={groups.length > 1 || undefined}
       className="flex min-h-0 min-w-0 flex-1"
     >
@@ -92,6 +92,9 @@ export function EditorGroupLayout(props: {
               data-active={group.id === props.activeGroupId || undefined}
               role="region"
               aria-label={`Editor group ${index + 1}`}
+              // Says which group takes opened files to a screen reader, as
+              // the strip's accent line does on screen.
+              aria-current={groups.length > 1 && group.id === props.activeGroupId ? "true" : undefined}
               style={{ flexGrow: group.size, flexBasis: 0 }}
               onPointerDownCapture={() => props.onFocusGroup(group.id)}
               onFocusCapture={() => props.onFocusGroup(group.id)}
