@@ -634,10 +634,6 @@ export interface VersionedTextStore {
     origin: ActorNeutralWriteMetadata["origin"];
     author?: MomentWriteAuthor;
   }): Promise<void>;
-  getObject(input: {
-    workspaceId: WorkspaceId;
-    objectId: WorkspaceObjectId;
-  }): Promise<FileObjectRecord | null>;
   // Timeline reads (PR 0M-5 history flip). listMoments serves the history
   // list without payload bodies; getMoment serves the diff page with the full
   // before/after payload. Both are workspace-scoped: a moment id from another

@@ -3604,7 +3604,7 @@ export function createWorkspaceEngineCapture(
   // The active version is read PER TASK on the chain — never cached across
   // tasks — so a batch enqueued before a switch and captured after it can
   // never write into the wrong version.
-  async function activeVersionIdOf(engine: VersionedTextStore): Promise<string> {
+  async function activeVersionIdOf(engine: Pick<VersionedTextStore, "getActiveVersion">): Promise<string> {
     const active = await engine.getActiveVersion({ workspaceId });
     return active?.id ?? ENGINE_MAIN_VERSION_ID;
   }
@@ -3645,7 +3645,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function deleteIfTracked(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "readTextFile" | "deleteTextFile">,
     versionId: string,
     path: string,
     metadata: ActorNeutralWriteMetadata,
@@ -3666,7 +3666,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function writeIfChanged(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "readTextFile" | "writeTextFile" | "writeBinaryFile">,
     versionId: string,
     path: string,
     disk:
@@ -3841,7 +3841,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function materializeWriteForSnapshot(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "readBinaryFile">,
     snapshot: { versionId: string; path: string; contentKind?: "text" | "binary"; text: string },
   ): Promise<MaterializeOperation> {
     if (snapshot.contentKind === "binary") {
@@ -3859,7 +3859,7 @@ export function createWorkspaceEngineCapture(
   }
 
   async function versionsSnapshot(
-    engine: VersionedTextStore,
+    engine: Pick<VersionedTextStore, "listVersions" | "getActiveVersion">,
   ): Promise<WorkspaceVersionsSnapshot> {
     const [versions, activeVersionId] = await Promise.all([
       engine.listVersions({ workspaceId }),
