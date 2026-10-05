@@ -554,7 +554,13 @@ it.skipIf(engine.missing)(
         const blob = await fetch(`${proxy.origin}/sync/shares/${shareId}/blobs/${digest}`, { headers });
         expect(blob.status).toBe(200);
         expect(await blob.text()).toBe(cleared);
-        await recipient!.capture.runRelaySync(page => recipient!.relay.pull(page));
+        await expect.poll(async () => {
+          await recipient!.capture.runRelaySync(page => recipient!.relay.pull(page));
+          const markdown = await readFile(join(rootB, path), "utf8");
+          const query = await recipient!.queryCollectionRecords({ collectionPath: "tasks", resolveRelations: true });
+          const record = query.records.find(record => record.id === sourceId);
+          return { markdown, recordId: record?.id, related: record?.values.find(value => value.field === "related") };
+        }, { timeout: 120_000 }).toEqual({ markdown: cleared, recordId: sourceId, related: undefined });
         await assertRecipientState();
       };
       await assertRecipient();
