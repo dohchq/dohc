@@ -1374,6 +1374,44 @@ describe("RelayShareDialog", () => {
     });
   });
 
+  it("stands lines in for links not yet shown, and keeps the words while shown links refresh", async () => {
+    const row = readableLink("grant-link-1", { shareId: "share-link-1" });
+    const first = controllable<{ links: LinkRow[] }>();
+    const again = controllable<{ links: LinkRow[] }>();
+    bridgeMock.listRelayShareLinks
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(again.promise)
+      .mockResolvedValue({ links: [row] });
+    const user = userEvent.setup();
+    render(
+      <RelayShareDialog
+        workspaceId="ws-1"
+        target={{ kind: "paths", paths: ["docs/plan.md"] }}
+        onClose={() => {}}
+      />,
+    );
+    await showLinkPane(user);
+    const opening = screen.getByText("Loading links…").closest("[role=status]");
+    expect(opening?.classList.contains("dohc-reveal-if-slow")).toBe(true);
+    await act(async () => {
+      first.resolve({ links: [row] });
+    });
+    await screen.findByTestId("share-link-row-grant-link-1");
+
+    await user.click(screen.getByRole("button", { name: "Create link" }));
+    await vi.waitFor(() => {
+      expect(bridgeMock.listRelayShareLinks).toHaveBeenCalledTimes(2);
+    });
+    expect(
+      screen.getByText("Loading links…").tagName,
+      "a refresh draws placeholder lines above the links already on screen",
+    ).toBe("P");
+    expect(screen.getByTestId("share-link-row-grant-link-1")).toBeTruthy();
+    await act(async () => {
+      again.resolve({ links: [row] });
+    });
+  });
+
   it("ends with no dependents, clears its minted URL, and refreshes", async () => {
     const row = readableLink("grant-link-1", { shareId: "share-link-1" });
     bridgeMock.listRelayShareLinks.mockResolvedValue({ links: [row] });

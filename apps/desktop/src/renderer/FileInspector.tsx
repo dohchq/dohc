@@ -704,8 +704,11 @@ export const FileInspector = memo(function FileInspector(
         {error ? (
           <Empty>Couldn't read this file.</Empty>
         ) : kind === "markdown" ? (
-          // Where the title and the first lines land when the document opens.
-          <SkeletonRows layout="document" label="Loading…" className="pt-12" />
+          // Where the title and the first lines land when the document opens:
+          // in a pane that keeps its scrollbar's room, as the document's does.
+          <div className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]">
+            <SkeletonRows layout="document" label="Loading…" className="pt-12" />
+          </div>
         ) : (
           <SkeletonRows layout="panel" label="Loading…" />
         )}

@@ -5,7 +5,7 @@ import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
 import { hasBlockingModal } from "./modalFocus";
-import { SkeletonRows } from "./ui/SkeletonRows";
+import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, RefreshCw, Search, Send, User } from "lucide-react";
 import {
@@ -5017,7 +5017,9 @@ export function DesktopWorkspaceShell(props: {
                 />
               )
             ) : isChatsTabPath(tabPath) ? (
-              captureAvailable ? (
+              // Each loading state of the tab puts its lines at the top, so
+              // each one takes over from the last without blinking.
+              <SkeletonSlot>{captureAvailable ? (
                 <Suspense fallback={<SkeletonRows layout="panel" label="Loading Chats..." />}>
                   <LazyChatsView
                     key={`${workspaceId}:${tabPath}:${chatEditors.get(tabPath).generation}:${chatEditors.get(tabPath).revision}`}
@@ -5062,7 +5064,7 @@ export function DesktopWorkspaceShell(props: {
                 >
                   {chatsOffCopy(syncStatus)}
                 </div>
-              )
+              )}</SkeletonSlot>
             ) : isSiteTabPath(tabPath) ? (
               groupSiteRoot ? (
                 <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
@@ -5103,6 +5105,7 @@ export function DesktopWorkspaceShell(props: {
               </Suspense>
             ) : isCollectionTabPath(tabPath) ? (
               groupCollectionPath ? (
+                <SkeletonSlot>
                 <Suspense fallback={<SkeletonRows layout="panel" label="Loading collection..." />}>
                   <LazyCollectionPage
                     key={`${tabPath}:${collectionLineage}`}
@@ -5127,6 +5130,7 @@ export function DesktopWorkspaceShell(props: {
                     onAutomationFocused={clearAutomationFocus}
                   />
                 </Suspense>
+                </SkeletonSlot>
               ) : (
                 // A persisted tab whose path names no collection folder
                 // (hand-edited or truncated state). Closeable, never a crash.

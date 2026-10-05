@@ -9,7 +9,7 @@ import { ErrorBoundary } from "../ErrorBoundary";
 import type { CustomizePart } from "../settings/customize";
 import { MoreMenu } from "../ui/MoreMenu";
 import { ChatsPanel, type ChatsPanelTab } from "../workbench/ChatsPanel";
-import { SkeletonRows } from "../ui/SkeletonRows";
+import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 import {
   isChatsTabPath,
   setChatsWidth,
@@ -112,6 +112,9 @@ export function ShellChatsPanel(props: {
         scope="rail"
         resetKeys={[chatsPanelActiveTab, focusedTabPath]}
       >
+        {/* Every loading state here puts its lines at the top of the panel,
+            so each one takes over from the last without blinking. */}
+        <SkeletonSlot>
         {!captureAvailable && !isShareView ? (
           // Main's capture cannot serve chats here, so mounting either
           // view below would issue calls it refuses and show the
@@ -152,6 +155,7 @@ export function ShellChatsPanel(props: {
             <LazyChatsView key={workspaceId} {...chatsNavigatorProps} />
           </Suspense>
         )}
+        </SkeletonSlot>
       </ErrorBoundary>
     </ChatsPanel>
   );

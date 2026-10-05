@@ -2,7 +2,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import css from "../styles.css?raw";
-import { SkeletonLines, SkeletonRows } from "./SkeletonRows";
+import { SkeletonLines, SkeletonRows, SkeletonSlot } from "./SkeletonRows";
 
 afterEach(() => {
   cleanup();
@@ -15,23 +15,63 @@ function clock(start: number) {
   return time;
 }
 
+// jsdom runs no animations, so the test says what opacity the browser would
+// report for lines that are leaving.
+function painted(opacity: "0" | "1") {
+  vi.spyOn(window, "getComputedStyle").mockImplementation(() => ({ opacity }) as unknown as CSSStyleDeclaration);
+}
+
+const waiting = (testId: string) => screen.getByTestId(testId).style.animation !== "none";
+
 describe("SkeletonRows", () => {
   // A lazy view's fallback lines give way to the view's own loading lines in
   // one commit. Waiting again would blank the lines that were already showing.
-  it("shows at once when it takes over from lines that were showing", () => {
+  it("shows at once when it takes over, in the same slot, from lines that were showing", () => {
     const time = clock(10_000);
-    const { rerender } = render(<SkeletonRows key="fallback" label="Loading apps..." />);
+    painted("1");
+    const { rerender } = render(<SkeletonSlot><SkeletonRows key="fallback" label="Loading apps..." /></SkeletonSlot>);
     time.now += 200;
-    rerender(<SkeletonRows key="view" label="Loading apps…" />);
-    expect(screen.getByRole("status").style.animation).toBe("none");
+    rerender(<SkeletonSlot><SkeletonRows key="view" label="Loading apps…" testId="view" /></SkeletonSlot>);
+    expect(waiting("view")).toBe(false);
   });
 
-  it("keeps the wait when the lines it replaces never showed", () => {
+  it("keeps the wait when the lines it replaces were still blank", () => {
     const time = clock(20_000);
-    const { rerender } = render(<SkeletonRows key="fallback" label="Loading…" />);
-    time.now += 40;
-    rerender(<SkeletonRows key="view" label="Loading…" />);
-    expect(screen.getByRole("status").style.animation).toBe("");
+    painted("0");
+    const { rerender } = render(<SkeletonSlot><SkeletonRows key="fallback" label="Loading…" /></SkeletonSlot>);
+    time.now += 200;
+    rerender(<SkeletonSlot><SkeletonRows key="view" label="Loading…" testId="view" /></SkeletonSlot>);
+    expect(waiting("view")).toBe(true);
+  });
+
+  // A tab or workspace switch mounts new lines while other lines leave.
+  it("keeps the wait for lines in another place, or in no slot", () => {
+    const time = clock(30_000);
+    painted("1");
+    const { rerender } = render(<>
+      <SkeletonSlot><SkeletonRows key="a" label="Loading apps…" /></SkeletonSlot>
+      <SkeletonSlot>{null}</SkeletonSlot>
+      <SkeletonRows key="c" label="Loading…" />
+    </>);
+    time.now += 200;
+    rerender(<>
+      <SkeletonSlot>{null}</SkeletonSlot>
+      <SkeletonSlot><SkeletonRows key="b" label="Loading Chats..." testId="other-slot" /></SkeletonSlot>
+      <SkeletonRows key="d" label="Loading…" testId="no-slot" />
+    </>);
+    expect(waiting("other-slot")).toBe(true);
+    expect(waiting("no-slot")).toBe(true);
+  });
+
+  it("keeps the wait when the clock went back", () => {
+    const time = clock(40_000);
+    painted("1");
+    const { rerender } = render(<SkeletonSlot><SkeletonRows key="fallback" label="Loading…" /></SkeletonSlot>);
+    time.now += 200;
+    rerender(<SkeletonSlot>{null}</SkeletonSlot>);
+    time.now = 1_000;
+    rerender(<SkeletonSlot><SkeletonRows key="view" label="Loading…" testId="view" /></SkeletonSlot>);
+    expect(waiting("view")).toBe(true);
   });
 
   it("is one status whose only words are its label", () => {

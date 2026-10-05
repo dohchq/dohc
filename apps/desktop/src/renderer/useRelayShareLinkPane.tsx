@@ -1790,7 +1790,15 @@ export function useRelayShareLinkPane(props: {
             Links
           </SectionLabel>
 
-          {linksLoading ? <SkeletonRows rows={2} label="Loading links…" /> : null}
+          {/* Lines stand in only for links not yet shown; a refresh keeps the
+              links on screen and says so. */}
+          {linksLoading ? (
+            visibleLinkGroups.length ? (
+              <p className="m-0 text-xs text-muted">Loading links…</p>
+            ) : (
+              <SkeletonRows rows={2} label="Loading links…" />
+            )
+          ) : null}
 
           {linksError ? (
             <div className="flex items-center justify-between gap-3">
@@ -1967,7 +1975,13 @@ export function useRelayShareLinkPane(props: {
                           ) : null}
                         </div>
 
-                        {ownerDiscussion.loading ? <SkeletonRows rows={2} label="Loading comments…" /> : null}
+                        {ownerDiscussion.loading ? (
+                          ownerDiscussion.loaded ? (
+                            <p className="m-0 text-xs text-muted">Loading comments…</p>
+                          ) : (
+                            <SkeletonRows rows={2} label="Loading comments…" />
+                          )
+                        ) : null}
 
                         {ownerDiscussion.loadError ? (
                           <div className="flex items-center justify-between gap-3">

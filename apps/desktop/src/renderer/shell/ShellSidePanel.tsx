@@ -1,11 +1,11 @@
-import { Maximize2, RefreshCw } from "lucide-react";
+import { Globe2, Maximize2, RefreshCw } from "lucide-react";
 import { Suspense, lazy, type ComponentProps, type ReactNode } from "react";
 import type { WorkspaceSummary } from "../../ipc/bridgeContract";
 import { ErrorBoundary } from "../ErrorBoundary";
 import type { CustomizePart } from "../settings/customize";
 import { MoreMenu } from "../ui/MoreMenu";
 import type { RelayShareTarget } from "../RelayShareDialog";
-import { SkeletonRows } from "../ui/SkeletonRows";
+import { SkeletonRows, SkeletonSlot } from "../ui/SkeletonRows";
 // Eager on purpose. Behind lazy(), the search input did not exist until the
 // chunk resolved, and every character typed in that gap went to whatever the
 // user clicked to open the panel — queries arrived with their first letters
@@ -18,6 +18,19 @@ import { LazyGraphView, LazySitePreviewPage } from "./lazyViews";
 const LazyAppsView = lazy(() =>
   import("../workbench/AppsView").then((mod) => ({ default: mod.AppsView })),
 );
+
+// AppsView's own toolbar row above its loading lines, so when the view
+// arrives still loading, its lines take over in the same place.
+function AppsViewLoading() {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
+        <Globe2 size={13} aria-hidden className="text-subtle" />
+      </div>
+      <SkeletonRows layout="panel" label="Loading apps..." />
+    </div>
+  );
+}
 
 type GraphViewProps = ComponentProps<typeof LazyGraphView>;
 type AppsViewProps = ComponentProps<typeof LazyAppsView>;
@@ -159,7 +172,8 @@ export function ShellSidePanel(props: {
           />
         </Suspense>
       ) : wb.activeView === "sites" ? (
-        <Suspense fallback={<SkeletonRows layout="panel" label="Loading apps..." />}>
+        <SkeletonSlot>
+        <Suspense fallback={<AppsViewLoading />}>
           <LazyAppsView
             workspaceId={workspaceId}
             pinnedApps={pinnedRoots}
@@ -171,6 +185,7 @@ export function ShellSidePanel(props: {
             {...(askAgent ? { askAgent } : {})}
           />
         </Suspense>
+        </SkeletonSlot>
       ) : wb.activeView === "history" ? (
         historyTimeline
       ) : selectedAppRoot !== null ? (

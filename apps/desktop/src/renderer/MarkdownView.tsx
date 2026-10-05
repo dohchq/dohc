@@ -1978,7 +1978,11 @@ export function MarkdownView(props: {
             )}
           </div>
         ) : null}
-        {/* data-dohc-doc-pane: the whole pane is the editor's image drop zone,
+        {/* Every document pane keeps its scrollbar's room, so a short and a
+            long document share one column, and the loading lines line up
+            with both (FileInspector).
+
+            data-dohc-doc-pane: the whole pane is the editor's image drop zone,
             top-matter included — MarkdownEditor finds it with closest(). See
             the drop-zone comment in imagePaste.ts.
 
@@ -1992,7 +1996,7 @@ export function MarkdownView(props: {
           data-testid="view-markdown"
           data-dohc-doc-pane=""
           hidden={showSource}
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)]"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           {/* Title + inline properties are one top-matter zone (hovering it
               reveals the quiet "Add a property" affordance on empty docs). */}
@@ -2185,7 +2189,7 @@ export function MarkdownView(props: {
           ref={localDocPaneRef}
           data-testid="view-markdown"
           data-dohc-doc-pane=""
-          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)]"
+          className="min-h-0 flex-1 overflow-auto bg-bg text-[length:var(--dohc-editor-font-size)] [scrollbar-gutter:stable]"
         >
           <div className="dohc-page-topmatter">
             <PageIdentity
@@ -2259,7 +2263,7 @@ export function MarkdownView(props: {
         <div
           ref={localDocPaneRef}
           data-testid="view-markdown"
-          className="min-h-0 flex-1 overflow-auto"
+          className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]"
         >
           <div className="dohc-page-topmatter">
             {/* Title, icon and properties autosave through the same disk write
