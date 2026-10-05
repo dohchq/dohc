@@ -9,6 +9,7 @@ export const desktopPins = {
   settingsEmptySearch: "settings-empty-search",
   settingsSearch: "settings-search",
   settingsWarning: "settings-warning",
+  sidePanel: "side-panel",
   titlebar: "titlebar",
   titlebarChatsSidebar: "titlebar-chats-sidebar",
 } as const;

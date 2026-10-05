@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Titlebar } from "./renderer/Titlebar";
 import { ActivityBar } from "./renderer/workbench/ActivityBar";
 import { ChatsPanel } from "./renderer/workbench/ChatsPanel";
+import { SidePanel } from "./renderer/workbench/SidePanel";
 import { desktopPins, activityPin, chatsPanelTabPin, settingsNavPin, settingsSectionPin, editorTabTestId, editorTabPrefixPattern } from "./testPins";
 
 afterEach(cleanup);
@@ -15,8 +16,9 @@ describe("shared desktop pins", () => {
       <Titlebar chatsSidebar={{ visible: true, onToggle: noop }} primarySidebar={{ visible: true, onToggle: noop }} onQuickOpen={noop} />
       <ActivityBar views={["explorer", "search", "graph", "sites", "history"]} activeView="search" sidebarVisible hasConflict={false} searchResultCount={3} onSelectView={noop} onOpenSettings={noop} onOpenCloud={noop} />
       <ChatsPanel width={320} onWidthChange={noop} onCollapse={noop} tabs={["all", "file"]} tab="all" onTabChange={noop}>Chats</ChatsPanel>
+      <SidePanel title="Explorer" width={320} onWidthChange={noop}>Files</SidePanel>
     </>);
-    for (const id of [desktopPins.titlebar, desktopPins.titlebarChatsSidebar, desktopPins.activityBar, desktopPins.chatsPanel, desktopPins.chatsPanelCollapse]) {
+    for (const id of [desktopPins.titlebar, desktopPins.titlebarChatsSidebar, desktopPins.activityBar, desktopPins.chatsPanel, desktopPins.chatsPanelCollapse, desktopPins.sidePanel]) {
       expect(screen.getByTestId(id).getAttribute("data-testid")).toBe(id);
     }
     for (const view of ["explorer", "search", "graph", "sites", "history", "cloud", "settings"]) {
