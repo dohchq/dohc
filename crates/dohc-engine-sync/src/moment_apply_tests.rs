@@ -3133,7 +3133,7 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
             Ok::<_, rusqlite::Error>((latest, conflicts))
         })
         .expect("peer result");
-    assert_eq!(latest_moment_id, "moment-after-settle");
+    assert!(latest_moment_id.starts_with("moment-ydoc-apply-"));
     assert_eq!(conflicts, 0);
 }
 
@@ -4249,7 +4249,185 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
 }
 
 #[test]
-fn moment_append_content_fast_forward_converges_text_at_the_same_path() {
+fn covered_artifact_is_history_only_with_live_edits_and_crash_replay() {
+    use dohc_engine_storage::FaultPoint;
+    use dohc_engine_testkit::ScriptedFaults;
+    for advanced in [false, true] {
+        for point in [
+            FaultPoint::SyncBeforeApplyCommit,
+            FaultPoint::StorageAfterCommitBeforeAck,
+        ] {
+            let (scratch, mut store) = test_store();
+            let key = DocKey::new("ws", "main", "object").unwrap();
+            let doc = Ydoc::wire();
+            doc.plaintext_insert(0, "artifact");
+            let sha = store.put_binary_blob(&doc.encode_full_state()).unwrap();
+            let base = ReplicationEnvelope {
+                workspace_id: "ws".into(),
+                origin_id: "peer".into(),
+                origin_seq: 0,
+                op_kind: "ydoc.update".into(),
+                recorded_at_ms: 1_500,
+                relay_seq: Some(1),
+                payload: json!({"versionId":"main","objectId":"object","path":"head.md",
+                    "contentKind":"plaintext","updateBlobSha256":sha,"lineageClaimId":sha,"isBaseState":true}),
+            };
+            apply_ydoc_envelope(
+                &mut store,
+                &mut Default::default(),
+                &base,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            if advanced {
+                VersionedTextStore::new(&mut store)
+                    .write_text(
+                        &WriteText {
+                            workspace_id: "ws".into(),
+                            version_id: "main".into(),
+                            object_id: "object".into(),
+                            path: "head.md".into(),
+                            text: "artifact plus peer edits".into(),
+                            moment_id: "peer-edit".into(),
+                            metadata_origin: "ydoc".into(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: None,
+                            now_ms: 1_600,
+                            request_id: None,
+                        },
+                        &NoFaults,
+                    )
+                    .unwrap();
+                let foreign = envelope(
+                    "other-lineage",
+                    0,
+                    "ws",
+                    absent_text_payload("foreign-artifact", "object", "head.md", "artifact"),
+                );
+                assert!(matches!(
+                    crate::apply_moment_envelope_detailed(
+                        &mut store,
+                        &foreign,
+                        &NoFaults,
+                        &crate::AlwaysLive
+                    ),
+                    Err(SyncError::RetryableState {
+                        reason: "ydoc-session-live"
+                    })
+                ));
+            }
+            let before = snapshot(&store, "object");
+            let leases = LeaseRegistry::new();
+            let _held = leases.acquire(&key).unwrap();
+            let op = envelope(
+                "peer",
+                1,
+                "ws",
+                absent_text_payload("artifact-history", "object", "head.md", "artifact"),
+            );
+            let faults = ScriptedFaults::crash_at(point);
+            let result =
+                crate::apply_moment_envelope_detailed(&mut store, &op, faults.as_ref(), &leases)
+                    .unwrap();
+            assert!(matches!(result.primary, ApplyDisposition::Crashed { .. }));
+            assert!(faults.fired());
+            drop(store);
+            let mut store = EngineStore::open(&engine_db_path(&scratch).unwrap(), 2_100).unwrap();
+            let result =
+                crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases).unwrap();
+            if let ApplyDisposition::Applied(applied) = result.primary {
+                assert_eq!(applied.conflicts_opened, 0);
+                assert!(applied.materialization_changes.is_empty());
+            } else {
+                assert!(matches!(result.primary, ApplyDisposition::Skipped));
+            }
+            assert_eq!(snapshot(&store, "object"), before);
+            assert_eq!(read_replication_acked_seq(&store, "ws", "peer").unwrap(), 1);
+            assert!(conflict_ids(&store).is_empty());
+            let rows:i64 = store.read_with(|conn|conn.query_row(
+                "SELECT COUNT(*) FROM moments WHERE moment_id='artifact-history' AND sync_record_only=1", [], |r|r.get(0))).unwrap();
+            assert_eq!(rows, 1);
+            assert!(
+                crate::moment_apply::stored_materialization_changes(&store, &op)
+                    .unwrap()
+                    .is_empty()
+            );
+            let persisted = store
+                .read_with(|conn| dohc_engine_collab::load_doc_in(conn, &key))
+                .unwrap();
+            assert_eq!(
+                persisted
+                    .project(YdocContentKind::Plaintext)
+                    .unwrap()
+                    .content,
+                "artifact"
+            );
+        }
+    }
+}
+
+#[test]
+fn moment_append_equal_text_for_bound_owner_keeps_live_binding_checks() {
+    let RestoreOwner {
+        _scratch,
+        mut store,
+        initial_text,
+        initial_moment,
+        ..
+    } = restore_owner();
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    let before = snapshot(&store, "object");
+    let op = envelope(
+        "unaudited-peer",
+        0,
+        "ws",
+        present_text_payload(
+            "unaudited-equal-moment",
+            "object",
+            "write",
+            "owner.md",
+            "owner.md",
+            &initial_text,
+            &initial_moment,
+            &initial_text,
+        ),
+    );
+    let leases = LeaseRegistry::new();
+    let held = leases.acquire(&key).unwrap();
+    assert!(matches!(
+        crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases),
+        Err(SyncError::RetryableState {
+            reason: "ydoc-session-live"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&store, "ws", "unaudited-peer").unwrap(),
+        -1
+    );
+    assert_eq!(store.table_row_count("moments").unwrap(), 1);
+
+    drop(held);
+    let result =
+        crate::apply_moment_envelope_detailed(&mut store, &op, &NoFaults, &leases).unwrap();
+    assert!(matches!(
+        result.primary,
+        ApplyDisposition::Refused(ReplicationRefusal {
+            reason: RefusalReason::InvalidInput { ref reason },
+            ..
+        }) if reason == "live document binding is still active"
+    ));
+    assert_eq!(store.table_row_count("moments").unwrap(), 1);
+    assert_eq!(
+        store.table_row_count("owner_pending_settlements").unwrap(),
+        0
+    );
+    assert_eq!(snapshot(&store, "object"), before);
+}
+
+#[test]
+fn moment_append_equal_text_is_history_only_at_the_same_path() {
     let (_scratch, mut store) = test_store();
     seed_text_moment(
         &mut store,
@@ -4280,12 +4458,12 @@ fn moment_append_content_fast_forward_converges_text_at_the_same_path() {
         apply_moment_envelope(&mut store, &op, &NoFaults).expect("converge"),
         ApplyOutcome::new(ApplyDisposition::Applied(0))
     );
-    assert_eq!(snapshot(&store, "object").unwrap().3, "remote-head");
+    assert_eq!(snapshot(&store, "object").unwrap().3, "local-head");
     assert!(conflict_ids(&store).is_empty());
 }
 
 #[test]
-fn moment_append_content_fast_forward_converges_binary_at_the_same_path() {
+fn moment_append_equal_binary_is_history_only_at_the_same_path() {
     let (_scratch, mut store) = test_store();
     let bytes = b"\0same binary\xff";
     let sha = seed_binary_head(&mut store, "binary-object", "same.bin", bytes, "local-bin");
@@ -4325,8 +4503,61 @@ fn moment_append_content_fast_forward_converges_binary_at_the_same_path() {
     assert_eq!(head.0, "same.bin");
     assert_eq!(head.1, "binary");
     assert_eq!(head.2, sha);
-    assert_eq!(head.3, "remote-bin");
+    assert_eq!(head.3, "local-bin");
     assert!(indexed(&store, "binary-object").is_empty());
+}
+
+#[test]
+fn file_successor_of_history_only_artifact_adopts_the_local_preimage() {
+    let (_scratch, mut store) = test_store();
+    seed_text_moment(
+        &mut store,
+        "object",
+        "same.md",
+        "agreed",
+        "local-head",
+        None,
+        true,
+    );
+    hydrate_texts(&mut store, &["next"]);
+    let artifact = envelope(
+        "peer",
+        0,
+        "ws",
+        absent_text_payload("remote-artifact", "object", "same.md", "agreed"),
+    );
+    apply_moment_envelope(&mut store, &artifact, &NoFaults).unwrap();
+    assert_eq!(snapshot(&store, "object").unwrap().3, "local-head");
+    let next = envelope(
+        "peer",
+        1,
+        "ws",
+        present_text_payload(
+            "remote-next",
+            "object",
+            "write",
+            "same.md",
+            "same.md",
+            "agreed",
+            "remote-artifact",
+            "next",
+        ),
+    );
+    assert_eq!(
+        apply_moment_envelope(&mut store, &next, &NoFaults).unwrap(),
+        ApplyOutcome::new(ApplyDisposition::Applied(0))
+    );
+    assert_eq!(snapshot(&store, "object").unwrap().3, "remote-next");
+    let before: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT before_latest_moment_id FROM moments WHERE moment_id='remote-next'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(before, "local-head");
 }
 
 #[test]
@@ -4366,7 +4597,7 @@ fn moment_append_same_bytes_at_a_different_path_conflicts_instead_of_converging(
 }
 
 #[test]
-fn moment_append_content_convergent_adoption_localizes_rollback_but_keeps_wire_payload() {
+fn moment_append_equal_content_keeps_remote_history_and_wire_payload() {
     let (_scratch, mut store) = test_store();
     seed_text_moment(
         &mut store,
@@ -4406,9 +4637,9 @@ fn moment_append_content_convergent_adoption_localizes_rollback_but_keeps_wire_p
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
-            assert_eq!(before.0, text_sha("agreed"));
-            assert_eq!(before.1, "local-head");
-            assert_eq!(before.2, None);
+            assert_eq!(before.0, text_sha("remote-old"));
+            assert_eq!(before.1, "remote-old-head");
+            assert_eq!(before.2, Some(1));
             let journal: String = conn.query_row(
                 "SELECT payload_json FROM replication_log \
                  WHERE workspace_id='ws' AND origin_id='peer' AND origin_seq=0",

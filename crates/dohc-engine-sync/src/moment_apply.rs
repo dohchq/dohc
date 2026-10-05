@@ -376,21 +376,17 @@ pub fn apply_moment_envelope_detailed(
         .map_err(|_| SyncError::InvalidInput {
             reason: "moment.append Y.Doc coordinates are invalid",
         })?;
-        if leases.is_live(&key)
+        let content_held = leases.is_live(&key)
             && !(payload.operation == "write"
                 && is_ydoc_settlement_moment_id(&payload.moment_id)
-                && is_bound_owner(tx, &key))
-        {
-            return Err(SyncError::RetryableState {
-                reason: "ydoc-session-live",
-            });
-        }
+                && is_bound_owner(tx, &key));
         apply_moment_append(
             tx,
             envelope,
             &payload,
             search_policy.as_ref(),
             MomentApplyMode::Ordinary,
+            content_held,
         )
     })
 }
@@ -540,6 +536,7 @@ fn apply_moment_append(
     payload: &MomentAppendPayload,
     search_policy: Option<&SearchPolicySnapshot>,
     mode: MomentApplyMode,
+    content_held: bool,
 ) -> Result<MomentApplyResult, SyncError> {
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
 
@@ -591,12 +588,16 @@ fn apply_moment_append(
         path_occupant.filter(|snapshot| snapshot.object_id != payload.object_id);
 
     let origin_saw_absent = matches!(payload.before_present.as_str(), "absent" | "null");
+    let recorded_preimage = local.as_ref().map_or(Ok(false), |snapshot| {
+        recorded_preimage_matches(tx, &envelope.workspace_id, payload, snapshot)
+    })?;
     let mut head_fast_forward = if origin_saw_absent {
         local.is_none() && conflicting_occupant.is_none()
     } else {
         local.as_ref().is_some_and(|snapshot| {
             Some(snapshot.latest_moment_id.as_str()) == payload.before_latest_moment_id.as_deref()
                 || equivalent_ydoc_settlement_preimage(snapshot, payload)
+                || recorded_preimage
         }) && conflicting_occupant.is_none()
     };
     let after_kind = ContentKind::from_wire(payload.payload_after_content_kind.as_deref());
@@ -623,6 +624,40 @@ fn apply_moment_append(
 
     validate_payload_sides(tx, payload)?;
     let remote_before = moment_before_from_payload(tx, payload)?;
+
+    if mode == MomentApplyMode::Ordinary
+        && payload.operation == "write"
+        && conflicting_occupant.is_none()
+        && !is_bound_owner(
+            tx,
+            &DocKey::new(
+                &envelope.workspace_id,
+                &payload.version_id,
+                &payload.object_id,
+            )
+            .map_err(|_| SyncError::CoordinateDiverged)?,
+        )
+        && local.as_ref().is_some_and(|snapshot| {
+            snapshot.path == payload.payload_after_path && snapshot.kind == after_kind
+        })
+        && (local
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.digest == payload.payload_after_blob_sha256)
+            || holds_earlier_lineage_artifact(tx, envelope, payload)?)
+    {
+        ensure_file_object(tx, &envelope.workspace_id, payload)?;
+        insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
+        return Ok(MomentApplyResult {
+            conflicts_opened: 0,
+            materialization_changes: Vec::new(),
+            record_facts: None,
+        });
+    }
+    if content_held {
+        return Err(SyncError::RetryableState {
+            reason: "ydoc-session-live",
+        });
+    }
 
     let mut owner_settlement_committed = false;
     if mode == MomentApplyMode::Ordinary {
@@ -760,7 +795,7 @@ fn apply_moment_append(
 
     if head_fast_forward || content_fast_forward {
         let active = is_active_version(tx, &envelope.workspace_id, &payload.version_id)?;
-        let adopted_before = if content_fast_forward && !head_fast_forward {
+        let adopted_before = if recorded_preimage || (content_fast_forward && !head_fast_forward) {
             local.as_ref().map_or(remote_before.clone(), |snapshot| {
                 MomentBefore::Present(Box::new(snapshot.clone()))
             })
@@ -1089,6 +1124,133 @@ fn apply_moment_append(
     })
 }
 
+fn recorded_preimage_matches(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    payload: &MomentAppendPayload,
+    snapshot: &Snapshot,
+) -> Result<bool, SyncError> {
+    if payload.before_present != "present"
+        || payload.before_latest_moment_id.as_deref() == Some(snapshot.latest_moment_id.as_str())
+        || payload.before_object_id.as_deref() != Some(snapshot.object_id.as_str())
+        || payload.before_version_id.as_deref() != Some(payload.version_id.as_str())
+        || payload.before_path.as_deref() != Some(snapshot.path.as_str())
+        || payload.before_blob_sha256.as_deref() != Some(snapshot.digest.as_str())
+        || ContentKind::from_wire(payload.before_content_kind.as_deref()) != snapshot.kind
+    {
+        return Ok(false);
+    }
+    // A history-only predecessor never became the head. Its successor adopts
+    // the equal local preimage so rollback still returns to the actual head.
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=?1 AND m.moment_id=?2 \
+         AND m.version_id=?3 AND m.object_id=?4 AND m.operation='write' AND m.sync_record_only=1 \
+         AND m.payload_after_path=?5 AND m.payload_after_content_kind=?6 AND m.payload_after_blob_sha256=?7 \
+         AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.workspace_id=m.workspace_id \
+           AND c.incoming_latest_moment_id=m.moment_id))",
+        params![workspace,payload.before_latest_moment_id,payload.version_id,payload.object_id,
+            snapshot.path,snapshot.kind.as_str(),snapshot.digest],
+        |row| row.get(0),
+    ).map_err(SyncError::corrupt)
+}
+
+fn holds_earlier_lineage_artifact(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
+) -> Result<bool, SyncError> {
+    // The ordered origin log identifies the claim this artifact follows.
+    // Never use equal bytes from a replaced or independently claimed base.
+    let claim: Option<String> = tx.query_row(
+        "SELECT json_extract(r.payload_json,'$.lineageClaimId') FROM replication_log r \
+         JOIN ydoc_docs d ON d.workspace_id=r.workspace_id AND d.version_id=?3 AND d.object_id=?4 \
+         WHERE r.workspace_id=?1 AND r.origin_id=?2 AND r.origin_seq<?5 \
+           AND r.op_kind='ydoc.update' AND json_extract(r.payload_json,'$.versionId')=?3 \
+           AND json_extract(r.payload_json,'$.objectId')=?4 \
+           AND r.origin_seq=(SELECT MAX(prior.origin_seq) FROM replication_log prior \
+             WHERE prior.workspace_id=r.workspace_id AND prior.origin_id=r.origin_id AND prior.origin_seq<?5 \
+               AND prior.op_kind='ydoc.update' AND json_extract(prior.payload_json,'$.versionId')=?3 \
+               AND json_extract(prior.payload_json,'$.objectId')=?4) \
+           AND d.lineage_claim_status='exact' \
+           AND json_extract(r.payload_json,'$.lineageClaimId')=d.lineage_claim_id \
+           AND NOT EXISTS (SELECT 1 FROM replication_pending_refusals p \
+             WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq) \
+         ORDER BY r.origin_seq DESC LIMIT 1",
+        params![envelope.workspace_id,envelope.origin_id,payload.version_id,payload.object_id,envelope.origin_seq],
+        |row| row.get(0),
+    ).optional().map_err(SyncError::corrupt)?.flatten();
+    let Some(claim) = claim else {
+        return Ok(false);
+    };
+    let held: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM moments m JOIN replication_log r \
+           ON r.workspace_id=m.workspace_id AND r.op_kind='moment.append' \
+             AND json_extract(r.payload_json,'$.momentId')=m.moment_id \
+         WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.operation='write' \
+           AND m.payload_after_path=?4 AND m.payload_after_content_kind=?5 AND m.payload_after_blob_sha256=?6 \
+           AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.workspace_id=m.workspace_id \
+             AND c.incoming_latest_moment_id=m.moment_id) \
+           AND ?7=(SELECT json_extract(u.payload_json,'$.lineageClaimId') FROM replication_log u \
+             WHERE u.workspace_id=r.workspace_id AND u.origin_id=r.origin_id AND u.origin_seq<r.origin_seq \
+               AND u.op_kind='ydoc.update' AND json_extract(u.payload_json,'$.versionId')=?2 \
+               AND json_extract(u.payload_json,'$.objectId')=?3 ORDER BY u.origin_seq DESC LIMIT 1))",
+        params![envelope.workspace_id,payload.version_id,payload.object_id,payload.payload_after_path,
+            ContentKind::from_wire(payload.payload_after_content_kind.as_deref()).as_str(),payload.payload_after_blob_sha256,claim],
+        |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
+    if held {
+        return Ok(true);
+    }
+    let key = DocKey::new(
+        &envelope.workspace_id,
+        &payload.version_id,
+        &payload.object_id,
+    )
+    .map_err(|_| SyncError::CoordinateDiverged)?;
+    let mut stmt = tx
+        .prepare(
+            "SELECT origin_id,origin_seq,json_extract(payload_json,'$.path') FROM replication_log \
+         WHERE workspace_id=?1 AND op_kind='ydoc.update' \
+           AND json_extract(payload_json,'$.versionId')=?2 \
+           AND json_extract(payload_json,'$.objectId')=?3 \
+           AND json_extract(payload_json,'$.lineageClaimId')=?4",
+        )
+        .map_err(SyncError::corrupt)?;
+    let rows = stmt
+        .query_map(
+            params![
+                envelope.workspace_id,
+                payload.version_id,
+                payload.object_id,
+                claim
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(SyncError::corrupt)?;
+    for row in rows {
+        let (origin, seq, path) = row.map_err(SyncError::corrupt)?;
+        let id = crate::ydoc_apply::ydoc_apply_moment_id(&key, &path, &origin, seq);
+        let held: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2 \
+             AND version_id=?3 AND object_id=?4 AND operation='write' AND COALESCE(sync_record_only,0)=0 \
+             AND payload_after_path=?5 AND payload_after_content_kind=?6 AND payload_after_blob_sha256=?7)",
+            params![envelope.workspace_id,id,payload.version_id,payload.object_id,payload.payload_after_path,
+                ContentKind::from_wire(payload.payload_after_content_kind.as_deref()).as_str(),payload.payload_after_blob_sha256],
+            |row| row.get(0),
+        ).map_err(SyncError::corrupt)?;
+        if held {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn freeze_incoming_scene_delete_authority(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
@@ -1150,6 +1312,7 @@ pub(crate) fn apply_conflict_parent_shadow_in_tx(
         &payload,
         search_policy,
         MomentApplyMode::ConflictParent,
+        false,
     )
 }
 
