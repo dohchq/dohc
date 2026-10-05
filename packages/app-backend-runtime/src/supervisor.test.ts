@@ -1010,6 +1010,5 @@ it("measures benign 64-event recovery including a fully installed checkpoint",as
     expect(batches).toEqual([64]);expect(snapshots).toHaveLength(1);
     const measurement=JSON.stringify({scenario:'benign-64-recovery',totalMs,checkpointMs,snapshotMs:snapshots[0],checkpointBytes:cached.byteLength,batches,includes:'open, replay, foreign-key check, snapshot, hashing, staging, verification, installation, read',cacheEligibility:'host clock advanced 1000 ms; worker and measured wall clock unchanged'});
     if(process.env.DOHC_RECOVERY_MEASUREMENT_PATH)await writeFile(process.env.DOHC_RECOVERY_MEASUREMENT_PATH,measurement+'\n');
-    else console.log(measurement);
   }finally{time.mockRestore();await supervisor.close();}
 });
