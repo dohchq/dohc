@@ -22,7 +22,14 @@ import {
   type DeleteWorkspacePathPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { readError } from "./errorWords";
 import { createOwnerRelayShareHandler } from "./ownerRelayShareHandler";
+
+// A refused file's reason, as the person reads it. History's rules refuse
+// in dohc's words: an unreadable rules file's message is its parser's text.
+function refusalDetail(error: Error): string {
+  return error instanceof RestorePolicyRefusalError ? readError(error).words ?? error.message : error.message;
+}
 
 // Stop and restore (ADR 0013) in main. The renderer names a person or an
 // Edit share link; main finds the grants on this workspace from the relay's
@@ -326,7 +333,7 @@ export function registerStopAndRestoreIpc<
             } catch (error) {
               if (error instanceof RestoreHeadChangedError) return { kind: "changed" };
               if (error instanceof RestoreFolderInUseError) return { kind: "folder-in-use" };
-              if (error instanceof LiveDocumentMutationError || error instanceof RestorePolicyRefusalError) return { kind: "refused", detail: error.message };
+              if (error instanceof LiveDocumentMutationError || error instanceof RestorePolicyRefusalError) return { kind: "refused", detail: refusalDetail(error) };
               throw error;
             }
           },
@@ -364,7 +371,7 @@ export function registerStopAndRestoreIpc<
             } catch (error) {
               if (!(error instanceof RestorePolicyRefusalError || error instanceof LiveDocumentMutationError ||
                 error instanceof RestoreHeadChangedError || error instanceof RestoreFolderInUseError)) throw error;
-              files.push({ momentId, kind: "refused", detail: error.message.slice(0, 500) });
+              files.push({ momentId, kind: "refused", detail: refusalDetail(error).slice(0, 500) });
             }
           }
           return UndoStopAndRestoreResult.parse({ files, errorMessage: null });

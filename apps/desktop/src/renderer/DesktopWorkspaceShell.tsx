@@ -174,6 +174,7 @@ import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
 } from "./workbench/EngineHistory";
+import { HistoryHiddenState } from "./workbench/HistoryPolicyStates";
 import {
   ConflictReviewDialog,
   VersionComparePage,
@@ -1466,6 +1467,7 @@ export function DesktopWorkspaceShell(props: {
     page: engineHistory,
     loadingMore: engineHistoryLoadingMore,
     readState: engineHistoryReadState,
+    policyError: engineHistoryPolicyError,
     refresh: refreshHistoryPage,
     supersede: supersedeHistoryPage,
     loadMore: loadMoreEngineHistory,
@@ -2383,6 +2385,12 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [refreshFiles, refreshHistory, reportShellError, workspaceId],
+  );
+  // One row per file in Notices: a newer failure for the file replaces it.
+  const reportRestoreError = useCallback(
+    (fallback: string, error: unknown, retry: () => void, identity: string) =>
+      reportShellError(fallback, error, retry, undefined, identity),
+    [reportShellError],
   );
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
@@ -4073,6 +4081,16 @@ export function DesktopWorkspaceShell(props: {
         }
         onOpenMoment={openMomentDiffTab}
       />
+    ) : engineHistoryReadState === "failed" && engineHistoryPolicyError ? (
+      <HistoryHiddenState
+        testId="history-policy-hidden"
+        result={engineHistoryPolicyError}
+        onRetry={() =>
+          void refreshHistory().catch((error) =>
+            reportShellError("Could not refresh history.", error),
+          )
+        }
+      />
     ) : engineHistoryReadState === "failed" ||
       engineHistoryReadState === "updating" ? (
       // The same state its two siblings render — ChatsView and LinkedChats
@@ -4967,6 +4985,8 @@ export function DesktopWorkspaceShell(props: {
                   registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
                   onRestored={refreshAfterHistoryRestore}
                   onStopAndRestore={stopAndRestore.open}
+                  onError={reportRestoreError}
+                  onSettled={clearIdentity}
                 />
               )
             ) : isVersionCompareTabPath(tabPath) ? (

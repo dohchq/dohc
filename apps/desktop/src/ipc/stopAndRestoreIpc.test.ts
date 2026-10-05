@@ -197,7 +197,7 @@ describe("stop and restore in main", () => {
       await f.writePolicy('[[rule]]\npath = "notes/**"\ntracked = false\n');
       await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toMatchObject({
         status: "restored", restored: [{ path: "docs/b.md" }],
-        review: [{ path: "notes/a.md", reason: "restore-refused", detail: "This history moment is no longer available." }], unfinished: null,
+        review: [{ path: "notes/a.md", reason: "restore-refused", detail: "History no longer tracks this file. Track it in .dohc/files.toml, then try again." }], unfinished: null,
       });
       expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("shared edit");
       expect(await readFile(join(f.rootPath, "docs/b.md"), "utf8")).toBe("owner original");
@@ -212,7 +212,7 @@ describe("stop and restore in main", () => {
       await f.writePolicy('[[rule]]\npath = "notes/**"\ntracked = false\n');
       await expect(f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: stopped.restored.map(row => row.restoredMomentId) })).resolves.toMatchObject({ files: [
         { momentId: stopped.restored[2]!.restoredMomentId, kind: "restored", receipt: { path: "docs/new.md" } },
-        { momentId: stopped.restored[1]!.restoredMomentId, kind: "refused", detail: "This history moment is no longer available." },
+        { momentId: stopped.restored[1]!.restoredMomentId, kind: "refused", detail: "History no longer tracks this file. Track it in .dohc/files.toml, then try again." },
         { momentId: stopped.restored[0]!.restoredMomentId, kind: "restored", receipt: { path: "docs/old.md" } },
       ] });
       expect(await readFile(join(f.rootPath, "docs/new.md"), "utf8")).toBe("shared edit");
@@ -222,6 +222,8 @@ describe("stop and restore in main", () => {
   });
 
   it.each([CHANNELS.stopAndRestore, CHANNELS.undoStopAndRestore])("reports unreadable policy for every file in %s", async channel => {
+    // dohc's words, never the TOML parser's.
+    const unreadable = "dohc can't read .dohc/files.toml or .dohc/visibility.toml. Fix the file, then try again.";
     const f = await capturedFiles(["notes/a.md", "docs/b.md"]);
     try {
       await f.writePolicy("[[rule] invalid");
@@ -229,8 +231,8 @@ describe("stop and restore in main", () => {
         ? { target: { kind: "person", userId: "user_ana" } }
         : { restoredMomentIds: f.files.map(file => file.momentId) });
       expect(result).toMatchObject(channel === CHANNELS.stopAndRestore
-        ? { restored: [], review: [{ path: "docs/b.md", reason: "restore-refused", detail: expect.stringContaining("files.toml") }, { path: "notes/a.md", reason: "restore-refused", detail: expect.stringContaining("files.toml") }], unfinished: null }
-        : { files: [{ kind: "refused", detail: expect.stringContaining("files.toml") }, { kind: "refused", detail: expect.stringContaining("files.toml") }] });
+        ? { restored: [], review: [{ path: "docs/b.md", reason: "restore-refused", detail: unreadable }, { path: "notes/a.md", reason: "restore-refused", detail: unreadable }], unfinished: null }
+        : { files: [{ kind: "refused", detail: unreadable }, { kind: "refused", detail: unreadable }] });
       expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("shared edit");
       expect(await readFile(join(f.rootPath, "docs/b.md"), "utf8")).toBe("shared edit");
     } finally { await f.engineCapture.stop(); }
@@ -244,7 +246,7 @@ describe("stop and restore in main", () => {
       await f.writePolicy('[[rule]]\npath = "notes/**"\ntracked = false\n');
       const before = await f.store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 });
       await expect(f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: result.restored.map(row => row.restoredMomentId) }))
-        .resolves.toEqual({ files: [{ momentId: result.restored[0]!.restoredMomentId, kind: "refused", detail: "This history moment is no longer available." }], errorMessage: null });
+        .resolves.toEqual({ files: [{ momentId: result.restored[0]!.restoredMomentId, kind: "refused", detail: "History no longer tracks this file. Track it in .dohc/files.toml, then try again." }], errorMessage: null });
       expect(await readFile(join(f.rootPath, "notes/a.md"), "utf8")).toBe("owner original");
       expect(await f.store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).toEqual(before);
     } finally { await f.engineCapture.stop(); }

@@ -114,6 +114,13 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     stale_revision: "The Collection changed while dohc was working on it. Try again.",
     "*": null,
   },
+  // A restore History's current rules refuse. An unreadable rules file's
+  // message is its parser's own text, which only Copy details carry.
+  RestorePolicyRefusalError: {
+    "policy-unreadable": "dohc can't read .dohc/files.toml or .dohc/visibility.toml. Fix the file, then try again.",
+    "path-not-admitted": "History no longer tracks this file. Track it in .dohc/files.toml, then try again.",
+    "*": null,
+  },
   // The file system's codes. A plain error with no listed code keeps its
   // message, because dohc writes those for people.
   Error: {

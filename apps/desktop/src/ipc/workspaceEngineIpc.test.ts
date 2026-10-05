@@ -176,7 +176,7 @@ async function harness(sharedStore?: SharedHistoryStore, policyRoot?: string) {
     const reply = await relay(workspaceId, request);
     return reply && { ...reply, asker: { account, current: () => session.generation === generation } };
   });
-  const readPolicy = vi.fn<(rootPath: string) => Promise<WorkspaceEnginePolicySnapshot>>(async () => ({ filesPolicy: null, visibilityPolicy: null, errors: [] }));
+  const readPolicy = vi.fn<(rootPath: string) => Promise<WorkspaceEnginePolicySnapshot>>(async () => ({ filesPolicy: null, visibilityPolicy: null, errors: [], unreadable: [] }));
   if (policyRoot) readPolicy.mockImplementation(readWorkspaceEnginePolicy);
   const registrations = createWorkspaceEngineIpc({
     readWorkspaceEnginePolicy: readPolicy,
@@ -930,7 +930,7 @@ function historyPage(path = "notes/a.md") {
 describe("owner History path policy", () => {
   it("skips excluded pages to reach older admitted History", async () => {
     const h = await harness();
-    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [] });
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
     h.capture.listMoments
       .mockResolvedValueOnce({ ...historyPage("private/a.md"), nextBeforeMomentOrder: 800, latestMomentOrder: 1000, protectedTruncated: true })
       .mockResolvedValueOnce({ ...historyPage("private/b.md"), nextBeforeMomentOrder: 600, latestMomentOrder: 1000 })
@@ -943,7 +943,7 @@ describe("owner History path policy", () => {
 
   it("bounds excluded-page reads and leaves a cursor to continue", async () => {
     const h = await harness();
-    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [] });
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
     h.capture.listMoments.mockImplementation(async ({ beforeMomentOrder } = {}) => ({
       ...historyPage("private/a.md"), nextBeforeMomentOrder: (beforeMomentOrder ?? 2000) - 200,
     }));
@@ -953,7 +953,7 @@ describe("owner History path policy", () => {
 
   it("stops skipping at the end of History", async () => {
     const h = await harness();
-    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [] });
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
     h.capture.listMoments.mockResolvedValue({ ...historyPage("private/a.md"), nextBeforeMomentOrder: null });
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextBeforeMomentOrder: null });
     expect(h.capture.listMoments).toHaveBeenCalledTimes(1);
@@ -972,16 +972,24 @@ describe("owner History path policy", () => {
       h.readPolicy.mockClear();
       await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toEqual({ ...historyPage(), moments: [] });
       expect(h.readPolicy).toHaveBeenCalledExactlyOnceWith(path);
-      await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ moment: null });
+      await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ status: "untracked", moment: null });
     }
+  });
+
+  // A change History never had is not one the rules hide.
+  it("answers a missing change without calling it untracked", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
+    h.capture.readMoment.mockResolvedValue(null);
+    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "gone" })).resolves.toEqual({ moment: null });
   });
 
   it.each(["moment", "before", "after"])("admits the %s path before returning a guessed detail", async side => {
     const h = await harness();
-    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [] });
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [], unreadable: [] });
     h.capture.readMoment.mockResolvedValue(historyDetail(side === "moment" ? "private/a.md" : "notes/a.md",
       side === "before" ? "private/a.md" : "notes/a.md", side === "after" ? "private/a.md" : "notes/a.md"));
-    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "guessed" })).resolves.toEqual({ moment: null });
+    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "guessed" })).resolves.toEqual({ status: "untracked", moment: null });
   });
 
   it.each([".env", ".dohc/internal.md", "notes//a.md"])("keeps ordinary %s rows behind CLI path admission", async path => {
@@ -989,7 +997,7 @@ describe("owner History path policy", () => {
     h.capture.listMoments.mockResolvedValue(historyPage(path));
     h.capture.readMoment.mockResolvedValue(historyDetail(path));
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextBeforeMomentOrder: 8, latestMomentOrder: 10 });
-    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ moment: null });
+    await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ status: "untracked", moment: null });
   });
 
   it("keeps protected activity, its metadata-only detail and its reverse path", async () => {
@@ -1012,7 +1020,7 @@ describe("owner History path policy", () => {
       momentOrder: 10, protected: true as const, operation: "write" as const, metadata: { origin: "local-file" as const } };
     h.capture.listMoments.mockResolvedValue({ ...historyPage(), moments: [...historyPage().moments, protectedMoment] });
     h.capture.readMoment.mockResolvedValue({ protected: true, moment: protectedMoment });
-    const blocked = { status: "policy-unreadable", policyErrors: expect.arrayContaining([expect.stringContaining("files.toml")]) };
+    const blocked = { status: "policy-unreadable", unreadable: [".dohc/files.toml"], policyErrors: expect.arrayContaining([expect.stringContaining("files.toml")]) };
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toEqual(blocked);
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ ...blocked, moment: null });
     expect(h.capture.listMoments).not.toHaveBeenCalled();

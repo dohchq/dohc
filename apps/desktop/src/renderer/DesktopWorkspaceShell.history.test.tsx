@@ -277,6 +277,62 @@ describe("history page", () => {
     expect(bridge.listEngineMoments).toHaveBeenLastCalledWith(expect.objectContaining({ beforeMomentOrder: 80 }));
   });
 
+  it("says History is hidden while its rules can't be read, and shows it again once they can", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn()
+      .mockResolvedValueOnce({
+        status: "policy-unreadable",
+        unreadable: [".dohc/visibility.toml"],
+        policyErrors: ["visibility.toml: TOML parse error at line 3, column 9"],
+      } satisfies ListEngineMomentsResponse)
+      .mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+
+    const hidden = await screen.findByTestId("history-policy-hidden");
+    expect(hidden.textContent).toContain(
+      "dohc can't read .dohc/visibility.toml, so History is hidden. Fix the file, then try again.",
+    );
+    expect(hidden.textContent).not.toContain("TOML parse error");
+    expect(screen.queryByTestId("history-load-failed")).toBeNull();
+    expect(screen.queryByText("No changes yet")).toBeNull();
+
+    await user.click(within(hidden).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Wrote the plan")).toBeTruthy();
+    expect(screen.queryByTestId("history-policy-hidden")).toBeNull();
+  });
+
+  it("reports a refused restore in dohc's words, with the parser's text only in Copy details", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const moment = historyMoment("m-1", "Wrote the plan");
+    bridge.listEngineMoments = vi.fn(async () => historyPage([moment]));
+    bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...moment, beforeText: "one\n", afterText: "two\n" } }));
+    const restoreEngineMomentFile = vi.fn(async (): Promise<never> => {
+      throw new Error(
+        "Error invoking remote method 'desktop:restore-engine-moment-file': RestorePolicyRefusalError [policy-unreadable]: visibility.toml: TOML parse error at line 3, column 9",
+      );
+    });
+    Object.assign(bridge, { restoreEngineMomentFile });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await user.click(await screen.findByTestId("engine-diff-restore-file"));
+    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not restore notes/plan.md. dohc can't read .dohc/files.toml or .dohc/visibility.toml. Fix the file, then try again.",
+    );
+    expect(toast.textContent).not.toContain("TOML parse error");
+    expect(screen.queryByTestId("engine-diff-restore-status")).toBeNull();
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(restoreEngineMomentFile).toHaveBeenCalledTimes(2));
+  });
+
   it("persists a moment diff opened for a valid multibyte file path", async () => {
     const filePath = `目录/${"界".repeat(500)}.md`;
     const bridge = makeBridge(Promise.resolve(null));

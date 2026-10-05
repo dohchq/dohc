@@ -1574,8 +1574,16 @@ const ListEngineMomentsUpdatingResult = z.object({
 type ListEngineMomentsUpdatingResult = z.infer<
   typeof ListEngineMomentsUpdatingResult
 >;
+// The workspace's rules for which files History tracks and who sees them,
+// and the folder that holds them.
+export const WorkspacePolicyPath = z.enum([".dohc", ".dohc/files.toml", ".dohc/visibility.toml"]);
+export type WorkspacePolicyPath = z.infer<typeof WorkspacePolicyPath>;
+
+// History hides everything while those rules cannot be read. `unreadable`
+// names what to fix; `policyErrors` say why, for Copy details only.
 export const HistoryPolicyUnreadableResult = z.object({
   status: z.literal("policy-unreadable"),
+  unreadable: z.array(WorkspacePolicyPath).min(1),
   policyErrors: z.array(z.string()).min(1),
 });
 export type HistoryPolicyUnreadableResult = z.infer<typeof HistoryPolicyUnreadableResult>;
@@ -1620,8 +1628,11 @@ export const EngineMomentDetailRecord = EngineMomentRecord.omit({
 });
 export type EngineMomentDetailRecord = z.infer<typeof EngineMomentDetailRecord>;
 
+// `untracked`: the change is in History, but the current rules no longer
+// track a file it touched, so its contents stay hidden.
 export const ReadEngineMomentResult = z.union([
   HistoryPolicyUnreadableResult.extend({ moment: z.null() }),
+  z.object({ status: z.literal("untracked"), moment: z.null() }),
   z.object({ moment: EngineMomentDetailRecord.nullable() }),
 ]);
 export type ReadEngineMomentResult = z.infer<typeof ReadEngineMomentResult>;

@@ -1,6 +1,8 @@
 import { AlertTriangle, Bot, CheckCircle2, MoreHorizontal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import type { HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
+import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
 import { OverlayFrame } from "../Overlay";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
@@ -17,6 +19,7 @@ import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { HistoryHiddenState, HistoryUntrackedState } from "../workbench/HistoryPolicyStates";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { closeStatesPage } from "./statesRoute";
@@ -170,6 +173,25 @@ function toast(tone: "danger" | "success") {
     ...(tone === "success" ? { tone } : {}),
   };
 }
+
+const PARSER_TEXT = "visibility.toml: TOML parse error at line 3, column 9";
+const HIDDEN_HISTORY: HistoryPolicyUnreadableResult = {
+  status: "policy-unreadable",
+  unreadable: [".dohc/visibility.toml"],
+  policyErrors: [PARSER_TEXT],
+};
+// The toast a refused restore raises, in the words the shell builds for it.
+const REFUSED_RESTORE = new Error(
+  `Error invoking remote method 'desktop:restore-engine-moment-file': RestorePolicyRefusalError [policy-unreadable]: ${PARSER_TEXT}`,
+);
+const REFUSED_RESTORE_TOAST = {
+  id: "refused-restore",
+  message: withErrorWords("dohc could not restore notes/plan.md.", REFUSED_RESTORE),
+  details: `Cause: ${readError(REFUSED_RESTORE).cause ?? ""}`,
+  atMs: 0,
+  canRetry: true,
+  seen: false,
+};
 
 function notice(id: string, tone: "danger" | "success") {
   return {
@@ -659,6 +681,25 @@ function Pane(props: { theme: "light" | "dark" }) {
             data-force-target="[role=menuitem]:nth-child(2)"
           >
             <MenuSpecimen label="More for Research" items={dangerMenuItems} width={176} testId={`states-menu-danger-${theme}`} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so a change here moves no part above it. */}
+      <Section part="history" title="History held back by its rules">
+        <Specimen label="panel: rules can't be read">
+          <div className="flex h-64 w-64 flex-col rounded-lg border border-line bg-panel">
+            <HistoryHiddenState testId={`states-history-hidden-${theme}`} result={HIDDEN_HISTORY} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="diff: file no longer tracked">
+          <div className="flex h-64 w-96 flex-col rounded-lg border border-line bg-bg">
+            <HistoryUntrackedState testId={`states-history-untracked-${theme}`} onRetry={noop} />
+          </div>
+        </Specimen>
+        <Specimen label="restore refused">
+          <div className={SHADOW_ROOM}>
+            <WorkspaceErrorToast error={REFUSED_RESTORE_TOAST} onRetry={noop} onHide={noop} />
           </div>
         </Specimen>
       </Section>

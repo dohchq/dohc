@@ -1,7 +1,8 @@
 import { ExternalLink, FileArchive, FileText, Lock, Undo2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { EngineMomentDetailRecord } from "../../ipc/bridgeContract";
+import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { HistoryHiddenState, HistoryUntrackedState } from "./HistoryPolicyStates";
 import { momentDiffSides } from "./momentDiffSides";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import {OwnerRestoreDialog} from "../OwnerRestoreDialog";
@@ -17,7 +18,6 @@ import { EngineMomentSource, engineMomentSummary } from "./EngineHistory";
 import { parseMomentDiffTabPath } from "./workbenchState";
 import { hasBlockingModal } from "../modalFocus";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { ipcErrorMessage } from "../ipcError";
 
 function isEditableShortcutTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) return false;
@@ -56,6 +56,8 @@ export function EngineMomentDiffPage({
   registerActiveUndo,
   onRestored,
   onStopAndRestore,
+  onError,
+  onSettled,
 }: {
   workspaceId: string;
   tabPath: string;
@@ -72,19 +74,26 @@ export function EngineMomentDiffPage({
   // Opens the shell's Stop and restore for a person the owner shared with,
   // or for the Edit share link that wrote this change.
   onStopAndRestore: (target: StopTarget) => void;
+  // A failed restore or undo goes to the shell's toast and Notices row, with
+  // a Try again that repeats it. A later success clears that row.
+  onError: (fallback: string, error: unknown, retry: () => void, identity: string) => void;
+  onSettled: (identity: string) => void;
 }) {
   const momentId = useMemo(() => parseMomentDiffTabPath(tabPath), [tabPath]);
   const [state, setState] = useState<
     | { status: "loading" }
     | { status: "ready"; moment: EngineMomentDetailRecord | null }
+    | { status: "hidden"; result: HistoryPolicyUnreadableResult }
+    | { status: "untracked" }
     | { status: "error" }
   >({ status: "loading" });
+  // Bumped by Try again on a hidden or untracked page, to read the change again.
+  const [readAttempt, setReadAttempt] = useState(0);
   const [restoreState, setRestoreState] = useState<
     | { status: "idle" }
     | { status: "restoring" }
     | { status: "undoing" }
     | { status: "restored"; restored: "text" | "deleted"; message: string }
-    | { status: "error"; message: string }
   >({ status: "idle" });
   const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
   const [sharedRestoreOpen, setSharedRestoreOpen] = useState(false);
@@ -107,6 +116,10 @@ export function EngineMomentDiffPage({
       .readEngineMoment({ workspaceId, momentId })
       .then((result) => {
         if (token !== liveToken.current) return;
+        if ("status" in result) {
+          setState(result.status === "untracked" ? { status: "untracked" } : { status: "hidden", result });
+          return;
+        }
         if (result.moment) onPathResolved(momentId, result.moment.path);
         setState({ status: "ready", moment: result.moment });
       })
@@ -117,7 +130,7 @@ export function EngineMomentDiffPage({
     return () => {
       liveToken.current += 1;
     };
-  }, [momentId, onPathResolved, workspaceId]);
+  }, [momentId, onPathResolved, readAttempt, workspaceId]);
   useEffect(() => {
     setRestoreState({ status: "idle" });
     setConfirmRestoreOpen(false);
@@ -140,42 +153,62 @@ export function EngineMomentDiffPage({
     restoreState.status === "restoring" || restoreState.status === "undoing";
   const canRestore = moment !== null && moment.operation !== "rename" && !undoMomentId;
 
-  const undoRestore = useCallback(async () => {
-    const target = undoMomentId;
-    if (!target || restoreBusy || restoreInFlight.current) return;
+  // One restore through the engine. Restore returns the file to before this
+  // change, and Undo to before the restore it recorded; each records a new
+  // change. `token` is the page the person asked from. A Try again from
+  // Notices keeps it, so it repaints this page only while the page still
+  // shows this change.
+  const runRestore = useCallback(async (
+    kind: "restore" | "undo",
+    target: string,
+    path: string,
+    token: number,
+  ): Promise<void> => {
+    if (restoreInFlight.current) return;
     restoreInFlight.current = true;
-    const token = liveToken.current;
-    setRestoreState({ status: "undoing" });
+    const live = () => token === liveToken.current;
+    const identity = `history-restore:${path}`;
+    if (live()) {
+      setConfirmRestoreOpen(false);
+      setRestoreState({ status: kind === "undo" ? "undoing" : "restoring" });
+    }
     let releaseOperation: (() => void) | null = null;
     try {
       releaseOperation = await onBeforeRestore();
-      const result = await bridge().restoreEngineMomentFile({
-        workspaceId,
-        momentId: target,
-      });
+      const result = await bridge().restoreEngineMomentFile({ workspaceId, momentId: target });
       onRestored();
-      if (token !== liveToken.current) return;
+      onSettled(identity);
+      if (!live()) return;
       setRestoreState({
         status: "restored",
         restored: result.restored,
-        message:
-          result.restored === "deleted"
+        message: kind === "undo"
+          ? result.restored === "deleted"
             ? "Undid the restore by removing the file again. This was recorded in history."
-            : "Undid the restore. This was recorded in history.",
+            : "Undid the restore. This was recorded in history."
+          : result.restored === "deleted"
+            ? "Removed the file this change created. Undo restore is available here."
+            : "Restored the earlier state. Undo restore is available here.",
       });
-      setUndoMomentId(null);
+      setUndoMomentId(kind === "undo" ? null : result.restoredMomentId);
     } catch (error) {
-      if (token !== liveToken.current) return;
-      setRestoreState({
-        status: "error",
-        message:
-          ipcErrorMessage(error, "Could not undo this restore."),
-      });
+      onError(
+        kind === "undo" ? `dohc could not undo the restore of ${path}.` : `dohc could not restore ${path}.`,
+        error,
+        () => void runRestore(kind, target, path, token),
+        identity,
+      );
+      if (live()) setRestoreState({ status: "idle" });
     } finally {
       releaseOperation?.();
       restoreInFlight.current = false;
     }
-  }, [onBeforeRestore, onRestored, restoreBusy, undoMomentId, workspaceId]);
+  }, [onBeforeRestore, onError, onRestored, onSettled, workspaceId]);
+
+  const undoRestore = useCallback(async () => {
+    if (!undoMomentId || !moment || restoreBusy) return;
+    await runRestore("undo", undoMomentId, moment.path, liveToken.current);
+  }, [moment, restoreBusy, runRestore, undoMomentId]);
 
   useEffect(() => {
     if (!undoMomentId || restoreBusy) {
@@ -215,6 +248,23 @@ export function EngineMomentDiffPage({
   }
   if (state.status === "loading") {
     return <SkeletonRows layout="panel" label="Loading history diff..." />;
+  }
+  if (state.status === "hidden") {
+    return (
+      <HistoryHiddenState
+        testId="engine-diff-hidden"
+        result={state.result}
+        onRetry={() => setReadAttempt((attempt) => attempt + 1)}
+      />
+    );
+  }
+  if (state.status === "untracked") {
+    return (
+      <HistoryUntrackedState
+        testId="engine-diff-untracked"
+        onRetry={() => setReadAttempt((attempt) => attempt + 1)}
+      />
+    );
   }
   if (!moment || !prepared) {
     return (
@@ -263,40 +313,8 @@ export function EngineMomentDiffPage({
   const diffLines: UnifiedDiffLine[] = prepared.lines;
 
   const restoreFile = async () => {
-    if (!canRestore || restoreBusy || restoreInFlight.current) return;
-    restoreInFlight.current = true;
-    const token = liveToken.current;
-    setConfirmRestoreOpen(false);
-    setRestoreState({ status: "restoring" });
-    let releaseOperation: (() => void) | null = null;
-    try {
-      releaseOperation = await onBeforeRestore();
-      const result = await bridge().restoreEngineMomentFile({
-        workspaceId,
-        momentId: moment.id,
-      });
-      onRestored();
-      if (token !== liveToken.current) return;
-      setRestoreState({
-        status: "restored",
-        restored: result.restored,
-        message:
-          result.restored === "deleted"
-            ? "Removed the file this change created. Undo restore is available here."
-            : "Restored the earlier state. Undo restore is available here.",
-      });
-      setUndoMomentId(result.restoredMomentId);
-    } catch (error) {
-      if (token !== liveToken.current) return;
-      setRestoreState({
-        status: "error",
-        message:
-          ipcErrorMessage(error, "Could not restore this file."),
-      });
-    } finally {
-      releaseOperation?.();
-      restoreInFlight.current = false;
-    }
+    if (!canRestore || restoreBusy) return;
+    await runRestore("restore", moment.id, moment.path, liveToken.current);
   };
 
   return (
@@ -345,12 +363,10 @@ export function EngineMomentDiffPage({
             {engineMomentSummary(moment)}
           </p>
           <div role="status" aria-live="polite">
-            {restoreState.status === "restored" || restoreState.status === "error" ? (
+            {restoreState.status === "restored" ? (
               <p
                 data-testid="engine-diff-restore-status"
-                className={`mb-0 mt-1 text-[11px] ${
-                  restoreState.status === "error" ? "text-danger" : "text-success"
-                }`}
+                className="mb-0 mt-1 text-[11px] text-success"
               >
                 {restoreState.message}
               </p>
