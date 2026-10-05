@@ -47,6 +47,27 @@ describe("EditorGroupLayout", () => {
     ).toBe("right");
   });
 
+  // EditorTabs reads these two attributes to mark the active group's tab.
+  it("marks a split and its active group, and leaves a single group unmarked", () => {
+    renderLayout();
+    expect(screen.getByTestId("editor-group-layout").dataset.split).toBe("true");
+    expect(screen.getByRole("region", { name: "Editor group 1" }).dataset.active).toBe("true");
+    expect(screen.getByRole("region", { name: "Editor group 2" }).dataset.active).toBeUndefined();
+    cleanup();
+
+    render(
+      <EditorGroupLayout
+        groups={[{ id: "only", size: 1, content: <button type="button">Editor</button> }]}
+        activeGroupId="only"
+        onFocusGroup={vi.fn()}
+        onResizeGroups={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("editor-group-layout").dataset.split).toBeUndefined();
+    // No frame around the group: the tab carries the mark in a split.
+    expect(screen.getByRole("region", { name: "Editor group 1" }).className).not.toContain("ring");
+  });
+
   it("previews pointer moves locally and commits adjacent groups once on release", () => {
     const { onResizeGroups } = renderLayout();
     const layout = screen.getByTestId("editor-group-layout");

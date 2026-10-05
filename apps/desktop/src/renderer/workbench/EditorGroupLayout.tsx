@@ -75,6 +75,9 @@ export function EditorGroupLayout(props: {
     <div
       ref={layoutRef}
       data-testid="editor-group-layout"
+      // A split marks which group takes opened files on that group's active
+      // tab (EditorTabs). One group needs no mark.
+      data-split={groups.length > 1 || undefined}
       className="flex min-h-0 min-w-0 flex-1"
     >
       {groups.map((group, index) => {
@@ -93,9 +96,7 @@ export function EditorGroupLayout(props: {
               onPointerDownCapture={() => props.onFocusGroup(group.id)}
               onFocusCapture={() => props.onFocusGroup(group.id)}
               onContextMenuCapture={() => props.onFocusGroup(group.id)}
-              className={`flex min-h-0 min-w-0 flex-col bg-bg ${
-                group.id === props.activeGroupId ? "ring-1 ring-inset ring-ink/15" : ""
-              }`}
+              className="flex min-h-0 min-w-0 flex-col bg-bg"
             >
               {group.content}
             </section>

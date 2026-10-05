@@ -103,6 +103,11 @@ const TAB_JOIN = `${DECORATION} -bottom-px`;
 const TAB_JOIN_ARC = `${DECORATION_ARC} border-b shadow-[0_0_0_8px_var(--color-bg)]`;
 const PANE_CORNER = `${DECORATION} top-0`;
 const PANE_CORNER_ARC = `${DECORATION_ARC} border-t shadow-[0_0_0_8px_var(--color-panel)]`;
+// Read from the attributes EditorGroupLayout sets: `data-split` on the
+// layout, `data-active` on the group that takes opened files.
+const ACTIVE_GROUP_TAB =
+  "[[data-split]_[data-editor-group-id][data-active]_&]:shadow-[inset_0_2px_0_var(--color-accent)]";
+const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-muted";
 
 // Memoized so the dirty flips while typing (saveState ticks every autosave)
 // re-render only the active tab, not the whole strip (FileRow precedent —
@@ -175,9 +180,13 @@ const Tab = memo(function Tab(props: {
       // would re-layout the strip on every crossing. `transform`
       // transitions slide displaced neighbours; the dragged tab itself
       // follows the pointer with no interpolation.
+      // In a split editor the active group's active tab carries a 2px accent
+      // edge along its top, and the other groups' active tabs recede to
+      // muted text. The layout marks the split and the active group, so a
+      // single group, and every inactive tab, look the same as before.
       className={`group relative flex h-8 shrink-0 select-none items-center gap-1.5 self-end border px-3 text-[13px] [transform:translateX(0)] transition-[background-color,color,transform] duration-150 data-dragging:z-20 data-dragging:cursor-grabbing data-dragging:transition-none ${
         props.active
-          ? "z-10 rounded-t-lg border-line border-b-bg bg-bg text-ink"
+          ? `z-10 rounded-t-lg border-line border-b-bg bg-bg text-ink ${ACTIVE_GROUP_TAB} ${INACTIVE_GROUP_TAB}`
           : "cursor-default border-transparent border-b-line text-muted before:absolute before:inset-y-2 before:-left-px before:w-px before:bg-line first:before:hidden [[data-active]+&::before]:hidden hover:bg-hover hover:text-ink"
       }`}
     >

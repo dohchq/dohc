@@ -44,7 +44,7 @@ const THEMES = ["light", "dark"] as const;
 const PARTS = [
   "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
   "steps", "folder-chip", "hue-control", "color-control", "list-rows", "menu", "document-menu",
-  "empty", "loading", "toasts", "notices", "dialog",
+  "empty", "loading", "toasts", "notices", "dialog", "editor-groups",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and

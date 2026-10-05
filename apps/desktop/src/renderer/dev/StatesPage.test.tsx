@@ -19,6 +19,9 @@ describe("states page", () => {
     vi.stubGlobal("dohcDesktop", {});
     // jsdom has no ResizeObserver; the page measures its sections.
     vi.stubGlobal("ResizeObserver", ObserverStub);
+    // Nor scrollIntoView, which an editor tab strip calls on its active tab.
+    const scrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = vi.fn();
     try {
     document.documentElement.dataset.theme = "dark";
     const { unmount } = render(<StatesPage />);
@@ -44,6 +47,7 @@ describe("states page", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
     } finally {
       vi.unstubAllGlobals();
+      Element.prototype.scrollIntoView = scrollIntoView;
     }
   });
 });

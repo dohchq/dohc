@@ -15,6 +15,8 @@ import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
+import { EditorTabs } from "../workbench/EditorTabs";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { PanelLoading } from "../workbench/PanelLoading";
@@ -103,6 +105,32 @@ function Swatch(props: { label: string; className: string }) {
 }
 
 const noop = () => undefined;
+
+const NO_RECOVERY: ReadonlySet<string> = new Set();
+
+// One group's strip over a strip of paper, as the shell lays a group out.
+function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs: string[]; active: string }) {
+  return (
+    <>
+      <EditorTabs
+        groupId={props.groupId}
+        groupNumber={props.groupNumber}
+        tabs={props.tabs.map((path) => ({ path }))}
+        activeTab={props.active}
+        activeTabDirty={false}
+        recoveryPaths={NO_RECOVERY}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+        onCloseGroup={noop}
+      />
+      <div className="h-8 bg-bg" />
+    </>
+  );
+}
 
 function treeRow(name: string, folder = false): VisibleRow {
   return {
@@ -548,6 +576,31 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="dialog" title="Dialog">
         <DialogSpecimen theme={theme} />
+      </Section>
+
+      {/* After the dialog, so the parts above keep their places. */}
+      <Section part="editor-groups" title="Editor groups">
+        <Specimen label="split: the active group, then an inactive one">
+          <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
+            <EditorGroupLayout
+              groups={[
+                {
+                  id: "left",
+                  size: 1,
+                  content: <EditorGroupSpecimen groupId="left" groupNumber={1} tabs={["plan.md", "notes.md"]} active="plan.md" />,
+                },
+                {
+                  id: "right",
+                  size: 1,
+                  content: <EditorGroupSpecimen groupId="right" groupNumber={2} tabs={["budget.md", "ideas.md"]} active="budget.md" />,
+                },
+              ]}
+              activeGroupId="left"
+              onFocusGroup={noop}
+              onResizeGroups={noop}
+            />
+          </div>
+        </Specimen>
       </Section>
     </section>
   );
