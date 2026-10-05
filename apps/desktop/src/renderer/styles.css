@@ -234,6 +234,22 @@ table {
   animation: dohc-menu-in 130ms ease-out both;
 }
 
+/* Reduced motion turns the entrance into a 60ms fade with no movement. It
+ * follows the global reduced-motion rule so it wins over it; :where keeps
+ * it at no specificity, so a rule later in the page can still stop it. */
+@keyframes dohc-menu-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(.dohc-menu-in) {
+    animation-name: dohc-menu-fade !important;
+    animation-duration: 60ms !important;
+  }
+}
+
 /* Faint paper grid for brand moments (first-run) — texture, not decoration. */
 .dohc-paper-grid {
   background-image:

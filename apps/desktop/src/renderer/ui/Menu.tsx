@@ -69,13 +69,25 @@ const GAP_PX = 4;
 
 type Place = { left: number; maxHeight: number; top?: number; bottom?: number; above: boolean };
 
+// The list-row ladder: hover 7%, the current or checked row 11% whatever has
+// focus, and the focused row the same fill with an inset ring. The ring
+// stands in for the global focus outline, so a focused row still reads
+// beside a current one.
 const ROW =
-  "flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 hover:bg-hover focus:bg-selected aria-disabled:opacity-50";
+  "flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] outline-none transition-colors duration-75 focus:bg-selected focus:ring-1 focus:ring-inset focus:ring-ink/30 aria-disabled:opacity-50";
+// Hover paints only after the pointer moves, so a menu opened from the
+// keyboard under a still pointer shows one active row.
 const ROW_TONE = {
-  rest: "text-muted hover:text-ink focus:text-ink",
-  current: "text-ink",
-  danger: "text-danger",
+  rest: { base: "text-muted focus:text-ink", hover: "hover:bg-hover hover:text-ink" },
+  current: { base: "bg-selected text-ink", hover: "" },
+  danger: { base: "text-danger", hover: "hover:bg-hover" },
 };
+
+// During IME composition, Enter, Escape and the arrows work the candidate
+// list. Some browsers mark those keys only with keyCode 229.
+function composing(event: KeyboardEvent): boolean {
+  return event.nativeEvent.isComposing || event.keyCode === 229;
+}
 
 function isField(row: MenuRow): row is MenuField {
   return "field" in row;
@@ -125,6 +137,7 @@ export function Menu(props: {
   const refocus = useRef<string | null>(null);
   const width = props.width ?? MENU_WIDTH_PX;
   const [place, setPlace] = useState<Place | null>(null);
+  const [pointerMoved, setPointerMoved] = useState(false);
   useDismiss({ open, container, trigger, onClose: () => onOpenChange(false) });
 
   const rows = props.items.filter((entry): entry is MenuRow => entry !== MENU_SEPARATOR);
@@ -150,7 +163,10 @@ export function Menu(props: {
     }
     // A field that took focus as it mounted keeps it.
     if (!list.current?.contains(document.activeElement)) rowElements.current[0]?.focus({ preventScroll: true });
-    return () => setPlace(null);
+    return () => {
+      setPlace(null);
+      setPointerMoved(false);
+    };
   }, [open, width]);
 
   useLayoutEffect(() => {
@@ -184,6 +200,7 @@ export function Menu(props: {
   };
   const onKeyDown = (event: KeyboardEvent) => {
     const inField = typing();
+    if (inField && composing(event)) return;
     const moves: Record<string, () => void> = {
       ArrowDown: () => focusRow(current() + 1),
       ArrowUp: () => focusRow(current() - 1),
@@ -243,6 +260,9 @@ export function Menu(props: {
           onMouseDown={(event) => {
             if (!(event.target instanceof HTMLInputElement)) event.preventDefault();
           }}
+          onMouseMove={(event) => {
+            if (!pointerMoved && (event.movementX || event.movementY)) setPointerMoved(true);
+          }}
           style={{
             width,
             ...(place
@@ -281,15 +301,18 @@ export function Menu(props: {
                     readOnly={field.busy}
                     onChange={(event) => field.onChange(event.target.value)}
                     // Taken while the key is still on its way down, before the
-                    // menu's own Escape closes the whole menu.
+                    // menu's own Escape closes the whole menu. Escape that
+                    // ends a composition, or comes while the owner acts on
+                    // the value, leaves the field and the menu as they are.
                     onKeyDownCapture={(event) => {
                       if (event.key !== "Escape") return;
                       event.stopPropagation();
+                      if (composing(event) || field.busy) return;
                       refocus.current = entry.id;
                       field.onCancel();
                     }}
                     onKeyDown={(event) => {
-                      if (event.key !== "Enter") return;
+                      if (event.key !== "Enter" || composing(event)) return;
                       event.preventDefault();
                       if (!field.busy) field.onSubmit();
                     }}
@@ -300,6 +323,7 @@ export function Menu(props: {
               );
             }
             const tone = entry.danger ? ROW_TONE.danger : entry.current || entry.checked ? ROW_TONE.current : ROW_TONE.rest;
+            const hover = pointerMoved ? tone.hover : "";
             return (
               <button
                 key={entry.id}
@@ -323,7 +347,7 @@ export function Menu(props: {
                   }
                 }}
                 onClick={() => pick(entry)}
-                className={`${ROW} ${tone}`}
+                className={`${ROW} ${tone.base} ${hover}`}
               >
                 {lead ? (
                   <span className={`grid size-3.5 shrink-0 place-items-center ${entry.danger ? "" : "text-subtle"}`}>

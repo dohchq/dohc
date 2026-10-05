@@ -263,11 +263,8 @@ export function VersionMenu(props: {
 
   const requestSwitch = useCallback(
     (versionId: string) => {
-      if (versionId === snapshot?.activeVersionId) {
-        setMenu(false);
-        return;
-      }
       setMenu(false);
+      if (versionId === snapshot?.activeVersionId) return;
       if (props.activeTabDirty) {
         // Save-first prompt: switching always saves into the current version
         // first, and the user should know that before it happens.

@@ -245,6 +245,39 @@ describe("Menu", () => {
     expect(forget.className).toContain("text-danger");
     await user.keyboard("{ArrowDown}");
     expect(document.activeElement).toBe(forget);
+    // The current row keeps the selected fill after focus leaves it.
+    expect(current.className.split(" ")).toContain("bg-selected");
+    expect(forget.className.split(" ")).not.toContain("bg-selected");
+  });
+
+  it("keeps the checked row's selected fill whatever has focus", async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        items={[
+          { id: "main", label: "Main", onSelect: vi.fn(), checked: false },
+          { id: "draft", label: "Draft", onSelect: vi.fn(), checked: true },
+        ]}
+      />,
+    );
+    await user.click(screen.getByTestId("row-menu"));
+    expect(document.activeElement).toBe(screen.getByRole("menuitemradio", { name: "Main" }));
+    expect(screen.getByRole("menuitemradio", { name: "Draft" }).className.split(" ")).toContain("bg-selected");
+    expect(screen.getByRole("menuitemradio", { name: "Main" }).className.split(" ")).not.toContain("bg-selected");
+  });
+
+  // A browser paints :hover on a row that opens under a still pointer.
+  it("paints hover only after the pointer moves over the list", async () => {
+    const user = userEvent.setup();
+    render(<Harness items={items} />);
+    screen.getByTestId("row-menu").focus();
+    await user.keyboard("{Enter}");
+    const second = screen.getByRole("menuitem", { name: "Duplicate" });
+    expect(second.className).not.toContain("hover:bg-hover");
+    fireEvent.mouseMove(screen.getByRole("menu"), { movementX: 0, movementY: 0 });
+    expect(second.className).not.toContain("hover:bg-hover");
+    fireEvent.mouseMove(screen.getByRole("menu"), { movementX: 2, movementY: 0 });
+    expect(second.className).toContain("hover:bg-hover");
   });
 
   // A browser sends a still pointer's events to a row that opens under it.
@@ -407,6 +440,35 @@ describe("Menu", () => {
       expect(input.value).toBe("draft");
       expect(submit).not.toHaveBeenCalled();
       expect(document.activeElement).toBe(input);
+
+      // Escape holds too: a failure still has the typed name to show.
+      await user.keyboard("{Escape}");
+      expect(screen.getByTestId("new-input")).toBe(input);
+      expect(screen.queryByRole("menu")).not.toBeNull();
+      expect(document.activeElement).toBe(input);
+    });
+
+    // While an IME composes, Enter takes a candidate, Escape drops the
+    // composition, and the arrows move in the candidate list. Some browsers
+    // mark those keys only with keyCode 229.
+    it("leaves Enter, Escape and the arrows to an IME while it composes", async () => {
+      const user = userEvent.setup();
+      const submit = vi.fn();
+      render(<Naming onSubmit={submit} />);
+      await user.click(screen.getByTestId("row-menu"));
+      await user.click(screen.getByTestId("new"));
+      const input = screen.getByTestId("new-input");
+      for (const composition of [{ isComposing: true }, { keyCode: 229 }]) {
+        for (const key of ["Enter", "Escape", "ArrowDown", "ArrowUp"]) {
+          fireEvent.keyDown(input, { key, ...composition });
+          expect(submit).not.toHaveBeenCalled();
+          expect(screen.getByTestId("new-input")).toBe(input);
+          expect(screen.queryByRole("menu")).not.toBeNull();
+          expect(document.activeElement).toBe(input);
+        }
+      }
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(submit).toHaveBeenCalledOnce();
     });
   });
 });
