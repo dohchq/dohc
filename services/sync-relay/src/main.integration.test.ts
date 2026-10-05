@@ -484,7 +484,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
 
   it("keeps the missing key envelope code through HTTP normalization for link-prefixed workspaces", async () => {
     const relay = await spawnRelay(join(await tempRoot("link-prefixed-workspaces"), "relay.sqlite"));
-    for (const workspaceId of ["link-lane-owner", "linkx", "link-exchange-owner", "link-refresh", "link-handoff", "link-redeem"]) {
+    for (const workspaceId of ["link", "link-lane-owner", "linkx", "link-exchange-owner", "link-refresh", "link-handoff", "link-redeem"]) {
       expect((await postJson(relay, "/sync/workspaces", {workspaceId})).status).toBe(200);
       const missing = await fetch(`${relay}/sync/${workspaceId}/keys`, {headers: authHeaders()});
       expect(missing.status).toBe(404);

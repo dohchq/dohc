@@ -2,6 +2,8 @@ import {expect, it} from "vitest";
 import {isLinkEndpointPath} from "./linkEndpointPath";
 
 it.each([
+  "/sync/link/keys", "/sync/link/bootstrap", "/sync/link/log/owner/0",
+  "/sync/link/collection-writes/grant", "/sync/link/shares/links",
   "/sync/link-lane-owner/keys", "/sync/linkx/keys", "/sync/link-owner/log",
   "/sync/link-exchange-owner/keys", "/sync/link-refresh/keys",
   "/sync/link-handoff/keys", "/sync/link-redeem/keys", "/sync/link-tickets/keys",
