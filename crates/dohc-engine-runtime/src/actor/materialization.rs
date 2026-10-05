@@ -109,6 +109,8 @@ impl ActorHandle {
         now_ms: i64,
         progress: Option<Arc<AtomicU64>>,
     ) -> Result<usize, RuntimeError> {
+        #[cfg(unix)]
+        self.retained_root.set(root_dir.clone());
         self.run(move |store, _cache| {
             // Open-time replay runs before the files layer starts. The
             // switch path calls the same tolerant per-job executor with a

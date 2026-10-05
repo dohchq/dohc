@@ -2569,6 +2569,39 @@ CREATE INDEX materialization_displacements_state
     ON materialization_displacements(state, job_id);
 ";
 
+const V2_RETAINED_DISPLACEMENTS_DDL: &str = r#"
+CREATE TABLE materialization_retained (
+    displacement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    source_path TEXT NOT NULL UNIQUE,
+    device TEXT NOT NULL,
+    inode TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    size INTEGER NOT NULL CHECK (size >= 0),
+    mtime TEXT NOT NULL,
+    ctime TEXT NOT NULL,
+    changed_at_ms INTEGER NOT NULL
+) STRICT;
+CREATE INDEX materialization_retained_due ON materialization_retained(changed_at_ms);
+CREATE INDEX materialization_retained_job ON materialization_retained(job_id);
+CREATE TABLE materialization_displacement_reads (
+    workspace_id TEXT NOT NULL,
+    displacement_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    target_path TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    bytes BLOB NOT NULL,
+    observed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY(workspace_id, displacement_id, sha256)
+) STRICT;
+CREATE TABLE materialization_staging_locations (
+    job_id TEXT PRIMARY KEY,
+    directory TEXT NOT NULL
+) STRICT;
+"#;
+
 /// Run history keeps an automation's settled claims 30 days from when they
 /// last settled, and its newest failure. An expired claim that still keeps a
 /// trigger from running twice stays, marked `expired` and out of run
@@ -2896,6 +2929,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE live_device_update_applications DROP COLUMN declared_on_behalf_of; ALTER TABLE live_device_update_applications DROP COLUMN declared_depth; ALTER TABLE live_device_update_applications DROP COLUMN declared_agent_id; ALTER TABLE live_device_update_applications ADD COLUMN admitted_metadata_json TEXT CHECK (admitted_metadata_json IS NULL OR json_valid(admitted_metadata_json)); ALTER TABLE live_audit_events ADD COLUMN canonical_version INTEGER NOT NULL DEFAULT 1 CHECK (canonical_version IN (1,2));",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 30,
+        id: "v2-retained-materialization-displacements",
+        sql: V2_RETAINED_DISPLACEMENTS_DDL,
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -3213,6 +3252,48 @@ fn apply_transactional(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn p0_upgrade_adds_retention_without_changing_jobs() {
+        let dir = tempdir();
+        let mut conn = open_bare(&dir.join("engine.db"));
+        let ctx = MigrationContext::current(1);
+        let before = migration_index("v2-retained-materialization-displacements");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 30);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
+        let sha = crate::blob::put_binary_blob(&conn, b"before").unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        crate::materialize::enqueue_job(
+            &tx,
+            &crate::MaterializationJobSpec {
+                job_id: "pending".into(),
+                workspace_id: "ws".into(),
+                target_path: "notes.md".into(),
+                content_sha256: sha,
+                preimage: crate::Preimage::Absent,
+                target_generation: 1,
+                now_ms: 1,
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
+        let jobs:i64=conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE job_id='pending' AND status='pending'",[],|r|r.get(0)).unwrap();
+        assert_eq!(jobs, 1);
+        for table in [
+            "materialization_retained",
+            "materialization_displacement_reads",
+            "materialization_staging_locations",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+    }
+
     #[cfg(feature = "fault-injection")]
     use crate::faults::FaultAction;
     use crate::faults::NoFaults;
@@ -3337,6 +3418,10 @@ mod tests {
             (
                 "v2-live-admitted-metadata-receipts",
                 "384caa34711fd4cc1431c153d3e567f33b4c99e8f5428175f7c76c64f7ef83c3",
+            ),
+            (
+                "v2-retained-materialization-displacements",
+                "a3acee99edade72fc8fda127206bcf641f876ad08fb4b39ce96c50afc372a2b3",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

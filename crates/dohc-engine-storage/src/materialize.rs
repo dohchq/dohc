@@ -846,3 +846,103 @@ pub(crate) fn max_completed_generation_for_path(
     .query_row([workspace_id, path], |r| r.get::<_, Option<i64>>(0))
     .map_err(StorageError::corrupt)
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedDisplacement {
+    pub displacement_id: i64,
+    pub job_id: String,
+    pub workspace_id: String,
+    pub target_path: String,
+    pub source_path: String,
+    pub device: String,
+    pub inode: String,
+    pub digest: String,
+    pub size: i64,
+    pub mtime: String,
+    pub ctime: String,
+    pub changed_at_ms: i64,
+}
+
+pub(crate) fn retained_rows(
+    conn: &Connection,
+    after: i64,
+) -> Result<Vec<RetainedDisplacement>, StorageError> {
+    let mut q = conn.prepare_cached("SELECT displacement_id,job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms FROM materialization_retained WHERE displacement_id>?1 ORDER BY displacement_id LIMIT 128").map_err(StorageError::corrupt)?;
+    q.query_map([after], |r| {
+        Ok(RetainedDisplacement {
+            displacement_id: r.get(0)?,
+            job_id: r.get(1)?,
+            workspace_id: r.get(2)?,
+            target_path: r.get(3)?,
+            source_path: r.get(4)?,
+            device: r.get(5)?,
+            inode: r.get(6)?,
+            digest: r.get(7)?,
+            size: r.get(8)?,
+            mtime: r.get(9)?,
+            ctime: r.get(10)?,
+            changed_at_ms: r.get(11)?,
+        })
+    })
+    .map_err(StorageError::corrupt)?
+    .collect::<Result<_, _>>()
+    .map_err(StorageError::corrupt)
+}
+
+pub(crate) fn with_full_commit<T>(
+    conn: &Connection,
+    f: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    let mode: i64 = conn
+        .pragma_query_value(None, "synchronous", |r| r.get(0))
+        .map_err(StorageError::corrupt)?;
+    conn.pragma_update(None, "synchronous", 2)
+        .map_err(StorageError::persist)?;
+    let result = (|| {
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(StorageError::persist)?;
+        let value = f(&tx)?;
+        tx.commit().map_err(StorageError::persist)?;
+        Ok(value)
+    })();
+    let restored = conn
+        .pragma_update(None, "synchronous", mode)
+        .map_err(StorageError::persist);
+    let value = result?;
+    restored?;
+    Ok(value)
+}
+
+pub(crate) fn retain(conn: &Connection, row: &RetainedDisplacement) -> Result<i64, StorageError> {
+    with_full_commit(conn, |tx| {
+        tx.execute("INSERT INTO materialization_retained(job_id,workspace_id,target_path,source_path,device,inode,digest,size,mtime,ctime,changed_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(source_path) DO NOTHING",rusqlite::params![row.job_id,row.workspace_id,row.target_path,row.source_path,row.device,row.inode,row.digest,row.size,row.mtime,row.ctime,row.changed_at_ms]).map_err(StorageError::persist)?;
+        tx.query_row(
+            "SELECT displacement_id FROM materialization_retained WHERE source_path=?1",
+            [&row.source_path],
+            |r| r.get(0),
+        )
+        .map_err(StorageError::corrupt)
+    })
+}
+
+pub(crate) fn record_retained_read(
+    conn: &Connection,
+    old: &RetainedDisplacement,
+    new: &RetainedDisplacement,
+    bytes: &[u8],
+    now_ms: i64,
+) -> Result<(), StorageError> {
+    if crate::hex_sha256(bytes) != new.digest || bytes.len() > crate::MAX_MATERIALIZE_BYTES {
+        return Err(StorageError::InvalidInput {
+            reason: "retained read bytes do not match the bounded digest",
+        });
+    }
+    with_full_commit(conn, |tx| {
+        let updated=tx.execute("UPDATE materialization_retained SET digest=?2,size=?3,mtime=?4,ctime=?5,changed_at_ms=?6 WHERE displacement_id=?1 AND digest=?7 AND changed_at_ms=?8",rusqlite::params![old.displacement_id,new.digest,new.size,new.mtime,new.ctime,now_ms,old.digest,old.changed_at_ms]).map_err(StorageError::persist)?;
+        if updated == 1 && new.digest != old.digest {
+            tx.execute("INSERT OR IGNORE INTO materialization_displacement_reads(workspace_id,displacement_id,job_id,target_path,sha256,bytes,observed_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7)",rusqlite::params![old.workspace_id,format!("retained:{}",old.displacement_id),old.job_id,old.target_path,new.digest,bytes,now_ms]).map_err(StorageError::persist)?;
+        }
+        Ok(())
+    })
+}
