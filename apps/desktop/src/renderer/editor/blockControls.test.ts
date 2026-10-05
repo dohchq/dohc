@@ -18,6 +18,7 @@ import { NodeSelection } from "@tiptap/pm/state";
 import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
 import {
   BlockMenu,
+  CLOSED_BLOCK_MENU_STATE,
   blockDragSlice,
   copyBlockAsMarkdown,
   deleteBlock,
@@ -197,6 +198,22 @@ describe("BlockMenu on the Menu part's recipe and rule", () => {
     fireEvent.pointerDown(outside);
     expect(onClose).toHaveBeenCalledTimes(3);
     document.removeEventListener("keydown", parentEscape);
+  });
+
+  it("returns focus to the handle when a press on blank space that closed it ends", () => {
+    const handle = document.createElement("button");
+    document.body.append(handle);
+    handle.focus();
+    const open = { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle } as const;
+    const onClose = vi.fn();
+    const { rerender } = render(createElement(BlockMenu, { state: open, onSelect: vi.fn(), onClose }));
+    fireEvent.pointerDown(document.body);
+    expect(onClose).toHaveBeenCalledOnce();
+    // The owner closes it; the browser's press puts focus on the page.
+    rerender(createElement(BlockMenu, { state: CLOSED_BLOCK_MENU_STATE, onSelect: vi.fn(), onClose }));
+    handle.blur();
+    fireEvent.pointerUp(document.body);
+    expect(document.activeElement).toBe(handle);
   });
 
   it("shows Del beside the destructive row without adding it to the row's name", () => {

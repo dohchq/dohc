@@ -639,8 +639,10 @@ export function BlockMenu({
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
+  // Kept after the menu closes: a press on blank space returns focus to the
+  // handle when the press ends, which is after the close.
   const trigger = useRef<HTMLElement | null>(null);
-  trigger.current = state.open ? state.trigger ?? null : null;
+  if (state.open) trigger.current = state.trigger ?? null;
   const id = useId();
   const [active, setActive] = useState(0);
   const open = state.open;
