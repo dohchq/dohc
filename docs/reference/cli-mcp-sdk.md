@@ -41,7 +41,7 @@ Changes the workspace, so a shared view does not offer it.
 
 - `request`: `{ action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
 
-Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the link can be ended. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
+Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the owner can end it in dohc. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
 
 ### `dohc_dataset`
 
@@ -1021,7 +1021,7 @@ Returns `{ kind: "prepared", preparationId, revision, sourceDigest }`.
 
 Approve prepared source.
 
-Take preparationId and revisionSha256 from the reviewed preparation. agentLabel is an optional label supplied by the agent. With --as-agent or during an agent run, it is recorded as agent-declared. Human calls record no agent identity.
+Take preparationId and revisionSha256 from the reviewed preparation. agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.
 
 - `workspaceId`: `string`. Required.
 - `agentLabel`: `string`
@@ -1082,7 +1082,7 @@ Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision
 
 Apply a reviewed migration.
 
-Take revisionSha256 and approvalDigest from the preparation. Approval applies the reviewed result without rerunning the SQL. agentLabel is an optional label supplied by the agent. With --as-agent or during an agent run, it is recorded as agent-declared. Human calls record no agent identity.
+Take revisionSha256 and approvalDigest from the preparation. Approval applies the reviewed result without rerunning the SQL. agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.
 
 - `workspaceId`: `string`. Required.
 - `agentLabel`: `string`
@@ -1132,7 +1132,7 @@ Each verb takes one JSON object that names workspaceId. Find workspaceId in .doh
 
 Create a scoped app link at View access by default.
 
-Choose appRoot relative to the workspace. paths are workspace-relative selectors and default to the app root. access defaults to view. Generate operationId as a UUID for this creation. Reuse operationId for retries. A link URL is a bearer credential at its stated access level, usable by anyone holding it. Append the published appQuery before the fragment of any link URL, including one returned by createLink. agentLabel is an optional label supplied by the agent. With --as-agent or during an agent run, it is recorded as agent-declared. Human calls record no agent identity.
+appRoot and paths resolve from your current folder (the workspace root through MCP). paths default to the app root. access defaults to view. Generate operationId as a UUID for this creation. Reuse operationId for retries. A link URL is a bearer credential at its stated access level, usable by anyone holding it. Append the published appQuery before the fragment of any link URL, including one returned by createLink. agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
@@ -1201,7 +1201,7 @@ Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, so
 
 Publish a prepared app.
 
-Set `approvalId` to `approvalId` from `prepare`. Set `candidateDigest` to `candidateDigest` from `prepare`. Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. For linkReads, select operationId from the prepared dataset capability's operations and fieldIds from each operation's fields[].fieldId. These selections expose reads to link holders. agentLabel is an optional label supplied by the agent. With --as-agent or during an agent run, it is recorded as agent-declared. Human calls record no agent identity.
+Set `approvalId` to `approvalId` from `prepare`. Set `candidateDigest` to `candidateDigest` from `prepare`. Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. For linkReads, select operationId from the prepared dataset capability's operations and fieldIds from each operation's fields[].fieldId. These selections expose reads to link holders. agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.
 
 - `workspaceId`: `string`. Required.
 - `approvalId`: `UUID`. Required.

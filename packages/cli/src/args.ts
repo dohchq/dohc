@@ -641,7 +641,7 @@ function jsonVerb(
 const workspaceNote =
   "Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root.";
 const migrationApproval = "Review the result, then approve it with approveMigration.";
-const agentLabelNote = "agentLabel is an optional label supplied by the agent. With --as-agent or during an agent run, it is recorded as agent-declared. Human calls record no agent identity.";
+const agentLabelNote = "agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.";
 
 const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   list: { summary: "List Collections." },
@@ -777,7 +777,7 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
   createLink: {
     summary: "Create a scoped app link at View access by default.",
     notes: [
-      "Choose appRoot relative to the workspace. paths are workspace-relative selectors and default to the app root. access defaults to view.",
+      "appRoot and paths resolve from your current folder (the workspace root through MCP). paths default to the app root. access defaults to view.",
       "Generate operationId as a UUID for this creation. Reuse operationId for retries.",
       "A link URL is a bearer credential at its stated access level, usable by anyone holding it. Append the published appQuery before the fragment of any link URL, including one returned by createLink.",
       agentLabelNote,
