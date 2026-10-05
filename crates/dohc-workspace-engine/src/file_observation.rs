@@ -4,7 +4,9 @@ use dohc_engine_files::observation::{
     ObservationChanges, ObservationCursor, ObservationFeed, ObservationWalker,
 };
 use dohc_engine_files::watch::{WATCH_STARTUP_DEADLINE, WatchMonitor};
-use dohc_engine_files::{CancellationToken, FilesError, FilesHandle, NativeWatcher, ScanBounds};
+use dohc_engine_files::{
+    CancellationToken, FilesError, FilesHandle, NativeWatcher, NativeWorkCounters, ScanBounds,
+};
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
@@ -26,6 +28,8 @@ pub(crate) struct ObservationHandle {
 /// That thread has its own runtime, so Drop can join even during runtime teardown.
 pub(crate) struct FileObservation {
     pub(crate) feed: ObservationFeed,
+    pub(crate) observation_work: NativeWorkCounters,
+    pub(crate) capture_work: NativeWorkCounters,
     events: EngineEvents,
     workspace_id: String,
     pub(crate) files: tokio::sync::watch::Sender<Option<ObservationHandle>>,
@@ -65,6 +69,8 @@ impl FileObservation {
     pub(crate) fn new(events: EngineEvents, workspace_id: String) -> Arc<Self> {
         let binding = Arc::new(Self {
             feed: ObservationFeed::new(),
+            observation_work: NativeWorkCounters::default(),
+            capture_work: NativeWorkCounters::default(),
             events: events.clone(),
             workspace_id: workspace_id.clone(),
             files: tokio::sync::watch::channel(None).0,
@@ -102,6 +108,7 @@ impl FileObservation {
         let startup_finished = self.startup_finished.clone();
         let cancel = self.cancel.clone();
         let feed = self.feed.clone();
+        let work = self.observation_work.clone();
         let capture = Arc::clone(&self.capture);
         let worker = std::thread::Builder::new()
             .name("dohc-file-observation".to_owned())
@@ -113,7 +120,7 @@ impl FileObservation {
                     startup_finished.send_replace(true);
                     return;
                 };
-                let walker = ObservationWalker::new(ScanBounds::default(), feed);
+                let walker = ObservationWalker::with_stats(ScanBounds::default(), feed, work);
                 let mut failures: u32 = 0;
                 while !cancel.is_cancelled() {
                     let dirty = Arc::new(AtomicBool::new(true));

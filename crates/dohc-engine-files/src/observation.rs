@@ -2,6 +2,7 @@
 
 use crate::floor;
 use crate::scan::FailedPath;
+use crate::work_stats::{NativeWorkCounters, WorkOutcome};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -38,11 +39,20 @@ impl ObservedEntry {
 pub struct ObservationWalker {
     bounds: crate::ScanBounds,
     feed: ObservationFeed,
+    work: NativeWorkCounters,
 }
 
 impl ObservationWalker {
     pub fn new(bounds: crate::ScanBounds, feed: ObservationFeed) -> Self {
-        Self { bounds, feed }
+        Self::with_stats(bounds, feed, NativeWorkCounters::default())
+    }
+
+    pub fn with_stats(
+        bounds: crate::ScanBounds,
+        feed: ObservationFeed,
+        work: NativeWorkCounters,
+    ) -> Self {
+        Self { bounds, feed, work }
     }
 
     pub fn observe(
@@ -50,6 +60,7 @@ impl ObservationWalker {
         root: &std::path::Path,
         token: &crate::CancellationToken,
     ) -> Result<bool, crate::FilesError> {
+        let mut work = self.work.start();
         let previous_len = self
             .feed
             .state
@@ -64,9 +75,11 @@ impl ObservationWalker {
         while let Some((dir, relative)) = stack.pop() {
             if listing.len() + failed.len() > self.bounds.max_files {
                 self.feed.resync();
+                work.finish(WorkOutcome::BoundsExceeded);
                 return Ok(true);
             }
             if token.is_cancelled() {
+                work.finish(WorkOutcome::Cancelled);
                 return Ok(false);
             }
             let children = match std::fs::read_dir(&dir) {
@@ -92,13 +105,16 @@ impl ObservationWalker {
             let relative_key = floor::fold_segment(&relative);
             for child in children {
                 if token.is_cancelled() {
+                    work.finish(WorkOutcome::Cancelled);
                     return Ok(false);
                 }
                 entries += 1;
+                work.entries_visited = work.entries_visited.saturating_add(1);
                 if entries > self.bounds.max_entries
                     || listing.len() + failed.len() > self.bounds.max_files
                 {
                     self.feed.resync();
+                    work.finish(WorkOutcome::BoundsExceeded);
                     return Ok(true);
                 }
                 let child = match child {
@@ -156,6 +172,7 @@ impl ObservationWalker {
                     use std::os::unix::fs::MetadataExt;
                     (metadata.ctime(), metadata.ctime_nsec())
                 };
+                work.files_enumerated = work.files_enumerated.saturating_add(1);
                 listing.push(ObservedEntry {
                     #[cfg(windows)]
                     key: if relative_key.is_empty() {
@@ -172,7 +189,12 @@ impl ObservationWalker {
                 });
             }
         }
-        self.feed.publish(listing, &failed, self.bounds.max_files)?;
+        let complete = self.feed.publish(listing, &failed, self.bounds.max_files)?;
+        work.finish(if complete {
+            WorkOutcome::Completed
+        } else {
+            WorkOutcome::BoundsExceeded
+        });
         Ok(true)
     }
 }
@@ -240,6 +262,10 @@ impl Default for ObservationFeed {
 }
 
 impl ObservationFeed {
+    pub fn generation(&self) -> &str {
+        &self.generation
+    }
+
     pub fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let generation = format!(
@@ -329,7 +355,7 @@ impl ObservationFeed {
         mut listing: Vec<ObservedEntry>,
         failed: &[FailedPath],
         cap: usize,
-    ) -> Result<(), crate::FilesError> {
+    ) -> Result<bool, crate::FilesError> {
         let mut state = self
             .state
             .lock()
@@ -338,7 +364,7 @@ impl ObservationFeed {
         if listing.len() > cap {
             drop(state);
             self.resync();
-            return Ok(());
+            return Ok(false);
         }
         listing.sort_unstable_by(|a, b| a.key().cmp(b.key()));
         if !failed.is_empty() {
@@ -370,7 +396,7 @@ impl ObservationFeed {
                     if listing.len() == cap {
                         drop(state);
                         self.resync();
-                        return Ok(());
+                        return Ok(false);
                     }
                     listing.push(entry.clone());
                 }
@@ -465,7 +491,7 @@ impl ObservationFeed {
                 revision: state.revision,
             });
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -550,6 +576,59 @@ mod tests {
             path: path.to_owned(),
             kind,
         }
+    }
+
+    #[test]
+    fn work_counts_unchanged_walks_cancellation_failure_and_bounds() {
+        let root = ScratchDir::new_named("observation-work").unwrap();
+        std::fs::write(root.path().join("note.md"), "hello").unwrap();
+        let feed = ObservationFeed::new();
+        let work = NativeWorkCounters::default();
+        let walker =
+            ObservationWalker::with_stats(ScanBounds::default(), feed.clone(), work.clone());
+        walker
+            .observe(root.path(), &CancellationToken::new())
+            .unwrap();
+        let cursor = feed.changes_since(None).cursor;
+        walker
+            .observe(root.path(), &CancellationToken::new())
+            .unwrap();
+        assert!(feed.changes_since(Some(&cursor)).facts.is_empty());
+        let totals = work.snapshot();
+        assert_eq!(totals.started, 2);
+        assert_eq!(totals.completed, 2);
+        assert_eq!(totals.entries_visited, 2);
+        assert_eq!(totals.files_enumerated, 2);
+        assert_eq!(totals.hash_attempts_completed, 0);
+        assert_eq!(totals.bytes_read_for_hashing, 0);
+
+        let token = CancellationToken::new();
+        token.cancel();
+        assert!(!walker.observe(root.path(), &token).unwrap());
+        assert!(
+            walker
+                .observe(&root.path().join("absent"), &CancellationToken::new())
+                .is_err()
+        );
+        std::fs::write(root.path().join("second.md"), "second").unwrap();
+        let bounded = ObservationWalker::with_stats(
+            ScanBounds::builder().max_files(1).build(),
+            feed,
+            work.clone(),
+        );
+        assert!(
+            bounded
+                .observe(root.path(), &CancellationToken::new())
+                .unwrap()
+        );
+        let totals = work.snapshot();
+        assert_eq!(totals.started, 5);
+        assert_eq!(totals.active, 0);
+        assert_eq!(totals.completed, 2);
+        assert_eq!(totals.cancelled, 1);
+        assert_eq!(totals.failed, 1);
+        assert_eq!(totals.bounds_exceeded, 1);
+        assert_eq!(totals.files_enumerated, 4);
     }
 
     #[test]

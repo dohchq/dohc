@@ -20,6 +20,7 @@ use crate::error::FilesError;
 use crate::hash::PoolGauge;
 use crate::reconcile::{ReconcileController, ReconcilePlan, ReconcileRun, ScanGeneration};
 use crate::scan::{ScanOutcome, Scanner};
+use crate::work_stats::NativeWorkCounters;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -153,6 +154,15 @@ impl FilesActor {
         bounds: ScanBounds,
         rehydrated: Option<(ScanManifest, ScanGeneration)>,
     ) -> Result<Self, FilesError> {
+        Self::spawn_with_manifest_and_stats(root, bounds, rehydrated, NativeWorkCounters::default())
+    }
+
+    fn spawn_with_manifest_and_stats(
+        root: PathBuf,
+        bounds: ScanBounds,
+        rehydrated: Option<(ScanManifest, ScanGeneration)>,
+        work: NativeWorkCounters,
+    ) -> Result<Self, FilesError> {
         debug_assert_off_runtime();
         let (tx, rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
         // Reserve the dedicated Close slot up front (the channel is empty, so
@@ -170,7 +180,7 @@ impl FilesActor {
                 worker_main(
                     root,
                     bounds,
-                    rehydrated,
+                    (rehydrated, work),
                     rx,
                     worker_state,
                     worker_overflow,
@@ -216,11 +226,28 @@ impl FilesActor {
         bounds: ScanBounds,
         rehydrated: Option<(ScanManifest, ScanGeneration)>,
     ) -> Result<Self, FilesError> {
+        Self::spawn_async_with_manifest_and_stats(
+            root,
+            bounds,
+            rehydrated,
+            NativeWorkCounters::default(),
+        )
+        .await
+    }
+
+    pub async fn spawn_async_with_manifest_and_stats(
+        root: PathBuf,
+        bounds: ScanBounds,
+        rehydrated: Option<(ScanManifest, ScanGeneration)>,
+        work: NativeWorkCounters,
+    ) -> Result<Self, FilesError> {
         let (tx, rx) = oneshot::channel();
         std::thread::Builder::new()
             .name("dohc-files-spawn".to_owned())
             .spawn(move || {
-                let _ = tx.send(FilesActor::spawn_with_manifest(root, bounds, rehydrated));
+                let _ = tx.send(FilesActor::spawn_with_manifest_and_stats(
+                    root, bounds, rehydrated, work,
+                ));
             })
             .map_err(|_| FilesError::PoolUnavailable {
                 reason: "could not spawn files actor startup thread",
@@ -424,7 +451,7 @@ fn debug_assert_off_runtime() {
 fn worker_main(
     root: PathBuf,
     bounds: ScanBounds,
-    rehydrated: Option<(ScanManifest, ScanGeneration)>,
+    seed: (Option<(ScanManifest, ScanGeneration)>, NativeWorkCounters),
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     pending_overflow: Arc<AtomicBool>,
@@ -441,7 +468,8 @@ fn worker_main(
     }
     let _closed_guard = ClosedGuard(Arc::clone(&state));
 
-    let scanner = match Scanner::new(bounds) {
+    let (rehydrated, work) = seed;
+    let scanner = match Scanner::with_stats(bounds, work) {
         Ok(scanner) => scanner,
         Err(err) => {
             let _ = startup_tx.send(Err(err));

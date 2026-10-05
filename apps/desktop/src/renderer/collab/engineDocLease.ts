@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { profileCounters } from "../../performance/profileCounters";
 import { authorCapacityMessage } from "./authorCapacityMessage";
 import type { LiveDocumentKind } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -478,6 +479,8 @@ function createEngineDocSession(
   ): void => {
     if (disposed) return;
     snapshot = update(snapshot);
+    profileCounters.add("sessionPublications");
+    profileCounters.add("sessionSubscriberDeliveries", listeners.size);
     for (const listener of listeners) listener();
   };
 
@@ -1343,6 +1346,8 @@ function createEngineDocLease(
   const publish = (next: EngineDocLeaseSnapshot): void => {
     if (disposed) return;
     snapshot = next;
+    profileCounters.add("leasePublications");
+    profileCounters.add("leaseSubscriberDeliveries", listeners.size);
     for (const listener of listeners) listener();
   };
 

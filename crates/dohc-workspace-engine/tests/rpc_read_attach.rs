@@ -157,6 +157,16 @@ async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
     .expect("CLI read attach");
     assert_ne!(cli, desktop);
 
+    let attached_work = call(&transport, &cli, 30, "files.workStats").await;
+    let owner_work = call(&transport, &desktop, 31, "files.workStats").await;
+    assert_eq!(attached_work["generation"], owner_work["generation"]);
+    assert!(
+        attached_work["capture"]["completed"]
+            .as_u64()
+            .expect("binding capture scans")
+            >= 1
+    );
+
     let error = transport
         .call(
             RequestContext::unbounded(),

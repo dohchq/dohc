@@ -142,7 +142,7 @@ The comparison command refuses diagnostic runs. Use separate uninstrumented soak
 Run `node --test tools/perf-profiling/packaged-benchmark.test.mjs` for CLI, lifecycle, fixture, and summary checks. The fixture contract check imports the automation executor, so build `@dohc/app-backend-runtime` first, as the JS gate does.
 These tests also run through the canonical root test command. They do not launch the GUI workload.
 
-This harness profiles the desktop renderer on seeded workspaces. Its six
+This harness profiles the desktop renderer on seeded workspaces. Its seven
 scenarios measure:
 
 - `switch-profile`: ten workspace switches after both workspaces are ready,
@@ -153,6 +153,7 @@ scenarios measure:
 - `excalidraw-profile`: pointer-frame dragging in the 1,500-element scene.
 - `bigdoc-profile`: opening, typing in, and saving the 250 KiB document.
 - `bigdoc-read-profile`: a settled read of the 3 MiB Markdown document.
+- `save-amplification-profile`: rich typing above a table, alone and during external file writes, in ordinary and stress workspaces.
 
 The reader is the next agent preparing a scheduled profiling run.
 
@@ -173,7 +174,7 @@ The runner performs these actions:
 1. Prepares and verifies the engine and desktop for this checkout, then stages the engine for E2E.
 2. Seeds deterministic workspaces under `<output>/fixtures`.
 3. Runs each profiling spec in a separate Electron profile.
-4. Runs the six scenarios serially.
+4. Runs the seven scenarios serially.
 5. Writes an attributable `run.json` before launching the scenarios.
 6. Writes each raw artifact and `summary.json` under the output directory.
 
@@ -238,3 +239,57 @@ A missing scenario is `null`, never a pass. `complete` is true only when every
 scenario produced an artifact.
 
 React commit counts are currently `null`. The app has no production React Profiler or commit mark.
+
+## Attribute rich-editor save work
+
+Use `--scenario save-amplification-profile` to select only the rich-edit diagnostic.
+The runner still prepares the checkout and seeds the fixture corpus.
+
+```powershell
+node tools/perf-profiling/run-profiles.mjs --scenario save-amplification-profile --output .agent-artifacts/rich-edit-profile
+```
+
+The ordinary workspace has 100 files and a 100-paragraph document. The stress workspace has 5,000 files and at most 40 KiB of Markdown.
+Both put the editable first paragraph above the same eight-column, three-body-row table.
+Stress uses longer paragraphs and stays below the engine's 48 KiB Markdown seed cap.
+Tiny mode reduces stress to 200 files and at most 16 KiB. It retains the ordinary document.
+The fixture test measures encoded Y.Doc bytes, including source metadata when projection changes the original Markdown.
+The earlier 250 KiB rich-edit fixture exceeded the seed cap. Its incomplete run does not measure engine rich editing.
+Keep that failed run's fixture receipt, logs, and partial artifact when comparing later runs.
+Each fixture receipt hashes its file names and contents. `run.json` also hashes the profiling tools and specs.
+
+The profile records opening separately. Each typing phase sends 30 trusted characters with a fixed 40 ms delay between keystrokes.
+The contention phase interleaves ten direct filesystem writes to separate files with that input stream.
+Their parent directory is the seeded `background` directory. No workspace setup write runs between opening and typing.
+The initial fixture file counts stay unchanged. A completed contention phase adds ten files.
+It checks persisted document text, external file bytes, received activity for every expected path, table content, and editor focus.
+Its overlap count covers the external writer's lifecycle, including gaps between writes; it does not prove an input overlapped an individual filesystem call.
+
+Main and renderer counters collect only under the existing unpackaged desktop test gate.
+Renderer counters wait for main's gated `getDesktopMarks` acknowledgement. The preload flag alone does not enable them.
+Disabled counters retain no values and call no diagnostic clocks. Enabled counters use bounded aggregate storage.
+IPC invocation counts cover non-test channels registered through `handleIpc`. Direct automation and stop handlers are outside this count.
+Main hash counters cover `workspaceEngineCapture`'s text and byte hash helpers. They do not count every cryptographic operation in main.
+Settled-file read counters include containment checks and streamed rereads. Their elapsed time includes filesystem waits and hashing.
+Observation resync callbacks are not native scans. Capture callbacks without path hints have their own count.
+
+Artifacts retain raw main, native, and renderer snapshots, each sequential-read bracket, deltas, input events, save notifications, and activity notifications.
+The end condition requires a saved notification, persisted marker, and activity for the document and external paths.
+It does not assert that every background queue is empty. Phase elapsed time includes persistence, activity, table, focus, and snapshot checks.
+It excludes CPU-profile download and final input and native validation.
+The counters are process-wide; an isolated run has one open workspace and document.
+
+Per-notification ratios divide by unique received `saved` IPC notifications, keyed by session and sequence.
+The raw notifications are not filtered to the active session. They do not count engine settlement attempts or artifact writes.
+Native snapshots request `files.workStats` through the requested workspace's existing engine binding. The test seam never opens or reconnects a workspace.
+The read checks the renderer request and engine binding after the response. It does not request a scan or drain.
+Native snapshots retain the engine generation and all observation and capture fields, including actual bytes read for hashing.
+Native deltas require matching generations and valid, nondecreasing cumulative counters. Unavailable snapshots or invalid deltas fail this workload.
+The native `active` field is a gauge. Artifacts report its before and after values separately; a decrease is valid.
+Partial artifacts retain unavailable snapshots and generation changes. Sequential reads are not atomic and do not prove empty queues.
+Each phase is recorded before setup. Failures retain collected input events, completed counter reads, failed read brackets, and error reasons.
+`summary.json` contains scalar counts, deltas, ratios, native work, CPU summaries, and long-task summaries. Raw arrays stay in `save-amplification-profile.json`.
+React commit counts stay `null`. Session counters measure inner document publications and deliveries to the lease forwarder.
+Lease counters measure outer lease publications and deliveries to lease subscribers. Neither count establishes a React commit.
+The long-task observer excludes buffered entries from before capture began. Earlier captures that included buffered entries are not comparable.
+CPU profiling and enabled counters make this a diagnostic run. Compare it only with a run using the same instrumentation and workload settings.

@@ -470,6 +470,7 @@ async fn a_switch_refuses_while_a_new_file_is_held_unrecorded() {
             CaptureProvenance::default(),
             EngineEvents::default(),
             CancellationToken::new(),
+            dohc_engine_files::NativeWorkCounters::default(),
         )
     };
     assert!(matches!(

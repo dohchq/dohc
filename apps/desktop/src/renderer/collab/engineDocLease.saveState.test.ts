@@ -9,6 +9,7 @@ import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
+import { profileCounters } from "../../performance/profileCounters";
 
 const projectionGate = vi.hoisted(() => ({
   pending: null as Promise<void> | null,
@@ -99,6 +100,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  profileCounters.resetForTests();
   cleanup();
   retained?.release();
   await disposeEngineDocLeasesForTests();
@@ -678,14 +680,30 @@ it("ignores a save-state report addressed to a different session", async () => {
   });
   await flushLocalBatch();
   const seq = harness.applied.at(-1)!.seq;
+  profileCounters.enable();
+  const before = profileCounters.snapshot()!;
+  const first = vi.fn(), second = vi.fn();
+  const unsubscribeFirst = retained.lease.subscribe(first);
+  const unsubscribeSecond = retained.lease.subscribe(second);
 
   // Another document's settle must never repaint this one (the renderer
   // async-state invariant): right seq, wrong session id.
   harness.emit("saved", seq, "eyd-someone-else");
   expect(retained.snapshot.saveState).toBe("saving");
+  expect(profileCounters.snapshot()!.leasePublications).toBe(before.leasePublications);
+  expect(profileCounters.snapshot()!.sessionPublications).toBe(before.sessionPublications);
 
   harness.emit("saved", seq);
   await waitFor(() =>
     expect(retained.snapshot.saveState).toBe("saved"),
   );
+  const after = profileCounters.snapshot()!;
+  expect(after.sessionPublications - before.sessionPublications).toBe(1);
+  expect(after.sessionSubscriberDeliveries - before.sessionSubscriberDeliveries).toBe(1);
+  expect(after.leasePublications - before.leasePublications).toBe(1);
+  // The retained observation and these two subscribers receive one forward each.
+  expect(after.leaseSubscriberDeliveries - before.leaseSubscriberDeliveries).toBe(3);
+  expect(first).toHaveBeenCalledOnce();
+  expect(second).toHaveBeenCalledOnce();
+  unsubscribeFirst(); unsubscribeSecond();
 });

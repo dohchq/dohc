@@ -3,6 +3,7 @@ import {
   type WorkspaceActivityEvent,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { profileCounters } from "../performance/profileCounters";
 
 // What a call site knows about the activity it reports. `workspaceId` scopes
 // the send to windows with that workspace active. No scope means a genuinely global event (logout, registry change,
@@ -80,6 +81,7 @@ export function broadcastWorkspaceActivity(options: {
     ) {
       continue;
     }
+    profileCounters.add("activityWindowDeliveries");
     win.webContents.send(CHANNELS.workspaceActivity, payload);
   }
 }

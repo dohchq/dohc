@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, parse, relative, resolve } from "node:path";
 import process from "node:process";
@@ -275,6 +276,42 @@ async function seedDrawings(root, counts, random) {
   return { files: files.map(({ path, elementCount }) => ({ path, elementCount })) };
 }
 
+
+export async function seedRichEdit(root, { stress = false, tiny = false } = {}) {
+  const paragraph = "A deterministic paragraph for rich editing and persisted document checks.";
+  const intro = "Type above this table.";
+  const table = ["| A | B | C | D | E | F | G | H |", "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| Row one | 1 | 2 | 3 | 4 | 5 | 6 | 7 |", "| Row two | 8 | 9 | 10 | 11 | 12 | 13 | 14 |", "| Row three | 15 | 16 | 17 | 18 | 19 | 20 | 21 |"].join("\n");
+  const prefix = "# Rich edit fixture\n\n" + intro + "\n\n" + table + "\n\n";
+  let contents = prefix + Array.from({ length: 99 }, (_, i) => paragraph + " " + i + "\n\n").join("");
+  let paragraphs = 100;
+  if (stress) {
+    const targetBytes = (tiny ? 16 : 40) * 1024;
+    const stressParagraph = [
+      "The team keeps the project notes beside the files that the notes describe.",
+      "Each paragraph records a decision, the reason for it, and the next action for the person continuing the work.",
+      "An editor can update the text above the table while another tool writes separate files in the workspace.",
+      "The saved document should preserve the table and the surrounding text after the workspace closes and opens again.",
+      "These longer paragraphs represent working notes without filling the document with thousands of separate blocks.",
+    ].join(" ");
+    contents = prefix;
+    paragraphs = 1;
+    while (Buffer.byteLength(contents + stressParagraph + "\n\n") <= targetBytes) {
+      contents += stressParagraph + "\n\n";
+      paragraphs++;
+    }
+  }
+  const count = stress ? (tiny ? 200 : 5000) : 100;
+  const files = [{ path: "notes/rich-table.md", contents },
+    ...Array.from({ length: count - 1 }, (_, i) => ({ path: "background/file-" + padded(i) + ".txt", contents: "fixture " + i + "\n" }))];
+  await writeFiles(root, files);
+  const digest = createHash("sha256");
+  for (const file of files) digest.update(file.path).update("\0").update(file.contents).update("\0");
+  return { files: files.length, path: files[0].path, bytes: Buffer.byteLength(contents), paragraphs, tableRows: 3,
+    externalWritePaths: Array.from({ length: 10 }, (_, index) => `background/agent-write-${index}.txt`),
+    contentDigest: digest.digest("hex") };
+}
+
 export async function seedProfilingWorkspaces({ output, scale, seed }) {
   const counts = scale === "tiny" ? TINY_COUNTS : FULL_COUNTS;
   const random = mulberry32(seed);
@@ -286,6 +323,8 @@ export async function seedProfilingWorkspaces({ output, scale, seed }) {
     "large-deep": await seedLargeDeep(resolve(output, "large-deep"), counts, random),
     "big-docs": await seedBigDocs(resolve(output, "big-docs"), counts),
     drawings: await seedDrawings(resolve(output, "drawings"), counts, random),
+    "rich-edit-ordinary": await seedRichEdit(resolve(output, "rich-edit-ordinary")),
+    "rich-edit-stress": await seedRichEdit(resolve(output, "rich-edit-stress"), { stress: true, tiny: scale === "tiny" }),
   };
   const manifest = {
     schemaVersion: 1,

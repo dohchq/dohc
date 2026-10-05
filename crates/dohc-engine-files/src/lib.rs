@@ -42,6 +42,7 @@ pub mod scan;
 pub mod search_policy;
 pub mod search_text;
 pub mod watch;
+pub mod work_stats;
 
 pub use actor::{FilesActor, FilesHandle, FilesStats, LifecycleState};
 pub use bounds::{
@@ -84,3 +85,5 @@ pub use watch::{
 // The cancellation primitive the actor loop consumes, re-exported so a caller
 // drives cancellation through one crate (mirrors `dohc-engine-runtime`).
 pub use tokio_util::sync::CancellationToken;
+
+pub use work_stats::{NativeWorkCounters, NativeWorkSnapshot};

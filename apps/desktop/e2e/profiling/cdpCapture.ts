@@ -75,7 +75,7 @@ export async function startLongTaskObserver(page: Page): Promise<void> {
           });
         }
       });
-      state.observer.observe({ type: "longtask", buffered: true });
+      state.observer.observe({ type: "longtask" });
     }
     target.__dohcProfileLongTasks = state;
   });

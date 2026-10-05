@@ -667,6 +667,7 @@ impl EngineService {
                 reconcile_provenance,
                 events.clone(),
                 token.clone(),
+                open.observation.capture_work.clone(),
             )
             .await;
 

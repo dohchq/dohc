@@ -20,6 +20,7 @@ use crate::hash::{
     HashInput, HashOutcome, HashPool, HashRun, PostHashExpectation, PostHashProbe, mtime_ms,
 };
 use crate::media::media_type_for_path;
+use crate::work_stats::{NativeWorkCounters, WorkOutcome, WorkRun};
 use std::borrow::Cow;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -120,20 +121,27 @@ pub struct Scanner {
     bounds: ScanBounds,
     pool: HashPool,
     io_faults: Option<Arc<dyn ScanIoFaultInjector>>,
+    work: NativeWorkCounters,
 }
 
 impl Scanner {
     /// Build a scanner with the given bounds, spinning up the fixed hash pool.
     pub fn new(bounds: ScanBounds) -> Result<Self, FilesError> {
-        let pool = HashPool::new(
+        Self::with_stats(bounds, NativeWorkCounters::default())
+    }
+
+    pub fn with_stats(bounds: ScanBounds, work: NativeWorkCounters) -> Result<Self, FilesError> {
+        let pool = HashPool::with_stats(
             bounds.hash_workers(),
             bounds.read_buffer_bytes(),
             bounds.max_file_bytes,
+            work.clone(),
         )?;
         Ok(Scanner {
             bounds,
             pool,
             io_faults: None,
+            work,
         })
     }
 
@@ -177,8 +185,30 @@ impl Scanner {
         prior: &ScanManifest,
         token: &CancellationToken,
     ) -> Result<ScanOutcome, FilesError> {
+        let mut work = self.work.start();
+        let result = self.scan_with_prior_inner(root, prior, token, &mut work);
+        work.finish(match &result {
+            Ok(ScanOutcome::Completed(_)) => WorkOutcome::Completed,
+            Ok(ScanOutcome::Cancelled) => WorkOutcome::Cancelled,
+            Err(
+                FilesError::TooManyFiles { .. }
+                | FilesError::TooManyEntries { .. }
+                | FilesError::FileTooLarge { .. },
+            ) => WorkOutcome::BoundsExceeded,
+            Err(_) => WorkOutcome::Failed,
+        });
+        result
+    }
+
+    fn scan_with_prior_inner(
+        &self,
+        root: &Path,
+        prior: &ScanManifest,
+        token: &CancellationToken,
+        work: &mut WorkRun,
+    ) -> Result<ScanOutcome, FilesError> {
         let root = canonical_dir(root)?;
-        let candidates = match self.enumerate(&root, token)? {
+        let candidates = match self.enumerate(&root, token, work)? {
             EnumOutcome::Cancelled => return Ok(ScanOutcome::Cancelled),
             EnumOutcome::Completed {
                 mut files,
@@ -225,6 +255,8 @@ impl Scanner {
                     size: candidate.size,
                     mtime_ms: candidate.mtime_ms,
                 });
+            } else {
+                work.hashes_reused = work.hashes_reused.saturating_add(1);
             }
             reused.push(hash);
         }
@@ -351,7 +383,12 @@ impl Scanner {
     }
 
     /// Enumerate every tracked candidate under `root`, bounded and cancellable.
-    fn enumerate(&self, root: &Path, token: &CancellationToken) -> Result<EnumOutcome, FilesError> {
+    fn enumerate(
+        &self,
+        root: &Path,
+        token: &CancellationToken,
+        work: &mut WorkRun,
+    ) -> Result<EnumOutcome, FilesError> {
         let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
         let mut files: Vec<Candidate> = Vec::new();
         let mut skipped: Vec<SkippedPath> = Vec::new();
@@ -410,6 +447,7 @@ impl Scanner {
                 // Bound the total traversal (dirs included) — fail closed rather
                 // than grow the working set unbounded.
                 entries = entries.saturating_add(1);
+                work.entries_visited = work.entries_visited.saturating_add(1);
                 if entries > self.bounds.max_entries {
                     return Err(FilesError::TooManyEntries {
                         cap: self.bounds.max_entries,
@@ -522,6 +560,7 @@ impl Scanner {
                         }
                     }
                 }
+                work.files_enumerated = work.files_enumerated.saturating_add(1);
                 files.push(Candidate {
                     rel,
                     abs: path,
@@ -659,6 +698,144 @@ mod traversal_tests {
             1,
             "a new sibling must normalize its own name without repeating its ancestors"
         );
+    }
+
+    #[test]
+    fn scan_work_distinguishes_hash_reuse_from_disk_reads() {
+        let root = ScratchDir::new_named("scan-work").unwrap();
+        std::fs::write(root.path().join("a.md"), "hello").unwrap();
+        std::fs::write(root.path().join("b.md"), "tiny").unwrap();
+        let work = NativeWorkCounters::default();
+        let scanner = Scanner::with_stats(ScanBounds::default(), work.clone()).unwrap();
+        let token = CancellationToken::new();
+        let ScanOutcome::Completed(first) = scanner.scan(root.path(), &token).unwrap() else {
+            panic!("cancelled")
+        };
+        let prior = ScanManifest::from_entries(first.files.iter().map(|file| {
+            (
+                file.path.clone(),
+                crate::diff::ManifestEntry {
+                    size: file.size,
+                    sha256: file.sha256.clone(),
+                    mtime_ms: file.mtime_ms,
+                },
+            )
+        }));
+        assert!(first.files.iter().all(|file| file.mtime_ms > 0));
+        let cold = work.snapshot();
+        assert_eq!(cold.completed, 1);
+        assert_eq!(cold.files_enumerated, 2);
+        assert_eq!(cold.hash_attempts_completed, 2);
+        assert_eq!(cold.bytes_read_for_hashing, 9);
+        scanner
+            .scan_with_prior(root.path(), &prior, &token)
+            .unwrap();
+        let warm = work.snapshot();
+        assert_eq!(warm.completed, 2);
+        assert_eq!(warm.entries_visited, 4);
+        assert_eq!(warm.files_enumerated, 4);
+        assert_eq!(warm.hashes_reused, 2);
+        assert_eq!(warm.hash_attempts_completed, cold.hash_attempts_completed);
+        assert_eq!(warm.bytes_read_for_hashing, cold.bytes_read_for_hashing);
+        std::fs::write(root.path().join("a.md"), "changed!").unwrap();
+        scanner
+            .scan_with_prior(root.path(), &prior, &token)
+            .unwrap();
+        let changed = work.snapshot();
+        assert_eq!(changed.hashes_reused, 3);
+        assert_eq!(changed.hash_attempts_completed, 3);
+        assert_eq!(changed.bytes_read_for_hashing, 17);
+    }
+
+    #[test]
+    fn capture_work_survives_scanner_replacement() {
+        let root = ScratchDir::new_named("scan-work-replacement").unwrap();
+        std::fs::write(root.path().join("note.md"), "bytes").unwrap();
+        let work = NativeWorkCounters::default();
+        for _ in 0..2 {
+            let scanner = Scanner::with_stats(ScanBounds::default(), work.clone()).unwrap();
+            scanner
+                .scan(root.path(), &CancellationToken::new())
+                .unwrap();
+        }
+        let totals = work.snapshot();
+        assert_eq!(totals.completed, 2);
+        assert_eq!(totals.hash_attempts_completed, 2);
+        assert_eq!(totals.bytes_read_for_hashing, 10);
+    }
+
+    #[test]
+    fn scan_work_retains_bound_progress_and_counts_outcomes() {
+        let root = ScratchDir::new_named("scan-work-outcomes").unwrap();
+        std::fs::write(root.path().join("a.md"), "a").unwrap();
+        std::fs::write(root.path().join("b.md"), "b").unwrap();
+        let work = NativeWorkCounters::default();
+        let scanner =
+            Scanner::with_stats(ScanBounds::builder().max_entries(1).build(), work.clone())
+                .unwrap();
+        assert!(matches!(
+            scanner.scan(root.path(), &CancellationToken::new()),
+            Err(FilesError::TooManyEntries { .. })
+        ));
+        let bounded = work.snapshot();
+        assert_eq!(bounded.bounds_exceeded, 1);
+        assert_eq!(bounded.entries_visited, 2);
+        assert_eq!(bounded.files_enumerated, 1);
+        assert_eq!(bounded.hash_attempts_completed, 0);
+        let token = CancellationToken::new();
+        token.cancel();
+        assert!(matches!(
+            scanner.scan(root.path(), &token).unwrap(),
+            ScanOutcome::Cancelled
+        ));
+        assert!(
+            scanner
+                .scan(&root.path().join("absent"), &CancellationToken::new())
+                .is_err()
+        );
+        let totals = work.snapshot();
+        assert_eq!(totals.started, 3);
+        assert_eq!(totals.active, 0);
+        assert_eq!(totals.cancelled, 1);
+        assert_eq!(totals.failed, 1);
+        assert_eq!(totals.completed, 0);
+    }
+
+    #[test]
+    fn converged_reconcile_does_not_count_a_scan() {
+        let root = ScratchDir::new_named("scan-work-converged").unwrap();
+        let work = NativeWorkCounters::default();
+        let scanner = Scanner::with_stats(ScanBounds::default(), work.clone()).unwrap();
+        let mut controller = crate::ReconcileController::new();
+        let token = CancellationToken::new();
+        let crate::ReconcileRun::Completed(plan) = controller
+            .reconcile_if_dirty(&scanner, root.path(), &token)
+            .unwrap()
+        else {
+            panic!("initial scan")
+        };
+        controller
+            .acknowledge_capture(
+                &plan,
+                &crate::CaptureApplyResult {
+                    applied_paths: vec![],
+                    captured: vec![],
+                    not_owned_paths: vec![],
+                    failed_applies: vec![],
+                    deferred_paths: vec![],
+                    crashed_after_durable_boundary: None,
+                    degraded: false,
+                },
+            )
+            .unwrap();
+        let before = work.snapshot();
+        assert!(matches!(
+            controller
+                .reconcile_if_dirty(&scanner, root.path(), &token)
+                .unwrap(),
+            crate::ReconcileRun::Converged
+        ));
+        assert_eq!(work.snapshot(), before);
     }
 
     #[test]

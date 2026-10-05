@@ -1,3 +1,4 @@
+import { profileCounters } from "../performance/profileCounters";
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { errorMessage } from "./workspaceError";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
@@ -996,11 +997,21 @@ function claimCoversRecordedHistory(
 }
 
 function sha256Utf8(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
+  if (!profileCounters.enabled) return createHash("sha256").update(text, "utf8").digest("hex");
+  profileCounters.add("mainHashCalls");
+  profileCounters.add("mainHashBytes", Buffer.byteLength(text, "utf8"));
+  const started = profileCounters.start();
+  try { return createHash("sha256").update(text, "utf8").digest("hex"); }
+  finally { profileCounters.finish("mainHashDurationMs", started); }
 }
 
 function sha256Bytes(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
+  if (!profileCounters.enabled) return createHash("sha256").update(bytes).digest("hex");
+  profileCounters.add("mainHashCalls");
+  profileCounters.add("mainHashBytes", bytes.byteLength);
+  const started = profileCounters.start();
+  try { return createHash("sha256").update(bytes).digest("hex"); }
+  finally { profileCounters.finish("mainHashDurationMs", started); }
 }
 
 // A settled projection is capped at MAX_PROJECTION_BYTES
@@ -1026,52 +1037,58 @@ async function digestSettledFile(
   rootPath: string,
   path: string,
 ): Promise<SettledFileDigest> {
-  const absolute = join(rootPath, path);
-  // Containment first, the same check the disk writer runs before it writes
-  // (createDefaultDiskWriter's assertContainedDir): a parent directory
-  // replaced by a symlink redirects this read outside the workspace, and a
-  // file out there that happened to match would report a save for an artifact
-  // that is not in the workspace at all.
-  let realRoot: string;
-  let realParent: string;
+  const started = profileCounters.start();
+  profileCounters.add("settledFileReadCalls");
   try {
-    [realRoot, realParent] = await Promise.all([
-      realpath(resolve(rootPath)),
-      realpath(dirname(absolute)),
-    ]);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return { kind: "changed" };
-    return { kind: "unverifiable", reason: `the folder could not be read (${code ?? "unknown"})` };
-  }
-  if (!isInside(realRoot, realParent)) {
-    return {
-      kind: "unverifiable",
-      reason: "the folder now resolves outside the workspace",
-    };
-  }
-  try {
-    const info = await lstat(absolute);
-    // A symlink leaf is never an engine artifact — the disk writer refuses to
-    // write through one — so the artifact is not here.
-    if (info.isSymbolicLink() || !info.isFile()) return { kind: "changed" };
-    if (info.size > MAX_SETTLED_FILE_BYTES) return { kind: "changed" };
-    const hash = createHash("sha256");
-    let read = 0;
-    for await (const chunk of createReadStream(absolute)) {
-      const bytes = chunk as Uint8Array;
-      read += bytes.byteLength;
-      // The file grew past the bound after its size was taken. Same answer,
-      // and the read stops here rather than following it.
-      if (read > MAX_SETTLED_FILE_BYTES) return { kind: "changed" };
-      hash.update(bytes);
+    const absolute = join(rootPath, path);
+    // Containment first, the same check the disk writer runs before it writes
+    // (createDefaultDiskWriter's assertContainedDir): a parent directory
+    // replaced by a symlink redirects this read outside the workspace, and a
+    // file out there that happened to match would report a save for an artifact
+    // that is not in the workspace at all.
+    let realRoot: string;
+    let realParent: string;
+    try {
+      [realRoot, realParent] = await Promise.all([
+        realpath(resolve(rootPath)),
+        realpath(dirname(absolute)),
+      ]);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return { kind: "changed" };
+      return { kind: "unverifiable", reason: `the folder could not be read (${code ?? "unknown"})` };
     }
-    return { kind: "sha256", sha256: hash.digest("hex") };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENOTDIR") return { kind: "changed" };
-    return { kind: "unverifiable", reason: `the file could not be read (${code ?? "unknown"})` };
-  }
+    if (!isInside(realRoot, realParent)) {
+      return {
+        kind: "unverifiable",
+        reason: "the folder now resolves outside the workspace",
+      };
+    }
+    try {
+      const info = await lstat(absolute);
+      // A symlink leaf is never an engine artifact — the disk writer refuses to
+      // write through one — so the artifact is not here.
+      if (info.isSymbolicLink() || !info.isFile()) return { kind: "changed" };
+      if (info.size > MAX_SETTLED_FILE_BYTES) return { kind: "changed" };
+      const hash = createHash("sha256");
+      let read = 0;
+      for await (const chunk of createReadStream(absolute)) {
+        const bytes = chunk as Uint8Array;
+        read += bytes.byteLength;
+        profileCounters.add("settledFileReadBytes", bytes.byteLength);
+        // The file grew past the bound after its size was taken. Same answer,
+        // and the read stops here rather than following it.
+        if (read > MAX_SETTLED_FILE_BYTES) return { kind: "changed" };
+        hash.update(bytes);
+      }
+      return { kind: "sha256", sha256: hash.digest("hex") };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return { kind: "changed" };
+      return { kind: "unverifiable", reason: `the file could not be read (${code ?? "unknown"})` };
+    }
+
+  } finally { profileCounters.finish("settledFileReadElapsedMs", started); }
 }
 
 function pathBasename(path: string): string {

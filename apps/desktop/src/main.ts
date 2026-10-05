@@ -1,3 +1,5 @@
+import { profileCounters } from "./performance/profileCounters";
+import { readNativeWorkStats } from "./performance/readNativeWorkStats";
 import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
 import { createDesktopAutomationControls } from "./workspaces/desktopAutomationControls";
 import {parseDohcSiteConfig} from "@dohc/workspace-core";
@@ -791,10 +793,15 @@ const workspaceFileListings = new WorkspaceFileListingCache(process.platform, as
   } finally { lease.release(); }
 });
 
+if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) profileCounters.enable();
 const notifyRendererCoalesced = coalesceWorkspaceActivity(sendRendererActivity);
-function notifyRenderer(scope?: WorkspaceActivityScope): void { notifyRendererCoalesced(scope); }
+function notifyRenderer(scope?: WorkspaceActivityScope): void {
+  profileCounters.add("activityRequests");
+  notifyRendererCoalesced(scope);
+}
 
 function sendRendererActivity(scope?: WorkspaceActivityScope): void {
+  profileCounters.add("activityEmissions");
   if (scope) {
     for (const workspace of listWorkspaces()) {
       const mounts = storedShareMounts(workspace);
@@ -5210,6 +5217,12 @@ function isTrustedFrame(frameUrl: string): boolean {
 // error to the renderer as one string, so this keeps its code in that string.
 function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[1]): void {
   ipcMain.handle(channel, async (event, ...args) => {
+    if (profileCounters.enabled && !channel.startsWith("desktop:test:")) {
+      profileCounters.add("ipcInvocations");
+      if (channel === CHANNELS.readWorkspaceText) profileCounters.add("readWorkspaceTextCalls");
+      if (channel === CHANNELS.listWorkspaceFiles) profileCounters.add("listWorkspaceFilesCalls");
+      if (channel === CHANNELS.writeWorkspaceText) profileCounters.add("writeWorkspaceTextCalls");
+    }
     try {
       return await listener(event, ...args);
     } catch (error) {
@@ -5356,6 +5369,10 @@ function registerIpcHandlers(): void {
     rememberChromeTheme, titleBarOverlayOptions,
     stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step), exitRounds,
     quitGuard, isTrustedFrame, launchMarks, desktopMarks, logLaunchMarksOnce, app,
+    readNativeWorkStats: (event, workspaceId) => withRendererWorkspaceOperation(
+      event.sender, workspaceId, "Native work snapshot stopped because this window changed workspaces.",
+      operation => readNativeWorkStats(desktopEngine.sessions, operation.workspace, () => operation.assertCurrent()),
+    ),
   });
   windowIpc.registerReload();
 

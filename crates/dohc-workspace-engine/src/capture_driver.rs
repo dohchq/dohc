@@ -1207,9 +1207,13 @@ impl FilesLayer {
         observation: &Arc<crate::file_observation::FileObservation>,
     ) -> Result<(FilesLayer, RootBoundRun), FilesError> {
         let captured_root = bind_capture_root(root)?;
-        let files =
-            FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
-                .await?;
+        let files = FilesActor::spawn_async_with_manifest_and_stats(
+            root.to_path_buf(),
+            ScanBounds::default(),
+            seed,
+            observation.capture_work.clone(),
+        )
+        .await?;
         // Before the watcher's initial scan, so the scan's count is readable.
         scan.set(files.gauge());
         let handle = files.handle();
@@ -2317,6 +2321,7 @@ pub(crate) async fn reconcile_full_for_switch(
     provenance: CaptureProvenance,
     events: EngineEvents,
     token: CancellationToken,
+    work: dohc_engine_files::NativeWorkCounters,
 ) -> Result<bool, SwitchReconcileError> {
     if token.is_cancelled() {
         return Err(SwitchReconcileError::Cancelled);
@@ -2326,10 +2331,14 @@ pub(crate) async fn reconcile_full_for_switch(
         .map_err(|_| SwitchReconcileError::Unavailable)?
         .into_scan_seed();
     let captured_root = bind_capture_root(root).map_err(|_| SwitchReconcileError::Unavailable)?;
-    let files =
-        FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
-            .await
-            .map_err(|_| SwitchReconcileError::Unavailable)?;
+    let files = FilesActor::spawn_async_with_manifest_and_stats(
+        root.to_path_buf(),
+        ScanBounds::default(),
+        seed,
+        work,
+    )
+    .await
+    .map_err(|_| SwitchReconcileError::Unavailable)?;
     let files = FilesActorCloseGuard::new(files);
     let handle = files.handle();
     let run = handle

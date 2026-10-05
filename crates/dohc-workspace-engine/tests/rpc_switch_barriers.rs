@@ -417,9 +417,38 @@ async fn set_active_forced_scan_captures_edit_while_live_driver_is_gated() {
         probe.wait_until_version_fence_paused(),
     )
     .await;
+    let before = call(&transport, &handle, 30, "files.workStats", json!({})).await;
+    probe.pause_next_version_commit();
     std::fs::write(scratch.path().join("notes.md"), "unannounced disk edit")
         .expect("external edit");
     probe.release_version_fence();
+    bounded(
+        "setActive post-scan probe",
+        probe.wait_until_version_commit_paused(),
+    )
+    .await;
+    let after = call(&transport, &handle, 31, "files.workStats", json!({})).await;
+    assert_eq!(after["generation"], before["generation"]);
+    for counter in ["started", "completed", "hashAttemptsCompleted"] {
+        assert_eq!(
+            after["capture"][counter].as_u64().expect("capture counter"),
+            before["capture"][counter]
+                .as_u64()
+                .expect("capture counter")
+                + 1,
+            "{counter} must include the fence's temporary scanner"
+        );
+    }
+    assert_eq!(
+        after["capture"]["bytesReadForHashing"]
+            .as_u64()
+            .expect("hash read bytes"),
+        before["capture"]["bytesReadForHashing"]
+            .as_u64()
+            .expect("hash read bytes")
+            + "unannounced disk edit".len() as u64
+    );
+    probe.release_version_commit();
     bounded("setActive task", switching)
         .await
         .expect("switch task")
