@@ -40,7 +40,7 @@ import type { ChatRelayIdentityTarget } from "../workspaces/chatRelayIdentity";
 import type { ChatWrites } from "../workspaces/chatWrites";
 import type { LiveDocumentEditOrigin, LiveDocumentSessions } from "../workspaces/engineYDocSessionIpc";
 import { readWorkspaceText } from "../workspaces/workspaceAssets";
-import { historyPathAdmission, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
+import { historyPathAdmission, historyMomentPathsAdmitted, readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import type { DocumentProjection } from "../workspaces/documentProjection";
 import { FRONTMATTER_REFUSAL, startsWithFrontmatter } from "@dohc/ydoc-projection";
 import { VersionedTextStoreError, type MomentWriteAuthor } from "@dohc/workspace-contracts/engine";
@@ -416,8 +416,7 @@ export function createDesktopCliServer<State>(
         // History reads come from the active version, as the list does.
         if (moment.versionId !== (await capture.listVersions()).activeVersionId) return null;
         const admitted = historyPathAdmission(await readWorkspaceEnginePolicy(workspace.rootPath));
-        const paths = [moment.path, moment.payload.after.path, ...(moment.payload.before ? [moment.payload.before.path] : [])];
-        return paths.every(admitted) ? moment : null;
+        return historyMomentPathsAdmitted(admitted, moment) ? moment : null;
       },
     };
   }
