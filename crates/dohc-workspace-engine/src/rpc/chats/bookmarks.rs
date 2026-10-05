@@ -20,6 +20,7 @@ use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 
@@ -120,37 +121,54 @@ fn parse_bookmark_mode(raw: &str) -> Result<BookmarkMode, WireError> {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BookmarkWire<'a> {
+    bookmark_id: &'a str,
+    workspace_id: &'a str,
+    owner_user_id: &'a str,
+    target_kind: &'a str,
+    target_id: &'a str,
+    thread_id: &'a str,
+    mode: &'a str,
+    destination_path: &'a str,
+    state: &'a str,
+    generation: i64,
+    projected_generation: i64,
+    projection_state: &'a str,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection_object_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_projected_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_reason: Option<&'a str>,
+}
+
 fn bookmark_json(workspace_id: &str, bookmark: &ChatBookmark) -> Value {
-    let mut value = json!({
-        "bookmarkId": bookmark.bookmark_id,
-        "workspaceId": workspace_id,
-        "ownerUserId": bookmark.owner_user_id,
-        "targetKind": bookmark.target_kind,
-        "targetId": bookmark.target_id,
-        "threadId": bookmark.thread_id,
-        "mode": bookmark.mode,
-        "destinationPath": bookmark.destination_path,
-        "state": bookmark.state,
-        "generation": bookmark.generation,
-        "projectedGeneration": bookmark.projected_generation,
-        "projectionState": bookmark.projection_state,
-        "createdAtMs": bookmark.created_at_ms,
-        "updatedAtMs": bookmark.updated_at_ms,
-    });
-    let object = value.as_object_mut().expect("bookmark is an object");
-    if let Some(message_id) = &bookmark.message_id {
-        object.insert("messageId".to_owned(), json!(message_id));
-    }
-    if let Some(projection_object_id) = &bookmark.projection_object_id {
-        object.insert("projectionObjectId".to_owned(), json!(projection_object_id));
-    }
-    if let Some(last_projected_at_ms) = bookmark.last_projected_at_ms {
-        object.insert("lastProjectedAtMs".to_owned(), json!(last_projected_at_ms));
-    }
-    if let Some(failure_reason) = &bookmark.failure_reason {
-        object.insert("failureReason".to_owned(), json!(failure_reason));
-    }
-    value
+    json!(BookmarkWire {
+        bookmark_id: &bookmark.bookmark_id,
+        workspace_id,
+        owner_user_id: &bookmark.owner_user_id,
+        target_kind: &bookmark.target_kind,
+        target_id: &bookmark.target_id,
+        thread_id: &bookmark.thread_id,
+        mode: &bookmark.mode,
+        destination_path: &bookmark.destination_path,
+        state: &bookmark.state,
+        generation: bookmark.generation,
+        projected_generation: bookmark.projected_generation,
+        projection_state: &bookmark.projection_state,
+        created_at_ms: bookmark.created_at_ms,
+        updated_at_ms: bookmark.updated_at_ms,
+        message_id: bookmark.message_id.as_deref(),
+        projection_object_id: bookmark.projection_object_id.as_deref(),
+        last_projected_at_ms: bookmark.last_projected_at_ms,
+        failure_reason: bookmark.failure_reason.as_deref(),
+    })
 }
 
 impl EngineService {
@@ -488,5 +506,64 @@ impl EngineService {
             "bookmark": bookmark_json(&workspace_id, &transition.bookmark),
             "applied": transition.applied,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bookmark_projection_omits_absent_projection_facts() {
+        let thread_bookmark = ChatBookmark {
+            bookmark_id: "bookmark".to_owned(),
+            owner_user_id: "user".to_owned(),
+            target_kind: "thread".to_owned(),
+            target_id: "thread".to_owned(),
+            thread_id: "thread".to_owned(),
+            message_id: None,
+            mode: "live".to_owned(),
+            destination_path: "saved/thread.md".to_owned(),
+            state: "active".to_owned(),
+            generation: 1,
+            projected_generation: 0,
+            projection_state: "pending".to_owned(),
+            projection_object_id: None,
+            created_at_ms: 10,
+            updated_at_ms: 11,
+            last_projected_at_ms: None,
+            failure_reason: None,
+        };
+        assert_eq!(
+            bookmark_json("workspace", &thread_bookmark),
+            json!({
+                "bookmarkId": "bookmark",
+                "workspaceId": "workspace",
+                "ownerUserId": "user",
+                "targetKind": "thread",
+                "targetId": "thread",
+                "threadId": "thread",
+                "mode": "live",
+                "destinationPath": "saved/thread.md",
+                "state": "active",
+                "generation": 1,
+                "projectedGeneration": 0,
+                "projectionState": "pending",
+                "createdAtMs": 10,
+                "updatedAtMs": 11,
+            })
+        );
+        let projected = ChatBookmark {
+            message_id: Some("message".to_owned()),
+            projection_object_id: Some("object".to_owned()),
+            last_projected_at_ms: Some(12),
+            failure_reason: Some("stale".to_owned()),
+            ..thread_bookmark
+        };
+        let value = bookmark_json("workspace", &projected);
+        assert_eq!(value["messageId"], json!("message"));
+        assert_eq!(value["projectionObjectId"], json!("object"));
+        assert_eq!(value["lastProjectedAtMs"], json!(12));
+        assert_eq!(value["failureReason"], json!("stale"));
     }
 }

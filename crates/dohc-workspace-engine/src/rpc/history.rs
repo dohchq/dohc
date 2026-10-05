@@ -2,7 +2,6 @@ use crate::EngineService;
 use crate::rpc::capture::MAX_DESKTOP_CAPTURE_TEXT_BYTES;
 use crate::rpc::reads::MAX_INBAND_CONTENT_BYTES;
 use crate::rpc::reads::byte_budget_cut_serialized;
-use crate::rpc::reads::inband_text;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::parse;
 use crate::rpc::secrets::secret_moment_json;
@@ -10,12 +9,14 @@ use crate::rpc::versions::version_record_json;
 use crate::rpc::workspace::validate_workspace_param;
 use dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES;
 use dohc_engine_domain::MomentPage;
+use dohc_engine_domain::MomentRecord;
 use dohc_engine_domain::SecretMomentRecord;
 use dohc_engine_protocol::error::ErrorCode;
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 use std::time::Duration;
@@ -87,19 +88,55 @@ struct PublicationAppliedParams {
     moment_id: String,
 }
 
-pub(super) fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
-    let after_inband_limit = (moment.after_content_kind == "text"
-        && moment.after_text.is_none()
-        && moment
-            .after_byte_length
-            .is_some_and(|length| length as usize > MAX_DESKTOP_CAPTURE_TEXT_BYTES))
-    .then_some(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
-    let before_inband_limit = (moment.before_content_kind == "text"
-        && moment.before_text.is_none()
-        && moment
-            .before_byte_length
-            .is_some_and(|length| length as usize > MAX_DESKTOP_CAPTURE_TEXT_BYTES))
-    .then_some(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+/// How a moment projection carries its two payload bodies.
+#[derive(Clone, Copy)]
+enum MomentBodies {
+    /// Each body under the same self-describing in-band cap as every content
+    /// read.
+    Capped,
+    /// Every body the capped form would carry, withheld at that cap.
+    Withheld,
+    /// Neither body: a first page row past `MOMENTS_PAGE_BYTE_BUDGET`, sent as
+    /// metadata so the cursor still makes progress.
+    PageDegraded,
+}
+
+impl MomentBodies {
+    /// One payload body and the in-band limit beside it.
+    fn project<'a>(
+        self,
+        content_kind: &str,
+        text: Option<&'a str>,
+        byte_length: Option<i64>,
+    ) -> (Option<&'a str>, Option<usize>) {
+        let capped = text.filter(|text| text.len() <= MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+        match (self, capped) {
+            (MomentBodies::PageDegraded, _) => (None, Some(MAX_INBAND_CONTENT_BYTES)),
+            (MomentBodies::Withheld, Some(_)) => (None, Some(MAX_DESKTOP_CAPTURE_TEXT_BYTES)),
+            (_, Some(text)) => (Some(text), None),
+            // Only a text body the store left unhydrated names the limit.
+            (_, None) => {
+                let over_cap = content_kind == "text"
+                    && text.is_none()
+                    && byte_length
+                        .is_some_and(|length| length as usize > MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+                (None, over_cap.then_some(MAX_DESKTOP_CAPTURE_TEXT_BYTES))
+            }
+        }
+    }
+}
+
+fn moment_wire_json(moment: &MomentRecord, bodies: MomentBodies) -> Value {
+    let (after_text, after_inband_limit_bytes) = bodies.project(
+        &moment.after_content_kind,
+        moment.after_text.as_deref(),
+        moment.after_byte_length,
+    );
+    let (before_text, before_inband_limit_bytes) = bodies.project(
+        &moment.before_content_kind,
+        moment.before_text.as_deref(),
+        moment.before_byte_length,
+    );
     json!({
         "momentOrder": moment.moment_order,
         "momentId": moment.moment_id,
@@ -124,16 +161,26 @@ pub(super) fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         // dropped and never trusted raw.
         "authors": moment.author_json.as_deref().map(parsed_moment_authors),
         "syncRecordOnly": moment.sync_record_only,
-        // Hydrated payload text (momentSelectSql parity), each body under
-        // the same self-describing in-band cap as every content read.
-        "afterText": inband_text(moment.after_text.as_deref()),
+        // Hydrated payload text (momentSelectSql parity).
+        "afterText": after_text,
         "afterByteLength": moment.after_byte_length,
-        "afterInbandLimitBytes": after_inband_limit,
-        "beforeText": inband_text(moment.before_text.as_deref()),
+        "afterInbandLimitBytes": after_inband_limit_bytes,
+        "beforeText": before_text,
         "beforeByteLength": moment.before_byte_length,
-        "beforeInbandLimitBytes": before_inband_limit,
+        "beforeInbandLimitBytes": before_inband_limit_bytes,
         "beforePath": moment.before_path,
     })
+}
+
+pub(super) fn moment_json(moment: &MomentRecord) -> Value {
+    moment_wire_json(moment, MomentBodies::Capped)
+}
+
+/// A moment with both payload bodies withheld. The digests beside them stay,
+/// so the caller hydrates through `versionedText.readBlob` — the shape an
+/// over-cap moment already arrives in.
+pub(super) fn withheld_moment_json(moment: &MomentRecord) -> Value {
+    moment_wire_json(moment, MomentBodies::Withheld)
 }
 
 fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError> {
@@ -144,13 +191,10 @@ fn encode_moment_page(page: &MomentPage) -> Result<EncodedMomentPage, WireError>
     // A first row may legitimately exceed the page budget. Degrade that row
     // to metadata so the cursor still makes progress, exactly as moments.list
     // did before the history aggregate existed.
-    if let Some(first) = rows.first_mut() {
-        if serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET {
-            first["afterText"] = Value::Null;
-            first["beforeText"] = Value::Null;
-            first["afterInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
-            first["beforeInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
-        }
+    if let (Some(first), Some(moment)) = (rows.first_mut(), page.moments.first())
+        && serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET
+    {
+        *first = moment_wire_json(moment, MomentBodies::PageDegraded);
     }
     let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
     if included == 0 && !rows.is_empty() {
@@ -285,58 +329,47 @@ fn parsed_moment_author(value: Value) -> Value {
         return if valid { value } else { corrupt() };
     }
     let kind_ok = object.get("kind").and_then(Value::as_str) == Some("agent");
-    let nonempty = |key: &str| {
-        object
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|v| !v.is_empty())
-    };
+    let agent_id = object
+        .get("agentId")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty());
     let run_ok = match object.get("agentRunId") {
         None => true,
         Some(Value::String(v)) => !v.is_empty(),
         Some(_) => false,
     };
     let name_ok = !object.contains_key("agentName") || snapshot_text("agentName");
-    if kind_ok && nonempty("agentId") && principal_ok && run_ok && name_ok {
-        let mut author = json!({
-            "kind": "agent",
-            "agentId": object["agentId"],
-        });
-        // The name a live author snapshot declared for its agent.
-        if let Some(name) = object.get("agentName") {
-            author["agentName"] = name.clone();
-        }
-        if let Some(principal) = object.get("onBehalfOf") {
-            author["onBehalfOf"] = principal.clone();
-        }
-        // The contract field is OPTIONAL (`agentRunId?: string`), never
-        // nullable — omit it when absent, exactly as pickMomentAuthor does.
-        if let Some(run_id) = object.get("agentRunId") {
-            author["agentRunId"] = run_id.clone();
-        }
-        // Named only past 0; a depth an older build stored unchecked reads as none.
-        if let Some(depth) = dohc_engine_domain::agent_author_depth(object.get("depth")) {
-            author["depth"] = json!(depth);
-        }
-        author
-    } else {
-        corrupt()
+    match agent_id {
+        Some(agent_id) if kind_ok && principal_ok && run_ok && name_ok => json!(AgentAuthorWire {
+            kind: "agent",
+            agent_id,
+            agent_name: object.get("agentName").and_then(Value::as_str),
+            on_behalf_of: object.get("onBehalfOf").and_then(Value::as_str),
+            agent_run_id: object.get("agentRunId").and_then(Value::as_str),
+            // Named only past 0; a depth an older build stored unchecked reads as none.
+            depth: dohc_engine_domain::agent_author_depth(object.get("depth")),
+        }),
+        _ => corrupt(),
     }
 }
 
-/// Withhold both payload bodies of one serialized moment, in place. The
-/// digests beside them stay, so the caller hydrates through
-/// `versionedText.readBlob` — the shape an over-cap moment already arrives in.
-pub(super) fn withhold_moment_texts(moment: &mut Value) {
-    for (text, limit) in [
-        ("afterText", "afterInbandLimitBytes"),
-        ("beforeText", "beforeInbandLimitBytes"),
-    ] {
-        if moment.get(text).is_some_and(|body| !body.is_null()) {
-            moment[text] = Value::Null;
-            moment[limit] = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
-        }
-    }
+/// An agent author, rebuilt from its checked fields so nothing else it stored
+/// rides along.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentAuthorWire<'a> {
+    kind: &'static str,
+    agent_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on_behalf_of: Option<&'a str>,
+    // The contract field is OPTIONAL (`agentRunId?: string`), never
+    // nullable — omit it when absent, exactly as pickMomentAuthor does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_run_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    depth: Option<u32>,
 }
 
 impl EngineService {
@@ -531,6 +564,182 @@ impl EngineService {
 }
 
 #[cfg(test)]
+mod moment_projection_tests {
+    use super::*;
+    use dohc_engine_domain::MomentOp;
+
+    const CAP: i64 = MAX_DESKTOP_CAPTURE_TEXT_BYTES as i64;
+
+    fn moment(after_text: Option<&str>, after_byte_length: Option<i64>) -> MomentRecord {
+        MomentRecord {
+            moment_order: 3,
+            moment_id: "moment".to_owned(),
+            version_id: "main".to_owned(),
+            object_id: "object".to_owned(),
+            path: "notes/a.md".to_owned(),
+            recorded_at_ms: 9,
+            operation: MomentOp::Write,
+            after_content_kind: "text".to_owned(),
+            after_blob_sha256: Some("after-digest".to_owned()),
+            after_binary_sha256: None,
+            before_present: true,
+            before_blob_sha256: None,
+            before_content_kind: "binary".to_owned(),
+            before_binary_sha256: Some("before-digest".to_owned()),
+            before_latest_moment_id: Some("earlier".to_owned()),
+            metadata_origin: "api".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: Some("correlation".to_owned()),
+            author_json: Some(
+                json!([{"kind":"agent", "agentId":"agent", "depth":0, "model":"m"}]).to_string(),
+            ),
+            sync_record_only: false,
+            after_text: after_text.map(str::to_owned),
+            after_byte_length,
+            before_text: None,
+            before_byte_length: Some(CAP + 1),
+            before_path: Some("notes/old.md".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_moment_carries_every_field_and_both_limits() {
+        assert_eq!(
+            moment_json(&moment(Some("body"), Some(4))),
+            json!({
+                "momentOrder": 3,
+                "momentId": "moment",
+                "versionId": "main",
+                "objectId": "object",
+                "path": "notes/a.md",
+                "recordedAtMs": 9,
+                "operation": "write",
+                "afterContentKind": "text",
+                "afterBlobSha256": "after-digest",
+                "afterBinarySha256": null,
+                "beforePresent": true,
+                "beforeContentKind": "binary",
+                "beforeBlobSha256": null,
+                "beforeBinarySha256": "before-digest",
+                "beforeLatestMomentId": "earlier",
+                "metadataOrigin": "api",
+                "metadataSummary": null,
+                "metadataCorrelationId": "correlation",
+                "authors": [{"kind":"agent", "agentId":"agent"}],
+                "syncRecordOnly": false,
+                "afterText": "body",
+                "afterByteLength": 4,
+                "afterInbandLimitBytes": null,
+                // A binary preimage never names the text limit, whatever its length.
+                "beforeText": null,
+                "beforeByteLength": CAP + 1,
+                "beforeInbandLimitBytes": null,
+                "beforePath": "notes/old.md",
+            })
+        );
+    }
+
+    #[test]
+    fn a_moment_names_the_limit_only_for_an_unhydrated_text_body_past_the_cap() {
+        let at_cap = "a".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+        let past_cap = "a".repeat(MAX_DESKTOP_CAPTURE_TEXT_BYTES + 1);
+        let limit = json!(MAX_DESKTOP_CAPTURE_TEXT_BYTES);
+        // (stored body, stored length) -> (capped, withheld) as (afterText, afterInbandLimitBytes).
+        let cases = [
+            (
+                Some(at_cap.as_str()),
+                Some(CAP),
+                (json!(at_cap), Value::Null),
+                (Value::Null, limit.clone()),
+            ),
+            // A hydrated body past the cap goes out null, and names no limit.
+            (
+                Some(past_cap.as_str()),
+                Some(CAP + 1),
+                (Value::Null, Value::Null),
+                (Value::Null, Value::Null),
+            ),
+            (
+                None,
+                Some(CAP),
+                (Value::Null, Value::Null),
+                (Value::Null, Value::Null),
+            ),
+            (
+                None,
+                Some(CAP + 1),
+                (Value::Null, limit.clone()),
+                (Value::Null, limit.clone()),
+            ),
+            // A negative stored length reads as past the cap, as it always has.
+            (
+                None,
+                Some(-1),
+                (Value::Null, limit.clone()),
+                (Value::Null, limit.clone()),
+            ),
+            (
+                None,
+                None,
+                (Value::Null, Value::Null),
+                (Value::Null, Value::Null),
+            ),
+        ];
+        for (text, byte_length, capped, withheld) in cases {
+            let record = moment(text, byte_length);
+            for (projected, expected) in [
+                (moment_json(&record), capped),
+                (withheld_moment_json(&record), withheld),
+            ] {
+                assert_eq!(
+                    (
+                        projected["afterText"].clone(),
+                        projected["afterInbandLimitBytes"].clone()
+                    ),
+                    expected,
+                    "{byte_length:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_over_budget_first_row_degrades_to_metadata_and_the_cursor_moves_past_it() {
+        let mut heavy = moment(Some("body"), Some(4));
+        heavy.metadata_summary = Some("s".repeat(MOMENTS_PAGE_BYTE_BUDGET));
+        let mut next = moment(Some("next"), Some(4));
+        next.moment_order = 2;
+        let page = MomentPage {
+            moments: vec![heavy.clone(), next],
+            next_before_moment_order: None,
+            latest_moment_order: Some(3),
+        };
+        let encoded = encode_moment_page(&page).expect("a degraded row still ships");
+        assert_eq!(encoded.included, 1);
+        assert_eq!(encoded.next_before_moment_order, Some(3));
+        // Both bodies go, the binary preimage's too, and both name the
+        // in-band content cap rather than the per-body text cap.
+        let mut expected = moment_json(&heavy);
+        for (text, limit) in [
+            ("afterText", "afterInbandLimitBytes"),
+            ("beforeText", "beforeInbandLimitBytes"),
+        ] {
+            expected[text] = Value::Null;
+            expected[limit] = json!(MAX_INBAND_CONTENT_BYTES);
+        }
+        assert_eq!(encoded.rows[0], expected);
+
+        heavy.metadata_summary = Some("s".repeat(crate::rpc::reads::SINGLE_ROW_HARD_CAP_BYTES));
+        let refused = encode_moment_page(&MomentPage {
+            moments: vec![heavy],
+            next_before_moment_order: None,
+            latest_moment_order: Some(3),
+        });
+        assert!(refused.is_err(), "a row past the hard cap is refused");
+    }
+}
+
+#[cfg(test)]
 mod relay_author_tests {
     use super::parsed_moment_authors;
     use dohc_engine_domain::MAX_AUTHOR_FIELD_BYTES;
@@ -707,6 +916,31 @@ mod relay_author_tests {
             let mut stored = named.clone();
             stored["depth"] = depth;
             assert_eq!(parsed_moment_author(&stored.to_string()), named, "{stored}");
+        }
+    }
+
+    #[test]
+    fn rebuilds_an_agent_author_from_its_checked_fields_only() {
+        let stored = json!({
+            "kind": "agent",
+            "agentId": "agent",
+            "onBehalfOf": "local",
+            "agentRunId": "run",
+            "depth": 2,
+            "model": "unlisted",
+        });
+        assert_eq!(
+            parsed_moment_author(&stored.to_string()),
+            json!({"kind":"agent", "agentId":"agent", "onBehalfOf":"local", "agentRunId":"run", "depth":2})
+        );
+        for run in [json!(null), json!(""), json!(7)] {
+            let mut malformed = stored.clone();
+            malformed["agentRunId"] = run;
+            assert_eq!(
+                parsed_moment_author(&malformed.to_string()),
+                json!({"corrupt":true}),
+                "{malformed}"
+            );
         }
     }
 

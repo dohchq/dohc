@@ -8,12 +8,12 @@ use crate::rpc::chats::chat_page_cursor;
 use crate::rpc::chats::chat_page_limit;
 use crate::rpc::chats::decode_chat_cursor;
 use crate::rpc::chats::encode_chat_cursor;
+use crate::rpc::chats::messages::AuthorWire;
+use crate::rpc::chats::messages::AutomationWire;
 use crate::rpc::chats::messages::ChatMessageAutomationParams;
-use crate::rpc::chats::messages::actor_kind_str;
-use crate::rpc::chats::messages::automation_json;
+use crate::rpc::chats::messages::ReactionWire;
 use crate::rpc::chats::messages::message_json;
 use crate::rpc::chats::messages::parse_actor_kind;
-use crate::rpc::chats::messages::reaction_json;
 use crate::rpc::request::OperationCancellation;
 use crate::rpc::request::deserialize_optional_non_null;
 use crate::rpc::request::now_ms;
@@ -31,6 +31,7 @@ use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::RequestContext;
 use dohc_engine_protocol::wire::WorkspaceHandle;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 use serde_json::json;
 
@@ -173,83 +174,106 @@ fn parse_thread_lane(raw: Option<&str>) -> Result<ChatThreadLane, WireError> {
     }
 }
 
-pub(super) fn thread_b2_json(thread: &ChatThread) -> Value {
-    let mut value = json!({
-        "id": thread.thread_id,
-        "workspaceId": thread.workspace_id,
-        "title": thread.title,
-        "createdAtMs": thread.created_at_ms,
-        "updatedAtMs": thread.updated_at_ms,
-        "lane": thread.lane.as_str(),
-    });
-    let object = value.as_object_mut().expect("thread is an object");
-    if let Some(channel_id) = &thread.channel_id {
-        object.insert("channelId".to_owned(), json!(channel_id));
-    }
-    if let Some(object_id) = &thread.linked_object_id {
-        let mut linked_file = json!({
-            "objectId": object_id,
-            "linkedAtMs": thread.linked_at_ms.expect("validated linked thread"),
-        });
-        if let Some(path_hint) = &thread.linked_path_hint {
-            linked_file
-                .as_object_mut()
-                .expect("linked file is an object")
-                .insert("pathHint".to_owned(), json!(path_hint));
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkedFileWire<'a> {
+    object_id: &'a str,
+    linked_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_hint: Option<&'a str>,
+}
+
+/// The RPC-B2 thread record, which omits an absent channel and linked file.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ThreadB2Wire<'a> {
+    id: &'a str,
+    workspace_id: &'a str,
+    title: &'a str,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    lane: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linked_file: Option<LinkedFileWire<'a>>,
+}
+
+impl<'a> From<&'a ChatThread> for ThreadB2Wire<'a> {
+    fn from(thread: &'a ChatThread) -> Self {
+        ThreadB2Wire {
+            id: &thread.thread_id,
+            workspace_id: &thread.workspace_id,
+            title: &thread.title,
+            created_at_ms: thread.created_at_ms,
+            updated_at_ms: thread.updated_at_ms,
+            lane: thread.lane.as_str(),
+            channel_id: thread.channel_id.as_deref(),
+            linked_file: thread
+                .linked_object_id
+                .as_deref()
+                .map(|object_id| LinkedFileWire {
+                    object_id,
+                    linked_at_ms: thread.linked_at_ms.expect("validated linked thread"),
+                    path_hint: thread.linked_path_hint.as_deref(),
+                }),
         }
-        object.insert("linkedFile".to_owned(), linked_file);
     }
-    value
+}
+
+pub(super) fn thread_b2_json(thread: &ChatThread) -> Value {
+    json!(ThreadB2Wire::from(thread))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpeningMessageWire<'a> {
+    id: &'a str,
+    author: AuthorWire<'a>,
+    created_at_ms: i64,
+    body_snippet: &'a str,
+    reactions: Vec<ReactionWire<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_user_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_owner_display_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automation: Option<AutomationWire<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChannelThreadSummaryWire<'a> {
+    thread: ThreadB2Wire<'a>,
+    message_count: i64,
+    last_read_sequence: i64,
+    unread_count: i64,
+    open_decision_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    opening_message: Option<OpeningMessageWire<'a>>,
 }
 
 fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
-    let mut value = json!({
-        "thread": thread_b2_json(&summary.thread),
-        "messageCount": summary.message_count,
-        "lastReadSequence": summary.last_read_sequence,
-        "unreadCount": summary.unread_count,
-        "openDecisionCount": summary.open_decision_count,
-    });
-    if let Some(opening) = &summary.opening_message {
-        value
-            .as_object_mut()
-            .expect("channel thread summary is an object")
-            .insert(
-                "openingMessage".to_owned(),
-                json!({
-                    "id": opening.message_id,
-                    "author": {
-                        "kind": actor_kind_str(opening.author_kind),
-                        "displayName": opening.author_display_name,
-                    },
-                    "createdAtMs": opening.created_at_ms,
-                    "bodySnippet": opening.body_snippet,
-                    "reactions": opening.reactions.iter().map(reaction_json).collect::<Vec<_>>(),
-                }),
-            );
-    }
-    if let Some(author_user_id) = summary
-        .opening_message
-        .as_ref()
-        .and_then(|opening| opening.author_user_id.as_ref())
-    {
-        value["openingMessage"]["authorUserId"] = json!(author_user_id);
-    }
-    if let Some(owner_name) = summary
-        .opening_message
-        .as_ref()
-        .and_then(|opening| opening.author_owner_display_name.as_ref())
-    {
-        value["openingMessage"]["authorOwnerDisplayName"] = json!(owner_name);
-    }
-    if let Some(automation) = summary
-        .opening_message
-        .as_ref()
-        .and_then(|opening| opening.automation.as_ref())
-    {
-        value["openingMessage"]["automation"] = automation_json(automation);
-    }
-    value
+    json!(ChannelThreadSummaryWire {
+        thread: ThreadB2Wire::from(&summary.thread),
+        message_count: summary.message_count,
+        last_read_sequence: summary.last_read_sequence,
+        unread_count: summary.unread_count,
+        open_decision_count: summary.open_decision_count,
+        opening_message: summary
+            .opening_message
+            .as_ref()
+            .map(|opening| OpeningMessageWire {
+                id: &opening.message_id,
+                author: AuthorWire::new(opening.author_kind, &opening.author_display_name),
+                created_at_ms: opening.created_at_ms,
+                body_snippet: &opening.body_snippet,
+                reactions: opening.reactions.iter().map(ReactionWire::from).collect(),
+                author_user_id: opening.author_user_id.as_deref(),
+                author_owner_display_name: opening.author_owner_display_name.as_deref(),
+                automation: opening.automation.as_ref().map(AutomationWire::from),
+            }),
+    })
 }
 
 impl EngineService {
@@ -597,6 +621,120 @@ impl EngineService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dohc_engine_domain::ChannelOpeningMessage;
+    use dohc_engine_domain::ChatActorKind;
+    use dohc_engine_domain::ChatMessageAutomation;
+
+    fn thread() -> ChatThread {
+        ChatThread {
+            workspace_id: "workspace".to_owned(),
+            thread_id: "thread".to_owned(),
+            title: "Plan".to_owned(),
+            created_at_ms: 10,
+            updated_at_ms: 11,
+            lane: ChatThreadLane::Chat,
+            channel_id: None,
+            linked_object_id: None,
+            linked_path_hint: None,
+            linked_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn thread_list_rows_carry_nulls_where_b2_threads_omit() {
+        let bare = thread();
+        assert_eq!(
+            thread_json(&bare),
+            json!({
+                "workspaceId": "workspace",
+                "threadId": "thread",
+                "title": "Plan",
+                "createdAtMs": 10,
+                "updatedAtMs": 11,
+                "lane": "chat",
+                "channelId": null,
+                "linkedObjectId": null,
+            })
+        );
+        assert_eq!(
+            thread_b2_json(&bare),
+            json!({
+                "id": "thread",
+                "workspaceId": "workspace",
+                "title": "Plan",
+                "createdAtMs": 10,
+                "updatedAtMs": 11,
+                "lane": "chat",
+            })
+        );
+        let linked = ChatThread {
+            channel_id: Some("channel".to_owned()),
+            linked_object_id: Some("object".to_owned()),
+            linked_at_ms: Some(12),
+            ..thread()
+        };
+        let value = thread_b2_json(&linked);
+        assert_eq!(value["channelId"], json!("channel"));
+        assert_eq!(
+            value["linkedFile"],
+            json!({ "objectId": "object", "linkedAtMs": 12 })
+        );
+        let hinted = ChatThread {
+            linked_path_hint: Some("notes/plan.md".to_owned()),
+            ..linked
+        };
+        assert_eq!(
+            thread_b2_json(&hinted)["linkedFile"],
+            json!({ "objectId": "object", "linkedAtMs": 12, "pathHint": "notes/plan.md" })
+        );
+    }
+
+    #[test]
+    fn channel_thread_summary_omits_absent_opening_fields_and_chain_depth() {
+        let summary = ChannelThreadSummary {
+            thread: thread(),
+            message_count: 3,
+            last_read_sequence: 1,
+            unread_count: 2,
+            open_decision_count: 0,
+            opening_message: None,
+        };
+        assert!(
+            channel_thread_summary_json(&summary)
+                .get("openingMessage")
+                .is_none()
+        );
+        let opening = ChannelOpeningMessage {
+            message_id: "message".to_owned(),
+            author_kind: ChatActorKind::Automation,
+            author_display_name: "Stamp".to_owned(),
+            author_owner_display_name: None,
+            author_user_id: Some("user".to_owned()),
+            created_at_ms: 10,
+            automation: Some(ChatMessageAutomation {
+                automation_id: "collection:tasks#stamp".to_owned(),
+                chain_depth: 2,
+            }),
+            body_snippet: "hello".to_owned(),
+            reactions: Vec::new(),
+        };
+        let summary = ChannelThreadSummary {
+            opening_message: Some(opening),
+            ..summary
+        };
+        assert_eq!(
+            channel_thread_summary_json(&summary)["openingMessage"],
+            json!({
+                "id": "message",
+                "author": { "kind": "automation", "displayName": "Stamp" },
+                "createdAtMs": 10,
+                "bodySnippet": "hello",
+                "reactions": [],
+                "authorUserId": "user",
+                "automation": { "automationId": "collection:tasks#stamp" },
+            })
+        );
+    }
 
     #[test]
     fn optional_chat_fields_distinguish_missing_null_and_present_values() {
