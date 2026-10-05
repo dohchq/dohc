@@ -872,6 +872,20 @@ describe("closed document Set batches", () => {
     expect(saved!.steps[1]!.batches!.filter(batch => !batch.abandoned).map(batch => batch.count)).toEqual([4, 1, 1]);
   });
 
+  it("includes commit and submission time when sizing the next batch", async () => {
+    const space = workspace([task("rec_t", {Project: "A", Count: 1}), ...[0,1,2,3,4].map(id => task(`rec_${id}`, {Project: "A", Count: 1}))]);
+    const engine = batchEngine(space, {writerMs: 1});
+    const store = await scratchStore();
+    let now = 1_000;
+    const services = {...engine.services, submit: async (...args: Parameters<AutomationSetBatches["submit"]>) => {
+      const receipt = await engine.services.submit(...args);
+      now += 80;
+      return receipt;
+    }};
+    await expect(runCollectionAutomation({...space.dependencies(store), nowMs: () => now, setBatches: services}, batchInput(batchDefinition()))).resolves.toEqual({kind: "done"});
+    expect(engine.submissions.map(submission => submission.count)).toEqual([4, 1, 1]);
+  });
+
   it("abandons an oversized saved key and persists both sub-batches before sending either", async () => {
     const space = workspace([task("rec_t", { Project: "A", Count: 1 }), ...[0,1,2].map(id => task(`rec_${id}`, { Project: "A", Count: 1 }))]);
     const store = await scratchStore();

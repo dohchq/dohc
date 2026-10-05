@@ -419,9 +419,10 @@ async function walkSteps(
               return input.signal.aborted ? failed(DEADLINE_ERROR, true) : failed(errorText(error));
             }
           }
-          batchSize = Math.max(1, Math.min(8, Math.floor(batch.count * 12 / Math.max(1, receipt.writerMs))));
-          const writes = batchWrites(batch, receipt, step);
           const writeMs = Math.max(0, dependencies.nowMs() - writeStarted);
+          // Submission includes FULL commit and bounds the receipt's precommit timer.
+          batchSize = Math.max(1, Math.min(8, Math.floor(batch.count * 12 / Math.max(1, receipt.writerMs, writeMs))));
+          const writes = batchWrites(batch, receipt, step);
           const landed = writes.map(writes => ({ ordinal: step.ordinal, writes, writeMs: writeMs / batch!.count, writeCount: 1 }));
           if (!store.appendBatch) throw new Error("The run store cannot record Set batches.");
           const appendStarted = dependencies.nowMs();
