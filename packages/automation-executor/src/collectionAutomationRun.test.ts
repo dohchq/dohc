@@ -819,6 +819,18 @@ describe("closed document Set batches", () => {
     expect([...space.records.values()].map(record => record.values.Count)).toEqual([1,1,1,1,1,1]);
   });
 
+  it("keeps an all-open run on the borrowed path without a batch wait", async () => {
+    const ids = ["rec_t", "rec_0", "rec_1", "rec_2"];
+    const space = workspace(ids.map(id => task(id, {Project: "A", Count: 1})));
+    const store = await scratchStore();
+    const engine = batchEngine(space, {open: new Set(ids)});
+    await expect(runCollectionAutomation({...space.dependencies(store), setBatches: engine.services}, batchInput(batchDefinition()))).resolves.toEqual({kind: "done"});
+    expect(engine.submissions).toEqual([]);
+    expect(engine.waits()).toBe(0);
+    expect(space.keys.size).toBe(4);
+    expect([...space.records.values()].map(record => record.values.Count)).toEqual([2, 2, 2, 2]);
+  });
+
   it("recovers every record of a stopped committed batch inside Undo before any result append", async () => {
     const space = workspace([task("rec_t", { Project: "A", Count: 1 }), ...[0,1,2].map(id => task(`rec_${id}`, { Project: "A", Count: 1 }))]);
     const store = await scratchStore();

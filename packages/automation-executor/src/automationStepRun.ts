@@ -185,7 +185,7 @@ export async function runSteps(
     run.applied = (await reconcileSetBatches(run, backend.lookupBatch)).applied;
   }
   if (outcome.kind === "done") {
-    await backend.waitBatches?.(run);
+    if (run.steps.some(step => step.batches?.some(batch => !batch.abandoned))) await backend.waitBatches?.(run);
     run.outcome = { state: "done" };
   } else if (outcome.outcome.kind === "failed") {
     run.outcome = { state: "failed", error: outcome.outcome.error, run: input.claimRun, step: outcome.step };
