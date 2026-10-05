@@ -223,7 +223,7 @@ describe("stop and restore in main", () => {
 
   it.each([CHANNELS.stopAndRestore, CHANNELS.undoStopAndRestore])("reports unreadable policy for every file in %s", async channel => {
     // dohc's words, never the TOML parser's.
-    const unreadable = "dohc can't read .dohc/files.toml or .dohc/visibility.toml. Fix the file, then try again.";
+    const unreadable = "It can't read .dohc/files.toml. Fix the file, then try again.";
     const f = await capturedFiles(["notes/a.md", "docs/b.md"]);
     try {
       await f.writePolicy("[[rule] invalid");

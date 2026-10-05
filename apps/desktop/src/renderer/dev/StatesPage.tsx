@@ -182,7 +182,7 @@ const HIDDEN_HISTORY: HistoryPolicyUnreadableResult = {
 };
 // The toast a refused restore raises, in the words the shell builds for it.
 const REFUSED_RESTORE = new Error(
-  `Error invoking remote method 'desktop:restore-engine-moment-file': RestorePolicyRefusalError [policy-unreadable]: ${PARSER_TEXT}`,
+  `Error invoking remote method 'desktop:restore-engine-moment-file': RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: ${PARSER_TEXT}`,
 );
 const REFUSED_RESTORE_TOAST = {
   id: "refused-restore",

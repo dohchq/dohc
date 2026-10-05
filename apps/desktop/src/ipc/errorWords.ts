@@ -115,9 +115,14 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "*": null,
   },
   // A restore History's current rules refuse. An unreadable rules file's
-  // message is its parser's own text, which only Copy details carry.
+  // message leads with the files dohc can't read, then the parser's own text,
+  // which only Copy details carry. "It" is dohc, the caller's sentence's actor.
   RestorePolicyRefusalError: {
-    "policy-unreadable": "dohc can't read .dohc/files.toml or .dohc/visibility.toml. Fix the file, then try again.",
+    ".dohc/files.toml": "It can't read .dohc/files.toml. Fix the file, then try again.",
+    ".dohc/visibility.toml": "It can't read .dohc/visibility.toml. Fix the file, then try again.",
+    ".dohc/files.toml and .dohc/visibility.toml":
+      "It can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
+    ".dohc": "It can't read this workspace's .dohc folder. Fix the folder, then try again.",
     "path-not-admitted": "History no longer tracks this file. Track it in .dohc/files.toml, then try again.",
     "*": null,
   },

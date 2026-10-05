@@ -10,20 +10,24 @@ export function useTabTitles(workspaceId: string) {
     workspaceId: string;
     titles: ReadonlyMap<string, string>;
   }>({ workspaceId: "", titles: EMPTY_TAB_LABELS });
+  // A null title forgets the one learned, such as a path History now hides.
   const rememberTabTitle = useCallback(
-    (tabPath: string, title: string) => {
+    (tabPath: string, title: string | null) => {
       setKnownTabTitles((previous) => {
         // A title learned for another workspace never labels this one's tabs.
         const known =
           previous.workspaceId === workspaceId ? previous.titles : EMPTY_TAB_LABELS;
-        if (known.get(tabPath) === title) return previous;
-        return { workspaceId, titles: new Map(known).set(tabPath, title) };
+        if ((known.get(tabPath) ?? null) === title) return previous;
+        const titles = new Map(known);
+        if (title === null) titles.delete(tabPath);
+        else titles.set(tabPath, title);
+        return { workspaceId, titles };
       });
     },
     [workspaceId],
   );
   const rememberMomentDiffPath = useCallback(
-    (momentId: string, filePath: string) =>
+    (momentId: string, filePath: string | null) =>
       rememberTabTitle(momentDiffTabPath(momentId), filePath),
     [rememberTabTitle],
   );

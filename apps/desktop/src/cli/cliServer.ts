@@ -268,7 +268,9 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   fileObjectIdForPath(path: string): Promise<string | null>;
   filePathForObjectId(objectId: string): Promise<string | null>;
   listMoments(input: { limit: number; objectId?: string }): Promise<VersionedTextMomentSummary[]>;
-  readMoment(momentId: string): Promise<VersionedTextMoment | null>;
+  // "untracked": History has the change, but its rules no longer track a
+  // file it touched, so neither its path nor its contents may be read.
+  readMoment(momentId: string): Promise<VersionedTextMoment | "untracked" | null>;
   daemonReads: {
     queryChatMessagesGranular(input: {
       query: string;
@@ -2296,6 +2298,13 @@ async function dispatchWorkspace(
 
     case "moment": {
       const moment = await context.readMoment(request.args.id);
+      if (moment === "untracked") {
+        return {
+          ok: false as const,
+          status: "untracked" as const,
+          reason: `change ${request.args.id} is hidden because History no longer tracks its file`,
+        };
+      }
       if (!moment) {
         return {
           ok: false as const,

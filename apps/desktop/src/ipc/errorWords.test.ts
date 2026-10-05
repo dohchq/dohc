@@ -4,6 +4,7 @@ import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine
 import { describe, expect, it } from "vitest";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
 import { RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import type { WorkspacePolicyPath } from "./bridgeContract";
 import { ERROR_WORDS, ipcWireError, isWorkspaceUpdatingError, readError, withErrorWords } from "./errorWords";
 
 // What the renderer receives when a main-process handler rejects: Electron
@@ -150,19 +151,26 @@ describe("error words", () => {
       .toBe("This copy of dohc is missing a file it needs. Reinstall dohc.");
   });
 
-  it("says why History's rules refused a restore, and keeps the parser's text for Copy only", () => {
+  it("names the rules file a refused restore could not read, and keeps the parser's text for Copy only", () => {
     const parser = "visibility.toml: TOML parse error at line 3, column 9";
-    const unreadable = acrossIpc(new RestorePolicyRefusalError("policy-unreadable", parser), "desktop:restore-engine-moment-file");
-    expect(readError(unreadable)).toEqual({
-      words: "dohc can't read .dohc/files.toml or .dohc/visibility.toml. Fix the file, then try again.",
-      mapped: true,
-      cause: `RestorePolicyRefusalError [policy-unreadable]: ${parser}`,
-    });
-    expect(withErrorWords("dohc could not restore notes/plan.md.", unreadable)).toBe(
-      "dohc could not restore notes/plan.md. dohc can't read .dohc/files.toml or .dohc/visibility.toml. Fix the file, then try again.",
+    const refused = (unreadable: WorkspacePolicyPath[]) => acrossIpc(
+      new RestorePolicyRefusalError({ reason: "policy-unreadable", unreadable, detail: parser }),
+      "desktop:restore-engine-moment-file",
     );
+    expect(readError(refused([".dohc/visibility.toml"]))).toEqual({
+      words: "It can't read .dohc/visibility.toml. Fix the file, then try again.",
+      mapped: true,
+      cause: `RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: ${parser}`,
+    });
+    expect(withErrorWords("dohc could not restore notes/plan.md.", refused([".dohc/visibility.toml"]))).toBe(
+      "dohc could not restore notes/plan.md. It can't read .dohc/visibility.toml. Fix the file, then try again.",
+    );
+    expect(readError(refused([".dohc/files.toml"])).words).toBe("It can't read .dohc/files.toml. Fix the file, then try again.");
+    expect(readError(refused([".dohc/files.toml", ".dohc/visibility.toml"])).words)
+      .toBe("It can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.");
+    expect(readError(refused([".dohc"])).words).toBe("It can't read this workspace's .dohc folder. Fix the folder, then try again.");
     // Main reads the class itself for Stop and restore's review rows.
-    expect(readError(new RestorePolicyRefusalError("path-not-admitted", "This history moment is no longer available.")).words)
+    expect(readError(new RestorePolicyRefusalError({ reason: "path-not-admitted" })).words)
       .toBe("History no longer tracks this file. Track it in .dohc/files.toml, then try again.");
   });
 

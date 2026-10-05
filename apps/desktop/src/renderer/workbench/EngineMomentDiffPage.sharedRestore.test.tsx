@@ -25,7 +25,8 @@ async function open(detail: WorkspaceEngineMomentDetail) {
     nextGrantCursor: null, nextBeforeCursor: null});
   vi.stubGlobal("dohcDesktop", {readEngineMoment: vi.fn().mockResolvedValue({moment}), ownerRestore});
   render(<EngineMomentDiffPage workspaceId="workspace" tabPath={momentDiffTabPath(moment.id)}
-    onBeforeRestore={async () => noop} onOpenFile={noop} onPathResolved={noop} registerActiveUndo={noop} onRestored={noop} onStopAndRestore={stopAndRestore} onError={noop} onSettled={noop} />);
+    onBeforeRestore={async () => noop} onOpenFile={noop} onPathResolved={noop} registerActiveUndo={noop} onRestored={noop} onStopAndRestore={stopAndRestore} onError={noop} onSettled={noop}
+    historyAnswer={null} onReopenRestore={noop} restoreRequested={false} onRestoreRequestTaken={noop} />);
   await screen.findByTestId("engine-diff-restore-file");
   return {moment, ownerRestore};
 }

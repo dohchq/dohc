@@ -73,6 +73,10 @@ describe("history diff page", () => {
       onStopAndRestore: () => {},
       onError,
       onSettled: noop,
+      historyAnswer: null,
+      onReopenRestore: noop,
+      restoreRequested: false,
+      onRestoreRequestTaken: noop,
     };
     return render(<EngineMomentDiffPage {...props} />);
   }
@@ -99,6 +103,10 @@ describe("history diff page", () => {
         onStopAndRestore={() => {}}
         onError={noop}
         onSettled={noop}
+        historyAnswer={null}
+        onReopenRestore={noop}
+        restoreRequested={false}
+        onRestoreRequestTaken={noop}
       />,
     );
     await act(async () => {});
@@ -168,6 +176,10 @@ describe("history diff page", () => {
         onStopAndRestore={() => {}}
         onError={noop}
         onSettled={noop}
+        historyAnswer={null}
+        onReopenRestore={noop}
+        restoreRequested={false}
+        onRestoreRequestTaken={noop}
       />,
     );
     await screen.findByTestId("engine-diff-lines");

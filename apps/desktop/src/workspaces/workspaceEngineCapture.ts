@@ -1,6 +1,7 @@
 import type { RecordEditSession } from "@dohc/automation-executor/collection-record-edits";
 import { errorMessage } from "./workspaceError";
 import type {AppResponseUndoSelection,AppResponseUndoResult} from "./ownerAppResponseModeration";
+import type { WorkspacePolicyPath } from "../ipc/bridgeContract";
 import type { WatcherEvent } from "@dohc/workspace-core";
 import {
   validateUserMaterializePath,
@@ -1094,10 +1095,24 @@ export class RestoreFolderInUseError extends Error {
   }
 }
 
+// History's current rules refused a restore. An unreadable rules file's
+// message leads with the files dohc could not read, so the error map names
+// them after IPC turns the error into one string. The parser's text follows,
+// for Copy details only.
 export class RestorePolicyRefusalError extends Error {
-  constructor(readonly reason: "path-not-admitted" | "policy-unreadable", detail: string) {
-    super(detail);
+  readonly reason: "path-not-admitted" | "policy-unreadable";
+  readonly unreadable: readonly WorkspacePolicyPath[];
+  constructor(
+    refusal:
+      | { reason: "path-not-admitted" }
+      | { reason: "policy-unreadable"; unreadable: readonly WorkspacePolicyPath[]; detail: string },
+  ) {
+    super(refusal.reason === "policy-unreadable"
+      ? `${refusal.unreadable.join(" and ")}: ${refusal.detail}`
+      : "This history moment is no longer available.");
     this.name = "RestorePolicyRefusalError";
+    this.reason = refusal.reason;
+    this.unreadable = refusal.reason === "policy-unreadable" ? refusal.unreadable : [];
   }
 }
 
@@ -6293,7 +6308,9 @@ export function createWorkspaceEngineCapture(
       const author = structuredClone(person);
       return enqueueResult("restore file", async () => {
         const policy = await readPolicyForTask();
-        if (policy.errors.length) throw new RestorePolicyRefusalError("policy-unreadable", policy.errors.join("; "));
+        if (policy.errors.length) {
+          throw new RestorePolicyRefusalError({ reason: "policy-unreadable", unreadable: policy.unreadable, detail: policy.errors.join("; ") });
+        }
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
         await engine.flushCapture?.();
@@ -6394,7 +6411,7 @@ export function createWorkspaceEngineCapture(
           };
         }
         if (!historyMomentPathsAdmitted(historyPathAdmission(policy), moment)) {
-          throw new RestorePolicyRefusalError("path-not-admitted", "This history moment is no longer available.");
+          throw new RestorePolicyRefusalError({ reason: "path-not-admitted" });
         }
         if (moment.versionId !== activeVersionId) {
           throw new Error(

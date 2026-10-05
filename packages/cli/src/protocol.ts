@@ -708,7 +708,9 @@ const momentResultSchema = z.discriminatedUnion("ok", [
       }).strict(),
     })
     .strict(),
-  z.object({ ok: z.literal(false), reason: z.string().min(1) }).strict(),
+  // `untracked`: History has the change, but its rules no longer track a
+  // file it touched. Neither its path nor its contents are sent.
+  z.object({ ok: z.literal(false), status: z.literal("untracked").optional(), reason: z.string().min(1) }).strict(),
 ]);
 
 const rawChannelIdSchema = z.string().regex(/^channel-/u);

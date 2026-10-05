@@ -206,6 +206,7 @@ import {
   versionCompareTabPath,
   isMomentDiffTabPath,
   momentDiffTabPath,
+  parseMomentDiffTabPath,
   collectionTabPath,
   transactionalCollectionTabPath,
   parseTransactionalCollectionTabPath,
@@ -2392,6 +2393,17 @@ export function DesktopWorkspaceShell(props: {
       reportShellError(fallback, error, retry, undefined, identity),
     [reportShellError],
   );
+  // Try again on a failed restore opens the change's tab, and that page asks
+  // before it restores, with its Undo restore after.
+  const [restoreRequest, setRestoreRequest] = useState<{ workspaceId: string; momentId: string } | null>(null);
+  const reopenRestore = useCallback(
+    (momentId: string, path: string) => {
+      setRestoreRequest({ workspaceId, momentId });
+      openMomentDiffTab(momentId, path);
+    },
+    [openMomentDiffTab, workspaceId],
+  );
+  const takeRestoreRequest = useCallback(() => setRestoreRequest(null), []);
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
       const current = wbRef.current;
@@ -4987,6 +4999,13 @@ export function DesktopWorkspaceShell(props: {
                   onStopAndRestore={stopAndRestore.open}
                   onError={reportRestoreError}
                   onSettled={clearIdentity}
+                  historyAnswer={engineHistory ?? engineHistoryPolicyError}
+                  onReopenRestore={reopenRestore}
+                  restoreRequested={
+                    restoreRequest?.workspaceId === workspaceId &&
+                    restoreRequest.momentId === parseMomentDiffTabPath(tabPath ?? "")
+                  }
+                  onRestoreRequestTaken={takeRestoreRequest}
                 />
               )
             ) : isVersionCompareTabPath(tabPath) ? (

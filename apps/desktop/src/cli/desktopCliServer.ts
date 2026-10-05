@@ -415,8 +415,10 @@ export function createDesktopCliServer<State>(
         const { moment } = detail;
         // History reads come from the active version, as the list does.
         if (moment.versionId !== (await capture.listVersions()).activeVersionId) return null;
-        const admitted = historyPathAdmission(await readWorkspaceEnginePolicy(workspace.rootPath));
-        return historyMomentPathsAdmitted(admitted, moment) ? moment : null;
+        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+        // Unreadable rules hide every change; that is not this change's file.
+        if (policy.errors.length) return null;
+        return historyMomentPathsAdmitted(historyPathAdmission(policy), moment) ? moment : "untracked";
       },
     };
   }

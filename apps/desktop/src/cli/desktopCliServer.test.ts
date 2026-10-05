@@ -232,7 +232,7 @@ describe("desktop CLI workspace context", () => {
     expect(f.capture.listMoments).toHaveBeenCalledWith({ limit: 4 });
     await context.listMoments({ limit: 4, objectId: "object-plan" });
     expect(f.capture.listMoments).toHaveBeenLastCalledWith({ limit: 4, objectId: "object-plan" });
-    const detail = { id: "detail", versionId: "main", path: "notes.md", payload: { before: null, after: { path: "notes.md", text: "" } } } as unknown as NonNullable<Awaited<ReturnType<typeof context.readMoment>>>;
+    const detail = { id: "detail", versionId: "main", path: "notes.md", payload: { before: null, after: { path: "notes.md", text: "" } } } as unknown as Exclude<Awaited<ReturnType<typeof context.readMoment>>, "untracked" | null>;
     f.capture.readMoment.mockResolvedValueOnce({ protected: false, moment: detail })
       .mockResolvedValueOnce({ protected: true, moment: { id: "secret" } } as never).mockResolvedValueOnce(null);
     expect(await context.readMoment("visible")).toBe(detail);
@@ -289,16 +289,21 @@ describe("desktop CLI workspace context", () => {
       expect(await mcp("moment", { id: "journal" })).toMatchObject({ ok: true });
 
       await writeFile(join(root, ".dohc", "files.toml"), '[[rule]]\npath = "private/**"\ntracked = false\n');
-      expect(await cli("history", "show", "journal")).toEqual({ exitCode: 1, stdout: "", stderr: "dohc: change not found: journal\n" });
-      expect(await cli("history", "show", "moved")).toMatchObject({ exitCode: 1, stderr: "dohc: change not found: moved\n" });
+      // An untracked change says so, as the desktop's diff does, and names no path.
+      expect(await cli("history", "show", "journal")).toEqual({ exitCode: 1, stdout: "",
+        stderr: "dohc: change journal is hidden because History no longer tracks its file\n" });
+      expect(await cli("history", "show", "moved")).toMatchObject({ exitCode: 1,
+        stderr: "dohc: change moved is hidden because History no longer tracks its file\n" });
       expect((await cli("history", "show", "notes")).stdout).toBe("plain");
       // A list row names only the path after the change; show also checks the path before it.
       expect((await cli("history", "list")).stdout).toBe([
         `moved · ${new Date(20).toISOString()} · rename · notes/moved.md`,
         `notes · ${new Date(20).toISOString()} · write · notes.md`,
       ].join("\n") + "\n");
-      expect(await mcp("moment", { id: "journal" })).toEqual({ ok: false, reason: "change not found: journal" });
-      expect(await mcp("moment", { id: "moved" })).toEqual({ ok: false, reason: "change not found: moved" });
+      expect(await mcp("moment", { id: "journal" })).toEqual({
+        ok: false, status: "untracked", reason: "change journal is hidden because History no longer tracks its file" });
+      expect(await mcp("moment", { id: "moved" })).toEqual({
+        ok: false, status: "untracked", reason: "change moved is hidden because History no longer tracks its file" });
       expect(await mcp("moments", {})).toMatchObject({ changes: [{ id: "moved" }, { id: "notes" }], count: 2 });
       // Neither door sends the rename's summary, which names the excluded path.
       expect(JSON.stringify(await mcp("moments", { includeFiles: true }))).not.toContain("private/");
@@ -308,7 +313,8 @@ describe("desktop CLI workspace context", () => {
       // A policy file dohc cannot read hides all history, as it blocks search.
       await writeFile(join(root, ".dohc", "files.toml"), "[[rule]\n");
       expect(await mcp("moments", {})).toMatchObject({ changes: [], count: 0 });
-      expect(await mcp("moment", { id: "notes" })).toMatchObject({ ok: false });
+      // Unreadable rules hide every change, which says nothing about this change's file.
+      expect(await mcp("moment", { id: "notes" })).toEqual({ ok: false, reason: "change not found: notes" });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

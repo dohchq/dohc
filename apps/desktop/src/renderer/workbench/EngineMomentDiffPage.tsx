@@ -58,6 +58,10 @@ export function EngineMomentDiffPage({
   onStopAndRestore,
   onError,
   onSettled,
+  historyAnswer,
+  onReopenRestore,
+  restoreRequested,
+  onRestoreRequestTaken,
 }: {
   workspaceId: string;
   tabPath: string;
@@ -68,16 +72,26 @@ export function EngineMomentDiffPage({
   // edit lands between the drain and the lineage change.
   onBeforeRestore: () => Promise<() => void>;
   onOpenFile: (path: string) => void;
-  onPathResolved: (momentId: string, path: string) => void;
+  // The tab's title names the change's path, or nothing once History's rules
+  // hide the change.
+  onPathResolved: (momentId: string, path: string | null) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
   onRestored: () => void;
   // Opens the shell's Stop and restore for a person the owner shared with,
   // or for the Edit share link that wrote this change.
   onStopAndRestore: (target: StopTarget) => void;
-  // A failed restore or undo goes to the shell's toast and Notices row, with
-  // a Try again that repeats it. A later success clears that row.
+  // A failed restore or undo goes to the shell's toast and Notices row. A
+  // later success clears that row.
   onError: (fallback: string, error: unknown, retry: () => void, identity: string) => void;
   onSettled: (identity: string) => void;
+  // The shell's latest History answer. Each new one reads this change again,
+  // because the rules that decide whether History shows it may have changed.
+  historyAnswer: object | null;
+  // Try again on a failed restore asks first: the shell opens this tab and
+  // sets `restoreRequested`, and the page opens its confirm dialog.
+  onReopenRestore: (momentId: string, path: string) => void;
+  restoreRequested: boolean;
+  onRestoreRequestTaken: () => void;
 }) {
   const momentId = useMemo(() => parseMomentDiffTabPath(tabPath), [tabPath]);
   const [state, setState] = useState<
@@ -101,36 +115,58 @@ export function EngineMomentDiffPage({
   const [undoMomentId, setUndoMomentId] = useState<string | null>(null);
   const pageRef = useRef<HTMLElement | null>(null);
   const restoreInFlight = useRef(false);
-  // Liveness: bumped when the tab changes/unmounts so a slow response can
-  // never repaint another moment's page.
+  // Liveness of the change this page shows: bumped when the tab changes or
+  // the page unmounts, so a slow restore can never repaint another change.
   const liveToken = useRef(0);
+  // Only the newest read may set what the page shows; a newer History answer
+  // or Try again makes every earlier read stale.
+  const readToken = useRef(0);
+  // The change the page has an answer for. Reading it again keeps that
+  // answer on screen until the new one arrives.
+  const answeredFor = useRef<string | null>(null);
 
+  useEffect(() => () => {
+    liveToken.current += 1;
+  }, [momentId, workspaceId]);
   useEffect(() => {
-    const token = ++liveToken.current;
+    const read = ++readToken.current;
     if (!momentId) {
       setState({ status: "error" });
       return;
     }
-    setState({ status: "loading" });
+    const key = `${workspaceId}\0${momentId}`;
+    if (answeredFor.current !== key) setState({ status: "loading" });
     void bridge()
       .readEngineMoment({ workspaceId, momentId })
       .then((result) => {
-        if (token !== liveToken.current) return;
+        if (read !== readToken.current) return;
+        answeredFor.current = key;
         if ("status" in result) {
+          // The tab no longer names the file, so it shows only that a change exists.
+          onPathResolved(momentId, null);
+          setConfirmRestoreOpen(false);
+          setSharedRestoreOpen(false);
           setState(result.status === "untracked" ? { status: "untracked" } : { status: "hidden", result });
           return;
         }
         if (result.moment) onPathResolved(momentId, result.moment.path);
-        setState({ status: "ready", moment: result.moment });
+        const next = result.moment;
+        // A change never changes, so reading the same one again keeps the
+        // diff already built for it.
+        setState((current) =>
+          current.status === "ready" && next !== null && current.moment?.id === next.id
+            ? current
+            : { status: "ready", moment: next });
       })
       .catch(() => {
-        if (token !== liveToken.current) return;
-        setState({ status: "error" });
+        if (read !== readToken.current) return;
+        // A failed re-read leaves the last answer on screen.
+        setState((current) => (current.status === "loading" ? { status: "error" } : current));
       });
     return () => {
-      liveToken.current += 1;
+      readToken.current += 1;
     };
-  }, [momentId, onPathResolved, readAttempt, workspaceId]);
+  }, [historyAnswer, momentId, onPathResolved, readAttempt, workspaceId]);
   useEffect(() => {
     setRestoreState({ status: "idle" });
     setConfirmRestoreOpen(false);
@@ -195,7 +231,10 @@ export function EngineMomentDiffPage({
       onError(
         kind === "undo" ? `dohc could not undo the restore of ${path}.` : `dohc could not restore ${path}.`,
         error,
-        () => void runRestore(kind, target, path, token),
+        // The file may have changed by the time the person tries again, so a
+        // restore asks again on its page. Undo puts back the file's state just
+        // before the restore, so it runs again as it is.
+        kind === "undo" ? () => void runRestore(kind, target, path, token) : () => onReopenRestore(target, path),
         identity,
       );
       if (live()) setRestoreState({ status: "idle" });
@@ -203,15 +242,26 @@ export function EngineMomentDiffPage({
       releaseOperation?.();
       restoreInFlight.current = false;
     }
-  }, [onBeforeRestore, onError, onRestored, onSettled, workspaceId]);
+  }, [onBeforeRestore, onError, onReopenRestore, onRestored, onSettled, workspaceId]);
 
   const undoRestore = useCallback(async () => {
     if (!undoMomentId || !moment || restoreBusy) return;
     await runRestore("undo", undoMomentId, moment.path, liveToken.current);
   }, [moment, restoreBusy, runRestore, undoMomentId]);
 
+  // The shell asked for this change's confirm dialog, from a failed
+  // restore's Try again. The request is taken once this change has an
+  // answer, whether or not the change can still be restored. Until then the
+  // page may still show the change its tab showed before.
   useEffect(() => {
-    if (!undoMomentId || restoreBusy) {
+    if (!restoreRequested || state.status === "loading") return;
+    if (answeredFor.current !== `${workspaceId}\0${momentId}`) return;
+    if (state.status === "ready" && canRestore && !restoreBusy) setConfirmRestoreOpen(true);
+    onRestoreRequestTaken();
+  }, [canRestore, momentId, onRestoreRequestTaken, restoreBusy, restoreRequested, state, workspaceId]);
+
+  useEffect(() => {
+    if (!undoMomentId || restoreBusy || !moment) {
       registerActiveUndo(null);
       return;
     }
@@ -237,7 +287,13 @@ export function EngineMomentDiffPage({
       },
     });
     return () => registerActiveUndo(null);
-  }, [registerActiveUndo, restoreBusy, undoMomentId, undoRestore]);
+  }, [moment, registerActiveUndo, restoreBusy, undoMomentId, undoRestore]);
+
+  // Try again shows that it is reading, as the History panel's does.
+  const readAgain = () => {
+    setState({ status: "loading" });
+    setReadAttempt((attempt) => attempt + 1);
+  };
 
   if (!momentId || state.status === "error") {
     return (
@@ -254,7 +310,7 @@ export function EngineMomentDiffPage({
       <HistoryHiddenState
         testId="engine-diff-hidden"
         result={state.result}
-        onRetry={() => setReadAttempt((attempt) => attempt + 1)}
+        onRetry={readAgain}
       />
     );
   }
@@ -262,7 +318,7 @@ export function EngineMomentDiffPage({
     return (
       <HistoryUntrackedState
         testId="engine-diff-untracked"
-        onRetry={() => setReadAttempt((attempt) => attempt + 1)}
+        onRetry={readAgain}
       />
     );
   }
