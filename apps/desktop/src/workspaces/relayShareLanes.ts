@@ -24,11 +24,6 @@ export function isReadableChatChannelRow(row: ShareRow): boolean {
   return kind === "chat" || kind === "group";
 }
 
-/** A row the relay could not read at all. */
-export function isDamagedShareRow(row: ShareRow): boolean {
-  return row.selector === null || row.selector === undefined;
-}
-
 export function pathShareLanes(listing: {
   granted?: ShareRow[];
   received?: ShareRow[];

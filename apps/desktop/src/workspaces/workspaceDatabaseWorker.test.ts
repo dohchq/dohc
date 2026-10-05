@@ -1,7 +1,4 @@
-import {
-  createDatabaseOperation,
-  databaseOpLogPath,
-} from "@dohc/workspace-core";
+import { databaseOpLogPath } from "@dohc/workspace-core";
 import {
   copyFile,
   link,
@@ -358,19 +355,13 @@ describe("workspace database worker", () => {
     ]);
 
     const invalidOperations = [
-      { ...operation(" ") },
-      { ...operation("op-invalid-path"), databasePath: "" },
-      { ...operation("op-invalid-table"), table: "\t" },
-      { ...operation("op-invalid-row"), rowId: "" },
-      { ...operation("op-invalid-time"), appliedAt: Number.NaN },
-    ];
-    for (const invalidOperation of invalidOperations) {
-      let expectedError: unknown;
-      try {
-        createDatabaseOperation({ ...invalidOperation, version: 2 });
-      } catch (error) {
-        expectedError = error;
-      }
+      [operation(" "), "operationId"],
+      [{ ...operation("op-invalid-path"), databasePath: "" }, "databasePath"],
+      [{ ...operation("op-invalid-table"), table: "\t" }, "table"],
+      [{ ...operation("op-invalid-row"), rowId: "" }, "rowId"],
+      [{ ...operation("op-invalid-time"), appliedAt: Number.NaN }, "appliedAt"],
+    ] as const;
+    for (const [invalidOperation, field] of invalidOperations) {
       await expect(
         databaseWorker.editPath({
           absolutePath: databasePath,
@@ -379,7 +370,7 @@ describe("workspace database worker", () => {
           edit: UPDATE,
           operation: invalidOperation,
         }),
-      ).rejects.toThrow((expectedError as Error).message);
+      ).rejects.toThrow(`Database operation ${field}`);
     }
     expect(await logOperations(paths.logPath)).toHaveLength(1);
   });

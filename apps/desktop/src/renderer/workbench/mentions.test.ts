@@ -7,7 +7,6 @@ import {
   matchMentionCandidates,
   mentionsAnyCandidate,
   resolveMentionCandidate,
-  toMentionSegments,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
 
@@ -93,9 +92,6 @@ describe("findMentions code-awareness (ignoreCode)", () => {
   it("keeps a package scope like @agent/pkg in code inert", () => {
     const body = "install `@agent/pkg` please";
     expect(mentionsAnyCandidate(body, [agent], { ignoreCode: true })).toBe(false);
-    expect(toMentionSegments(body, candidates, { ignoreCode: true })).toEqual([
-      { type: "text", text: body },
-    ]);
   });
 });
 
@@ -114,23 +110,6 @@ describe("codeRanges", () => {
 describe("resolveMentionCandidate", () => {
   it("returns null for an unknown handle", () => {
     expect(resolveMentionCandidate("nobody", candidates)).toBeNull();
-  });
-});
-
-describe("toMentionSegments", () => {
-  it("preserves surrounding text verbatim and splits out mentions", () => {
-    const segments = toMentionSegments("ok @agent go", candidates);
-    expect(segments).toEqual([
-      { type: "text", text: "ok " },
-      { type: "mention", text: "@agent", candidate: agent },
-      { type: "text", text: " go" },
-    ]);
-  });
-
-  it("returns a single text segment when there are no mentions", () => {
-    expect(toMentionSegments("no mentions here", candidates)).toEqual([
-      { type: "text", text: "no mentions here" },
-    ]);
   });
 });
 
