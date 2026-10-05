@@ -634,10 +634,12 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: RelayWorkspaceParams = parse(params)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let progress = Arc::default();
         let push = || -> Result<RelayOperation, WireError> {
             Ok(RelayOperation::Push {
                 workspace_id: open.workspace_id.clone(),
                 now_ms: now_ms()?,
+                progress: Arc::clone(&progress),
                 max_read_bytes: self
                     .relay_sync_admission()
                     .map_or(0, |(policy, _)| policy.max_read_bytes),

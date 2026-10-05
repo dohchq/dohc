@@ -642,6 +642,41 @@ pub struct RelaySyncClient<T> {
     automation_claims: std::sync::Mutex<Vec<dohc_engine_domain::AutomationClaim>>,
 }
 
+/// Selection progress for one logical push, including transport continuations.
+#[derive(Debug, Default)]
+pub struct WorkspacePushProgress {
+    file_versions_selected: bool,
+}
+
+impl WorkspacePushProgress {
+    fn select_file_versions(
+        &mut self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<bool, RelayError> {
+        if self.file_versions_selected {
+            return Ok(true);
+        }
+        match store
+            .write_with(faults, |tx| {
+                if !crate::ydoc_origination::can_originate_local_bases_in_tx(tx, workspace_id)? {
+                    return Ok::<_, SyncError>(false);
+                }
+                crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id)?;
+                Ok(true)
+            })
+            .map_err(local)?
+        {
+            TxnOutcome::Committed(selected) => {
+                self.file_versions_selected = selected;
+                Ok(true)
+            }
+            TxnOutcome::Crashed { .. } => Ok(false),
+        }
+    }
+}
+
 struct PendingBaseRelayRepair {
     key: dohc_engine_collab::DocKey,
     lineage_claim_id: String,
@@ -1028,6 +1063,29 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         now_ms: i64,
         max_read_bytes: usize,
     ) -> Result<SyncPassOutcome, RelayError> {
+        self.resume_workspace_push(
+            store,
+            workspace_id,
+            faults,
+            leases,
+            now_ms,
+            max_read_bytes,
+            &mut WorkspacePushProgress::default(),
+        )
+    }
+
+    /// Reuse `progress` until this push finishes, even when transport I/O yields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume_workspace_push(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+        now_ms: i64,
+        max_read_bytes: usize,
+        progress: &mut WorkspacePushProgress,
+    ) -> Result<SyncPassOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::IdentityRequired)?;
@@ -1059,14 +1117,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             now_ms,
         )
         .map_err(local)?;
-        match store
-            .write_with(faults, |tx| {
-                crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id)
-            })
-            .map_err(local)?
-        {
-            TxnOutcome::Committed(()) => {}
-            TxnOutcome::Crashed { .. } => return Ok(SyncPassOutcome::CrashedAfterRemoteCommit),
+        if !progress.select_file_versions(store, workspace_id, faults)? {
+            return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
         }
         let mut origins = list_workspace_origins(store, workspace_id).map_err(local)?;
         let mut pushed = 0_usize;
@@ -1115,14 +1167,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 .map_err(local)?,
             );
             enrollment_prepared = true;
-            match store
-                .write_with(faults, |tx| {
-                    crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id)
-                })
-                .map_err(local)?
-            {
-                TxnOutcome::Committed(()) => {}
-                TxnOutcome::Crashed { .. } => return Ok(SyncPassOutcome::CrashedAfterRemoteCommit),
+            if !progress.select_file_versions(store, workspace_id, faults)? {
+                return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
             }
             // Re-read so the probe's backfill enters the push loop.
             origins = list_workspace_origins(store, workspace_id).map_err(local)?;
@@ -1219,16 +1265,8 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             .map_err(local)?,
                         );
                         enrollment_prepared = true;
-                        match store
-                            .write_with(faults, |tx| {
-                                crate::enrolment::backfill_file_versions_in_tx(tx, workspace_id)
-                            })
-                            .map_err(local)?
-                        {
-                            TxnOutcome::Committed(()) => {}
-                            TxnOutcome::Crashed { .. } => {
-                                return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
-                            }
+                        if !progress.select_file_versions(store, workspace_id, faults)? {
+                            return Ok(SyncPassOutcome::CrashedAfterRemoteCommit);
                         }
                         for added in list_workspace_origins(store, workspace_id).map_err(local)? {
                             if seen_origins.insert(added.clone()) {
