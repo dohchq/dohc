@@ -102,6 +102,20 @@ it("returns focus to the trigger when a press on blank space ends", async () => 
   fireEvent.pointerUp(document.body);
   expect(document.activeElement).toBe(trigger);
 });
+it("counts the workspace's frame as blank space", async () => {
+  render(
+    <div tabIndex={-1} data-focus-surface="workspace" data-testid="frame">
+      <Menu />
+    </div>,
+  );
+  const trigger = screen.getByRole("button", { name: "Trigger" });
+  const frame = screen.getByTestId("frame");
+  fireEvent.pointerDown(frame);
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  frame.focus();
+  fireEvent.pointerUp(frame);
+  expect(document.activeElement).toBe(trigger);
+});
 it("leaves focus on the control a press outside lands on", async () => {
   render(<Menu />);
   const elsewhere = screen.getByRole("button", { name: "Elsewhere" });

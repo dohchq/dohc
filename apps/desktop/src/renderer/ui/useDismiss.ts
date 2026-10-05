@@ -44,14 +44,16 @@ export function useDismiss(options: {
     function onPointerDown(event: PointerEvent) {
       if (!element || element.contains(event.target as Node)) return;
       close();
-      // A press on blank space takes focus to the page after the close has
-      // returned it. When the press ends there, focus goes back to the
-      // trigger, as it does for every other close. A press on a control
-      // keeps the focus it gave that control.
+      // A press on blank space takes focus to the page, or to the
+      // workspace's frame, after the close has returned it. When the press
+      // ends there, focus goes back to the trigger, as it does for every
+      // other close. A press on a control keeps the focus it gave that control.
       const settle = (end: Event) => {
         document.removeEventListener("pointerup", settle, true);
         document.removeEventListener("pointercancel", settle, true);
-        if (end.type === "pointerup" && document.activeElement === document.body) trigger.current?.focus();
+        const active = document.activeElement;
+        const blank = active === document.body || (active instanceof HTMLElement && active.dataset.focusSurface === "workspace");
+        if (end.type === "pointerup" && blank) trigger.current?.focus();
       };
       document.addEventListener("pointerup", settle, true);
       document.addEventListener("pointercancel", settle, true);
