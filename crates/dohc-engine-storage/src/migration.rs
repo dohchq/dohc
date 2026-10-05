@@ -2896,6 +2896,17 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE live_device_update_applications DROP COLUMN declared_on_behalf_of; ALTER TABLE live_device_update_applications DROP COLUMN declared_depth; ALTER TABLE live_device_update_applications DROP COLUMN declared_agent_id; ALTER TABLE live_device_update_applications ADD COLUMN admitted_metadata_json TEXT CHECK (admitted_metadata_json IS NULL OR json_valid(admitted_metadata_json)); ALTER TABLE live_audit_events ADD COLUMN canonical_version INTEGER NOT NULL DEFAULT 1 CHECK (canonical_version IN (1,2));",
         sets_user_version: None,
     },
+    Migration {
+        ordinal: 30,
+        id: "v2-retained-head-export-attempts",
+        sql: "CREATE INDEX replication_log_moment_object ON replication_log( \
+                workspace_id,json_extract(payload_json,'$.versionId'), \
+                json_extract(payload_json,'$.objectId')) WHERE op_kind='moment.append'; \
+              ALTER TABLE ydoc_docs ADD COLUMN export_attempt_moment_id TEXT; \
+              ALTER TABLE ydoc_docs ADD COLUMN export_attempt_update_seq INTEGER; \
+              ALTER TABLE ydoc_docs ADD COLUMN export_attempt_snapshot_seq INTEGER;",
+        sets_user_version: None,
+    },
 ];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
@@ -3337,6 +3348,10 @@ mod tests {
             (
                 "v2-live-admitted-metadata-receipts",
                 "384caa34711fd4cc1431c153d3e567f33b4c99e8f5428175f7c76c64f7ef83c3",
+            ),
+            (
+                "v2-retained-head-export-attempts",
+                "ba1421193e0df1585620c17a25e4a1e085340eb5669438b0e23046351b7073df",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

@@ -166,7 +166,7 @@ describe("owner app publication", () => {
   });
   it("prepares exact sources without upload, then approves the displayed digest and supports withdrawal", async () => {
     const h = harness(), prepared = await h.prepare();
-    expect(prepared).toMatchObject({ externalNetwork: true, capabilities: [], sourcePaths: ["app/app.publish.json", "app/index.js"] });
+    expect(prepared).toMatchObject({ audience:{shareId:"s",grantId:"g",selector:{paths:["app"],versionId:null},access:"view"}, externalNetwork: true, capabilities: [], sourcePaths: ["app/app.publish.json", "app/index.js"] });
     expect(h.upload).not.toHaveBeenCalled();
     h.source.set("app/index.js", Buffer.from("later source edit"));
     expect(await h.approve(prepared)).toMatchObject({ kind: "published", authorityRevision: 1 });
@@ -224,7 +224,7 @@ describe("owner app publication", () => {
     h.relay.mockResolvedValueOnce({ publicationId: "a".repeat(64), owner, active: true, authorityRevision: 3 });
     expect(await h.approve(reviewed)).toMatchObject({ kind: "published", authorityRevision: 3 });
     expect(h.relay.mock.calls.at(-1)![1]).toMatch(/\/reactivate$/);
-    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({ expectedAuthorityRevision: 2 });
+    expect(JSON.parse(String(h.relay.mock.calls.at(-1)![2]!.body))).toEqual({ expectedAuthorityRevision: 2, agent: null });
     expect(h.upload).toHaveBeenCalledOnce();
   });
   it("refuses an individual bundle above the relay blob cap before approval", async () => {
@@ -380,4 +380,61 @@ it("checks relay-returned revisions directly on every publication preparation", 
     expect(capability.operations.find(operation => operation.operationId === id(6))).not.toHaveProperty("fields");
     expect(verify.mock.calls.every(([, lookup]) => lookup === undefined)).toBe(true);
   } finally { verify.mockRestore(); generate.mockRestore(); }
+});
+
+
+it("returns the scoped link credential only from creation and app suffixes from publication", async () => {
+  const h = harness(), original = h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async (...args) => args[1].endsWith("/shares/links") && args[2]?.method === "POST"
+    ? {ok:true,workspaceId:"w",shareId:"s",grantId:"g",selector:h.grant.selector,access:"view",generation:h.grant.generation,url:"https://relay.example/s/#secret"}
+    : original(...args));
+  const link = await h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(101)});
+  expect(link).toMatchObject({kind:"linkCreated",url:"https://relay.example/s/#secret",access:"view",selector:{paths:["app"],versionId:null},bearerWarning:expect.stringContaining("anyone who holds it")});
+  expect(JSON.parse(String(h.relay.mock.calls[0]![2]!.body))).toMatchObject({paths:["app"],access:"view",operationId:id(101)});
+  const result = await h.approve(await h.prepare());
+  expect(result).toMatchObject({kind:"published",appQuery:"?app="+"a".repeat(64),access:"view"});
+  expect(result).not.toHaveProperty("url");
+  expect(result).not.toHaveProperty("urlUnavailable");
+  expect(JSON.stringify(h.relay.mock.calls)).not.toContain("#secret");
+  expect(await h.approve(await h.prepare())).toMatchObject({appQuery:"?app="+"a".repeat(64)});
+});
+
+it("keeps an existing credential entirely caller-held and reports its app suffix", async () => {
+  const h = harness(), result = await h.approve(await h.prepare());
+  expect(result).toMatchObject({kind:"published",appQuery:"?app="+"a".repeat(64),access:"view"});
+  expect(result).not.toHaveProperty("url");
+  await expect(h.invoke({...prepareInput, url:"https://relay.example/s/#existing"})).rejects.toThrow();
+});
+
+it("returns the orphan grant after retry without receiving another credential", async () => {
+  const h=harness();
+  h.relay.mockResolvedValue({ok:true,workspaceId:"w",shareId:"s",grantId:"g",selector:h.grant.selector,access:"view",urlUnavailable:true});
+  expect(await h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(101)})).toMatchObject({kind:"urlUnavailable",grantId:"g",shareId:"s"});
+});
+
+it.each(["", ".env", "app/.env", ".dohc/secret", "shared-with-me/app"])("refuses link exposure of %s before calling the relay", async path => {
+  const h=harness();
+  await expect(h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",paths:[path],operationId:id(101)})).rejects.toThrow();
+  expect(h.relay).not.toHaveBeenCalled();
+});
+
+it("requires the trusted original workspace for the link door", async () => {
+  const input={action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(101)};
+  const h=harness();
+  await expect(h.invoke(input,-1)).rejects.toThrow("untrusted");
+  h.workspace.shareView={};
+  await expect(h.invoke(input)).rejects.toThrow("original workspace");
+  expect(h.relay).not.toHaveBeenCalled();
+});
+
+
+it("never returns a newly created credential after its grant rotates",async()=>{
+  const h=harness(),original=h.relay.getMockImplementation()!;
+  h.relay.mockImplementation(async(...args)=>args[1].endsWith("/shares/links")&&args[2]?.method==="POST"
+    ?{ok:true,workspaceId:"w",shareId:"s",grantId:"g",selector:h.grant.selector,access:"view",generation:h.grant.generation,url:"https://relay.example/s/#old"}:original(...args));
+  await h.invoke({action:"createLink",workspaceId:"w",appRoot:"app",operationId:id(101)});
+  h.grant.generation++;
+  const result=await h.approve(await h.prepare());
+  expect(result).toMatchObject({kind:"published"});
+  expect(result).not.toHaveProperty("url");
 });

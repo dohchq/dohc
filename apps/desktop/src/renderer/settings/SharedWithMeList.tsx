@@ -8,6 +8,7 @@ import type {
   ShareAccess,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import {
   hasUnacknowledgedShareSkips,
   shareSkipNoticeLines,
@@ -314,7 +315,7 @@ export function SharedWithMeList(props: {
   }
 
   if (load.status === "loading") {
-    return <p className="m-0 text-[11px] text-subtle">Loading shares sent to you…</p>;
+    return <SkeletonRows rows={2} label="Loading shares sent to you…" />;
   }
   if (load.status === "error") {
     return (

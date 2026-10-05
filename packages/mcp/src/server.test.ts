@@ -12,6 +12,7 @@ import type { ToolContext } from "./tools";
 // changes the granter's files; a chat write posts to a thread.
 const DOCUMENT_WRITE_TOOLS = [
   "dohc_dataset",
+  "dohc_publish_app",
   "dohc_write_file",
   "dohc_create_directory",
   "dohc_move_path",
@@ -191,9 +192,10 @@ describe("MCP tool results", () => {
     expect(result.structuredContent).toEqual(partial);
     expect(result.content).toEqual([{ type: "text", text: JSON.stringify(partial, null, 2) }]);
   });
-  it("omits tools that cannot perform the advertised action", async () => {
+  it("exposes owner publication and omits unsupported actions", async () => {
     const { names } = await connectedToolNames({ root: "/workspace", home: "/home" });
-    for (const name of ["build_app", "preview_app", "publish_app", "share", "open_in_dohc", "resolve_conflict"]) {
+    expect(names).toContain("dohc_publish_app");
+    for (const name of ["build_app", "preview_app", "share", "open_in_dohc", "resolve_conflict"]) {
       expect(names).not.toContain(`dohc_${name}`);
     }
   });
@@ -399,4 +401,19 @@ describe("file write handshake attribution", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]).toMatchObject({ verb: "fileWrite", args: { actor: "agent", agent: name === "Codex" ? name : undefined } });
   });
+});
+
+
+it("routes owner publication with a bearer warning and a stable link operation id", async () => {
+  const operationId="00000000-0000-4000-8000-000000000101";
+  const facts={kind:"linkCreated",shareId:"s",grantId:"g",selector:{paths:["app"],versionId:null},access:"view",url:"https://relay.example/s/#secret",bearerWarning:"This URL is a bearer credential at view access, usable by anyone who holds it."};
+  const {client}=await connectedToolNames({root:"/workspace",home:"/home",request:async request=>{
+    expect(request.verb).toBe("appPublication");
+    expect(request.args).toMatchObject({actor:"agent",request:{action:"createLink",workspaceId:"w",appRoot:"app",operationId,access:"view",agentLabel:"Builder"}});
+    return facts;
+  }});
+  const result=await client.callTool({name:"dohc_publish_app",arguments:{request:{action:"createLink",workspaceId:"w",appRoot:"app",operationId,agentLabel:"Builder"}}});
+  expect(result.structuredContent).toEqual(facts);
+  expect(result.content).toHaveLength(1);
+  expect(JSON.parse((result.content as Array<{type:string;text:string}>)[0]!.text)).toEqual(facts);
 });

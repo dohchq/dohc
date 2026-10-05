@@ -66,6 +66,7 @@ export function createShare(storage: StorageContext, input: {
   }
 
 export function createFileLinkShare(storage: StorageContext, input: {
+    operation?: { operationId: string; requestJson: string };
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
     credential: SyncRelayLinkCredentialRow;
@@ -96,6 +97,8 @@ export function createFileLinkShare(storage: StorageContext, input: {
       insertShare(storage, share);
       insertShareGrant(storage, grant);
       insertLinkCredential(storage, credential);
+      if (input.operation) storage.db.prepare("INSERT INTO sync_relay_link_creations(workspace_id,operation_id,owner_user_id,share_id,grant_id,request_json) VALUES(?,?,?,?,?,?)")
+        .run(share.workspaceId,input.operation.operationId,share.granterUserId,share.shareId,grant.grantId,input.operation.requestJson);
       return true;
     });
   }
@@ -774,6 +777,7 @@ export function listLinkGrantsByWorkspace(
            LIMIT ${LINK_INVENTORY_PAGE_SIZE}
          )
          SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
+                (SELECT request_json FROM sync_relay_link_creations c WHERE c.share_id=s.share_id LIMIT 1) AS creation_provenance_json,
                 s.created_at_ms AS share_created_at_ms,
                 link.grant_id AS link_grant_id, link.share_id AS link_share_id,
                 link.principal_kind AS link_principal_kind,

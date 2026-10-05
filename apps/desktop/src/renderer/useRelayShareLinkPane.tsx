@@ -22,6 +22,7 @@ import type { ShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { AutomationShareNote, useAutomationShareCheck, type AutomationShare } from "./automationShareCheck";
 import { DangerButton, PrimaryButton, SecondaryButton, SectionLabel } from "./ui/controls";
 import { SegmentedControl } from "./ui/SegmentedControl";
+import { SkeletonRows } from "./ui/SkeletonRows";
 
 type LinkAccess = "view" | "comment" | "edit";
 
@@ -1789,8 +1790,14 @@ export function useRelayShareLinkPane(props: {
             Links
           </SectionLabel>
 
+          {/* Lines stand in only for links not yet shown; a refresh keeps the
+              links on screen and says so. */}
           {linksLoading ? (
-            <p className="m-0 text-xs text-muted">Loading links…</p>
+            visibleLinkGroups.length ? (
+              <p role="status" className="m-0 text-xs text-muted">Loading links…</p>
+            ) : (
+              <SkeletonRows rows={2} label="Loading links…" />
+            )
           ) : null}
 
           {linksError ? (
@@ -1969,7 +1976,11 @@ export function useRelayShareLinkPane(props: {
                         </div>
 
                         {ownerDiscussion.loading ? (
-                          <p className="m-0 text-xs text-muted">Loading comments…</p>
+                          ownerDiscussion.loaded ? (
+                            <p role="status" className="m-0 text-xs text-muted">Loading comments…</p>
+                          ) : (
+                            <SkeletonRows rows={2} label="Loading comments…" />
+                          )
                         ) : null}
 
                         {ownerDiscussion.loadError ? (

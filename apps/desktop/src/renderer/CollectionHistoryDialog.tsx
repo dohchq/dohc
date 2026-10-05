@@ -4,6 +4,7 @@ import { DatasetHistoryPage } from "@dohc/cli/dataset";
 import { CollectionHistoryRevisionDetails, type HistoryRevisionControls } from "./CollectionHistoryRevisionDetails";
 import { Overlay } from "./Overlay";
 import { SecondaryButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import type { TransactionalInvoke } from "./TransactionalCollectionPage";
 
 export interface CollectionHistoryDialogProps extends HistoryRevisionControls {
@@ -41,7 +42,8 @@ function History(props: CollectionHistoryDialogProps) {
     <div className="flex items-center justify-between text-[12px] text-muted"><span>Saved changes</span><span>Newest first</span></div>
     <p className="m-0 text-[11px] text-muted">Reads and refused requests do not appear here.</p>
     {props.pendingUndo && <div className="flex items-center gap-2 text-[12px] text-muted"><span>{props.undoBusy ? "Reversing edit…" : "Undo not confirmed"}</span>{!props.undoBusy && <SecondaryButton onClick={() => props.onUndo?.(props.pendingUndo!)}>Try again</SecondaryButton>}</div>}
-    {busy && <p role="status" className="m-0 text-[12px] text-muted">Loading history…</p>}
+    {/* Lines stand in only for a page not yet shown; a refresh keeps its page and says so. */}
+    {busy && (page ? <p role="status" className="m-0 text-[12px] text-muted">Loading history…</p> : <SkeletonRows label="Loading history…" />)}
     {page && !page.entries.length && <p className="m-0 text-[13px] text-muted">No saved operations on this page. Refresh to check for changes.</p>}
     <div className="min-h-0 overflow-auto">{page?.entries.map(entry => <details key={entry.revision} className="group/entry border-b border-line py-3"><summary className="flex cursor-pointer list-none flex-wrap items-center gap-3 rounded-md text-[13px] [&::-webkit-details-marker]:hidden"><ChevronRight size={14} strokeWidth={1.9} aria-hidden className="shrink-0 text-muted group-open/entry:rotate-90" /><span className="rounded border border-line bg-panel-2 px-1.5 py-0.5 font-mono text-[11px] text-muted" title="Revision">{entry.revision}</span><span className="font-medium">{entry.operation}</span>{entry.automation && <span className="flex min-w-0 items-center gap-1 text-[12px] text-muted" title="Automation"><Zap size={12} strokeWidth={1.9} aria-hidden /><span className="truncate">{entry.automation.name ?? entry.automation.automationId.slice(entry.automation.automationId.lastIndexOf("#") + 1)}</span></span>}{entry.attachmentCount > 0 && <span className="flex items-center gap-1 font-mono text-[11px] text-muted" title="Attached files"><Paperclip size={12} strokeWidth={1.9} aria-hidden />{entry.attachmentCount}</span>}{entry.recordedAtMs !== null && <time className="ml-auto text-[12px] text-muted" dateTime={new Date(entry.recordedAtMs).toISOString()}>{new Date(entry.recordedAtMs).toLocaleString()}</time>}</summary>
       {entry.schema && <CollectionHistoryRevisionDetails beforeHash={entry.schema.previousRevisionHash} afterHash={entry.schema.revisionHash}
