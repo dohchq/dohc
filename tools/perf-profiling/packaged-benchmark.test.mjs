@@ -411,12 +411,14 @@ test('strict release CLI rejects typos, duplicates, missing provenance and ambig
   assert.throws(() => parseOptions([...required, '--scenario', 'go-to']), /at least 4243/);
 });
 test('surface scenarios parse with their own sizes and defaults', () => {
-  for (const scenario of ['go-to', 'command-palette', 'search', 'chat-history', 'collection', 'soak']) {
+  for (const scenario of ['go-to', 'go-to-mixed', 'command-palette', 'search', 'chat-history', 'collection', 'soak']) {
     const options = parseOptions([...required, '--scenario', scenario, '--files', '5000']);
     assert.deepEqual([options.scenario, options.soakMinutes, options.chatMessages, options.records], [scenario, 10, 200, 500]);
     assert.equal(options.runCount, scenario === 'collection' ? 5 : 3);
   }
   assert.equal(parseOptions([...required, '--scenario', 'go-to', '--files', '4243']).fixtureFiles, 4243);
+  assert.throws(() => parseOptions([...required, '--scenario', 'go-to-mixed']), /at least 5000/);
+  assert.equal(parseOptions([...required, '--scenario', 'go-to-mixed', '--files', '5000']).fixtureFiles, 5000);
   assert.equal(parseOptions([...required, '--scenario', 'soak', '--soak-minutes', '3', '--profile-renderer', 'true']).soakMinutes, 3);
   assert.equal(parseOptions([...required, '--scenario', 'chat-history', '--chat-messages', '2']).chatMessages, 2);
   assert.equal(parseOptions([...required, '--scenario', 'collection', '--records', '1']).records, 1);

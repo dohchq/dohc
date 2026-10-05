@@ -24,3 +24,14 @@ export function goToIndexFixture(fileCount = GO_TO_COUNTS.files) {
     groups: Array.from({ length: 20 }, (_, i) => ({ id: "group-" + i, name: i === 0 ? "General" : "Fixture Group " + i, kind: "channel" })),
   };
 }
+
+// Separate scan workload with deeper folders and longer descriptive file names.
+export function goToLongPathFixture(fileCount = GO_TO_COUNTS.files) {
+  const sources = goToIndexFixture(fileCount);
+  sources.listing.files = sources.listing.files.map((file, n) => ({ ...file,
+    path: "workspaces/customer-support/desktop-application/packages/workspace-renderer/components/module-" + n % 7 +
+      "/document-navigation/collections/activity-history/customer-retention-summary-" +
+      String(n).padStart(6, "0") + ".integration.test.ts",
+  }));
+  return sources;
+}

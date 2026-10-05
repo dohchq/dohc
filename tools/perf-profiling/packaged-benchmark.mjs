@@ -81,9 +81,9 @@ Object.assign(receipt, {
   surfacesSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-surfaces.mjs')),
   closeImplementationSha256: await sha256(fileURLToPath(new URL('../../scripts/verification/close-electron.mjs', import.meta.url))),
   summarizerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'summarize-packaged-benchmark.mjs')),
-  ...(['chat-history', 'collection', 'go-to'].includes(scenario) ? { cli, cliHashedPaths, cliSha256: await sha256Tree(cli, cliHashedPaths),
+  ...(['chat-history', 'collection', 'go-to-mixed'].includes(scenario) ? { cli, cliHashedPaths, cliSha256: await sha256Tree(cli, cliHashedPaths),
     processRunner, processRunnerPaths, processRunnerSha256: await sha256Tree(processRunner, processRunnerPaths) } : {}),
-  ...(scenario === 'go-to' ? { goToFixtureSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'go-to-packaged-fixture.mts')),
+  ...(scenario === 'go-to-mixed' ? { goToFixtureSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'go-to-packaged-fixture.mts')),
     goToFixtureGeneratorsSha256: await sha256Tree(root, ['packages/mcp/src/tools.ts', 'apps/desktop/src/renderer/collections/schemaAuthoring.ts',
       'apps/desktop/e2e/helpers/syncRelay.ts', 'apps/desktop/src/testing/relayFilePeer.ts']) } : {}),
   ...(scenario === 'chat-history' ? { cliLauncher, seedScript, seedScriptSha256: await sha256(seedScript) } : {}),
@@ -171,7 +171,7 @@ async function fixture(runDir) {
       await writeFile(join(workspace.rootPath, `${name}.md`), content);
       workspaceHash.update(`${name}.md\0${content}\0`);
     }
-    for (let begin = 2; begin < (scenario === 'go-to' ? 2 : fixtureFiles); begin += 32) {
+    for (let begin = 2; begin < (scenario === 'go-to-mixed' ? 2 : fixtureFiles); begin += 32) {
       cancellation.signal.throwIfAborted();
       const batch = [];
       for (let n = begin; n < Math.min(fixtureFiles, begin + 32); n++) {
@@ -191,7 +191,7 @@ async function fixture(runDir) {
         return writeFile(join(workspace.rootPath, file.path), file.content);
       }));
     }
-    fixtureHashes.push({ workspaceId: workspace.workspaceId, files: scenario === 'go-to' ? 2 : fixtureFiles, collectionFiles: collection.length, digest: workspaceHash.digest('hex'), algorithm: 'SHA256 of name,NUL,UTF8-content,NUL in generation order; workspace metadata excluded' });
+    fixtureHashes.push({ workspaceId: workspace.workspaceId, files: scenario === 'go-to-mixed' ? 2 : fixtureFiles, collectionFiles: collection.length, digest: workspaceHash.digest('hex'), algorithm: 'SHA256 of name,NUL,UTF8-content,NUL in generation order; workspace metadata excluded' });
     workspaces.push(workspace);
   }
   await json(join(profile, 'dohc-workspaces.json'), { version: 1, workspaces });
@@ -840,7 +840,7 @@ async function soak(instance, data, runDir) {
       await json(join(output, 'result.json'), receipt);
       continue;
     }
-    if (scenario === 'go-to') {
+    if (scenario === 'go-to-mixed') {
       const relayRequire = createRequire(join(root, 'services/sync-relay/package.json'));
       const { tsImport } = relayRequire('tsx/esm/api');
       const { provisionGoToFixture } = await tsImport('./go-to-packaged-fixture.mts', import.meta.url);
@@ -892,9 +892,9 @@ async function soak(instance, data, runDir) {
       await json(join(runDir, 'fixture.json'), f.fixtureHashes);
       await json(join(output, 'result.json'), receipt);
     }
-    if (['go-to', 'command-palette', 'search', 'collection'].includes(scenario)) {
+    if (['go-to', 'go-to-mixed', 'command-palette', 'search', 'collection'].includes(scenario)) {
       data.listing = await filesListed(fresh.page, fixtureFiles + (scenario === 'collection' ? 1 : 0));
-      if (scenario === 'go-to') data.goTo = await goTo(fresh.page);
+      if (scenario === 'go-to' || scenario === 'go-to-mixed') data.goTo = await goTo(fresh.page);
       if (scenario === 'command-palette') data.commandPalette = await commandPalette(fresh.page);
       if (scenario === 'search') data.search = await search(fresh.page);
       if (scenario === 'collection') {

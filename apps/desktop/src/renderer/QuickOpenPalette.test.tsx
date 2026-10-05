@@ -11,9 +11,8 @@ vi.mock("./workbench/quick-open-rank", async (importOriginal) => {
 });
 
 import { QuickOpenPalette } from "./QuickOpenPalette";
-import { GoToIndex, prepareQuickOpenPaths } from "./workbench/quick-open-rank";
+import { prepareQuickOpenPaths } from "./workbench/quick-open-rank";
 
-const namesIndex = new GoToIndex("workspace");
 const files = [{ path: "notes.md" }, { path: "docs/report.md" }];
 const recent = ["docs/report.md"];
 const pinned = ["notes.md"];
@@ -29,7 +28,6 @@ function palette(overrides: {
 } = {}) {
   return (
     <QuickOpenPalette
-      namesIndex={namesIndex}
       files={overrides.files ?? files}
       recent={overrides.recent ?? recent}
       pinned={overrides.pinned ?? pinned}

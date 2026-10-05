@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { GoToIndex, isGoToPathQuery, quickOpenMatchTier, rankQuickOpenPaths, type GoToListing } from "./quick-open-rank";
 const context = { pinned: [], recent: [] };
 const listing = (paths: string[]): GoToListing => ({
@@ -98,13 +98,13 @@ it("keeps the unseen 51st match so it can win the next prefix", () => {
   expect(index.query("re")[0].path).toBe("really-long.txt");
   expect(index.lastScanCount).toBe(51);
 });
-it("scans only the current match set while narrowing and rescans after backspacing or changing scope", () => {
+it("scans only the current match set while narrowing and rescans after backspacing or replacing a prefix", () => {
   const index = new GoToIndex("workspace");
   index.update({ listing: listing(["report.md", "result.md", "plain.txt"]) });
   index.query("r"); expect(index.lastScanCount).toBe(3);
   index.query("re"); expect(index.lastScanCount).toBe(2);
   index.query("r"); expect(index.lastScanCount).toBe(3);
-  index.queryFiles("re"); expect(index.lastScanCount).toBe(3);
+  index.query("p"); expect(index.lastScanCount).toBe(3);
 });
 it("uses slash and known case-insensitive extensions to put files first", () => {
   for (const query of ["notes.MD", "docs/notes"]) {
@@ -122,7 +122,7 @@ it("keeps the existing file-only tier, pin, recency, tie, and duplicate semantic
   const index = new GoToIndex("workspace");
   index.update({ listing: listing(paths) }, ranking);
   for (const query of ["", "no", "note", "nte", "notes.md"]) {
-    expect(index.queryFiles(query).map(row => row.path)).toEqual(rankQuickOpenPaths(query, [...new Set(paths)], ranking).slice(0, 50));
+    expect(index.query(query).map(row => row.path)).toEqual(rankQuickOpenPaths(query, [...new Set(paths)], ranking).slice(0, 50));
   }
 });
 it("subtracts only host rule verdicts, leaving .env and mounted names findable after a policy edit", () => {
@@ -138,20 +138,56 @@ it("subtracts only host rule verdicts, leaving .env and mounted names findable a
   expect(index.rows.some(row => row.path === "private")).toBe(false);
   expect(index.query(".env")[0].path).toBe(".env");
 });
-it("withholds only host file rows for a degraded policy, recovers, and preserves mounted selectors", () => {
-  const index = new GoToIndex("workspace");
-  const snapshot = listing(["host.md", "shared-with-me/team/shared.md"]);
-  snapshot.receivedRoots = [{ path: "shared-with-me/team", ended: false, damaged: false }];
-  index.update({ listing: { ...snapshot, visibility: { status: "degraded", hiddenHostPaths: new Set() } },
-    apps: [{ root: "host-app", title: "App" }], versions: [{ id: "main", name: "Main" }], groups: [{ id: "general", name: "General", kind: "channel" }],
+for (const status of ["degraded", "unavailable"] as const) {
+  it("withholds every host path kind for a " + status + " policy and preserves mounted selectors", () => {
+    const index = new GoToIndex("workspace");
+    const snapshot = listing(["host.md", "shared-with-me/team/shared.md"]);
+    snapshot.folders = ["host-folder", "host-records", "shared-with-me/team/folder"];
+    snapshot.receivedRoots = [{ path: "shared-with-me/team", ended: false, damaged: false }];
+    index.update({ listing: { ...snapshot, visibility: { status, hiddenHostPaths: new Set() } },
+      collections: [{ path: "host-records", objectId: "host" }, { path: "shared-with-me/team/records", objectId: "shared" }],
+      apps: [{ root: "host-app", title: "Host app" }, { root: "shared-with-me/team/app", title: "Shared app" }],
+      versions: [{ id: "main", name: "Main" }], groups: [{ id: "general", name: "General", kind: "channel" }],
+    });
+    expect(index.rows.map(row => row.kind)).toEqual(["file", "folder", "collection", "app", "version", "group"]);
+    expect(index.query("host")).toEqual([]);
+    index.update({ listing: snapshot });
+    expect(index.query("host")).toHaveLength(4);
+    index.update({ listing: { ...snapshot, visibility: { status: "ready",
+      hiddenHostPaths: new Set(["host.md", "host-folder", "host-records", "host-app"]) } } });
+    expect(index.query("host")).toEqual([]);
+    // Selector narrowing and Remove/Leave arrive through the canonical listing.
+    index.update({ listing: { ...snapshot, files: snapshot.files.slice(0, 1), receivedRoots: [] } });
+    expect(index.query("shared.md")).toEqual([]);
   });
-  expect(index.rows.map(row => row.kind)).toEqual(["file", "app", "version", "group"]);
-  expect(index.query("host.md")).toEqual([]);
+}
+it("withholds path-backed names until a listing supplies ready rule verdicts", () => {
+  const index = new GoToIndex("workspace");
+  index.update({ apps: [{ root: "host-app", title: "Host app" }],
+    collections: [{ path: "host-records", objectId: "host" }] });
+  expect(index.query("host")).toEqual([]);
+  index.update({ listing: listing([]) });
+  expect(index.query("host")).toHaveLength(2);
+});
+it("compares fresh policy and mount contents before reapplying file verdicts", () => {
+  const index = new GoToIndex("workspace");
+  const snapshot = listing(["a.md", "b.md", "shared-with-me/team/shared.md"]);
+  snapshot.visibility.hiddenHostPaths = new Set(["private"]);
+  snapshot.receivedRoots = [{ path: "shared-with-me/team", ended: false, damaged: false }];
   index.update({ listing: snapshot });
-  expect(index.query("host.md")[0].path).toBe("host.md");
-  // Selector narrowing and Remove/Leave arrive through the canonical listing.
-  index.update({ listing: { ...snapshot, files: snapshot.files.slice(0, 1), receivedRoots: [] } });
-  expect(index.query("shared.md")).toEqual([]);
+  const previous = index.rows[0];
+  const hiddenHostPaths = new Set(["private"]);
+  const has = vi.spyOn(hiddenHostPaths, "has");
+  index.update({ listing: { ...snapshot, files: [...snapshot.files, { path: "new.md", kind: "file" }],
+    visibility: { ...snapshot.visibility, hiddenHostPaths },
+    receivedRoots: snapshot.receivedRoots.map(root => ({ ...root })) } });
+  expect(index.lastPreparationCount).toBe(1);
+  expect(index.rows[0]).toBe(previous);
+  expect(has).toHaveBeenCalledTimes(1);
+  expect(has).toHaveBeenCalledWith("new.md");
+  index.update({ listing: { ...snapshot, visibility: { status: "ready", hiddenHostPaths: new Set(["a.md"]) } } });
+  expect(index.query("a.md").some(row => row.path === "a.md")).toBe(false);
+  expect(index.query("b.md")).toHaveLength(1);
 });
 it("keeps ended-share copies marked ended and drops damaged copies", () => {
   const index = new GoToIndex("workspace");
@@ -206,7 +242,7 @@ it("reuses rows through reordering, deletion, insertion, and duplicate paths", (
   }
   index.update({ listing: listing(["new.md", "c.md", "b.md"]) });
   expect(index.lastPreparationCount).toBe(1);
-  expect(index.queryFiles("").map(row => row.path)).toEqual(["b.md", "c.md", "new.md"]);
+  expect(index.query("").map(row => row.path)).toEqual(["b.md", "c.md", "new.md"]);
 });
 
 it("applies share status and explicit rule verdicts to Collection and app names", () => {

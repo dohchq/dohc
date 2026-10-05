@@ -181,9 +181,10 @@ export interface GoToListing {
   files: readonly GoToFile[];
   folders: readonly string[];
   // Verdicts come from the visibility-rule loop, never the engine path floor.
-  // Until the listing producer supplies them, unified host file rows stay withheld.
+  // Until the listing producer supplies them, all host path rows stay withheld.
   visibility: {
     status: "ready" | "degraded" | "unavailable";
+    // Exact paths: the producer must cover folders, Collections, and apps too.
     hiddenHostPaths: ReadonlySet<string>;
   };
   // The listing has already applied each share's selector and canonical overlay.
@@ -218,8 +219,22 @@ export interface PreparedGoToRow extends PreparedQuickOpenPath {
 function applyGoToPathState(row: PreparedGoToRow, listing: GoToListing): void {
   const share = listing.receivedRoots.find(root => root.path === "" || row.path === root.path || row.path.startsWith(root.path + "/"));
   row.ended = share?.ended ?? false;
-  row.visible = share ? !share.damaged : !listing.visibility.hiddenHostPaths.has(row.path) &&
-    (row.kind !== "file" || listing.visibility.status === "ready");
+  row.visible = share ? !share.damaged : listing.visibility.status === "ready" &&
+    !listing.visibility.hiddenHostPaths.has(row.path);
+}
+
+function samePathVerdicts(a: GoToListing, b: GoToListing | undefined): boolean {
+  if (!b || a.visibility.status !== b.visibility.status) return false;
+  const hidden = a.visibility.hiddenHostPaths, previousHidden = b.visibility.hiddenHostPaths;
+  if (hidden !== previousHidden) {
+    if (hidden.size !== previousHidden.size) return false;
+    for (const path of hidden) if (!previousHidden.has(path)) return false;
+  }
+  return a.receivedRoots === b.receivedRoots || a.receivedRoots.length === b.receivedRoots.length &&
+    a.receivedRoots.every((root, i) => {
+      const previous = b.receivedRoots[i];
+      return root.path === previous.path && root.ended === previous.ended && root.damaged === previous.damaged;
+    });
 }
 
 const KNOWN_EXTENSIONS = new Set<string>(Object.values(FILE_KIND_RECORDS).flatMap(record => [...record.extensions]));
@@ -246,7 +261,7 @@ export class GoToIndex {
   private readonly subsets = new Map<GoToKind, Map<string, PreparedGoToRow>>();
   private sources: GoToSources = {};
   private context: QuickOpenContext = EMPTY_CONTEXT;
-  private matches: { query: string; revision: number; filesOnly: boolean; indices: Int32Array; count: number } | null = null;
+  private matches: { query: string; revision: number; indices: Int32Array; count: number } | null = null;
 
   constructor(workspaceId: string) { this.workspaceId = workspaceId; }
 
@@ -291,7 +306,7 @@ export class GoToIndex {
       const snapshot = sources.listing;
       const next = this.subsets.get("file") ?? new Map<string, PreparedGoToRow>();
       const generation = ++this.listingGeneration;
-      const verdictsChanged = snapshot.visibility !== this.sources.listing?.visibility || snapshot.receivedRoots !== this.sources.listing?.receivedRoots;
+      const verdictsChanged = !samePathVerdicts(snapshot, this.sources.listing);
       const removedCandidates: PreparedGoToRow[] = [];
       let fileIndex = 0;
       for (const file of snapshot.files) {
@@ -368,8 +383,9 @@ export class GoToIndex {
         row.pinnedRank = pinned.has(row.path) ? 0 : 1;
         row.recentRank = recent.get(row.path) ?? Number.MAX_SAFE_INTEGER;
       }
-      if ((kind === "folder" || kind === "collection" || kind === "app") && this.sources.listing) {
-        applyGoToPathState(row, this.sources.listing);
+      if (kind === "folder" || kind === "collection" || kind === "app") {
+        if (this.sources.listing) applyGoToPathState(row, this.sources.listing);
+        else row.visible = false;
       }
       // A Collection replaces its ordinary folder row.
       if (row.visible && !(kind === "folder" && this.subsets.get("collection")?.has(row.path))) rows.push(row);
@@ -382,26 +398,17 @@ export class GoToIndex {
   }
 
   query(query: string, limit = 50): PreparedGoToRow[] {
-    return this.rank(query, limit, false);
-  }
-
-  // Ctrl+P preserves Explorer's complete file list until Opus activates unified rows.
-  queryFiles(query: string, limit = 50): PreparedGoToRow[] {
-    return this.rank(query, limit, true);
-  }
-
-  private rank(query: string, limit: number, filesOnly: boolean): PreparedGoToRow[] {
     const boundedLimit = Math.max(0, Math.floor(limit));
     if (boundedLimit === 0) return [];
     const q = query.toLowerCase();
-    const rows = filesOnly ? this.files : this.rows;
+    const rows = this.rows;
     const previous = this.matches;
-    const narrow = previous && previous.revision === this.revision && previous.filesOnly === filesOnly && q.startsWith(previous.query);
+    const narrow = previous && previous.revision === this.revision && q.startsWith(previous.query);
     const indices = narrow ? previous.indices : new Int32Array(rows.length);
     const scanCount = narrow ? previous.count : rows.length;
     let count = 0;
     const selected: ScoredQuickOpenPath<PreparedGoToRow>[] = [];
-    const pathQuery = !filesOnly && isGoToPathQuery(q);
+    const pathQuery = isGoToPathQuery(q);
     for (let at = 0; at < scanCount; at++) {
       const i = narrow ? indices[at] : at;
       const row = rows[i];
@@ -416,7 +423,7 @@ export class GoToIndex {
     }
     this.lastScanCount = scanCount;
     // Compact one current match set in place. All unseen matches survive narrowing.
-    this.matches = { query: q, revision: this.revision, filesOnly, indices, count };
+    this.matches = { query: q, revision: this.revision, indices, count };
     return selected.map(candidate => candidate.prepared);
   }
 }

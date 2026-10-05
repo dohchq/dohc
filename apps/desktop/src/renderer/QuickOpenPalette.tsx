@@ -9,11 +9,7 @@ import {
   rankPreparedQuickOpenPaths,
 } from "./workbench/quick-open-rank";
 
-import type { GoToIndex } from "./workbench/quick-open-rank";
-
 export function QuickOpenPalette(props: {
-  // Opus activates the unified rows in the palette PR. This PR preserves file-only results.
-  namesIndex: GoToIndex;
   files: readonly { path: string }[];
   recent: readonly string[];
   pinned: readonly string[];

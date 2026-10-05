@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useReducer } from "react";
 import { GoToIndex, type GoToSources, type QuickOpenContext } from "../workbench/quick-open-rank";
 
-// Source owners supply committed snapshots and keep their own response guards.
-// The first preparation runs after the Explorer's listing has painted. No reads
-// start here; opening or typing in the palette never loads any source.
+/**
+ * Unmounted scaffold for consuming committed snapshots without starting reads.
+ * Before the palette PR mounts this hook, replace synchronous preparation with
+ * background slices of 4 ms or less, outside animation frame callbacks.
+ * Source owners retain their response guards. The index compares policy and
+ * mount contents, so fresh listing metadata does not reapply every file verdict.
+ */
 export function useGoToIndex(workspaceId: string, sources: GoToSources, context: QuickOpenContext, listingCommitted = true): GoToIndex {
   const index = useMemo(() => new GoToIndex(workspaceId), [workspaceId]);
   const [, repaint] = useReducer((revision: number) => revision + 1, 0);

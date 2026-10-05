@@ -23,7 +23,7 @@ function Shell(props: { workspaceId: string; refresh: number }) {
   useEffect(() => { void refreshFiles().catch(() => undefined); }, [refreshFiles, props.refresh]);
   const listing = useMemo(() => ({ files, folders, visibility: { status: "ready" as const, hiddenHostPaths: new Set<string>() }, receivedRoots: [] }), [files, folders]);
   const index = useGoToIndex(props.workspaceId, { listing }, context);
-  return <><output data-testid="explorer">{files.map(file => file.path).join(",")}</output><output data-testid="names">{index.queryFiles("").map(row => row.path).join(",")}</output></>;
+  return <><output data-testid="explorer">{files.map(file => file.path).join(",")}</output><output data-testid="names">{index.query("").map(row => row.path).join(",")}</output></>;
 }
 function Root(props: { workspaceId: string; refresh?: number }) {
   return <Shell key={props.workspaceId} workspaceId={props.workspaceId} refresh={props.refresh ?? 0} />;
@@ -84,4 +84,30 @@ it("waits for a complete paint before the first preparation and starts no extra 
   view.rerender(<Root workspaceId="A" />);
   expect(update).toHaveBeenCalledTimes(1);
   expect(listWorkspaceFiles).toHaveBeenCalledTimes(1);
+});
+
+it("does not reapply existing file verdicts when hook inputs recreate unchanged metadata", () => {
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+  vi.stubGlobal("cancelAnimationFrame", () => {});
+  const files = [{ path: "a.md", kind: "file" as const }];
+  const receivedRoots = [{ path: "shared-with-me/team", ended: false, damaged: false }];
+  function Snapshot(props: { renamed: boolean; hidden: Set<string> }) {
+    const listing = useMemo(() => ({
+      files: props.renamed ? [{ path: "renamed.md", kind: "file" as const }] : files,
+      folders: [], visibility: { status: "ready" as const, hiddenHostPaths: props.hidden },
+      receivedRoots: receivedRoots.map(root => ({ ...root })),
+    }), [props.renamed, props.hidden]);
+    const index = useGoToIndex("workspace", { listing }, context);
+    return <output>{index.query("").map(row => row.path).join(",")}</output>;
+  }
+  const view = render(<Snapshot renamed={false} hidden={new Set(["private"])} />);
+  act(() => frames.shift()!(0));
+  act(() => frames.shift()!(0));
+  expect(view.container.textContent).toBe("a.md");
+  const freshHidden = new Set(["private"]);
+  const has = vi.spyOn(freshHidden, "has");
+  view.rerender(<Snapshot renamed hidden={freshHidden} />);
+  expect(view.container.textContent).toBe("renamed.md");
+  expect(has).toHaveBeenCalledTimes(1);
 });

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GO_TO_COUNTS, goToIndexFixture } from "./go-to-index-fixture.mjs";
+import { GO_TO_COUNTS, goToIndexFixture, goToLongPathFixture } from "./go-to-index-fixture.mjs";
 for (const count of [5000, 30000]) test("PR 1 Go to fixture counts at " + count + " files", () => {
   const sources = goToIndexFixture(count);
   assert.equal(sources.listing.files.length, count);
@@ -15,4 +15,14 @@ for (const count of [5000, 30000]) test("PR 1 Go to fixture counts at " + count 
   assert.equal(GO_TO_COUNTS.people, 9);
   assert.equal(GO_TO_COUNTS.agents, 18);
   assert.equal(GO_TO_COUNTS.dms, 7);
+});
+
+test("the worst scan workload uses 30,000 long paths without a z match", () => {
+  const sources = goToLongPathFixture(30000);
+  assert.equal(sources.listing.files.length, 30000);
+  for (const file of sources.listing.files) {
+    assert.ok(file.path.length >= 180);
+    assert.ok(file.path.split("/").length >= 10);
+    assert.ok(!file.path.toLowerCase().includes("z"));
+  }
 });
