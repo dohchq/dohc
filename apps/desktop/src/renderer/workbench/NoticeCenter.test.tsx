@@ -10,7 +10,9 @@ import type {
 } from "../../ipc/bridgeContract";
 import { NoticeCenter, SENT_NOTICE_PAGE, type SentNotice } from "./NoticeCenter";
 import { deferred } from "../../testing/deferred";
+import { useEffect, useRef } from "react";
 import { Overlay } from "../Overlay";
+import { switchModalRegion } from "../modalFocus";
 
 // Captures the renderer-side update listener exactly as the preload would
 // install it — the auto-updater itself never runs in dev/test (gated on
@@ -564,6 +566,73 @@ describe("notice center", () => {
 
     rerender(view(true));
     await waitFor(() => expect(document.activeElement).toBe(restore));
+  });
+
+  // A dialog opened over the one F6 left takes focus when the toast goes:
+  // the older dialog sits behind it, outside the trap on top.
+  it("hands focus to a newer dialog opened over the one F6 left", async () => {
+    const error = { id: "e", message: "dohc could not save the retry.", details: "", atMs: 1, canRetry: true, seen: false };
+    const view = (seen: boolean, confirming: boolean) => (
+      <>
+        {noticeElement({ workspaceErrors: [{ ...error, seen }], onRetryWorkspaceError: vi.fn(), onHideWorkspaceError: vi.fn() })}
+        <Overlay onClose={() => undefined}>
+          <button type="button">Clear retry</button>
+        </Overlay>
+        {confirming ? (
+          <Overlay onClose={() => undefined} panelProps={{ "data-testid": "confirmation" }}>
+            <button type="button">Keep the retry</button>
+          </Overlay>
+        ) : null}
+      </>
+    );
+    const { rerender } = render(view(false, false));
+    const clear = screen.getByRole("button", { name: "Clear retry" });
+    clear.focus();
+    fireEvent.keyDown(clear, { key: "F6" });
+    fireEvent.keyDown(document.activeElement!, { key: "F6" });
+    expect(document.activeElement).toBe(clear);
+
+    rerender(view(false, true));
+    within(screen.getByTestId("notice-toasts")).getByRole("button", { name: "Try again" }).focus();
+    rerender(view(true, true));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("confirmation")));
+  });
+
+  // A bare dialog with its own trap, such as the icon picker, can sit inside
+  // an Overlay. The toast's focus goes back to the control F6 left in it.
+  it("hands focus back to a bare dialog's control inside an Overlay", async () => {
+    function BareDialog() {
+      const ref = useRef<HTMLDivElement>(null);
+      useEffect(() => {
+        const onKeyDown = (event: KeyboardEvent) => void switchModalRegion(event, ref.current);
+        document.addEventListener("keydown", onKeyDown);
+        return () => document.removeEventListener("keydown", onKeyDown);
+      }, []);
+      return (
+        <div ref={ref} role="dialog" aria-label="Choose an icon" tabIndex={-1}>
+          <button type="button">Use 📄</button>
+        </div>
+      );
+    }
+    const error = { id: "e", message: "dohc could not reach this server.", details: "", atMs: 1, canRetry: true, seen: false };
+    const view = (seen: boolean) => (
+      <>
+        {noticeElement({ workspaceErrors: [{ ...error, seen }], onRetryWorkspaceError: vi.fn(), onHideWorkspaceError: vi.fn() })}
+        <Overlay onClose={() => undefined}>
+          <BareDialog />
+        </Overlay>
+      </>
+    );
+    const { rerender } = render(view(false));
+    const emoji = screen.getByRole("button", { name: "Use 📄" });
+    emoji.focus();
+    fireEvent.keyDown(emoji, { key: "F6" });
+    expect(document.activeElement).toBe(
+      within(screen.getByTestId("notice-toasts")).getByRole("button", { name: "Try again" }),
+    );
+
+    rerender(view(true));
+    await waitFor(() => expect(document.activeElement).toBe(emoji));
   });
 
   // The corner host sits in a fixed wrapper, which is a stacking context of

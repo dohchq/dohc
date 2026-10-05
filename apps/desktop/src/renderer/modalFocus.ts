@@ -59,7 +59,10 @@ export function switchModalRegion(event: KeyboardEvent, dialog: HTMLElement | nu
   if (event.key !== "F6") return false;
   const toast = [...document.querySelectorAll<HTMLElement>(TOASTS_SELECTOR)].flatMap(modalFocusableElements)[0];
   if (!toast) return false;
+  // Stopped here, so a dialog inside this one, with a handler of its own,
+  // does not read the same key as a way back from the toast.
   event.preventDefault();
+  event.stopPropagation();
   if (active instanceof HTMLElement && dialog.contains(active)) leftAt.set(dialog, active);
   leftLast = new WeakRef(dialog);
   toast.focus();
@@ -89,11 +92,13 @@ export function topModalPanel(): HTMLElement | null {
 }
 
 // Where focus goes back to from a toast: the control F6 left from, in the
-// dialog F6 left last while that dialog is open, or else the dialog itself.
-// With no such dialog, the panel of the Overlay on top.
+// dialog F6 left last, or else that dialog itself. That dialog counts while
+// it is open and inside the Overlay on top, or there is no Overlay: a newer
+// Overlay opened over it takes focus instead.
 export function modalReturnTarget(): HTMLElement | null {
   const left = leftLast?.deref();
-  const dialog = left?.isConnected ? left : topModalPanel();
+  const top = topModalPanel();
+  const dialog = left?.isConnected && (!top || top.contains(left)) ? left : top;
   if (!dialog) return null;
   const back = leftAt.get(dialog);
   return back?.isConnected && dialog.contains(back) ? back : dialog;
