@@ -1,4 +1,4 @@
-import { desktopPins, activityPin, activityCountPin } from "../../testPins";
+import { desktopPins, activityPin } from "../../testPins";
 import {
   Cloud,
   Files,
@@ -77,7 +77,7 @@ function RailButton(props: {
       ) : null}
       {typeof props.count === "number" ? (
         <span
-          data-testid={activityCountPin(props.testId)}
+          data-testid={`${props.testId}-count`}
           className="absolute -right-0.5 -top-0.5 min-w-4 rounded-full bg-ink px-1 text-center text-[10px] font-semibold leading-4 text-bg"
         >
           {/* Clamp at 99+: the right-anchored pill grows leftward, and at
@@ -174,7 +174,7 @@ export function ActivityBar(props: {
           return (
             <RailButton
               key={viewId}
-              testId={desktopPins.activityPinnedApp}
+              testId="activity-pinned-app"
               label={app.label}
               active={props.sidebarVisible && props.activeView === viewId}
               onClick={() => props.onSelectView(viewId)}

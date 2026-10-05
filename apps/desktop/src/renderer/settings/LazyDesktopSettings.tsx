@@ -1,4 +1,3 @@
-import { desktopPins } from "../../testPins";
 import {
   Suspense,
   lazy,
@@ -27,7 +26,7 @@ function SettingsLoading() {
       role="dialog"
       aria-modal="true"
       aria-label="Settings"
-      data-testid={desktopPins.settingsLoading}
+      data-testid="settings-loading"
       className="dohc-elevated flex h-[min(760px,calc(100vh-48px))] w-[min(1040px,calc(100vw-32px))] items-center justify-center overflow-hidden rounded-xl border border-line bg-bg px-4 text-xs text-subtle"
     >
       Loading settings...

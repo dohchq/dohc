@@ -1,4 +1,3 @@
-import { settingsRowPin } from "../../testPins";
 import { AUTOMATION_SERVER_OFF } from "@dohc/workspace-contracts/relay";
 import { Check } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
@@ -82,7 +81,7 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   if (loaded.status === "loading") return null;
   if (loaded.status === "failed") {
     return (
-      <SettingRow title="Schedules run on" testId={settingsRowPin("schedule-host")}>
+      <SettingRow title="Schedules run on" testId="settings-row-schedule-host">
         <SecondaryButton size="compact" disabled={busy} onClick={() => void read()}>Try again</SecondaryButton>
       </SettingRow>
     );
@@ -91,7 +90,7 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   if (state.kind === "none") return null;
   if (state.kind === "this-computer" || state.kind === "note") {
     return (
-      <SettingRow title="Schedules run on" testId={settingsRowPin("schedule-host")}>
+      <SettingRow title="Schedules run on" testId="settings-row-schedule-host">
         <span data-testid="schedule-host-note" className="text-[12px] text-muted">
           {state.kind === "this-computer" ? "This computer" : state.message}
         </span>
@@ -139,7 +138,7 @@ export function ScheduleHostRow(props: { workspaceId: string; onError?: (message
   };
 
   return (
-    <SettingRow title="Schedules run on" testId={settingsRowPin("schedule-host")}>
+    <SettingRow title="Schedules run on" testId="settings-row-schedule-host">
       <div className="flex min-w-[260px] flex-col gap-2">
         <div role="group" aria-label="Schedules run on" className="flex flex-col">
           {state.computers.map((computer, index) => {

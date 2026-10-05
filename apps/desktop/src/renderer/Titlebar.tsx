@@ -104,7 +104,7 @@ export function Titlebar(props: {
     >
       {/* Reserve space for centered quick-open. */}
       <div
-        data-testid={desktopPins.titlebarLeftGroup}
+        data-testid="titlebar-left-group"
         className="flex min-w-0 items-center gap-2"
         style={{ maxWidth: `calc(50vw - ${QUICK_OPEN_WIDTH} / 2 - ${leftInset} - 12px)` }}
       >
@@ -217,7 +217,7 @@ export function Titlebar(props: {
       {props.onQuickOpen ? (
         <button
           type="button"
-          data-testid={desktopPins.titlebarQuickOpen}
+          data-testid="titlebar-quick-open"
           onClick={props.onQuickOpen}
           style={{ width: QUICK_OPEN_WIDTH }}
           className="titlebar-no-drag absolute left-1/2 top-1/2 flex h-7 -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
@@ -230,14 +230,14 @@ export function Titlebar(props: {
 
       {props.primarySidebar || props.chatsSidebar ? (
         <div
-          data-testid={desktopPins.titlebarLayoutControls}
+          data-testid="titlebar-layout-controls"
           role="group"
           aria-label="Layout controls"
           className="titlebar-no-drag ml-auto flex shrink-0 items-center gap-0.5"
         >
           {props.primarySidebar ? (
             <LayoutToggle
-              testId={desktopPins.titlebarPrimarySidebar}
+              testId="titlebar-primary-sidebar"
               label="Toggle primary sidebar"
               pressed={props.primarySidebar.visible}
               onClick={props.primarySidebar.onToggle}

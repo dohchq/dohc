@@ -51,7 +51,7 @@ export function ChatsPanel(props: {
       style={{ width }}
     >
       <div
-        data-testid={desktopPins.chatsPanelResize}
+        data-testid="chats-panel-resize"
         role="separator"
         tabIndex={0}
         aria-orientation="vertical"

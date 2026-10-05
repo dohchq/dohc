@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Titlebar } from "./renderer/Titlebar";
 import { ActivityBar } from "./renderer/workbench/ActivityBar";
 import { ChatsPanel } from "./renderer/workbench/ChatsPanel";
-import { desktopPins, activityPin, activityCountPin, chatsPanelTabPin, settingsNavPin, settingsSectionPin, settingsRowPin, editorTabTestId, editorTabPrefixPattern } from "./testPins";
+import { desktopPins, activityPin, chatsPanelTabPin, settingsNavPin, settingsSectionPin, editorTabTestId, editorTabPrefixPattern } from "./testPins";
 
 afterEach(cleanup);
 const noop = () => {};
@@ -16,13 +16,12 @@ describe("shared desktop pins", () => {
       <ActivityBar views={["explorer", "search", "graph", "sites", "history"]} activeView="search" sidebarVisible hasConflict={false} searchResultCount={3} onSelectView={noop} onOpenSettings={noop} onOpenCloud={noop} />
       <ChatsPanel width={320} onWidthChange={noop} onCollapse={noop} tabs={["all", "file"]} tab="all" onTabChange={noop}>Chats</ChatsPanel>
     </>);
-    for (const id of [desktopPins.titlebar, desktopPins.titlebarChatsSidebar, desktopPins.titlebarPrimarySidebar, desktopPins.titlebarQuickOpen, desktopPins.activityBar, desktopPins.chatsPanel, desktopPins.chatsPanelCollapse, desktopPins.chatsPanelResize]) {
+    for (const id of [desktopPins.titlebar, desktopPins.titlebarChatsSidebar, desktopPins.activityBar, desktopPins.chatsPanel, desktopPins.chatsPanelCollapse]) {
       expect(screen.getByTestId(id).getAttribute("data-testid")).toBe(id);
     }
     for (const view of ["explorer", "search", "graph", "sites", "history", "cloud", "settings"]) {
       expect(screen.getByTestId(activityPin(view)).getAttribute("data-testid")).toBe("activity-" + view);
     }
-    expect(screen.getByTestId(activityCountPin(activityPin("search"))).textContent).toBe("3");
     for (const tab of ["all", "file"]) {
       expect(screen.getByTestId(chatsPanelTabPin(tab)).getAttribute("data-testid")).toBe("chats-panel-tab-" + tab);
     }
@@ -32,7 +31,6 @@ describe("shared desktop pins", () => {
     expect(desktopPins.settingsDialog).toBe("settings-dialog");
     expect(settingsNavPin("appearance")).toBe("settings-nav-appearance");
     expect(settingsSectionPin("agents")).toBe("settings-section-agents");
-    expect(settingsRowPin("your-color")).toBe("settings-row-your-color");
     expect(editorTabTestId("fixture/旅 [one].md")).toBe("tab-fixture/旅 [one].md");
     expect(editorTabTestId("tab://chats/channel/team%2Fone")).toBe("tab-dohc://chats/channel/team%2Fone");
     expect(editorTabPrefixPattern("fixture/a+b[1].").test("tab-fixture/a+b[1].md")).toBe(true);

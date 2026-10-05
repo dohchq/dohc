@@ -1,4 +1,3 @@
-import { settingsRowPin } from "../../testPins";
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { useRequestSequence } from "../useRequestSequence";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -289,7 +288,7 @@ export function AgentsMcpSettings(props: {
       <SettingRow
         title="Workspace"
         description="The local folder exposed to this workspace-scoped MCP server."
-        testId={settingsRowPin("workspace-path")}
+        testId="settings-row-workspace-path"
       >
         <code className="max-w-sm truncate rounded-md bg-panel-2 px-2 py-1 font-mono text-[11px] text-ink">
           {workspacePath}
@@ -299,7 +298,7 @@ export function AgentsMcpSettings(props: {
       <SettingRow
         title="dohc MCP server"
         description="Enable this only when you want local agents to use dohc tools for this workspace."
-        testId={settingsRowPin("mcp-server")}
+        testId="settings-row-mcp-server"
       >
         <span
           data-testid="mcp-status"

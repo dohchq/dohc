@@ -1,4 +1,3 @@
-import { settingsRowPin } from "../../testPins";
 import { createContext } from "react";
 import type { AskAgent } from "../askAgent";
 import type { SettingsSectionId } from "./settingsRegistry";
@@ -17,16 +16,16 @@ export interface CustomizeTarget {
 }
 
 export const CUSTOMIZE_TARGETS: Record<CustomizePart, CustomizeTarget> = {
-  sidebar: { section: "appearance", row: settingsRowPin("sidebar"), keys: ["sidebar"], subject: "sidebar" },
+  sidebar: { section: "appearance", row: "settings-row-sidebar", keys: ["sidebar"], subject: "sidebar" },
   chats: {
     section: "appearance",
-    row: settingsRowPin("your-color"),
+    row: "settings-row-your-color",
     keys: ["appearance.yourColor", "appearance.yourAgentColor"],
     subject: "chat colors",
   },
   editor: {
     section: "appearance",
-    row: settingsRowPin("editor-font"),
+    row: "settings-row-editor-font",
     keys: ["editor.fontFamily", "editor.fontSize"],
     subject: "editor",
   },
