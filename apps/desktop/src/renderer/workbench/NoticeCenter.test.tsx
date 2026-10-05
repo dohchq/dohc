@@ -401,7 +401,7 @@ describe("notice center", () => {
     const notice = screen.getByTestId("notice-sharing-declined-main:object-1");
     expect(notice.textContent).toContain("Too large to share your edits");
     expect(notice.textContent).toContain(
-      "People you share large.md with don't get the changes you make to it in dohc. Make it smaller, then open it again.",
+      "People you share large.md with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.",
     );
     expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
 
@@ -409,7 +409,7 @@ describe("notice center", () => {
     const copied = await navigator.clipboard.readText();
     expect(copied).toContain("Notice: Too large to share your edits");
     expect(copied).toContain(
-      "Detail: People you share large.md with don't get the changes you make to it in dohc. Make it smaller, then open it again.",
+      "Detail: People you share large.md with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.",
     );
     expect(copied).toContain("File: notes/large.md");
     expect(copied).toContain("Size: 280001 bytes");
@@ -429,7 +429,7 @@ describe("notice center", () => {
 
     const toast = screen.getByTestId("sharing-declined-toast");
     expect(toast.textContent).toContain(
-      "Too large to share your edits. People you share large.md with don't get the changes you make to it in dohc. Make it smaller, then open it again.",
+      "Too large to share your edits. People you share large.md with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.",
     );
   });
 

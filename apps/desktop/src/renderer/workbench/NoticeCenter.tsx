@@ -239,7 +239,7 @@ type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
 const SHARING_DECLINED_TITLE = "Too large to share your edits";
 function sharingDeclinedBody(declined: SharingDeclined): string {
   const fileName = declined.path.split("/").pop() ?? declined.path;
-  return `People you share ${fileName} with don't get the changes you make to it in dohc. Make it smaller, then open it again.`;
+  return `People you share ${fileName} with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.`;
 }
 function sharingDeclinedDetails(workspaceId: string, declined: SharingDeclined): string {
   return errorDetails([
