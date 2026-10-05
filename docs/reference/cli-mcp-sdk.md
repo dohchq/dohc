@@ -33,6 +33,16 @@ Read automation definitions and on/off file state in a Collection, including sha
 
 Returns `{ ok: true, definitions } | { ok: false, reason }`.
 
+### `dohc_publish_app`
+
+Create a share link, prepare an immutable app revision, and approve publication with local owner authority. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.
+
+Changes the workspace, so a shared view does not offer it.
+
+- `request`: `{ action: "createLink", workspaceId: string, appRoot: string, paths?: string[], access?: "view" | "comment" | "edit", operationId: UUID, agentLabel?: string } | { action: "listLocal", workspaceId: string, appRoot: string } | { action: "prepareLocal", workspaceId: string, appRoot: string } | { action: "launchLocal", workspaceId: string, publicationId: SHA-256 hex } | { action: "list", workspaceId: string, appRoot: string, cursor?: SHA-256 hex } | { action: "prepare", workspaceId: string, appRoot: string, shareId: string, grantId: string } | { action: "approve", workspaceId: string, approvalId: UUID, candidateDigest: SHA-256 hex, agentLabel?: string, linkReads?: ({ operationId: UUID, fieldIds: UUID[] })[] } | { action: "cancel", workspaceId: string, approvalId: UUID } | { action: "withdraw", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "revokeCollection", workspaceId: string, publicationId: SHA-256 hex, expectedAuthorityRevision: integer } | { action: "reviewReactivation", workspaceId: string, publicationId: SHA-256 hex }`. Required.
+
+Returns the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the link can be ended. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.
+
 ### `dohc_dataset`
 
 Create, prepare, approve, inspect, and use transactional Collections in the owning workspace. Address a dataset with datasetPath, its dataset.json path relative to the MCP server folder. List and describe return this path; datasetId is internal identity. After a move, update path references. Apps bind to these same datasets; they have no separate private app store. Invoke approved operations with their described revision and a stable retry key. History shows record edits and schema/rule revisions. historyRevision reads immutable saved source. prepareHistoryRestore prepares a reviewed forward change against current records, preserving current access; approveMigration applies it. Source-file restoration alone never activates rules. Permissions manages explicit data grants. Export streams a private recovery archive to an explicit savePath ending in .dohc-recovery; it includes private records, files, history, and retry credentials. savePath must be absolute and outside the workspace. A relative sourcePath is read only and resolves from the MCP server folder; an absolute sourcePath is also supported. Recovery uses prepareRecovery with explicit sourcePath, then claimRecovery after stopping the old host, or discardRecovery to cancel. The same rules apply in dohc and apps.
@@ -702,7 +712,7 @@ List saved operations, with values to undo edits.
 - `beforeRevision`: `integer`
 - `limit`: `integer`
 
-Returns `{ kind: "history", datasetId, headRevision, entries: { revision, operation, callerReference, recordedAtMs, approvedRevisionHash, changesetBytes, attachmentCount, undo?, automation?, schema? }[], nextBeforeRevision }`.
+Returns `{ kind: "history", datasetId, headRevision, entries: { revision, operation, callerReference, recordedAtMs, approvedRevisionHash, changesetBytes, attachmentCount, undo?, automation?, approvalAgent?, schema? }[], nextBeforeRevision }`.
 
 #### `dohc dataset historyRevision`
 
@@ -713,7 +723,7 @@ Show the saved source of one past revision.
 - `expectedDatasetId`: `UUID`
 - `revisionSha256`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "history-revision", revision, schemaSql, operationSource }`.
+Returns `{ kind: "history-revision", approvalAgent?: { kind: "agent", label, labelSource: "agent-declared" } | null, revision, schemaSql, operationSource }`.
 
 #### `dohc dataset prepareHistoryRestore`
 
@@ -1011,9 +1021,10 @@ Returns `{ kind: "prepared", preparationId, revision, sourceDigest }`.
 
 Approve prepared source.
 
-Take preparationId and revisionSha256 from the reviewed preparation.
+Take preparationId and revisionSha256 from the reviewed preparation. agentLabel is an optional label supplied by the agent. With --as-agent or during an agent run, it is recorded as agent-declared. Human calls record no agent identity.
 
 - `workspaceId`: `string`. Required.
+- `agentLabel`: `string`
 - `preparationId`: `UUID`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 
@@ -1071,9 +1082,10 @@ Returns `{ kind: "migration-prepared", preparationId, previousRevision, revision
 
 Apply a reviewed migration.
 
-Take revisionSha256 and approvalDigest from the preparation. Approval applies the reviewed result without rerunning the SQL.
+Take revisionSha256 and approvalDigest from the preparation. Approval applies the reviewed result without rerunning the SQL. agentLabel is an optional label supplied by the agent. With --as-agent or during an agent run, it is recorded as agent-declared. Human calls record no agent identity.
 
 - `workspaceId`: `string`. Required.
+- `agentLabel`: `string`
 - `preparationId`: `UUID`. Required.
 - `revisionSha256`: `SHA-256 hex`. Required.
 - `approvalDigest`: `SHA-256 hex`. Required.
@@ -1116,6 +1128,21 @@ Approve, open, and share apps.
 
 Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root.
 
+#### `dohc app createLink`
+
+Create a scoped app link at View access by default.
+
+Choose appRoot relative to the workspace. paths are workspace-relative selectors and default to the app root. access defaults to view. Generate operationId as a UUID for this creation. Reuse operationId for retries. A link URL is a bearer credential at its stated access level, usable by anyone holding it. Append the published appQuery before the fragment of any link URL, including one returned by createLink. agentLabel is an optional label supplied by the agent. With --as-agent or during an agent run, it is recorded as agent-declared. Human calls record no agent identity.
+
+- `workspaceId`: `string`. Required.
+- `appRoot`: `string`. Required.
+- `paths`: `string[]`
+- `access`: `"view" | "comment" | "edit"`
+- `operationId`: `UUID`. Required.
+- `agentLabel`: `string`
+
+Returns `{ kind: "linkCreated", shareId, grantId, selector: { paths, versionId }, access, bearerWarning, url }` or `{ kind: "urlUnavailable", shareId, grantId, selector: { paths, versionId }, access, bearerWarning }`.
+
 #### `dohc app listLocal`
 
 List an app's publications on this computer.
@@ -1134,7 +1161,7 @@ Review the source and the dataset operations it asks for, then approve.
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access }, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
 
 #### `dohc app launchLocal`
 
@@ -1155,37 +1182,40 @@ List an app's shared publications.
 - `appRoot`: `string`. Required.
 - `cursor`: `SHA-256 hex`
 
-Returns `{ kind: "listed", publications: ({ publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }`.
+Returns `{ kind: "listed", publications: ({ approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: false, appRoot, sourceRevision } | { approvalProvenance?, publicationId, authorityRevision, shareId, grantId, active, linkCurrent, collectionCapability, datasetCapability, manifestUnavailable: true })[], nextCursor }`.
 
 #### `dohc app prepare`
 
 Prepare an app for a share link.
 
-shareId and grantId name the share and its link grant. Review the result, then approve.
+Set `shareId` to `shareId` from `createLink`. Set `grantId` to `grantId` from `createLink`. shareId and grantId name the share and its link grant. Review the result, then approve.
 
 - `workspaceId`: `string`. Required.
 - `appRoot`: `string`. Required.
 - `shareId`: `string`. Required.
 - `grantId`: `string`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access }, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
 
 #### `dohc app approve`
 
 Publish a prepared app.
 
-Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation.
+Set `approvalId` to `approvalId` from `prepare`. Set `candidateDigest` to `candidateDigest` from `prepare`. Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. For linkReads, select operationId from the prepared dataset capability's operations and fieldIds from each operation's fields[].fieldId. These selections expose reads to link holders. agentLabel is an optional label supplied by the agent. With --as-agent or during an agent run, it is recorded as agent-declared. Human calls record no agent identity.
 
 - `workspaceId`: `string`. Required.
 - `approvalId`: `UUID`. Required.
 - `candidateDigest`: `SHA-256 hex`. Required.
+- `agentLabel`: `string`
 - `linkReads`: `({ operationId: UUID, fieldIds: UUID[] })[]`
 
-Returns `{ kind: "published", publicationId, authorityRevision, local?: true }`.
+Returns `{ kind: "published", publicationId, authorityRevision, local?: true, appQuery?, access?, bearerWarning? }`.
 
 #### `dohc app cancel`
 
 Discard a prepared app before approval.
+
+Set `approvalId` to `approvalId` from `prepare`. Use approvalId from prepareLocal or reviewReactivation to cancel those preparations.
 
 - `workspaceId`: `string`. Required.
 - `approvalId`: `UUID`. Required.
@@ -1225,7 +1255,7 @@ Review the result, then approve.
 - `workspaceId`: `string`. Required.
 - `publicationId`: `SHA-256 hex`. Required.
 
-Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
+Returns `{ kind: "prepared", approvalId, candidateDigest, appRoot, versionId, sourceRevision, audience?: { shareId, grantId, selector, access }, sourcePaths, capabilities, externalNetwork: true, local?: true }`.
 
 #### `dohc app responses`
 

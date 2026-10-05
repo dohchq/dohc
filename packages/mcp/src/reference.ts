@@ -149,6 +149,7 @@ export const CHAT_EXAMPLES: Record<string, string[][]> = {
 // verb's result schema; a string is written from the tool in tools.ts.
 export const MCP_RETURNS: Record<string, { cli: CliSocketVerb } | string> = {
   dohc_dataset: "what that verb returns, listed under [`dohc dataset`](#dohc-dataset).",
+  dohc_publish_app: "the requested action's result, listed under [`dohc app`](#dohc-app). Only `createLink` returns a bearer link `url` once, in `linkCreated`. `urlUnavailable` includes `grantId` so the link can be ended. Shared approval returns `published` with `appQuery` (`?app=<publicationId>`), never the link URL. Append `appQuery` before the fragment of any link URL, including one returned by `createLink`. Keep the link secret yourself.",
   dohc_list_workspaces: "`{ workspaces: { workspaceId, rootPath, kind, remote? }[] }`",
   dohc_workspace_status: "`{ synced, scope, cloudConnected, credentialStatus, workspaceId?, serverUrl? }`. `scope` is `\"local\"` or `\"cloud\"`.",
   dohc_list_changes: { cli: "moments" },
