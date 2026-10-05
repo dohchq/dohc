@@ -29,3 +29,15 @@ it("classifies every served link route, including decoded route segments", () =>
   ];
   for (const path of paths) expect(isLinkEndpointPath(path), path).toBe(true);
 });
+
+it.each([
+  "/sync/link/app-publications/invalid",
+  `/sync/link/app-publications/${"a".repeat(64)}/unknown`,
+  `/sync/link/app-publications/${"a".repeat(64)}/backend/activate`,
+  `/sync/link/app-publications/${"a".repeat(64)}/blobs/invalid`,
+  "/sync/link-lane-owner/app-publications",
+  `/sync/owner/app-publications/${"a".repeat(64)}/backend/invoke`,
+  "/sync/link%/share",
+])("does not classify unserved link paths or owner routes as link routes: %s", path => {
+  expect(isLinkEndpointPath(path)).toBe(false);
+});

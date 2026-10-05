@@ -30,6 +30,9 @@ it("preserves app backend conflicts and verified rate limits", async () => {
 
 it.each([
   ["/sync/link/collection-writes", 403, "share_op_rejected", 403],
+  ["/sync/%6cink/collection-writes", 403, "share_op_rejected", 403],
+  ["/%73ync/link/%63ollection-writes", 403, "share_op_rejected", 403],
+  ["/sync//link/collection-writes/", 403, "share_op_rejected", 403],
   ["/sync/link/share", 403, "share_op_rejected", 404],
   ["/sync/link/collection-writes/extra", 403, "share_op_rejected", 403],
   ["/sync/link/collection-writes", 401, "share_op_rejected", 404],
