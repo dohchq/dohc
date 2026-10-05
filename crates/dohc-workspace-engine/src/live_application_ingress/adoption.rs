@@ -127,7 +127,10 @@ mod tests {
         };
         let canonical = json!([{"clientId": 7, "startClock": 0, "endClock": 3}, {"clientId": 7, "startClock": 5, "endClock": 10}]);
         let decoded = decode(&cut(canonical.clone()), 1, limits.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&decoded.events[0].metadata.first_seen).unwrap(), canonical);
+        assert_eq!(
+            serde_json::to_value(&decoded.events[0].metadata.first_seen).unwrap(),
+            canonical
+        );
         for ranges in [
             json!([{"clientId": 7, "startClock": 0, "endClock": 3}, {"clientId": 7, "startClock": 3, "endClock": 10}]),
             json!([{"clientId": 7, "startClock": 0, "endClock": 6}, {"clientId": 7, "startClock": 5, "endClock": 10}]),
