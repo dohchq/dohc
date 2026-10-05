@@ -116,7 +116,7 @@ import { ExternalLinkConfirm } from "./ExternalLinkConfirm";
 import { CommandPalette, type Command } from "./CommandPalette";
 import { QuickOpenPalette } from "./QuickOpenPalette";
 import { FileInspector } from "./FileInspector";
-import { classifyForView } from "./fileViewKind";
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { HeadingTarget, ScrollTarget } from "./MarkdownView";
 import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
 import { NewFileDialog } from "./NewFileDialog";
@@ -2678,7 +2678,7 @@ export function DesktopWorkspaceShell(props: {
             (group) => group.id === groupId,
           )?.activeTab;
           if (nextActiveTab === undefined || nextActiveTab === null) continue;
-          const viewKind = classifyForView(nextActiveTab);
+          const viewKind = fileKindForPath(nextActiveTab).displayKind;
           if (viewKind === "markdown" || viewKind === "database") {
             rendererMarks.mark(fileOpenStartMark(groupId));
           }
@@ -2999,7 +2999,7 @@ export function DesktopWorkspaceShell(props: {
             (candidate) => candidate.id === mountingGroupId,
           )?.activeTab;
           if (nextActiveTab === undefined || nextActiveTab === null) continue;
-          const viewKind = classifyForView(nextActiveTab);
+          const viewKind = fileKindForPath(nextActiveTab).displayKind;
           if (viewKind === "markdown" || viewKind === "database") {
             rendererMarks.mark(fileOpenStartMark(mountingGroupId));
           }
@@ -3067,7 +3067,7 @@ export function DesktopWorkspaceShell(props: {
           next,
           requestSequencesAtIssue,
         );
-        const viewKind = classifyForView(tab.path);
+        const viewKind = fileKindForPath(tab.path).displayKind;
         if (viewKind === "markdown" || viewKind === "database") {
           rendererMarks.mark(fileOpenStartMark(newGroupId));
         }
@@ -3562,7 +3562,7 @@ export function DesktopWorkspaceShell(props: {
       },
       // Only offered while a markdown document is the active tab — on every
       // other tab the toggle has nothing to act on, so the palette hides it.
-      ...(activeDocumentPath && classifyForView(activeDocumentPath) === "markdown"
+      ...(activeDocumentPath && fileKindForPath(activeDocumentPath).displayKind === "markdown"
         ? [
             {
               id: "toggle-markdown-source",

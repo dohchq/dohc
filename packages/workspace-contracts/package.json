@@ -21,6 +21,7 @@
     "./domain-values": "./src/domainValues.ts",
     "./engine": "./src/engine.ts",
     "./file-version": "./src/fileVersion.ts",
+    "./kinds": "./src/kinds.ts",
     "./live-documents": "./src/liveDocuments.ts",
     "./path-floor": "./src/pathFloor.ts",
     "./relay": "./src/relay.ts",

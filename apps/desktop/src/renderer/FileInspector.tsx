@@ -16,7 +16,7 @@ import type { PendingFileUndo } from "./fileEditorUndo";
 import { CsvView } from "./CsvView";
 import { ImageView } from "./ImageView";
 import { extensionOf } from "./path";
-import { classifyForView } from "./fileViewKind";
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { DraftFlush } from "./useAutosavedTextDraft";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -363,13 +363,9 @@ export const FileInspector = memo(function FileInspector(
     props.engineVersionKey,
   );
   const localBuffer = useRetainedLocalDocument(key);
-  const kind = classifyForView(props.path);
-  const isText =
-    kind === "markdown" ||
-    kind === "drawing" ||
-    kind === "csv" ||
-    kind === "json" ||
-    kind === "text";
+  const fileKind = fileKindForPath(props.path);
+  const kind = fileKind.displayKind;
+  const isText = fileKind.opens.content === "text";
   const localBufferSnapshot = useSyncExternalStore(
     localBuffer.subscribe,
     localBuffer.getSnapshot,
@@ -826,6 +822,7 @@ export const FileInspector = memo(function FileInspector(
       );
     case "json":
     case "text":
+    case "code":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader

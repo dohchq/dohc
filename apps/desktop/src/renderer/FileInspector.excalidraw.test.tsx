@@ -67,7 +67,7 @@ vi.mock("./ExcalidrawCanvas", () => ({
 }));
 
 import { FileInspector } from "./FileInspector";
-import { classifyForView } from "./fileViewKind";
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import {
   EMPTY_EXCALIDRAW_DOCUMENT,
   parseExcalidrawDocument,
@@ -268,7 +268,7 @@ describe("FileInspector Excalidraw view", () => {
   });
 
   it("classifies .excalidraw files as drawings", () => {
-    expect(classifyForView("plans/architecture.EXCALIDRAW")).toBe("drawing");
+    expect(fileKindForPath("plans/architecture.EXCALIDRAW").displayKind).toBe("drawing");
   });
 
   it("does not let an inactive editor-group drawing claim focus", async () => {
