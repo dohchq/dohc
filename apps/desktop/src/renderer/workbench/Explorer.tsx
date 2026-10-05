@@ -1709,9 +1709,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                 // Bounded, internally scrolling list (VS Code-style Open
                 // Editors pane). The cap is workbench state: the section's
                 // bottom-edge handle resizes it and the value persists — the
-                // render additionally bounds it to the viewport cap.
+                // render additionally bounds it to the viewport cap. The
+                // padding holds a row's focus outline inside the scroller.
                 style={{ maxHeight: openEditorsHeight }}
-                className="m-0 list-none overflow-y-auto overscroll-contain p-0"
+                className="m-0 list-none overflow-y-auto overscroll-contain px-0 py-1"
               >
                 {props.editorGroups.map((group, groupIndex) => (
                   <li
