@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MENU_SEPARATOR, Menu, type MenuEntry, type MenuItem } from "./Menu";
+import { MENU_SEPARATOR, Menu, menuEnterFrom, moveInMenu, type MenuEntry, type MenuItem } from "./Menu";
 import { Overlay } from "../Overlay";
 
 function Harness(props: { items: readonly MenuEntry[]; closeOnPick?: boolean; children?: ReactNode }) {
@@ -470,5 +470,36 @@ describe("Menu", () => {
       fireEvent.keyDown(input, { key: "Enter" });
       expect(submit).toHaveBeenCalledOnce();
     });
+  });
+});
+
+// The keys every menu shares, the Menu part and the editor menus alike.
+describe("moveInMenu", () => {
+  const labels = ["Text", "Heading 1", "Heading 2", "Duplicate", "Delete"];
+  it("wraps the arrows, jumps with Home and End, and finds the next row by its first letter", () => {
+    expect(moveInMenu("ArrowDown", 4, labels)).toBe(0);
+    expect(moveInMenu("ArrowUp", 0, labels)).toBe(4);
+    expect(moveInMenu("Home", 3, labels)).toBe(0);
+    expect(moveInMenu("End", 0, labels)).toBe(4);
+    expect(moveInMenu("h", 0, labels)).toBe(1);
+    expect(moveInMenu("h", 1, labels)).toBe(2);
+    expect(moveInMenu("D", 2, labels)).toBe(3);
+    expect(moveInMenu("d", 3, labels)).toBe(4);
+  });
+
+  it("answers null for other keys, a letter no row starts with, and an empty list", () => {
+    expect(moveInMenu("Enter", 0, labels)).toBeNull();
+    expect(moveInMenu(" ", 0, labels)).toBeNull();
+    expect(moveInMenu("z", 0, labels)).toBeNull();
+    expect(moveInMenu("ArrowDown", 0, [])).toBeNull();
+  });
+});
+
+describe("menuEnterFrom", () => {
+  it("starts the list 4px toward its trigger", () => {
+    expect(menuEnterFrom("below")).toEqual({ "--dohc-menu-from": "-4px" });
+    expect(menuEnterFrom("above")).toEqual({ "--dohc-menu-from": "4px" });
+    expect(menuEnterFrom("right")).toEqual({ "--dohc-menu-from": "0px", "--dohc-menu-from-x": "-4px" });
+    expect(menuEnterFrom("left")).toEqual({ "--dohc-menu-from": "0px", "--dohc-menu-from-x": "4px" });
   });
 });

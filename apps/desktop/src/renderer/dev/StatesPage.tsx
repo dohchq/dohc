@@ -1,7 +1,9 @@
 import { AlertTriangle, Bot, CheckCircle2, MoreHorizontal } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { DocumentMenu } from "../DocumentMenu";
+import { BlockMenu } from "../editor/blockControls";
+import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
 import { CopyDetailsButton } from "../shell/copyDetails";
@@ -282,6 +284,52 @@ const dangerMenuItems: MenuEntry[] = [
   { id: "reveal", label: "Reveal in folder", onSelect: noop },
   { id: "forget", label: "Forget", danger: true, onSelect: noop },
 ];
+
+// The editor's menus draw themselves at fixed places. Laid out inside a box
+// with `contain: layout`, which is the containing block for fixed children,
+// they land in their part. The box leaves room for the shadow.
+const EDITOR_MENU_BOX = "relative [contain:layout]";
+
+const BLOCK_MENU_OPEN = {
+  open: true,
+  pos: 0,
+  x: 0,
+  y: 0,
+  maxHeight: 420,
+  placement: "below",
+  trigger: null,
+} as const;
+
+const TABLE_MENU_ROWS: readonly TableMenuRow[] = [
+  { label: "Insert column left" },
+  { label: "Insert column right" },
+  { label: "Align left", separatorBefore: true },
+  { label: "Align center" },
+  { label: "Align right" },
+  { label: "Duplicate column" },
+  { label: "Delete column", destructive: true, separatorBefore: true },
+];
+
+// The grip menu is built from the DOM, as the table controls build it, with
+// its destructive row active.
+function TableMenuSpecimen(props: { menuId: string }) {
+  const host = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const element = host.current;
+    if (!element) return;
+    const { menu, buttons } = buildTableMenu(element.ownerDocument, TABLE_MENU_ROWS, props.menuId);
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+    const active = buttons.at(-1);
+    if (active) {
+      active.toggleAttribute("data-active", true);
+      menu.setAttribute("aria-activedescendant", active.id);
+    }
+    element.append(menu);
+    return () => menu.remove();
+  }, [props.menuId]);
+  return <div ref={host} className={`${EDITOR_MENU_BOX} h-[300px] w-[260px]`} />;
+}
 
 function Pane(props: { theme: "light" | "dark" }) {
   const { theme } = props;
@@ -660,6 +708,23 @@ function Pane(props: { theme: "light" | "dark" }) {
           >
             <MenuSpecimen label="More for Research" items={dangerMenuItems} width={176} testId={`states-menu-danger-${theme}`} />
           </div>
+        </Specimen>
+      </Section>
+
+      {/* The editor's menus, after the shell's so the parts above keep their
+          places. Their active row is the one Enter acts on, keyboard or
+          pointer, and always draws the outline. */}
+      <Section part="block-menu" title="Block menu">
+        <Specimen label="sections; first row active; destructive with Del">
+          <div className={`${EDITOR_MENU_BOX} h-[410px] w-[270px]`}>
+            <BlockMenu state={BLOCK_MENU_OPEN} onSelect={noop} onClose={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="table-menu" title="Table menu">
+        <Specimen label="separators; destructive row active, with Del">
+          <TableMenuSpecimen menuId={`states-table-menu-${theme}`} />
         </Specimen>
       </Section>
     </section>

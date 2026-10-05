@@ -126,6 +126,89 @@ describe("blockControls menu keyboard deletion", () => {
   );
 });
 
+describe("BlockMenu on the Menu part's recipe and rule", () => {
+  function openMenu(onSelect = vi.fn(), onClose = vi.fn()) {
+    const handle = document.createElement("button");
+    handle.setAttribute("aria-label", "block actions");
+    document.body.append(handle);
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    handle.focus();
+    render(
+      createElement(BlockMenu, {
+        state: { open: true, pos: 0, x: 20, y: 20, maxHeight: 400, placement: "below", trigger: handle },
+        onSelect,
+        onClose,
+      }),
+    );
+    const menu = screen.getByRole("menu", { name: "block actions" });
+    const rows = screen.getAllByRole("menuitem");
+    return { handle, outside, menu, rows, onSelect, onClose };
+  }
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  it("keeps focus on its frame and names the active row, which the keys and a moving pointer move", () => {
+    const { handle, menu, rows } = openMenu();
+    expect(document.activeElement).toBe(menu);
+    expect(handle.getAttribute("aria-expanded")).toBe("true");
+    expect(menu.getAttribute("aria-activedescendant")).toBe(rows[0]?.id);
+    expect(rows[0]?.hasAttribute("data-active")).toBe(true);
+
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(menu.getAttribute("aria-activedescendant")).toBe(rows.at(-1)?.id);
+    fireEvent.keyDown(menu, { key: "h" });
+    expect(menu.getAttribute("aria-activedescendant")).toBe(rows[1]?.id);
+
+    // A row that opens under a still pointer does not take the active row.
+    fireEvent.mouseMove(rows[4]!, { movementX: 0, movementY: 0 });
+    expect(rows[1]?.hasAttribute("data-active")).toBe(true);
+    fireEvent.mouseMove(rows[4]!, { movementX: 0, movementY: 2 });
+    expect(rows[4]?.hasAttribute("data-active")).toBe(true);
+    expect(rows[1]?.hasAttribute("data-active")).toBe(false);
+  });
+
+  it("returns focus to the handle before the pick runs, so an action that edits can take it", () => {
+    let focusedAtPick: Element | null = null;
+    const { handle, menu, rows } = openMenu(vi.fn(() => {
+      focusedAtPick = document.activeElement;
+    }));
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    fireEvent.keyDown(menu, { key: " " });
+    expect(focusedAtPick).toBe(handle);
+    fireEvent.click(rows[2]!);
+    expect(focusedAtPick).toBe(handle);
+  });
+
+  it("closes on Escape without passing it on, on Tab, and on a press outside, but not on a press on its handle", () => {
+    const parentEscape = vi.fn();
+    document.addEventListener("keydown", parentEscape);
+    const { handle, outside, menu, onClose } = openMenu();
+    fireEvent.pointerDown(handle);
+    fireEvent.focusOut(menu, { relatedTarget: handle });
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(menu, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(parentEscape).not.toHaveBeenCalled();
+    fireEvent.keyDown(menu, { key: "Tab" });
+    expect(onClose).toHaveBeenCalledTimes(2);
+    fireEvent.pointerDown(outside);
+    expect(onClose).toHaveBeenCalledTimes(3);
+    document.removeEventListener("keydown", parentEscape);
+  });
+
+  it("shows Del beside the destructive row without adding it to the row's name", () => {
+    const { rows } = openMenu();
+    const remove = screen.getByRole("menuitem", { name: "Delete" });
+    expect(remove).toBe(rows.at(-1));
+    expect(remove.getAttribute("aria-keyshortcuts")).toBe("Delete Backspace");
+    expect(within(remove).getByText("Del").getAttribute("aria-hidden")).toBe("true");
+    expect(remove.className).toContain("text-danger");
+  });
+});
+
 describe("blockControls duplicate", () => {
   it("inserts a copy of a paragraph directly after itself", () => {
     const editor = track(makeEditor("Hello"));
