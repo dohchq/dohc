@@ -89,6 +89,37 @@ it("returns focus after selecting a menu item", async () => {
   fireEvent.click(item);
   await waitFor(() => expect(document.activeElement).toBe(screen.getByText("Trigger")));
 });
+// The browser moves focus on the press, after the close: to the page for
+// blank space, to the control for a control. Each test stands in for that move.
+it("returns focus to the trigger when a press on blank space ends", async () => {
+  render(<Menu />);
+  const trigger = screen.getByRole("button", { name: "Trigger" });
+  screen.getByText("Item").focus();
+  fireEvent.pointerDown(document.body);
+  expect(screen.queryByRole("menu")).toBeNull();
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+  trigger.blur();
+  fireEvent.pointerUp(document.body);
+  expect(document.activeElement).toBe(trigger);
+});
+it("leaves focus on the control a press outside lands on", async () => {
+  render(<Menu />);
+  const elsewhere = screen.getByRole("button", { name: "Elsewhere" });
+  fireEvent.pointerDown(elsewhere);
+  await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+  elsewhere.focus();
+  fireEvent.pointerUp(elsewhere);
+  expect(document.activeElement).toBe(elsewhere);
+});
+it("forgets a press outside that the browser cancels", async () => {
+  render(<Menu />);
+  const trigger = screen.getByRole("button", { name: "Trigger" });
+  fireEvent.pointerDown(document.body);
+  fireEvent.pointerCancel(document.body);
+  trigger.blur();
+  fireEvent.pointerUp(document.body);
+  expect(document.activeElement).toBe(document.body);
+});
 it("keeps an intentional outside focus destination", async () => {
   render(<Menu />);
   screen.getByText("Item").focus();

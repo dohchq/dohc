@@ -19,7 +19,8 @@ function holdMenuOpen(): () => void {
 /**
  * Closes an open menu the ways a person expects: a press outside it, focus
  * moving to something outside it, the window losing focus, and Escape while
- * focus is inside it. Escape returns focus to the trigger.
+ * focus is inside it. Escape, and a press on blank space, return focus to
+ * the trigger.
  *
  * The window check covers what the press check cannot see. A click in an
  * embedded frame, such as an app preview, never reaches this document, but
@@ -41,7 +42,19 @@ export function useDismiss(options: {
     if (!open || !element) return;
     const close = () => onClose.current();
     function onPointerDown(event: PointerEvent) {
-      if (element && !element.contains(event.target as Node)) close();
+      if (!element || element.contains(event.target as Node)) return;
+      close();
+      // A press on blank space takes focus to the page after the close has
+      // returned it. When the press ends there, focus goes back to the
+      // trigger, as it does for every other close. A press on a control
+      // keeps the focus it gave that control.
+      const settle = (end: Event) => {
+        document.removeEventListener("pointerup", settle, true);
+        document.removeEventListener("pointercancel", settle, true);
+        if (end.type === "pointerup" && document.activeElement === document.body) trigger.current?.focus();
+      };
+      document.addEventListener("pointerup", settle, true);
+      document.addEventListener("pointercancel", settle, true);
     }
     function onFocusOut(event: FocusEvent) {
       // No next element means focus went to the page, a frame, or another

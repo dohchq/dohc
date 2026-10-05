@@ -221,6 +221,19 @@ table {
   animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
 }
 
+/* A menu enters from its trigger's side: 4px and a fade, no scale. The Menu
+ * part sets --dohc-menu-from to -4px under its trigger and 4px over it. */
+@keyframes dohc-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--dohc-menu-from, -4px));
+  }
+}
+
+.dohc-menu-in {
+  animation: dohc-menu-in 130ms ease-out both;
+}
+
 /* Faint paper grid for brand moments (first-run) — texture, not decoration. */
 .dohc-paper-grid {
   background-image:
