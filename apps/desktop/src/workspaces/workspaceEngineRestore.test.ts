@@ -380,9 +380,7 @@ describe("stable object ids for the linked-chat rail", () => {
 
     expect(await engine.filePathForObjectId(objectId)).toBe("two.md");
     expect(await engine.filePathForObjectId("missing-object-id")).toBeNull();
-    expect(requests.map((request) => request.method)).toContain(
-      VERSIONED_METHOD.textList,
-    );
+    expect(requests.map((request) => request.method)).toContain("files.resolve");
     expect(requests.map((request) => request.method)).not.toContain(
       VERSIONED_METHOD.textRead,
     );

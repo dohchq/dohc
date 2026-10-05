@@ -105,6 +105,7 @@ impl Default for EngineService {
     }
 }
 
+// Keep dispatcher state out of callers' inline RPC futures.
 impl ProtocolEngineService for EngineService {
     type Input = LiveApplicationInput;
 
@@ -116,7 +117,7 @@ impl ProtocolEngineService for EngineService {
     ) -> Result<ServiceResponse, WireError> {
         match input {
             Some(input) => self.dispatch_input(ctx, request, input).await,
-            None => self.dispatch(ctx, request).await,
+            None => Box::pin(self.dispatch(ctx, request)).await,
         }
     }
     async fn call(
@@ -124,7 +125,7 @@ impl ProtocolEngineService for EngineService {
         ctx: RequestContext,
         request: Request,
     ) -> Result<ServiceResponse, WireError> {
-        self.dispatch(ctx, request).await
+        Box::pin(self.dispatch(ctx, request)).await
     }
 }
 
