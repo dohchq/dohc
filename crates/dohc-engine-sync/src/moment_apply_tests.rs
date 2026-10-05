@@ -1964,7 +1964,7 @@ fn disposition(store: &EngineStore, origin: &str) -> Option<String> {
 }
 
 #[test]
-fn public_create_author_survives_replay_and_payload_export() {
+fn public_create_author_survives_replay_locally_and_is_omitted_from_client_payload() {
     let (_scratch, mut store) = test_store();
     hydrate_texts(&mut store, &["---\nanswer: Lisbon\n---\n"]);
     let mut payload = absent_text_payload(
@@ -1991,9 +1991,17 @@ fn public_create_author_survives_replay_and_payload_export() {
                 )
                 .unwrap();
             assert_eq!(count, 1);
+            let stored: String = tx
+                .query_row(
+                    "SELECT author_json FROM moments WHERE moment_id='accepted-create'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&stored).unwrap(), authors);
             let (exported, _) =
                 crate::outbound::moment_append_payload_in_tx(tx, "ws", "accepted-create").unwrap();
-            assert_eq!(exported["authors"], authors);
+            assert!(exported.get("authors").is_none());
             Ok::<_, SyncError>(())
         })
         .unwrap();

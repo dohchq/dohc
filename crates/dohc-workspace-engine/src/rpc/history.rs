@@ -215,7 +215,7 @@ fn parsed_moment_author(value: Value) -> Value {
         _ => None,
     };
     if let Some(fields) = snapshot_fields {
-        let valid = object.len() == 3 && fields.into_iter().all(|field| snapshot_text(field));
+        let valid = object.len() == 3 && fields.into_iter().all(&snapshot_text);
         return if valid { value } else { corrupt() };
     }
     if object.get("kind").and_then(Value::as_str) == Some("public") {
