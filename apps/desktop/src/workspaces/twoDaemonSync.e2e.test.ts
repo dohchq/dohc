@@ -10,7 +10,7 @@ import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { buildRelay } from "../../../../services/sync-relay/scripts/build.mjs";
 import { stableJsonStringify } from "../../../../services/sync-relay/src/canonicalJson";
 import * as Y from "yjs";
-import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
+import { parseFrontmatter, patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { createLocalChangeAuthor } from "@dohc/workspace-core";
 import { DaemonRefusalError, VersionedLiveAdapter, WorkspaceDaemonRequester, type AutomationClaim } from "@dohc/workspace-engine-client";
@@ -75,6 +75,7 @@ interface LiveDaemonCapture {
   chats: DesktopLinkedChatStore;
   relay: EngineRelayWorkspaceClient;
   refusalNotices(): Promise<unknown>;
+  queryCollectionRecords: VersionedLiveAdapter["queryCollectionRecords"];
   close(): Promise<void>;
 }
 
@@ -101,6 +102,8 @@ async function openLiveDaemonCapture(input: {
     capture,
     chats: workspace.chats,
     relay,
+    queryCollectionRecords: query => workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
+      new VersionedLiveAdapter(client, handle, { workspaceId: input.workspaceId }).queryCollectionRecords(query)),
     refusalNotices: () => workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
       new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {
         workspaceId: input.workspaceId,
@@ -155,6 +158,8 @@ async function openJoinedDaemonCapture(input: {
     capture,
     chats: workspace.chats,
     relay,
+    queryCollectionRecords: query => workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
+      new VersionedLiveAdapter(client, handle, { workspaceId: input.workspaceId }).queryCollectionRecords(query)),
     refusalNotices: () => workspace.sessions.run(workspace.workspace, async ({ client, workspace: handle }) =>
       new WorkspaceDaemonRequester(client).request("sync.refusalNotices", {
         workspaceId: input.workspaceId,
@@ -505,7 +510,20 @@ it.skipIf(engine.missing)(
         const blob = await fetch(`${proxy.origin}/sync/shares/${shareId}/blobs/${digest}`, { headers });
         expect(blob.status).toBe(200);
         expect(await blob.text()).toBe(cleared);
-        expect(await readFile(join(rootB, path), "utf8")).toBe(cleared);
+        const markdown = await readFile(join(rootB, path), "utf8");
+        expect(markdown).toBe(cleared);
+        expect(parseFrontmatter(markdown, false).meta).toEqual({ id: sourceId, title: "Keep" });
+        await expect.poll(async () => {
+          const query = await recipient!.queryCollectionRecords({ collectionPath: "tasks", resolveRelations: true });
+          const record = query.records.find(record => record.id === sourceId);
+          return record && {
+            id: record.id, path: record.path, conflicted: record.conflicted,
+            related: record.values.find(value => value.field === "related"),
+            title: record.values.find(value => value.field === "title"),
+          };
+        }, { timeout: REAL_DAEMON_DEADLINE_MS }).toMatchObject({
+          id: sourceId, path, conflicted: false, related: undefined, title: { value: "Keep" },
+        });
         expect(await recipient!.refusalNotices()).toEqual({ notices: [] });
         expect(await recipient!.capture.countOpenConflicts()).toBe(0);
       };

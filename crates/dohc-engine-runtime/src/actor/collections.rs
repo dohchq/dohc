@@ -1374,16 +1374,50 @@ mod collection_relation_cleanup_tests {
             .unwrap()
             .unwrap();
         let after_restart = reopened.doc.encode_full_state();
+        let fixture = serde_json::json!({
+            "sourceId": SOURCE_ID, "targetId": TARGET_ID, "seed": updates[0],
+            "cleanup": updates[1], "checkpoint": checkpoint, "afterRestart": after_restart,
+        });
         if let Ok(path) = std::env::var("DOHC_SEEDED_CLEANUP_FIXTURE") {
-            std::fs::write(
-                path,
-                serde_json::to_vec_pretty(&serde_json::json!({
-                    "sourceId": SOURCE_ID, "targetId": TARGET_ID, "seed": updates[0],
-                    "cleanup": updates[1], "checkpoint": checkpoint, "afterRestart": after_restart,
-                }))
-                .unwrap(),
-            )
-            .unwrap();
+            std::fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+        }
+        let committed: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../dohc-engine-collab/tests/seeded-doc-fixtures/cleanup.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            fixture.as_object().unwrap().keys().collect::<Vec<_>>(),
+            committed.as_object().unwrap().keys().collect::<Vec<_>>(),
+            "cleanup fixture keys drift"
+        );
+        for field in ["sourceId", "targetId"] {
+            assert_eq!(
+                fixture[field], committed[field],
+                "cleanup input drift: {field}"
+            );
+        }
+        for field in ["seed", "cleanup", "checkpoint", "afterRestart"] {
+            let documents = [&fixture, &committed].map(|input| {
+                let doc = Ydoc::wire();
+                if field == "cleanup" {
+                    let seed: Vec<u8> = serde_json::from_value(input["seed"].clone()).unwrap();
+                    doc.apply(&seed).unwrap();
+                }
+                let bytes: Vec<u8> = serde_json::from_value(input[field].clone()).unwrap();
+                doc.apply(&bytes).unwrap();
+                doc
+            });
+            // Compare semantic roots, metadata, and projection, not random client bytes.
+            assert_eq!(
+                documents[0].canonical_content(),
+                documents[1].canonical_content(),
+                "cleanup shape drift: {field}"
+            );
+            assert_eq!(
+                documents[0].project(ContentKind::Richdoc).unwrap().content,
+                documents[1].project(ContentKind::Richdoc).unwrap().content,
+                "cleanup projection drift: {field}"
+            );
         }
         assert_eq!(
             after_restart, checkpoint,

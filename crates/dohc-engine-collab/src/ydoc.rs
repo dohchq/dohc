@@ -7106,7 +7106,30 @@ mod projection_tests {
         if let Ok(path) = std::env::var("DOHC_SEEDED_REWRITE_FIXTURE") {
             std::fs::write(path, serde_json::to_vec_pretty(&fixtures).unwrap()).unwrap();
         }
-        for fixture in fixtures {
+        let committed: Vec<Value> =
+            serde_json::from_str(include_str!("../tests/seeded-doc-fixtures/rewrites.json"))
+                .unwrap();
+        assert_eq!(
+            fixtures.len(),
+            committed.len(),
+            "rewrite fixture coverage drift"
+        );
+        for (fixture, saved) in fixtures.into_iter().zip(committed) {
+            assert_eq!(
+                fixture.as_object().unwrap().keys().collect::<Vec<_>>(),
+                saved.as_object().unwrap().keys().collect::<Vec<_>>(),
+                "rewrite fixture keys drift"
+            );
+            assert_eq!(
+                fixture["markdown"], saved["markdown"],
+                "rewrite input drift"
+            );
+            let saved_update: Vec<u8> = serde_json::from_value(saved["update"].clone()).unwrap();
+            let saved_doc = Ydoc::wire();
+            saved_doc.apply(&saved_update).unwrap();
+            saved_doc
+                .validate_public_baseline(&saved_update)
+                .expect("committed rewrite admission");
             let update: Vec<u8> = serde_json::from_value(fixture["update"].clone()).unwrap();
             let replay = Ydoc::wire();
             replay
@@ -7123,6 +7146,18 @@ mod projection_tests {
             assert_eq!(
                 replay.project_richdoc().unwrap(),
                 fixture["markdown"].as_str().unwrap()
+            );
+            // Canonical content includes roots, map keys, version, and body shape,
+            // while excluding the random client identity and CRDT clocks.
+            assert_eq!(
+                replay.canonical_content(),
+                saved_doc.canonical_content(),
+                "rewrite shape drift"
+            );
+            assert_eq!(
+                replay.project_richdoc().unwrap(),
+                saved_doc.project_richdoc().unwrap(),
+                "rewrite projection drift"
             );
         }
     }
