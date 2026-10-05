@@ -461,6 +461,117 @@ fn lane_refused_import_is_never_a_public_preimage() {
 }
 
 #[test]
+fn former_lane_delete_restore_never_backfills_intermediate_settles() {
+    let (_scratch, _, mut source) = owner();
+    write(&mut source, "doc", "seed", "doc.md", "seed", "ydoc", 10);
+    lane(&mut source, "doc");
+    write(
+        &mut source,
+        "doc",
+        "intermediate",
+        "doc.md",
+        "intermediate",
+        "ydoc",
+        20,
+    );
+    write(
+        &mut source,
+        "doc",
+        "exported",
+        "doc.md",
+        "exported",
+        "ydoc",
+        30,
+    );
+    drain(&mut source);
+    VersionedTextStore::new(&mut source)
+        .delete_text_file(
+            &DeleteTextFile {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                path: "doc.md".into(),
+                moment_id: "deleted".into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 40,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    source
+        .write_with(&NoFaults, |tx| {
+            journal_moment_append_in_tx(tx, "ws", "deleted")
+        })
+        .unwrap();
+    VersionedTextStore::new(&mut source)
+        .rollback_text_file_mutation(
+            &dohc_engine_domain::RollbackTextFileMutation {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                path: "doc.md".into(),
+                mutation_moment_id: "deleted".into(),
+                metadata_origin: "restore".into(),
+                author_json: None,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let key = DocKey::new("ws", "main", "doc").unwrap();
+    assert!(
+        !dohc_engine_collab::read_marker(&source, &key)
+            .unwrap()
+            .unwrap()
+            .file_export_lane
+            .is_enabled()
+    );
+    source
+        .write_with(&NoFaults, |tx| {
+            crate::enrolment::backfill_enrolment_window_in_tx(tx, "ws", &NoLiveLeases, 60)
+        })
+        .unwrap();
+    let all = exports(&source);
+    assert_eq!(
+        all.iter()
+            .map(|op| op.payload["momentId"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "exported",
+            "deleted",
+            &dohc_engine_domain::rollback_compensating_moment_id("ws", "main", "deleted")
+        ]
+    );
+    assert_eq!(
+        dohc_engine_collab::read_marker(&source, &key)
+            .unwrap()
+            .unwrap()
+            .file_export_lane,
+        dohc_engine_collab::FileExportLane::Retired
+    );
+    let (_peer_scratch, _, mut peer) = open_store();
+    seed_replication_version(&mut peer, "main", "main");
+    adopt_join_identity(
+        &mut peer,
+        "ws",
+        "recipient",
+        "epoch-1",
+        "stream-1",
+        1,
+        &NoFaults,
+    )
+    .unwrap();
+    hydrate(&source, &mut peer);
+    for op in all {
+        apply(&mut peer, &op);
+    }
+    assert_eq!(count(&peer, "moments"), 3);
+    assert_eq!(count(&peer, "conflicts"), 0);
+}
+
+#[test]
 fn lane_journal_transaction_survives_crash_and_offline_restart() {
     for point in [
         FaultPoint::StorageBeforePersist,

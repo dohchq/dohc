@@ -95,11 +95,13 @@ pub enum FileExportLane {
     Off,
     Declined,
     Reseeded,
+    /// Delivery ended at deletion; old settles still belong only to the owner.
+    Retired,
 }
 
 impl FileExportLane {
     pub fn is_enabled(self) -> bool {
-        self != Self::Off
+        matches!(self, Self::Declined | Self::Reseeded)
     }
 }
 
@@ -2710,6 +2712,7 @@ pub fn read_marker_in(conn: &Connection, key: &DocKey) -> Result<Option<Marker>,
                 0 => FileExportLane::Off,
                 1 => FileExportLane::Declined,
                 2 => FileExportLane::Reseeded,
+                3 => FileExportLane::Retired,
                 _ => {
                     return Err(CollabError::Corrupt {
                         reason: "invalid file export lane".to_owned(),

@@ -156,7 +156,7 @@ pub fn originate_live_ydoc_base_in_tx(
                ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
               AND s.object_id=d.object_id \
              WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
-               AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane=0",
+               AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane IN (0,3)",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
@@ -185,7 +185,7 @@ pub fn originate_closing_ydoc_base_in_tx(
              ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
              AND s.object_id=d.object_id \
              WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
-             AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane=0",
+             AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane IN (0,3)",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
@@ -409,7 +409,7 @@ fn backfill_moments_between(
                        WHERE d.workspace_id=m.workspace_id AND d.version_id=m.version_id \
                          AND d.object_id=m.object_id \
                          AND (d.head_update_seq>0 OR d.head_snapshot_seq>0 \
-                           OR d.lineage_claim_status != 'unclaimed' OR d.file_export_lane!=0))) \
+                           OR d.lineage_claim_status != 'unclaimed' OR d.file_export_lane IN (1,2)))) \
                    AND m.moment_order > ?2 \
                    AND (?3 IS NULL OR m.moment_order <= ?3) \
                    AND NOT EXISTS (SELECT 1 FROM replication_pending_conflict_moments p \
@@ -478,7 +478,7 @@ pub(crate) fn backfill_file_versions_in_tx(
             "SELECT m.moment_id,m.version_id,m.object_id
              FROM moments m JOIN snapshots s USING(workspace_id,version_id,object_id)
              JOIN ydoc_docs d USING(workspace_id,version_id,object_id)
-             WHERE m.workspace_id=?1 AND d.file_export_lane!=0 AND d.lineage_claim_status='unclaimed'
+             WHERE m.workspace_id=?1 AND d.file_export_lane IN (1,2) AND d.lineage_claim_status='unclaimed'
                AND s.latest_moment_id=m.moment_id AND s.content_kind='text'
                AND m.payload_after_blob_sha256=s.blob_sha256 AND m.payload_after_path=s.path
                AND m.moment_order<=?2

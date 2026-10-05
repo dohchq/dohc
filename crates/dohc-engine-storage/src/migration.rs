@@ -2744,7 +2744,7 @@ END;
 ";
 
 const V2_YDOC_FILE_EXPORT_LANE_DDL: &str = "
-ALTER TABLE ydoc_docs ADD COLUMN file_export_lane INTEGER NOT NULL DEFAULT 0 CHECK (file_export_lane IN (0,1,2));
+ALTER TABLE ydoc_docs ADD COLUMN file_export_lane INTEGER NOT NULL DEFAULT 0 CHECK (file_export_lane IN (0,1,2,3));
 UPDATE ydoc_docs SET file_export_lane=1 WHERE lineage_claim_status='unclaimed' AND sharing_declined_json IS NOT NULL;
 DROP TRIGGER ydoc_sharing_declined_head;
 CREATE TRIGGER ydoc_sharing_declined_head AFTER UPDATE ON snapshots
@@ -2753,14 +2753,14 @@ WHEN NEW.blob_sha256 IS NOT OLD.blob_sha256
 BEGIN
     UPDATE ydoc_docs SET sharing_declined_json=NULL
     WHERE workspace_id=NEW.workspace_id AND version_id=NEW.version_id AND object_id=NEW.object_id
-        AND file_export_lane=0 AND sharing_declined_json IS NOT NULL;
+        AND file_export_lane NOT IN (1,2) AND sharing_declined_json IS NOT NULL;
 END;
 DROP TRIGGER ydoc_sharing_declined_restore;
 CREATE TRIGGER ydoc_sharing_declined_restore AFTER INSERT ON live_restore_fences
 BEGIN
     UPDATE ydoc_docs SET sharing_declined_json=NULL
     WHERE workspace_id=NEW.workspace_id AND version_id=NEW.main_version_id AND object_id=NEW.object_id
-        AND file_export_lane=0 AND sharing_declined_json IS NOT NULL;
+        AND file_export_lane NOT IN (1,2) AND sharing_declined_json IS NOT NULL;
 END;
 CREATE TRIGGER ydoc_file_export_claimed AFTER UPDATE OF lineage_claim_status ON ydoc_docs
 WHEN NEW.lineage_claim_status != 'unclaimed' AND NEW.file_export_lane != 0
@@ -2769,7 +2769,7 @@ BEGIN
 END;
 CREATE TRIGGER ydoc_file_export_deleted AFTER DELETE ON snapshots
 BEGIN
-    UPDATE ydoc_docs SET file_export_lane=0 WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id;
+    UPDATE ydoc_docs SET file_export_lane=3 WHERE workspace_id=OLD.workspace_id AND version_id=OLD.version_id AND object_id=OLD.object_id AND file_export_lane IN (1,2);
 END;
 ";
 
@@ -4678,7 +4678,8 @@ mod tests {
     }
 
     #[test]
-    fn file_export_lane_migration_preserves_prune_and_head_changes_but_clears_claim_and_delete() {
+    fn file_export_lane_migration_preserves_prune_and_head_changes_clears_claim_and_retires_delete()
+    {
         let mut conn = Connection::open_in_memory().unwrap();
         let ctx = MigrationContext::current(1000);
         run_migrations(
@@ -4738,9 +4739,9 @@ mod tests {
         )
         .unwrap();
         conn.execute("DELETE FROM snapshots", []).unwrap();
-        assert_eq!(flag(&conn), 0);
+        assert_eq!(flag(&conn), 3);
         assert!(
-            conn.execute("UPDATE ydoc_docs SET file_export_lane=3", [])
+            conn.execute("UPDATE ydoc_docs SET file_export_lane=4", [])
                 .is_err()
         );
     }

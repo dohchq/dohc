@@ -68,7 +68,7 @@ pub(crate) fn current_sharing_declines_in_tx(
          FROM ydoc_docs d JOIN snapshots s USING(workspace_id,version_id,object_id)
          WHERE d.workspace_id=?1 AND d.lineage_claim_status='unclaimed'
            AND d.sharing_declined_json IS NOT NULL AND s.content_kind='text'
-           AND (d.file_export_lane!=0
+           AND (d.file_export_lane IN (1,2)
              OR s.blob_sha256=json_extract(d.sharing_declined_json,'$.head_sha256'))
          ORDER BY d.version_id,d.object_id",
         )
@@ -183,7 +183,9 @@ pub fn originate_ydoc_base_in_tx(
     if !can_originate_local_bases_in_tx(tx, &key.workspace_id)? {
         return Ok(BaseOrigination::NothingToDo);
     }
-    let catch_up: Option<String> = if marker.file_export_lane.is_enabled() {
+    let catch_up: Option<String> = if marker.file_export_lane
+        != dohc_engine_collab::FileExportLane::Off
+    {
         let head: Option<String> = tx.query_row(
             "SELECT s.latest_moment_id FROM snapshots s JOIN ydoc_docs d USING(workspace_id,version_id,object_id)
              WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.content_kind='text'
