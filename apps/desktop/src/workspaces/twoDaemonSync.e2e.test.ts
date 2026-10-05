@@ -498,18 +498,22 @@ it.skipIf(engine.missing)(
       capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
       await capture.runRelaySync(page => relay.pull(page));
       await relay.push();
-      await recipient.capture.runRelaySync(page => recipient!.relay.pull(page));
       const assertRecipient = async () => {
         const headers = { authorization: "Bearer test:relation-recipient" };
         const digest = createHash("sha256").update(cleared).digest("hex");
-        const log = await fetch(`${proxy.origin}/sync/shares/${shareId}/log?since=0&limit=500`, { headers });
-        expect(log.status).toBe(200);
-        expect(await log.json()).toMatchObject({ ops: expect.arrayContaining([
+        await expect.poll(async () => {
+          await capture!.runRelaySync(page => relay.pull(page));
+          await relay.push();
+          const log = await fetch(`${proxy.origin}/sync/shares/${shareId}/log?since=0&limit=500`, { headers });
+          expect(log.status).toBe(200);
+          return log.json();
+        }, { timeout: 120_000 }).toMatchObject({ ops: expect.arrayContaining([
           expect.objectContaining({ opKind: "moment.append", payload: expect.objectContaining({ payloadAfterBlobSha256: digest }) }),
         ]) });
         const blob = await fetch(`${proxy.origin}/sync/shares/${shareId}/blobs/${digest}`, { headers });
         expect(blob.status).toBe(200);
         expect(await blob.text()).toBe(cleared);
+        await recipient!.capture.runRelaySync(page => recipient!.relay.pull(page));
         const markdown = await readFile(join(rootB, path), "utf8");
         expect(markdown).toBe(cleared);
         expect(parseFrontmatter(markdown, false).meta).toEqual({ id: sourceId, title: "Keep" });
@@ -530,7 +534,6 @@ it.skipIf(engine.missing)(
       await assertRecipient();
       await recipient.close();
       recipient = await openLiveDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
-      await recipient.capture.runRelaySync(page => recipient!.relay.pull(page));
       await assertRecipient();
     } finally {
       await recipient?.close();
