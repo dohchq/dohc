@@ -928,7 +928,37 @@ function historyPage(path = "notes/a.md") {
 }
 
 describe("owner History path policy", () => {
-  it("retires captured list, detail and restore after exclusion, including a reopened window", async () => {
+  it("skips excluded pages to reach older admitted History", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [] });
+    h.capture.listMoments
+      .mockResolvedValueOnce({ ...historyPage("private/a.md"), nextBeforeMomentOrder: 800, latestMomentOrder: 1000, protectedTruncated: true })
+      .mockResolvedValueOnce({ ...historyPage("private/b.md"), nextBeforeMomentOrder: 600, latestMomentOrder: 1000 })
+      .mockResolvedValueOnce({ ...historyPage("notes/old.md"), nextBeforeMomentOrder: 400, latestMomentOrder: 1000 });
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 200 })).resolves.toMatchObject({
+      moments: [{ path: "notes/old.md" }], nextBeforeMomentOrder: 400, latestMomentOrder: 1000, protectedTruncated: true,
+    });
+    expect(h.capture.listMoments.mock.calls).toEqual([[{ limit: 200 }], [{ limit: 200, beforeMomentOrder: 800 }], [{ limit: 200, beforeMomentOrder: 600 }]]);
+  });
+
+  it("bounds excluded-page reads and leaves a cursor to continue", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [] });
+    h.capture.listMoments.mockImplementation(async ({ beforeMomentOrder } = {}) => ({
+      ...historyPage("private/a.md"), nextBeforeMomentOrder: (beforeMomentOrder ?? 2000) - 200,
+    }));
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextBeforeMomentOrder: 0 });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(10);
+  });
+
+  it("stops skipping at the end of History", async () => {
+    const h = await harness();
+    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [] });
+    h.capture.listMoments.mockResolvedValue({ ...historyPage("private/a.md"), nextBeforeMomentOrder: null });
+    await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toMatchObject({ moments: [], nextBeforeMomentOrder: null });
+    expect(h.capture.listMoments).toHaveBeenCalledTimes(1);
+  });
+  it("retires captured list and detail after exclusion, including a reopened window", async () => {
     const path = await policyWorkspace();
     for (let pass = 0; pass < 2; pass += 1) {
       const h = await harness(undefined, path);
@@ -943,9 +973,6 @@ describe("owner History path policy", () => {
       await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toEqual({ ...historyPage(), moments: [] });
       expect(h.readPolicy).toHaveBeenCalledExactlyOnceWith(path);
       await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ moment: null });
-      await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "moment" })).rejects.toThrow("This history moment is no longer available.");
-      expect(h.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
-      expect(h.notify).not.toHaveBeenCalled();
     }
   });
 
@@ -955,16 +982,6 @@ describe("owner History path policy", () => {
     h.capture.readMoment.mockResolvedValue(historyDetail(side === "moment" ? "private/a.md" : "notes/a.md",
       side === "before" ? "private/a.md" : "notes/a.md", side === "after" ? "private/a.md" : "notes/a.md"));
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "guessed" })).resolves.toEqual({ moment: null });
-  });
-
-  it.each(["moment", "before", "after"])("admits the %s path before restoring a guessed detail", async side => {
-    const h = await harness();
-    h.readPolicy.mockResolvedValue({ filesPolicy: [{ path: "private/**", tracked: false }], visibilityPolicy: null, errors: [] });
-    h.capture.readMoment.mockResolvedValue(historyDetail(side === "moment" ? "private/a.md" : "notes/a.md",
-      side === "before" ? "private/a.md" : "notes/a.md", side === "after" ? "private/a.md" : "notes/a.md"));
-    await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "guessed" })).rejects.toThrow("This history moment is no longer available.");
-    expect(h.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
-    expect(h.notify).not.toHaveBeenCalled();
   });
 
   it.each([".env", ".dohc/internal.md", "notes//a.md"])("keeps ordinary %s rows behind CLI path admission", async path => {
@@ -998,7 +1015,6 @@ describe("owner History path policy", () => {
     const blocked = { status: "policy-unreadable", policyErrors: expect.arrayContaining([expect.stringContaining("files.toml")]) };
     await expect(h.invoke(CHANNELS.listEngineMoments)).resolves.toEqual(blocked);
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ ...blocked, moment: null });
-    await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "moment" })).rejects.toThrow("files.toml");
     expect(h.capture.listMoments).not.toHaveBeenCalled();
     expect(h.capture.readMoment).not.toHaveBeenCalled();
     expect(h.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
@@ -1006,8 +1022,11 @@ describe("owner History path policy", () => {
 
   it("refuses unknown restore ids without writing or notifying", async () => {
     const h = await harness();
+    h.capture.restoreFileToBeforeMoment.mockRejectedValue(new Error("This history moment is no longer available."));
     await expect(h.invoke(CHANNELS.restoreEngineMomentFile, { workspaceId: "workspace", momentId: "unknown" })).rejects.toThrow("This history moment is no longer available.");
-    expect(h.capture.restoreFileToBeforeMoment).not.toHaveBeenCalled();
+    expect(h.capture.restoreFileToBeforeMoment).toHaveBeenCalledWith("unknown", { kind: "human", humanId: "person-local" });
+    expect(h.capture.readMoment).not.toHaveBeenCalled();
+    expect(h.readPolicy).not.toHaveBeenCalled();
     expect(h.notify).not.toHaveBeenCalled();
   });
 });

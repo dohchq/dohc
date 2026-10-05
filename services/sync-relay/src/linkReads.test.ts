@@ -3742,7 +3742,7 @@ describe("relay capability reads", () => {
     ).toBe(`404:${LINK_REFUSAL_BODY}`);
   });
 
-  it("retires a policy-narrowed path through the link log and withdraws its history", async () => {
+  it("propagates a retirement delete through the link log and withdraws its history", async () => {
     const storage = await newStorage();
     const h = handler(storage);
     const seeded = await seed(h);

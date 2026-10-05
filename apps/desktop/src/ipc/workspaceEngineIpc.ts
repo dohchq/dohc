@@ -281,13 +281,22 @@ export function createWorkspaceEngineIpc<
         const admitted = policy ? historyPathAdmission(policy) : null;
         return listEngineMomentsForIpc(
           async () => {
-            const page = await history.listMoments({
-              ...(input.limit !== undefined ? { limit: input.limit } : {}),
-              ...(input.beforeMomentOrder !== undefined
-                ? { beforeMomentOrder: input.beforeMomentOrder }
-                : {}),
-            });
-            return admitted ? { ...page, moments: page.moments.filter(moment => moment.protected || admitted(moment.path)) } : page;
+            let beforeMomentOrder = input.beforeMomentOrder;
+            let protectedTruncated = false;
+            // Skip retired pages, but leave a continuation after a bounded scan.
+            for (let pageIndex = 0; ; pageIndex += 1) {
+              const page = await history.listMoments({
+                ...(input.limit !== undefined ? { limit: input.limit } : {}),
+                ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
+              });
+              if (!admitted) return page;
+              protectedTruncated ||= page.protectedTruncated;
+              const moments = page.moments.filter(moment => moment.protected || admitted(moment.path));
+              if (moments.length > 0 || page.nextBeforeMomentOrder === null || pageIndex === 9) {
+                return { ...page, moments, protectedTruncated };
+              }
+              beforeMomentOrder = page.nextBeforeMomentOrder;
+            }
           },
           authorNames(input.workspaceId),
         );
@@ -317,12 +326,6 @@ export function createWorkspaceEngineIpc<
         input.workspaceId,
         "Engine history",
       );
-      const policy = await readWorkspaceEnginePolicy(requireWorkspace(input.workspaceId).rootPath);
-      if (policy.errors.length) throw new Error(policy.errors.join("; "));
-      const detail = await capture.readMoment(input.momentId);
-      if (!detail || (!detail.protected && !historyMomentPathsAdmitted(historyPathAdmission(policy), detail.moment))) {
-        throw new Error("This history moment is no longer available.");
-      }
       const result = await capture.restoreFileToBeforeMoment(input.momentId, person);
       notifyRenderer({ workspaceId: input.workspaceId });
       return RestoreEngineMomentFileResult.parse(result);

@@ -1318,6 +1318,67 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it.each(["moment", "before", "after"])("admits the %s path inside restore before any mutation", async side => {
+    const root = await createTestScratch("dohc-restore-path-admission-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "notes/a.md", metadata: { origin: "api" as const } };
+    await store.writeTextFile({ ...target, text: "old" });
+    const changed = await store.writeTextFile({ ...target, text: "current" });
+    await write(root, target.path, "current");
+    await write(root, ".dohc/files.toml", '[[rule]]\npath = "private/**"\ntracked = false\n');
+    const original = changed.moment;
+    vi.spyOn(store, "getMoment").mockResolvedValue({ ...original,
+      path: side === "moment" ? "private/a.md" : original.path,
+      payload: { before: { ...original.payload.before!, path: side === "before" ? "private/a.md" : target.path },
+        after: { ...original.payload.after, path: side === "after" ? "private/a.md" : target.path } },
+    });
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    try {
+      await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER)).rejects.toThrow("This history moment is no longer available.");
+      expect((await store.readTextFile(target))?.text).toBe("current");
+      expect((await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments).toHaveLength(2);
+      expect(await readFile(join(root, target.path), "utf8")).toBe("current");
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it.each(["untracked", "malformed"])("reads %s policy inside the queued restore before writing", async state => {
+    const root = await createTestScratch("dohc-restore-queued-policy-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "notes/a.md", metadata: { origin: "api" as const } };
+    await store.writeTextFile({ ...target, text: "old" });
+    const changed = await store.writeTextFile({ ...target, text: "current" });
+    await write(root, target.path, "current");
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const originalList = store.listMoments.bind(store);
+    vi.spyOn(store, "flushCapture").mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    const pendingList = engine.flush();
+    await entered.promise;
+    const pendingRestore = engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER);
+    const refused = expect(pendingRestore).rejects.toThrow(state === "malformed" ? "files.toml" : "This history moment is no longer available.");
+    await write(root, ".dohc/files.toml", state === "malformed" ? "[[rules] invalid" : '[[rule]]\npath = "notes/**"\ntracked = false\n');
+    release.resolve();
+    await pendingList;
+    try {
+      await refused;
+      expect((await store.readTextFile(target))?.text).toBe("current");
+      expect((await originalList({ workspaceId: WORKSPACE_ID, limit: 20 })).moments).toHaveLength(2);
+      expect(await readFile(join(root, target.path), "utf8")).toBe("current");
+    } finally {
+      await engine.stop();
+    }
+  });
+
   it("preserves the outside file when History restore publication conflicts", async () => {
     const root = await createTestScratch("dohc-restore-conflict-");
     const loopback = new VersionedLoopbackEngine();

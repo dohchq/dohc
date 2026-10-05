@@ -85,6 +85,7 @@ import {
   type ActiveAgentRun,
 } from "../agents/activeAgentRun";
 import {
+  historyMomentPathsAdmitted,
   historyPathAdmission,
   readWorkspaceEnginePolicy,
   type WorkspaceEnginePolicySnapshot,
@@ -6285,6 +6286,7 @@ export function createWorkspaceEngineCapture(
       const author = structuredClone(person);
       return enqueueResult("restore file", async () => {
         const policy = await readPolicyForTask();
+        if (policy.errors.length) throw new Error(policy.errors.join("; "));
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
         await engine.flushCapture?.();
@@ -6383,6 +6385,9 @@ export function createWorkspaceEngineCapture(
             restoredMomentId: result.restoredMomentId,
             path: secretPath,
           };
+        }
+        if (!historyMomentPathsAdmitted(historyPathAdmission(policy), moment)) {
+          throw new Error("This history moment is no longer available.");
         }
         if (moment.versionId !== activeVersionId) {
           throw new Error(

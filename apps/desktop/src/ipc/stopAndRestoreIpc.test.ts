@@ -1,4 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
+import { mockDaemonSessions } from "../testing/liveEngineSessions";
+import { createTestScratch } from "../workspaces/testTemp";
+import { createCaptureLiveStores } from "../workspaces/workspaceEngineCaptureLiveStore";
+import { createWorkspaceEngineCapture, type WorkspaceEngineCapture } from "../workspaces/workspaceEngineCapture";
 import { createServerRuns } from "../automations/serverRuns";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { writeAutomationsFile, type Automation } from "@dohc/workspace-contracts/automations";
@@ -35,6 +42,8 @@ const schemaMoment: VersionedTextMoment = {
 };
 
 function fixture(options: {
+  engineCapture?: WorkspaceEngineCapture;
+  rootPath?: string;
   granted?: unknown[];
   ledger?: Record<string, unknown[]>;
   links?: unknown[][];
@@ -132,7 +141,7 @@ function fixture(options: {
     registerHandler: (channel, handler) => handlers.set(channel, handler),
     assertTrustedSender: () => undefined,
     withRendererWorkspaceOperation: async (_sender, _workspaceId, _message, work) => await work({
-      workspace: { workspaceId: WORKSPACE_ID, rootPath: "/missing-root" },
+      workspace: { workspaceId: WORKSPACE_ID, rootPath: options.rootPath ?? "/missing-root" },
       state: { collectionAutomations: { undoRunsOf: options.undoRunsOf } as CollectionAutomations },
       assertCurrent: () => undefined,
     }),
@@ -141,7 +150,7 @@ function fixture(options: {
     relayJson: relayJson as <Result>(credentials: string, path: string, init?: RequestInit) => Promise<Result>,
     endLink,
     sharesChanged,
-    requireEngineCapture: async () => ({ capture }),
+    requireEngineCapture: async () => ({ capture: options.engineCapture ?? capture }),
     localPerson: async () => account.person,
     queuePull,
     deletePath: async () => undefined,
@@ -156,6 +165,36 @@ function fixture(options: {
 }
 
 describe("stop and restore in main", () => {
+  it("refuses Undo after the owner untracks the restored path", async () => {
+    const rootPath = await createTestScratch("dohc-stop-restore-policy-");
+    await mkdir(join(rootPath, "notes"), { recursive: true });
+    await writeFile(join(rootPath, "notes/a.md"), "owner original");
+    const attachmentId = Symbol("stop-restore-policy");
+    const sessions = mockDaemonSessions({ rootPath, workspaceId: WORKSPACE_ID, loopback: new VersionedLoopbackEngine() });
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath, attachmentId }, sessions).store;
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "notes/a.md", metadata: { origin: "sync" as const } };
+    await store.writeTextFile({ ...target, text: "owner original" });
+    const changed = await store.writeTextFile({ ...target, text: "shared edit", publish: true });
+    const engineCapture = createWorkspaceEngineCapture({ workspaceId: WORKSPACE_ID, rootPath, attachmentId, rustEngineSessions: sessions, store });
+    try {
+      const f = fixture({ engineCapture, rootPath, ledger: {
+        "grant-edit": [{ writes: [{ committedAtMs: 2, files: [{ path: target.path, objectId: changed.moment.objectId, momentId: changed.moment.id, created: false }] }], nextAfterOriginSeq: null }],
+      } });
+      const result = await f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } }) as { restored: { restoredMomentId: string }[] };
+      expect(result.restored).toHaveLength(1);
+      expect(await readFile(join(rootPath, target.path), "utf8")).toBe("owner original");
+      await mkdir(join(rootPath, ".dohc"), { recursive: true });
+      await writeFile(join(rootPath, ".dohc/files.toml"), '[[rule]]\npath = "notes/**"\ntracked = false\n');
+      const before = await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 });
+      await expect(f.call(CHANNELS.undoStopAndRestore, { restoredMomentIds: result.restored.map(row => row.restoredMomentId) }))
+        .rejects.toThrow("This history moment is no longer available.");
+      expect(await readFile(join(rootPath, target.path), "utf8")).toBe("owner original");
+      expect(await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).toEqual(before);
+    } finally {
+      await engineCapture.stop();
+    }
+  });
   it("revokes only the person's grants on this workspace that can write, then restores from every grant's ledger", async () => {
     const f = fixture();
     await expect(f.call(CHANNELS.stopAndRestore, { target: { kind: "person", userId: "user_ana" } })).resolves.toEqual({

@@ -26,6 +26,7 @@ export function engineMomentSummary(
   moment: Pick<EngineMomentRecord, "summary" | "operation" | "path" | "contentKind" | "byteLength">,
 ): string {
   if (moment.summary) return moment.summary;
+  if (moment.operation === "rename") return `Renamed to ${basenameOf(moment.path)}`;
   if (moment.operation === "delete") return `Deleted ${basenameOf(moment.path)}`;
   if (moment.contentKind === "binary") {
     return `Updated ${basenameOf(moment.path)} (${moment.byteLength ?? 0} bytes)`;
@@ -404,7 +405,7 @@ export function EngineHistoryView(props: {
   // A known page with no moments. The caller renders this view only when it
   // has a page: "No changes yet" states something about the workspace,
   // and a read still in flight or a read that failed may not state it.
-  if (props.moments.length === 0) {
+  if (props.moments.length === 0 && !props.hasMore) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
         <span className="text-sm text-muted">No changes yet</span>
