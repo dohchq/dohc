@@ -66,6 +66,14 @@ wall time sits beside each timing in the receipt.
 - `--scenario chat-history [--chat-messages 200]`: seeds one #general post and its replies through `packages/cli/bin/dohc.js` against the running package, restarts, then opens the channel to its post card and the thread to its first and to all comment rows. One observer carries both comment milestones from the same click.
 - `--scenario collection [--records 500] [--find-cap 50] [--write-cap 200]`: seeds `records/collection.yaml` and Markdown records with pre-minted ids, waits for the Explorer to mark the folder as a Collection, then opens it to the first table rows. It then runs the typing workload in `small.md`, then the automation phase described below.
 - `--scenario soak [--soak-minutes 10]`: repeats a mixed cycle (open both documents, Go to typing `small`, command palette, search for `Performance`, two switches) until the time is up and records working set and private bytes per process kind after each cycle. Each cycle records its search query. The document-open and switch timings are the existing harness wall-clock observations.
+- `--scenario soak --soak-minutes 60 --heap-snapshot-minutes 10,60`: also captures renderer heaps at the first completed cycle boundary at or after each requested minute. Minutes must be distinct positive integers within the soak duration. Capture is off by default.
+
+Heap capture waits until both workspace switches finish, leaving workspace 0 selected with no workload step running.
+The renderer pauses while HeapProfiler collects and streams the snapshot. The next cycle starts after the file closes.
+Each run directory holds `renderer-heap-10m.heapsnapshot` and `renderer-heap-60m.heapsnapshot` for this example.
+Incomplete files keep a `.partial` suffix.
+Each capture receipt records its boundary `cycle`, requested and actual elapsed times, byte count, status, and `pauseMs`.
+The soak receipt and summary also report total `heapSnapshotPauseMs`. Capture pauses are outside measured cycle durations.
 
 `go-to` and `search` reject `--files` below 4243, because their queries name `fixture-004242`.
 Search waits for the Explorer to list every fixture file before it submits. A sample whose search id changed before Enter is flagged `debounceFiredBeforeSubmit`.
@@ -127,8 +135,9 @@ Only the controlled loopback `DOHC_UPDATE_URL` is added.
 
 `--profile-renderer true` records diagnostic switch CPU profiles.
 `--profile-main true --scenario startup` requests V8 startup logs and requires an output path without whitespace.
-Main profiling must produce a log matching the recorded main PID. Profiled runs are marked diagnostic in summaries.
-Keep them separate from unprofiled comparisons.
+Main profiling must produce a log matching the recorded main PID.
+CPU-profiled runs and `--heap-snapshot-minutes` runs are marked diagnostic in summaries.
+The comparison command refuses diagnostic runs. Use separate uninstrumented soaks for the memory budgets.
 
 Run `node --test tools/perf-profiling/packaged-benchmark.test.mjs` for CLI, lifecycle, fixture, and summary checks. The fixture contract check imports the automation executor, so build `@dohc/app-backend-runtime` first, as the JS gate does.
 These tests also run through the canonical root test command. They do not launch the GUI workload.
