@@ -10,7 +10,6 @@ const bridgeMock = {
   readShareProposalChanges: vi.fn(),
   settleShareProposal: vi.fn(),
   revokeRelayShare: vi.fn(),
-  writeClipboardText: vi.fn(),
 };
 
 vi.mock("../bridge", () => ({
@@ -38,7 +37,6 @@ beforeEach(() => {
   bridgeMock.listRelayShares.mockResolvedValue({ granted: [ACTIVE_SHARE] });
   bridgeMock.listShareProposals.mockResolvedValue({ proposals: [] });
   bridgeMock.revokeRelayShare.mockResolvedValue({ undo: UNDO });
-  bridgeMock.writeClipboardText.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -202,9 +200,9 @@ describe("SharedByMeList", () => {
     await screen.findByTestId("shared-by-me-row");
     expect(screen.queryByTestId("shared-by-me-copy-invitation")).toBeNull();
     await user.click(screen.getByTestId("shared-by-me-copy"));
-    expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({
-      text: "dohc-share:share-1:http://relay.test",
-    });
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("dohc-share:share-1:http://relay.test"),
+    );
   });
 
   it("copies the exact named invitation for a remote workspace row", async () => {
@@ -213,7 +211,7 @@ describe("SharedByMeList", () => {
     const user = userEvent.setup(); render(<SharedByMeList workspaceId="ws-1"/>);
     await screen.findByTestId("shared-by-me-row");
     await user.click(screen.getByTestId("shared-by-me-copy-invitation"));
-    expect(bridgeMock.writeClipboardText).toHaveBeenLastCalledWith({text: invitation});
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(invitation));
     expect(screen.getByTestId("shared-by-me-row").getAttribute("data-grant-id")).toBe("grant-1");
     expect(screen.getByTestId("shared-by-me-copy")).toBeTruthy();
   });

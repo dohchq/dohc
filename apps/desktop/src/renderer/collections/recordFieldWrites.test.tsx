@@ -288,7 +288,8 @@ describe("retained failures", () => {
 
     // Actionable with only the host mounted — no CollectionPage anywhere.
     screen.getByTestId("collection-write-failures");
-    expect(screen.getByRole("status").textContent).toContain("1 unsaved collection change needs attention.");
+    // The host's region comes first; the copy control has its own.
+    expect(screen.getAllByRole("status")[0]!.textContent).toContain("1 unsaved collection change needs attention.");
     screen.getByTestId("collection-write-retry");
     expect(
       screen.getByTestId("collection-write-discard").textContent,

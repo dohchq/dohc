@@ -19,6 +19,8 @@ import { SettingsDialog } from "./SettingsDialog";
 import { applyLookSettings } from "../theme";
 import { CUSTOMIZE_TARGETS } from "./customize";
 import { deferred } from "../../testing/deferred";
+import { ShellErrorReporter, type ReportShellError } from "../shell/useShellError";
+import { COPY_FAILURE } from "../ui/CopyButton";
 
 const config = {
   command: "dohc-mcp",
@@ -131,7 +133,6 @@ const bridge = {
   getWorkspaceSettings: vi.fn(readWorkspaceSettings),
   setWorkspaceSettings: vi.fn(writeWorkspaceSettings),
   resetWorkspaceSettings: vi.fn(resetWorkspaceSettings),
-  writeClipboardText: vi.fn(async (_payload: { text: string }) => undefined),
   setTitlebarTheme: vi.fn(async () => undefined),
   onUserSettingsChanged: vi.fn(
     (_listener: (result: DesktopUserSettingsResult) => void) => () => undefined,
@@ -943,27 +944,29 @@ describe("SettingsDialog", () => {
     );
     await screen.findByTestId("mcp-config-snippet");
     await user.click(screen.getByText("Copy"));
-    expect(bridge.writeClipboardText).toHaveBeenCalledWith({
-      text: expect.stringContaining('"mcpServers"'),
-    });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('"mcpServers"')));
   });
 
-  it("reports a copy failure without claiming success", async () => {
+  it("reports a copy failure to the shell without claiming success", async () => {
     const user = userEvent.setup();
-    bridge.writeClipboardText.mockRejectedValueOnce(new Error("Clipboard denied"));
+    stubClipboard();
+    const denied = new Error("Clipboard denied");
+    writeText.mockRejectedValueOnce(denied);
+    const report = vi.fn<ReportShellError>();
     render(
-      <SettingsDialog
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="agents"
-        onClose={() => {}}
-      />,
+      <ShellErrorReporter.Provider value={report}>
+        <SettingsDialog
+          workspaceId="ws-1"
+          workspacePath="/x"
+          initialSection="agents"
+          onClose={() => {}}
+        />
+      </ShellErrorReporter.Provider>,
     );
     await screen.findByTestId("mcp-config-snippet");
     await user.click(screen.getByText("Copy"));
-    expect((await screen.findByTestId("mcp-copy-error")).textContent).toBe(
-      "Could not copy MCP config.",
-    );
+    expect(await screen.findByRole("button", { name: "Couldn't copy" })).toBeTruthy();
+    expect(report).toHaveBeenCalledWith(COPY_FAILURE, denied, expect.any(Function));
     expect(screen.queryByText("Copied")).toBeNull();
   });
 

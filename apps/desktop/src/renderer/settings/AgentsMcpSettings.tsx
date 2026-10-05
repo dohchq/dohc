@@ -1,13 +1,14 @@
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { useRequestSequence } from "../useRequestSequence";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, Check, Copy } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Bot } from "lucide-react";
 import type {
   AgentRunStatusResult,
   McpConfigResult,
 } from "../../ipc/bridgeContract";
 import type { RunnerSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
+import { CopyButton } from "../ui/CopyButton";
 import { PreferredNameControl } from "./PreferredNameControl";
 import { RunnerSettingsCard } from "./RunnerSettingsCard";
 import { SettingRow } from "./SettingRow";
@@ -68,20 +69,10 @@ export function AgentsMcpSettings(props: {
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
   const [config, setConfig] = useState<McpConfigResult | null>(null);
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   // Workspace async safety invariant: IPC responses are allowed to update this
   // panel only if they belong to the latest workspace/request version.
   const requestVersionRef = useRequestSequence();
-  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const clearCopyResetTimer = useCallback(() => {
-    if (copyResetTimerRef.current) {
-      clearTimeout(copyResetTimerRef.current);
-      copyResetTimerRef.current = null;
-    }
-  }, []);
 
   const isCurrentRequest = useCallback(
     (version: number) => requestVersionRef.isCurrent(version),
@@ -115,8 +106,6 @@ export function AgentsMcpSettings(props: {
     const version = requestVersionRef.next();
     setStatus(null);
     setConfig(null);
-    setCopied(false);
-    setCopyError(null);
     setLoadError(null);
     setBusy(false);
     void refresh(version).catch(() => {
@@ -126,9 +115,8 @@ export function AgentsMcpSettings(props: {
     });
     return () => {
       requestVersionRef.next();
-      clearCopyResetTimer();
     };
-  }, [clearCopyResetTimer, isCurrentRequest, refresh, workspaceId]);
+  }, [isCurrentRequest, refresh, workspaceId]);
 
   const enabled = status?.mcpEnabled ?? false;
   const runnerConfigured = configuredRunnerCommand(runner).length > 0;
@@ -169,34 +157,6 @@ export function AgentsMcpSettings(props: {
       if (isCurrentRequest(version)) setBusy(false);
     }
   }, [workspaceId, refresh, isCurrentRequest, status?.activeRun?.id, onAgentActiveChange]);
-
-  const copyConfig = useCallback(async () => {
-    if (!config || "unavailable" in config) return;
-    const version = requestVersionRef.current();
-    const text = configSnippet(config);
-    try {
-      if (window.dohcDesktop?.writeClipboardText) {
-        await bridge().writeClipboardText({ text });
-      } else {
-        await navigator.clipboard.writeText(text);
-      }
-    } catch {
-      if (isCurrentRequest(version)) {
-        clearCopyResetTimer();
-        setCopied(false);
-        setCopyError("Could not copy MCP config.");
-      }
-      return;
-    }
-    if (!isCurrentRequest(version)) return;
-    clearCopyResetTimer();
-    setCopyError(null);
-    setCopied(true);
-    copyResetTimerRef.current = setTimeout(() => {
-      copyResetTimerRef.current = null;
-      if (isCurrentRequest(version)) setCopied(false);
-    }, 1500);
-  }, [clearCopyResetTimer, config, isCurrentRequest]);
 
   return (
     <div className="flex flex-col">
@@ -340,26 +300,17 @@ export function AgentsMcpSettings(props: {
       ) : null}
 
       <section className="border-b border-line py-4">
-        <div className="mb-2 flex items-center gap-2">
+        <div className="mb-2 flex items-center justify-between gap-2">
           <h3 className="m-0 text-[13px] font-medium text-ink">MCP config</h3>
-          <button
-            type="button"
+          <CopyButton
+            key={workspaceId}
             disabled={!config || "unavailable" in config}
-            onClick={() => void copyConfig()}
-            className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
-            {copied ? "Copied" : "Copy"}
-          </button>
+            getText={() => (config && !("unavailable" in config) ? configSnippet(config) : null)}
+          />
         </div>
         <p className="m-0 mb-2 text-[11px] text-muted">
           Paste this into your AI tool to let it use this workspace.
         </p>
-        {copyError ? (
-          <p data-testid="mcp-copy-error" className="m-0 mb-2 text-[11px] text-danger">
-            {copyError}
-          </p>
-        ) : null}
         {config && "unavailable" in config ? (
           <p data-testid="mcp-unavailable" className="m-0 text-[11px] text-danger">
             {config.message}

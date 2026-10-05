@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import {
   ListRelayShareLinksResult,
   type RelayShareDiscussionMessage,
@@ -275,7 +275,6 @@ const bridgeMock = {
   resumeRelayShareDiscussion: vi.fn(),
   promoteRelayShareGrant: vi.fn(),
   revokeRelayShareGrant: vi.fn(),
-  writeClipboardText: vi.fn(),
 };
 
 vi.mock("./bridge", () => ({
@@ -288,6 +287,8 @@ vi.mock("./bridge", () => ({
     }),
   }),
 }));
+
+let writeText: MockInstance<(text: string) => Promise<void>>;
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -347,7 +348,9 @@ beforeEach(() => {
     parentGrantId: null,
     undo: UNDO,
   });
-  bridgeMock.writeClipboardText.mockResolvedValue(undefined);
+  // user-event's clipboard stub: every setup() in this file reuses it.
+  userEvent.setup();
+  writeText = vi.spyOn(navigator.clipboard, "writeText");
 });
 
 afterEach(() => {
@@ -476,7 +479,7 @@ describe("RelayShareDialog", () => {
     bridgeMock.createRelayShare
       .mockResolvedValueOnce(emailResult("old"))
       .mockResolvedValueOnce(emailResult("current"));
-    bridgeMock.writeClipboardText.mockReturnValueOnce(oldCopy.promise);
+    writeText.mockReturnValueOnce(oldCopy.promise);
     const user = userEvent.setup();
     const onClose = vi.fn();
     const view = render(
@@ -486,7 +489,7 @@ describe("RelayShareDialog", () => {
       await user.type(screen.getByTestId("share-email"), "friend@dohc.test");
       await user.click(screen.getByTestId("share-create"));
       await user.click(await screen.findByTestId("share-code-copy"));
-      expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({ text: emailResult("old").shareCode });
+      expect(writeText).toHaveBeenCalledWith(emailResult("old").shareCode);
 
       view.rerender(
         <RelayShareDialog workspaceId="ws-1" target={{ kind: "paths", paths: ["docs/b.md"] }} onClose={onClose} />,
@@ -496,10 +499,10 @@ describe("RelayShareDialog", () => {
       await user.click(screen.getByTestId("share-create"));
       expect((await screen.findByTestId("share-code")).textContent).toBe(emailResult("current").shareCode);
       await act(async () => oldCopy.resolve());
-      expect(screen.getByTestId("share-code-copy").textContent).toBe("Copy");
+      expect(screen.getByTestId("share-code-copy").getAttribute("aria-label")).toBe("Copy");
       await user.click(screen.getByTestId("share-code-copy"));
-      expect(bridgeMock.writeClipboardText).toHaveBeenLastCalledWith({ text: emailResult("current").shareCode });
-      expect(screen.getByTestId("share-code-copy").textContent).toBe("Copied");
+      expect(writeText).toHaveBeenLastCalledWith(emailResult("current").shareCode);
+      await waitFor(() => expect(screen.getByTestId("share-code-copy").getAttribute("aria-label")).toBe("Copied"));
     } finally {
       view.unmount();
       await act(async () => {
@@ -524,7 +527,7 @@ describe("RelayShareDialog", () => {
     const create = controllable<ReturnType<typeof emailResult>>();
     const copy = controllable<void>();
     bridgeMock.createRelayShare.mockReturnValueOnce(create.promise);
-    bridgeMock.writeClipboardText.mockReturnValueOnce(copy.promise);
+    writeText.mockReturnValueOnce(copy.promise);
     const user = userEvent.setup();
     const onClose = vi.fn();
     const view = render(<RelayShareDialog workspaceId="ws-1" target={initial} onClose={onClose} />);
@@ -545,12 +548,15 @@ describe("RelayShareDialog", () => {
       await user.click(screen.getByRole("radio", { name: "Invite by email" }));
       expect(screen.getByTestId("share-code").textContent).toBe(emailResult("current").shareCode);
       await user.click(screen.getByTestId("share-code-copy"));
+      expect(writeText).toHaveBeenLastCalledWith(emailResult("current").shareCode);
       view.rerender(<RelayShareDialog workspaceId="ws-1" target={equivalent} onClose={onClose} />);
       await showLinkPane(user);
       await act(async () => copy.resolve());
       await user.click(screen.getByRole("radio", { name: "Invite by email" }));
       expect(screen.getByTestId("share-code").textContent).toBe(emailResult("current").shareCode);
-      expect(screen.getByTestId("share-code-copy").textContent).toBe("Copied");
+      // The copy finished while its pane was hidden. Its answer was a moment
+      // the person did not see, so the control comes back ready to copy.
+      expect(screen.getByTestId("share-code-copy").getAttribute("aria-label")).toBe("Copy");
       expect(bridgeMock.createRelayShare).toHaveBeenCalledOnce();
     } finally {
       view.unmount();
@@ -1027,7 +1033,7 @@ describe("RelayShareDialog", () => {
     await showLinkPane(user);
 
     expect(screen.queryByText(LINK_URL)).toBeNull();
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Create link" }));
 
     const url = await screen.findByTestId("share-link-url");
@@ -1040,12 +1046,12 @@ describe("RelayShareDialog", () => {
         "To reset or end this link later, open Share on this selection again.",
       ),
     ).toBeTruthy();
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Copy" }));
-    expect(bridgeMock.writeClipboardText).toHaveBeenCalledTimes(1);
-    expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({ text: LINK_URL });
-    expect(screen.getByRole("button", { name: "Copied" })).toBeTruthy();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith(LINK_URL);
+    expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
 
     first.unmount();
     render(
@@ -1750,7 +1756,7 @@ describe("RelayShareDialog", () => {
     const pendingCreate = screen.getByRole("button", { name: "Create link" });
     expect(pendingCreate.textContent).toBe("Creating link…");
     expect(pendingCreate.hasAttribute("disabled")).toBe(true);
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
 
     await act(async () => {
       requestB.resolve(linkResult(LINK_URL_B));
@@ -1792,7 +1798,7 @@ describe("RelayShareDialog", () => {
     const pendingCreate = screen.getByRole("button", { name: "Create link" });
     expect(pendingCreate.textContent).toBe("Creating link…");
     expect(pendingCreate.hasAttribute("disabled")).toBe(true);
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
 
     await act(async () => {
       requestB.resolve(linkResult(LINK_URL_B));
@@ -1838,7 +1844,7 @@ describe("RelayShareDialog", () => {
 
     expect(screen.queryByText(LINK_URL_A)).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
   });
 
   it("recovers a committed Create link after its response is lost", async () => {
@@ -2851,7 +2857,7 @@ describe("RelayShareDialog", () => {
       access: "view",
       paths: ["docs/plan.md"],
     });
-    expect(bridgeMock.writeClipboardText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
   });
 
   it("keeps one collapsed Comments section per eligible real share", async () => {

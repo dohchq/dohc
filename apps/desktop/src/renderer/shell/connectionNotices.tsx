@@ -6,7 +6,7 @@ import {
   type WorkspaceErrorNotice,
 } from "../workbench/NoticeCenter";
 import { errorDetails } from "./copyDetails";
-import { useShellError } from "./useShellError";
+import { ShellErrorReporter, useShellError, type ReportShellError } from "./useShellError";
 
 // What a connection attempt hands the surface that owns its notices. The
 // owner raises the toast and the Notices row; the panel shows nothing inline.
@@ -110,6 +110,8 @@ const NOOP = () => undefined;
  */
 export function ConnectionNotices(props: {
   notices: readonly WorkspaceErrorNotice[];
+  // Where a copy from one of these notices reports its own failure.
+  reportError: ReportShellError;
   onRetry: (id: string) => void;
   onHide: (id: string) => void;
   onDismiss: (id: string) => void;
@@ -123,6 +125,7 @@ export function ConnectionNotices(props: {
       data-testid="connection-notices"
       className="fixed bottom-2 right-3 z-30"
     >
+      <ShellErrorReporter.Provider value={props.reportError}>
       <NoticeCenter
         workspaceId={NO_WORKSPACE}
         host="corner"
@@ -142,6 +145,7 @@ export function ConnectionNotices(props: {
         {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
         {...(props.onDismissCrashReport ? { onDismissCrashReport: props.onDismissCrashReport } : {})}
       />
+      </ShellErrorReporter.Provider>
     </div>
   );
 }

@@ -89,7 +89,6 @@ import {
 import {
   app,
   BrowserWindow,
-  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -5351,7 +5350,7 @@ function registerIpcHandlers(): void {
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
     registerHandler: handleIpc,
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),
-    assertTrustedSender, prepareForRendererReload, shell, clipboard, BrowserWindow,
+    assertTrustedSender, prepareForRendererReload, shell, BrowserWindow,
     rememberChromeTheme, titleBarOverlayOptions,
     stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step), exitRounds,
     quitGuard, isTrustedFrame, launchMarks, desktopMarks, logLaunchMarksOnce, app,

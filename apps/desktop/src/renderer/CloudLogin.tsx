@@ -1,5 +1,5 @@
 import { useRequestSequence } from "./useRequestSequence";
-import { Check, Cloud, Copy, ExternalLink, LogOut } from "lucide-react";
+import { Cloud, ExternalLink, LogOut } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CloudStatusResult } from "../ipc/bridgeContract";
 import { canonicalCloudOrigin } from "../workspaces/cloudConfiguration";
@@ -13,6 +13,7 @@ import {
   type ConnectionNoticeHost,
 } from "./shell/connectionNotices";
 import { Pill, PrimaryButton, SecondaryButton } from "./ui/controls";
+import { CopyField } from "./ui/CopyButton";
 
 const SETUP_GUIDE_URL =
   "https://github.com/dohc-ai/dohc/blob/main/docs/how-to/self-host.md";
@@ -105,7 +106,6 @@ export function CloudLogin(props: {
   // components.
 } & ConnectionNoticeHost) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
-  const [codeCopied, setCodeCopied] = useState(false);
   const [workspaceSyncState, setWorkspaceSyncState] = useState(UNSYNCED);
   const { workspaceSynced, workspaceSyncConnected, workspaceSecretState } =
     workspaceSyncState;
@@ -429,17 +429,6 @@ export function CloudLogin(props: {
   // The server the session actually uses, in the form the user typed it.
   const connectedServer = canonicalCloudOrigin(serverUrl) ?? serverUrl.trim();
 
-  async function copySyncCode() {
-    if (!syncCode) return;
-    try {
-      await navigator.clipboard.writeText(syncCode);
-      setCodeCopied(true);
-      setTimeout(() => setCodeCopied(false), 2000);
-    } catch {
-      // Clipboard can be denied; the code stays visible and selectable.
-    }
-  }
-
   // Main drops the cached credentials before the cleanup that can fail, so a
   // rejection here says nothing about whether the session survived. Report the
   // reason, then ask main what the state actually is.
@@ -691,27 +680,10 @@ export function CloudLogin(props: {
                           On the other machine, sign in with the same account,
                           choose “Join a synced workspace”, and paste this code.
                         </p>
-                        <div className="mt-2 flex items-center gap-2">
-                          <code
-                            data-testid="cloud-sync-code"
-                            className="min-w-0 flex-1 truncate rounded-md border border-line bg-bg px-2.5 py-1 font-mono text-[11px] text-ink"
-                            title={syncCode}
-                          >
-                            {syncCode}
-                          </code>
-                          <button
-                            type="button"
-                            data-testid="cloud-copy-sync-code"
-                            onClick={() => void copySyncCode()}
-                            className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-transparent px-2 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-                          >
-                            {codeCopied ? (
-                              <Check size={11} aria-hidden />
-                            ) : (
-                              <Copy size={11} aria-hidden />
-                            )}
-                            {codeCopied ? "Copied" : "Copy"}
-                          </button>
+                        <div className="mt-2">
+                          <CopyField copyTestId="cloud-copy-sync-code" getText={() => syncCode}>
+                            <code data-testid="cloud-sync-code" title={syncCode}>{syncCode}</code>
+                          </CopyField>
                         </div>
                       </div>
                     ) : null}
@@ -828,6 +800,7 @@ export function CloudLogin(props: {
       {panel}
       <ConnectionNotices
         notices={ownNotices.notices}
+        reportError={ownNotices.reportError}
         onRetry={ownNotices.retryNotice}
         onHide={ownNotices.hideNotice}
         onDismiss={ownNotices.dismissNotice}

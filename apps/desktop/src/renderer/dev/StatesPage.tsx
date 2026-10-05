@@ -4,9 +4,8 @@ import type { ReactNode } from "react";
 import { DocumentMenu } from "../DocumentMenu";
 import { OverlayFrame } from "../Overlay";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
-import { CopyDetailsButton } from "../shell/copyDetails";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
-import { CopyButton } from "../ui/CopyButton";
+import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
@@ -230,6 +229,41 @@ const menuItems = [
 
 const avatarSizes = ["post", "comment", "strip"] as const;
 
+const SYNC_CODE = "dohc-sync:ws_7f3a:wss://relay.dohc.dev";
+
+function failToCopy(): never {
+  throw new Error("nothing to copy");
+}
+
+// One row per form: rest, hover, keyboard focus, then the two answers.
+function CopySpecimens(props: { theme: "light" | "dark"; form: "icon" | "words" }) {
+  const { theme, form } = props;
+  const iconOnly = form === "icon";
+  return (
+    <Specimen label={`${iconOnly ? "icon only" : "with words"}: rest, hover, focus-visible, copied, failed`}>
+      <CopyButton iconOnly={iconOnly} label="Copy details" getText={() => RELAY_ERROR} />
+      <span data-force-state="hover" data-force-target="button">
+        <CopyButton iconOnly={iconOnly} label="Copy details" getText={() => RELAY_ERROR} />
+      </span>
+      <span data-force-state="focus-visible" data-force-target="button">
+        <CopyButton iconOnly={iconOnly} label="Copy details" getText={() => RELAY_ERROR} />
+      </span>
+      <CopyButton
+        iconOnly={iconOnly}
+        label="Copy details"
+        getText={() => RELAY_ERROR}
+        testId={`states-copy-${form}-copied-${theme}`}
+      />
+      <CopyButton
+        iconOnly={iconOnly}
+        label="Copy details"
+        getText={failToCopy}
+        testId={`states-copy-${form}-failed-${theme}`}
+      />
+    </Specimen>
+  );
+}
+
 function Pane(props: { theme: "light" | "dark" }) {
   const { theme } = props;
   return (
@@ -301,36 +335,23 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The copied and refused ones are pressed by the capture; press them
-          yourself on the page. */}
+      {/* The copied and failed ones are pressed by the capture; press them
+          yourself on the page. A failed copy here says so in place only:
+          the page has no notice owner to report to. */}
       <Section part="copy" title="Copy">
-        <Specimen label="copy: rest, hover, copied, refused">
-          <CopyButton getText={() => ""} testId={`states-copy-${theme}`} />
-          <span data-force-state="hover" data-force-target="button">
-            <CopyButton getText={() => ""} testId={`states-copy-hover-${theme}`} />
-          </span>
-          <CopyButton getText={() => "wss://relay.dohc.dev"} testId={`states-copy-copied-${theme}`} />
-          <CopyButton
-            getText={() => {
-              throw new Error("nothing to copy");
-            }}
-            testId={`states-copy-refused-${theme}`}
-          />
-        </Specimen>
-        <Specimen label="copy details: rest, icon, copied, icon copied">
-          <CopyDetailsButton label="Copy details" details={() => ""} />
-          <CopyDetailsButton iconOnly label="Copy details" details={() => ""} />
-          <CopyDetailsButton
-            label="Copy details"
-            details={() => RELAY_ERROR}
-            data-testid={`states-copy-details-copied-${theme}`}
-          />
-          <CopyDetailsButton
-            iconOnly
-            label="Copy details"
-            details={() => RELAY_ERROR}
-            data-testid={`states-copy-details-icon-copied-${theme}`}
-          />
+        <CopySpecimens theme={theme} form="icon" />
+        <CopySpecimens theme={theme} form="words" />
+        <Specimen label="field: rest, copied">
+          <div className="w-64">
+            <CopyField getText={() => SYNC_CODE}>
+              <code title={SYNC_CODE}>{SYNC_CODE}</code>
+            </CopyField>
+          </div>
+          <div className="w-64">
+            <CopyField copyTestId={`states-copy-field-copied-${theme}`} getText={() => SYNC_CODE}>
+              <code title={SYNC_CODE}>{SYNC_CODE}</code>
+            </CopyField>
+          </div>
         </Specimen>
       </Section>
 

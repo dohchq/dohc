@@ -1,6 +1,5 @@
 import { useRequestSequence } from "../useRequestSequence";
 import { ipcErrorMessage } from "../ipcError";
-import { Copy, Check } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type {
   RelayShareGrantedRow,
@@ -11,6 +10,7 @@ import type { ShareRemovalNotices } from "../shell/useShareRemovalNotices";
 import { ProposalReviewDialog } from "../workbench/ProposalReviewDialog";
 import { ShareAccessBadge } from "./ShareAccessBadge";
 import { DangerButton } from "../ui/controls";
+import { CopyButton } from "../ui/CopyButton";
 
 // "Shared by me": the management list for relay share grants. Lives
 // in Settings → Cloud. Calm inventory: what's shared, with whom, and one
@@ -59,8 +59,6 @@ export function SharedByMeList(props: {
   const workspaceId = props.workspaceId;
   const [load, setLoad] = useState<LoadState>({ status: "loading" });
   const [busyShareId, setBusyShareId] = useState<string | null>(null);
-  const [copiedShareId, setCopiedShareId] = useState<string | null>(null);
-  const [copiedInvitationGrantId, setCopiedInvitationGrantId] = useState<string | null>(null);
   const [reviewProposalId, setReviewProposalId] = useState<string | null>(null);
   // Which row is asking before it discards. Ending a share settles what the
   // recipient still has waiting, so the count is shown before the click.
@@ -146,27 +144,6 @@ export function SharedByMeList(props: {
     }
   }
 
-  async function copyCode(share: RelayShareGrantedRow) {
-    const token = loadToken.current();
-    try {
-      await bridge().writeClipboardText({ text: share.shareCode });
-      if (loadToken.isCurrent(token)) setCopiedShareId(share.shareId);
-    } catch {
-      // Non-fatal; the row keeps its copy affordance.
-    }
-  }
-
-  async function copyInvitation(share: RelayShareGrantedRow) {
-    if (!share.browserInvitationUrl) return;
-    const token = loadToken.current();
-    try {
-      await bridge().writeClipboardText({ text: share.browserInvitationUrl });
-      if (loadToken.isCurrent(token)) setCopiedInvitationGrantId(share.grantId);
-    } catch {
-      // The row keeps its copy control for retry.
-    }
-  }
-
   if (load.status === "loading") {
     return <p className="m-0 text-[11px] text-subtle">Loading your shares…</p>;
   }
@@ -236,29 +213,14 @@ export function SharedByMeList(props: {
           {share.revokedAtMs === null ? (
             <>
               {share.selector && share.browserInvitationUrl && (
-                <button type="button" data-testid="shared-by-me-copy-invitation"
-                  onClick={() => void copyInvitation(share)}
-                  className="shrink-0 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink">
-                  {copiedInvitationGrantId === share.grantId ? "Browser invitation copied" : "Copy browser invitation"}
-                </button>
+                <CopyButton testId="shared-by-me-copy-invitation" label="Copy browser invitation"
+                  getText={() => share.browserInvitationUrl ?? null} />
               )}
               {/* No code to hand out for a row the relay cannot read: the
                   recipient's own open would refuse it. Ending the share
                   stays available — the reverse path must not disappear. */}
               {share.selector ? (
-              <button
-                type="button"
-                data-testid="shared-by-me-copy"
-                onClick={() => void copyCode(share)}
-                className="flex shrink-0 items-center gap-1 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-              >
-                {copiedShareId === share.shareId ? (
-                  <Check size={11} aria-hidden />
-                ) : (
-                  <Copy size={11} aria-hidden />
-                )}
-                {copiedShareId === share.shareId ? "Copied" : "Copy code"}
-              </button>
+              <CopyButton testId="shared-by-me-copy" label="Copy code" getText={() => share.shareCode} />
               ) : null}
               {/* Ending a share DECLINES whatever the recipient still has
                   waiting. Undo brings the share back, not the declined

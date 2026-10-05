@@ -524,6 +524,7 @@ export function WorkspaceManager(props: {
       </div>
       <ConnectionNotices
         notices={connectionNotices.notices}
+        reportError={connectionNotices.reportError}
         onRetry={connectionNotices.retryNotice}
         onHide={connectionNotices.hideNotice}
         onDismiss={connectionNotices.dismissNotice}

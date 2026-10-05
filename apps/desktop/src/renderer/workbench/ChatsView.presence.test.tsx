@@ -112,7 +112,6 @@ const bridgeMock = {
   declineDm: vi.fn(),
   requestDmAgain: vi.fn(),
   leaveDm: vi.fn(),
-  writeClipboardText: vi.fn(),
   onWorkspaceActivity: vi.fn(),
 };
 
@@ -199,7 +198,6 @@ beforeEach(() => {
   bridgeMock.listChatThreadDecisions.mockResolvedValue({ decisions: [] });
   bridgeMock.listChatThreadAttachments.mockResolvedValue({ attachments: [] });
   bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: {} });
-  bridgeMock.writeClipboardText.mockResolvedValue(undefined);
   bridgeMock.onWorkspaceActivity.mockReturnValue(() => undefined);
   bridgeMock.onCloudSessionChanged.mockReturnValue(() => undefined);
   bridgeMock.markChatThreadRead.mockResolvedValue({ lastReadSequence: 1, revision: 1 });

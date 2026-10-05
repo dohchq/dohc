@@ -87,14 +87,15 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
-import { useShellError } from "./shell/useShellError";
+import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
-import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
+import { errorDetails } from "./shell/copyDetails";
+import { CopyButton } from "./ui/CopyButton";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
@@ -4504,6 +4505,7 @@ export function DesktopWorkspaceShell(props: {
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
     <CustomizeContext.Provider value={customizeContext}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
+    <ShellErrorReporter.Provider value={reportShellError}>
     <div
       data-testid="workspace-shell"
       ref={focusRoot}
@@ -5351,14 +5353,11 @@ export function DesktopWorkspaceShell(props: {
             >
               <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
                 <span className="dohc-section-label">Technical details</span>
-                <CopyDetailsButton
-                  data-testid="workspace-update-copy-details"
+                <CopyButton
+                  testId="workspace-update-copy-details"
                   label="Copy"
                   iconOnly
-                  details={() => storeDetailsText}
-                  onError={(error) =>
-                    reportShellError("Could not copy the details.", error)
-                  }
+                  getText={() => storeDetailsText}
                 />
               </div>
               <dl className="m-0 grid select-text cursor-text grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 px-3 py-2.5 text-[12px] leading-snug">
@@ -5395,8 +5394,9 @@ export function DesktopWorkspaceShell(props: {
             >
               Try again
             </PrimaryButton>
-            <CopyDetailsButton
-              details={() =>
+            <CopyButton
+              label="Copy details"
+              getText={() =>
                 errorDetails([
                   ["Error", "Couldn't open this workspace"],
                   ["Detail", workspaceOpenFailure.message],
@@ -5862,6 +5862,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       <ExternalLinkConfirm workspaceId={workspaceId} />
     </div>
+    </ShellErrorReporter.Provider>
     </CollectionFieldMarksProvider>
     </CustomizeContext.Provider>
     </AgentSettingsProvider>

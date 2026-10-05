@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { automationShareWarning } from "./automationShareCheck";
@@ -10,7 +10,6 @@ const SHARE_CODE = "dohc-share:share-1:http://relay.test";
 const bridgeMock = {
   automationShareImpact: vi.fn(),
   createRelayShare: vi.fn(),
-  writeClipboardText: vi.fn(),
 };
 
 vi.mock("./bridge", () => ({
@@ -25,7 +24,6 @@ beforeEach(() => {
     shareCode: SHARE_CODE,
     recipientEmail: "friend@dohc.test",
   });
-  bridgeMock.writeClipboardText.mockResolvedValue(undefined);
   bridgeMock.automationShareImpact.mockResolvedValue({ stops: [] });
 });
 
@@ -146,7 +144,7 @@ describe("EmailShareForm", () => {
     expect(screen.queryByTestId("share-browser-invitation-copy")).toBeNull();
 
     await user.click(screen.getByTestId("share-code-copy"));
-    expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({ text: SHARE_CODE });
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(SHARE_CODE));
   });
 
   it("copies the exact server invitation and retains the desktop code", async () => {
@@ -161,7 +159,7 @@ describe("EmailShareForm", () => {
     await user.click(screen.getByTestId("share-create"));
     expect((await screen.findByTestId("share-browser-invitation")).getAttribute("data-grant-id")).toBe("exact-grant");
     await user.click(screen.getByTestId("share-browser-invitation-copy"));
-    expect(bridgeMock.writeClipboardText).toHaveBeenLastCalledWith({text: invitation});
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(invitation));
     expect(screen.getByTestId("share-code").textContent).toBe(SHARE_CODE);
     expect(screen.getByText(/sign in with the invited account/)).toBeTruthy();
   });
