@@ -215,6 +215,7 @@ it.each([false, true])("keeps recovery records until registry removal succeeds: 
     findWorkspace: () => registered,
     removeWorkspace,
     removeDrafts,
+    onError: vi.fn(),
   });
   const removing = removePhysicalWorkspace(binding, () => {
     if (refused) registered = {...initial, rootPath: "replacement-root"};

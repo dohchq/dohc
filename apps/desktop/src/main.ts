@@ -6,7 +6,7 @@ import { describeAutomationDataset } from "./workspaces/automationDatasetDescrip
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
 import { preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
-import { createPhysicalWorkspaceRemoval } from "./workspaces/physicalWorkspaceRemoval";
+import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./workspaces/physicalWorkspaceRemoval";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
   createDesktopWorkspaceCallbacks,
@@ -1760,20 +1760,21 @@ function registerReservedPhysicalWorkspace(
   return binding;
 }
 
-// Forget: close every handle the app holds on the workspace and drop its
-// registry row. The folder is untouched; opening it again re-adopts the
-// manifest and its identity.
-async function forgetWorkspace(workspaceId: string): Promise<void> {
-  await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
-  chatDispatchNotices.clearWorkspace(workspaceId);
-  notifyRenderer();
-}
-
 const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
   retireBinding: (binding, retirement) => workspaceAuthorities.retireBinding(binding, retirement),
   findWorkspace,
   removeWorkspace,
   removeDrafts: workspaceId => removeWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId),
+  onError: (workspaceId, error) => console.warn(`[desktop] Could not remove recovery records for workspace "${workspaceId}":`, error),
+});
+
+// Forget: close every handle the app holds on the workspace and drop its
+// registry row. The folder is untouched; opening it again re-adopts the
+// manifest and its identity.
+const forgetWorkspace = createWorkspaceForget({
+  remove: workspaceId => removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId)),
+  clearNotices: workspaceId => chatDispatchNotices.clearWorkspace(workspaceId),
+  notifyRenderer,
 });
 
 const createJoinedWorkspace = createJoinedWorkspaceRunner({

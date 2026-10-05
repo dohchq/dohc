@@ -5,6 +5,7 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
   findWorkspace(workspaceId: string): Workspace | null;
   removeWorkspace(workspaceId: string): void;
   removeDrafts(workspaceId: string): Promise<void>;
+  onError(workspaceId: string, error: unknown): void;
 }) {
   return async function removePhysicalWorkspace(
     binding: WorkspaceAuthorityBinding<Workspace>,
@@ -20,6 +21,22 @@ export function createPhysicalWorkspaceRemoval<Workspace extends {workspaceId: s
         dependencies.removeWorkspace(binding.workspaceId);
       },
     });
-    await dependencies.removeDrafts(binding.workspaceId);
+    try {
+      await dependencies.removeDrafts(binding.workspaceId);
+    } catch (error) {
+      dependencies.onError(binding.workspaceId, error);
+    }
+  };
+}
+
+export function createWorkspaceForget(dependencies: {
+  remove(workspaceId: string): Promise<void>;
+  clearNotices(workspaceId: string): void;
+  notifyRenderer(): void;
+}) {
+  return async function forgetWorkspace(workspaceId: string): Promise<void> {
+    await dependencies.remove(workspaceId);
+    dependencies.clearNotices(workspaceId);
+    dependencies.notifyRenderer();
   };
 }
