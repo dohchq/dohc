@@ -41,3 +41,12 @@ it.each([
   expect(result.status).toBe(expected);
   expect(await result.json()).toEqual(expected === 403 ? body : {ok: false, error: "not found"});
 });
+
+it.each(["link-lane-owner", "linkx", "link-refresh", "link-handoff", "link-redeem"])("preserves a missing key envelope response for workspace %s", async workspaceId => {
+  const body = {ok: false, code: "key_envelope_not_found", error: "key envelope not found"};
+  const response = Response.json(body, {status: 404, headers: {"x-workspace-test": "preserved"}});
+  const result = await normalizeLinkRefusal(response, `/sync/${workspaceId}/keys`);
+  expect(result).toBe(response);
+  expect(result.headers.get("x-workspace-test")).toBe("preserved");
+  expect(await result.json()).toEqual(body);
+});

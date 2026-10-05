@@ -482,6 +482,16 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     expect((await postJson(enabled, "/sync/live/link-tickets", {})).status).toBe(404);
   });
 
+  it("keeps the missing key envelope code through HTTP normalization for link-prefixed workspaces", async () => {
+    const relay = await spawnRelay(join(await tempRoot("link-prefixed-workspaces"), "relay.sqlite"));
+    for (const workspaceId of ["link-lane-owner", "linkx", "link-exchange-owner", "link-refresh", "link-handoff", "link-redeem"]) {
+      expect((await postJson(relay, "/sync/workspaces", {workspaceId})).status).toBe(200);
+      const missing = await fetch(`${relay}/sync/${workspaceId}/keys`, {headers: authHeaders()});
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toMatchObject({code: "key_envelope_not_found"});
+    }
+  });
+
   it("refuses a relay API version it does not serve before it reads the credential", async () => {
     const relay = await spawnRelay(join(await tempRoot("api-version"), "relay.sqlite"));
     const ready = await (await fetch(`${relay}/ready`)).json() as {apiVersions: unknown};

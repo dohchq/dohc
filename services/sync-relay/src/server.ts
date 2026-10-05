@@ -1019,7 +1019,6 @@ export function createSyncRelayHandler({
   const handle: SyncRelayHandler = async (request) => {
     const result = await dispatch(request);
     const path = new URL(request.url).pathname;
-    if (!/^\/sync\/link(?:[/-]|$)/.test(path) || result.status < 400) return result;
     return normalizeLinkRefusal(result, path);
   };
   return Object.assign(handle, {

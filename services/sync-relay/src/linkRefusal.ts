@@ -1,3 +1,4 @@
+import {isLinkEndpointPath} from "./linkEndpointPath";
 import {LINK_REFUSALS, linkRefusalBody, parseLinkRefusal, type LinkRefusalCode} from "@dohc/security-contract/link-refusal";
 
 export function opaqueLinkRefusal(): Response {
@@ -9,6 +10,7 @@ export function linkRefusal(code: LinkRefusalCode): Response {
 }
 
 export async function normalizeLinkRefusal(response: Response, path: string, liveEditing = false): Promise<Response> {
+  if (!isLinkEndpointPath(path)) return response;
   if (response.status >= 500) {
     await response.body?.cancel().catch(() => undefined);
     return linkRefusal(liveEditing ? "link_live_unavailable" : "link_unavailable");
