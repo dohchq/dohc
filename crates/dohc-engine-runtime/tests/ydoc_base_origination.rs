@@ -3770,14 +3770,30 @@ async fn oversized_close_decline_survives_prune_and_restart() {
         .unwrap();
     assert!(reopened.lineage_claim_id.is_none());
     enable_sync(&db, WS);
+    let cache_before = handle.ydoc_cache_stats_for_test().await.unwrap();
     let (claim, decline) = handle
         .ydoc_originate_live_lineage(key.clone(), 830, CancellationToken::new())
         .await
         .unwrap();
-    assert!(claim.is_some());
+    assert!(claim.is_none(), "the live push hook skips a reseeded lane");
     assert!(decline.is_none());
+    assert_eq!(
+        handle.ydoc_cache_stats_for_test().await.unwrap(),
+        cache_before
+    );
     supervisor.close(&db).unwrap();
     let mut store = EngineStore::open(&db, 900).unwrap();
+    assert!(matches!(
+        commit_relay_cursor(&mut store, WS, &cursor, &NoFaults, &NoLiveLeases, 910).unwrap(),
+        dohc_engine_storage::TxnOutcome::Committed(declines) if declines.is_empty()
+    ));
+    assert!(
+        dohc_engine_collab::read_marker(&store, &key)
+            .unwrap()
+            .unwrap()
+            .lineage_claim_id
+            .is_some()
+    );
     assert!(pass(&mut store).is_empty());
     let refusal: Option<String> = store
         .read_with(|conn| {

@@ -916,7 +916,7 @@ impl ActorHandle {
                 return Ok((None, None));
             };
             if marker.lineage_claim_status.has_claimed_base()
-                || marker.file_export_lane == dohc_engine_collab::FileExportLane::Declined
+                || marker.file_export_lane.is_enabled()
                 || (marker.head_update_seq == 0 && marker.head_snapshot_seq == 0)
                 || !store.read_with(|conn| {
                     dohc_engine_sync::workspace_replicates_with_relay(conn, &key.workspace_id)

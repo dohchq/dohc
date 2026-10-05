@@ -671,6 +671,11 @@ fn lane_skips_every_retry_until_a_fresh_seed_then_claims_once() {
     );
     source
         .write_with(&NoFaults, |tx| {
+            assert_eq!(
+                crate::enrolment::originate_live_ydoc_base_in_tx(tx, &key, 110)?,
+                BaseOrigination::NothingToDo,
+                "the live-session push hook must skip a reseeded lane too"
+            );
             assert!(matches!(
                 originate_appended_ydoc_base_in_tx(tx, &key, "doc.md", None, None, true, 110)?,
                 BaseOrigination::Originated { .. }

@@ -156,7 +156,7 @@ pub fn originate_live_ydoc_base_in_tx(
                ON s.workspace_id=d.workspace_id AND s.version_id=d.version_id \
               AND s.object_id=d.object_id \
              WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
-               AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane!=1",
+               AND d.lineage_claim_status = 'unclaimed' AND d.file_export_lane=0",
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
