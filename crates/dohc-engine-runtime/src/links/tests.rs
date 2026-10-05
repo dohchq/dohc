@@ -6,6 +6,45 @@ use dohc_engine_storage::{FaultPoint, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 
+thread_local! {
+    static WAL_THRESHOLD: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+    static WAL_CHECKPOINT_RAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn observe_checkpoints(store: &EngineStore) {
+    store
+        .read_with(|c| {
+            let threshold: i32 = c.query_row("PRAGMA wal_autocheckpoint", [], |r| r.get(0))?;
+            WAL_THRESHOLD.set(threshold);
+            // Match sqlite3WalDefaultHook: same threshold, passive checkpoint,
+            // and ignored checkpoint errors. This hook exists only in tests.
+            c.wal_hook(Some(|wal, frames| {
+                let threshold = WAL_THRESHOLD.get();
+                if threshold > 0 && frames >= threshold {
+                    WAL_CHECKPOINT_RAN.set(true);
+                    let _ = wal.checkpoint();
+                }
+                Ok(())
+            }));
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+}
+
+pub(super) fn begin_tick_measurement() {
+    WAL_CHECKPOINT_RAN.set(false);
+}
+
+pub(super) fn report_slow_tick(duration: Duration, phase: &str) {
+    if duration > ACTOR_SLICE_BUDGET {
+        eprintln!(
+            "slow links tick: phase={phase} actor_us={} wal_checkpoint_ran={}",
+            duration.as_micros(),
+            WAL_CHECKPOINT_RAN.get()
+        );
+    }
+}
+
 fn open(path: &Path) -> EngineStore {
     EngineStore::open(path, 1).unwrap()
 }
@@ -41,10 +80,10 @@ fn parsed(s: &EngineStore) -> Staged {
 }
 fn drain(s: &mut EngineStore) {
     for _ in 0..10000 {
-        if gc_step(s).unwrap() || reseed_step(s).unwrap() {
-            continue;
-        }
         let Some((w, h)) = prepare(s).unwrap() else {
+            if gc_step(s).unwrap() || reseed_step(s).unwrap() {
+                continue;
+            }
             return;
         };
         let mut p = Staged::new(parser::parse(w, h).unwrap());
@@ -138,6 +177,54 @@ fn partial_batches_are_unpublished_and_resume_after_restart() {
     assert_eq!(certified_literals(&s).len(), 500);
     assert_eq!(count(&s, "links"), 500);
     assert_eq!(count(&s, "link_gc"), 0);
+}
+
+#[test]
+fn interrupted_prior_parser_staging_does_not_certify_leftover_rows() {
+    for prior_generation in [None, Some(PARSER_GENERATION - 1)] {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let mut s = open(&db);
+        write(&mut s, "a", "a.md", &"[[x]] ".repeat(500), 2);
+        let mut staged = parsed(&s);
+        let w = staged.parsed.work.clone();
+        let key = w.index_key();
+        for _ in 0..5 {
+            assert!(!staged.step(&mut s, &NoFaults).unwrap());
+        }
+        drop(staged);
+        // Model committed slices from the preceding build, including the
+        // legacy key that did not yet name its parser generation.
+        let prior_key = prior_generation.map_or_else(
+            || format!("{}:{}", w.id, w.revision),
+            |generation| format!("{}:{}:{generation}", w.id, w.revision),
+        );
+        s.write_with(&NoFaults, |tx| {
+            for table in ["links", "link_occurrence_keys", "link_target_keys", "link_gc"] {
+                tx.execute(&format!("UPDATE {table} SET index_key=?1 WHERE index_key=?2"), params![prior_key, key]).map_err(sql)?;
+            }
+            tx.execute("INSERT INTO links VALUES('ws','main','a',?1,999,'ghost','wikilink',NULL,0,0,1,'ghost')", [&prior_key]).map_err(sql)?;
+            tx.execute("INSERT INTO link_occurrence_keys VALUES('ws','main','a',?1,999,'folded-path','ghost.md')", [&prior_key]).map_err(sql)?;
+            Ok::<_, StorageError>(())
+        }).unwrap();
+        drop(s);
+        let mut s = open(&db);
+        let mut worker = DrainWorker::new(SharedMetrics::default()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while count(&s, "link_pending") != 0 {
+            worker.tick(&mut s);
+            assert!(Instant::now() < deadline, "restart drain deadline");
+            std::thread::yield_now();
+        }
+        assert_eq!(certified_literals(&s), vec!["x"; 500]);
+        let probes: i64 = s.read_with(|c| c.query_row("SELECT COUNT(*) FROM link_occurrence_keys k JOIN link_sources s USING(workspace_id,version_id,object_id,index_key) WHERE ordinal=999", [], |r| r.get(0))).unwrap();
+        assert_eq!(probes, 0);
+        // Certification precedes cleanup of the interrupted generation.
+        assert!(count(&s, "link_gc") > 0);
+        drain(&mut s);
+        assert_eq!(count(&s, "links"), 500);
+        assert_eq!(count(&s, "link_gc"), 0);
+    }
 }
 #[test]
 fn unindexable_hashes_are_terminal_until_head_changes() {
@@ -479,13 +566,17 @@ fn five_hundred_links_publish_atomically_in_bounded_actor_slices() {
     let mut s = open(&db);
     write(&mut s, "a", "a.md", &"[[target]] ".repeat(500), 2);
     let mut staged = parsed(&s);
+    observe_checkpoints(&s);
     let mut batches = 0;
     let mut durations = Vec::new();
     let began = Instant::now();
     loop {
+        begin_tick_measurement();
         let start = Instant::now();
         let done = staged.step(&mut s, &NoFaults).unwrap();
-        durations.push(start.elapsed());
+        let duration = start.elapsed();
+        report_slow_tick(duration, if done { "certify" } else { "stage" });
+        durations.push(duration);
         batches += 1;
         if done {
             break;

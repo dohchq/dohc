@@ -31,6 +31,10 @@ pub struct DrainWorker {
     staged: Option<Staged>,
     retry_at: Instant,
     metrics: SharedMetrics,
+    #[cfg(test)]
+    measurement_initialized: bool,
+    #[cfg(test)]
+    phase: &'static str,
 }
 impl DrainWorker {
     pub fn new(metrics: SharedMetrics) -> std::io::Result<Self> {
@@ -54,11 +58,24 @@ impl DrainWorker {
             staged: None,
             retry_at: Instant::now(),
             metrics,
+            #[cfg(test)]
+            measurement_initialized: false,
+            #[cfg(test)]
+            phase: "prepare",
         })
     }
     // Called between foreground commands. Immediate work returns zero delay;
     // idle and transient failures wait without monopolizing the actor.
     pub fn tick(&mut self, store: &mut EngineStore) -> Duration {
+        #[cfg(test)]
+        {
+            if !self.measurement_initialized {
+                super::tests::observe_checkpoints(store);
+                self.measurement_initialized = true;
+            }
+            super::tests::begin_tick_measurement();
+            self.phase = "prepare";
+        }
         let began = Instant::now();
         let delay = self.tick_inner(store);
         let mut m = self
@@ -69,6 +86,8 @@ impl DrainWorker {
         m.actor_batches += 1;
         m.max_actor_us = m.max_actor_us.max(us);
         m.over_budget_batches += u64::from(us > ACTOR_SLICE_BUDGET.as_micros() as u64);
+        #[cfg(test)]
+        super::tests::report_slow_tick(Duration::from_micros(us), self.phase);
         delay
     }
     fn tick_inner(&mut self, store: &mut EngineStore) -> Duration {
@@ -103,7 +122,15 @@ impl DrainWorker {
     }
     fn step(&mut self, store: &mut EngineStore) -> Result<Duration, StorageError> {
         if let Some(staged) = self.staged.as_mut() {
+            #[cfg(test)]
+            {
+                self.phase = "stage";
+            }
             if staged.step(store, &NoFaults)? {
+                #[cfg(test)]
+                {
+                    self.phase = "certify";
+                }
                 // Only count certification if this exact obligation vanished.
                 let w = &staged.parsed.work;
                 let certified=store.read_with(|c|c.query_row("SELECT EXISTS(SELECT 1 FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND index_key=?4)",params![w.workspace,w.version,w.object,w.index_key()],|r|r.get::<_,bool>(0))).map_err(super::sql)?;
@@ -137,6 +164,10 @@ impl DrainWorker {
         } else {
             // Obsolete generations are invisible to readers. Drain pending
             // sources first; cleanup runs only with no parse or staging active.
+            #[cfg(test)]
+            {
+                self.phase = "cleanup";
+            }
             if gc_step(store)? || reseed_step(store)? {
                 return Ok(Duration::ZERO);
             }

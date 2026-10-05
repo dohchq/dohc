@@ -35,7 +35,7 @@ pub struct Work {
 }
 impl Work {
     fn index_key(&self) -> String {
-        format!("{}:{}", self.id, self.revision)
+        format!("{}:{}:{PARSER_GENERATION}", self.id, self.revision)
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,20 +281,23 @@ impl Staged {
         let outcome=store.write_with(faults,|tx| {
             if !current(tx,p)? { return Ok((true,start,target_start)); }
             tx.execute("INSERT OR IGNORE INTO link_gc VALUES(?1,?2,?3,?4)",params![w.workspace,w.version,w.object,key]).map_err(sql)?;
+            let mut insert_link=tx.prepare_cached("INSERT OR REPLACE INTO links VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)").map_err(sql)?;
+            let mut insert_occurrence_key=tx.prepare_cached("INSERT OR IGNORE INTO link_occurrence_keys VALUES(?1,?2,?3,?4,?5,?6,?7)").map_err(sql)?;
             let began=Instant::now();
             let mut end=start;
             for (ordinal,(o,keys)) in self.rows.iter().enumerate().skip(start).take(ROW_SLICE) {
-                tx.execute("INSERT OR REPLACE INTO links VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![w.workspace,w.version,w.object,key,ordinal as i64,o.literal,o.kind,o.fragment,o.start_utf16 as i64,o.end_utf16 as i64,o.line as i64,o.snippet]).map_err(sql)?;
+                insert_link.execute(params![w.workspace,w.version,w.object,key,ordinal as i64,o.literal,o.kind,o.fragment,o.start_utf16 as i64,o.end_utf16 as i64,o.line as i64,o.snippet]).map_err(sql)?;
                 for (kind,value) in keys {
-                    tx.execute("INSERT OR IGNORE INTO link_occurrence_keys VALUES(?1,?2,?3,?4,?5,?6,?7)",params![w.workspace,w.version,w.object,key,ordinal as i64,kind,value]).map_err(sql)?;
+                    insert_occurrence_key.execute(params![w.workspace,w.version,w.object,key,ordinal as i64,kind,value]).map_err(sql)?;
                 }
                 end=ordinal+1;
                 if began.elapsed()>=ACTOR_SLICE_BUDGET/2 {break;}
             }
             if end<self.rows.len() {return Ok((false,end,target_start));}
+            let mut insert_target_key=tx.prepare_cached("INSERT OR IGNORE INTO link_target_keys VALUES(?1,?2,?3,?4,?5,?6)").map_err(sql)?;
             let mut target_end=target_start;
             for (kind,value) in self.targets.iter().skip(target_start).take(ROW_SLICE) {
-                tx.execute("INSERT OR IGNORE INTO link_target_keys VALUES(?1,?2,?3,?4,?5,?6)",params![w.workspace,w.version,w.object,key,kind,value]).map_err(sql)?;
+                insert_target_key.execute(params![w.workspace,w.version,w.object,key,kind,value]).map_err(sql)?;
                 target_end += 1;
                 if began.elapsed() >= ACTOR_SLICE_BUDGET/2 { break; }
             }
