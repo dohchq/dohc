@@ -143,7 +143,7 @@ async function harness() {
     requireEngineCapture: async () => ({ workspace, capture }), linkedChatStoreFor,
     openWorkspaceActivity: async () => undefined,
     receivedShareEngine: { workspaceFor: input => ({ workspaceId: input.engineWorkspaceId, rootPath: input.rootPath, attachmentId: input.attachmentId }) },
-    activeEngineFileIndex: async () => ({ objectIdByPath: new Map() }),
+    resolveEngineFiles: async (_workspace, targets) => targets.map(() => ({ status: "absent" })),
     readOwnedWorkspaceText: async () => ({ text: "# Current heading\n" }),
   });
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();

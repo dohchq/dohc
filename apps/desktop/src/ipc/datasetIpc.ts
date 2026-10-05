@@ -18,7 +18,7 @@ import { DatasetAddressUnavailableError, addressDatasets, resolveDatasetAddress,
 
 
 type Workspace = { workspaceId: string; shareView?: unknown };
-type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "workspace">;
+type SourceAdapter = Pick<VersionedLiveAdapter, "captureSourceMetadata" | "hydrateCapturedSources" | "listTextFileMetadata" | "resolveFiles" | "workspace">;
 type Operation<W extends Workspace> = { workspace: W; signal: AbortSignal; scope?: string; assertCurrent(): void };
 
 class DatasetScopeError extends Error {
@@ -149,10 +149,13 @@ export function createDatasetHandler<Caller, W extends Workspace, O extends Oper
             datasetPath = definition.schemaPath.slice(0, definition.schemaPath.lastIndexOf("/") + 1) + "dataset.json";
             const files = { [definition.schemaPath]: approved.schemaSql, [definition.operationsPath]: approved.operationSource,
               [datasetPath]: JSON.stringify(definition, null, 2) + "\n" };
-            const existing = await dependencies.withAdapter(operation.workspace, adapter => adapter.listTextFileMetadata({ workspaceId: input.workspaceId, versionId: "main" }));
+            const paths = Object.keys(files);
+            const existing = await dependencies.withAdapter(operation.workspace, adapter => adapter.resolveFiles({ workspaceId: input.workspaceId, targets: paths.map(path => ({ path })), signal: operation.signal }));
             current();
-            if (existing.some(file => file.path === datasetPath)) throw new Error(`Collection restored, but ${datasetPath} conflicts with its source. Move that file, then retry recovery.`);
-            const missing = Object.fromEntries(Object.entries(files).filter(([path]) => !existing.some(file => file.path === path)));
+            if (existing.results.some(file => file.status === "invalid")) throw new Error("Collection recovery has an invalid source path.");
+            const present = new Set(paths.filter((_path, index) => existing.results[index]?.status === "found"));
+            if (present.has(datasetPath)) throw new Error(`Collection restored, but ${datasetPath} conflicts with its source. Move that file, then retry recovery.`);
+            const missing = Object.fromEntries(Object.entries(files).filter(([path]) => !present.has(path)));
             await dependencies.createSources(operation.workspace, missing, operation.signal); current();
           }
         } catch (error) {

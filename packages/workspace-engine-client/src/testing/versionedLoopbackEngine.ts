@@ -1202,6 +1202,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.textDelete(state, workspace, params, parsedTextDelete!);
       case VERSIONED_METHOD.textRollback:
         return this.textRollback(state, workspace, params, request);
+      case "files.resolve":
+        return this.filesResolve(state, params);
       case VERSIONED_METHOD.textList:
         return this.textList(state, params);
       case VERSIONED_METHOD.binaryRead:
@@ -1897,6 +1899,29 @@ export class VersionedLoopbackEngine implements EngineTransport {
       materializeOutcome: materializeEnqueued ? "applied" : "skipped",
     };
     this.recordReplay(state, requestId, params, result, fingerprint);
+    return result;
+  }
+
+  private filesResolve(state: WorkspaceState, params: JsonObject): JsonValue {
+    if (!Array.isArray(params.targets) || params.targets.length > 128 || utf8Length(JSON.stringify(params)) > 48 * 1024) throw new Error("files.resolve exceeds its target or byte cap");
+    const versionId = optionalString(params, "versionId") ?? state.activeVersionId;
+    if (versionId === undefined) throw new Error("workspace-not-found");
+    const version = this.version(state, versionId);
+    const results = params.targets.map(target => {
+      if (!target || typeof target !== "object" || Array.isArray(target) || Object.keys(target).length !== 1) return { status: "invalid" };
+      let entry: [string, LoopbackFile] | undefined;
+      if ("path" in target && typeof target.path === "string") {
+        let path: string;
+        try { path = normalizedEnginePath(target.path, "addressable"); } catch { return { status: "invalid" }; }
+        const file = version.files.get(path);
+        if (file) entry = [path, file];
+      } else if ("objectId" in target && typeof target.objectId === "string" && target.objectId.length > 0 && utf8Length(target.objectId) <= 512) {
+        entry = [...version.files].find(([, file]) => file.objectId === target.objectId);
+      } else return { status: "invalid" };
+      return entry ? { status: "found", objectId: entry[1].objectId, path: entry[0] } : { status: "absent" };
+    });
+    const result = { versionId, results };
+    if (utf8Length(JSON.stringify(result)) > 48 * 1024) throw new Error("files.resolve exceeds its byte cap");
     return result;
   }
 

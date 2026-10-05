@@ -5,3 +5,4 @@ export type { NativeOwnerActivation, NativeOwnerActivationSource } from "./nativ
 export * from "./engineDaemonLifecycle";
 export * from "./engineWorkspaceSessions";
 export * from "./fileObservation";
+export * from "./fileResolution";

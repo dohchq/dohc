@@ -1,3 +1,5 @@
+import { resolveEngineFileTargets } from "./workspaces/resolveEngineFiles";
+import type { FileResolveTarget, FileResolution } from "@dohc/workspace-engine-client/daemon";
 import { writeWorkspaceFilesAs } from "./workspaces/workspaceFileWrites";
 import { createDesktopAutomationControls } from "./workspaces/desktopAutomationControls";
 import {parseDohcSiteConfig} from "@dohc/workspace-core";
@@ -2552,38 +2554,6 @@ function agentDispatchStoreHandleFor(workspace: {
   }
 }
 
-// The object-id <-> path index the search surfaces need, read through the
-// DAEMON rather than a second sqlite connection.
-//
-// This used to call the legacy TypeScript store factory, which opened another
-// node:sqlite connection to the engine.db the daemon owns -- exactly the second
-// writable connection workspaceEngineCapture.ts warns can deadlock. It also
-// hydrated every file's content via a full-text listing just to read two string
-// fields off each row.
-//
-// listTextFileMetadata is the right call: it pages (limit 500 + afterPath) so
-// a workspace past one page is no longer silently truncated, and it never
-// hydrates file bodies.
-async function engineSearchIndexFor(
-  workspace: EngineWorkspace,
-): Promise<{ versionId: string; files: { objectId: string; path: string }[];
-} | null> {
-  return await withEngineAdapter(workspace, async (adapter) => {
-    const active = await adapter.getActiveVersion({
-      workspaceId: workspace.workspaceId,
-    });
-    if (!active) return null;
-    const files = await adapter.listTextFileMetadata({
-      workspaceId: workspace.workspaceId,
-      versionId: active.id,
-    });
-    return {
-      versionId: active.id,
-      files: files.map((file) => ({ objectId: file.objectId, path: file.path })),
-    };
-  });
-}
-
 // One daemon round-trip per read, through the workspace-attachment authority
 // sandwich. Returns null when the daemon has no workspace sessions (engine
 // unavailable), so callers can answer with an empty result — collections.list
@@ -2618,18 +2588,10 @@ async function withEngineAdapter<T>(
   );
 }
 
-async function activeEngineFileIndex(workspace: EngineWorkspace): Promise<{
-  pathByObjectId: Map<string, string>;
-  objectIdByPath: Map<string, string>;
-}> {
-  const index = await engineSearchIndexFor(workspace);
-  if (!index) {
-    return { pathByObjectId: new Map(), objectIdByPath: new Map() };
-  }
-  return {
-    pathByObjectId: new Map(index.files.map((file) => [file.objectId, file.path])),
-    objectIdByPath: new Map(index.files.map((file) => [file.path, file.objectId])),
-  };
+async function resolveEngineFiles(workspace: EngineWorkspace, targets: readonly FileResolveTarget[]): Promise<readonly FileResolution[]> {
+  const results = await withEngineAdapter(workspace, adapter => resolveEngineFileTargets(adapter, workspace.workspaceId, targets));
+  if (results === null) throw new Error("Workspace engine is unavailable.");
+  return results;
 }
 
 // The human author every renderer-sent chat message is attributed to. Main
@@ -5491,7 +5453,7 @@ function registerIpcHandlers(): void {
     requireEngineCapture,
     syncWorkspaceSharedChannels,
     linkedChatStoreFor,
-    activeEngineFileIndex,
+    resolveEngineFiles,
   });
 
   windowIpc.registerExternalUrl();
@@ -6091,7 +6053,7 @@ function registerIpcHandlers(): void {
 
   const chatScope = createChatScopeCapability({
     workspaceAuthorities, canonicalWorkspaceFor, requireEngineCapture, linkedChatStoreFor,
-    openWorkspaceActivity, receivedShareEngine, activeEngineFileIndex, readOwnedWorkspaceText,
+    openWorkspaceActivity, receivedShareEngine, resolveEngineFiles, readOwnedWorkspaceText,
   });
 
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
@@ -6107,7 +6069,7 @@ function registerIpcHandlers(): void {
     assertWritableWorkspace, warmCredentialCache, localUserId,
     localInstallationId, currentCredentials: () => cachedCredentials, chatRelayIdentityFor,
     syncWorkspaceSharedChannels, syncSharedChannelsForChatTarget,
-    syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, activeEngineFileIndex,
+    syncRendererWorkspaceSharedChannels, withRendererWorkspaceOperation, resolveEngineFiles,
     activity, desktopChatBookmarks, notifyRenderer,
     automationCollectionOf: (workspaceId) => {
       const executor = collectionAutomationsOf(workspaceId);

@@ -25,7 +25,8 @@ fn method_requires_initial_capture_ready(method: &str) -> bool {
         || (method.starts_with("secrets.") && method != "secrets.write")
         || matches!(
             method,
-            "capture.reconcile"
+            "files.resolve"
+                | "capture.reconcile"
                 | "versionedText.list"
                 | "versionedText.captureSources"
                 | "versionedText.read"
@@ -277,6 +278,10 @@ impl EngineService {
             }
             "engine.ping" => engine_ping(),
             "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
+            "files.resolve" => {
+                self.files_resolve(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "files.changesSince" => {
                 Box::pin(self.files_changes_since(&ctx, request.workspace, request.params, false))
                     .await?
@@ -1171,6 +1176,7 @@ mod tests {
             "versions.ensureMain"
         ));
         for method in [
+            "files.resolve",
             "versions.active",
             "versions.list",
             "versions.createNamed",
@@ -1395,6 +1401,7 @@ mod tests {
             "versionedText.compare",
             "versionedText.checkMove",
             "versionedText.delete",
+            "files.resolve",
             "versionedText.list",
             "versionedText.captureSources",
             "versionedText.merge",

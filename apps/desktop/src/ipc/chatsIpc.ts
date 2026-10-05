@@ -1,3 +1,4 @@
+import type { EngineFileResolver } from "../workspaces/resolveEngineFiles";
 import { nameSlug } from "@dohc/workspace-contracts/names";
 import {
   ListFileChatsPayload,
@@ -160,9 +161,7 @@ export function registerChatsIpcHandlers<
     sender: Sender, workspaceId: string, message: string,
     work: (operation: Operation) => Result | Promise<Result>,
   ): Promise<Result>;
-  activeEngineFileIndex(workspace: EngineWorkspace): Promise<{
-    objectIdByPath: Map<string, string>; pathByObjectId: Map<string, string>;
-  }>;
+  resolveEngineFiles: EngineFileResolver<EngineWorkspace>;
   activity: { queueCloudSync(workspaceId: string): void };
   desktopChatBookmarks: {
     materializeChatBookmark(
@@ -184,7 +183,7 @@ export function registerChatsIpcHandlers<
     assertWritableWorkspace, warmCredentialCache, localUserId, localInstallationId,
     currentCredentials, chatRelayIdentityFor, syncWorkspaceSharedChannels,
     syncSharedChannelsForChatTarget, syncRendererWorkspaceSharedChannels,
-    withRendererWorkspaceOperation, activeEngineFileIndex, activity, desktopChatBookmarks,
+    withRendererWorkspaceOperation, resolveEngineFiles, activity, desktopChatBookmarks,
     notifyRenderer, ensureGroupFolder, automationCollectionOf,
   } = dependencies;
   const { requireChatScope, chatFileObjectId, resolveChatFileReferences } = dependencies.chatScope;
@@ -255,7 +254,9 @@ export function registerChatsIpcHandlers<
       workspaceId: workspace.workspaceId,
       ...(objectId ? { objectId } : { pathHint: input.path }),
     });
-    const activeFiles = await activeEngineFileIndex(workspace);
+    const [requestedFile] = await resolveEngineFiles(workspace, [{ path: input.path }]);
+    const pathByObjectId = new Map<string, string>();
+    if (requestedFile?.status === "found" && requestedFile.objectId === objectId) pathByObjectId.set(objectId, requestedFile.path);
     const mentionChannelWireIds = new Map(
       await Promise.all(
         [
@@ -289,7 +290,7 @@ export function registerChatsIpcHandlers<
           ...(mention.attachment.pathHint
             ? { attachmentPathHint: mention.attachment.pathHint }
             : {}),
-          pathByObjectId: activeFiles.pathByObjectId,
+          pathByObjectId,
         });
         if (!currentPath) return [];
         return [
@@ -645,7 +646,9 @@ export function registerChatsIpcHandlers<
         let pathByObjectId = new Map<string, string>();
         if (fileThreads.length > 0) {
           try {
-            ({ pathByObjectId } = await activeEngineFileIndex(workspace));
+            const ids = [...new Set(fileThreads.map(thread => thread.linkedFile!.objectId))];
+            const resolved = await resolveEngineFiles(workspace, ids.map(objectId => ({ objectId })));
+            pathByObjectId = new Map(resolved.flatMap(file => file.status === "found" ? [[file.objectId, file.path] as const] : []));
           } catch {
             // Path resolution is display-only; the hint fallback keeps the
             // listing honest enough.
