@@ -693,12 +693,12 @@ describe("shared view send changes", () => {
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));
   });
 
-  it("pushes nothing from a share view that cannot write", async () => {
+  it("listens without pushing from a share view that cannot write", async () => {
     const bridge = makeShareBridge();
     renderShell(bridge, { ...SHARE_VIEW, shareView: { shareId: "share-1", granterEmail: "sam@dohc.test", access: "comment" } });
     await screen.findByTestId("shared-view-banner");
-    // It does not listen for pushes at all.
-    expect(bridge.onShareDirectWritesPushed).not.toHaveBeenCalled();
+    // A write started before access ended can still report its outcome.
+    expect(bridge.onShareDirectWritesPushed).toHaveBeenCalledOnce();
     expect(bridge.pushShareDirectWrites).not.toHaveBeenCalled();
   });
 

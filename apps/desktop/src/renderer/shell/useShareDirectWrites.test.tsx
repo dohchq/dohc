@@ -63,9 +63,9 @@ it("pushes when the view opens and shows what that push answered", async () => {
   ]);
 });
 
-it("listens to nothing and pushes nothing when the share view cannot write", async () => {
+it("keeps listening without pushing when the share view cannot write", async () => {
   await setup({ enabled: false });
-  expect(pushed).toBeNull();
+  expect(pushed).not.toBeNull();
   expect(pushShareDirectWrites).not.toHaveBeenCalled();
 });
 
@@ -272,7 +272,7 @@ it("ignores an answer that arrives after the view closed", async () => {
   expect(notices).toEqual([]);
 });
 
-it("discards an unavailable push's pending refresh after the hook stops", async () => {
+it("keeps an unavailable push's pending refresh when writing stops in the same workspace", async () => {
   const refresh = deferred<ShareViewRefresh>();
   pushShareDirectWrites.mockResolvedValueOnce({ status: "unavailable" });
   const showNotice = vi.fn();
@@ -289,8 +289,23 @@ it("discards an unavailable push's pending refresh after the hook stops", async 
   await act(async () => {});
   expect(refreshShareView).toHaveBeenCalledOnce();
   hook.rerender({ enabled: false });
-  hook.rerender({ enabled: true });
-  await act(async () => { refresh.resolve("stale"); });
+  await act(async () => { refresh.resolve("ended"); });
+  expect(showNotice).toHaveBeenCalledWith(expect.objectContaining({ kind: "direct-write-unavailable" }));
+});
+
+it("discards an unavailable push's pending refresh after A to B to A", async () => {
+  const refresh = deferred<ShareViewRefresh>();
+  pushShareDirectWrites.mockResolvedValueOnce({ status: "unavailable" });
+  const showNotice = vi.fn();
+  const hook = renderHook(({ workspaceId }) => useShareDirectWrites({
+    workspaceId, enabled: true, ready: true, ownerName: "ana@example.com",
+    refreshShareView: () => refresh.promise,
+    sendShareChanges: async () => undefined, showNotice,
+  }), { initialProps: { workspaceId: "share-view" } });
+  await act(async () => {});
+  hook.rerender({ workspaceId: "other" });
+  hook.rerender({ workspaceId: "share-view" });
+  await act(async () => { refresh.resolve("ended"); });
   expect(showNotice).not.toHaveBeenCalled();
 });
 

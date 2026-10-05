@@ -21,7 +21,7 @@ function receivedSource(workspace: Workspace, shareEngine: ShareEngine, shareId?
     ? { kind: "mount", workspaceId: workspace.workspaceId, shareId }
     : { kind: "standalone", workspaceId: workspace.workspaceId });
   const grant = recordedShareSelector(target?.grantedSelector);
-  if (!target || target.ended || !grant) throw new Error("This share is no longer available.");
+  if (!target || !grant) throw new Error("This share is no longer available.");
   return {
     workspace: target.kind === "standalone" ? shareEngine.workspaceForRegistered(workspace)
       : shareEngine.workspaceFor({ engineWorkspaceId: target.storeWorkspaceId, rootPath: target.rootPath }),
@@ -51,7 +51,7 @@ export function collectionListSources(workspace: Workspace, shareEngine: ShareEn
   const mounts = storedShareMounts(workspace);
   return [
     { workspace: shareEngine.workspaceForRegistered(workspace), prefix: "", selected: () => true },
-    ...mounts.filter(mount => usableShareMountRecord(mounts, mount) && !mount.ended && recordedShareSelector(mount.grantedSelector))
+    ...mounts.filter(mount => usableShareMountRecord(mounts, mount) && recordedShareSelector(mount.grantedSelector))
       .map(mount => receivedSource(workspace, shareEngine, mount.shareId)),
   ];
 }

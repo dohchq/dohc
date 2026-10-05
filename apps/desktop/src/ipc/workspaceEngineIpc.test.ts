@@ -361,6 +361,32 @@ describe("workspace engine IPC registrations", () => {
     }]);
   });
 
+  it("lists and reads an ended Edit share's retained schema and records within its saved selector", async () => {
+    const h = await harness();
+    h.workspace.shareView = {
+      shareId: "share", granterEmail: null, genericChatWritable: false, ended: true,
+      grantedSelector: { paths: ["data"], versionId: null, access: "edit" },
+    };
+    const collection = { path: "data", objectId: "schema", status: "valid" as const, reasons: [] };
+    h.adapter.listCollections.mockResolvedValue({ collections: [collection,
+      { ...collection, path: "private" }] });
+    h.adapter.getCollection.mockResolvedValue({ ...collection,
+      schema: { name: "Retained", description: null, fields: [], views: [] }, recordCount: 1 });
+    const record = { id: "retained", path: "data/a.md", conflicted: false, values: [] };
+    h.adapter.queryCollectionRecords.mockResolvedValue({ collection,
+      records: [record, { ...record, id: "outside", path: "private/a.md" }], groups: null, nextCursor: null });
+    await expect(h.invoke(CHANNELS.listCollections)).resolves.toEqual({ collections: [collection] });
+    await expect(h.invoke(CHANNELS.getCollection, { workspaceId: "workspace", collectionPath: "data" }))
+      .resolves.toMatchObject({ schema: { name: "Retained" }, recordCount: 1 });
+    await expect(h.invoke(CHANNELS.queryCollectionRecords, { workspaceId: "workspace", collectionPath: "data" }))
+      .resolves.toMatchObject({ records: [record] });
+    for (const channel of [CHANNELS.getCollection, CHANNELS.queryCollectionRecords]) {
+      await expect(h.invoke(channel, { workspaceId: "workspace", collectionPath: "private" })).rejects.toThrow("outside");
+    }
+    expect(h.routed).toEqual(Array.from({ length: 3 }, () => expect.objectContaining({ shareMount: true })));
+    expect(h.requireEngineCapture).not.toHaveBeenCalled();
+  });
+
   it("parses collection results and preserves get arguments", async () => {
     const h = await harness();
     await expect(h.invoke(CHANNELS.getCollection, { workspaceId: "workspace", collectionPath: "data" })).rejects.toThrow("get boundary");

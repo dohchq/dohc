@@ -81,6 +81,7 @@ async function switchAgain(
 }
 
 export function SharedAutomationsPanel(props: {
+  readOnly?: boolean;
   workspaceId: string;
   collectionPath: string;
   definitions: SharedAutomationDefinitions;
@@ -101,8 +102,8 @@ export function SharedAutomationsPanel(props: {
   // Switches main saved, by automation. Until a read after the save
   // succeeds, each shows what main saved and whether the relay has it.
   const [saved, setSaved] = useState<ReadonlyMap<string, { enabled: boolean; pending: boolean; version: number }>>(new Map());
-  const latest = useRef({ definitions, version, saved });
-  latest.current = { definitions, version, saved };
+  const latest = useRef({ definitions, version, saved, readOnly: props.readOnly });
+  latest.current = { definitions, version, saved, readOnly: props.readOnly };
   // The file main wrote last, which the next switch saves over until a read replaces it.
   const lastWrite = useRef<{ contentHash: string; version: number } | null>(null);
   const [reformat, setReformat] = useState<(() => void) | null>(null);
@@ -128,14 +129,14 @@ export function SharedAutomationsPanel(props: {
   }, [definitions, version]);
 
   const toggle = (automation: string, name: string, enabled: boolean, agreed = false) => {
-    const { definitions: current, version: read, saved: saves } = latest.current;
+    const { definitions: current, version: read, saved: saves, readOnly } = latest.current;
     const entry = current.file.status === "read"
       ? current.file.entries.find((candidate) => candidate.status === "valid" && candidate.automation.id === automation)
       : undefined;
     const save = saves.get(automation);
     const shown = save !== undefined && save.version === read ? save.enabled : entry?.enabledInFile;
     const expectedContentHash = lastWrite.current?.version === read ? lastWrite.current.contentHash : current.contentHash;
-    if (busy.current || expectedContentHash === null || !entry?.canSwitch || shown === enabled) return;
+    if (readOnly || busy.current || expectedContentHash === null || !entry?.canSwitch || shown === enabled) return;
     const words = `"${name}" ${enabled ? "on" : "off"}`;
     const again = () => void switchAgain({ workspaceId, collectionPath }, automation, name, enabled, onError);
     const epoch = scope.current();
@@ -246,7 +247,7 @@ export function SharedAutomationsPanel(props: {
           </div>
         ) : (
           <>
-            {definitions.canSwitch && unreadable ? fileNote(
+            {!props.readOnly && definitions.canSwitch && unreadable ? fileNote(
               <>
                 <p className="m-0">Fix the automations dohc cannot read to switch them here.</p>
                 <SecondaryButton size="compact" className="mt-1.5" onClick={() => props.onOpenFile(filePath)}>Open file</SecondaryButton>
@@ -286,7 +287,7 @@ export function SharedAutomationsPanel(props: {
                     className="flex items-start gap-2 border-b border-line px-3 py-2.5"
                   >
                     <div className="w-9 shrink-0 pt-0.5">
-                      {entry.canSwitch ? (
+                      {!props.readOnly && entry.canSwitch ? (
                         <SwitchControl
                           label={automation.name}
                           checked={sent?.enabled ?? (unread ? save.enabled : entry.enabledInFile === true)}
@@ -318,7 +319,7 @@ export function SharedAutomationsPanel(props: {
           </>
         )}
       </div>
-      {reformat ? (
+      {reformat && !props.readOnly ? (
         <ConfirmDialog
           title={`Save ${AUTOMATIONS_FILE} in dohc's layout?`}
           confirmLabel="Save"

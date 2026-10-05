@@ -481,10 +481,11 @@ export interface AutomationFocus {
 }
 
 /** A Collection reached through a share lists what its file says; any other lists what this computer runs. */
-export function AutomationsPanel(props: Parameters<typeof OwnerAutomationsPanel>[0]) {
+export function AutomationsPanel(props: Parameters<typeof OwnerAutomationsPanel>[0] & { readOnly?: boolean }) {
   const file = props.automations.file;
   return file?.status === "shared" ? (
     <SharedAutomationsPanel
+      readOnly={props.readOnly}
       workspaceId={props.workspaceId}
       collectionPath={props.collectionPath}
       definitions={file.definitions}

@@ -21,7 +21,7 @@ const workspace = (rootPath: string): RegistryEntry & { attachmentId: symbol } =
 });
 
 describe("received Collection read routing", () => {
-  it("uses the saved grant for standalone reads and rejects damaged or ended shares", async () => {
+  it("uses the saved grant for standalone reads and rejects damaged shares", async () => {
     const target = { ...workspace("unused"), shareView: {
       shareId: "share", granterEmail: null, genericChatWritable: false,
       grantedSelector: { paths: ["trip"], versionId: null, access: "view" as const },
@@ -33,7 +33,28 @@ describe("received Collection read routing", () => {
     await expect(collectionReadSource(target, "private", access())).rejects.toThrow("outside");
     target.shareView.grantedSelector.paths = [];
     await expect(collectionReadSource(target, "trip/tasks", access())).rejects.toThrow("no longer available");
-    expect(() => collectionListSources({ ...target, shareView: { ...target.shareView, ended: true } }, access())).toThrow("no longer available");
+    expect(() => collectionListSources(target, access())).toThrow("no longer available");
+  });
+
+  it("keeps ended standalone Collections readable from their retained store within the saved selector", async () => {
+    const target = { ...workspace("unused"), shareView: {
+      shareId: "share", granterEmail: null, genericChatWritable: false, ended: true,
+      grantedSelector: { paths: ["trip/tasks"], versionId: null, access: "edit" as const },
+    } };
+    const sources = collectionListSources(target, access());
+    const { source, path } = await collectionReadSource(target, "trip/tasks", access());
+    expect(sources).toHaveLength(1);
+    expect(source.workspace).toMatchObject({ shareMount: true, workspaceId: "recipient", rootPath: "unused" });
+    expect(path).toBe("trip/tasks");
+    expect(source.selected("trip/tasks/collection.yaml")).toBe(true);
+    expect(source.selected("trip/private/collection.yaml")).toBe(false);
+    const result = receivedCollectionQuery({
+      collection: { path, objectId: "schema", status: "valid", reasons: [] },
+      records: [{ id: "retained", path: "trip/tasks/a.md", conflicted: false, values: [] },
+        { id: "outside", path: "trip/private/a.md", conflicted: false, values: [] }], groups: null, nextCursor: null,
+    }, source);
+    expect(result.records.map(record => record.id)).toEqual(["retained"]);
+    await expect(collectionReadSource(target, "trip/private", access())).rejects.toThrow("outside");
   });
 
   it("routes a mount to its own store and prefixes records, relations, and cursors", async () => {
@@ -57,7 +78,10 @@ describe("received Collection read routing", () => {
       expect(result.records.map(record => record.path)).toEqual([`${prefix}trip/tasks/a.md`]);
       expect(result.nextCursor?.recordPath).toBe(`${prefix}trip/tasks/a.md`);
       expect(receivedCollectionQuery({ ...result, nextCursor: { recordPath: "private/a.md", recordId: "secret", sortValues: [] } }, routed.source).nextCursor).toBeNull();
-      expect(collectionListSources({ ...target, shareMounts: [{ ...target.shareMounts[0]!, ended: true }] }, access())).toHaveLength(1);
+      const ended = { ...target, shareMounts: [{ ...target.shareMounts[0]!, ended: true }] };
+      expect(collectionListSources(ended, access())).toHaveLength(2);
+      expect((await collectionReadSource(ended, "shared-with-me/alice/trip/tasks", access())).source.workspace)
+        .toMatchObject(routed.source.workspace);
       await expect(collectionReadSource(target, "shared-with-me/alice/private", access())).rejects.toThrow("outside");
     } finally { await rm(root, { recursive: true, force: true }); }
   });
