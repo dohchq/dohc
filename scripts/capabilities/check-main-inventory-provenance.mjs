@@ -4,11 +4,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Run: node scripts/capabilities/check-main-inventory-provenance.mjs <generation.json>
+// Run: node scripts/capabilities/check-main-inventory-provenance.mjs
 const root = fileURLToPath(new URL("../../", import.meta.url));
-const manifestPath = process.argv[2];
-assert.ok(manifestPath, "Supply the main generation manifest.");
-const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+const manifest = JSON.parse(readFileSync(new URL("./generation.main.json", import.meta.url), "utf8"));
 const hash = path => createHash("sha256").update(readFileSync(resolve(root, path))).digest("hex");
 assert.equal(manifest.sourceCommit, "a4be19d5bc2c3581aca2d4b2bfb66af8b06b9945");
 assert.equal(manifest.trackedSourcesClean, true);
