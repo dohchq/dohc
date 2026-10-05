@@ -326,6 +326,84 @@ async fn a_held_recorded_file_changed_on_disk_keeps_capture_unsettled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_lease_retries_quarantined_capture_without_disk_changes() {
+    let harness = Harness::new();
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+    let lease = harness
+        .leases
+        .acquire(&harness.key(&object_id))
+        .expect("the editor holds a headless session");
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+    std::fs::write(harness.root.join(NEW_FILE), "Written outside the editor.\n")
+        .expect("outside write");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+
+    for _ in 0..dohc_engine_files::DEGRADED_RESCAN_BACKOFF {
+        assert!(!harness.capture(&files.handle()).await);
+    }
+    let stats = files.handle().stats().await.expect("stats");
+    assert_eq!(
+        (stats.deferred, stats.quarantined, stats.dirty),
+        (0, 1, false)
+    );
+    assert_eq!(head_count(&harness.db, NEW_FILE), 0);
+    offer_deferred_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(
+        !files.handle().stats().await.expect("stats").dirty,
+        "the held lease does not restart parked capture"
+    );
+
+    drop(lease);
+    offer_deferred_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(
+        files.handle().stats().await.expect("stats").dirty,
+        "release reoffers the quarantined write without a filesystem event"
+    );
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_count(&harness.db, NEW_FILE), 1);
+    assert_eq!(head_origin(&harness.db, NEW_FILE), "capture");
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(NEW_FILE)).expect("intact file"),
+        "Written outside the editor.\n"
+    );
+
+    drop(
+        harness
+            .leases
+            .acquire(&harness.key("another-object"))
+            .expect("lease"),
+    );
+    offer_deferred_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(
+        !files.handle().stats().await.expect("stats").dirty,
+        "a release with no capture backlog does not request a scan"
+    );
+    files.close().await;
+    harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() {
     use dohc_engine_collab::{
         ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,

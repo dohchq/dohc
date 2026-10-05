@@ -2984,12 +2984,10 @@ async fn materialize_ydoc_recoveries(
         .collect())
 }
 
-/// A path deferred to a live document session is not in the manifest yet, so
-/// the next full scan offers it again. That scan must happen once the session
-/// lets go, even when nothing on disk changes: a new file closed without an
-/// edit is otherwise never captured. Asks for it when a lease on this
-/// workspace was released since the last check and the last run deferred
-/// something.
+/// A live session can leave empty files deferred and nonempty files
+/// quarantined. Once a lease releases, offer both again even when nothing
+/// on disk changes. Without that scan, capture can remain parked after the
+/// session ends.
 async fn offer_deferred_after_release(
     leases: &LeaseRegistry,
     workspace_id: &str,
@@ -3001,7 +2999,7 @@ async fn offer_deferred_after_release(
         return;
     }
     *releases_seen = releases;
-    if matches!(files.stats().await, Ok(stats) if stats.deferred > 0) {
+    if matches!(files.stats().await, Ok(stats) if stats.deferred > 0 || stats.quarantined > 0) {
         files.request_rescan();
     }
 }
