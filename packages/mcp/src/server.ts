@@ -126,7 +126,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   }, async args => text(await switchAutomation(ctx, args)));
 
   registerWrite("dohc_publish_app", {
-    description: "Create a share link, prepare an immutable app revision, and approve publication with local owner authority. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. For an existing link, append the returned appQuery to your own URL before its fragment; never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.",
+    description: "Create a share link, prepare an immutable app revision, and approve publication with local owner authority. createLink requires a stable operationId; retries return the existing grant, never another link. Paths default to the app root at View access. A URL is a bearer credential at its stated access level, usable by anyone holding it. Keep its secret yourself. Append the returned appQuery before the fragment of any link URL, including one returned by createLink. Never send its secret to dohc. Rotation remains in the desktop. Agent labels are agent-declared provenance.",
     inputSchema: {request: OwnerAppPublicationRequest},
   }, async ({request}) => text(await publishApp(ctx,request)));
 
