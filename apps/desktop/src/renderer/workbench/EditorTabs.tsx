@@ -100,13 +100,13 @@ const DECORATION = "pointer-events-none absolute size-[9px] overflow-hidden";
 const DECORATION_ARC =
   "absolute inset-0 border-line transition-[border-radius] duration-[160ms] ease-[cubic-bezier(0.2,0.8,0.3,1)]";
 const TAB_JOIN = `${DECORATION} -bottom-px`;
-const TAB_JOIN_ARC = `${DECORATION_ARC} border-b shadow-[0_0_0_8px_var(--color-bg)]`;
+const TAB_JOIN_ARC = `${DECORATION_ARC} border-b shadow-[0_0_0_8px_var(--dohc-bg)]`;
 const PANE_CORNER = `${DECORATION} top-0`;
-const PANE_CORNER_ARC = `${DECORATION_ARC} border-t shadow-[0_0_0_8px_var(--color-panel)]`;
+const PANE_CORNER_ARC = `${DECORATION_ARC} border-t shadow-[0_0_0_8px_var(--dohc-panel)]`;
 // Read from the attributes EditorGroupLayout sets: `data-split` on the
 // layout, `data-active` on the group that takes opened files.
 const ACTIVE_GROUP_TAB =
-  "[[data-split]_[data-editor-group-id][data-active]_&]:shadow-[inset_0_2px_0_var(--color-accent)]";
+  "[[data-split]_[data-editor-group-id][data-active]_&]:shadow-[inset_0_2px_0_var(--dohc-accent)]";
 const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-muted";
 
 // Memoized so the dirty flips while typing (saveState ticks every autosave)
