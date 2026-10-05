@@ -74,6 +74,7 @@ export function rowToShareRow(row: Record<string, unknown>): SyncRelayShareRow {
     workspaceId: String(row.workspace_id),
     granterUserId: String(row.granter_user_id),
     selectorJson: String(row.selector_json),
+    ...(row.creation_provenance_json == null ? {} : {creationProvenance: JSON.parse(String(row.creation_provenance_json))}),
     createdAtMs: Number(row.created_at_ms),
   };
 }

@@ -5933,3 +5933,39 @@ describe("named share origin isolation", () => {
     expect(ownerRows.find((row) => row.opKind === "moment.append")?.originId).toBe("replica");
   });
 });
+
+
+it("retries an agent link creation across restart without minting another credential", async () => {
+  const {storage,dbPath}=await newStorageWithPath(), h=handler(storage);
+  await h(request(OWNER,"/sync/workspaces",jsonBody({workspaceId:WORKSPACE})));
+  const agent={kind:"agent",label:"Builder",labelSource:"agent-declared"}, body={paths:["docs"],access:"view",operationId:"00000000-0000-4000-8000-000000000101",agent};
+  const created=await h(request(OWNER,`/sync/${WORKSPACE}/shares/links`,jsonBody(body)));
+  expect(created.status).toBe(200);
+  const first=await json(created);
+  expect(first.url).toEqual(expect.any(String));
+  closeTestStorage(storage);
+  const reopened=reopenTestStorage(dbPath), next=handler(reopened);
+  const retry=await next(request(OWNER,`/sync/${WORKSPACE}/shares/links`,jsonBody(body)));
+  expect(retry.status).toBe(200);
+  expect(await json(retry)).toMatchObject({shareId:first.shareId,grantId:first.grantId,urlUnavailable:true});
+  const links=await ownerLinkInventory(next);
+  expect(links).toHaveLength(1);
+  expect(links[0]!.creationProvenance).toMatchObject({agent,selector:{paths:["docs"],versionId:null},access:"view"});
+  expect(JSON.stringify(links)).not.toContain(String(first.url));
+  const changed=await next(request(OWNER,`/sync/${WORKSPACE}/shares/links`,jsonBody({...body,access:"comment"})));
+  expect(changed.status).toBe(409);
+  expect((await next(request(RECIPIENT,`/sync/${WORKSPACE}/shares/links`,jsonBody(body)))).status).toBe(404);
+  expect(reopened.readLinkCreation(WORKSPACE,body.operationId,RECIPIENT)).toBeNull();
+  const database=inspectDatabase(dbPath);
+  try {
+    expect(database.prepare("SELECT COUNT(*) n FROM sync_relay_link_credentials").get()!.n).toBe(1);
+    expect(database.prepare("SELECT request_json FROM sync_relay_link_creations").get()!.request_json).not.toContain(String(first.url).split("#")[1]);
+  } finally {database.close();}
+});
+
+it.each([[[]],[[".env"]],[["docs/.env"]],[[".dohc/secret"]]])("refuses agent link secret paths and empty selectors %j",async paths=>{
+  const storage=await newStorage(),h=handler(storage);
+  await h(request(OWNER,"/sync/workspaces",jsonBody({workspaceId:WORKSPACE})));
+  expect((await h(request(OWNER,`/sync/${WORKSPACE}/shares/links`,jsonBody({paths,access:"view",operationId:"00000000-0000-4000-8000-000000000101"})))).status).toBe(400);
+  expect(await ownerLinkInventory(h)).toHaveLength(0);
+});

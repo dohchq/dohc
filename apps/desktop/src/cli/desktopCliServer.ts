@@ -61,7 +61,7 @@ async function settledMarkdown(rootPath: string, path: string): Promise<string> 
 interface DesktopCliServerDependencies<State> {
   dataset?(request: import("@dohc/cli/dataset").DatasetRequest, agent: LocalDatasetAgent | null): Promise<import("@dohc/cli/dataset").DatasetResult>;
   ownerAppResponses?(request:import("@dohc/cli/app-responses").OwnerAppResponsesRequest):Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>;
-  ownerAppPublication?(request: OwnerAppPublicationRequest): Promise<OwnerAppPublicationResult>;
+  ownerAppPublication?(request: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null): Promise<OwnerAppPublicationResult>;
   /** The executor calls the Automations panel makes, for one workspace. */
   automations(workspace: RegistryEntry): CliAutomationsPort;
   /** A window's press path, for one workspace. */
@@ -222,10 +222,10 @@ export function createDesktopCliServer<State>(
           if(request.workspaceId!==workspace.workspaceId || operation.signal!==publicationAttachment || publicationAttachment.aborted)throw new Error("The response workspace attachment changed.");
           return dependencies.ownerAppResponses!(request);
         })}:{}),
-      ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest) =>
+      ...(dependencies.ownerAppPublication ? { appPublication: (request: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null = null) =>
         withPhysicalWorkspaceOperation(workspace.workspaceId, operation => {
           if (request.workspaceId !== workspace.workspaceId || operation.signal !== publicationAttachment || publicationAttachment.aborted) throw new Error("The app publication workspace attachment changed.");
-          return dependencies.ownerAppPublication!(request);
+          return dependencies.ownerAppPublication!(request, agent);
         }) } : {}),
       rootPath: workspace.rootPath,
       automations: dependencies.automations(workspace),
