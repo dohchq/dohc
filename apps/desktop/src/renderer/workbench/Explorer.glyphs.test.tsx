@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
-import { Explorer, type ExplorerProps } from "./Explorer";
+import { Explorer, TreeRow, type ExplorerProps } from "./Explorer";
 
 afterEach(cleanup);
 
@@ -51,25 +51,36 @@ function treeRow(path: string): HTMLElement {
   return row;
 }
 
+function glyphOf(element: Element): SVGSVGElement {
+  const glyph = element.querySelector("svg");
+  if (!glyph) throw new Error("no glyph");
+  return glyph;
+}
+
 function file(path: string, kind: WorkspaceFileEntry["kind"] = "file"): WorkspaceFileEntry {
   return { path, kind };
 }
 
+function editRowGlyph(): SVGSVGElement {
+  const row = screen.getByTestId("tree-edit-input").closest("li");
+  if (!row) throw new Error("no edit row");
+  return glyphOf(row);
+}
+
 describe("Explorer kind glyphs", () => {
-  it("draws each file's registry glyph, labelled by its kind's name", () => {
+  it("draws each file's registry glyph and keeps the row named by its file", () => {
     const paths = [
       "plan.md", "flow.excalidraw", "budget.csv", "package.json", "notes.txt", "app.ts",
       "photo.png", "memo.m4a", "report.pdf", "archive.bin",
     ];
     render(<Explorer {...explorerProps({ files: [...paths.map((path) => file(path)), file("ledger.sqlite", "database")] })} />);
     for (const path of [...paths, "ledger.sqlite"]) {
-      const kind = fileKindForPath(path);
-      const glyph = within(treeRow(path)).getByRole("img");
-      expect(glyph.getAttribute("aria-label")).toBe(kind.name);
-      expect(glyph.classList.contains(`lucide-${kind.glyphId}`)).toBe(true);
+      const glyph = glyphOf(treeRow(path));
+      expect(glyph.classList.contains(`lucide-${fileKindForPath(path).glyphId}`)).toBe(true);
       expect(glyph.getAttribute("width")).toBe("15");
-      // The glyph adds no words: the row still reads as its file name.
-      expect(treeRow(path).textContent).toBe(path);
+      expect(glyph.getAttribute("aria-hidden")).toBe("true");
+      // The accessible name is exactly the file name: the glyph adds nothing.
+      expect(screen.getByRole("treeitem", { name: path })).toBe(treeRow(path));
     }
   });
 
@@ -83,38 +94,108 @@ describe("Explorer kind glyphs", () => {
         })}
       />,
     );
-    expect(within(treeRow("cache.db")).getByRole("img").getAttribute("aria-label")).toBe("File");
-    expect(within(treeRow("store.bin")).getByRole("img").getAttribute("aria-label")).toBe("Database");
-    expect(within(screen.getByTestId("pinned-row")).getByRole("img").getAttribute("aria-label")).toBe("Database");
-    expect(within(screen.getByTestId("open-editor-row")).getByRole("img").getAttribute("aria-label")).toBe("File");
+    expect(glyphOf(treeRow("cache.db")).classList.contains("lucide-file")).toBe(true);
+    expect(glyphOf(treeRow("store.bin")).classList.contains("lucide-database")).toBe(true);
+    expect(glyphOf(screen.getByTestId("pinned-row")).classList.contains("lucide-database")).toBe(true);
+    expect(glyphOf(screen.getByTestId("open-editor-row")).classList.contains("lucide-file")).toBe(true);
   });
 
-  it("shows a page's emoji in place of its glyph, still labelled by its kind", () => {
+  it("shows a page's emoji in place of its glyph without renaming the row", () => {
     render(<Explorer {...explorerProps({ files: [{ path: "launch.md", kind: "file", icon: "🚀" }], pinned: ["launch.md"] })} />);
     for (const row of [treeRow("launch.md"), screen.getByTestId("pinned-row")]) {
-      const glyph = within(row).getByRole("img", { name: "Document" });
-      expect(glyph.textContent).toBe("🚀");
       expect(row.querySelector("svg")).toBeNull();
+      const hidden = [...row.querySelectorAll("[aria-hidden]")].map((element) => element.textContent);
+      expect(hidden).toContain("🚀");
     }
+    expect(screen.getByRole("treeitem", { name: "launch.md" })).toBe(treeRow("launch.md"));
+    expect(screen.getByRole("button", { name: "launch.md" })).toBe(screen.getByTestId("pinned-row"));
   });
 
   it("keeps folders on their folder icons", () => {
-    render(<Explorer {...explorerProps({ files: [file("notes/plan.md")], folders: ["notes"] })} />);
-    const folder = treeRow("notes");
-    expect(within(folder).queryByRole("img")).toBeNull();
-    expect(folder.querySelector(".lucide-folder")?.getAttribute("width")).toBe("15");
+    render(<Explorer {...explorerProps({ files: [file("notes/plan.md")], folders: ["notes"], pinned: ["notes"] })} />);
+    for (const row of [treeRow("notes"), screen.getByTestId("pinned-row")]) {
+      const glyph = row.querySelector(".lucide-folder");
+      expect(glyph?.getAttribute("width")).toBe("15");
+      expect(glyph?.classList.contains("text-subtle")).toBe(true);
+    }
   });
 
-  it("draws the glyph in ink on a row with the selected fill and subtle elsewhere", () => {
+  it("draws every section's glyph at one size, ink on the selected fill and subtle elsewhere", () => {
     render(
       <Explorer
         {...explorerProps({
           files: [file("plan.md"), file("notes.md")],
-          editorGroups: [{ id: "group-1", tabs: [{ path: "plan.md" }], activeTab: "plan.md", size: 1 }],
+          pinned: ["notes.md"],
+          editorGroups: [{ id: "group-1", tabs: [{ path: "plan.md" }, { path: "notes.md" }], activeTab: "plan.md", size: 1 }],
         })}
       />,
     );
-    expect(within(treeRow("plan.md")).getByRole("img").classList.contains("text-ink")).toBe(true);
-    expect(within(treeRow("notes.md")).getByRole("img").classList.contains("text-subtle")).toBe(true);
+    const [activeEditor, otherEditor] = screen.getAllByTestId("open-editor-row");
+    const cases: Array<[HTMLElement | undefined, string]> = [
+      [treeRow("plan.md"), "text-ink"],
+      [treeRow("notes.md"), "text-subtle"],
+      [activeEditor, "text-ink"],
+      [otherEditor, "text-subtle"],
+      [screen.getByTestId("pinned-row"), "text-subtle"],
+    ];
+    for (const [row, tone] of cases) {
+      if (!row) throw new Error("missing row");
+      const glyph = glyphOf(row);
+      expect(glyph.getAttribute("width")).toBe("15");
+      expect(glyph.classList.contains(tone)).toBe(true);
+    }
+  });
+
+  it("lets a drop preview color the glyph with its row", () => {
+    const noop = () => undefined;
+    render(
+      <ul role="tree">
+        <TreeRow
+          row={{ fullPath: "plan.md", isFolder: false, isExpanded: false, depth: 0, parentPath: null, kind: "file", positionInSet: 1, setSize: 1 }}
+          collection={false}
+          selected
+          active={false}
+          focused={false}
+          tabbable={false}
+          dropPreview={{ kind: "blocked", role: "target" }}
+          registerRef={noop}
+          onRowFocus={noop}
+          onRowClick={noop}
+          onRowChevronClick={noop}
+          onRowContextMenu={noop}
+          onRowDragStart={noop}
+          onRowDragOver={noop}
+          onRowDrop={noop}
+          onRowDragLeave={noop}
+          onRowDragEnd={noop}
+        />
+      </ul>,
+    );
+    const row = treeRow("plan.md");
+    expect(row.classList.contains("text-danger")).toBe(true);
+    const glyph = glyphOf(row);
+    expect(glyph.classList.contains("text-ink")).toBe(false);
+    expect(glyph.classList.contains("text-subtle")).toBe(false);
+  });
+
+  it("shows the kind of the name being typed when creating and renaming", async () => {
+    render(<Explorer {...explorerProps({ files: [file("plan.md")] })} />);
+    fireEvent.click(screen.getByRole("button", { name: "New file" }));
+    const input = await screen.findByTestId("tree-edit-input");
+    // An empty draft shows the Markdown default, as does a name without an extension.
+    expect(editRowGlyph().classList.contains("lucide-file-text")).toBe(true);
+    fireEvent.change(input, { target: { value: "budget.csv" } });
+    expect(editRowGlyph().classList.contains("lucide-file-spreadsheet")).toBe(true);
+    fireEvent.change(input, { target: { value: "budget" } });
+    expect(editRowGlyph().classList.contains("lucide-file-text")).toBe(true);
+    fireEvent.keyDown(input, { key: "Escape" });
+
+    fireEvent.click(treeRow("plan.md"));
+    fireEvent.keyDown(treeRow("plan.md"), { key: "F2" });
+    const rename = await screen.findByTestId("tree-edit-input");
+    expect(editRowGlyph().classList.contains("lucide-file-text")).toBe(true);
+    fireEvent.change(rename, { target: { value: "plan.ts" } });
+    expect(editRowGlyph().classList.contains("lucide-file-code")).toBe(true);
+    fireEvent.keyDown(rename, { key: "Escape" });
   });
 });

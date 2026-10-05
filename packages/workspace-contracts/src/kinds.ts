@@ -13,6 +13,7 @@ export type FileDisplayKind =
   | "binary";
 
 type KindGlyphId =
+  | "file"
   | "file-text"
   | "file-spreadsheet"
   | "file-code"
@@ -82,13 +83,13 @@ export const FILE_KIND_RECORDS = {
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
   json: {
-    displayKind: "json", name: "Code or text", glyphId: "file-text", displayNameRule: "basename",
+    displayKind: "json", name: "Code or text", glyphId: "file-code", displayNameRule: "basename",
     extensions: ["json"],
     opens: { surface: "tab", content: "text" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
   text: {
-    displayKind: "text", name: "Code or text", glyphId: "file-text", displayNameRule: "basename",
+    displayKind: "text", name: "Code or text", glyphId: "file-code", displayNameRule: "basename",
     extensions: ["txt", "html", "htm", "xml", "yaml", "yml", "toml", "ini", "env", "log"],
     opens: { surface: "tab", content: "text" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
@@ -109,13 +110,13 @@ export const FILE_KIND_RECORDS = {
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
   audio: {
-    displayKind: "audio", name: "Audio", glyphId: "file-text", displayNameRule: "basename",
+    displayKind: "audio", name: "Audio", glyphId: "file", displayNameRule: "basename",
     extensions: ["m4a", "mp3", "wav", "ogg"],
     opens: { surface: "tab", content: "asset" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
   pdf: {
-    displayKind: "pdf", name: "PDF", glyphId: "file-text", displayNameRule: "basename",
+    displayKind: "pdf", name: "PDF", glyphId: "file", displayNameRule: "basename",
     extensions: ["pdf"],
     opens: { surface: "tab", content: "asset" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
@@ -127,7 +128,7 @@ export const FILE_KIND_RECORDS = {
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
   binary: {
-    displayKind: "binary", name: "File", glyphId: "file-text", displayNameRule: "basename",
+    displayKind: "binary", name: "File", glyphId: "file", displayNameRule: "basename",
     extensions: [],
     opens: { surface: "tab", content: "unsupported" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,

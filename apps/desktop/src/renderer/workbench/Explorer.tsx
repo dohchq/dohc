@@ -183,27 +183,28 @@ function explorerFileKind(path: string, listed: WorkspaceFileEntry["kind"] | nul
   return kind.displayKind === "database" ? FILE_KIND_RECORDS.binary : kind;
 }
 
-// The emoji box for each glyph size, so it sits on the glyph's baseline.
-const PAGE_ICON_BOX = {
-  13: "size-[13px] text-[12px]",
-  15: "size-[15px] text-[13px]",
-} as const;
+// The kind a create or rename draft will have once committed, so the glyph
+// follows the name as it is typed. The commit adds `.md` to a name without
+// an extension; an empty draft shows that Markdown default.
+function draftFileKind(value: string): FileKindRecord {
+  const name = value.trim();
+  return name ? fileKindForPath(withMarkdownDefault(name)) : FILE_KIND_RECORDS.markdown;
+}
+
+// Every Explorer row draws its glyph at the drawing's 15px.
+const GLYPH_SIZE = 15;
+
+// The glyph is ink on a row with the selected fill and subtle elsewhere.
+function glyphTone(selected: boolean): string {
+  return selected ? "text-ink" : "text-subtle";
+}
 
 // A page's `icon` frontmatter emoji stands in for its kind glyph
-// (Notion-style). The kind's name still labels it.
-function FileGlyph(props: {
-  kind: FileKindRecord;
-  icon: string | undefined;
-  size: keyof typeof PAGE_ICON_BOX;
-  className?: string;
-}) {
-  if (!props.icon) return <KindGlyph kind={props.kind} size={props.size} className={props.className} />;
+// (Notion-style), in a box the glyph's size so the name does not move.
+function FileGlyph(props: { kind: FileKindRecord; icon: string | undefined; className: string }) {
+  if (!props.icon) return <KindGlyph kind={props.kind} size={GLYPH_SIZE} className={props.className} />;
   return (
-    <span
-      role="img"
-      aria-label={props.kind.name}
-      className={`grid shrink-0 place-items-center leading-none ${PAGE_ICON_BOX[props.size]}`}
-    >
+    <span aria-hidden className="grid size-[15px] shrink-0 place-items-center text-[13px] leading-none">
       {props.icon}
     </span>
   );
@@ -258,14 +259,13 @@ export function editorTitle(path: string, label?: string): string {
   return basenameOf(path);
 }
 
-function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] | null }) {
+function OpenEditorIcon(props: { path: string; kind: WorkspaceFileEntry["kind"] | null; active: boolean }) {
+  const tone = glyphTone(props.active);
   if (isVirtualTabPath(props.path)) {
-    if (isSiteTabPath(props.path)) {
-      return <Globe2 size={13} aria-hidden className="shrink-0" />;
-    }
-    return <LayoutGrid size={13} aria-hidden className="shrink-0" />;
+    const Icon = isSiteTabPath(props.path) ? Globe2 : LayoutGrid;
+    return <Icon size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${tone}`} />;
   }
-  return <KindGlyph kind={explorerFileKind(props.path, props.kind)} size={13} />;
+  return <KindGlyph kind={explorerFileKind(props.path, props.kind)} size={GLYPH_SIZE} className={tone} />;
 }
 
 function SectionActionButton(props: {
@@ -349,8 +349,8 @@ export const TreeRow = memo(function TreeRow(props: {
   onRowDragEnd: () => void;
 }) {
   const { row } = props;
-  // The glyph is ink on a row with the selected fill, subtle otherwise.
-  const glyphClass = props.selected || props.active ? "text-ink" : "text-subtle";
+  // A drop preview colors the whole row, glyph included.
+  const glyphClass = props.dropPreview ? "" : glyphTone(props.selected || props.active);
   const dropClass =
     props.dropPreview?.kind === "blocked"
       ? props.dropPreview.role === "target"
@@ -440,9 +440,9 @@ export const TreeRow = memo(function TreeRow(props: {
               />
             </span>
             {row.isExpanded ? (
-              <FolderOpen size={15} aria-hidden className={`shrink-0 ${glyphClass}`} />
+              <FolderOpen size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphClass}`} />
             ) : (
-              <Folder size={15} aria-hidden className={`shrink-0 ${glyphClass}`} />
+              <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphClass}`} />
             )}
           </>
         ) : (
@@ -451,7 +451,6 @@ export const TreeRow = memo(function TreeRow(props: {
             <FileGlyph
               kind={explorerFileKind(row.fullPath, row.kind)}
               icon={row.icon}
-              size={15}
               className={glyphClass}
             />
           </>
@@ -626,10 +625,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   }, [projected.files]);
 
   // Same glyph rule as TreeRow, driven by the memoized lookup so pinned rows
-  // don't rescan projected.files.
+  // don't rescan projected.files. A pinned row has no selected fill.
   function fileGlyph(path: string) {
     const file = fileByPath.get(path);
-    return <FileGlyph kind={explorerFileKind(path, file?.kind)} icon={file?.icon} size={13} />;
+    return <FileGlyph kind={explorerFileKind(path, file?.kind)} icon={file?.icon} className={glyphTone(false)} />;
   }
 
   const expandedSet = useMemo(
@@ -1477,21 +1476,12 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         )}
         {isFolderEdit ? (
           folderEditExpanded ? (
-            <FolderOpen size={15} aria-hidden className="shrink-0 text-subtle" />
+            <FolderOpen size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
           ) : (
-            <Folder size={15} aria-hidden className="shrink-0 text-subtle" />
+            <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
           )
         ) : (
-          // A new file without an extension becomes Markdown.
-          <KindGlyph
-            kind={
-              editing?.mode === "rename"
-                ? explorerFileKind(editing.path, fileByPath.get(editing.path)?.kind)
-                : FILE_KIND_RECORDS.markdown
-            }
-            size={15}
-            className="text-subtle"
-          />
+          <KindGlyph kind={draftFileKind(editValue)} size={GLYPH_SIZE} className={glyphTone(false)} />
         )}
         <input
           spellCheck={false}
@@ -1796,6 +1786,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               <OpenEditorIcon
                                 path={tab.path}
                                 kind={fileByPath.get(tab.path)?.kind ?? null}
+                                active={active}
                               />
                               <span className="min-w-0 flex-1 truncate">{title}</span>
                               {dirty ? (
@@ -1956,7 +1947,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                           className="flex h-7 w-full items-center gap-1.5 px-3 text-left text-[13px] text-muted hover:bg-hover hover:text-ink"
                         >
                           {isFolderPath(path) ? (
-                            <Folder size={13} aria-hidden className="shrink-0" />
+                            <Folder size={GLYPH_SIZE} aria-hidden className={`shrink-0 ${glyphTone(false)}`} />
                           ) : (
                             fileGlyph(path)
                           )}
