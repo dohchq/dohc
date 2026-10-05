@@ -55,8 +55,8 @@ export function parseOptions(argv) {
     const value = args.get('heap-snapshot-minutes');
     const minutes = value.split(',').map(Number);
     if (!/^[1-9]\d*(,[1-9]\d*)*$/.test(value) || new Set(minutes).size !== minutes.length ||
-        minutes.some(minute => !Number.isSafeInteger(minute) || minute > options.soakMinutes || minute * 60000 > 2147483647)) {
-      throw Error('--heap-snapshot-minutes must be distinct positive integer minutes within --soak-minutes and the timer limit');
+        minutes.some(minute => !Number.isSafeInteger(minute) || minute > options.soakMinutes)) {
+      throw Error('--heap-snapshot-minutes must be distinct positive integer minutes within --soak-minutes');
     }
     options.heapSnapshotMinutes = minutes.sort((a, b) => a - b);
   }

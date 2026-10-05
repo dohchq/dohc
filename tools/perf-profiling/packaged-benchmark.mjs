@@ -1,5 +1,6 @@
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs, usage } from './packaged-benchmark-options.mjs';
+import { runSoakCycles } from './packaged-soak.mjs';
 import { startRendererHeapSnapshots } from './renderer-heap-snapshots.mjs';
 import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
@@ -74,6 +75,7 @@ Object.assign(receipt, {
   windowClientSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'window-controller.mjs')),
   lifecycleSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-process.mjs')),
   startupReadinessSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'startup-readiness.mjs')),
+  soakLifecycleSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-soak.mjs')),
   heapSnapshotsSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'renderer-heap-snapshots.mjs')),
   optionsSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-benchmark-options.mjs')),
   surfacesSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-surfaces.mjs')),
@@ -111,7 +113,7 @@ Object.assign(receipt, {
     'Automation settle times run from the renderer receipt of the trusted mousedown to the first animation-frame callback after the settle text appeared. startMs runs from that mousedown to the run header startedAtMs, before any Find. runMs runs from startedAtMs to finishedAtMs. Saved steps supply findMs for reads and Finds, including read access and permission checks, and planMs for planning and formula evaluation. Saved effects supply writeMs for effect application, excluding each effect result append but including created-record and replan appends, and writes for completed effect applications. Unmeasured stages and runs refused before saving a header stay missing.',
     'Automation CPU is per process kind between the snapshot that ended the quiet wait and one started when the run settled; PowerShell start-up adds about half a second to that window. The formula evaluator runs on a worker thread in main, so its CPU is part of main CPU. Peak memory and header bytes are sampled about once a second, so a short peak can be missed.',
     'Contention cases press the button, then run the typing workload in small.md; samplesDuringRun counts trusted input events between the press and the settle text, and a case expected to finish fails when none arrived. Their CPU ends when the run settles, not when typing ends. Document values are read from the settled Markdown; dataset values through the approved list operation.',
-    'Renderer heap snapshots are optional diagnostics. The harness streams chunks without awaiting captures inside measured cycles, but V8 can pause the renderer and alter GC/memory. Capture runs cannot serve as uninstrumented performance comparisons. Snapshot timestamps are elapsed from soak start, and completion includes file-stream close.',
+    'Renderer heap snapshots are optional diagnostics. The harness finishes the mixed cycle before streaming a due snapshot, with no browser step running. V8 pauses the renderer and can alter GC/memory. Each receipt records the boundary cycle and pause duration. Capture runs cannot serve as uninstrumented performance comparisons. Snapshot timestamps are elapsed from soak start, and completion includes file-stream close.',
     'soak samples working set and private bytes per process kind after each mixed cycle. Growth includes allocator and garbage-collector timing; it is not a leak proof.',
   ],
 });
@@ -745,37 +747,38 @@ async function soak(instance, data, runDir) {
     session: await page.context().newCDPSession(page), output: runDir, minutes: heapSnapshotMinutes, signal: cancellation.signal,
   }) : null;
   result.heapSnapshots = heaps?.records ?? [];
-  const deadline = (heaps?.startedAtMs ?? performance.now()) + soakMinutes * 60000;
   try {
-    while (performance.now() < deadline) {
-      cancellation.signal.throwIfAborted();
-      heaps?.throwIfFailed();
-      const started = performance.now();
-      const cycle = { index: result.cycles.length + 1 };
-      cycle.openLargeObservedMs = (await openDoc(page, 'large.md')).openObservedMs;
-      cycle.openSmallObservedMs = (await openDoc(page, 'small.md')).openObservedMs;
-      cycle.goToOpenMs = (await openPalette(page, surfaces.goTo, 'editable-input')).keydownToPaintedMs;
-      await typeInPalette(page, surfaces.goTo, 'small');
-      await closePalette(page, surfaces.goTo);
-      cycle.commandPaletteOpenMs = (await openPalette(page, surfaces.commandPalette, 'first-row')).keydownToPaintedMs;
-      await closePalette(page, surfaces.commandPalette);
-      await openSearchView(page);
-      cycle.searchQuery = SOAK_SEARCH_QUERY;
-      cycle.searchSettledMs = (await searchQuery(page, SOAK_SEARCH_QUERY, null)).submitToSettledMs;
-      await page.getByTestId('activity-explorer').click();
-      await page.getByTestId('file-tree').waitFor({ timeout: 30000 });
-      cycle.switchEditableObservedMs = [(await switchTo(page, 1)).editablePaintObservedMs, (await switchTo(page, 0)).editablePaintObservedMs];
-      cycle.durationMs = performance.now() - started;
-      result.cycles.push(cycle);
-      result.samples.push(await sample(cycle.index));
-      result.elapsedMs = result.samples.at(-1).completedAtMs - result.samples[0].completedAtMs;
-      await json(join(output, 'result.json'), receipt);
-      console.log(JSON.stringify({ label, phase: 'soak-cycle', cycle: cycle.index, durationMs: Math.round(cycle.durationMs) }));
-    }
-    await heaps?.finish();
-  } catch (error) {
-    await heaps?.cancel(error).catch(cleanupError => { if (cleanupError !== error) result.heapCleanupError = cleanupError.message; });
-    throw error;
+    await runSoakCycles({ minutes: soakMinutes, heaps, signal: cancellation.signal,
+      runCycle: async index => {
+        const started = performance.now();
+        const cycle = { index };
+        cycle.openLargeObservedMs = (await openDoc(page, 'large.md')).openObservedMs;
+        cycle.openSmallObservedMs = (await openDoc(page, 'small.md')).openObservedMs;
+        cycle.goToOpenMs = (await openPalette(page, surfaces.goTo, 'editable-input')).keydownToPaintedMs;
+        await typeInPalette(page, surfaces.goTo, 'small');
+        await closePalette(page, surfaces.goTo);
+        cycle.commandPaletteOpenMs = (await openPalette(page, surfaces.commandPalette, 'first-row')).keydownToPaintedMs;
+        await closePalette(page, surfaces.commandPalette);
+        await openSearchView(page);
+        cycle.searchQuery = SOAK_SEARCH_QUERY;
+        cycle.searchSettledMs = (await searchQuery(page, SOAK_SEARCH_QUERY, null)).submitToSettledMs;
+        await page.getByTestId('activity-explorer').click();
+        await page.getByTestId('file-tree').waitFor({ timeout: 30000 });
+        cycle.switchEditableObservedMs = [(await switchTo(page, 1)).editablePaintObservedMs, (await switchTo(page, 0)).editablePaintObservedMs];
+        cycle.durationMs = performance.now() - started;
+        result.cycles.push(cycle);
+      },
+      afterCycle: async index => {
+        const cycle = result.cycles.at(-1);
+        result.heapSnapshotPauseMs = result.heapSnapshots.reduce((total, capture) => total + (capture.pauseMs ?? 0), 0);
+        result.samples.push(await sample(index));
+        result.elapsedMs = result.samples.at(-1).completedAtMs - result.samples[0].completedAtMs;
+        await json(join(output, 'result.json'), receipt);
+        console.log(JSON.stringify({ label, phase: 'soak-cycle', cycle: cycle.index, durationMs: Math.round(cycle.durationMs) }));
+      },
+    });
+  } finally {
+    result.heapSnapshotPauseMs = result.heapSnapshots.reduce((total, capture) => total + (capture.pauseMs ?? 0), 0);
   }
   return result;
 }

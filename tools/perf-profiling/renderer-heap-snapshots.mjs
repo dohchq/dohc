@@ -40,9 +40,9 @@ async function capture(session, record, signal, now, startedAtMs, createStream) 
   }
 }
 
-// Timers enqueue diagnostics independently of the soak's measured cycle loop.
+// The soak calls captureDue only after a complete mixed cycle.
 export async function startRendererHeapSnapshots({ session, output, minutes, signal,
-  now = () => performance.now(), setTimer = setTimeout, clearTimer = clearTimeout, createStream = createWriteStream }) {
+  now = () => performance.now(), createStream = createWriteStream }) {
   try {
     signal?.throwIfAborted();
     await session.send('HeapProfiler.enable');
@@ -51,17 +51,15 @@ export async function startRendererHeapSnapshots({ session, output, minutes, sig
     await session.detach().catch(() => {});
     throw error;
   }
-  const startedAtMs = now(), abort = new AbortController(), timers = new Map();
+  const startedAtMs = now(), abort = new AbortController();
   const records = minutes.map(minute => {
     const file = join(output, 'renderer-heap-' + minute + 'm.heapsnapshot');
     return { minute, file, partialFile: file + '.partial', status: 'scheduled', bytes: 0, chunks: 0 };
   });
-  let queue = Promise.resolve(), failure, stopped = false, disposed = false, completion;
+  let queue = Promise.resolve(), failure, stopped = false, disposed = false, completion, lastBoundary;
   const stopScheduling = reason => {
     stopped = true;
-    for (const timer of timers.values()) clearTimer(timer);
-    timers.clear();
-    for (const record of records) if (['scheduled', 'queued'].includes(record.status)) {
+    for (const record of records) if (record.status === 'scheduled') {
       record.status = 'cancelled'; record.error = reason.message;
     }
   };
@@ -71,34 +69,36 @@ export async function startRendererHeapSnapshots({ session, output, minutes, sig
     abort.abort(failure);
   };
   signal?.addEventListener('abort', onAbort, { once: true });
-  const enqueue = record => {
-    if (stopped || record.status !== 'scheduled') return;
-    clearTimer(timers.get(record)); timers.delete(record);
-    record.status = 'queued'; record.requestedElapsedMs = now() - startedAtMs;
+  const captureDue = cycle => {
+    if (stopped) return Promise.reject(failure ?? Error('Heap capture has finished'));
+    lastBoundary = cycle;
     queue = queue.then(async () => {
-      if (record.status !== 'queued') return;
-      try { await capture(session, record, abort.signal, now, startedAtMs, createStream); }
-      catch (error) {
-        record.status = abort.signal.aborted ? 'cancelled' : 'failed';
-        record.error = error.message; record.completedElapsedMs = now() - startedAtMs;
-        failure ??= error;
-        stopScheduling(failure);
+      for (const record of records) {
+        if (record.status !== 'scheduled' || record.minute * 60000 > now() - startedAtMs) continue;
+        record.cycle = cycle;
+        record.requestedElapsedMs = now() - startedAtMs;
+        const pauseStarted = now();
+        try { await capture(session, record, abort.signal, now, startedAtMs, createStream); }
+        catch (error) {
+          record.status = abort.signal.aborted ? 'cancelled' : 'failed';
+          record.error = error.message; record.completedElapsedMs = now() - startedAtMs;
+          failure ??= error;
+          stopScheduling(failure);
+        } finally { record.pauseMs = now() - pauseStarted; }
       }
     });
+    return queue.then(() => { if (failure) throw failure; });
   };
-  for (const record of records) timers.set(record, setTimer(() => enqueue(record), record.minute * 60000));
   const finish = () => {
     if (completion) return completion;
-    // A final-minute timer may be due but still waiting for its event-loop turn.
-    for (const record of records) if (record.minute * 60000 <= now() - startedAtMs) enqueue(record);
-    for (const timer of timers.values()) clearTimer(timer);
-    timers.clear();
+    // Bookkeeping can cross a due minute after the last completed cycle.
+    if (!stopped && lastBoundary !== undefined) void captureDue(lastBoundary).catch(() => {});
     stopped = true;
     completion = (async () => {
       await queue;
       for (const record of records) if (record.status === 'scheduled') {
         record.status = 'cancelled';
-        record.error = 'Soak ended before the requested heap snapshot minute';
+        record.error = 'Soak ended before the requested heap snapshot boundary';
         failure ??= Error(record.error);
       }
       signal?.removeEventListener('abort', onAbort);
@@ -109,8 +109,7 @@ export async function startRendererHeapSnapshots({ session, output, minutes, sig
     })();
     return completion;
   };
-  return { records, startedAtMs, finish,
-    throwIfFailed() { if (failure) throw failure; },
+  return { records, startedAtMs, captureDue, finish,
     cancel(reason) {
       if (!disposed) {
         failure ??= reason;

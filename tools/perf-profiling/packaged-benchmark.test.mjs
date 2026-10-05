@@ -1368,15 +1368,8 @@ test('heap snapshots reject invalid schedules and other scenarios', () => {
 });
 
 function heapClock() {
-  let time = 100, id = 0;
-  const timers = new Map();
-  return { now: () => time, timers,
-    setTimer(callback, ms) { timers.set(++id, { callback, at: time + ms }); return id; },
-    clearTimer(key) { timers.delete(key); },
-    advance(ms, fire = true) {
-      time += ms;
-      if (fire) for (const [key, timer] of [...timers]) if (timer.at <= time) { timers.delete(key); timer.callback(); }
-    } };
+  let time = 100;
+  return { now: () => time, advance(ms) { time += ms; } };
 }
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 async function heapFixture(t, minutes = [10, 60], extra = {}) {
@@ -1398,26 +1391,28 @@ async function heapFixture(t, minutes = [10, 60], extra = {}) {
   const controller = await startRendererHeapSnapshots({ session, output, minutes, ...clock, ...extra });
   t.after(() => controller.cancel(Error('test cleanup')).catch(() => {}));
   const chunk = value => session.emit('HeapProfiler.addHeapSnapshotChunk', { chunk: value });
-  return { controller, session, output, clock, calls, captures, nextCapture, chunk };
+  const beginBoundary = cycle => { const pending = controller.captureDue(cycle); void pending.catch(() => {}); return pending; };
+  return { controller, session, output, clock, calls, captures, nextCapture, chunk, beginBoundary };
 }
 
-test('heap snapshots schedule 10 and 60 minutes without awaiting the workload', async t => {
+test('heap snapshots serialize every due minute once at the same boundary', async t => {
   const f = await heapFixture(t);
   f.clock.advance(599999);
+  await f.beginBoundary(1);
   assert.equal(f.captures.length, 0);
-  const first = f.nextCapture(); f.clock.advance(1); await first;
-  assert.equal(f.controller.records[0].startedElapsedMs, 600000);
-  assert.equal(f.controller.records[1].status, 'scheduled');
-  // The benchmark can continue its cycles while the protocol command remains pending.
-  let cycles = 0; for (let n = 0; n < 3; n++) cycles++;
-  assert.equal(cycles, 3);
-  const second = f.nextCapture(); f.clock.advance(3000000);
+  f.clock.advance(3000001);
+  const first = f.nextCapture(), second = f.nextCapture();
+  const boundary = f.beginBoundary(2);
+  await first;
   assert.equal(f.captures.length, 1, 'snapshots on one renderer never overlap');
   f.chunk('{"first":true}'); f.captures[0].resolve(); await second;
   f.chunk('{"second":true}'); f.captures[1].resolve();
+  await boundary;
+  await f.beginBoundary(3);
   await f.controller.finish();
-  assert.deepEqual(f.controller.records.map(r => [r.minute, r.status, r.requestedElapsedMs]), [[10, 'complete', 600000], [60, 'complete', 3600000]]);
-  assert.equal(f.clock.timers.size, 0);
+  assert.deepEqual(f.controller.records.map(r => [r.minute, r.status, r.cycle, r.requestedElapsedMs]),
+    [[10, 'complete', 2, 3600000], [60, 'complete', 2, 3600000]]);
+  assert.equal(f.captures.length, 2);
   assert.equal(f.session.listenerCount('HeapProfiler.addHeapSnapshotChunk'), 0);
   assert.equal(f.calls.at(-1).method, 'detach');
 });
@@ -1430,7 +1425,7 @@ test('heap snapshots stream chunks in order and publish only after protocol and 
     return new Writable({ write(chunk, encoding, callback) { chunks.push(chunk); callback(); },
       final(callback) { final.resolve(); void release.promise.then(() => writeFile(path, Buffer.concat(chunks))).then(() => callback(), callback); } });
   } });
-  const began = f.nextCapture(); f.clock.advance(60000); await began;
+  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
   f.chunk('{"name":"'); f.chunk('λ"}');
   assert.equal(f.controller.records[0].status, 'capturing');
   await assert.rejects(readFile(f.controller.records[0].file), { code: 'ENOENT' });
@@ -1447,19 +1442,17 @@ test('heap snapshots stream chunks in order and publish only after protocol and 
   await assert.rejects(readFile(record.partialFile), { code: 'ENOENT' });
 });
 
-test('heap snapshots finish captures the final minute even when its timer has not dispatched', async t => {
+test('heap snapshots finish never starts a capture without a cycle boundary', async t => {
   const f = await heapFixture(t, [60]);
-  f.clock.advance(3600000, false);
-  const began = f.nextCapture(), completion = f.controller.finish(); await began;
-  f.chunk('{"final":true}'); f.captures[0].resolve(); await completion;
-  assert.equal(f.controller.records[0].status, 'complete');
-  assert.equal(f.captures.length, 1);
-  assert.equal(f.clock.timers.size, 0);
+  f.clock.advance(3600000);
+  await assert.rejects(f.controller.finish(), /requested heap snapshot boundary/);
+  assert.equal(f.captures.length, 0);
+  assert.equal(f.controller.records[0].status, 'cancelled');
 });
 
 for (const empty of [false, true]) test('heap snapshots fail on ' + (empty ? 'empty output' : 'protocol failure') + ' and retain partial evidence', async t => {
   const f = await heapFixture(t, [1, 2]);
-  const began = f.nextCapture(); f.clock.advance(60000); await began;
+  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
   if (empty) f.captures[0].resolve(); else { f.chunk('{"partial":'); f.captures[0].reject(Error('protocol failed')); }
   await assert.rejects(f.controller.finish(), empty ? /empty/i : /protocol failed/);
   const record = f.controller.records[0];
@@ -1467,13 +1460,12 @@ for (const empty of [false, true]) test('heap snapshots fail on ' + (empty ? 'em
   assert.equal(await readFile(record.partialFile, 'utf8'), empty ? '' : '{"partial":');
   await assert.rejects(readFile(record.file), { code: 'ENOENT' });
   assert.equal(f.session.listenerCount('HeapProfiler.addHeapSnapshotChunk'), 0);
-  assert.equal(f.clock.timers.size, 0);
 });
 
 test('heap snapshots surface asynchronous disk failure without waiting for a stuck protocol', async t => {
   const { Writable } = await import('node:stream');
   const f = await heapFixture(t, [1], { createStream: () => new Writable({ write(chunk, encoding, callback) { callback(Error('disk full')); } }) });
-  const began = f.nextCapture(); f.clock.advance(60000); await began;
+  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
   f.chunk('a chunk');
   await assert.rejects(f.controller.finish(), /disk full/);
   assert.equal(f.controller.records[0].status, 'failed');
@@ -1483,11 +1475,10 @@ test('heap snapshots surface asynchronous disk failure without waiting for a stu
 test('heap snapshots cancellation closes an active stream and cancels future captures', async t => {
   const abort = new AbortController();
   const f = await heapFixture(t, [1, 2], { signal: abort.signal });
-  const began = f.nextCapture(); f.clock.advance(60000); await began;
+  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
   f.chunk('{"partial":'); abort.abort(Error('benchmark interrupted'));
   await assert.rejects(f.controller.finish(), /benchmark interrupted/);
   assert.deepEqual(f.controller.records.map(r => r.status), ['cancelled', 'cancelled']);
-  assert.equal(f.clock.timers.size, 0);
   assert.equal(f.session.listenerCount('HeapProfiler.addHeapSnapshotChunk'), 0);
   assert.equal(f.calls.at(-1).method, 'detach');
 });
@@ -1501,12 +1492,13 @@ test('heap snapshots setup failure detaches its owned CDP session', async () => 
 
 test('heap snapshots mark summaries diagnostic and retain capture receipts', async () => {
   const captures = [{ minute: 10, status: 'complete', file: 'renderer-heap-10m.heapsnapshot' }];
-  const summary = await summarize({ settings: { heapSnapshotMinutes: [10] }, runs: [{ soak: { minutes: 10, cycles: [], elapsedMs: 600000, samples: [], heapSnapshots: captures } }] });
+  const summary = await summarize({ settings: { heapSnapshotMinutes: [10] }, runs: [{ soak: { minutes: 10, cycles: [], elapsedMs: 600000, samples: [], heapSnapshots: captures, heapSnapshotPauseMs: 2500 } }] });
   assert.equal(summary.diagnostic, true);
   const comparison = compareSummaries({ ...summary, status: 'complete' }, { ...summary, status: 'complete' });
   assert.equal(comparison.pass, false);
   assert.deepEqual(comparison.problems, ['A profiled receipt cannot serve as a performance comparison.']);
   assert.deepEqual(summary.soak[0].heapSnapshots, captures);
+  assert.equal(summary.soak[0].heapSnapshotPauseMs, 2500);
   assert.equal((await summarize({ settings: { heapSnapshotMinutes: [] }, runs: [] })).diagnostic, false);
 });
 
@@ -1516,7 +1508,7 @@ test('heap snapshots cancellation interrupts file completion after finish has be
   const f = await heapFixture(t, [1], { createStream: () => new Writable({
     write(chunk, encoding, callback) { callback(); }, final() { final.resolve(); },
   }) });
-  const began = f.nextCapture(); f.clock.advance(60000); await began;
+  const began = f.nextCapture(); f.clock.advance(60000); f.beginBoundary(1); await began;
   f.chunk('snapshot'); f.captures[0].resolve(); await final.promise;
   const completion = f.controller.finish();
   const cancelled = f.controller.cancel(Error('stop during disk close'));
@@ -1531,10 +1523,107 @@ test('heap snapshots cancelled before their minute never send a capture command'
   await assert.rejects(f.controller.cancel(Error('soak failed')), /soak failed/);
   f.clock.advance(3600000);
   assert.equal(f.captures.length, 0);
-  assert.equal(f.clock.timers.size, 0);
   assert.deepEqual(f.controller.records.map(r => r.status), ['cancelled', 'cancelled']);
 });
 
-test('heap snapshots refuse timer overflow even for a longer soak', () => {
-  assert.throws(() => parseOptions([...heapRequired, '--scenario', 'soak', '--soak-minutes', '40000', '--heap-snapshot-minutes', '40000']), /timer limit/);
+test('heap snapshots soak waits for the cycle boundary and finishes before shutdown', { timeout: 120000 }, async t => {
+  const { runSoakCycles } = await import('./packaged-soak.mjs');
+  const firstCycle = deferred(), firstStep = deferred(), nextStep = deferred(), boundary = deferred();
+  const detaching = deferred(), releaseDetach = deferred(), events = [], captureStates = [];
+  t.after(() => { firstCycle.resolve(); releaseDetach.resolve(); });
+  const f = await heapFixture(t);
+  let activeStep = false, shutdown = false;
+  const send = f.session.send;
+  f.session.send = async (method, params) => {
+    if (method === 'HeapProfiler.takeHeapSnapshot') {
+      captureStates.push(activeStep);
+      events.push('capture');
+    }
+    return send(method, params);
+  };
+  const detach = f.session.detach;
+  f.session.detach = async () => { detaching.resolve(); await releaseDetach.promise; await detach(); };
+  const firstCapture = f.nextCapture();
+  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
+    runCycle: async index => {
+      activeStep = true; events.push('step-' + index);
+      if (index === 1) { firstStep.resolve(); await firstCycle.promise; }
+      else { nextStep.resolve(); f.clock.advance(3000000); }
+      activeStep = false; events.push('boundary-' + index);
+    },
+    afterCycle: async index => { if (index === 1) boundary.resolve(); },
+  }).then(() => { shutdown = true; events.push('shutdown'); });
+  await firstStep.promise;
+  f.clock.advance(600000);
+  await Promise.resolve();
+  assert.equal(f.captures.length, 0, 'a due minute cannot interrupt an unfinished cycle');
+  firstCycle.resolve(); await firstCapture;
+  assert.equal(f.controller.records[0].cycle, 1);
+  assert.deepEqual(events, ['step-1', 'boundary-1', 'capture'], 'the next cycle waits for the capture');
+  f.clock.advance(2500);
+  const secondCapture = f.nextCapture();
+  f.chunk('{"first":true}'); f.captures[0].resolve();
+  await boundary.promise; await nextStep.promise; await secondCapture;
+  assert.equal(f.controller.records[1].cycle, 2);
+  assert.equal(f.controller.records[0].pauseMs, 2500);
+  f.clock.advance(4000);
+  f.chunk('{"second":true}'); f.captures[1].resolve();
+  await detaching.promise;
+  assert.equal(shutdown, false, 'soak must await finish, including session detach');
+  releaseDetach.resolve(); await soak;
+  assert.deepEqual(events, ['step-1', 'boundary-1', 'capture', 'step-2', 'boundary-2', 'capture', 'shutdown']);
+  assert.deepEqual(captureStates, [false, false], 'no browser step may run during either capture');
+  assert.deepEqual(f.controller.records.map(r => r.status), ['complete', 'complete']);
+  assert.equal(f.controller.records[1].pauseMs, 4000);
+});
+
+test('heap snapshots soak cancels remaining captures on a cycle error', { timeout: 120000 }, async t => {
+  const { runSoakCycles } = await import('./packaged-soak.mjs');
+  const f = await heapFixture(t);
+  const began = f.nextCapture();
+  let shutdown = false;
+  const error = Error('closePalette failed');
+  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
+    runCycle: async index => {
+      if (index === 1) f.clock.advance(600000);
+      else { f.clock.advance(3000000); throw error; }
+    },
+  }).then(() => { shutdown = true; });
+  const rejected = assert.rejects(soak, value => value === error);
+  await began; f.chunk('{"first":true}'); f.captures[0].resolve(); await rejected;
+  assert.equal(shutdown, false);
+  assert.equal(f.captures.length, 1);
+  assert.deepEqual(f.controller.records.map(r => r.status), ['complete', 'cancelled']);
+  assert.equal(f.calls.at(-1).method, 'detach');
+});
+
+test('heap snapshots soak captures the final minute crossed during boundary bookkeeping', { timeout: 120000 }, async t => {
+  const { runSoakCycles } = await import('./packaged-soak.mjs');
+  const f = await heapFixture(t, [60]);
+  const began = f.nextCapture(), events = [];
+  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
+    runCycle: async index => { events.push('cycle-' + index); f.clock.advance(3599999); },
+    afterCycle: async () => { events.push('bookkeeping'); f.clock.advance(1); },
+  }).then(() => events.push('shutdown'));
+  await began;
+  assert.deepEqual(events, ['cycle-1', 'bookkeeping']);
+  assert.equal(f.controller.records[0].cycle, 1);
+  f.chunk('{"final":true}'); f.captures[0].resolve(); await soak;
+  assert.deepEqual(events, ['cycle-1', 'bookkeeping', 'shutdown']);
+  assert.equal(f.controller.records[0].status, 'complete');
+});
+
+test('heap snapshots soak captures a later due minute crossed during the first pause without another cycle', { timeout: 120000 }, async t => {
+  const { runSoakCycles } = await import('./packaged-soak.mjs');
+  const f = await heapFixture(t);
+  const first = f.nextCapture(), second = f.nextCapture(), cycles = [];
+  const soak = runSoakCycles({ minutes: 60, heaps: f.controller, now: f.clock.now,
+    runCycle: async index => { cycles.push(index); f.clock.advance(600000); },
+  });
+  await first; f.clock.advance(3000000);
+  f.chunk('{"first":true}'); f.captures[0].resolve(); await second;
+  assert.deepEqual(cycles, [1]);
+  f.chunk('{"second":true}'); f.captures[1].resolve(); await soak;
+  assert.deepEqual(f.controller.records.map(r => r.cycle), [1, 1]);
+  assert.equal(f.controller.records[0].pauseMs, 3000000);
 });
