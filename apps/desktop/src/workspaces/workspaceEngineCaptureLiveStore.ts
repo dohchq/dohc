@@ -646,6 +646,21 @@ export function createCaptureLiveStores(
     );
   }
 
+  async function waitForCapture<T>(operation: () => Promise<T>): Promise<T> {
+    const signal = captureWaitSignal;
+    signal?.throwIfAborted();
+    if (!signal) return await operation();
+    let rejectAbort!: (reason: unknown) => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {rejectAbort = reject;});
+    const abort = () => rejectAbort(signal.reason);
+    signal.addEventListener("abort", abort, {once: true});
+    try {
+      return await Promise.race([operation(), cancelled]);
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
+  }
+
   async function runRawMutation<T>(
     operation: (adapter: VersionedLiveAdapter) => Promise<T>,
   ): Promise<T> {
@@ -1376,9 +1391,9 @@ export function createCaptureLiveStores(
       // deliberate unsettled pass, `running: false` with `degraded: false`.
       // A second switch straight after the first therefore threw
       // "did not settle" at whoever asked for it.
-      let outcome = await runRead(async (adapter) => await adapter.flushCapture());
+      let outcome = await waitForCapture(() => runRead(async adapter => await adapter.flushCapture()));
       if (!outcome.settled) {
-        const status = await runRead(async (adapter) => await adapter.watcherStatus());
+        const status = await waitForCapture(() => runRead(async adapter => await adapter.watcherStatus()));
         if (status.phase === "starting" || status.phase === "importing") {
           throw new DaemonRefusalError(
             {
@@ -1398,7 +1413,7 @@ export function createCaptureLiveStores(
         captureWaitSignal?.throwIfAborted();
         await delay(FLUSH_SETTLE_POLL_MS, undefined, { signal: captureWaitSignal });
         captureWaitSignal?.throwIfAborted();
-        outcome = await runRead(async (adapter) => await adapter.flushCapture());
+        outcome = await waitForCapture(() => runRead(async adapter => await adapter.flushCapture()));
       }
       if (!outcome.settled) {
         throw new Error(

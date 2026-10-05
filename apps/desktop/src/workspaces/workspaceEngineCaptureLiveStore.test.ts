@@ -375,6 +375,27 @@ describe("createCaptureLiveStores", () => {
     await expect(store.flushCapture?.()).rejects.toThrow("did not settle");
   });
 
+  it("abandons an in-flight capture flush when shutdown aborts", async () => {
+    const controller = new AbortController();
+    let entered!: () => void;
+    let finish!: () => void;
+    const started = new Promise<void>(resolve => {entered = resolve;});
+    const pending = new Promise<void>(resolve => {finish = resolve;});
+    const client = clientFor(async request => {
+      entered();
+      await pending;
+      return {id: request.id, result: {settled: true, running: true, degraded: false}};
+    });
+    const {store} = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: "C:/workspace"}, sessionsFor(client), controller.signal);
+    const flushing = store.flushCapture!();
+    const outcome = flushing.catch((error: unknown) => error);
+    await started;
+    controller.abort();
+    try {
+      expect(await Promise.race([outcome, pending.then(() => "flush was not abandoned")])).toMatchObject({name: "AbortError"});
+    } finally {finish();}
+  });
+
   it("cancels capture polling between attempts and rejects a flush after shutdown", async () => {
     const controller = new AbortController();
     const requests: Request[] = [];
