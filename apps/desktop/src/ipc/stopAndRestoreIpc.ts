@@ -8,6 +8,7 @@ import {
   LiveDocumentMutationError,
   RestoreFolderInUseError,
   RestoreHeadChangedError,
+  RestorePolicyRefusalError,
   type WorkspaceEngineCapture,
 } from "../workspaces/workspaceEngineCapture";
 import { restoreDirectWrites, UndoRunsStopped, type DirectWriteFile, type UndoneRuns } from "../workspaces/stopAndRestore";
@@ -17,6 +18,7 @@ import {
   StopAndRestorePayload,
   StopAndRestoreResult,
   UndoStopAndRestorePayload,
+  UndoStopAndRestoreResult,
   type DeleteWorkspacePathPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
@@ -324,7 +326,7 @@ export function registerStopAndRestoreIpc<
             } catch (error) {
               if (error instanceof RestoreHeadChangedError) return { kind: "changed" };
               if (error instanceof RestoreFolderInUseError) return { kind: "folder-in-use" };
-              if (error instanceof LiveDocumentMutationError) return { kind: "refused", detail: error.message };
+              if (error instanceof LiveDocumentMutationError || error instanceof RestorePolicyRefusalError) return { kind: "refused", detail: error.message };
               throw error;
             }
           },
@@ -348,15 +350,26 @@ export function registerStopAndRestoreIpc<
     assertTrustedSender(event);
     const input = UndoStopAndRestorePayload.parse(payload);
     const person = await dependencies.localPerson();
-    await dependencies.withRendererWorkspaceOperation(
+    return dependencies.withRendererWorkspaceOperation(
       event.sender, input.workspaceId, "Undo stopped because this window changed workspaces.",
       async (operation) => {
         const { capture } = await dependencies.requireEngineCapture(operation.workspace.workspaceId);
+        const files: UndoStopAndRestoreResult["files"] = [];
         try {
           for (const momentId of [...input.restoredMomentIds].reverse()) {
             operation.assertCurrent();
-            await capture.restoreFileToBeforeMoment(momentId, person);
+            try {
+              const receipt = await capture.restoreFileToBeforeMoment(momentId, person);
+              files.push({ momentId, kind: "restored", receipt: { path: receipt.path, restoredMomentId: receipt.restoredMomentId } });
+            } catch (error) {
+              if (!(error instanceof RestorePolicyRefusalError || error instanceof LiveDocumentMutationError ||
+                error instanceof RestoreHeadChangedError || error instanceof RestoreFolderInUseError)) throw error;
+              files.push({ momentId, kind: "refused", detail: error.message.slice(0, 500) });
+            }
           }
+          return UndoStopAndRestoreResult.parse({ files, errorMessage: null });
+        } catch (error) {
+          return UndoStopAndRestoreResult.parse({ files, errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) });
         } finally {
           dependencies.notifyRenderer({ workspaceId: operation.workspace.workspaceId });
         }

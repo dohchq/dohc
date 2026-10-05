@@ -56,6 +56,7 @@ import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
 import { createPresenceIpc } from "./ipc/presenceIpc";
+import { readWorkspaceEnginePolicy } from "./workspaces/workspaceEnginePolicyFile";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
 import { registerDirectMessagesIpcHandlers, peekReceivedGrantKindForShare } from "./ipc/directMessagesIpc";
@@ -5428,7 +5429,7 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
+    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
     automationPersonName: (workspaceId, userId) => {
       const workspace = findWorkspace(workspaceId);

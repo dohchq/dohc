@@ -246,6 +246,37 @@ describe("history page", () => {
     };
   }
 
+  it("uses the admitted rename label in the row, search and diff header", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const renamed: EngineMomentRecord = { id: "rename", versionId: "main", path: "notes/b.md", recordedAtMs: 100,
+      operation: "rename", origin: "local-file", momentOrder: 1 };
+    bridge.listEngineMoments = vi.fn(async () => historyPage([renamed]));
+    bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...renamed, beforeText: "body", afterText: "body" } }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    expect(await screen.findByText("Renamed to b.md")).toBeTruthy();
+    await user.type(screen.getByTestId("engine-history-search"), "Renamed to");
+    await user.click(screen.getByTestId("engine-moment-open"));
+    expect((await screen.findByTestId("engine-diff-summary")).textContent).toBe("Renamed to b.md");
+  });
+
+  it("keeps earlier History reachable when the bounded policy scan returns no rows", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn()
+      .mockResolvedValueOnce({ ...historyPage([]), nextBeforeMomentOrder: 80 })
+      .mockResolvedValue(historyPage([historyMoment("older", "Older admitted edit")]));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-history-load-more"));
+    expect(await screen.findByText("Older admitted edit")).toBeTruthy();
+    expect(screen.queryByText("No changes yet")).toBeNull();
+    expect(bridge.listEngineMoments).toHaveBeenLastCalledWith(expect.objectContaining({ beforeMomentOrder: 80 }));
+  });
+
   it("persists a moment diff opened for a valid multibyte file path", async () => {
     const filePath = `目录/${"界".repeat(500)}.md`;
     const bridge = makeBridge(Promise.resolve(null));
