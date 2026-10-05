@@ -33,7 +33,7 @@ fn copy_rows(
     for (table, columns) in [
         (
             "link_sources",
-            "object_id,source_hash,path,title,parser_generation,status,reason,index_key,updated_at_ms,drain_latency_ms",
+            "object_id,source_hash,path,title,parser_generation,status,reason,index_key",
         ),
         (
             "links",
@@ -52,7 +52,7 @@ fn copy_rows(
         };
         tx.execute(&format!("INSERT INTO {table}(workspace_id,version_id,{columns}) SELECT workspace_id,?2,{columns} FROM {table} r WHERE workspace_id=?1 AND version_id=?3{certified}"),params![workspace,destination,source])?;
     }
-    tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,revision,queued_at_ms,retry_after_ms) SELECT workspace_id,?2,object_id,revision,queued_at_ms,retry_after_ms FROM link_pending WHERE workspace_id=?1 AND version_id=?3",params![workspace,destination,source])?;
+    tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,revision,queued_at_ms,retry_after_ms) SELECT workspace_id,?2,object_id,revision,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0 FROM link_pending WHERE workspace_id=?1 AND version_id=?3",params![workspace,destination,source])?;
     tx.execute("UPDATE link_index_state SET seed_after_object_id=(SELECT seed_after_object_id FROM link_index_state WHERE workspace_id=?1 AND version_id=?3), parser_generation=(SELECT parser_generation FROM link_index_state WHERE workspace_id=?1 AND version_id=?3) WHERE workspace_id=?1 AND version_id=?2 AND EXISTS(SELECT 1 FROM link_index_state WHERE workspace_id=?1 AND version_id=?3)",params![workspace,destination,source])?;
     Ok(())
 }

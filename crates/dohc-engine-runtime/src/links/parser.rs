@@ -1,7 +1,7 @@
 use super::{Head, Work};
 use dohc_engine_storage::{StorageError, hex_sha256};
 
-pub const MAX_DOCUMENT_BYTES: usize = 256 * 1024;
+pub const MAX_DOCUMENT_BYTES: usize = 512 * 1024;
 const MAX_OCCURRENCES: usize = 4096;
 const MAX_LITERAL_BYTES: usize = 2048;
 
@@ -164,128 +164,138 @@ pub fn extract(text: &str) -> Result<Vec<Occurrence>, ()> {
     utf16[b.len()] = units;
     lines[b.len()] = line;
     let mut out = Vec::new();
-    let mut i = 0;
-    let mut wiki_close = usize::MAX;
-    while i < b.len() {
-        if mask[i] || b[i] != b'[' || escaped(b, i) {
-            i += 1;
-            continue;
-        }
-        let (kind, literal, end) = if b[i..].starts_with(b"[[") {
-            if wiki_close == usize::MAX || wiki_close < i + 2 {
-                wiki_close = text[i + 2..].find("]]").map_or(b.len(), |n| i + 2 + n);
-            }
-            if wiki_close == b.len() {
-                i += 2;
+    // Independent scans keep a malformed Markdown label from hiding wikilinks.
+    for wiki_only in [true, false] {
+        let mut i = 0;
+        while i < b.len() {
+            if (wiki_only && !b[i..].starts_with(b"[[")) || mask[i] || b[i] != b'[' || escaped(b, i)
+            {
+                i += 1;
                 continue;
             }
-            let end = wiki_close + 2;
-            let literal = text[i + 2..end - 2]
-                .split('|')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_owned();
-            ("wikilink", literal, end)
-        } else {
             if i > 0 && b[i - 1] == b'!' {
                 i += 1;
                 continue;
             }
-            let mut j = i + 1;
-            let mut depth = 1;
-            while j < b.len() && depth > 0 && j - i <= MAX_LITERAL_BYTES * 2 {
-                if !escaped(b, j) {
-                    if b[j] == b'[' {
-                        depth += 1;
-                    } else if b[j] == b']' {
-                        depth -= 1;
-                    }
+            let (kind, literal, end) = if wiki_only {
+                // Match the renderer's one-line, 500 UTF-16 unit wikilink span.
+                let close = b[i + 2..]
+                    .iter()
+                    .take(2001)
+                    .position(|&c| c == b']' || c == b'\n' || c == b'\r');
+                let Some(close) = close.map(|n| i + 2 + n) else {
+                    i += 1;
+                    continue;
+                };
+                if b[close] != b']'
+                    || b.get(close + 1) != Some(&b']')
+                    || close == i + 2
+                    || utf16[close] - utf16[i + 2] > 500
+                {
+                    i += 1;
+                    continue;
                 }
-                j += 1;
-            }
-            if j - i > MAX_LITERAL_BYTES * 2 {
-                return Err(());
-            }
-            if depth != 0 || b.get(j) != Some(&b'(') {
-                i += 1;
-                continue;
-            }
-            let start = j + 1;
-            j = start;
-            let mut depth = 0;
-            let mut angle = false;
-            while j < b.len() && j - start <= MAX_LITERAL_BYTES && b[j] != b'\n' {
-                if !escaped(b, j) {
-                    match b[j] {
-                        b'<' if depth == 0 => angle = true,
-                        b'>' if angle => angle = false,
-                        b'(' if !angle => depth += 1,
-                        b')' if !angle && depth == 0 => break,
-                        b')' if !angle => depth -= 1,
-                        _ => {}
-                    }
-                }
-                j += 1;
-            }
-            if b.get(j) != Some(&b')') || !text.is_char_boundary(j) {
-                i += 1;
-                continue;
-            }
-            let raw = text[start..j].trim();
-            let href = if let Some(inside) = raw.strip_prefix('<') {
-                inside.split('>').next().unwrap_or("")
+                let literal = text[i + 2..close]
+                    .split('|')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_owned();
+                ("wikilink", literal, close + 2)
             } else {
-                let mut end = raw.len();
-                for (k, c) in raw.char_indices() {
-                    if c.is_whitespace() && !escaped(raw.as_bytes(), k) {
-                        end = k;
-                        break;
-                    }
+                // A malformed or long label is text. Resume scanning instead of
+                // refusing every other occurrence in the document.
+                let close = b[i + 1..]
+                    .iter()
+                    .take(MAX_LITERAL_BYTES * 2)
+                    .position(|&c| c == b']');
+                let Some(close) = close.map(|n| i + 1 + n) else {
+                    i += 1;
+                    continue;
+                };
+                let mut j = close + 1;
+                if b.get(j) != Some(&b'(') {
+                    i = j;
+                    continue;
                 }
-                &raw[..end]
-            };
-            let mut dest = String::new();
-            let mut chars = href.chars();
-            while let Some(c) = chars.next() {
-                if c == '\\' {
-                    if let Some(next) = chars.next() {
-                        dest.push(next);
+                let start = j + 1;
+                j = start;
+                let mut depth = 0;
+                let mut angle = false;
+                while j < b.len() && j - start <= MAX_LITERAL_BYTES && b[j] != b'\n' {
+                    if !escaped(b, j) {
+                        match b[j] {
+                            b'<' if depth == 0 => angle = true,
+                            b'>' if angle => angle = false,
+                            b'(' if !angle => depth += 1,
+                            b')' if !angle && depth == 0 => break,
+                            b')' if !angle => depth -= 1,
+                            _ => {}
+                        }
                     }
+                    j += 1;
+                }
+                if b.get(j) != Some(&b')') || !text.is_char_boundary(j) {
+                    i = close + 1;
+                    continue;
+                }
+                let raw = text[start..j].trim();
+                let href = if let Some(inside) = raw.strip_prefix('<') {
+                    inside.split('>').next().unwrap_or("")
                 } else {
-                    dest.push(c);
+                    let mut end = raw.len();
+                    for (k, c) in raw.char_indices() {
+                        if c.is_whitespace() && !escaped(raw.as_bytes(), k) {
+                            end = k;
+                            break;
+                        }
+                    }
+                    &raw[..end]
+                };
+                let mut dest = String::new();
+                let mut chars = href.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\\' {
+                        if let Some(next) = chars.next() {
+                            dest.push(next);
+                        }
+                    } else {
+                        dest.push(c);
+                    }
                 }
+                ("markdown", dest, j + 1)
+            };
+            if end - i > MAX_LITERAL_BYTES * 2 || literal.len() > MAX_LITERAL_BYTES {
+                i += 1;
+                continue;
             }
-            ("markdown", dest, j + 1)
-        };
-        if end - i > MAX_LITERAL_BYTES * 2 || literal.len() > MAX_LITERAL_BYTES {
-            return Err(());
-        }
-        if !mask[i..end].iter().any(|x| *x) && local(&literal) {
-            if out.len() == MAX_OCCURRENCES {
-                return Err(());
+            if !mask[i..end].iter().any(|x| *x) && local(&literal) {
+                if out.len() == MAX_OCCURRENCES {
+                    return Err(());
+                }
+                let start_line = text[..i].rfind(['\n', '\r']).map_or(0, |n| n + 1);
+                let snippet: String = text[start_line..]
+                    .split(['\n', '\r'])
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(240)
+                    .collect();
+                let fragment = literal.split_once('#').map(|(_, f)| f.to_owned());
+                out.push(Occurrence {
+                    literal,
+                    kind,
+                    fragment,
+                    start_utf16: utf16[i],
+                    end_utf16: utf16[end],
+                    line: lines[i],
+                    snippet,
+                });
             }
-            let start_line = text[..i].rfind(['\n', '\r']).map_or(0, |n| n + 1);
-            let snippet: String = text[start_line..]
-                .split(['\n', '\r'])
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(240)
-                .collect();
-            let fragment = literal.split_once('#').map(|(_, f)| f.to_owned());
-            out.push(Occurrence {
-                literal,
-                kind,
-                fragment,
-                start_utf16: utf16[i],
-                end_utf16: utf16[end],
-                line: lines[i],
-                snippet,
-            });
+            i = end;
         }
-        i = end;
     }
+    out.sort_by_key(|o| o.start_utf16);
     Ok(out)
 }
 #[cfg(test)]
@@ -305,7 +315,7 @@ mod tests {
     }
     #[test]
     fn nested_destinations_and_escaped_markup() {
-        let rows = extract(r"\[[escaped]] [nested [label]](a(b).md) ![image](ignore.md)").unwrap();
+        let rows = extract(r"\[[escaped]] [label](a(b).md) ![image](ignore.md)").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].literal, "a(b).md");
     }

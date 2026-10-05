@@ -150,7 +150,6 @@ fn path_keys(path: &str) -> Vec<(&'static str, String)> {
     let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
     let extensionless = path.strip_suffix(&name[stem.len()..]).unwrap_or(path);
     vec![
-        ("path", path.into()),
         ("folded-path", folded),
         ("extensionless", extensionless.to_lowercase()),
         ("stem", stem.to_lowercase()),
@@ -177,6 +176,7 @@ fn decoded_literal(literal: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| literal.to_owned())
 }
 fn occurrence_keys(source: &str, literal: &str, kind: &str) -> Vec<(&'static str, String)> {
+    let literal = literal.split('?').next().unwrap_or(literal);
     let decoded = decoded_literal(literal);
     let literal = decoded.as_str();
     let directory = source.rsplit_once('/').map_or("", |(d, _)| d);
@@ -198,7 +198,30 @@ fn occurrence_keys(source: &str, literal: &str, kind: &str) -> Vec<(&'static str
         };
         for path in paths {
             if let Some(path) = normalize_path(&path) {
-                keys.extend(path_keys(&path));
+                let name = path.rsplit('/').next().unwrap_or(&path);
+                let extensionless = match name.rsplit_once('.') {
+                    Some((_, ext))
+                        if matches!(
+                            ext.to_ascii_lowercase().as_str(),
+                            "md" | "markdown" | "mdx"
+                        ) =>
+                    {
+                        &path[..path.len() - ext.len() - 1]
+                    }
+                    _ => &path,
+                };
+                keys.extend([
+                    ("folded-path", path.to_lowercase()),
+                    ("extensionless", extensionless.to_lowercase()),
+                    (
+                        "stem",
+                        extensionless
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(extensionless)
+                            .to_lowercase(),
+                    ),
+                ]);
             }
         }
     }
@@ -268,18 +291,17 @@ impl Staged {
                 end=ordinal+1;
                 if began.elapsed()>=ACTOR_SLICE_BUDGET/2 {break;}
             }
-            if start<self.rows.len() {return Ok((false,end,target_start));}
+            if end<self.rows.len() {return Ok((false,end,target_start));}
             let mut target_end=target_start;
             for (kind,value) in self.targets.iter().skip(target_start).take(ROW_SLICE) {
                 tx.execute("INSERT OR IGNORE INTO link_target_keys VALUES(?1,?2,?3,?4,?5,?6)",params![w.workspace,w.version,w.object,key,kind,value]).map_err(sql)?;
                 target_end += 1;
                 if began.elapsed() >= ACTOR_SLICE_BUDGET/2 { break; }
             }
-            if target_start < self.targets.len() { return Ok((false, end, target_end)); }
+            if target_end < self.targets.len() { return Ok((false, end, target_end)); }
             tx.execute("INSERT OR IGNORE INTO link_gc SELECT workspace_id,version_id,object_id,index_key FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![w.workspace,w.version,w.object]).map_err(sql)?;
             if let Some(h)=&p.head {
-                let now=now_ms();
-                tx.execute("INSERT INTO link_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET source_hash=excluded.source_hash,path=excluded.path,title=excluded.title,parser_generation=excluded.parser_generation,status=excluded.status,reason=excluded.reason,index_key=excluded.index_key,updated_at_ms=excluded.updated_at_ms,drain_latency_ms=excluded.drain_latency_ms",params![w.workspace,w.version,w.object,h.hash,h.path,p.title,PARSER_GENERATION,if p.reason.is_some(){"unindexed"}else{"indexed"},p.reason,key,now,now.saturating_sub(w.queued_at_ms).max(0)]).map_err(sql)?;
+                tx.execute("INSERT INTO link_sources VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET source_hash=excluded.source_hash,path=excluded.path,title=excluded.title,parser_generation=excluded.parser_generation,status=excluded.status,reason=excluded.reason,index_key=excluded.index_key",params![w.workspace,w.version,w.object,h.hash,h.path,p.title,PARSER_GENERATION,if p.reason.is_some(){"unindexed"}else{"indexed"},p.reason,key]).map_err(sql)?;
             } else {
                 tx.execute("DELETE FROM link_sources WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![w.workspace,w.version,w.object]).map_err(sql)?;
             }
@@ -341,7 +363,7 @@ pub fn reseed_step(store: &mut EngineStore) -> Result<bool, StorageError> {
         let mut stmt=tx.prepare("SELECT object_id FROM path_aliases WHERE workspace_id=?1 AND version_id=?2 AND object_id>?3 GROUP BY object_id ORDER BY object_id LIMIT 32").map_err(sql)?;
         let objects=stmt.query_map(params![ws,v,after],|r|r.get::<_,String>(0)).map_err(sql)?.collect::<Result<Vec<_>,_>>().map_err(sql)?;
         for o in &objects {
-            tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(?1,?2,?3,?4) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,retry_after_ms=0",params![ws,v,o,now_ms()]).map_err(sql)?;
+            tx.execute("INSERT INTO link_pending(workspace_id,version_id,object_id,queued_at_ms) VALUES(?1,?2,?3,?4) ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET revision=revision+1,queued_at_ms=excluded.queued_at_ms,retry_after_ms=0",params![ws,v,o,now_ms()]).map_err(sql)?;
         }
         if let Some(last)=objects.last() {
             tx.execute("UPDATE link_index_state SET seed_after_object_id=?3 WHERE workspace_id=?1 AND version_id=?2",params![ws,v,last]).map_err(sql)?;

@@ -3346,7 +3346,7 @@ mod tests {
             ),
             (
                 "v2-persisted-links",
-                "7269f6e8e917cde71f4eb3e7c0ddf0fe99660187f33f2e8cfdebc25976f0fbb9",
+                "29a9651e9a40ea8a9d01ca044c6c32bdf0f92e1a0b30b150f4341d3dbc5cfaab",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

@@ -59,6 +59,19 @@ impl DrainWorker {
     // Called between foreground commands. Immediate work returns zero delay;
     // idle and transient failures wait without monopolizing the actor.
     pub fn tick(&mut self, store: &mut EngineStore) -> Duration {
+        let began = Instant::now();
+        let delay = self.tick_inner(store);
+        let mut m = self
+            .metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let us = began.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        m.actor_batches += 1;
+        m.max_actor_us = m.max_actor_us.max(us);
+        m.over_budget_batches += u64::from(us > ACTOR_SLICE_BUDGET.as_micros() as u64);
+        delay
+    }
+    fn tick_inner(&mut self, store: &mut EngineStore) -> Duration {
         if Instant::now() < self.retry_at {
             return Duration::from_millis(10);
         }
@@ -75,18 +88,7 @@ impl DrainWorker {
                 }
             }
         }
-        let began = Instant::now();
         let result = self.step(store);
-        let us = began.elapsed().as_micros().min(u64::MAX as u128) as u64;
-        {
-            let mut m = self
-                .metrics
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            m.actor_batches += 1;
-            m.max_actor_us = m.max_actor_us.max(us);
-            m.over_budget_batches += u64::from(us > ACTOR_SLICE_BUDGET.as_micros() as u64);
-        }
         match result {
             Ok(delay) => delay,
             Err(error) => {
@@ -123,9 +125,6 @@ impl DrainWorker {
         if self.parsing {
             return Ok(Duration::from_millis(1));
         }
-        if gc_step(store)? || reseed_step(store)? {
-            return Ok(Duration::ZERO);
-        }
         if let Some(job) = prepare(store)? {
             if self.jobs.as_ref().is_some_and(|tx| tx.send(job).is_ok()) {
                 self.parsing = true;
@@ -136,6 +135,11 @@ impl DrainWorker {
             }
             Ok(Duration::from_millis(1))
         } else {
+            // Obsolete generations are invisible to readers. Drain pending
+            // sources first; cleanup runs only with no parse or staging active.
+            if gc_step(store)? || reseed_step(store)? {
+                return Ok(Duration::ZERO);
+            }
             let pending = store
                 .read_with(|c| {
                     c.query_row("SELECT EXISTS(SELECT 1 FROM link_pending)", [], |r| {
