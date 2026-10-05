@@ -112,5 +112,6 @@
   "app.create",
   "app.test",
   "data.import",
-  "data.query"
+  "data.query",
+  "app.link.create"
 ]

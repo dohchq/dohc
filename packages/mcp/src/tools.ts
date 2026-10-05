@@ -21,6 +21,7 @@ import { DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
   DATASET_CAPABILITIES,
+  APP_PUBLICATION_CAPABILITIES,
   collectionCreateFieldsSchema,
   collectionQueryCursorSchema,
   collectionQueryFilterSchema,
@@ -58,6 +59,7 @@ export const MCP_TOOL_CAPABILITIES = {
   dohc_list_automations: ["automation.list"],
   dohc_switch_automation: ["automation.switch"],
   dohc_dataset: Object.values(DATASET_CAPABILITIES),
+  dohc_publish_app: Object.values(APP_PUBLICATION_CAPABILITIES),
   dohc_list_workspaces: ["workspace.list"],
   dohc_workspace_status: ["workspace.status"],
   dohc_list_changes: ["history.list"],

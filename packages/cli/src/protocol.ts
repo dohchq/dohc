@@ -478,6 +478,7 @@ export const DATASET_CAPABILITIES = {
 } as const satisfies Record<DatasetRequest["action"], CapabilityId>;
 
 export const APP_PUBLICATION_CAPABILITIES = {
+  createLink: "app.link.create",
   listLocal: "app.local.list",
   prepareLocal: "app.local.prepare",
   launchLocal: "app.local.launch",

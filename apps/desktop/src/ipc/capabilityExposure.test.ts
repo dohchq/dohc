@@ -1,6 +1,7 @@
-import { CLI_CAPABILITIES, cliRequestSchema, DATASET_CAPABILITIES } from "@dohc/cli/protocol";
+import { APP_PUBLICATION_CAPABILITIES, CLI_CAPABILITIES, cliRequestSchema, DATASET_CAPABILITIES } from "@dohc/cli/protocol";
 import { CLI_COMMANDS } from "@dohc/cli/args";
 import { DatasetRequest } from "@dohc/cli/dataset";
+import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { renderCliHelp } from "@dohc/cli/help";
 import { advertisedCapabilityTools as advertisedTools } from "@dohc/mcp/capability-exposure-fixture";
 import { MCP_TOOL_CAPABILITIES } from "@dohc/mcp/tools";
@@ -12,6 +13,7 @@ import type { OperationDefinition } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import mainIpc from "./ipcExposure.main.json";
 import mainCli from "./cliExposure.main.json";
+import publicationCli from "./cliExposure.pr1659.json";
 import admission from "./operationAdmission.json";
 
 const rows: OperationDefinition[] = OPERATION_TABLES.flatMap(table => Object.values(table));
@@ -51,13 +53,20 @@ describe("B1 main inventories (a4be19d5b)", () => {
     const internal = new Set(mainCli.internalVerbs);
     expect(socketVerbs.filter(verb => internal.has(verb))).toEqual(mainCli.internalVerbs);
     expect(socketVerbs.filter(verb => !internal.has(verb))).toEqual(mainCli.publicSocketVerbs);
-    expect(publicVerbs).toEqual(mainCli.publicVerbs);
+    // Hand-reviewed #1659 additions, separate from the hashed main baseline.
+    const expectedPublicVerbs = [...mainCli.publicVerbs];
+    for (const { verb, before } of publicationCli.publicVerbAdditions) {
+      expect(expectedPublicVerbs).not.toContain(verb);
+      expect(expectedPublicVerbs).toContain(before);
+      expectedPublicVerbs.splice(expectedPublicVerbs.indexOf(before), 0, verb);
+    }
+    expect(publicVerbs).toEqual(expectedPublicVerbs);
     const help: Record<string, string> = { top: renderCliHelp({ help: [] }) };
     for (const [group, command] of Object.entries(CLI_COMMANDS)) {
       help[group] = renderCliHelp({ help: [group] });
       for (const verb of Object.keys(command.verbs)) help[`${group} ${verb}`] = renderCliHelp({ help: [group, verb] });
     }
-    expect(help).toEqual(mainCli.help);
+    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help });
   });
   it("pins each row's guard, scope, and handler check to the hand-edited admission record", () => {
     expect(Object.fromEntries(rows.map(row => [row.channel, {
@@ -117,6 +126,16 @@ describe("capability identities and exposure", () => {
     expect(Object.keys(row.capabilityIdsByAction).sort()).toEqual(DatasetRequest.options.map(option => option.shape.action.value).sort());
     expect(Object.values(row.capabilityIdsByAction)).toHaveLength(34);
     assertAdmission(row);
+  });
+
+  it("tags every publication action offered by #1659 without replacing approval ids", () => {
+    expect(Object.keys(APP_PUBLICATION_CAPABILITIES).sort())
+      .toEqual(OwnerAppPublicationRequest.options.map(option => option.shape.action.value).sort());
+    expect(MCP_TOOL_CAPABILITIES.dohc_publish_app).toEqual(Object.values(APP_PUBLICATION_CAPABILITIES));
+    expect(APP_PUBLICATION_CAPABILITIES.createLink).toBe("app.link.create");
+    expect(APP_PUBLICATION_CAPABILITIES.approve).toBe("app.publication.approve");
+    expect(DATASET_CAPABILITIES.approve).toBe("dataset.approve");
+    expect(DATASET_CAPABILITIES.approveMigration).toBe("dataset.migration.approve");
   });
 
   it("matches each door's declared exposure to its actual rows, verbs, help, and advertised tools", async () => {
