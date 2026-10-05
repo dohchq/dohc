@@ -2964,6 +2964,24 @@ pub fn save_kept_displacement(
     displacement_id: i64,
     options: &MaterializeOptions<'_>,
 ) -> Result<KeptCopySave, MaterializeError> {
+    save_kept_displacement_with_cleanup(
+        store,
+        root,
+        workspace_id,
+        displacement_id,
+        options,
+        cleanup_staging_directory,
+    )
+}
+
+fn save_kept_displacement_with_cleanup(
+    store: &EngineStore,
+    root: &Path,
+    workspace_id: &str,
+    displacement_id: i64,
+    options: &MaterializeOptions<'_>,
+    cleanup: impl FnOnce(&EngineStore, &Path, &Path) -> Result<(), MaterializeError>,
+) -> Result<KeptCopySave, MaterializeError> {
     let Some(row) = store
         .list_kept_displacements(workspace_id)?
         .into_iter()
@@ -2985,7 +3003,9 @@ pub fn save_kept_displacement(
             None,
             options.now_ms,
         )?;
-        cleanup_staging_directory(store, &canonical_root, &staging)?;
+        if let Err(error) = cleanup(store, &canonical_root, &staging) {
+            eprintln!("materialization staging cleanup: {error}");
+        }
         return Ok(KeptCopySave::Gone);
     }
     // Orphan staging files have no original path. Keep them available through
@@ -3052,7 +3072,9 @@ pub fn save_kept_displacement(
             None,
             options.now_ms,
         )?;
-        cleanup_staging_directory(store, &canonical_root, &staging)?;
+        if let Err(error) = cleanup(store, &canonical_root, &staging) {
+            eprintln!("materialization staging cleanup: {error}");
+        }
         return Ok(KeptCopySave::Saved(copy_path));
     }
     Ok(KeptCopySave::NoValidName)

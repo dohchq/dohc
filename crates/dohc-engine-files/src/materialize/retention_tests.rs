@@ -619,3 +619,92 @@ fn sibling_cleanup_syncs_removal_before_forgetting_location() {
         }
     }
 }
+
+#[test]
+fn kept_copy_save_succeeds_when_staging_cleanup_sync_fails() {
+    for source_exists in [true, false] {
+        let scratch = ScratchDir::new_named("p0-kept-cleanup-sync").unwrap();
+        let root = scratch.path();
+        let store = EngineStore::open(&root.join("engine.db"), 0).unwrap();
+        let relative = ".dohc-write-displaced";
+        let directory = root.join(relative);
+        std::fs::create_dir(&directory).unwrap();
+        store.remember_staging("kept", relative).unwrap();
+        let name = staged_name("kept", 0);
+        let bytes = b"outside edit";
+        if source_exists {
+            let source = directory.join(&name);
+            std::fs::write(&source, bytes).unwrap();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&source)
+                .unwrap()
+                .sync_all()
+                .unwrap();
+        }
+        let id = store
+            .open_displacement(&DisplacementSpec {
+                job_id: "kept".into(),
+                workspace_id: "ws".into(),
+                target_path: "notes.md".into(),
+                displaced_name: name,
+                expected_sha256: hex_sha256(b"before"),
+                content_sha256: None,
+                now_ms: 0,
+            })
+            .unwrap();
+        store
+            .resolve_displacement(
+                id,
+                DisplacementResolution::Keep {
+                    displaced_sha256: Some(&hex_sha256(bytes)),
+                },
+                None,
+                0,
+            )
+            .unwrap();
+        let mut opts = options(1, &StdReplacer);
+        opts.policy = DurabilityPolicy::per_os();
+        let mut sync_attempted = false;
+        let result = save_kept_displacement_with_cleanup(
+            &store,
+            root,
+            "ws",
+            id,
+            &opts,
+            |store, root, directory| {
+                cleanup_staging_directory_with_sync(store, root, directory, |parent| {
+                    assert!(!directory.exists());
+                    assert!(store.list_kept_displacements("ws").unwrap().is_empty());
+                    sync_attempted = true;
+                    Err(MaterializeError::io(
+                        parent,
+                        &std::io::Error::from(ErrorKind::PermissionDenied),
+                    ))
+                })
+            },
+        );
+        assert!(sync_attempted);
+        assert_eq!(
+            result.unwrap(),
+            if source_exists {
+                KeptCopySave::Saved("notes (kept copy).md".into())
+            } else {
+                KeptCopySave::Gone
+            }
+        );
+        if source_exists {
+            assert_eq!(
+                std::fs::read(root.join("notes (kept copy).md")).unwrap(),
+                bytes
+            );
+        }
+        assert!(store.list_kept_displacements("ws").unwrap().is_empty());
+        assert_eq!(
+            store.staging_location("kept").unwrap().as_deref(),
+            Some(relative)
+        );
+        recover_displacements(&store, root, Some("ws"), &opts).unwrap();
+        assert!(store.staging_location("kept").unwrap().is_none());
+    }
+}
