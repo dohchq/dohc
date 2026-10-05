@@ -25,6 +25,7 @@ import { PERSONAL_NEEDS_ACCOUNT, type ReachRoster, type RosterGrant } from "@doh
 import { createAutomationRunStore, type AutomationRunStore, type ReportedFailure, type StoredRun, type StoredSubscription } from "@dohc/automation-executor/automation-run-store";
 import { automationHostGeneration, createAutomationHosts, HANDOVER_READ_FIRST_MS, HOST_FRESH_MS, type AutomationHosts } from "./automationHost";
 import { recordNeverSynced, recordSynced } from "../workspaces/syncHistory";
+import { collectionAutomationAuthor, listEngineMomentsForIpc, type EngineMomentAuthorNames } from "../ipc/engineHistoryIpc";
 import {
   CollectionAutomations,
   TIMEOUTS_BEFORE_SWITCH_OFF,
@@ -3700,6 +3701,40 @@ describe("Collection automations", () => {
     await expect(w.executor.fieldMarks("Tasks")).resolves.toEqual([]);
     expect(w.executor.automationName(TASKS)).toBe("Bump the count");
     expect(w.executor.automationName("collection:Tasks#stamp")).toBeNull();
+  });
+
+  // A broken entry keeps a name of any length. History shows it up to its
+  // bound, and the automation's id past that, alone or beside another author.
+  it("names an automation in History by its id when its name is longer than History shows", async () => {
+    const entry = (length: number) => `  - id: stamp\n    name: ${"n".repeat(length)}\n`;
+    const w = await world({ automations: { Tasks: entry(4096) } });
+    await w.executor.open();
+    const names: EngineMomentAuthorNames = {
+      agent: () => undefined,
+      person: () => undefined,
+      automation: (automationId) => collectionAutomationAuthor(w.executor, automationId),
+      named: () => "Named",
+    };
+    const automator = { kind: "automation", automationId: "collection:Tasks#stamp", depth: 1 } as const;
+    const agent = { kind: "agent", agentId: "writer", agentName: "Writer" } as const;
+    for (const [length, shown] of [[4096, "n".repeat(4096)], [4097, "stamp"], [20_000, "stamp"]] as const) {
+      if (length !== 4096) {
+        await w.writeAutomations("Tasks", entry(length));
+        w.executor.handleWatcherEvents([{ operation: "update", path: "Tasks/automations.yaml" }]);
+        await w.until(() => w.executor.automationName("collection:Tasks#stamp")?.length === length);
+      }
+      for (const [authors, expected] of [
+        [[automator], { automationAuthor: { name: shown, collection: "Tasks" } }],
+        [[automator, agent], { authorLabels: [`${shown} in Tasks`, "Writer"] }],
+      ] as const) {
+        const page = await listEngineMomentsForIpc(async () => ({
+          moments: [{ id: "moment-1", versionId: "main", path: "Tasks/notes.md", recordedAtMs: 1, operation: "write", metadata: { origin: "local-file" }, authors: [...authors], momentOrder: 1, protected: false }],
+          nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+        }), names);
+        if (!("moments" in page)) throw new Error("Expected ready history");
+        expect(page.moments[0]).toMatchObject(expected);
+      }
+    }
   });
 
   it("marks only what a run would write: no dataset, no missing Collection, no stopped step", async () => {

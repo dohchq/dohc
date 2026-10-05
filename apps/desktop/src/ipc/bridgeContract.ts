@@ -1470,7 +1470,7 @@ const SHARED_AUTHOR_ID = z.string().min(1).refine(
 );
 
 // A Collection automation's name or its Collection's, as History reads it.
-const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
+export const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
 const AUTOMATION_AUTHOR_TEXT = z.string().min(1).max(AUTOMATION_AUTHOR_TEXT_MAX);
 
 const EngineMomentAuthor = z.union([

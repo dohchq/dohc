@@ -6,6 +6,7 @@ import {
   type EngineMomentAuthorNames,
 } from "./engineHistoryIpc";
 import {
+  AUTOMATION_AUTHOR_TEXT_MAX,
   CompareWorkspaceVersionsResult,
   EngineMomentDetailRecord,
   EngineMomentRecord,
@@ -21,7 +22,6 @@ import type {
 import type { WorkspaceEngineMomentDetail } from "../workspaces/workspaceEngineCapture";
 import { DaemonRefusalError } from "@dohc/workspace-engine-client";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
-import { parseAutomationsFile } from "@dohc/workspace-contracts/automations";
 
 const names: EngineMomentAuthorNames = {
   agent: (author) => author.onBehalfOf === "local" ? "You" : author.onBehalfOf,
@@ -226,13 +226,11 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
     detail.moment.authors = [{kind: "automation", automationId: "other:tools/stamp", onBehalfOf: "local", depth: 1}];
     expect(engineMomentDetailForIpc(detail, names)).not.toHaveProperty("automationAuthor");
   });
-  // An invalid automations.yaml entry keeps its raw name, and a Collection's
-  // name has the same bound. History names both, alone or beside an agent.
+  // History shows an automation's name up to this bound, and its id past it.
+  // A Collection's name has the same bound. History names both, alone or
+  // beside an agent.
   it("names an automation at its longest name and Collection, alone or with another author", async () => {
-    const parsed = parseAutomationsFile(`version: 1\nautomations:\n  - id: stamp\n    name: ${"n".repeat(4096)}\n`);
-    const entry = parsed.status === "read" ? parsed.entries[0] : undefined;
-    if (entry?.status !== "invalid" || entry.name === null) throw new Error("Expected an invalid entry with its name");
-    const automation = {name: entry.name, collection: "c".repeat(4096)};
+    const automation = {name: "n".repeat(AUTOMATION_AUTHOR_TEXT_MAX), collection: "c".repeat(AUTOMATION_AUTHOR_TEXT_MAX)};
     const label = `${automation.name} in ${automation.collection}`;
     const automator = {kind: "automation", automationId: "collection:Tasks#stamp", depth: 1} as const;
     const agent = {kind: "agent", agentId: "writer", agentName: "Writer"} as const;

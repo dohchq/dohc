@@ -57,6 +57,7 @@ import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@doh
 import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
 import { createPresenceIpc } from "./ipc/presenceIpc";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
+import { collectionAutomationAuthor } from "./ipc/engineHistoryIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
 import { registerDirectMessagesIpcHandlers, peekReceivedGrantKindForShare } from "./ipc/directMessagesIpc";
 import { createChatScopeCapability } from "./ipc/chatScope";
@@ -111,7 +112,7 @@ import {
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { lstat, mkdir, readdir } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
-import { dirname, join, posix } from "node:path";
+import { dirname, join } from "node:path";
 import {
   SitePreviewReplacedEvent,
   McpConfigResult,
@@ -227,7 +228,6 @@ import {
   type CollectionAutomationRetry,
   type PressWaitReason,
 } from "@dohc/automation-executor/collection-automations";
-import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
 import { AutomationScheduler } from "@dohc/automation-executor/automation-scheduler";
 import { parseReachHandover, type ReachRelayRecord } from "@dohc/automation-executor/reach-verdicts";
 import {
@@ -1379,18 +1379,9 @@ function collectionAutomationsOf(workspaceId: string): CollectionAutomations | u
   return withWorkspaceAttachment({ workspaceId }, (lease) => lease.state.collectionAutomations);
 }
 
-// A Collection automation that wrote a moment, as History shows it: its
-// name from the workspace's automations.yaml as this computer read it, or
-// its id when the file no longer has it, and the Collection it belongs to
-// now. Any other automation keeps the moment's origin label.
-function automationAuthor(workspaceId: string, automationId: string): { name: string; collection?: string } | null {
-  const parsed = parseCollectionAutomationId(automationId);
-  if (parsed === null) return null;
-  const located = collectionAutomationsOf(workspaceId)?.locate(automationId) ?? null;
-  return {
-    name: collectionAutomationsOf(workspaceId)?.automationName(automationId) ?? parsed.id,
-    ...(located === null ? {} : { collection: posix.basename(located.collectionPath) }),
-  };
+// A Collection automation that wrote a moment, as History shows it.
+function automationAuthor(workspaceId: string, automationId: string): ReturnType<typeof collectionAutomationAuthor> {
+  return collectionAutomationAuthor(collectionAutomationsOf(workspaceId), automationId);
 }
 
 // MU-C4 shared channels: one best-effort refresh pass over every shared

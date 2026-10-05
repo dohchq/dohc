@@ -1,7 +1,8 @@
 // Pure engine-history -> IPC record mappers, extracted from main.ts so the
 // per-side content-kind rules are unit-testable (WS-G1 review fix). main
-// injects how agent, named, and automation authors read; nothing here touches
-// Electron or process state.
+// injects how agent, named, and automation authors read, and the Collection
+// automations it names them from; nothing here touches Electron or process
+// state.
 import type { VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import type {
   WorkspaceEngineCapture,
@@ -14,8 +15,11 @@ import type {
   ListEngineMomentsResponse,
   WorkspaceVersionConflict,
 } from "./bridgeContract";
-import { ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
+import { posix } from "node:path";
+import { AUTOMATION_AUTHOR_TEXT_MAX, ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
+import { parseCollectionAutomationId } from "@dohc/automation-executor/automation-plan";
+import type { CollectionAutomations } from "@dohc/automation-executor/collection-automations";
 
 type MomentAuthor = NonNullable<VersionedTextMomentSummary["authors"]>[number];
 
@@ -30,6 +34,25 @@ export interface EngineMomentAuthorNames {
   person(author: Extract<MomentAuthor, {kind: "human"}>): string | undefined;
   automation(automationId: string): { name: string; collection?: string } | null;
   named(author: Extract<MomentAuthor, {kind: "named"}>): string;
+}
+
+// A Collection automation that wrote a moment, as History shows it: its
+// name from the workspace's automations.yaml as this computer read it, or
+// its id when the file no longer has it or the name is longer than History
+// shows, and the Collection it belongs to now. Any other automation keeps
+// the moment's origin label.
+export function collectionAutomationAuthor(
+  automations: Pick<CollectionAutomations, "locate" | "automationName"> | undefined,
+  automationId: string,
+): { name: string; collection?: string } | null {
+  const parsed = parseCollectionAutomationId(automationId);
+  if (parsed === null) return null;
+  const located = automations?.locate(automationId) ?? null;
+  const name = automations?.automationName(automationId) ?? null;
+  return {
+    name: name !== null && name.length <= AUTOMATION_AUTHOR_TEXT_MAX ? name : parsed.id,
+    ...(located === null ? {} : { collection: posix.basename(located.collectionPath) }),
+  };
 }
 
 // A live author snapshot's account holder or link holder, as the relay
