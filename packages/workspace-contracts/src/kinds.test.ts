@@ -47,7 +47,7 @@ describe("file kind records", () => {
     ["photo.png", "Image", "image"],
     ["data.sqlite", "Database", "database"],
     ["memo.mp3", "Audio", "file-text"],
-    ["paper.pdf", "Document", "file-text"],
+    ["paper.pdf", "PDF", "file-text"],
     ["archive.bin", "File", "file-text"],
   ])("uses the drawing's name and glyph for %s", (path, name, glyphId) => {
     expect(fileKindForPath(path)).toMatchObject({ name, glyphId });

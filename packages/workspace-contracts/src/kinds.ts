@@ -115,7 +115,7 @@ export const FILE_KIND_RECORDS = {
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
   },
   pdf: {
-    displayKind: "pdf", name: "Document", glyphId: "file-text", displayNameRule: "basename",
+    displayKind: "pdf", name: "PDF", glyphId: "file-text", displayNameRule: "basename",
     extensions: ["pdf"],
     opens: { surface: "tab", content: "asset" },
     actions: FILE_ACTIONS, reference: FILE_REFERENCE,
