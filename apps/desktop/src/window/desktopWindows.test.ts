@@ -136,6 +136,21 @@ function observePersistedZoomReconciliations(expected = 1): Promise<void> {
 afterEach(() => vi.restoreAllMocks());
 
 describe("desktop workspace windows", () => {
+  it("reopens the last activated workspace after its window closes", async () => {
+    const f = fixture();
+    const rows = [workspace("a"), workspace("b")];
+    const previous = new Window();
+    f.windows.trackWorkspaceWindow(previous.native);
+    await f.windows.sendWorkspaceActivated(previous.native, rows[1]!);
+    previous.destroy();
+
+    const reopened = await f.windows.showOrCreateMainWindow();
+    expect(f.windows.prioritizePreferredWorkspace(rows, reopened.webContents)).toEqual([rows[1], rows[0]]);
+    expect(f.windows.prioritizePreferredWorkspace(rows, previous.webContents.native)).toBe(rows);
+    expect(f.windows.prioritizePreferredWorkspace(rows, new Contents().native)).toBe(rows);
+    reopened.destroy();
+  });
+
   it("orders registry startup by the asking window before activation can be received", async () => {
     const f = fixture();
     const rows = [workspace("a"), workspace("b"), workspace("c")];
