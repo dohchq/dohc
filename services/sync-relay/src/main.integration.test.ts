@@ -111,7 +111,7 @@ async function spawnRelay(
 async function spawnRunningRelay(
   dbPath: string,
   envOverrides: Record<string, string | undefined> = {},
-  bootstrap: { rejectPoolEnd?: boolean; sourceEntry?: boolean } = {},
+  bootstrap: { rejectPoolEnd?: boolean; sourceEntry?: boolean; projectionHandshake?: boolean } = {},
 ): Promise<RunningRelay> {
   const mainUrl = bootstrap.sourceEntry
     ? new URL("./main.ts", import.meta.url)
@@ -144,6 +144,43 @@ async function spawnRunningRelay(
         writeSync(2, "SYNC_RELAY_TEST_POOL_END_REJECTED\\n");
         throw new Error("injected pool shutdown failure");
       };
+    }
+    if (${bootstrap.projectionHandshake === true}) {
+      // Route coverage uses a fake isolated-engine handshake on every host.
+      Object.defineProperty(process, "platform", {value: "linux"});
+      const {default: childProcess} = await import("node:child_process");
+      const {syncBuiltinESMExports} = await import("node:module");
+      const originalSpawn = childProcess.spawn;
+      childProcess.spawn = (command, args, options) => {
+        if (command === "/bin/sh" && args?.[1]?.includes("--projection-only")) {
+          return originalSpawn(process.execPath, ["--input-type=module", "--eval", ${JSON.stringify(`
+            const frame = row => {
+              const payload = Buffer.from(JSON.stringify(row));
+              const header = Buffer.alloc(12); header.write("DOP1"); header[4] = 1;
+              header.writeUInt32LE(payload.length, 8); return Buffer.concat([header, payload]);
+            };
+            let pending = Buffer.alloc(0);
+            process.stdin.on("data", bytes => {
+              pending = Buffer.concat([pending, bytes]);
+              while (pending.length >= 12 && pending.length >= 12 + pending.readUInt32LE(8)) {
+                const size = pending.readUInt32LE(8);
+                const row = JSON.parse(pending.subarray(12, 12 + size).toString());
+                pending = pending.subarray(12 + size);
+                if (row.type === "hello") {
+                  process.stdout.write(frame({type:"helloAck",protocolVersion:2,sessionGeneration:1,capabilities:["projection-only"],
+                    limits:{maxFrameBytes:14680064,maxStringBytes:14680064,maxCollectionLen:16384,maxBatchLen:64,maxJsonDepth:32,maxBlobChunkBytes:262144}}));
+                } else if (row.method === "engine.ping") {
+                  process.stdout.write(frame({type:"response",id:row.id,result:{ok:true,mode:"projection-only"}}));
+                } else if (row.method === "ydoc.project" && row.params.contentKind === "plaintext" && row.params.updatesBase64[0] === "AAA=") {
+                  process.stdout.write(frame({type:"response",id:row.id,result:{contentBase64:"",sourceStateVectorSha256:"a".repeat(64)}}), () => process.exit(0));
+                } else { throw new Error("Unexpected projection fixture request"); }
+              }
+            });
+          `)}], options);
+        }
+        return originalSpawn(command, args, options);
+      };
+      syncBuiltinESMExports();
     }
     await import(${JSON.stringify(mainUrl.href)});`,
   ];
@@ -971,7 +1008,7 @@ function sendDoubleTerminationSignal(child: ChildProcess): void {
 }
 
 describe("sync relay startup guards", () => {
-  it.skipIf(projectionEngine.missing)("starts an empty self-host deployment with supported live defaults and reports readiness", async () => {
+  it("starts an empty self-host deployment with supported live defaults and reports readiness", async () => {
     const root = await tempRoot("self-host-ready"), configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
     initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
     const relay = await spawnRunningRelay(relayPath, {DOHC_SELF_HOST_LIVE: "1", SYNC_RELAY_DB_PATH: undefined,
@@ -979,6 +1016,7 @@ describe("sync relay startup guards", () => {
       DOHC_RELAY_ENGINE_EXECUTABLE: projectionEngine.require(), DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1", DOHC_RELAY_PUBLIC_ORIGIN: "https://relay.example.test",
       DOHC_RELAY_SHARE_WEB_ORIGIN: "https://share.example.test", DOHC_RELAY_NAMED_LIVE_HOSTS: "relay.example.test",
       DOHC_RELAY_EXCHANGE_KEY: "x".repeat(32), DOHC_RELAY_LINK_KEY: "y".repeat(32)});
+    expect(relay.stderr()).toContain("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1");
     // The empty deployment must complete its engine handshake and first pass.
     await vi.waitFor(async () => {
       const response = await fetch(`${relay.baseUrl}/ready`);
@@ -1065,8 +1103,27 @@ describe("sync relay startup guards", () => {
     SYNC_RELAY_PORT: "0",
     FORCE_COLOR: "0",
     DOHC_RELAY_ENGINE_EXECUTABLE: projectionEngine.path ?? undefined,
-    DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
+    DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: undefined,
   } as const;
+
+  it.each(["development", "test"])("warns when projection development opt-in is honored in %s", async nodeEnv => {
+    const root = await tempRoot("projection-warning");
+    const relay = await spawnRunningRelay(join(root,"relay.sqlite"), {NODE_ENV:nodeEnv,
+      DOHC_RELAY_ENGINE_EXECUTABLE:process.execPath, DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION:"1"}, {projectionHandshake:true});
+    expect(relay.stderr()).toContain("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1");
+  });
+
+  it.each(["production", "staging", undefined])("refuses the projection development flag outside development/test: %s", async nodeEnv => {
+    for (const flag of ["0", "1"]) {
+      const root = await tempRoot("projection-production-opt-in");
+      const {code, stderr} = await spawnRelayExpectExit({...productionEnv, NODE_ENV:nodeEnv,
+        SYNC_RELAY_DB_PATH:undefined, DOHC_RELAY_DEPLOYMENT_CONFIG:join(root,"must-not-open.json"),
+        DOHC_RELAY_ENGINE_EXECUTABLE:process.execPath, DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION:flag});
+      expect(code).toBe(1);
+      expect(stderr).toContain("DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION is allowed only in development/test.");
+      await expect(access(join(root,"relay.sqlite"))).rejects.toMatchObject({code:"ENOENT"});
+    }
+  });
 
   it.each(["true", "", "2"])("refuses invalid projection development opt-in before opening storage: %j", async value => {
     const dbPath = join(await tempRoot("projection-invalid-opt-in"), "relay.sqlite");
@@ -1101,15 +1158,17 @@ describe("sync relay startup guards", () => {
     await expect(access(dbPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it.skipIf(projectionEngine.missing)("keeps public Edit routes closed in production without a release marker", async () => {
+  it("keeps public Edit routes closed in production without a release marker", async () => {
     const root = await tempRoot("closed-public-edit-release");
     const configPath = join(root, "deployment.json"), relayPath = join(root, "relay", "relay.sqlite");
     initializeRelayDeployment({configPath, relayPath, continuityDirectory: join(root, "continuity")});
-    const baseUrl = await spawnRelay(relayPath, {
-      ...productionEnv, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
+    const relay = await spawnRunningRelay(relayPath, {
+      ...productionEnv,
+      DOHC_RELAY_ENGINE_EXECUTABLE: process.execPath, SYNC_RELAY_DB_PATH: undefined, DOHC_RELAY_DEPLOYMENT_CONFIG: configPath,
       DOHC_PUBLIC_EDIT_RELEASE: undefined, DOHC_RELAY_LINK_LIVE: undefined,
       DOHC_RELAY_NAMED_LIVE_CONFIG: undefined, DOHC_RELAY_NAMED_BROWSER_SESSION_LIMITS: undefined,
-    });
+    }, {projectionHandshake: true});
+    const baseUrl = relay.baseUrl;
     expect((await fetch(baseUrl + "/health")).status).toBe(200);
     for (const path of ["/sync/live/link-tickets", "/sync/live/link-session", "/sync/live/link-document"]) {
       expect((await fetch(baseUrl + path, {method: "POST"})).status).toBe(404);

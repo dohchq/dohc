@@ -88,6 +88,7 @@ export async function spawnSyncRelay(input: {
               DOHC_RELAY_DEPLOYMENT_CONFIG: join(deployment, "deployment.json"),
               DOHC_RELAY_SERVICE_HOST_ROOT: join(deployment, "live-host"),
               DOHC_RELAY_ENGINE_EXECUTABLE: input.editLinks.engineExecutable,
+              DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
               DOHC_RELAY_PUBLIC_ORIGIN: input.editLinks.publicOrigin ?? "https://relay.example.com",
               DOHC_RELAY_NAMED_LIVE_HOSTS: new URL(input.editLinks.publicOrigin ?? "https://relay.example.com").host,
               ...input.editLinks.trustEnv,

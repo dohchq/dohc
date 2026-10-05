@@ -245,6 +245,8 @@ if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined) fatal("FAT
 const projectionExecutable = process.env.DOHC_RELAY_ENGINE_EXECUTABLE;
 const projectionOptIn = process.env.DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION;
 if (projectionOptIn !== undefined && !["0", "1"].includes(projectionOptIn)) fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION must be 0 or 1.");
+if (projectionOptIn !== undefined && !isDevOrTest) fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION is allowed only in development/test.");
+if (projectionOptIn === "1") console.warn("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1 permits document projection without OS memory isolation on non-Linux platforms.");
 if (!isDevOrTest && !projectionExecutable) fatal("FATAL: Document sharing requires DOHC_RELAY_ENGINE_EXECUTABLE outside development/test.");
 const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
   allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
