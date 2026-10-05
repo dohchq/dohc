@@ -98,6 +98,8 @@ import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
+import { useGoToIndex } from "./shell/useGoToIndex";
+import type { GoToListing } from "./workbench/quick-open-rank";
 import { useHistoryPage } from "./shell/useHistoryPage";
 import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
 import {
@@ -588,6 +590,20 @@ export function DesktopWorkspaceShell(props: {
     id: number;
   } | null>(null);
   const [wb, setWbState] = useState<WorkbenchState>(defaultWorkbenchState);
+  const goToListing = useMemo<GoToListing>(() => ({
+    files,
+    folders,
+    // The listing-visibility PR supplies trusted rule verdicts here.
+    visibility: { status: "unavailable", hiddenHostPaths: new Set<string>() },
+    receivedRoots: props.workspace.shareView
+      ? [{ path: "", ended: !!props.workspace.shareView.ended, damaged: !!props.workspace.shareView.damaged }]
+      : workspaceShareMounts.map(mount => ({
+          path: "shared-with-me/" + mount.label, ended: !!mount.ended, damaged: !!mount.damaged,
+        })),
+  }), [files, folders, props.workspace.shareView, workspaceShareMounts]);
+  const goToIndex = useGoToIndex(props.workspace.workspaceId, { listing: goToListing }, {
+    pinned: wb.pinned, recent: wb.recentFiles,
+  }, fileListingCommit !== null);
   // wbRef holds the newest workbench, set with each write rather than after
   // commit. Handlers read it to choose what to act on, and a keydown can
   // arrive between a commit and React's passive effects.
@@ -5602,6 +5618,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       {quickOpenOpen ? (
         <QuickOpenPalette
+          namesIndex={goToIndex}
           files={files}
           recent={wb.recentFiles}
           pinned={wb.pinned}
