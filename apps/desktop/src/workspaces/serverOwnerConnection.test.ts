@@ -25,6 +25,7 @@ it("discovers only owned synced workspaces and sends credentials only to their p
     {...f.workspace, workspaceId: "bootstrapping", joinBootstrapPending: true}]);
   expect(f.connection.workspaceIds()).toEqual(["workspace"]);
   const session = await f.connection.connect(f.workspace, new AbortController().signal);
+  expect(session).toMatchObject({bearer: "secret", accountId: "owner"});
   expect(await session!.documents(new AbortController().signal)).toEqual({ok: true, documents: []});
   expect(await session!.documents(new AbortController().signal)).toEqual({ok: true, documents: []});
   expect(f.fetch).toHaveBeenCalledTimes(1);
