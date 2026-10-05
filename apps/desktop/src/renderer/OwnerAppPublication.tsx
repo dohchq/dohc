@@ -9,6 +9,7 @@ import { Overlay } from "./Overlay";
 import { OwnerAppResponses } from "./OwnerAppResponses";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 
 type Prepared = Extract<OwnerAppPublicationResult, { kind: "prepared" }>;
 type Publication = Extract<OwnerAppPublicationResult, { kind: "listed" }>["publications"][number];
@@ -417,7 +418,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
             <div className="flex gap-2"><SecondaryButton aria-label="Reload local apps" disabled={localLoading || !!busy || responsesBusy} onClick={() => setLocalReload(value => value + 1)}>Reload</SecondaryButton>
               <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => void prepareLocal()}>{localPreparing ? "Preparing app…" : "Prepare for this device"}</SecondaryButton></div></div>
           <p className="mb-0 mt-1 text-[12px] text-muted">Run this app with its data here. No account or link needed.</p>
-          {localLoading ? <p role="status" className="mb-0 text-[12px] text-muted">Loading local apps…</p> : localError ?
+          {localLoading ? <SkeletonRows rows={2} label="Loading local apps…" className="mt-3" /> : localError ?
             <p role="alert" className="mb-0 text-[13px] text-danger">{localError}</p> : localPublications.length === 0 ?
               <p className="mb-0 mt-2 text-[12px] text-muted">No app approved on this device yet. Prepare it to review its source and data access.</p> : <ul className="m-0 mt-3 list-none space-y-3 p-0">
                 {localPublications.map(publication => <li key={publication.publicationId} className="flex items-start justify-between gap-3">
@@ -438,7 +439,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
         <div className="border-b border-line pb-4">
           <div className="flex items-center justify-between gap-3"><h3 className="m-0 text-[13px] font-medium text-ink">Publications</h3>
             <SecondaryButton disabled={publicationsLoading || !!busy || responsesBusy} onClick={() => setPublicationsReload(value => value + 1)}>Reload publications</SecondaryButton></div>
-          {publicationsLoading ? <p role="status" className="mb-0 text-[12px] text-muted">Loading publications…</p> : publicationsError ?
+          {publicationsLoading ? <SkeletonRows rows={2} label="Loading publications…" className="mt-3" /> : publicationsError ?
             <p role="alert" className="mb-0 text-[13px] text-danger">{publicationsError}</p> : publications.length === 0 ?
               <p className="mb-0 text-[12px] text-muted">No publications.</p> : <ul className="m-0 mt-3 list-none space-y-3 p-0">
                   {publications.map(publication => <li key={publication.publicationId} className="flex items-center justify-between gap-3">
@@ -475,7 +476,7 @@ function PublicationDialog(props: PublicationProps & { onClose: () => void; onRe
             className="mt-2 w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] text-ink focus:border-ink">
             <option value="">Choose a link</option>{links.map(link => <option key={link.grantId} value={link.grantId}>{linkLabel(link)}</option>)}
           </select></label>
-        {loading ? <p role="status" className="m-0 text-[13px] text-muted">Loading links…</p> : loadError ? <div><p role="alert" className="text-[13px] text-danger">{loadError}</p><SecondaryButton onClick={() => setReload(value => value + 1)}>Reload links</SecondaryButton></div> : links.length === 0 ?
+        {loading ? <SkeletonRows rows={2} label="Loading links…" /> : loadError ? <div><p role="alert" className="text-[13px] text-danger">{loadError}</p><SecondaryButton onClick={() => setReload(value => value + 1)}>Reload links</SecondaryButton></div> : links.length === 0 ?
           <p className="m-0 text-[13px] text-muted">No active links include this app's source folder.</p> : null}
         {props.onShareSource ? <div className="flex items-center justify-between gap-3"><p className="m-0 text-[12px] text-muted">Create a link that includes this app's source files.</p>
           <SecondaryButton disabled={!!busy || responsesBusy} onClick={() => { props.onClose(); props.onShareSource?.(); }}>Share app folder</SecondaryButton></div> : null}

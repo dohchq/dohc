@@ -5,7 +5,7 @@ import { EngineMomentDiffPage } from "./workbench/EngineMomentDiffPage";
 import { StopAndRestoreDialog, useStopAndRestore } from "./StopAndRestoreDialog";
 import { useRecordHistory } from "./collections/useRecordHistory";
 import { hasBlockingModal } from "./modalFocus";
-import { PanelLoading } from "./workbench/PanelLoading";
+import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import { isSharedWithMePath } from "@dohc/workspace-core/paths";
 import { Bot, Check, ChevronRight, CircleHelp, Copy, Eye, RefreshCw, Search, Send, User } from "lucide-react";
 import {
@@ -4111,7 +4111,7 @@ export function DesktopWorkspaceShell(props: {
         </button>
       </div>
     ) : (
-      <PanelLoading label="history" />
+      <SkeletonRows layout="panel" label="Loading history..." />
     )
   ) : (
     // One line, per the empty-state recipe (copy.md): what is missing plus
@@ -4911,7 +4911,7 @@ export function DesktopWorkspaceShell(props: {
               resetKeys={[tabPath, workspaceId, versionEpoch]}
             >
             {isGraphTabPath(tabPath) ? (
-              <Suspense fallback={<PanelLoading label="graph" />}>
+              <Suspense fallback={<SkeletonRows layout="panel" label="Loading graph..." />}>
                 <LazyGraphView
                   workspaceId={workspaceId}
                   activePath={activeDocumentPath}
@@ -4942,7 +4942,7 @@ export function DesktopWorkspaceShell(props: {
                   // and must not state a capability either: neither read the
                   // shell has done proves anything about what main recorded,
                   // so this window gets a load state, not a claim.
-                  <PanelLoading label="history" />
+                  <SkeletonRows layout="panel" label="Loading history..." />
                 ) : (
                   // Main decided, and the answer was no recorder — or the
                   // renderer's own read failed, which asserts nothing. The
@@ -4994,7 +4994,7 @@ export function DesktopWorkspaceShell(props: {
                   // and must not state a capability either: neither read the
                   // shell has done proves anything about what main recorded,
                   // so this window gets a load state, not a claim.
-                  <PanelLoading label="versions" />
+                  <SkeletonRows layout="panel" label="Loading versions..." />
                 ) : (
                   // Main decided, and the answer was no recorder — or the
                   // renderer's own read failed, which asserts nothing. One
@@ -5017,8 +5017,10 @@ export function DesktopWorkspaceShell(props: {
                 />
               )
             ) : isChatsTabPath(tabPath) ? (
-              captureAvailable ? (
-                <Suspense fallback={<PanelLoading label="Chats" />}>
+              // Each loading state of the tab puts its lines at the top, so
+              // each one takes over from the last without blinking.
+              <SkeletonSlot>{captureAvailable ? (
+                <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading Chats..." />}>
                   <LazyChatsView
                     key={`${workspaceId}:${tabPath}:${chatEditors.get(tabPath).generation}:${chatEditors.get(tabPath).revision}`}
                     {...chatsViewProps}
@@ -5050,7 +5052,7 @@ export function DesktopWorkspaceShell(props: {
                 </div>
               ) : !captureDecided ? (
                 // Main has not decided yet — a load state, not a claim.
-                <PanelLoading label="Chats" />
+                <SkeletonRows inSlot layout="panel" label="Loading Chats..." />
               ) : (
                 // Main decided, and the answer was no capture: the engine flag
                 // is off, the settings file is unreadable, or the capture
@@ -5062,10 +5064,10 @@ export function DesktopWorkspaceShell(props: {
                 >
                   {chatsOffCopy(syncStatus)}
                 </div>
-              )
+              )}</SkeletonSlot>
             ) : isSiteTabPath(tabPath) ? (
               groupSiteRoot ? (
-                <Suspense fallback={<PanelLoading label="app" />}>
+                <Suspense fallback={<SkeletonRows layout="panel" label="Loading app..." />}>
                   <LazySitePreviewPage
                     workspaceId={workspaceId}
                     reportError={reportShellError}
@@ -5087,7 +5089,10 @@ export function DesktopWorkspaceShell(props: {
                 />
               )
             ) : groupDataCollection ? (
-              <Suspense fallback={<PanelLoading label="collection" />}>
+              // The view opens its Collection at the same place its fallback
+              // stands, so those lines take over without blinking.
+              <SkeletonSlot>
+              <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading collection..." />}>
                 <LazyTransactionalCollection key={`${workspaceId}:${tabPath}`} workspaceId={workspaceId}
                   datasetPath={groupDataCollection.datasetPath} tableId={groupDataCollection.tableId}
                   onOpenFile={(path) => openFile(path)}
@@ -5101,9 +5106,11 @@ export function DesktopWorkspaceShell(props: {
                     openVirtualTab(siteTabPath(appRoot));
                   }} />
               </Suspense>
+              </SkeletonSlot>
             ) : isCollectionTabPath(tabPath) ? (
               groupCollectionPath ? (
-                <Suspense fallback={<PanelLoading label="collection" />}>
+                <SkeletonSlot>
+                <Suspense fallback={<SkeletonRows inSlot layout="panel" label="Loading collection..." />}>
                   <LazyCollectionPage
                     key={`${tabPath}:${collectionLineage}`}
                     workspaceId={workspaceId}
@@ -5127,6 +5134,7 @@ export function DesktopWorkspaceShell(props: {
                     onAutomationFocused={clearAutomationFocus}
                   />
                 </Suspense>
+                </SkeletonSlot>
               ) : (
                 // A persisted tab whose path names no collection folder
                 // (hand-edited or truncated state). Closeable, never a crash.
@@ -5800,9 +5808,11 @@ export function DesktopWorkspaceShell(props: {
         <Overlay onClose={() => setShareTarget(null)}>
           <Suspense
             fallback={
-              <div className="rounded-md border border-line bg-panel px-4 py-3 text-xs text-subtle shadow-lg">
-                Loading share dialog...
-              </div>
+              // The share dialog's own card, so the dialog lands in its place.
+              <SkeletonRows
+                label="Loading share dialog..."
+                className="dohc-elevated w-105 rounded-xl border border-line bg-panel p-5"
+              />
             }
           >
             <LazyRelayShareDialog
