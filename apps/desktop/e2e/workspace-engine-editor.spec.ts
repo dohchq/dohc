@@ -151,9 +151,14 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
 });
 
 async function quitDesktop(desktop: Awaited<ReturnType<typeof launchDesktopApp>>) {
-  const exited = new Promise<void>(resolve => desktop.app.process().once("exit", () => resolve()));
+  const startedAt = performance.now();
+  const exited = new Promise<{ durationMs: number; exitCode: number | null }>(resolve =>
+    desktop.app.process().once("exit", exitCode => resolve({durationMs: performance.now() - startedAt, exitCode})));
   await desktop.app.evaluate(({app}) => {app.quit();});
-  await exited;
+  const duration = await exited;
+  await test.info().attach("quit-duration", {
+    body: JSON.stringify({...duration, budgetMs: 6000}), contentType: "application/json",
+  });
   await desktop.close();
 }
 

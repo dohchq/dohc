@@ -5,7 +5,7 @@ import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh}
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
-import { preserveLiveDraft, preserveUnsentLiveDraft } from "./workspaces/liveDraftRecovery";
+import { preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
   createDesktopWorkspaceCallbacks,
@@ -1773,7 +1773,10 @@ function removePhysicalWorkspace(
   beforeRegistryRemoval: () => void | Promise<void> = () => undefined,
 ): Promise<void> {
   return workspaceAuthorities.retireBinding(binding, {
-    finalize: beforeRegistryRemoval,
+    finalize: async () => {
+      await beforeRegistryRemoval();
+      await removeWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), binding.workspaceId);
+    },
     removeBinding: () => {
       const current = findWorkspace(binding.workspaceId);
       if (!current || current.rootPath !== binding.registeredRootPath) {

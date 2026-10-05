@@ -2448,10 +2448,18 @@ export function createWorkspaceEngineCapture(
               retired.destroy();
             },
             preserveUnsentState: options.preserveUnsentState ? async doc => {
-              if (!sessionObjectId || opened === null) throw new Error("Y.Doc recovery has no object identity.");
-              await options.preserveUnsentState!({
-                path: input.path, objectId: sessionObjectId, contentKind: opened.contentKind, doc,
-              });
+              try {
+                if (!sessionObjectId || opened === null) throw new Error("Y.Doc recovery has no object identity.");
+                await options.preserveUnsentState!({
+                  path: input.path, objectId: sessionObjectId, contentKind: opened.contentKind, doc,
+                });
+              } catch (error) {
+                const name = input.path.split("/").at(-1) ?? input.path;
+                const message = `Unsent changes to ${name} are not saved. ${errorMessage(error)} Copy them from the open document before you quit dohc.`;
+                onError(`draft preservation of ${input.path}`, error);
+                input.onEditRefused?.("draft-preservation", message);
+                throw error;
+              }
             } : undefined,
             onLocalEditError: requestReconnect,
             onLocalUpdateAcknowledged: (id) => {
@@ -3806,6 +3814,7 @@ export function createWorkspaceEngineCapture(
                   expectedObjectId: adoption.objectId,
                   contentKind: "richdoc",
                   seedAbsentLineage: true,
+                  // File-backed adoption state needs no draft writer; terminal eviction releases its lease.
                   onRemoteUpdate: () => undefined,
                 });
                 retained = { binding, provider };

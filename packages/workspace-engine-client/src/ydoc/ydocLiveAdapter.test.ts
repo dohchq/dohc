@@ -2740,7 +2740,10 @@ describe("YdocLiveAdapter", () => {
     ]);
   });
 
-  it.each(["saved", "refused", "unavailable"] as const)("sets aside unsent text before terminal eviction: %s", async recovery => {
+  it.each([
+    ["evict", "saved"], ["evict", "refused"], ["evict", "unavailable"],
+    ["close", "saved"], ["close", "refused"], ["close", "unavailable"],
+  ] as const)("handles unsent state before terminal %s: %s", async (release, recovery) => {
     const engine = seedPlaintextEngine();
     const busy = new DaemonRefusalError(
       {
@@ -2774,7 +2777,7 @@ describe("YdocLiveAdapter", () => {
           records += 1;
           throw records <= 2 ? busy : terminal;
         }
-        if (request.method === YDOC_METHOD.evict) evictions.push("evict");
+        if (request.method === YDOC_METHOD.evict || request.method === YDOC_METHOD.close) evictions.push(release);
         return engine.sendRequest(request);
       },
     };
@@ -2799,16 +2802,24 @@ describe("YdocLiveAdapter", () => {
 
     const completeText = provider.doc.getText("plainText").toString();
     expect(completeText).toContain("typed against a terminal engine");
+    const releaseProvider = () => release === "close" ? provider.close({ settle: false }) : provider.evict();
     if (recovery === "saved") {
-      const evicting = provider.evict();
-      await handoffStarted;
+      const releasing = releaseProvider();
+      // A settling error after successful release is still reported by close.
+      const outcome = releasing.catch((error: unknown) => error);
+      expect(await Promise.race([handoffStarted.then(() => true), outcome.then(() => false)])).toBe(true);
       expect(evictions).toEqual([completeText]);
       completeHandoff();
-      await expect(evicting).resolves.toBeUndefined();
-      expect(evictions).toEqual([completeText, "evict"]);
+      if (release === "close") expect(await outcome).toBeInstanceOf(YdocReleasedWithSettleFailureError);
+      else expect(await outcome).toBeUndefined();
+      expect(evictions).toEqual([completeText, release]);
+    } else if (recovery === "refused") {
+      await expect(releaseProvider()).rejects.toThrow("draft storage refused");
+      expect(evictions).not.toContain(release);
     } else {
-      await expect(provider.evict()).rejects.toThrow(recovery === "refused" ? "draft storage refused" : "conflict-stale-target");
-      expect(evictions).not.toContain("evict");
+      if (release === "close") await expect(releaseProvider()).rejects.toBeInstanceOf(YdocReleasedWithSettleFailureError);
+      else await expect(releaseProvider()).resolves.toBeUndefined();
+      expect(evictions).toEqual([release]);
     }
   });
 

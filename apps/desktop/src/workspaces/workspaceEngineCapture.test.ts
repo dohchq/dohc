@@ -29,6 +29,7 @@ import {
   YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
   type WorkspaceEngineCapture,
+  type WorkspaceEngineCaptureOptions,
   type WorkspaceEngineCaptureFailure,
 } from "./workspaceEngineCapture";
 import {
@@ -89,6 +90,7 @@ const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
 interface CaptureOptions {
+  preserveUnsentState?: WorkspaceEngineCaptureOptions["preserveUnsentState"];
   store?: CaptureVersionedTextStore;
   now?: () => number;
   createId?: () => string;
@@ -1516,6 +1518,35 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(rendererDoc.getText("content").toString()).toBe("base+remote");
     expect(forwarded).toEqual([bufferedUpdate]);
     await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("reports failed draft preservation through the existing edit error hook and refuses release", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed"});
+    const draftError = new Error("Draft storage refused.");
+    const notices = vi.fn();
+    const errors = vi.fn();
+    const released = vi.fn();
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback), onError: errors,
+      preserveUnsentState: async () => {throw draftError;},
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "richdoc",
+          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          settleNow: async () => ({sha256: "a".repeat(64), content: "seed"}) as never,
+          close: async () => { await options.preserveUnsentState!(doc); released(); },
+        } as EngineYdocProviderSession;
+      },
+    });
+    const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined, onEditRefused: notices});
+    await expect(session.close({settle: false})).rejects.toBe(draftError);
+    expect(released).not.toHaveBeenCalled();
+    expect(notices).toHaveBeenCalledWith("draft-preservation", "Unsent changes to a.md are not saved. Draft storage refused. Copy them from the open document before you quit dohc.");
+    expect(errors).toHaveBeenCalledWith("draft preservation of notes/a.md", draftError);
     await engine.stop();
   });
 
