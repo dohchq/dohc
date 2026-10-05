@@ -2898,6 +2898,17 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
     },
     Migration {
         ordinal: 30,
+        id: "v2-retained-head-export-attempts",
+        sql: "CREATE INDEX replication_log_moment_object ON replication_log( \
+                workspace_id,json_extract(payload_json,'$.versionId'), \
+                json_extract(payload_json,'$.objectId')) WHERE op_kind='moment.append'; \
+              ALTER TABLE ydoc_docs ADD COLUMN export_attempt_moment_id TEXT; \
+              ALTER TABLE ydoc_docs ADD COLUMN export_attempt_update_seq INTEGER; \
+              ALTER TABLE ydoc_docs ADD COLUMN export_attempt_snapshot_seq INTEGER;",
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 32,
         id: "v2-persisted-links",
         sql: include_str!("links.sql"),
         sets_user_version: None,
@@ -3343,6 +3354,10 @@ mod tests {
             (
                 "v2-live-admitted-metadata-receipts",
                 "384caa34711fd4cc1431c153d3e567f33b4c99e8f5428175f7c76c64f7ef83c3",
+            ),
+            (
+                "v2-retained-head-export-attempts",
+                "ba1421193e0df1585620c17a25e4a1e085340eb5669438b0e23046351b7073df",
             ),
             (
                 "v2-persisted-links",

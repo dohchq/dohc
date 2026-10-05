@@ -418,6 +418,15 @@ fn thousand_note_backlog_wakes_on_parser_completion() {
         );
     }
     assert_eq!(count(&s, "link_pending"), NOTES as i64);
+    let mut worker = DrainWorker::new(SharedMetrics::default()).unwrap();
+    let delay = worker.tick(&mut s);
+    assert!(worker.waiting_for_parser());
+    assert_eq!(
+        delay,
+        Duration::MAX,
+        "parser jobs must wait for completion, not a polling timer"
+    );
+    drop(worker);
     drop(s);
     let observer = EngineStore::open_read_only(&db).unwrap();
     let supervisor = crate::WorkspaceSupervisor::new();
@@ -441,12 +450,6 @@ fn thousand_note_backlog_wakes_on_parser_completion() {
     );
     drop(observer);
     supervisor.close(&db).unwrap();
-    // Allow parser work, actor startup, and shared-host scheduling noise.
-    // A timer tick per document dominates this allowance on Windows.
-    assert!(
-        elapsed <= ticks * 3 + Duration::from_millis(250),
-        "parser completion must wake the actor: elapsed={elapsed:?}, ticks={ticks:?}"
-    );
 }
 
 #[test]
