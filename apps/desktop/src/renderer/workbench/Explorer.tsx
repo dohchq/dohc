@@ -318,7 +318,6 @@ export const TreeRow = memo(function TreeRow(props: {
   collection: boolean;
   selected: boolean;
   active: boolean;
-  focused: boolean;
   tabbable: boolean;
   dropPreview: RowDropPreview | null;
   registerRef: (path: string, el: HTMLButtonElement | null) => void;
@@ -369,19 +368,18 @@ export const TreeRow = memo(function TreeRow(props: {
         onDrop={(event) => props.onRowDrop(row.fullPath, event)}
         onDragLeave={props.onRowDragLeave}
         onDragEnd={props.onRowDragEnd}
-        // One selected fill, a weight and a ring (VS Code list semantics):
-        // the ACTIVE-tab row and selected-not-active rows share the selected
-        // fill (Delete/drag act on the whole selection), the active row
+        // One selected fill and a weight (VS Code list semantics): the
+        // ACTIVE-tab row and selected-not-active rows share the selected
+        // fill (Delete/drag act on the whole selection), and the active row
         // alone is medium weight so it still reads inside a multi-selection
-        // once the tree loses focus, and the keyboard-FOCUSED row adds an
-        // inset ring. An attenuated fill for the selected-not-active rows
-        // sat between hover and selected, too close to either to read. The
-        // drag drop-target is a filled tint (list.drop-Background style) —
-        // box-shadow/background only, never `outline`:
-        // the base outline-none nulls --tw-outline-style later in the same
-        // cascade layer, which made an outline-based highlight unrenderable.
+        // once the tree loses focus. An attenuated fill for the
+        // selected-not-active rows sat between hover and selected, too close
+        // to either to read. The keyboard-focused row keeps the global
+        // accent focus outline, which holds 3:1 against every fill. The
+        // drag drop-target is a filled tint with a solid bar (list.drop-
+        // Background style).
         style={{ height: TREE_ROW_HEIGHT }}
-        className={`relative flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] outline-none transition-colors duration-75 ${
+        className={`relative flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] transition-colors duration-75 ${
           props.dropPreview
             ? dropClass
             : props.active
@@ -389,7 +387,7 @@ export const TreeRow = memo(function TreeRow(props: {
               : props.selected
                 ? "bg-selected text-ink"
                 : "text-muted hover:bg-hover hover:text-ink"
-        } ${props.focused ? "ring-1 ring-inset ring-ink/30" : ""}`}
+        }`}
       >
         {props.dropPreview ? (
           <span
@@ -1592,7 +1590,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           collection={row.isFolder && props.collectionFolders.has(row.fullPath)}
           selected={selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
-          focused={focusedPath === row.fullPath}
           tabbable={tabbablePath === row.fullPath}
           dropPreview={dropPreviewForRow(row)}
           registerRef={registerRef}
@@ -1767,7 +1764,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               type="button"
                               title={tab.path}
                               onClick={() => props.onActivateTab(group.id, tab.path)}
-                              className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-0 pl-8 pr-2 text-left text-[13px] outline-none"
+                              className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-0 pl-8 pr-2 text-left text-[13px]"
                             >
                               <OpenEditorIcon
                                 path={tab.path}

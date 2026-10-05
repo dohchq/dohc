@@ -135,7 +135,6 @@ function Row(props: {
   folder?: boolean;
   selected?: boolean;
   active?: boolean;
-  focused?: boolean;
   drop?: boolean;
   force?: string;
 }) {
@@ -146,7 +145,6 @@ function Row(props: {
         collection={false}
         selected={props.selected ?? false}
         active={props.active ?? false}
-        focused={props.focused ?? false}
         tabbable={false}
         dropPreview={props.drop ? { kind: "move", role: "target" } : null}
         {...treeRowCallbacks}
@@ -473,9 +471,11 @@ function Pane(props: { theme: "light" | "dark" }) {
         <ul role="tree" aria-label="Rows" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
           <Row name="rest" folder />
           <Row name="hover" force="hover" />
+          <Row name="focused" force="focus-visible" />
           <Row name="selected" selected />
+          <Row name="focused, selected" selected force="focus-visible" />
           <Row name="active" active />
-          <Row name="focused" focused />
+          <Row name="focused, hover" force="hover focus-visible" />
           <Row name="drop target" folder drop />
         </ul>
       </Section>
