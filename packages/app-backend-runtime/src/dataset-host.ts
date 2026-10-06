@@ -1,3 +1,4 @@
+import { parseApprovalAgent, type ApprovalAgent } from "@dohc/security-contract/approval-provenance";
 import { createHash, randomUUID } from "node:crypto";
 import { parseAppBackendCaller, parseAppBackendJson, type AppBackendCaller } from "@dohc/security-contract/app-backend";
 import { DATASET_UNDO_BYTES, datasetRevisionsPreserveAccess, describeApprovedDataset, parseDatasetRevision, type AppDatasetBinding, type DatasetDescription, type DatasetOperation, type DatasetRevision } from "@dohc/security-contract/dataset";
@@ -123,6 +124,7 @@ export interface DatasetHostOptions<Context> {
   };
 }
 export interface ActivateDatasetInput {
+  approvalAgent?: ApprovalAgent | null;
   workspaceId: string;
   revision: DatasetRevision;
   schemaSql: string;
@@ -428,14 +430,14 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       for(const [id,saved] of migrationCandidates)if(saved.candidate.expiresAtMs<=Date.now()||(saved.candidate.expected.workspaceId===key.workspaceId&&saved.candidate.expected.datasetId===key.datasetId))migrationCandidates.delete(id);
       migrationCandidates.set(candidate.candidateId,{candidate:structuredClone(candidate),authorityKey,approved,previous,schemaSql,source});return candidate;
     },
-    async approveMigration(context:Context,raw:DatasetScope & {candidateId:string;checkpointSha256:string;signal?:AbortSignal}):Promise<{revision:DatasetRevision;cursor:DatasetCursor}> {
+    async approveMigration(context:Context,raw:DatasetScope & {candidateId:string;checkpointSha256:string;approvalAgent?:ApprovalAgent|null;signal?:AbortSignal}):Promise<{revision:DatasetRevision;cursor:DatasetCursor}> {
       if(!options.supervisor.approveMigration)throw new DatasetHostError("invalid","This host cannot preview Collection changes.");
       const key=scope(raw),saved=migrationCandidates.get(text(raw.candidateId));
       if(!saved||saved.candidate.expected.workspaceId!==key.workspaceId||saved.candidate.expected.datasetId!==key.datasetId)throw new DatasetHostError("conflict","This preview is no longer available. Preview the change again.");
       const authorityKey=hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]));
       const authorize=()=>{raw.signal?.throwIfAborted();live(key);if(hash(JSON.stringify([JSON.stringify(owner(context,key)),lifecycle(key).generation]))!==saved.authorityKey)denied();assertDatasetAttemptsCommitted(db,key);};
       authorize();
-      const cursor=await options.supervisor.approveMigration({scope:key,tables:saved.previous.definition.tables.map(table=>table.sqlName),candidateId:raw.candidateId,checkpointSha256:raw.checkpointSha256,authorityKey,authorize,signal:raw.signal,
+      const cursor=await options.supervisor.approveMigration({scope:key,tables:saved.previous.definition.tables.map(table=>table.sqlName),candidateId:raw.candidateId,checkpointSha256:raw.checkpointSha256,approvalAgent:raw.approvalAgent === undefined ? undefined : parseApprovalAgent(raw.approvalAgent),authorityKey,authorize,signal:raw.signal,
         accountStage(allocation){if(options.accountCheckpointStage)synchronous(()=>options.accountCheckpointStage!(context,allocation));},
         account(allocation){
           const row=db.prepare("SELECT revision_json,artifacts_json FROM dohc_dataset_catalog WHERE workspace_id=? AND dataset_id=?").get(key.workspaceId,key.datasetId);
@@ -622,7 +624,7 @@ export function createDatasetHost<Context>(options: DatasetHostOptions<Context>)
       const checkpoint = await initializeAppDatabase({ schemaSql, tables: approved.definition.tables.map(table => table.sqlName), signal, journaled: true }, options.runtime);
       authorize();
       journal.initialize({ scope: key, hostEpoch: randomUUID(), approvedRevisionHash: approved.revisionSha256, source: compiledSource, schemaSql,
-        definitionJson: JSON.stringify(approved), checkpoint, capacityBytes, authorize,
+        definitionJson: JSON.stringify(approved), checkpoint, capacityBytes, approvalAgent:raw.approvalAgent === undefined ? undefined : parseApprovalAgent(raw.approvalAgent), authorize,
         account(allocation) {
           const revisionJson = JSON.stringify(approved), artifactsJson = JSON.stringify({ schemaSql, operationSource: source });
           if (options.accountCreation) synchronous(() => options.accountCreation!(context, { ...key, ...allocation,

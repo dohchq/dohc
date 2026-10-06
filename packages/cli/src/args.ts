@@ -641,6 +641,7 @@ function jsonVerb(
 const workspaceNote =
   "Each verb takes one JSON object that names workspaceId. Find workspaceId in .dohc/manifest.json at the workspace root.";
 const migrationApproval = "Review the result, then approve it with approveMigration.";
+const agentLabelNote = "agentLabel is an optional label supplied by the agent. With --as-agent, and always through MCP, agentLabel is recorded as agent-declared. Without it, no agent identity is recorded. Automation runs cannot approve or publish.";
 
 const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   list: { summary: "List Collections." },
@@ -738,7 +739,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   prepare: { summary: "Capture existing Collection source for review." },
   approve: {
     summary: "Approve prepared source.",
-    notes: ["Take preparationId and revisionSha256 from the reviewed preparation."],
+    notes: ["Take preparationId and revisionSha256 from the reviewed preparation.", agentLabelNote],
   },
   discard: { summary: "Discard prepared source. The files stay in place." },
   prepareMigration: {
@@ -755,7 +756,7 @@ const DATASET_HELP: Record<DatasetRequest["action"], JsonVerbHelp> = {
   },
   approveMigration: {
     summary: "Apply a reviewed migration.",
-    notes: ["Take revisionSha256 and approvalDigest from the preparation. Approval applies the reviewed result without rerunning the SQL."],
+    notes: ["Take revisionSha256 and approvalDigest from the preparation. Approval applies the reviewed result without rerunning the SQL.", agentLabelNote],
   },
   discardMigration: { summary: "Discard a prepared migration." },
   invoke: {
@@ -773,6 +774,15 @@ const publicationFromList: readonly CliFieldSource[] = [
 ];
 
 const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
+  createLink: {
+    summary: "Create a scoped app link at View access by default.",
+    notes: [
+      "appRoot and paths resolve from your current folder (the workspace root through MCP). paths default to the app root. access defaults to view.",
+      "Generate operationId as a UUID for this creation. Reuse operationId for retries.",
+      "A link URL is a bearer credential at its stated access level, usable by anyone holding it. Append the published appQuery before the fragment of any link URL, including one returned by createLink.",
+      agentLabelNote,
+    ],
+  },
   listLocal: { summary: "List an app's publications on this computer." },
   prepareLocal: {
     summary: "Prepare an app to open on this computer.",
@@ -785,13 +795,29 @@ const APP_HELP: Record<OwnerAppPublicationRequest["action"], JsonVerbHelp> = {
   list: { summary: "List an app's shared publications." },
   prepare: {
     summary: "Prepare an app for a share link.",
+    take: [
+      { field: "shareId", from: "createLink", path: "shareId" },
+      { field: "grantId", from: "createLink", path: "grantId" },
+    ],
     notes: ["shareId and grantId name the share and its link grant. Review the result, then approve."],
   },
   approve: {
     summary: "Publish a prepared app.",
-    notes: ["Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation."],
+    take: [
+      { field: "approvalId", from: "prepare", path: "approvalId" },
+      { field: "candidateDigest", from: "prepare", path: "candidateDigest" },
+    ],
+    notes: [
+      "Take approvalId and candidateDigest from prepare, prepareLocal, or reviewReactivation. Append the returned appQuery before the fragment of any link URL, including one returned by createLink.",
+      "For linkReads, select operationId from the prepared dataset capability's operations and fieldIds from each operation's fields[].fieldId. These selections expose reads to link holders.",
+      agentLabelNote,
+    ],
   },
-  cancel: { summary: "Discard a prepared app before approval." },
+  cancel: {
+    summary: "Discard a prepared app before approval.",
+    take: [{ field: "approvalId", from: "prepare", path: "approvalId" }],
+    notes: ["Use approvalId from prepareLocal or reviewReactivation to cancel those preparations."],
+  },
   withdraw: {
     summary: "Stop a shared publication.",
     take: publicationFromList,

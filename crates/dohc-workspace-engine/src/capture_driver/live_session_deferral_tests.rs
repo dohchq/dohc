@@ -325,6 +325,128 @@ async fn a_held_recorded_file_changed_on_disk_keeps_capture_unsettled() {
     harness.close();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() {
+    use dohc_engine_collab::{
+        ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
+    };
+    use dohc_engine_domain::{CaptureIngest, VersionedTextStore};
+    use dohc_engine_storage::EngineStore;
+
+    let harness = Harness::new();
+    let path = "tasks/empty.md";
+    let mut store = EngineStore::open(&harness.db, 1).unwrap();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .unwrap();
+    let mut cache = WriterDocCache::new();
+    std::fs::create_dir_all(harness.root.join("tasks")).unwrap();
+    for (path, text) in [
+        (
+            "tasks/collection.yaml",
+            "fields:\n  Title:\n    type: text\n",
+        ),
+        (path, ""),
+    ] {
+        std::fs::write(harness.root.join(path), text).unwrap();
+        VersionedTextStore::new(&mut store)
+            .capture_ingest(
+                &CaptureIngest {
+                    workspace_id: WORKSPACE_ID.into(),
+                    version_id: "main".into(),
+                    path: path.into(),
+                    text: text.into(),
+                    metadata_origin: "capture".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 2,
+                    request_id: None,
+                    claim_foreign_head: false,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+    }
+    let head = VersionedTextStore::new(&mut store)
+        .read_text(WORKSPACE_ID, "main", path)
+        .unwrap()
+        .unwrap();
+    let key = harness.key(&head.object_id);
+    let doc = Ydoc::wire();
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "")
+        .unwrap();
+    dohc_engine_collab::record_local_update(
+        &mut store,
+        &mut cache,
+        &key,
+        &doc.encode_full_state(),
+        LocalAppend {
+            marker: Some(MarkerCreation {
+                path: Some(path),
+                content_kind: ContentKind::Richdoc,
+                regime: Regime::LocalOnly,
+            }),
+            seed_source_sha256: Some(&head.blob_sha256),
+            ..Default::default()
+        },
+        &NoFaults,
+        3,
+        |_tx, _outcome, _sha| Ok(()),
+    )
+    .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, WORKSPACE_ID, "main").unwrap();
+            tx.execute(
+                "INSERT INTO replication_log \
+                 (workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported) \
+                 VALUES (?1,'seed-origin',0,'ydoc.update',?2,4,0)",
+                rusqlite::params![
+                    WORKSPACE_ID,
+                    serde_json::json!({"versionId":"main","objectId":key.object_id}).to_string()
+                ],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)
+        })
+        .unwrap();
+    drop(store);
+    std::fs::write(harness.root.join(path), "- parent\n  - child\n").unwrap();
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .unwrap(),
+    );
+    assert!(!harness.capture(&files.handle()).await);
+    assert!(harness.status.degraded());
+    assert_eq!(files.handle().stats().await.unwrap().deferred, 0);
+    let switch = || {
+        reconcile_full_for_switch(
+            &harness.root,
+            &harness.actor,
+            WORKSPACE_ID,
+            &harness.leases,
+            &harness.status,
+            &harness.self_writes,
+            None,
+            CaptureProvenance::default(),
+            EngineEvents::default(),
+            CancellationToken::new(),
+        )
+    };
+    assert!(matches!(
+        switch().await,
+        Err(SwitchReconcileError::ApplyFailed)
+    ));
+    std::fs::write(harness.root.join(path), "Completed\n").unwrap();
+    assert!(
+        switch().await.is_ok(),
+        "a representable change recovers version reconciliation"
+    );
+    files.close().await;
+    harness.close();
+}
+
 // A version switch or fork captures the whole workspace first. A new file an
 // editor still holds is not recorded, so the switch must not go ahead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

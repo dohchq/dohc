@@ -41,7 +41,7 @@ interface MigrationAuthority {
   assertCurrent(): void;
   approvedArtifacts(datasetId: string): { revision: DatasetRevision; cursor: DatasetCursor; active: boolean } | Promise<{ revision: DatasetRevision; cursor: DatasetCursor; active: boolean }>;
   prepareMigrationCandidate(input: MigrateDatasetInput): Promise<DatasetMigrationCandidate>;
-  approveMigrationCandidate(input: { workspaceId: string; datasetId: string; candidateId: string; checkpointSha256: string; signal?: AbortSignal }): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
+  approveMigrationCandidate(input: { workspaceId: string; datasetId: string; candidateId: string; checkpointSha256: string; approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null; signal?: AbortSignal }): Promise<{ revision: DatasetRevision; cursor: DatasetCursor }>;
   discardMigrationCandidate(input: { workspaceId: string; datasetId: string; candidateId: string; signal?: AbortSignal }): Promise<unknown>;
 }
 type MigrationApproval = { preparationId: string; revisionSha256: string; approvalDigest: string; signal?: AbortSignal };

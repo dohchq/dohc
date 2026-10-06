@@ -1,6 +1,6 @@
 import { DohcMark } from "@dohc/brand";
 import { FolderOpen, Inbox, Laptop, MoreHorizontal } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
@@ -14,6 +14,7 @@ import { ConnectionNotices, useConnectionNotices } from "./shell/connectionNotic
 import { useCrashReport } from "./shell/useCrashReport";
 import { Titlebar, workspaceName } from "./Titlebar";
 import { IconButton, SecondaryButton } from "./ui/controls";
+import { Menu } from "./ui/Menu";
 import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
 
 // The workspace manager. It is the first-run screen and the "manage
@@ -102,7 +103,6 @@ function writeListWidth(width: number): void {
 }
 
 const ROW_MENU_WIDTH = 176;
-const ROW_MENU_ITEMS = ["reveal", "forget"] as const;
 
 function WorkspaceRow(props: {
   workspace: Workspace;
@@ -112,58 +112,7 @@ function WorkspaceRow(props: {
   onForget: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const [selected, setSelected] = useState(0);
-  // The list scrolls and clips; the menu is positioned against the viewport
-  // from the trigger's box so a bottom row's menu is never cut off.
-  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    function onPointerDown(event: PointerEvent) {
-      const target = event.target as Node;
-      if (menuRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
-      setMenuOpen(false);
-    }
-    window.addEventListener("pointerdown", onPointerDown);
-    return () => window.removeEventListener("pointerdown", onPointerDown);
-  }, [menuOpen]);
-
-  useLayoutEffect(() => {
-    if (!menuOpen) {
-      setMenuPosition(null);
-      return;
-    }
-    const trigger = triggerRef.current?.getBoundingClientRect();
-    if (!trigger) return;
-    const estimatedHeight = ROW_MENU_ITEMS.length * 28 + 8;
-    const below = trigger.bottom + 4;
-    const top =
-      below + estimatedHeight > window.innerHeight ? Math.max(4, trigger.top - 4 - estimatedHeight) : below;
-    setMenuPosition({ top, left: Math.max(4, trigger.right - ROW_MENU_WIDTH) });
-    setSelected(0);
-  }, [menuOpen]);
-
-  // Roving focus: the selected item holds focus, so arrow keys read as
-  // movement to assistive tech and Tab leaves the menu.
-  useEffect(() => {
-    if (menuOpen && menuPosition) itemRefs.current[selected]?.focus();
-  }, [menuOpen, menuPosition, selected]);
-
-  // Focus returns to the trigger on every close path except Tab, so keyboard
-  // users are not dropped on the document body.
-  function closeMenu(returnFocus: boolean) {
-    setMenuOpen(false);
-    if (returnFocus) triggerRef.current?.focus();
-  }
-
-  function runItem(item: (typeof ROW_MENU_ITEMS)[number]) {
-    closeMenu(true);
-    if (item === "reveal") props.onReveal();
-    else props.onForget();
-  }
+  const label = `More for ${workspaceName(props.workspace)}`;
 
   return (
     <li
@@ -198,83 +147,28 @@ function WorkspaceRow(props: {
             {openedLabel(props.workspace.lastOpenedAt)}
           </time>
         ) : null}
-        <IconButton
-          ref={triggerRef}
-          aria-label={`More for ${workspaceName(props.workspace)}`}
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          onClick={() => setMenuOpen((open) => !open)}
-          onKeyDown={(event) => {
-            if (event.key === "ArrowDown" && !menuOpen) {
-              event.preventDefault();
-              setMenuOpen(true);
-            }
-          }}
-          className={`col-start-1 row-start-1 ${
-            menuOpen ? "text-ink" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
-          }`}
-        >
-          <MoreHorizontal size={14} aria-hidden />
-        </IconButton>
-        {menuOpen ? (
-          <div
-            ref={menuRef}
-            role="menu"
-            aria-label={`More for ${workspaceName(props.workspace)}`}
-            tabIndex={-1}
-            style={{ top: menuPosition?.top, left: menuPosition?.left, width: ROW_MENU_WIDTH }}
-            className={`dohc-popover dohc-pop-in fixed z-20 rounded-lg border border-line bg-panel p-1 outline-none ${
-              menuPosition ? "" : "invisible"
-            }`}
-            onBlur={(event) => {
-              if (
-                !event.currentTarget.contains(event.relatedTarget) &&
-                !triggerRef.current?.contains(event.relatedTarget)
-              ) closeMenu(false);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-                event.preventDefault();
-                const delta = event.key === "ArrowDown" ? 1 : -1;
-                setSelected((index) => (index + delta + ROW_MENU_ITEMS.length) % ROW_MENU_ITEMS.length);
-              } else if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                runItem(ROW_MENU_ITEMS[selected]!);
-              } else if (event.key === "Escape") {
-                event.preventDefault();
-                event.stopPropagation();
-                closeMenu(true);
-              } else if (event.key === "Tab") {
-                closeMenu(false);
-              }
-            }}
-          >
-            <button
-              ref={(node) => { itemRefs.current[0] = node; }}
-              type="button"
-              role="menuitem"
-              tabIndex={-1}
-              data-selected={selected === 0 || undefined}
-              onMouseEnter={() => setSelected(0)}
-              onClick={() => runItem("reveal")}
-              className="flex h-7 w-full items-center rounded px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-ink data-selected:bg-selected data-selected:text-ink"
+        <Menu
+          label={label}
+          open={menuOpen}
+          onOpenChange={setMenuOpen}
+          width={ROW_MENU_WIDTH}
+          trigger={(trigger) => (
+            <IconButton
+              {...trigger}
+              aria-label={label}
+              title={label}
+              className={`col-start-1 row-start-1 ${
+                menuOpen ? "text-ink" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+              }`}
             >
-              Reveal in folder
-            </button>
-            <button
-              ref={(node) => { itemRefs.current[1] = node; }}
-              type="button"
-              role="menuitem"
-              tabIndex={-1}
-              data-selected={selected === 1 || undefined}
-              onMouseEnter={() => setSelected(1)}
-              onClick={() => runItem("forget")}
-              className="flex h-7 w-full items-center rounded px-2 text-left text-[13px] text-muted hover:bg-hover hover:text-danger data-selected:bg-selected data-selected:text-danger"
-            >
-              Forget
-            </button>
-          </div>
-        ) : null}
+              <MoreHorizontal size={14} aria-hidden />
+            </IconButton>
+          )}
+          items={[
+            { id: "reveal", label: "Reveal in folder", onSelect: props.onReveal },
+            { id: "forget", label: "Forget", danger: true, onSelect: props.onForget },
+          ]}
+        />
       </div>
     </li>
   );

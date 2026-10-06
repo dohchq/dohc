@@ -167,6 +167,7 @@ export interface KeyEnvelopeRow {
 }
 
 export interface SyncRelayShareRow {
+  creationProvenance?: { agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null; selector: unknown; access: string };
   labels?: ShareLabels;
   shareId: string;
   workspaceId: string;
@@ -368,6 +369,15 @@ export interface SyncRelayShareWithGrantRow {
 // a Collection's automations.yaml directly (ADR 0013), or null.
 export interface SyncRelayGrantedShareRow extends SyncRelayShareWithGrantRow {
   automationsGeneration: number | null;
+}
+
+export interface SyncRelayGrantedInventoryCursor {
+  grantId: string;
+}
+
+export interface SyncRelayGrantedInventoryPage {
+  granted: SyncRelayGrantedShareRow[];
+  nextCursor: SyncRelayGrantedInventoryCursor | null;
 }
 
 export interface SyncRelayLinkInventoryRow extends SyncRelayShareWithGrantRow {
@@ -826,7 +836,9 @@ export interface SyncRelayStorage {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
   }): void;
+  readLinkCreation(workspaceId: string, operationId: string, ownerUserId: string): { shareId: string; grantId: string; requestJson: string } | null;
   createFileLinkShare(input: {
+    operation?: { operationId: string; requestJson: string };
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
     credential: SyncRelayLinkCredentialRow;
@@ -967,6 +979,7 @@ export interface SyncRelayStorage {
     recipientUserId: string,
   ): SyncRelayShareGrantRow[];
   listSharesGrantedBy(granterUserId: string): SyncRelayGrantedShareRow[];
+  listSharesGrantedPage(granterUserId: string, workspaceId: string, cursor?: SyncRelayGrantedInventoryCursor): SyncRelayGrantedInventoryPage;
   listLinkGrantsByWorkspace(
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,

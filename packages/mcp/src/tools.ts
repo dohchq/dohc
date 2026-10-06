@@ -15,6 +15,7 @@ import { fileVersionError, fileVersionReason } from "@dohc/workspace-contracts/f
 import { databaseSyncStrategy, DOHC_METADATA_GUARD, frameworkConfigName, hasIgnoredSegment, hasWebDependency, hasWebScript, mediaTypeForPath, notARealFolderRefusal, outsideWorkspaceRefusal, packageManagerFromFiles, validateUserMaterializePath, validateUserReadPath, type DohcPathGuard, type DohcSiteConfig, type PackageJson, type SiteConfidence, type SiteDiagnostic, type SiteKind, type SiteScripts, type WorkspaceSite, isSharedWithMePath, safeRelativeConfigPath } from "@dohc/workspace-core";
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
+import { OwnerAppPublicationRequest } from "@dohc/cli/app-publication";
 import { DatasetRequest } from "@dohc/cli/dataset";
 import {
   CLI_PROTOCOL_VERSION,
@@ -1953,11 +1954,19 @@ async function requestCli<Verb extends CliVerb>(
   try {
     const rawResult = ctx.request
       ? await ctx.request(request)
-      : await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" ? {timeoutMs:90_000} : {}) });
+      : await sendCliRequest(request, { stateDir: ctx.home, ...(verb === "dataset" || verb === "appPublication" ? {timeoutMs:90_000} : {}) });
     return parseCliResult(verb, rawResult);
   } catch (error) {
     return { ok: false as const, reason: cliFailureReason(error, verb) };
   }
+}
+
+/** Publication uses the same owner-local attachment as the CLI. */
+export async function publishApp(ctx: ToolContext, input: unknown) {
+  if (ctx.shareAccess !== undefined) return {ok:false as const,reason:"App publication requires the owning workspace."};
+  const parsed = OwnerAppPublicationRequest.safeParse(input);
+  if (!parsed.success) return {ok:false as const,reason:"Invalid app publication request."};
+  return requestCli(ctx,"appPublication",{request:parsed.data});
 }
 
 /** Dataset authority comes from the owning desktop attachment, never a folder share. */

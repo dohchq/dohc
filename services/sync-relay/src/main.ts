@@ -44,6 +44,7 @@ import { createLiveTickets } from "./liveTickets";
 import { createLiveHostReports } from "./namedLiveHostReports";
 import {createLinkLiveBrowserResolver} from "./linkLiveBrowserAuth";
 import {normalizeLinkRefusal, opaqueLinkRefusal} from "./linkRefusal";
+import {isLinkEndpointPath, isLinkLivePath} from "./linkEndpointPath";
 import {createLinkLiveHttp} from "./linkLiveHttp";
 import {createLiveMembershipRegistry} from "./liveMembership";
 import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
@@ -379,7 +380,6 @@ let linkLiveHttp: ReturnType<typeof createLinkLiveHttp> | undefined;
 let desktopLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let desktopAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
 let serviceEnrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
-const linkLivePaths = new Set(["/sync/live/link-tickets", "/sync/live/link-session", "/sync/live/link-document"]);
 const relayHandler = guardRelayResponses(storage, request => {
   const path = new URL(request.url).pathname;
   if (request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.")) return serviceReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
@@ -387,7 +387,7 @@ const relayHandler = guardRelayResponses(storage, request => {
   if (/^\/sync\/[^/]+\/live-host$/.test(path)) return serviceEnrollment?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/desktop-open") return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
-  if (linkLivePaths.has(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   return relayApplication(request);
 });
 const fetchHandler = async (request: Request): Promise<Response> => {
@@ -410,7 +410,7 @@ const fetchHandler = async (request: Request): Promise<Response> => {
   const refusal = relayApiVersionRefusal(request.headers);
   const result = refusal ? errorResponse(refusal) : await relayHandler(request);
   const path = new URL(request.url).pathname;
-  return /^\/sync\/link(?:[/-]|$)/.test(path) || linkLivePaths.has(path) ? normalizeLinkRefusal(result, path, linkLivePaths.has(path)) : result;
+  return normalizeLinkRefusal(result, path, isLinkLivePath(path));
 };
 
 // Headroom over the blob cap so a maximal valid blob PUT still passes; the
@@ -483,14 +483,14 @@ const server = serveFetchHandler({
     isAutomationPressPath(url.pathname) ? AUTOMATION_PRESS_MAX_BODY_BYTES :
     isAutomationServerPath(url.pathname) ? AUTOMATION_SERVER_MAX_BODY_BYTES :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
-    (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
+    (url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
       : MAX_BODY_BYTES),
   oversized: (url) =>
-    /^\/sync\/link(?:[/-]|$)/.test(url.pathname) || linkLivePaths.has(url.pathname) ? opaqueLinkRefusal() :
-    url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
+    isLinkEndpointPath(url.pathname) ? opaqueLinkRefusal() :
+    url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")
       : errorBody("payload_too_large"),
   // Never echo internal error details (or anything derived from the request)

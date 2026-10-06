@@ -215,7 +215,9 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       if(!(event.changeset instanceof Uint8Array) || event.changeset.byteLength>config.limits.databaseBytes || digest(event.changeset)!==event.changesetSha256) reject("invalid_input","Invalid committed changeset.");
       return await send({kind:"apply",input:{...event}}) as DatasetCursor;
     },
-    async applyBatch(events:CommittedChangeset[]):Promise<DatasetCursor> {
+    /** With chunkMs, return a foreign-key-checked prefix once its elapsed time reaches the limit. */
+    async applyBatch(events:CommittedChangeset[], chunkMs?:number):Promise<DatasetCursor> {
+      if(chunkMs!==undefined&&(!Number.isSafeInteger(chunkMs)||chunkMs<0||chunkMs>60_000))reject("invalid_input","Invalid replay chunk duration.");
       if(!Array.isArray(events)||!events.length||events.length>REPLAY_BATCH_EVENTS)reject("invalid_input","Invalid replay batch size.");
       let bytes=0;
       for(let index=0;index<events.length;index++) {
@@ -225,8 +227,9 @@ export async function openPersistentAppBackend(input:PersistentOpenInput, option
       }
       const input=events.map(event=>({revision:event.revision,digest:event.digest,previousDigest:event.previousDigest,changesetSha256:event.changesetSha256,changeset:event.changeset})),last=input.at(-1)!;
       try {
-        const result=await send({kind:"applyBatch",input}) as DatasetCursor;
-        if(!result||result.revision!==last.revision||result.digest!==last.digest)throw new PersistentRuntimeError("worker_protocol","Invalid replay batch cursor.");
+        const result=await send({kind:"applyBatch",input,...(chunkMs===undefined ? {} : {chunkMs})}) as DatasetCursor;
+        const completed=chunkMs===undefined ? last : input.find(event=>event.revision===result?.revision);
+        if(!result||!completed||result.revision!==completed.revision||result.digest!==completed.digest)throw new PersistentRuntimeError("worker_protocol","Invalid replay batch cursor.");
         return result;
       }catch(error){fail(error instanceof Error?error:new Error(String(error)));throw error;}
     },

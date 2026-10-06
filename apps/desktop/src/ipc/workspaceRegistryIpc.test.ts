@@ -181,7 +181,7 @@ describe("registered workspace open", () => {
     await expect(h.invoke(false)).rejects.toThrow("untrusted");
     expect(h.activity).not.toHaveBeenCalled();
     await expect(h.invoke()).resolves.toEqual(status);
-    expect(h.preferred).toHaveBeenCalledWith("workspace");
+    expect(h.preferred).toHaveBeenCalledWith("workspace", h.sender);
     expect(h.opened).toHaveBeenCalledWith("workspace");
     expect(h.projection).toHaveBeenCalledWith(h.workspace, status);
   });

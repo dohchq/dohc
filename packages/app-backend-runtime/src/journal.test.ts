@@ -11,7 +11,7 @@ const digest=(value:string|Uint8Array)=>createHash("sha256").update(value).diges
 const cleanups:Array<()=>void>=[];
 afterEach(()=>{for(const cleanup of cleanups.splice(0).reverse())cleanup();});
 const schemaSql="CREATE TABLE stock(id TEXT PRIMARY KEY NOT NULL,remaining INTEGER NOT NULL CHECK(remaining>=0)); INSERT INTO stock VALUES('item',3); CREATE TABLE orders(id TEXT PRIMARY KEY NOT NULL,quantity INTEGER NOT NULL);";
-function fixture(limits:Partial<JournalOptions>={}) {
+function fixture(limits:Partial<JournalOptions>={}, approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent) {
   const directory=mkdtempSync(join(tmpdir(),"dohc-journal-"));
   const opened=new Set<DatabaseSync>();
   const open=(name:string)=>{const db=new DatabaseSync(join(directory,name));db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");opened.add(db);return db;};
@@ -28,7 +28,7 @@ function fixture(limits:Partial<JournalOptions>={}) {
   const authorize=()=>{if(db.prepare("SELECT allowed FROM grants").get()!.allowed!==1)throw Error("denied");};
   let journal=createDatasetJournal({db,transaction,nowMs:()=>123,...limits});
   const scope:DatasetScope={workspaceId:"workspace",datasetId:"inventory"};
-  const initialization={scope,hostEpoch:"host-1",approvedRevisionHash:digest("approved"),source:"globalThis.operations = {};",schemaSql,definitionJson:'{"version":1}',checkpoint,authorize};
+  const initialization={...(approvalAgent ? {approvalAgent} : {}),scope,hostEpoch:"host-1",approvedRevisionHash:digest("approved"),source:"globalThis.operations = {};",schemaSql,definitionJson:'{"version":1}',checkpoint,authorize};
   const initial=journal.initialize(initialization);
   function prepare(expected:DatasetCursor=initial,key="order-1"):CommitOperationInput {
     const data=new DatabaseSync(":memory:");data.exec(schemaSql);
@@ -525,4 +525,21 @@ it("slices large checkpoint exports without loading whole blobs and rejects dama
   expect(()=>f.journal.exportPage({scope,through:{...cursor,digest:digest("wrong")},afterRevision:-1,authorize:f.authorize})).toThrow();
   f.db.prepare("UPDATE dohc_dataset_journals SET checkpoint_sha256=? WHERE dataset_id='large'").run(digest("wrong"));
   expect(()=>f.journal.exportBlob({scope,record,offset:0,authorize:f.authorize})).toThrow("damaged");
+});
+
+
+it("commits approval provenance with each checkpoint and retains it after restart and rollback",()=>{
+  const agent={kind:"agent" as const,label:"Builder",labelSource:"agent-declared" as const},f=fixture({},agent);
+  const first=f.journal.exportPage({scope:f.scope,through:f.initial,afterRevision:-1,authorize:f.authorize});
+  expect(first[0]).toMatchObject({kind:"checkpoint",approvalAgent:agent});
+  const input={...f.initialization,scope:undefined,expected:f.initial,hostEpoch:f.initial.hostEpoch,approvedRevisionHash:digest("revision2"),approvalAgent:{...agent,label:null},account(){}};
+  f.fault("before");
+  expect(()=>f.journal.transitionCheckpoint(input)).toThrow("before commit");
+  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_approval_provenance").get()!.n).toBe(1);
+  const next=f.journal.transitionCheckpoint(input);
+  f.reopen();
+  const history=f.journal.exportPage({scope:f.scope,through:next,afterRevision:-1,authorize:f.authorize});
+  expect(history).toMatchObject([{kind:"checkpoint",approvalAgent:agent},{kind:"checkpoint",approvalAgent:{...agent,label:null}}]);
+  expect(f.journal.transitionCheckpoint(input)).toEqual(next);
+  expect(f.db.prepare("SELECT COUNT(*) n FROM dohc_dataset_approval_provenance").get()!.n).toBe(2);
 });
