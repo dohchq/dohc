@@ -1,6 +1,6 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
-import { activityPathsAffectWorkspaceListing } from "./bridgeContract";
+import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailedEvent } from "./bridgeContract";
 
 import {
   ENGINE_YDOC_UPDATE_MAX_BYTES,
@@ -4465,4 +4465,23 @@ it("uses the engine slug byte bound in feed, mentions, and graph results", () =>
     const graph = { nodes: [{ path: "chat-thread/thread", title: "Thread", outgoing: 0, incoming: 0, kind: "chat-thread", threadId: "thread", channelSlug: slug }], edges: [], unresolvedLinks: 0, scannedFileCount: 0, omittedFileCount: 0, truncatedFileCount: 0 };
     expect(WorkspaceGraphResult.safeParse(graph).success).toBe(valid);
   }
+});
+
+describe("launch path failure event", () => {
+  it.each([null, { workspaceId: "selected", rendererDocumentId: "document", generation: 1 }])("retains the attempted path and cause with context %j", (context) => {
+    const event = { path: "C:\\work\\attempted", cause: "ReservedWorkspaceIdError [reserved-id]: refused",
+      workspaceId: null, rendererDocumentId: null, generation: null, ...context };
+    expect(WorkspacePathOpenFailedEvent.parse({ ...event, authority: "ignored" })).toEqual(event);
+  });
+
+  it.each([
+    { workspaceId: "other" },
+    { rendererDocumentId: "other" },
+    { generation: 2 },
+    { cause: null },
+    { path: null },
+  ])("rejects malformed failure packets %j", (change) => {
+    expect(WorkspacePathOpenFailedEvent.safeParse({ path: "attempted", cause: "refused",
+      workspaceId: null, rendererDocumentId: null, generation: null, ...change }).success).toBe(false);
+  });
 });

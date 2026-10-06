@@ -79,6 +79,7 @@ import {
   registerOpenWorkspaceIpcHandler,
 } from "./ipc/workspaceRegistryIpc";
 import { createAppLifecycle } from "./appLifecycle";
+import { captureOpenPathFailureTarget } from "./window/openPathFailureTarget";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
@@ -5017,6 +5018,10 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       contents.on("did-finish-load", onLoad);
       contents.on("did-fail-load", onFail);
     }),
+    openFailureTarget: (window) => captureOpenPathFailureTarget(window, {
+      isLive: () => workspaceWindows.allLive().includes(window),
+      currentSession: () => rendererWorkspaceSessions.current(window.webContents),
+    }),
     current: () => targetWindow(undefined),
     hasWorkspace: () => liveWorkspaceWindow() !== undefined,
     hasAny: () => BrowserWindow.getAllWindows().length !== 0,
@@ -5029,6 +5034,20 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
   },
   workspaces: {
     openPath: openWorkspacePath,
+    recordOpenFailure: (path, error) => {
+      console.error(`[desktop] could not open launch path ${path}:`, error);
+    },
+    reportOpenFailure: (path, error, window) => {
+      const session = rendererWorkspaceSessions.current(window.webContents);
+      const cause = ipcWireError(error);
+      window.webContents.send(CHANNELS.workspacePathOpenFailed, {
+        path,
+        cause: String(cause),
+        workspaceId: session?.workspaceId ?? null,
+        rendererDocumentId: session?.rendererDocumentId ?? null,
+        generation: session?.generation ?? null,
+      });
+    },
     refreshNativeSurfaces: refreshNativeWorkspaceSurfaces,
   },
   bootstrap: {

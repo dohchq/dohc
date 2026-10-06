@@ -6208,6 +6208,18 @@ export const LaunchMarksResult = z.object({
 });
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
+// A launch/OS attempt failed. Raw errors stay in main's diagnostic log;
+// the shell receives the attempted path, cause, and delivery context.
+export const WorkspacePathOpenFailedEvent = z.object({
+  path: z.string(),
+  cause: z.string(),
+  workspaceId: z.string().nullable(),
+  rendererDocumentId: z.string().nullable(),
+  generation: z.number().int().nonnegative().nullable(),
+}).refine((event) => (event.workspaceId === null) === (event.rendererDocumentId === null)
+  && (event.workspaceId === null) === (event.generation === null));
+export type WorkspacePathOpenFailedEvent = z.infer<typeof WorkspacePathOpenFailedEvent>;
+
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
@@ -6701,6 +6713,7 @@ export interface DohcDesktopBridge
   // workspace summary; the preload strips and validates it before the root
   // swaps workspaces.
   onWorkspaceActivated(listener: (workspace: WorkspaceSummary) => void): () => void;
+  onWorkspacePathOpenFailed(listener: (event: WorkspacePathOpenFailedEvent) => void): () => void;
   // Auto-update state pushes from main, validated against UpdateStateEvent in
   // the preload before they reach renderer code. Returns an unsubscribe function.
   onUpdateState(listener: (state: UpdateStateEvent) => void): () => void;
