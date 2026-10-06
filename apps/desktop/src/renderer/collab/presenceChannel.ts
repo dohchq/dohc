@@ -23,8 +23,6 @@ export interface PresencePeer {
 }
 
 export interface PresenceSnapshot {
-  // Authenticated scope owner, supplied by the relay rather than peer state.
-  ownerUserId?: string;
   version: number;
   peers: PresencePeer[];
 }
@@ -93,12 +91,7 @@ function parseSnapshot(value: unknown): PresenceSnapshot {
   const record = (value ?? {}) as Record<string, unknown>;
   const peers = Array.isArray(record.peers) ? (record.peers as PresencePeer[]) : [];
   const version = typeof record.version === "number" ? record.version : 0;
-  const ownerUserId = record.ownerUserId;
-  return {
-    version, peers,
-    ...(typeof ownerUserId === "string" && ownerUserId.length > 0 && ownerUserId.length <= 256
-      ? { ownerUserId } : {}),
-  };
+  return { version, peers };
 }
 
 // Build a relay-backed transport. The bearer token authenticates the actor;
@@ -146,7 +139,7 @@ interface PresenceChannelOptions {
   initialState: unknown;
   // Called with the full peer set (including this client, echoed by the relay)
   // whenever it changes. Never called after stop().
-  onPeers: (peers: PresencePeer[], ownerUserId?: string) => void;
+  onPeers: (peers: PresencePeer[]) => void;
   // Re-publish this often so the relay TTL never lapses. Must be < the relay
   // entry TTL (default 30s). Default 10s.
   heartbeatMs?: number;
@@ -210,7 +203,7 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
   function emit(snapshot: PresenceSnapshot): void {
     if (stopped) return;
     version = snapshot.version;
-    options.onPeers(snapshot.peers, snapshot.ownerUserId);
+    options.onPeers(snapshot.peers);
   }
 
   function startPublish(): Promise<void> {

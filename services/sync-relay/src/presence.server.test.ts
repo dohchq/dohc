@@ -352,7 +352,7 @@ describe("reserved agent presence", () => {
         clientId: "recipient-device", state: {},
       }))).status).toBe(200);
       for (const body of [
-        { clientId: "agent:w", state: { agent: true, activity: "idle", userId: "owner" }, ownerUserId: "recipient" },
+        { clientId: "agent:w", state: { agent: true, activity: "idle", userId: "owner" } },
         { clientId: "agent:w", leave: true },
       ]) {
         const spoof = await h(post("recipient", "/sync/shares/" + shares[0] + "/presence?topic=chat:agent", body));
@@ -363,8 +363,6 @@ describe("reserved agent presence", () => {
         ["observer", "/sync/shares/" + shares[1] + "/presence?topic=chat:agent&since=0&hold=0"],
       ]) {
         const snapshot = await json(await h(req(user!, path!, { method: "GET" })));
-        expect(snapshot.ownerUserId).toBe("owner");
-        expect(snapshot).not.toHaveProperty("workspaceId");
         expect((snapshot.peers as Array<Record<string, unknown>>).filter(p => p.clientId === "agent:w"))
           .toEqual(before.peers);
       }

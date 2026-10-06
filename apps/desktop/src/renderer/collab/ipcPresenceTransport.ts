@@ -33,7 +33,6 @@ function nextPollId(): string {
 function toSnapshot(snapshot: Extract<PresenceResult, { ok: true }>["snapshot"]): PresenceSnapshot {
   return {
     version: snapshot.version,
-    ...(snapshot.ownerUserId ? { ownerUserId: snapshot.ownerUserId } : {}),
     peers: snapshot.peers.map((peer) => ({
       userId: peer.userId,
       clientId: peer.clientId,

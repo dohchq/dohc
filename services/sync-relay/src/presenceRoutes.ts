@@ -47,8 +47,8 @@ function assertPresenceStateSize(state: unknown): void {
   }
 }
 
-function presenceResponse(snapshot: PresenceSnapshot, ownerUserId: string): Response {
-  return jsonResponse({ ok: true, ownerUserId, version: snapshot.version, peers: snapshot.peers });
+function presenceResponse(snapshot: PresenceSnapshot): Response {
+  return jsonResponse({ ok: true, version: snapshot.version, peers: snapshot.peers });
 }
 
 // Capacity refusals (scope/entry/waiter caps) are a client-visible 429 so a
@@ -84,7 +84,7 @@ export function createPresenceRoutes(
     scopeKey: string,
     userId: string,
     ownerUserId: string,
-    reauthorize: () => string,
+    reauthorize?: () => unknown,
   ): Promise<Response> => {
     if (request.method === "POST") {
       const input = await readJsonObject(request);
@@ -97,13 +97,12 @@ export function createPresenceRoutes(
         throw notFound();
       }
       if (input.leave === true) {
-        return presenceResponse(presence.leave(scopeKey, userId, clientId, nowMs()), ownerUserId);
+        return presenceResponse(presence.leave(scopeKey, userId, clientId, nowMs()));
       }
       assertPresenceStateSize(input.state);
       try {
         return presenceResponse(
           presence.publish(scopeKey, userId, clientId, input.state ?? null, nowMs()),
-          ownerUserId,
         );
       } catch (error) {
         throw presenceCapacityAs429(error);
@@ -126,8 +125,8 @@ export function createPresenceRoutes(
       }
       // A 25s park is long enough for a revoke to land mid-poll; re-run the
       // route's authorization before returning anything.
-      const currentOwnerUserId = reauthorize();
-      return presenceResponse(snapshot, currentOwnerUserId);
+      if (reauthorize) await reauthorize();
+      return presenceResponse(snapshot);
     }
     throw relayError("method_not_allowed");
   };
@@ -179,7 +178,7 @@ export function createPresenceRoutes(
       presenceScopeKey(share.workspaceId, topic),
       actorUserId,
       share.granterUserId,
-      () => authorizeShare().granterUserId,
+      authorizeShare,
     );
   };
 
@@ -203,7 +202,6 @@ export function createPresenceRoutes(
       actorUserId,
       () => {
         if (!storage.workspaceIsOwnedBy(workspaceId, actorUserId)) throw notFound();
-        return actorUserId;
       },
     );
   };

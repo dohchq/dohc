@@ -2947,12 +2947,10 @@ export function ChatsView(props: {
   const conversationAgentActivity = resolveAgentPresenceActivity(
     presence.others,
     workspaceId,
-    presence.ownerUserId,
   );
   const agentSummaryActivity = resolveAgentPresenceActivity(
     agentSummaryPresence.others,
     workspaceId,
-    agentSummaryPresence.ownerUserId,
   );
   const reservedAgentClientId = agentPresenceClientId(workspaceId);
   const peoplePresence = useMemo(

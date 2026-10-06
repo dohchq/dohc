@@ -2554,7 +2554,6 @@ const PresencePeerRecord = z.object({
   updatedAtMs: z.number(),
 });
 const PresenceSnapshotRecord = z.object({
-  ownerUserId: z.string().min(1).max(256).optional().catch(undefined),
   version: z.number(),
   peers: z.array(PresencePeerRecord),
 });

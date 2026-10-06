@@ -7,7 +7,6 @@ export const CHAT_AGENT_PRESENCE_TOPIC = "chat:agent";
 export type AgentPresenceActivity = "working" | "idle";
 
 interface AgentPresencePeer {
-  userId: string;
   clientId: string;
   state: unknown;
 }
@@ -17,17 +16,15 @@ export function agentPresenceClientId(workspaceId: string): string {
 }
 
 // The relay state is untrusted/opaque at this boundary. Only the reserved
-// client for this workspace, attributed to its server-proven owner, can become
+// client for this workspace and the exact published payload shape can become
 // visible UI; missing or malformed state means no hint.
 export function resolveAgentPresenceActivity(
   peers: readonly AgentPresencePeer[],
   workspaceId: string,
-  ownerUserId: string | null | undefined,
 ): AgentPresenceActivity | null {
-  if (!ownerUserId) return null;
   const expectedClientId = agentPresenceClientId(workspaceId);
   for (const peer of peers) {
-    if (peer.userId !== ownerUserId || peer.clientId !== expectedClientId) continue;
+    if (peer.clientId !== expectedClientId) continue;
     if (typeof peer.state !== "object" || peer.state === null) return null;
     const state = peer.state as { agent?: unknown; activity?: unknown };
     if (state.agent !== true) return null;
