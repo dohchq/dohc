@@ -138,7 +138,8 @@ function Mark(props: { kind: StateMarkKind }) {
  * own save error. `truncate` lets the label end in an ellipsis where room
  * runs out, such as a narrow file header. While the label is cut short, the
  * chip takes keyboard focus and shows the whole label and its explanation in
- * a tooltip, on focus or hover; with room to spare it is not a tab stop. */
+ * a tooltip, on focus or hover, in place of the title; with room to spare it
+ * is not a tab stop and keeps its title. */
 export function StateMark(props: {
   state: string;
   shown: SaveStateKey;
@@ -151,34 +152,58 @@ export function StateMark(props: {
   const title = props.title ?? presentation.title;
   const { label, cut } = useCutShort(presentation.label, props.truncate === true);
   const [open, setOpen] = useState(false);
-  const tooltipId = useId();
+  // A focused chip keeps its tab stop when its label stops being cut, so
+  // focus never falls to the page; it gives the stop up on blur.
+  const [focused, setFocused] = useState(false);
+  const explanationId = useId();
   const shown = open && cut;
   const chipRef = useRef<HTMLSpanElement>(null);
   const tooltip = useRef<HTMLSpanElement>(null);
   const [place, setPlace] = useState<{ left: number; top: number } | null>(null);
   // Placed as Menu places its list: measured before the first paint, under
   // the chip with its right edge at the chip's, and kept inside the window,
-  // so no pane or panel edge cuts it off.
+  // so no pane or panel edge cuts it off. Placed again while it shows,
+  // whenever the window, the chip or the tooltip changes size.
   useLayoutEffect(() => {
-    if (!shown) return;
-    const box = chipRef.current?.getBoundingClientRect();
-    const width = tooltip.current?.offsetWidth ?? 0;
-    if (box) {
-      const left = Math.min(Math.max(TOOLTIP_GAP_PX, box.right - width), window.innerWidth - TOOLTIP_GAP_PX - width);
-      setPlace({ left: Math.max(TOOLTIP_GAP_PX, left), top: box.bottom + TOOLTIP_GAP_PX });
-    }
-    return () => setPlace(null);
+    const chipElement = chipRef.current;
+    if (!shown || !chipElement) return;
+    const position = () => {
+      const box = chipElement.getBoundingClientRect();
+      const width = tooltip.current?.offsetWidth ?? 0;
+      const left = Math.max(TOOLTIP_GAP_PX, Math.min(box.right - width, window.innerWidth - TOOLTIP_GAP_PX - width));
+      const top = box.bottom + TOOLTIP_GAP_PX;
+      setPlace((current) => (current?.left === left && current.top === top ? current : { left, top }));
+    };
+    position();
+    window.addEventListener("resize", position);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
+    observer?.observe(chipElement);
+    if (tooltip.current) observer?.observe(tooltip.current);
+    return () => {
+      window.removeEventListener("resize", position);
+      observer?.disconnect();
+      setPlace(null);
+    };
   }, [shown]);
   const chip = (
     <span
       ref={chipRef}
       data-testid={props.testId}
       data-state={props.state}
-      title={title}
-      tabIndex={cut ? 0 : undefined}
-      aria-describedby={shown ? tooltipId : undefined}
-      onFocus={() => setOpen(true)}
-      onBlur={() => setOpen(false)}
+      // Cut short, the tooltip says what the title would, so the browser's
+      // own tooltip does not repeat it a moment later.
+      title={cut ? undefined : title}
+      tabIndex={cut || focused ? 0 : undefined}
+      // The chip's words are its label, so only the explanation describes it.
+      aria-describedby={shown && title ? explanationId : undefined}
+      onFocus={() => {
+        setFocused(true);
+        setOpen(true);
+      }}
+      onBlur={() => {
+        setFocused(false);
+        setOpen(false);
+      }}
       onKeyDown={(event) => {
         if (event.key === "Escape" && shown) {
           event.stopPropagation();
@@ -214,13 +239,12 @@ export function StateMark(props: {
       {shown ? (
         <span
           ref={tooltip}
-          id={tooltipId}
           role="tooltip"
           style={place ?? undefined}
           className={`dohc-popover fixed z-50 flex w-max max-w-72 flex-col gap-1 rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink ${place ? "dohc-pop-in" : "invisible"}`}
         >
           <span className="font-medium">{presentation.label}</span>
-          {title ? <span className="text-muted">{title}</span> : null}
+          {title ? <span id={explanationId} className="text-muted">{title}</span> : null}
         </span>
       ) : null}
     </span>
