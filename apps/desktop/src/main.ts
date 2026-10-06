@@ -56,6 +56,7 @@ import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
 import { createPresenceIpc } from "./ipc/presenceIpc";
+import { readWorkspaceEnginePolicy } from "./workspaces/workspaceEnginePolicyFile";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
 import { collectionAutomationAuthor } from "./ipc/engineHistoryIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
@@ -4260,16 +4261,16 @@ const chatWrites = createChatWrites({
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
 });
 
-let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
+let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
     return datasetForCli(input, agent);
   },
-  ownerAppPublication: input => {
+  ownerAppPublication: (input, agent) => {
     if (!ownerAppPublicationForCli) throw new Error("App publication is not ready. Try again.");
-    return ownerAppPublicationForCli(input);
+    return ownerAppPublicationForCli(input, agent);
   },
   ownerAppResponses:input=>{
     if(!ownerAppResponsesForCli)throw new Error("App responses are not ready. Try again.");
@@ -5358,7 +5359,8 @@ function registerIpcHandlers(): void {
     roots: workspaceRootApproval,
     effectiveHome,
     workspaceSummaries,
-    prioritizePreferredWorkspace,
+    prioritizePreferredWorkspace: (workspaces, event) =>
+      prioritizePreferredWorkspace(workspaces, event.sender),
     createWorkspaceFolder,
     forgetWorkspace,
     showItemInFolder: (path) => shell.showItemInFolder(path),
@@ -5419,7 +5421,7 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
+    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
     automationPersonName: (workspaceId, userId) => {
       const workspace = findWorkspace(workspaceId);
@@ -5766,7 +5768,7 @@ function registerIpcHandlers(): void {
     callerKey: workspaceId => `local-owner-cli:${workspaceId}`,
     withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
   });
-  ownerAppPublicationForCli = input => cliOwnerPublication(input.workspaceId, input);
+  ownerAppPublicationForCli = (input, agent) => cliOwnerPublication(input.workspaceId, input, agent);
   const undoAcceptedResponse=async(workspace:DesktopRendererWorkspaceOperation["workspace"],input:AppResponseUndoSelection,author?:MomentWriteAuthor)=>{
     await openWorkspaceActivity(workspace);
     const capture=activity.engineCaptureFor(workspace.workspaceId,workspace.rootPath);
@@ -6050,8 +6052,8 @@ function registerIpcHandlers(): void {
     assertTrustedSender,
     withPhysicalWorkspaceOperation,
     rendererWorkspaceSessions,
-    setPreferredWorkspaceId: (workspaceId) => {
-      desktopWindows.setPreferredWorkspaceId(workspaceId);
+    setPreferredWorkspaceId: (workspaceId, sender) => {
+      desktopWindows.setPreferredWorkspaceId(workspaceId, sender);
     },
     markWorkspaceOpened,
     syncStatusWithOwnedProjection,

@@ -142,7 +142,7 @@ function engineMomentBaseForIpc(
     ...(moment.authors !== undefined && moment.authors.length > 1
       ? { authorLabels: moment.authors.map((each) => authorLabel(each, names)) }
       : {}),
-    ...(moment.metadata.summary !== undefined
+    ...(moment.operation !== "rename" && moment.metadata.summary !== undefined
       ? { summary: moment.metadata.summary }
       : {}),
     ...(moment.metadata.correlationId !== undefined

@@ -16,7 +16,7 @@ import type { PendingFileUndo } from "./fileEditorUndo";
 import { CsvView } from "./CsvView";
 import { ImageView } from "./ImageView";
 import { extensionOf } from "./path";
-import { classifyForView } from "./fileViewKind";
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { DraftFlush } from "./useAutosavedTextDraft";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -42,6 +42,7 @@ import { useEngineDoc } from "./collab/useEngineDoc";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { SecondaryButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import type { ExcalidrawPresenceFactory } from "./collab/excalidrawPresence";
 import {
   acquireSharedLocalDocument,
@@ -364,13 +365,9 @@ export const FileInspector = memo(function FileInspector(
     props.engineVersionKey,
   );
   const localBuffer = useRetainedLocalDocument(key);
-  const kind = classifyForView(props.path);
-  const isText =
-    kind === "markdown" ||
-    kind === "drawing" ||
-    kind === "csv" ||
-    kind === "json" ||
-    kind === "text";
+  const fileKind = fileKindForPath(props.path);
+  const kind = fileKind.displayKind;
+  const isText = fileKind.opens.content === "text";
   const localBufferSnapshot = useSyncExternalStore(
     localBuffer.subscribe,
     localBuffer.getSnapshot,
@@ -702,7 +699,17 @@ export const FileInspector = memo(function FileInspector(
             the marker and the close warning must not point at actions this
             branch withholds. */}
         {recoveryNotices}
-        <Empty>{error ? "Couldn't read this file." : "Loading…"}</Empty>
+        {error ? (
+          <Empty>Couldn't read this file.</Empty>
+        ) : kind === "markdown" ? (
+          // Where the title and the first lines land when the document opens:
+          // in a pane that keeps its scrollbar's room, as the document's does.
+          <div className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]">
+            <SkeletonRows layout="document" label="Loading…" className="pt-12" />
+          </div>
+        ) : (
+          <SkeletonRows layout="panel" label="Loading…" />
+        )}
       </div>
     );
   }
@@ -818,6 +825,7 @@ export const FileInspector = memo(function FileInspector(
       );
     case "json":
     case "text":
+    case "code":
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader
@@ -916,7 +924,7 @@ export const FileInspector = memo(function FileInspector(
                   label="database"
                   onShare={onShareCurrentPath}
                 />
-                <Empty>Loading database…</Empty>
+                <SkeletonRows layout="panel" label="Loading database…" />
               </div>
             }
           >

@@ -33,6 +33,11 @@ describe("engineMomentSummary", () => {
     ).toBe("Reconciled offline edits");
   });
 
+  it("names only the admitted after path for a rename", () => {
+    expect(engineMomentSummary(moment({ id: "rename", operation: "rename", path: "notes/b.md" })))
+      .toBe("Renamed to b.md");
+  });
+
   it("falls back to calm product copy from the operation", () => {
     expect(engineMomentSummary(moment({ id: "m1" }))).toBe("Edited plan.md");
     expect(

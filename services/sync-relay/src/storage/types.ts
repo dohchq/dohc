@@ -167,6 +167,7 @@ export interface KeyEnvelopeRow {
 }
 
 export interface SyncRelayShareRow {
+  creationProvenance?: { agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null; selector: unknown; access: string };
   labels?: ShareLabels;
   shareId: string;
   workspaceId: string;
@@ -826,7 +827,9 @@ export interface SyncRelayStorage {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
   }): void;
+  readLinkCreation(workspaceId: string, operationId: string, ownerUserId: string): { shareId: string; grantId: string; requestJson: string } | null;
   createFileLinkShare(input: {
+    operation?: { operationId: string; requestJson: string };
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
     credential: SyncRelayLinkCredentialRow;

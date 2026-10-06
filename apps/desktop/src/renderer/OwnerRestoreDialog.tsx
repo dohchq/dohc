@@ -2,6 +2,7 @@ import {useEffect, useMemo, useRef, useState} from "react";
 import {bridge} from "./bridge";
 import {Overlay} from "./Overlay";
 import {DangerButton, PrimaryButton, SecondaryButton} from "./ui/controls";
+import { SkeletonLines } from "./ui/SkeletonRows";
 import {useRequestSequence} from "./useRequestSequence";
 import {ipcErrorMessage} from "./ipcError";
 import {ownerRestoreOutcomes} from "./ownerRestoreOutcomes";
@@ -170,7 +171,9 @@ export function OwnerRestoreDialog({workspaceId, path, onClose, onBeforeRestore,
     className: "dohc-elevated dohc-pop-in w-[min(760px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"}}>
     <h2 id="owner-restore-title" className="m-0 text-sm font-semibold text-ink">{state.kind === "stop" ? "Stop access before restoring?" : state.kind === "complete" ? "File restored" : "Restore shared file"}</h2>
     <p className="break-all font-mono text-[12px] text-muted">{path}</p>
-    <div role="status" aria-live="polite">{busy ? <p className="text-[12px] text-muted">{state.kind === "loading" ? "Loading restore choices…" : "Preparing the restore…"}</p> : null}</div>
+    {/* While the choices load, the lines show it and the status words are for the screen reader. */}
+    <div role="status" aria-live="polite">{busy ? <p className={state.kind === "loading" ? "sr-only" : "text-[12px] text-muted"}>{state.kind === "loading" ? "Loading restore choices…" : "Preparing the restore…"}</p> : null}</div>
+    {busy && state.kind === "loading" ? <SkeletonLines rows={2} className="my-3" /> : null}
     {state.kind === "options" && <div className="space-y-3">
       <p className="text-[13px] text-muted">Choose the access to stop and the change to restore to. Restoring keeps the file as it was after that change.</p>
       <label className="block text-[12px] text-muted">Access<select aria-label="Access to stop" disabled={busy} value={grantId} onChange={event => setGrantId(event.target.value)} className="mt-1 w-full rounded-md border border-line bg-bg p-2 text-[13px] text-ink"><option value="">Choose access</option>{state.options.grants.map(grant => <option key={grant.grantId} value={grant.grantId}>{recipient(grant, emails)}</option>)}</select></label>

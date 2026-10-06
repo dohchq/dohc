@@ -686,7 +686,7 @@ describe("VersionComparePage paging", () => {
   });
 });
 
-it("returns focus after the Versions backdrop closes a descendant-only menu", async () => {
+it("returns focus after a press on blank space closes the Versions menu", async () => {
   const user = userEvent.setup();
   function Shell() {
     const root = useRef<HTMLDivElement>(null);
@@ -701,12 +701,11 @@ it("returns focus after the Versions backdrop closes a descendant-only menu", as
   const trigger = screen.getByTestId("version-menu-button");
   await user.click(trigger);
   expect(document.activeElement).toBe(screen.getAllByTestId("version-item")[0]);
-  const backdrop = screen.getByTestId("version-menu").previousElementSibling!;
-  await user.pointer({ target: backdrop, keys: "[MouseLeft>]" });
-  expect(document.activeElement).toBe(document.body);
-  expect(screen.queryByTestId("version-menu")).not.toBeNull();
+  await user.pointer({ target: document.body, keys: "[MouseLeft>]" });
+  expect(screen.queryByTestId("version-menu")).toBeNull();
+  // A browser's press on blank space takes focus to the page after the close.
+  trigger.blur();
   await user.pointer({ keys: "[/MouseLeft]" });
   await settle();
-  expect(screen.queryByTestId("version-menu")).toBeNull();
   expect(document.activeElement).toBe(trigger);
 });

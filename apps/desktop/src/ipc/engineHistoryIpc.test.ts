@@ -627,3 +627,22 @@ describe("version texts the engine accepted cross the bridge", () => {
     expect(message).toContain("version text");
   });
 });
+
+
+it("omits only rename summaries from timeline rows and details", async () => {
+  for (const operation of ["write", "delete", "rename"] as const) {
+    const detail = detailWith({ before: textSide("old"), after: textSide("new") });
+    if (detail.protected) throw new Error("Expected ordinary history");
+    detail.moment.operation = operation;
+    detail.moment.metadata.summary = operation === "rename" ? "Renamed private/a.md to notes/a.md" : "Saved latest edits";
+    const listed = await listEngineMomentsForIpc(async () => ({
+      moments: [{ ...detail.moment, momentOrder: 1, protected: false }],
+      nextBeforeMomentOrder: null, latestMomentOrder: 1, activeVersionId: "main", protectedTruncated: false,
+    }), names);
+    if (!("moments" in listed)) throw new Error("Expected ready history");
+    for (const row of [listed.moments[0], engineMomentDetailForIpc(detail, names)]) {
+      if (operation === "rename") expect(row).not.toHaveProperty("summary");
+      else expect(row).toHaveProperty("summary", "Saved latest edits");
+    }
+  }
+});
