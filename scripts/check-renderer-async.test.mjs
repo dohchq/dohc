@@ -29,8 +29,8 @@ test("the raw-reference ratchet rejects an added call in a legacy file", () => {
     const inventory = { counts: { "Legacy.tsx": 1 } };
     assert.deepEqual(checkRawBridge(root, inventory), []);
     writeFileSync(join(root, "Legacy.tsx"), 'import { bridge } from "./bridge";\nbridge().read(); bridge().read();\n');
-    assert.deepEqual(checkRawBridge(root, inventory), ["RATCHET Legacy.tsx: raw bridge references 1 -> 2. Use desktopAction or the operation's owner."]);
-    assert.deepEqual(checkRawBridge(root, { counts: {} }), ["RATCHET Legacy.tsx: raw bridge references 0 -> 2. Use desktopAction or the operation's owner."]);
+    assert.deepEqual(checkRawBridge(root, inventory), ["RATCHET Legacy.tsx:2: raw bridge references exceed inventory count 1 -> 2. Use desktopAction or the operation's owner."]);
+    assert.deepEqual(checkRawBridge(root, { counts: {} }), ["RATCHET Legacy.tsx:2: raw bridge references exceed inventory count 0 -> 2. Use desktopAction or the operation's owner."]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -90,8 +90,8 @@ test("raw-reference counts include aliases, retained handles, and spacing", () =
     ['import { bridge } from "./bridge"; const { a, b: read } = bridge(); a(); read();', 3],
     ['import { bridge } from "./bridge"; const read = flag ? bridge().a : bridge().b; read(); read();', 4],
     ['window.dohcDesktop.a(); window ["dohcDesktop"].b();', 2],
-    ['const { bridge: desktopBridge } = await import("./bridge"); desktopBridge().a(); desktopBridge ().b();', 2],
-    ['const module = await import("./bridge"); const d = module.bridge(); d.a(); d.b();', 3],
+    ['const { bridge: desktopBridge } = await import("./bridge"); desktopBridge().a(); desktopBridge ().b();', 3],
+    ['const module = await import("./bridge"); const d = module.bridge(); d.a(); d.b();', 4],
   ]) assert.equal(rawBridgeReferences(source), expected, source);
   assert.equal(rawBridgeReferences('const text = "bridge().read()"; // bridge().read()'), 0);
 });
@@ -171,7 +171,7 @@ test("supported JavaScript specifiers retain every renderer boundary", () => {
     assert.match(result.stdout, new RegExp(rule + " View"));
   }
   assert.equal(rawBridgeReferences('import { bridge as api } from "./bridge.js"; api().read(); api().read();'), 2);
-  assert.equal(rawBridgeReferences('const { bridge: api } = await import("./bridge.js"); api().read();'), 1);
+  assert.equal(rawBridgeReferences('const { bridge: api } = await import("./bridge.js"); api().read();'), 2);
   for (const [specifier, file] of [["helpers.mjs", "helpers.mts"], ["helpers.jsx", "helpers.tsx"]]) {
     const result = probe({ "data/read.ts": 'export { read } from "../' + specifier + '";', [file]: 'export function read() {}' });
     assert.equal(result.status, 1, result.stderr);
@@ -202,4 +202,38 @@ test("runtime TypeScript expressions remain references while type syntax does no
   assert.equal(rawBridgeReferences(prefix + 'namespace N { var bridge = ordinary; bridge.read(); } bridge().read();'), 1);
   assert.equal(rawBridgeReferences(prefix + 'class C { constructor(private bridge: Api) { bridge.read(); } }'), 0);
   assert.equal(rawBridgeReferences(prefix + 'class C { static { const bridge = ordinary; bridge.read(); } }'), 0);
+});
+
+test("dynamic bridge imports count even when their promise uses then", () => {
+  for (const specifier of ["./bridge", "./bridge.ts", "./bridge.js", "./bridge.mjs", "./bridge.jsx"]) {
+    const source = 'void import("' + specifier + '").then(m => { m.bridge().a(); m.bridge().b(); });';
+    assert.equal(rawBridgeReferences(source), 1, specifier);
+  }
+  assert.equal(rawBridgeReferences('void import("./ordinary").then(m => m.read());'), 0);
+});
+test("destructuring assignments retain bridge authority through existing bindings", () => {
+  for (const assignment of ["({ api: d } = { api: bridge() })", "[d] = [bridge()]", "({ api: { nested: d } } = { api: { nested: bridge() } })"]) {
+    const source = 'import { bridge } from "./bridge"; let d; ' + assignment + '; d.a(); d.b();';
+    assert.equal(rawBridgeReferences(source), 4, assignment);
+  }
+  assert.equal(rawBridgeReferences('import { bridge } from "./bridge"; let d; { ({ api: d } = { api: bridge() }); } d.a();'), 3);
+  assert.equal(rawBridgeReferences('import { bridge } from "./bridge"; const d = bridge(); { let d; ({ api: d } = ordinary); d.a(); } d.a();'), 2);
+});
+test("constant-template global destructuring assignments cannot bypass RA1", () => {
+  for (const key of ["dohcDesktop", '"dohcDesktop"', '["dohcDesktop"]', '[`dohcDesktop`]']) {
+    assert.equal(rawBridgeReferences('let d; ({ ' + key + ': d } = window); d!.a(); d!.b();'), 4, key);
+  }
+  const result = probe({ "View.tsx": 'let d; ({ [`dohcDesktop`]: d } = window); d!.a(); d!.b();' });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stdout, /RA1 View.tsx:1:/);
+});
+
+test("the ratchet rejects growth through a destructuring-assigned handle", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-u4-assignment-"));
+  try {
+    const source = 'import { bridge } from "./bridge";\nlet d; ({ api: d } = { api: bridge() });\nd.read();\nd.read();\n';
+    writeFileSync(join(root, "Legacy.tsx"), source);
+    assert.deepEqual(checkRawBridge(root, { counts: { "Legacy.tsx": 1 } }), ["RATCHET Legacy.tsx:2,3,4: raw bridge references exceed inventory count 1 -> 4. Use desktopAction or the operation's owner."]);
+    assert.deepEqual(checkRawBridge(root, { counts: { "Legacy.tsx": 4 } }), []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -4,7 +4,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { checkUiRules, isRendererSource, scanSource } from "./check-ui-rules.mjs";
+import { checkUiRules, scanSource } from "./check-ui-rules.mjs";
+import { isRendererSource } from "./renderer-source.mjs";
 import { readWorkspacePackages, selectJavaScript } from "./verification/selection.mjs";
 
 const root = join(import.meta.dirname, "..");
@@ -283,3 +284,15 @@ test("backdrop comparisons do not count as assignments", () => {
     'const compare = backdropFilter => backdropFilter === x;',
   ]) assert.deepEqual(scanSource(path, source), [], source);
 });
+
+for (const extension of ["ts", "tsx", "mts", "cts"]) {
+  test("UI enumeration scans ." + extension + " renderer sources", t => {
+    const { directory, put } = fixture(t);
+    const sourcePath = renderer + "View." + extension;
+    assert.equal(isRendererSource(sourcePath), true);
+    put(sourcePath, 'const color = "#fff";');
+    const result = checkUiRules(directory, empty());
+    assert.deepEqual(result.counts, { [sourcePath]: { "raw-hex": 1 } });
+    assert.deepEqual(result.failures, [sourcePath + ":1: raw-hex: #fff (count exceeds 0). Use interface tokens and lucide-react; remove blur."]);
+  });
+}

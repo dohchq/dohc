@@ -5,7 +5,6 @@ import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isRendererSource } from "./renderer-source.mjs";
-export { isRendererSource } from "./renderer-source.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const allowlistPath = "scripts/ui-rules-allowlist.json";
@@ -19,7 +18,6 @@ const nonColorNames = /^(?:href|src|to|id|hash|querySelector|querySelectorAll|ge
 const styleKey = "(?:[\\w-]*color|(?:background|border|outline)[\\w-]*|(?:box|text)-?shadow|fill|stroke)";
 const styleName = new RegExp(`^${styleKey}$`, "iu");
 const cssDeclaration = new RegExp(`(?:(?:^|[\\s;{])(?:${styleKey}|--[\\w-]+)\\s*:|\\b(?:repeating-)?(?:linear|radial|conic)-gradient\\()[^;{}]*$`, "iu");
-
 
 const isComment = node => node?.name === "LineComment" || node?.name === "BlockComment";
 function sibling(node, direction) {
@@ -136,7 +134,7 @@ export function checkUiRules(root, allowlist) {
       if (!rules.has(rule) || !Number.isSafeInteger(expected) || expected <= 0) failures.push(`${allowlistPath}: invalid entry ${path} (${rule}). Use a known rule and positive count.`);
     }
   }
-  const paths = globSync(`${renderer}**/*.{ts,tsx}`, { cwd: root }).map(path => path.replaceAll("\\", "/")).filter(isRendererSource).sort();
+  const paths = globSync(`${renderer}**/*.{ts,tsx,mts,cts}`, { cwd: root }).map(path => path.replaceAll("\\", "/")).filter(isRendererSource).sort();
   for (const path of paths) {
     const findings = scanSource(path, readFileSync(join(root, path), "utf8"));
     for (const finding of findings) {

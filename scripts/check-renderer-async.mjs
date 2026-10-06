@@ -2,7 +2,7 @@
 // Types carry the capability rules (read vs command, owned operations, data inputs, opaque task).
 // This check covers what types cannot: who may reach transport, and the form of handlers.
 // Usage: node scripts/check-renderer-async.mjs [rendererRoot] [--strict]
-// The default renderer uses the base raw-call inventory until migration completes.
+// The default renderer caps raw references at the current inventory counts until migration completes.
 import { checkRawBridge, rawBridgeReferences, isRendererTest, rendererRoot as defaultRoot, transportFiles } from "./check-raw-bridge.mjs";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -35,7 +35,6 @@ function role(path) {
   if (r.startsWith("data/")) return "data";
   return "view";
 }
-
 
 const findings = [];
 const referenceCounts = new Map();
@@ -192,8 +191,9 @@ for (const path of files) {
       && !program.body.some((s) => s.type === "ImportDeclaration" && s.specifiers.some((sp) => sp.imported === node))) {
       report(node, "RA7", "use the desktopAction hooks only as direct calls. Do not alias, re-export, or pass them around.");
     }
-    if (kind !== "owner" && ((node.type === "Identifier" && node.name === "dohcDesktop") || (isString(node) && node.value === "dohcDesktop"))) {
-      report(node, "RA1", "views cannot reach window.dohcDesktop. Use the desktopAction hooks, or desktopMetadata() for platform, devTools, and window role.");
+    if (kind !== "owner" && ((node.type === "Identifier" && node.name === "dohcDesktop") || (isString(node) && node.value === "dohcDesktop")
+      || (["MemberExpression", "Property"].includes(node.type) && memberName(node) === "dohcDesktop"))) {
+      report(node.property ?? node.key ?? node, "RA1", "views cannot reach window.dohcDesktop. Use the desktopAction hooks, or desktopMetadata() for platform, devTools, and window role.");
     }
     if (node.type === "ImportExpression") {
       if (!isString(node.source)) report(node, "RA7", "dynamic imports must name a literal module so its renderer boundary can be checked.");

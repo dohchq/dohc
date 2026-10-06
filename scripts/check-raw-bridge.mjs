@@ -8,26 +8,31 @@ export const rendererRoot = resolve(import.meta.dirname, "../apps/desktop/src/re
 export const transportFiles = ["bridge.ts", "desktopAction.ts", "desktopActionTesting.ts", "desktopOperations.ts"];
 export const isRendererTest = file => !isRendererSource("apps/desktop/src/renderer/" + file);
 
-export function rawBridgeReferences(source, path = "renderer.tsx", parsed = parseSync(path, source)) {
+// Counts every scoped bridge or window.dohcDesktop reference; acquiring a handle adds a reference before its uses.
+export function rawBridgeReferences(source, path = "renderer.tsx", parsed = parseSync(path, source), lines = null) {
   const { program, errors } = parsed;
   if (errors.length) throw new Error(path + ": " + errors[0].message);
   const references = [], bindings = [], assignments = [], declared = new Set();
-  const bridgeModule = spec => typeof spec === "string" && /(?:^|[\\/])bridge\.ts$/u.test(resolveModule(path, spec));
-  const bind = (pattern, scope, value, raw = false) => {
+  const bridgeModule = spec => typeof spec === "string" && /(?:^|[\\/])bridge\.(?:[cm]?ts|tsx)$/u.test(resolveModule(path, spec));
+  const bind = (pattern, scope, value, raw = false, assignment = false) => {
     if (!pattern) return;
     if (pattern.type === "Identifier") {
-      declared.add(pattern);
-      const binding = scope.names.get(pattern.name) ?? { raw, values: [] };
+      if (!assignment) declared.add(pattern);
+      let owner = scope;
+      if (assignment) while (owner && !owner.names.has(pattern.name)) owner = owner.parent;
+      if (!owner) return;
+      const binding = owner.names.get(pattern.name) ?? { raw, values: [] };
+      binding.raw ||= raw;
       if (value) binding.values.push(value);
-      scope.names.set(pattern.name, binding); bindings.push(binding);
-    } else if (pattern.type === "AssignmentPattern") { bind(pattern.left, scope, value, raw); bind(pattern.left, scope, pattern.right, raw); }
-    else if (["RestElement", "TSParameterProperty"].includes(pattern.type)) bind(pattern.argument ?? pattern.parameter, scope, value, raw);
+      owner.names.set(pattern.name, binding); bindings.push(binding);
+    } else if (pattern.type === "AssignmentPattern") { bind(pattern.left, scope, value, raw, assignment); bind(pattern.left, scope, pattern.right, raw, assignment); }
+    else if (["RestElement", "TSParameterProperty"].includes(pattern.type)) bind(pattern.argument ?? pattern.parameter, scope, value, raw, assignment);
     else if (pattern.type === "ObjectPattern") pattern.properties.forEach(property => {
       const desktop = ["window", "globalThis"].includes(unwrap(value)?.name) && memberName(property) === "dohcDesktop";
       if (desktop) references.push({ node: property, scope, raw: true });
-      bind(property.value ?? property.argument, scope, value, raw || desktop);
+      bind(property.value ?? property.argument, scope, value, raw || desktop, assignment);
     });
-    else if (pattern.type === "ArrayPattern") pattern.elements.forEach(element => bind(element, scope, value, raw));
+    else if (pattern.type === "ArrayPattern") pattern.elements.forEach(element => bind(element, scope, value, raw, assignment));
   };
   const visit = (node, scope, parent) => {
     if (node.type.startsWith("TS") && unwrap(node) === node && !["TSEnumDeclaration", "TSEnumBody", "TSEnumMember", "TSModuleDeclaration", "TSModuleBlock", "TSExportAssignment", "TSParameterProperty"].includes(node.type)) return;
@@ -44,21 +49,21 @@ export function rawBridgeReferences(source, path = "renderer.tsx", parsed = pars
     if (node.type === "VariableDeclarator") {
       let owner = scope;
       if (parent.kind === "var") while (owner.parent && !owner.fn) owner = owner.parent;
-      const value = unwrap(node.init?.type === "AwaitExpression" ? node.init.argument : node.init);
-      bind(node.id, owner, node.init, value?.type === "ImportExpression" && bridgeModule(value.source.value));
+      bind(node.id, owner, node.init);
     }
-    if (node.type === "AssignmentExpression" && node.operator === "=" && node.left.type === "Identifier") assignments.push(node);
+    if (node.type === "AssignmentExpression" && node.operator === "=") assignments.push({ node, scope });
+    const dynamicBridge = node.type === "ImportExpression" && bridgeModule(node.source.value);
     const globalBridge = node.type === "MemberExpression" && memberName(node) === "dohcDesktop" && ["window", "globalThis"].includes(unwrap(node.object)?.name);
     const staticName = (parent?.type === "MemberExpression" && parent.property === node || ["Property", "MethodDefinition", "PropertyDefinition"].includes(parent?.type) && parent.key === node) && !parent.computed || parent?.type === "ExportSpecifier" && parent.exported === node;
-    if (globalBridge || node.type === "Identifier" && !declared.has(node) && !staticName && !["LabeledStatement", "BreakStatement", "ContinueStatement"].includes(parent?.type)) references.push({ node, scope, raw: globalBridge || node.name === "dohcDesktop" });
+    if (dynamicBridge || globalBridge || node.type === "Identifier" && !declared.has(node) && !staticName && !["LabeledStatement", "BreakStatement", "ContinueStatement"].includes(parent?.type)) references.push({ node, scope, raw: dynamicBridge || globalBridge || node.name === "dohcDesktop" });
     children(node).forEach(child => visit(child, scope, node));
   };
   visit(program, { names: new Map(), parent: null, fn: true });
+  for (const { node, scope } of assignments) bind(node.left, scope, node.right, false, true);
   for (const reference of references) {
     for (let scope = reference.scope; scope; scope = scope.parent) if (scope.names.has(reference.node.name)) { reference.binding = scope.names.get(reference.node.name); break; }
   }
   const byNode = new Map(references.map(ref => [ref.node, ref]));
-  for (const assignment of assignments) byNode.get(assignment.left)?.binding?.values.push(assignment.right);
   const derived = node => {
     if (/^(?:Function|ArrowFunction)/u.test(node.type)) return false;
     const ref = byNode.get(node);
@@ -70,7 +75,9 @@ export function rawBridgeReferences(source, path = "renderer.tsx", parsed = pars
     changed = false;
     for (const binding of bindings) if (!binding.raw && binding.values.some(derived)) { binding.raw = true; changed = true; }
   } while (changed);
-  return references.filter(ref => ref.raw || ref.binding?.raw).length;
+  const counted = references.filter(ref => ref.raw || ref.binding?.raw);
+  lines?.push(...counted.map(ref => source.slice(0, ref.node.start).split("\n").length));
+  return counted.length;
 }
 export function rendererSources(root) {
   return readdirSync(root, { recursive: true }).filter(name => /\.(?:[cm]?ts|tsx)$/u.test(name) && statSync(join(root, name)).isFile());
@@ -82,7 +89,11 @@ export function checkRawBridge(root, inventory, referenceCounts = new Map()) {
     if (isRendererTest(file) || transportFiles.includes(file)) continue;
     const before = inventory.counts[file] ?? 0;
     const after = referenceCounts.get(file) ?? rawBridgeReferences(readFileSync(join(root, name), "utf8"), name);
-    if (after > before) violations.push("RATCHET " + file + ": raw bridge references " + before + " -> " + after + ". Use desktopAction or the operation's owner.");
+    if (after > before) {
+      const lines = [];
+      rawBridgeReferences(readFileSync(join(root, name), "utf8"), name, undefined, lines);
+      violations.push("RATCHET " + file + ":" + [...new Set(lines)].join(",") + ": raw bridge references exceed inventory count " + before + " -> " + after + ". Use desktopAction or the operation's owner.");
+    }
   }
   return violations;
 }

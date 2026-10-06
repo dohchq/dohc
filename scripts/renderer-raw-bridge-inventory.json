@@ -1,5 +1,5 @@
 {
-  "base": "237dceaf60b93661fd2272457aa08c7b5aa3d625",
+  "introducedAgainst": "237dceaf60b93661fd2272457aa08c7b5aa3d625",
   "counts": {
     "BacklinksPanel.tsx": 10,
     "CloudLogin.tsx": 9,
@@ -32,7 +32,7 @@
     "StopAndRestoreDialog.tsx": 42,
     "Titlebar.tsx": 7,
     "WorkspaceManager.tsx": 2,
-    "automationShareCheck.tsx": 1,
+    "automationShareCheck.tsx": 5,
     "collab/engineDocLease.ts": 43,
     "collab/ipcPresenceTransport.ts": 10,
     "collectionTableViews.ts": 11,
