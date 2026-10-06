@@ -51,7 +51,7 @@ impl std::fmt::Display for SharingDeclined {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredSharingDeclined {
-    head_sha256: String,
+    head_sha256: Option<String>,
     constraint: String,
     limit_bytes: usize,
     observed_bytes: usize,
@@ -64,7 +64,7 @@ pub(crate) fn current_sharing_declines_in_tx(
     let mut statement = tx
         .prepare(
             "SELECT d.object_id,d.version_id,s.path,d.sharing_declined_json,
-                d.head_update_seq=0 AND d.head_snapshot_seq=0,s.blob_sha256
+                d.head_update_seq=0 AND d.head_snapshot_seq=0
          FROM ydoc_docs d JOIN snapshots s USING(workspace_id,version_id,object_id)
          WHERE d.workspace_id=?1 AND d.lineage_claim_status='unclaimed'
            AND d.sharing_declined_json IS NOT NULL AND s.content_kind='text'
@@ -81,13 +81,12 @@ pub(crate) fn current_sharing_declines_in_tx(
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, bool>(4)?,
-                row.get::<_, String>(5)?,
             ))
         })
         .map_err(SyncError::corrupt)?;
     let mut declines = Vec::new();
     for row in rows {
-        let (object_id, version_id, path, json, lineage_pruned, head_sha256) =
+        let (object_id, version_id, path, json, lineage_pruned) =
             row.map_err(SyncError::corrupt)?;
         // Resolve and admit today's path before disclosing a stored fact.
         if dohc_engine_domain::validate_plaintext_storable_path(&path).is_err() {
@@ -107,7 +106,7 @@ pub(crate) fn current_sharing_declines_in_tx(
             version_id,
             path,
             lineage_pruned,
-            head_blob_sha256: Some(head_sha256),
+            head_blob_sha256: stored.head_sha256,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: stored.limit_bytes,
             observed_bytes: stored.observed_bytes,
@@ -216,8 +215,6 @@ pub fn originate_ydoc_base_in_tx(
     // user can act on, and it is indistinguishable from the four benign ones
     // unless it says so.
     if encoded.base.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
-        tx.execute("UPDATE ydoc_docs SET file_export_lane=1 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
-            params![key.workspace_id,key.version_id,key.object_id]).map_err(SyncError::persist)?;
         let mut declined = SharingDeclined {
             object_id: key.object_id.clone(),
             version_id: key.version_id.clone(),
@@ -229,24 +226,25 @@ pub fn originate_ydoc_base_in_tx(
             observed_bytes: encoded.base.len(),
         };
         let head: Option<String> = tx.query_row(
-            "SELECT blob_sha256 FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+            "SELECT CASE WHEN d.file_export_lane IN (1,2) AND d.sharing_declined_json IS NOT NULL
+                THEN json_extract(d.sharing_declined_json,'$.head_sha256')
+                ELSE (SELECT s.blob_sha256 FROM snapshots s WHERE s.workspace_id=d.workspace_id
+                  AND s.version_id=d.version_id AND s.object_id=d.object_id) END
+             FROM ydoc_docs d WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
             params![key.workspace_id, key.version_id, key.object_id], |row| row.get(0),
-        ).optional().map_err(SyncError::corrupt)?.flatten();
+        ).map_err(SyncError::corrupt)?;
         declined.head_blob_sha256 = head.clone();
-        if let Some(head_sha256) = head {
-            let stored = serde_json::to_string(&StoredSharingDeclined {
-                head_sha256,
-                constraint: declined.constraint.to_owned(),
-                limit_bytes: declined.limit_bytes,
-                observed_bytes: declined.observed_bytes,
-            })
-            .map_err(SyncError::corrupt)?;
-            // Repeated live pushes and cursor passes usually observe the same refusal.
-            tx.execute(
-                "UPDATE ydoc_docs SET sharing_declined_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND sharing_declined_json IS NOT ?4",
+        let stored = serde_json::to_string(&StoredSharingDeclined {
+            head_sha256: head,
+            constraint: declined.constraint.to_owned(),
+            limit_bytes: declined.limit_bytes,
+            observed_bytes: declined.observed_bytes,
+        })
+        .map_err(SyncError::corrupt)?;
+        tx.execute(
+                "UPDATE ydoc_docs SET file_export_lane=1,sharing_declined_json=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 AND (file_export_lane!=1 OR sharing_declined_json IS NOT ?4)",
                 params![key.workspace_id, key.version_id, key.object_id, stored],
             ).map_err(SyncError::persist)?;
-        }
         return Ok(BaseOrigination::Declined(declined));
     }
     if let Some(moment_id) = catch_up

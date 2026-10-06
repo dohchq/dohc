@@ -109,6 +109,187 @@ fn apply(store: &mut EngineStore, op: &ReplicationEnvelope) {
     assert_eq!(result, 0);
 }
 
+fn unsynced_settle_then_ordinary_publication(operation: &str) {
+    for flag in [1, 2] {
+        let (_scratch, _, mut source) = owner();
+        write(&mut source, "doc", "v1", "doc.md", "exported", "ydoc", 10);
+        lane(&mut source, "doc");
+        drain(&mut source);
+        source
+            .write_with(&NoFaults, |tx| {
+                tx.execute("UPDATE ydoc_docs SET file_export_lane=?1", [flag])
+                    .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        write(&mut source, "doc", "v2", "doc.md", "owner-only", "ydoc", 20);
+        if operation == "delete" {
+            VersionedTextStore::new(&mut source)
+                .delete_text_file(
+                    &DeleteTextFile {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        path: "doc.md".into(),
+                        moment_id: "outside".into(),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 30,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        } else {
+            write(
+                &mut source,
+                "doc",
+                "outside",
+                "doc.md",
+                "outside edit",
+                "api",
+                30,
+            );
+        }
+        source
+            .write_with(&NoFaults, |tx| {
+                journal_moment_append_in_tx(tx, "ws", "outside")
+            })
+            .unwrap();
+        let all = exports(&source);
+        assert_eq!(all.len(), 2, "the intermediate settle stays owner-only");
+        let (_peer_scratch, _, mut peer) = open_store();
+        seed_replication_version(&mut peer, "main", "main");
+        adopt_join_identity(
+            &mut peer,
+            "ws",
+            "recipient",
+            "epoch-1",
+            "stream-1",
+            1,
+            &NoFaults,
+        )
+        .unwrap();
+        hydrate(&source, &mut peer);
+        for op in &all {
+            apply(&mut peer, op);
+        }
+        assert_eq!(count(&peer, "conflicts"), 0);
+        assert_eq!(all[1].payload["beforeLatestMomentId"], "v1");
+        let local_before: String = source
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT before_latest_moment_id FROM moments WHERE moment_id='outside'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(local_before, "v2", "owner rollback keeps the real preimage");
+    }
+}
+
+#[test]
+fn lane_outside_write_after_unsynced_settle_uses_the_exported_preimage() {
+    unsynced_settle_then_ordinary_publication("write");
+}
+
+#[test]
+fn lane_delete_after_unsynced_settle_uses_the_exported_preimage() {
+    unsynced_settle_then_ordinary_publication("delete");
+}
+
+#[test]
+fn lane_decline_head_stays_stable_across_two_settles() {
+    for flag in [1, 2] {
+        let (_scratch, _, mut source) = owner();
+        write(&mut source, "doc", "seed", "doc.md", "seed", "ydoc", 10);
+        lane(&mut source, "doc");
+        let refused = dohc_engine_storage::hex_sha256(b"seed");
+        source.write_with(&NoFaults, |tx| {
+            let fact = serde_json::json!({"head_sha256":refused,"constraint":"MAX_YDOC_UPDATE_BYTES","limit_bytes":20,"observed_bytes":21});
+            tx.execute("UPDATE ydoc_docs SET file_export_lane=?1,sharing_declined_json=?2", params![flag,fact.to_string()]).map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        }).unwrap();
+        for (id, text) in [("settle-1", "saved one"), ("settle-2", "saved two")] {
+            write(&mut source, "doc", id, "doc.md", text, "ydoc", 20);
+            let declines = source
+                .write_with(&NoFaults, |tx| {
+                    crate::ydoc_origination::current_sharing_declines_in_tx(tx, "ws")
+                })
+                .unwrap();
+            let TxnOutcome::Committed(declines) = declines else {
+                panic!("decline query crashed")
+            };
+            assert_eq!(declines.len(), 1);
+            assert_eq!(
+                declines[0].head_blob_sha256.as_deref(),
+                Some(refused.as_str())
+            );
+        }
+    }
+}
+
+#[test]
+fn lane_headless_decline_is_reported_after_settles_with_a_stable_absent_head() {
+    let (_scratch, _, mut source) = owner();
+    let doc = Ydoc::wire();
+    doc.plaintext_insert(
+        0,
+        &"x".repeat(dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES + 1),
+    );
+    doc.plaintext_delete(
+        0,
+        dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES as u32 + 1,
+    );
+    doc.plaintext_insert(0, "saved one");
+    let base = doc.encode_full_state();
+    assert!(base.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES);
+    let blob = source.put_binary_blob(&base).unwrap();
+    let key = DocKey::new("ws", "main", "doc").unwrap();
+    source.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO file_objects VALUES ('ws','doc',0)", []).map_err(SyncError::persist)?;
+        tx.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,head_update_seq,path) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',1,1,'doc.md')", []).map_err(SyncError::persist)?;
+        tx.execute("INSERT INTO ydoc_updates(workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms) VALUES ('ws','main','doc',1,?1,10)", [&blob]).map_err(SyncError::persist)?;
+        let BaseOrigination::Declined(declined) = originate_ydoc_base_in_tx(tx, &key, "doc.md", None, None, 10)? else { panic!("oversized base must decline") };
+        assert_eq!(declined.head_blob_sha256, None);
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    for (id, text) in [("settle-1", "saved one"), ("settle-2", "saved two")] {
+        let input = WriteText {
+            workspace_id: "ws".into(),
+            version_id: "main".into(),
+            object_id: "doc".into(),
+            moment_id: id.into(),
+            path: "doc.md".into(),
+            text: text.into(),
+            metadata_origin: "ydoc".into(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            author_json: None,
+            now_ms: 20,
+            request_id: None,
+        };
+        source
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::write_projected_text_in_tx(tx, &input)
+            })
+            .unwrap();
+        let TxnOutcome::Committed(declines) = source
+            .write_with(&NoFaults, |tx| {
+                crate::ydoc_origination::current_sharing_declines_in_tx(tx, "ws")
+            })
+            .unwrap()
+        else {
+            panic!("decline query crashed")
+        };
+        assert_eq!(declines.len(), 1);
+        assert_eq!(declines[0].head_blob_sha256, None);
+        assert_eq!(declines[0].path, "doc.md");
+    }
+}
+
 #[test]
 fn lane_many_settles_deliver_one_head_and_keep_owner_history() {
     let (_scratch, _, mut source) = owner();

@@ -516,6 +516,36 @@ pub(crate) const LAST_FILE_EXPORT_SQL: &str = "SELECT r.payload_json FROM replic
              WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq))
          ORDER BY m.moment_order DESC,r.rowid DESC LIMIT 1";
 
+pub(crate) fn last_file_export_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+) -> Result<Option<serde_json::Value>, SyncError> {
+    let last: Option<String> = tx
+        .query_row(
+            LAST_FILE_EXPORT_SQL,
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    last.map(|json| serde_json::from_str(&json).map_err(SyncError::corrupt))
+        .transpose()
+}
+
+pub(crate) fn file_version_before_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    last: Option<&serde_json::Value>,
+) -> Result<crate::outbound::PortableBefore, SyncError> {
+    if let Some(last) = last {
+        return Ok(crate::outbound::PortableBefore::published(last));
+    }
+    let first: String = tx.query_row("SELECT m.moment_id FROM moments m WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND r.imported=1 AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)) ORDER BY m.moment_order LIMIT 1", params![key.workspace_id,key.version_id,key.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
+    let (bootstrap, _) =
+        crate::outbound::moment_append_payload_in_tx(tx, &key.workspace_id, &first)?;
+    Ok(crate::outbound::PortableBefore::bootstrap(&bootstrap))
+}
+
 #[derive(Default)]
 pub(crate) struct FileExportBudget {
     blobs: std::collections::BTreeMap<String, i64>,
@@ -527,36 +557,22 @@ pub(crate) fn journal_file_version_in_tx(
     moment_id: &str,
     budget: &mut FileExportBudget,
 ) -> Result<bool, SyncError> {
-    let last: Option<String> = tx
-        .query_row(
-            LAST_FILE_EXPORT_SQL,
-            params![key.workspace_id, key.version_id, key.object_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?;
+    let last = last_file_export_in_tx(tx, key)?;
     let (current, _) =
         crate::outbound::moment_append_payload_in_tx(tx, &key.workspace_id, moment_id)?;
-    let before = if let Some(last) = last {
-        let last: serde_json::Value = serde_json::from_str(&last).map_err(SyncError::corrupt)?;
-        if last["operation"] != "delete"
-            && [
-                "payloadAfterBlobSha256",
-                "payloadAfterPath",
-                "payloadAfterContentKind",
-            ]
-            .iter()
-            .all(|field| last[*field] == current[*field])
-        {
-            return Ok(true);
-        }
-        crate::outbound::PortableBefore::published(&last)
-    } else {
-        let first: String = tx.query_row("SELECT m.moment_id FROM moments m WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND NOT EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=m.workspace_id AND r.op_kind='moment.append' AND r.imported=1 AND json_extract(r.payload_json,'$.momentId')=+m.moment_id AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)) ORDER BY m.moment_order LIMIT 1", params![key.workspace_id,key.version_id,key.object_id], |r|r.get(0)).map_err(SyncError::corrupt)?;
-        let (bootstrap, _) =
-            crate::outbound::moment_append_payload_in_tx(tx, &key.workspace_id, &first)?;
-        crate::outbound::PortableBefore::bootstrap(&bootstrap)
-    };
+    if let Some(last) = last.as_ref()
+        && last["operation"] != "delete"
+        && [
+            "payloadAfterBlobSha256",
+            "payloadAfterPath",
+            "payloadAfterContentKind",
+        ]
+        .iter()
+        .all(|field| last[*field] == current[*field])
+    {
+        return Ok(true);
+    }
+    let before = file_version_before_in_tx(tx, key, last.as_ref())?;
     let payload = crate::outbound::moment_append_payload_from_in_tx(
         tx,
         &key.workspace_id,

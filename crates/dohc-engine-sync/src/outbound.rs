@@ -194,6 +194,28 @@ pub fn journal_moment_append_in_tx(
     moment_id: &str,
 ) -> Result<(), SyncError> {
     let (payload, recorded_at_ms) = moment_payload_in_tx(tx, workspace_id, moment_id, None)?;
+    let uses_file_preimage: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
+           AND (file_export_lane IN (1,2) OR (file_export_lane=3 AND ?4='delete')))",
+        params![workspace_id,payload["versionId"].as_str(),payload["objectId"].as_str(),payload["operation"].as_str()],
+        |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
+    if uses_file_preimage {
+        let key = dohc_engine_collab::DocKey {
+            workspace_id: workspace_id.to_owned(),
+            version_id: payload["versionId"]
+                .as_str()
+                .expect("moment names its version")
+                .to_owned(),
+            object_id: payload["objectId"]
+                .as_str()
+                .expect("moment names its object")
+                .to_owned(),
+        };
+        let last = crate::enrolment::last_file_export_in_tx(tx, &key)?;
+        let before = crate::enrolment::file_version_before_in_tx(tx, &key, last.as_ref())?;
+        return journal_moment_append_from_in_tx(tx, workspace_id, moment_id, &before);
+    }
     journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
 }
 

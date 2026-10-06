@@ -3882,6 +3882,7 @@ async fn oversized_declined_editor_settlements_export_only_latest_after_enrolmen
     let doc = Ydoc::wire();
     doc.apply(&opened.initial_update)
         .expect("load editor state");
+    let refusal_head = opened.head_blob_sha256.clone();
     let mut expected_head = opened.head_blob_sha256;
     let mut settlements = Vec::new();
     for (now, edit) in [(200, "first edit\n"), (300, "second edit\n")] {
@@ -3986,7 +3987,7 @@ async fn oversized_declined_editor_settlements_export_only_latest_after_enrolmen
             };
         assert_eq!(declines.len(), 1);
         assert_eq!(declines[0].object_id, object);
-        assert_eq!(declines[0].head_blob_sha256, expected_head);
+        assert_eq!(declines[0].head_blob_sha256, refusal_head);
         dohc_engine_sync::RelaySyncClient::new(AcceptPushTransport)
             .push_workspace(&mut store, WS, &NoFaults, &NoLiveLeases, now, 0)
             .expect("push the latest selected editor version");

@@ -4686,20 +4686,21 @@ mod tests {
     {
         let mut conn = Connection::open_in_memory().unwrap();
         let ctx = MigrationContext::current(1000);
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..BASELINE_MIGRATIONS.len() - 1],
-            &ctx,
-            &NoFaults,
-        )
-        .unwrap();
+        let target = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.ordinal == 33)
+            .unwrap();
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..target], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0);").unwrap();
         let sha = "a".repeat(64);
         conn.execute("INSERT INTO blobs VALUES (?1,1,'a')", [&sha])
             .unwrap();
         conn.execute("INSERT INTO snapshots(workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','doc.md',?1,0,'a','ydoc')",[&sha]).unwrap();
         conn.execute("INSERT INTO ydoc_docs(workspace_id,version_id,object_id,content_kind,regime,lineage_claim_status,updated_at_ms,sharing_declined_json) VALUES ('ws','main','doc','plaintext','local-only','unclaimed',0,?1)",[format!(r#"{{"head_sha256":"{sha}","constraint":"MAX_YDOC_UPDATE_BYTES","limit_bytes":20,"observed_bytes":21}}"#)]).unwrap();
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap();
+        assert_eq!(
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=target], &ctx, &NoFaults).unwrap(),
+            MigrationOutcome::Applied { newly_applied: 1 }
+        );
         let flag = |conn: &Connection| {
             conn.query_row("SELECT file_export_lane FROM ydoc_docs", [], |r| {
                 r.get::<_, i64>(0)
@@ -4753,7 +4754,11 @@ mod tests {
     fn sharing_decline_migration_clears_head_claim_delete_and_restore() {
         let mut conn = Connection::open_in_memory().unwrap();
         let ctx = MigrationContext::current(1_000);
-        let previous = &BASELINE_MIGRATIONS[..BASELINE_MIGRATIONS.len() - 1];
+        let target = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.ordinal == 31)
+            .unwrap();
+        let previous = &BASELINE_MIGRATIONS[..target];
         run_migrations(&mut conn, previous, &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0);").unwrap();
         for value in ['a', 'b'] {
@@ -4771,7 +4776,7 @@ mod tests {
         conn.execute("INSERT INTO ydoc_docs (workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms) VALUES ('ws','main','doc','plaintext','local-only',0,0,'unclaimed',0)", []).unwrap();
         conn.execute("INSERT INTO snapshots (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','notes/a.md',?1,0,'moment','api')", ["a".repeat(64)]).unwrap();
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=target], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let refusal = format!(
