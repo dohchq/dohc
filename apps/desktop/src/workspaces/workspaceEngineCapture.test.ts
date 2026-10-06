@@ -477,6 +477,69 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["OVERLOADED", "engine-store-busy", "afterBackoff", false],
+    ["OVERLOADED", "live-settlement-capacity", "afterBackoff", false],
+    ["INTERNAL", "live-settlement-capacity", "no", true],
+  ] as const)("retries an open adoption refused with %s %s on the next pass", async (code, message, retry, reported) => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const path = "tasks/pending.md";
+    const objectId = "pending-object";
+    const recordId = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, objectId, text: "# Body\n" });
+    const sessions = mockLiveSessions(loopback);
+    const liveStore = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root,
+      attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    let pending = true;
+    const store = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "flushCapture" || property === "reconcileCapture") return async () => undefined;
+        if (property === "listPendingCollectionAdoptions") return async () => ({
+          adoptions: pending ? [{ versionId: "main", recordId, collectionPath: "tasks", filePath: path, objectId }] : [],
+          nextCursor: null,
+        });
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const refusal = new DaemonRefusalError({ code, message, retry }, undefined);
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("Name", "Manual");
+    const close = vi.fn(async () => undefined);
+    const evict = vi.fn(async () => undefined);
+    let adoptions = 0;
+    const adopt = vi.fn(async () => {
+      if (++adoptions === 1) throw refusal;
+      doc.getMap("frontmatter").set("id", recordId);
+      pending = false;
+      return "settled" as const;
+    });
+    const open = vi.fn(async () => ({
+      doc, initialUpdate: Y.encodeStateAsUpdate(doc), contentKind: "richdoc" as const,
+      path, objectId, versionId: "main", head: "present" as const, lineage: "existing" as const,
+      unsettled: false, close, evict,
+      applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); },
+      adoptCollectionRecord: adopt,
+      settleNow: async () => undefined,
+    }) as unknown as EngineYdocProviderSession);
+    const errors: Array<{ context: string; error: unknown }> = [];
+    const engine = capture(root, { store, rustEngineSessions: sessions, openRustYDocProviderSession: open,
+      onError: (context, error) => errors.push({ context, error }) });
+    const session = await engine.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    await engine.flush();
+    expect(adopt).toHaveBeenCalledTimes(2);
+    expect(pending).toBe(false);
+    expect(session.doc.getMap("frontmatter").toJSON()).toEqual({ Name: "Manual", id: recordId });
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    expect(evict).not.toHaveBeenCalled();
+    expect(errors).toEqual(reported ? [{ context: `collection adoption of ${path}`, error: refusal }] : []);
+    await session.close({ settle: false });
+    await engine.stop();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it("adopts records discovered by this flush's capture in one fixed second pass", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     let pending = false;
@@ -562,7 +625,11 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it("retries a busy collection adoption provider on a later pass while other items proceed", async () => {
+  it.each([
+    ["OVERLOADED", "engine-store-busy", "afterBackoff", false],
+    ["OVERLOADED", "live-settlement-capacity", "afterBackoff", false],
+    ["INTERNAL", "live-settlement-capacity", "no", true],
+  ] as const)("retries a %s %s collection adoption provider on a later pass while other items proceed", async (code, message, retry, reported) => {
     const root = await createTestScratch("dohc-engine-capture-");
     const adoptions = [
       {
@@ -599,14 +666,10 @@ describe("workspaceEngineCapture batch capture", () => {
         nextCursor: null,
       }),
     } as unknown as CaptureVersionedTextStore;
-    const busy = new DaemonRefusalError(
-      {
-        code: "OVERLOADED",
-        message: "engine-store-busy",
-        retry: "afterBackoff",
-      },
-      undefined,
-    );
+    const busy = new DaemonRefusalError({ code, message, retry }, undefined);
+    const expectedErrors = reported
+      ? [{ context: "collection adoption of projects/busy.md", error: busy }]
+      : [];
     const opens = new Map<string, number>();
     const sessions = {
       run: async (_workspace: unknown, task: (binding: unknown) => unknown) =>
@@ -643,7 +706,7 @@ describe("workspaceEngineCapture batch capture", () => {
       "projects/busy.md:1", "projects/healthy.md:1", "reconcile",
       "projects/busy.md:2", "reconcile",
     ]);
-    expect(errors).toEqual([]);
+    expect(errors).toEqual(expectedErrors);
 
     await engine.flush();
 
@@ -663,7 +726,7 @@ describe("workspaceEngineCapture batch capture", () => {
         ["projects/healthy.md", 1],
       ]),
     );
-    expect(errors).toEqual([]);
+    expect(errors).toEqual(expectedErrors);
     await engine.stop();
   });
 

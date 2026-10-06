@@ -3836,7 +3836,12 @@ export function createWorkspaceEngineCapture(
           } else {
             pendingCollectionAdoptionProviders.delete(adoptionKey);
           }
-          if (isEngineStoreBusyRefusal(error)) continue;
+          // A refusal that clears by itself leaves the adoption pending; a
+          // later drain pass retries it.
+          if (isTransientEngineRefusal(error)) {
+            deferred = true;
+            continue;
+          }
           onError(`collection adoption of ${adoption.filePath}`, error);
         }
       }
