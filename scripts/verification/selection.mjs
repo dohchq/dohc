@@ -203,8 +203,15 @@ export function selectedGates(files, workflow) {
 
 export const isGateReader = path => /\.(?:rs|[cm]?[jt]sx?)$/u.test(path);
 
-function* javascriptGateInputs(path, source) {
+function* javascriptGateInputs(path, source, couldFind) {
   if (!/\b(?:readFileSync|readFile|createReadStream|existsSync|URL|join|resolve)\b/u.test(source)) return;
+  // Overlapping quotes retain candidates inside templates, comments, and regexes.
+  // Treat every value as a direct read here; the parser decides its actual role.
+  let candidate = false;
+  for (const match of source.matchAll(/(?=(["'\x60])([^\\\r\n]*?)\1)/gu)) {
+    if (couldFind(match[2])) { candidate = true; break; }
+  }
+  if (!candidate) return;
   // Lezer treats a CRLF continuation differently from its equivalent LF source.
   source = source.replaceAll("\r\n", "\n");
   const language = /\.[jt]sx$/u.test(path) ? tsxLanguage : typescriptLanguage;
@@ -322,13 +329,20 @@ export function uncoveredGateInputs(files, trackedPaths, workflow) {
     const gates = Object.entries(gatesFor(reader))
       .filter(([gate, selected]) => selected && (gate === "rust") === rust).map(([gate]) => gate);
     if (!gates.length) continue;
-    const inputs = rust ? rustGateInputs(source) : javascriptGateInputs(reader, source);
     const runtimeBase = rust ? crateRoot(reader, tracked) : ".";
-    for (const { reference, directRead, call } of inputs) {
+    const resolveReference = ({ reference, directRead, call }) => {
       const include = rust && (call === "include_str!" || call === "include_bytes!");
-      const input = include || /^\.{1,2}\//u.test(reference)
+      return include || /^\.{1,2}\//u.test(reference)
         ? posix.normalize(posix.join(include || !rust ? posix.dirname(reader) : runtimeBase, reference))
         : directRead ? posix.normalize(posix.join(runtimeBase, reference)) : null;
+    };
+    const couldFind = reference => {
+      const input = resolveReference({ reference, directRead: true });
+      return tracked.has(input) && gates.some(gate => !gatesFor(input)[gate]);
+    };
+    const inputs = rust ? rustGateInputs(source) : javascriptGateInputs(reader, source, couldFind);
+    for (const reference of inputs) {
+      const input = resolveReference(reference);
       if (!input || !tracked.has(input)) continue;
       for (const gate of gates) {
         if (!gatesFor(input)[gate]) findings.set(`${gate}|${reader}|${input}`,

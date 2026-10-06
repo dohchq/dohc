@@ -482,3 +482,35 @@ test("gate input guard admits a bare read after argument comments", () => {
   assert.deepEqual(gateFixture("scripts/read.mjs", 'readFileSync(/* input */ "LICENSE");', "LICENSE"),
     [gateFinding("scripts/read.mjs", "LICENSE", "js")]);
 });
+
+
+test("gate input prefilter preserves commented, optional, and later literal arguments", () => {
+  const reader = "scripts/fixture.ts";
+  const input = "LICENSE";
+  for (const source of [
+    'readFileSync /* call */ (/* input */ "LICENSE");',
+    'readFileSync // call\n(// input\n"LICENSE");',
+    'fs.readFileSync?.("LICENSE");',
+    'readFileSync(unknown, "../LICENSE");',
+    'join(unknown, /* input */ "../LICENSE");',
+    'resolve?.(unknown, "../LICENSE");',
+    'new /* call */ URL(/* input */ "../LICENSE", import.meta.url);',
+    'const text = \x60\x24{join("../LICENSE")}\x60;',
+  ]) {
+    assert.deepEqual(gateFixture(reader, source, input), [gateFinding(reader, input, "js")], source);
+  }
+});
+
+
+test("gate input prefilter retains overlapping quotes and mixed quotes in paths", () => {
+  const reader = "scripts/fixture.mjs";
+  for (const [source, input] of [
+    ['import value from "./covered.mjs"; const text = \x60\x24{new URL("../LICENSE", import.meta.url)}\x60;', "LICENSE"],
+    ['// "unmatched quote\nresolve("../LICENSE");', "LICENSE"],
+    [String.raw`const text = "escaped \" quote"; resolve("../LICENSE");`, "LICENSE"],
+    [`resolve("../assets/it's.json");`, "assets/it's.json"],
+    [`resolve('../assets/a"b.json');`, 'assets/a"b.json'],
+  ]) {
+    assert.deepEqual(gateFixture(reader, source, input), [gateFinding(reader, input, "js")], source);
+  }
+});
