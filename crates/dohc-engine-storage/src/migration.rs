@@ -2930,7 +2930,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        ordinal: 30,
+        ordinal: 33,
         id: "v2-retained-materialization-displacements",
         sql: V2_RETAINED_DISPLACEMENTS_DDL,
         sets_user_version: None,
@@ -3258,7 +3258,7 @@ mod tests {
         let mut conn = open_bare(&dir.join("engine.db"));
         let ctx = MigrationContext::current(1);
         let before = migration_index("v2-retained-materialization-displacements");
-        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 30);
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 33);
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         let sha = crate::blob::put_binary_blob(&conn, b"before").unwrap();
         let tx = conn.unchecked_transaction().unwrap();
@@ -3277,7 +3277,7 @@ mod tests {
         .unwrap();
         tx.commit().unwrap();
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let jobs:i64=conn.query_row("SELECT COUNT(*) FROM materialization_jobs WHERE job_id='pending' AND status='pending'",[],|r|r.get(0)).unwrap();
