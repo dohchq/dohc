@@ -37,15 +37,53 @@ Every release job runs on a self-hosted runner. Cloud runners stay off.
 
 | Jobs | Runner labels |
 | --- | --- |
-| Preflight, Publish, and the Linux x64 package | `self-hosted`, `linux`, `x64` |
-| Windows x64 package | `self-hosted`, `windows`, `x64` |
+| Preflight, version check, Publish, and Windows x64 package | `self-hosted`, `windows`, `x64` |
+| Linux x64 package | `self-hosted`, `linux`, `x64` |
 | macOS x64 and arm64 packages | `self-hosted`, `macos`, `arm64` |
 
 A job waits in the queue until a runner with its labels is online.
 Each runner needs Git with bash, rustup, and the platform's native build tools.
-The Linux runner also needs `xvfb-run` for the fuse smoke and the GitHub CLI, `gh`, for publishing.
+The Windows runner also needs the GitHub CLI, `gh`, for publishing.
+The Linux runner also needs `xvfb-run` for the fuse smoke.
 The package and publish jobs receive the environment's secrets.
 Register only runners that the release owner controls.
+On this shared Windows PC, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.
+This keeps release engine builds within the local disk, slot, and compiler budget, even when Actions sets `CI=true`.
+Start the runner's `run.cmd` when building a release.
+The runner can stay offline between releases.
+
+## Choose versions
+
+Stable releases use SemVer in `apps/desktop/package.json`.
+During initial development, bump the patch number for fixes and the minor number for meaningful features or changed contracts.
+Reserve `1.0.0` for the first supported stable release.
+An agent can recommend and prepare the version change from the changes since the previous stable release.
+Review that change through the normal pull request procedure.
+
+Nightlies need no committed version change.
+With package version `0.1.0`, a nightly becomes `0.1.1-nightly.YYYYMMDD.RUN.ATTEMPT`.
+The date uses UTC. GitHub supplies the run number and attempt.
+Each published release retains its tag, source commit, notes, and installers in GitHub Releases.
+
+## Build a Windows nightly
+
+Dispatch `Desktop Release` from `main` with `channel=nightly`, `platforms=windows`, and `dry_run=true`.
+The Windows runner performs every job for this selection.
+The workflow generates the nightly version from the package version, UTC date, run number, and run attempt.
+Download the run's `desktop-Windows-x64` artifact after every job passes.
+Verify its files with the artifact command below.
+Run the packaged executable with an isolated profile before publishing the first testing build.
+For publication, dispatch again with `dry_run=false`.
+The new dispatch generates a new nightly version.
+The published prerelease records the source commit and includes generated release notes.
+
+Use `platforms=all` when Windows, macOS, and Linux runners are available.
+Only the selected platforms receive installers and update packages.
+Choose `all` when the release must update existing installations on every supported platform.
+
+Private repository downloads require repository access.
+The packaged updater also needs an authenticated private feed or a public download host.
+Do not embed a repository token in the desktop package.
 
 ## Publish a stable version
 
@@ -53,6 +91,7 @@ Merge the version change and its verification evidence into `main`.
 Before enabling releases, configure the environment credentials and protect changes to `main`.
 Complete the installer and update rehearsal below before publishing the first stable release.
 Dispatch `Desktop Release` from `main` with `channel=latest` and the matching package version.
+Select the platforms that the release supports.
 Use `dry_run=true` to check unsigned packaging without publication.
 For publication, use `dry_run=false`. Stable Windows and macOS builds require signing.
 

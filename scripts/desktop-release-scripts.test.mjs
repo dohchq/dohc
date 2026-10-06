@@ -28,6 +28,7 @@ after(async () => {
 });
 
 import {
+  desktopReleaseTargets,
   nextNightlyBaseVersion,
   resolveDesktopRelease,
   writeGithubOutput,
@@ -78,6 +79,23 @@ test("resolves stable and nightly desktop release metadata", async () => {
   assert.equal(nightly.version, "0.1.1-nightly.20260621.12.2");
   assert.equal(nightly.release_channel, "nightly");
   assert.equal(nightly.make_latest, "false");
+  assert.deepEqual(JSON.parse(nightly.matrix).map((target) => target.os), ["Windows"]);
+});
+
+test("release platform selection defaults to Windows and keeps every native target available", () => {
+  const windows = desktopReleaseTargets();
+  assert.equal(windows.length, 1);
+  assert.deepEqual(windows[0].runner, ["self-hosted", "windows", "x64"]);
+  assert.equal(windows[0].target, "x86_64-pc-windows-msvc");
+  const all = desktopReleaseTargets("all");
+  assert.deepEqual(all.map((target) => [target.arch, target.target]), [
+    ["x64", "x86_64-pc-windows-msvc"],
+    ["x64", "x86_64-apple-darwin"],
+    ["arm64", "aarch64-apple-darwin"],
+    ["x64", "x86_64-unknown-linux-gnu"],
+  ]);
+  for (const target of all) assert.equal(target.runner[0], "self-hosted");
+  assert.throws(() => desktopReleaseTargets("linux"), /Invalid release platforms/);
 });
 
 test("release metadata requires a real commit sha", async () => {
@@ -509,8 +527,12 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   const jobNames = [...jobs.matchAll(/^ {2}([\w-]+):/gm)].map((match) => match[1]);
   const runsOn = [...jobs.matchAll(/^ {4}runs-on: (.+)$/gm)].map((match) => match[1].trim());
   assert.equal(runsOn.length, jobNames.length, "every job names its runner");
-  const matrixRunners = [...jobs.matchAll(/^ {12}runner: (.+)$/gm)].map((match) => match[1].trim());
-  assert.ok(matrixRunners.length > 0, "the package matrix names its runners");
+  assert.match(jobs, /include: \$\{\{ fromJSON\(needs\.preflight\.outputs\.matrix\) \}\}/);
+  assert.match(indentedSection(jobs, 2, "preflight"), /--platforms "\$DISPATCH_PLATFORMS"/);
+  for (const name of ["preflight", "unused-version", "publish"]) {
+    assert.match(indentedSection(jobs, 2, name), /runs-on: \[self-hosted, windows, x64\]/);
+  }
+  const matrixRunners = desktopReleaseTargets("all").map((target) => `[${target.runner.join(", ")}]`);
   for (const runner of [
     ...runsOn.filter((value) => value !== "${{ matrix.runner }}"),
     ...matrixRunners,
@@ -675,22 +697,6 @@ test("desktop release stages the Rust engine built for the packaged architecture
   const workflow = await readFile(
     join(process.cwd(), ".github/workflows/desktop-release.yml"),
     "utf8",
-  );
-  assert.match(
-    workflow,
-    /arch: x64\s+target: x86_64-apple-darwin/,
-  );
-  assert.match(
-    workflow,
-    /arch: arm64\s+target: aarch64-apple-darwin/,
-  );
-  assert.match(
-    workflow,
-    /arch: x64\s+target: x86_64-pc-windows-msvc/,
-  );
-  assert.match(
-    workflow,
-    /arch: x64\s+target: x86_64-unknown-linux-gnu/,
   );
   assert.match(
     stepBlock(workflow, "Build workspace engine"),
