@@ -9,6 +9,7 @@ import { cancellationScope } from "./cancellation.mjs";
 import { startTiming, timed } from "./timing.mjs";
 import { testWorkspace } from "./js-tests.mjs";
 import { readWorkspacePackages, selectJavaScript, selectedGates, workflowFilters } from "./selection.mjs";
+import { readFocusedRendererSelection } from "./renderer-selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
@@ -20,6 +21,15 @@ export function desktopProofCommand(args, { platform = process.platform, env = p
   return platform === "linux" && !env.DISPLAY && !env.WAYLAND_DISPLAY
     ? ["xvfb-run", ["-a", command[0], ...command[1]]]
     : command;
+}
+
+export function desktopProofTags(proofs, {platform = process.platform} = {}) {
+  const gallery = proofs.statesPage && platform === "win32";
+  const smoke = proofs.desktop || proofs.smoke;
+  return {
+    selected: [...(smoke ? ["@verification-smoke"] : []), ...(proofs.desktop ? ["@self-host-onboarding"] : []), ...(gallery ? ["@states-page"] : [])],
+    required: [...(smoke ? ["@verification-smoke"] : []), ...(proofs.desktop ? ["@self-host-onboarding"] : []), ...(gallery ? ["@states-baselines"] : [])],
+  };
 }
 
 function createTreeReader() {
@@ -149,7 +159,9 @@ export async function verify(args) {
     const gates = Object.fromEntries(Object.entries(requiredGates).map(([name, needed]) => [name, needed && (!job || name === job)]));
     const jsPatterns = workflowFilters(workflow).js;
     const jsFiles = files.filter(file => jsPatterns.some(pattern => matchesGlob(file, pattern)));
-    const javascript = gates.js ? selectJavaScript(jsFiles, readWorkspacePackages(repoRoot), { full: full || job === "js" && !jsFiles.length }) : null;
+    const forceFull = full || job === "js" && !jsFiles.length;
+    const javascript = gates.js ? (!forceFull && readFocusedRendererSelection(repoRoot, jsFiles, baseCommit)
+      || selectJavaScript(jsFiles, readWorkspacePackages(repoRoot), { full: forceFull })) : null;
     return { baseCommit, files, workflow, requiredGates, gates, javascript };
   }
   if (mode === "plan") { const {baseCommit, files, gates, javascript} = selection(); console.log(JSON.stringify({base, baseCommit, files, gates, javascript}, null, 2)); return; }
@@ -229,7 +241,7 @@ export async function verify(args) {
     await cancellation.checkpoint();
     if (mode === "pr" && (gates.js || gates.rust)) await step("install", ...pnpm(["install", "--frozen-lockfile"]));
     if (needs.desktop) await step("electron-install", process.execPath, ["apps/desktop/scripts/ensure-electron-installed.mjs"]);
-    report.doctor = await measure("doctor", () => doctor({engine: native, desktop: needs.desktop, browser: Boolean(proofs.accounts || proofs.desktop)})); save();
+    report.doctor = await measure("doctor", () => doctor({engine: native, desktop: needs.desktop, browser: Boolean(proofs.accounts || desktopProofTags(proofs).selected.length)})); save();
     await cancellation.checkpoint();
     if (report.doctor.checks.some((check) => check.state === "FAIL")) throw new Error("Preflight failed. Read result.json and run pnpm setup:worktree.");
     await step("app-backend-runtime", ...pnpm(["--filter", "@dohc/app-backend-runtime", "build"]));
@@ -280,7 +292,8 @@ export async function verify(args) {
             {...env, DOHC_SERVICE_HOST_PROOF_BINARY: stagedEnginePath, DOHC_SERVICE_HOST_PROOF_SHA256: nativeHash, DOHC_SERVICE_HOST_PROOF_OUTPUT: nativeOutput});
           report.selfHostNative = readSelfHostNativeProof(nativeOutput, stagedEnginePath, nativeHash); save();
         }
-        if (mode === "pr" && (proofs.accounts || proofs.desktop)) {
+        const tags = mode === "pr" ? desktopProofTags(proofs) : {selected: ["@verification-smoke"], required: ["@verification-smoke"]};
+        if (mode === "pr" && (proofs.accounts || tags.selected.length)) {
           await proofStep("browser-install", ...pnpm(["exec", "playwright", "install", ...(process.platform === "linux" ? ["--with-deps"] : []), "chromium"]), env);
         }
         if (mode === "pr" && proofs.accounts) {
@@ -289,17 +302,16 @@ export async function verify(args) {
           report.accounts = JSON.parse(readFileSync(accountReport, "utf8")).stats;
           if (!report.accounts?.expected || report.accounts.unexpected || report.accounts.flaky || report.accounts.skipped) throw new Error("Account browser verification did not complete without failures or skips.");
         }
-        if (proofs.desktop) {
+        if (mode === "pr" && proofs.statesPage && process.platform !== "win32") {
+          report.statesPage = `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`; save();
+        }
+        if (tags.selected.length) {
           // The states page compares its baselines on Windows, where they were
           // taken. Elsewhere its pixel test skips itself, which the skip check
           // below would count as a failure, so it is left out and the report
           // says so. @states-page selects both of its tests; the pixel test
           // alone carries @states-baselines, and that is the proof required.
-          const gallery = mode === "pr" && proofs.statesPage && process.platform === "win32";
-          if (mode === "pr" && proofs.statesPage && !gallery) { report.statesPage = `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`; save(); }
-          const selected = mode === "pr" ? ["@verification-smoke", "@self-host-onboarding", ...(gallery ? ["@states-page"] : [])] : ["@verification-smoke"];
-          const required = mode === "pr" ? ["@verification-smoke", "@self-host-onboarding", ...(gallery ? ["@states-baselines"] : [])] : ["@verification-smoke"];
-          const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", selected.join("|")];
+          const forwarded = mode === "e2e" ? args.slice(1).filter((arg) => arg !== "--") : ["--grep", tags.selected.join("|")];
           const jsonReport = join(output, "playwright.json");
           await proofStep("desktop", ...desktopProofCommand(["--config", "apps/desktop/playwright.config.ts", "--output", join(output, "desktop"), ...forwarded, "--reporter=list,json"], { env }), { ...env, PLAYWRIGHT_JSON_OUTPUT_NAME: jsonReport, DOHC_QA_OUTPUT: output, DOHC_REQUIRE_ENGINE_E2E: "1" });
           const desktopReport = JSON.parse(readFileSync(jsonReport, "utf8"));
@@ -307,7 +319,7 @@ export async function verify(args) {
           report.desktopProofs = passedSpecTitles(desktopReport.suites);
           if (!report.desktop?.expected || report.desktop.unexpected || report.desktop.flaky) throw new Error("Desktop verification did not complete a passing test run.");
           if (mode !== "e2e" && report.desktop.skipped) throw new Error("A mandatory desktop smoke test was skipped.");
-          if (mode === "pr" && required.some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error(`The desktop gate did not pass every required proof: ${required.join(", ")}.`);
+          if (mode === "pr" && tags.required.some((tag) => !report.desktopProofs.some((title) => title.split(/\s+/u).includes(tag)))) throw new Error(`The desktop gate did not pass every required proof: ${tags.required.join(", ")}.`);
         }
       }
       if (mode === "pr" && gates.js) {
