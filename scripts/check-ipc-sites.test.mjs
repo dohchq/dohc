@@ -33,6 +33,7 @@ test("rejects a new hand invoke even when another legacy invoke is removed", t =
   assert.match(failures[0], /OperationTable in apps\/desktop\/src\/ipc\/bridgeContract\.ts/u);
   assert.match(failures[0], /operationBridge and registerOperations/u);
   assert.match(failures[1], /CHANNELS.old.*stale entry/u);
+  assert.doesNotMatch(failures[0], /[Ii]f this change only moves/u);
 });
 
 test("accepts an added table row and its derived bridge and registration", t => {
@@ -168,7 +169,7 @@ test("source and full repository verification include the check and fixtures", (
   assert.ok(scripts["test:repo"].startsWith("pnpm test:repo:source &&"));
 });
 
-test("regression: tuple wrappers, constants, spreads, and unresolved rows retain sites", () => {
+test("tuple wrappers, constants, and spreads retain sites", () => {
   const rows = [
     '[CHANNELS.new, true] as const',
     '[CHANNELS.new, true] satisfies Row',
@@ -176,15 +177,18 @@ test("regression: tuple wrappers, constants, spreads, and unresolved rows retain
     'row',
     '[...channelTuple]',
     '...rows',
-    '...unknownRows',
   ];
   const results = rows.map(row => extractIpcSites(registrar,
     'const channelTuple = [CHANNELS.new, true] as const; const row = channelTuple; const rows = [row]; for (const [channel, stop] of ['
     + row + '] as const) registerHandler(channel, handler);').map(site => site.fingerprint.split(' | ').at(-1)));
-  assert.deepEqual(results.slice(0, -1), rows.slice(0, -1).map(() => ['CHANNELS.new']));
-  assert.match(results.at(-1)[0], /^collection/u);
-  assert.equal(results.at(-1).length, 1);
+  assert.deepEqual(results, rows.map(() => ['CHANNELS.new']));
   assert.deepEqual(extractIpcSites(registrar, 'const rows = [[CHANNELS.new, true]] as const; for (const [channel, stop] of (rows satisfies Rows)) registerHandler(channel, handler);').map(site => site.fingerprint), [registrar + ' | CHANNELS.new']);
+});
+
+test("unresolved rows retain their collection text", () => {
+  const spread = extractIpcSites(registrar, 'for (const [channel] of [...unknownRows]) registerHandler(channel, handler);');
+  assert.equal(spread.length, 1);
+  assert.match(spread[0].fingerprint, /collection/u);
   const unknown = value => extractIpcSites(registrar,
     'const rows = makeRows(' + value + '); for (const [channel, stop] of rows) registerHandler(channel, handler);');
   assert.equal(unknown('CHANNELS.a').length, 1);
@@ -203,13 +207,13 @@ test("regression: tuple wrappers, constants, spreads, and unresolved rows retain
   assert.notDeepEqual(indirect('CHANNELS.a'), indirect('CHANNELS.b'));
 });
 
-test("regression: boundary and one-shot registrations are hand sites", () => {
+test("boundary and one-shot registrations are hand sites", () => {
   const results = ['operationBoundary.handle', 'ipcMain.handleOnce'].map(callee =>
     extractIpcSites(main, 'const operationBoundary = { handle: handleIpc }; ' + callee + '(CHANNELS.new, handler);').map(site => site.fingerprint.split(' | ').at(-1)));
   assert.deepEqual(results, [['CHANNELS.new'], ['CHANNELS.new']]);
 });
 
-test("regression: invoke normalization follows transparent expressions and local aliases", () => {
+test("invoke normalization follows transparent expressions and local aliases", () => {
   const sources = [
     '(ipcRenderer.invoke)(CHANNELS.new);',
     '(ipcRenderer).invoke(CHANNELS.new);',
@@ -225,10 +229,11 @@ test("regression: invoke normalization follows transparent expressions and local
     '(ipcRenderer.invoke.bind(ipcRenderer))(CHANNELS.new);',
   ];
   assert.deepEqual(sources.map(source => extractIpcSites(preload, source)
-    .map(site => site.fingerprint.split(' | ').at(-1))), sources.map(() => ['CHANNELS.new']));
+    .map(site => site.fingerprint.split(' | ').at(-1))), sources.map(source => source.includes('.bind')
+    ? ['CHANNELS.new', 'invoke transport reference: ipcRenderer.invoke'] : ['CHANNELS.new']));
 });
 
-test("regression: inline and constant table transports are exempt only when forwarding", () => {
+test("inline and constant table transports are exempt only when forwarding", () => {
   for (const transport of [
     '(channel, payload) => ipcRenderer.invoke(channel, payload)',
     'function(channel, payload) { return ipcRenderer.invoke(channel, payload); }',
@@ -242,7 +247,7 @@ test("regression: inline and constant table transports are exempt only when forw
   }
 });
 
-test("regression: moved preload and registrar modules remain in the scanned set", t => {
+test("moved preload and registrar modules remain in the scanned set", t => {
   const paths = ['apps/desktop/src/bridge/transport.ts', 'apps/desktop/src/ipc/settings/handlers.ts'];
   const { dir } = fixture(t, {
     [paths[0]]: 'ipcRenderer.invoke(CHANNELS.new);',
@@ -255,13 +260,17 @@ test("regression: moved preload and registrar modules remain in the scanned set"
   for (const path of paths) assert.ok(failures.some(failure => failure.startsWith(path)));
 });
 
-test("regression: mixed new and stale sites explain fingerprint replacement", t => {
-  const { dir } = fixture(t, { [preload]: 'ipcRenderer.invoke(CHANNELS.new);' });
+test("cross-file moves explain fingerprint replacement", t => {
+  const moved = "apps/desktop/src/bridge/transport.ts";
+  const { dir } = fixture(t, { [preload]: "", [moved]: "ipcRenderer.invoke(CHANNELS.old);" });
   const stale = extractIpcSites(preload, 'ipcRenderer.invoke(CHANNELS.old);')[0].fingerprint;
   const { failures } = checkIpcSites(dir, { sites: [stale] });
-  assert.match(failures.join('\n'), /if this change only moves existing hand sites, replace the stale fingerprints with these/u);
+  assert.match(failures.join('\n'), /If this change only moves existing hand sites, replace the stale fingerprints with these/u);
   assert.match(failures.join('\n'), /CHANNELS.old/u);
-  assert.match(failures.join('\n'), /CHANNELS.new/u);
+  assert.match(failures.join('\n'), /bridge\/transport.ts/u);
+  const duplicate = fixture(t, { [moved]: 'ipcRenderer.invoke(CHANNELS.old);' });
+  const duplicateMove = checkIpcSites(duplicate.dir, { sites: [oldSite, oldSite + ' #2'] });
+  assert.match(duplicateMove.failures.join('\n'), /If this change only moves/u);
 });
 
 test("local aliases respect function and block bindings", () => {
@@ -274,4 +283,102 @@ test("forwarding fingerprints name the registrar and channel parameter", () => {
   assert.deepEqual(extractIpcSites(main,
     'registerExampleIpc({ registerHandler: (channel, handler) => ipcMain.handle(channel, handler) });')
     .map(site => site.fingerprint), [main + ' | registerExampleIpc.registerHandler forwards channel to ipcMain.handle']);
+});
+
+test("entry-name bindings remain hand calls after alias resolution", () => {
+  for (const [path, source] of [
+    [preload, 'const { ipcRenderer } = require("electron"); ipcRenderer.invoke(CHANNELS.new);'],
+    [preload, 'const ipcRenderer = electron.ipcRenderer; ipcRenderer.invoke(CHANNELS.new);'],
+    [main, 'const handleIpc = createHandleIpc(ipcMain); handleIpc(CHANNELS.new, handler);'],
+    [registrar, 'const registerHandler = guarded(deps.registerHandler); registerHandler(CHANNELS.new, handler);'],
+    [registrar, 'const registerHandler = deps.handle; registerHandler(CHANNELS.new, handler);'],
+  ]) assert.deepEqual(extractIpcSites(path, source).map(site => site.fingerprint), [path + ' | CHANNELS.new']);
+});
+
+test("named row collections referenced outside their loop are sites", () => {
+  const rows = 'const rows = [[CHANNELS.old, true], [CHANNELS.resume, false]]; ';
+  const loop = 'for (const [channel, stop] of rows) registerHandler(channel, handler);';
+  assert.deepEqual(extractIpcSites(registrar, rows + loop).map(site => site.fingerprint), [
+    registrar + ' | CHANNELS.old', registrar + ' | CHANNELS.resume',
+  ]);
+  for (const use of ['rows.push([CHANNELS.new, true]);', 'mutate(rows);', 'mutate({ rows });', 'const other = rows;', 'rows[0] = [CHANNELS.new, true];']) {
+    assert.deepEqual(extractIpcSites(registrar, rows + use + loop).map(site => site.fingerprint), [
+      registrar + ' | collection(rows) referenced outside its loop',
+    ]);
+  }
+  assert.deepEqual(extractIpcSites(registrar, rows + '{ const rows = other; mutate(rows); }' + loop)
+    .map(site => site.fingerprint), [registrar + ' | CHANNELS.old', registrar + ' | CHANNELS.resume']);
+});
+
+test("table forwarding distinguishes a shadowed channel binding", () => {
+  for (const named of [false, true]) {
+    const transport = '(channel, payload) => { { const channel = "desktop:new"; ipcRenderer.invoke(channel); } return ipcRenderer.invoke(channel, payload); }';
+    const source = named ? 'const transport = ' + transport + '; operationBridge(ops, transport);' : 'operationBridge(ops, ' + transport + ');';
+    assert.deepEqual(extractIpcSites(preload, source).map(site => site.fingerprint), [preload + ' | "desktop:new"']);
+  }
+});
+
+test("Electron imports and let aliases identify hand calls", t => {
+  const sources = [
+    'import { ipcRenderer as ipc } from "electron"; ipc.invoke(CHANNELS.new);',
+    'import * as electron from "electron"; electron.ipcRenderer.invoke(CHANNELS.new);',
+    'import { ipcMain as mainIpc } from "electron"; mainIpc.handle(CHANNELS.new, handler);',
+    'import * as electron from "electron"; electron.ipcMain.handle(CHANNELS.new, handler);',
+    'let r = ipcRenderer; r.invoke(CHANNELS.new);',
+  ];
+  for (const source of sources) {
+    const { dir } = fixture(t, { [preload]: source });
+    const { sites, failures } = checkIpcSites(dir, { sites: [] });
+    assert.deepEqual(sites.map(site => site.fingerprint), [preload + ' | CHANNELS.new']);
+    assert.equal(failures.length, 1);
+  }
+  assert.deepEqual(extractIpcSites(preload, 'import { ipcRenderer as ipc } from "other"; ipc.invoke(CHANNELS.fake);'), []);
+});
+
+test("uncalled invoke transports and helper references are sites", t => {
+  const helper = 'function invoke(channel, payload) { return ipcRenderer.invoke(channel, payload); } operationBridge(ops, invoke); ';
+  for (const expression of [
+    'export const request = ipcRenderer.invoke.bind(ipcRenderer);',
+    'const transport = { request: ipcRenderer.invoke.bind(ipcRenderer) };',
+    'const request = invoke.bind(null); request(CHANNELS.new);',
+    'ipcRenderer.invoke.call(ipcRenderer, CHANNELS.new);',
+    'ipcRenderer.invoke.apply(ipcRenderer, [CHANNELS.new]);',
+    'Reflect.apply(ipcRenderer.invoke, ipcRenderer, [CHANNELS.new]);',
+    'const transport = { invoke };',
+    'invoke.call(null, CHANNELS.new);',
+    'invoke.apply(null, [CHANNELS.new]);',
+    'Reflect.apply(invoke, null, [CHANNELS.new]);',
+  ]) {
+    const reference = expression.includes('ipcRenderer.invoke') ? 'ipcRenderer.invoke' : 'invoke';
+    assert.deepEqual(extractIpcSites(preload, helper + expression).map(site => site.fingerprint), [
+      preload + ' | invoke transport reference: ' + reference,
+    ], expression);
+  }
+  const provider = 'apps/desktop/src/bridge/auditTransport.ts';
+  const { dir } = fixture(t, {
+    [preload]: '',
+    [provider]: 'import { ipcRenderer } from "electron"; export const invoke = ipcRenderer.invoke.bind(ipcRenderer);',
+    'apps/desktop/src/bridge/auditIndex.ts': 'export { invoke as requestFromMain } from "./auditTransport";',
+    'apps/desktop/src/bridge/auditMethods.ts': 'import { requestFromMain } from "./auditIndex"; export const getStatus = () => requestFromMain(CHANNELS.new);',
+  });
+  const { sites, failures } = checkIpcSites(dir, { sites: [] });
+  assert.deepEqual(sites.map(site => site.fingerprint), [provider + ' | invoke transport reference: ipcRenderer.invoke']);
+  assert.equal(failures.length, 1);
+  assert.deepEqual(extractIpcSites(preload, 'operationBridge(ops, (ipcRenderer.invoke as Transport));'), []);
+});
+
+test("table forwarding accepts transparent channel wrappers and local aliases", () => {
+  for (const expression of ['(channel)', 'channel as string', 'channel!', 'key']) {
+    const transport = '(channel, payload) => { const key = channel; return ipcRenderer.invoke(' + expression + ', payload); }';
+    assert.deepEqual(extractIpcSites(preload, 'operationBridge(ops, ' + transport + ');'), [], expression);
+    assert.deepEqual(extractIpcSites(preload, 'const transport = ' + transport + '; operationBridge(ops, transport);'), [], expression);
+  }
+});
+
+test("same-file site swaps keep the plain OperationTable diagnostic", t => {
+  const { dir } = fixture(t, { [preload]: 'ipcRenderer.invoke(CHANNELS.new);' });
+  const { failures } = checkIpcSites(dir, { sites: [oldSite] });
+  assert.equal(failures.length, 2);
+  assert.match(failures[0], /Declare a row in an OperationTable/u);
+  assert.doesNotMatch(failures.join('\n'), /[Ii]f this change only moves/u);
 });
