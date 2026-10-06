@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import childProcess, {execFileSync} from "node:child_process";
-import {syncBuiltinESMExports} from "node:module";
+import childProcess, {execFileSync, spawn, spawnSync} from "node:child_process";
+import {once} from "node:events";
+import {createRequire, syncBuiltinESMExports} from "node:module";
 import {copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {dirname, join} from "node:path";
@@ -106,6 +107,36 @@ test("build globs retain tests that the production builder consumes", t => {
   assert.notEqual(artifactSourceFingerprint("desktop", root), before);
 });
 
+test("Tailwind renderer and declared source scans are covered by desktop receipts", async t => {
+  const {root, put} = fixture(t);
+  const require = createRequire(new URL("../../apps/desktop/package.json", import.meta.url));
+  const tailwindRequire = createRequire(require.resolve("@tailwindcss/vite"));
+  const {compile} = await import(pathToFileURL(tailwindRequire.resolve("@tailwindcss/node")).href);
+  const {Scanner} = tailwindRequire("@tailwindcss/oxide");
+  const renderer = join(root, "apps/desktop/src/renderer");
+  const cssSource = readFileSync(new URL("../../apps/desktop/src/renderer/styles.css", import.meta.url), "utf8");
+  put("apps/desktop/src/renderer/styles.css", cssSource);
+  put("apps/desktop/src/renderer/scan.test.tsx", 'const className = "w-[913px]";');
+  put("packages/collection-views/src/scan.test.tsx", 'const className = "h-[927px]";');
+  const css = async () => {
+    const compiler = await compile(cssSource, {base: renderer, onDependency: () => {},
+      customCssResolver: id => id === "tailwindcss" ? require.resolve("tailwindcss/index.css") : undefined});
+    assert.equal(compiler.root, null);
+    const scanner = new Scanner({sources: [{base: renderer, pattern: "**/*", negated: false}, ...compiler.sources]});
+    return compiler.build(scanner.scan());
+  };
+  const before = artifactSourceFingerprint("desktop", root);
+  assert.match(await css(), /913px/);
+  assert.match(await css(), /927px/);
+  put("apps/desktop/src/renderer/scan.test.tsx", 'const className = "w-[914px]";');
+  const rendererChanged = artifactSourceFingerprint("desktop", root);
+  assert.notEqual(rendererChanged, before);
+  assert.match(await css(), /914px/);
+  put("packages/collection-views/src/scan.test.tsx", 'const className = "h-[928px]";');
+  assert.notEqual(artifactSourceFingerprint("desktop", root), rendererChanged);
+  assert.match(await css(), /928px/);
+});
+
 test("receipts cover new configuration, manifests, lockfiles, Cargo and vendor inputs", t => {
   const {root, put} = fixture(t);
   const exec = childProcess.execFileSync;
@@ -172,6 +203,7 @@ test("runtime receipts reuse exact outputs and reject source, output and environ
   const root = mkdtempSync(join(tmpdir(), "dohc-runtime-receipt-"));
   t.after(() => rmSync(root, {recursive: true, force: true}));
   createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+  copyFileSync(new URL("../../tools/rust-engine-program/build-slot.mjs", import.meta.url), join(root, "tools/rust-engine-program/build-slot.mjs"));
   writeFileSync(join(root, ".gitignore"), readFileSync(join(root, ".gitignore"), "utf8") + "packages/app-backend-runtime/dist/\n");
   const runtime = join(root, "packages/app-backend-runtime");
   mkdirSync(join(runtime, "scripts"), {recursive: true});
@@ -194,4 +226,57 @@ test("runtime receipts reuse exact outputs and reject source, output and environ
   assert.equal(readFileSync(join(runtime, "dist/index.mjs"), "utf8"), "changed source");
   assert.doesNotMatch(run({ESBUILD_BINARY_PATH: "changed-compiler"}), /reuse/);
   assert.equal(readFileSync(join(root, ".dohc-dev/runtime-calls"), "utf8"), "build\n".repeat(4));
+});
+
+test("a killed runtime build releases ownership on retry while live owners remain protected", {timeout: 15_000}, async t => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-runtime-interrupt-"));
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+  copyFileSync(new URL("../../tools/rust-engine-program/build-slot.mjs", import.meta.url), join(root, "tools/rust-engine-program/build-slot.mjs"));
+  writeFileSync(join(root, ".gitignore"), readFileSync(join(root, ".gitignore"), "utf8") + "packages/app-backend-runtime/dist/\n");
+  const runtime = join(root, "packages/app-backend-runtime");
+  mkdirSync(join(runtime, "scripts"), {recursive: true});
+  mkdirSync(join(runtime, "src"));
+  writeFileSync(join(runtime, "package.json"), '{"name":"@dohc/app-backend-runtime","type":"module","scripts":{"build":"node scripts/build.mjs"}}');
+  writeFileSync(join(runtime, "src/index.ts"), "runtime source");
+  const buildScript = join(runtime, "scripts/build.mjs");
+  copyFileSync(new URL("../../packages/app-backend-runtime/scripts/build.mjs", import.meta.url), buildScript);
+  const esbuild = join(runtime, "node_modules/esbuild");
+  mkdirSync(esbuild, {recursive: true});
+  writeFileSync(join(esbuild, "package.json"), '{"type":"module","exports":"./index.mjs"}');
+  writeFileSync(join(esbuild, "index.mjs"), `import {mkdirSync,writeFileSync} from 'node:fs';import {join} from 'node:path';export async function build(options){mkdirSync(options.outdir,{recursive:true});writeFileSync(join(options.outdir,'index.mjs'),'held output');if(process.env.DOHC_TEST_HOLD_RUNTIME==='1'){console.log('runtime compiler ready');await new Promise(resolve=>process.stdin.once('data',resolve));}writeFileSync(join(options.outdir,'index.mjs'),'completed output');}`);
+  const child = spawn(process.execPath, [buildScript], {env: {...process.env, DOHC_TEST_HOLD_RUNTIME: "1"}, stdio: ["pipe", "pipe", "pipe"]});
+  const closed = once(child, "close");
+  try {
+    let stdout = "", stderr = "";
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    await new Promise((resolveReady, reject) => {
+      child.stdout.on("data", chunk => { stdout += chunk; if (stdout.includes("runtime compiler ready")) resolveReady(); });
+      child.once("error", reject);
+      child.once("exit", () => reject(new Error(`Runtime builder exited before its compiler started: ${stderr}`)));
+    });
+    const ownerPath = join(root, ".dohc-dev/verification/runtime-build-1/owner.json");
+    assert.equal(JSON.parse(readFileSync(ownerPath, "utf8")).pid, child.pid);
+    const competing = spawnSync(process.execPath, [buildScript], {encoding: "utf8"});
+    assert.equal(competing.status, 1);
+    assert.match(competing.stderr, new RegExp(`pid ${child.pid}`));
+    assert.equal(readFileSync(join(runtime, "dist/index.mjs"), "utf8"), "held output");
+    process.kill(child.pid, 0);
+    const interruptedFileLock = join(root, ".dohc-dev/verification/runtime-build.json.lock");
+    writeFileSync(interruptedFileLock, JSON.stringify({pid: child.pid}));
+    const liveFileOwner = spawnSync(process.execPath, [buildScript], {encoding: "utf8"});
+    assert.equal(liveFileOwner.status, 1);
+    assert.match(liveFileOwner.stderr, new RegExp(`pid ${child.pid}`));
+    assert.equal(JSON.parse(readFileSync(interruptedFileLock, "utf8")).pid, child.pid);
+    child.kill("SIGKILL");
+    await closed;
+    assert.equal(JSON.parse(readFileSync(ownerPath, "utf8")).pid, child.pid);
+    assert.doesNotMatch(execFileSync(process.execPath, [buildScript], {encoding: "utf8"}), /reuse/);
+    assert.throws(() => readFileSync(interruptedFileLock), {code: "ENOENT"});
+    assert.equal(readFileSync(join(runtime, "dist/index.mjs"), "utf8"), "completed output");
+    assert.match(execFileSync(process.execPath, [buildScript], {encoding: "utf8"}), /reuse prepared bundle/);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await closed;
+  }
 });

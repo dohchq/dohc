@@ -1,7 +1,7 @@
 import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const dist = fileURLToPath(new URL("../dist", import.meta.url));
@@ -10,7 +10,7 @@ const receiptPath = join(root, ".dohc-dev/verification/runtime-build.json");
 const cache = existsSync(join(root, ".git")) && existsSync(join(root, "scripts/verification/build.mjs"))
   ? await import("../../../scripts/verification/build.mjs") : null;
 
-export function runtimeBuildPrepared() {
+function runtimeBuildPrepared() {
   if (!cache) return false;
   try {
     const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
@@ -23,20 +23,34 @@ export function runtimeBuildPrepared() {
   }
 }
 
-if (cache && existsSync(receiptPath + ".lock")) {
-  throw new Error(`Another runtime build owns ${receiptPath}.lock. Inspect its PID before removing a stale lock.`);
-}
-if (runtimeBuildPrepared()) {
-  console.log("[runtime-build] reuse prepared bundle");
-} else {
-  if (cache) mkdirSync(resolve(receiptPath, ".."), {recursive: true});
-  const lock = receiptPath + ".lock";
-  try { if (cache) writeFileSync(lock, JSON.stringify({pid: process.pid}), {flag: "wx"}); }
-  catch (error) {
-    if (error.code === "EEXIST") throw new Error(`Another runtime build owns ${lock}. Inspect its PID before removing a stale lock.`);
-    throw error;
-  }
+function clearInterruptedFileLock() {
+  const path = receiptPath + ".lock";
   try {
+    const file = lstatSync(path);
+    if (!file.isFile() || process.getuid && file.uid !== process.getuid()) {
+      throw new Error(`Cannot reclaim runtime build lock ${path}: owner unavailable.`);
+    }
+    const owner = JSON.parse(readFileSync(path, "utf8"));
+    if (!Number.isInteger(owner.pid) || owner.pid <= 0) {
+      throw new Error(`Cannot reclaim runtime build lock ${path}: owner unavailable.`);
+    }
+    try { process.kill(owner.pid, 0); }
+    catch (error) { if (error.code === "ESRCH") { unlinkSync(path); return; } }
+    throw new Error(`Another runtime build owns ${path}: pid ${owner.pid}.`);
+  } catch (error) { if (error.code !== "ENOENT") throw error; }
+}
+
+let lease;
+if (cache) {
+  clearInterruptedFileLock();
+  const {acquireExclusiveSlot} = await import("../../../tools/rust-engine-program/build-slot.mjs");
+  lease = acquireExclusiveSlot({root: dirname(receiptPath), kind: "runtime-build", cooperativeCancellation: false,
+    metadata: {purpose: "runtime build", checkout: resolve(root), phase: "build"}});
+}
+try {
+  if (runtimeBuildPrepared()) {
+    console.log("[runtime-build] reuse prepared bundle");
+  } else {
     const source = cache?.artifactSourceFingerprint("runtime", root);
     rmSync(dist, {recursive: true, force: true});
 
@@ -74,5 +88,5 @@ if (runtimeBuildPrepared()) {
       writeFileSync(receiptPath + ".tmp", JSON.stringify({version: 1, root: resolve(root), source, artifact: cache.directoryFingerprint(dist)}) + "\n");
       renameSync(receiptPath + ".tmp", receiptPath);
     }
-  } finally { if (cache) rmSync(lock, {force: true}); }
-}
+  }
+} finally { lease?.release(); }

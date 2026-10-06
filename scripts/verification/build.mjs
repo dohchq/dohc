@@ -154,7 +154,9 @@ export function artifactSourceFingerprint(kind, root = repoRoot) {
     || /^scripts\/(?!verification\/)/u.test(path) && !testInput(path)
     || preparationInputs.includes(path);
   const inOwner = path => [...owners].some(owner => path.startsWith(owner + "/"));
-  const selected = new Set(files.filter(path => shared(path) || inOwner(path) && !testInput(path)));
+  // Tailwind scans the Vite renderer root even when a file is not bundled.
+  const selected = new Set(files.filter(path => shared(path) || inOwner(path) && (!testInput(path)
+    || kind === "desktop" && path.startsWith("apps/desktop/src/renderer/"))));
   // Receipts depend on the helpers that discover inputs and launch each build.
   for (const path of preparationInputs) selected.add(path);
   // A test-named file can still be a production import or build resource.
@@ -182,14 +184,15 @@ export function artifactSourceFingerprint(kind, root = repoRoot) {
     for (const match of text.matchAll(/(["'`])((?:\\.|(?!\1)[^\\\r\n])*?)\1/gu)) {
       const value = match[2].split("${", 1)[0];
       if (!value || value === "." || value === ".." || value.length > 512 || /\s/u.test(value)) continue;
+      const cssSource = path.endsWith(".css") && /@source\s+(?:not\s+)?$/u.test(text.slice(Math.max(0, match.index - 100), match.index));
       if (!buildScripts.has(path) && !value.includes("/") && !value.includes("\\") && !/\.[\w]+$/u.test(value)) continue;
       const glob = /[?*[{]/u.test(value);
-      if (glob && !buildScripts.has(path)
+      if (glob && !buildScripts.has(path) && !cssSource
         && !/import\.meta\.glob\s*\(\s*$/u.test(text.slice(Math.max(0, match.index - 100), match.index))) continue;
       if (!glob && !names.has(basename(value.replace(/\/$/u, "")))) continue;
       for (const base of [dirname(path), owner, ""].filter(base => base !== undefined)) {
         const target = relative(root, resolve(root, base, value)).replaceAll("\\", "/");
-        const resourceDirectory = match[2].includes("${") || /(?:^|\/)(?:tests|__tests__|e2e)(?:\/|$)/u.test(value)
+        const resourceDirectory = cssSource || match[2].includes("${") || /(?:^|\/)(?:tests|__tests__|e2e)(?:\/|$)/u.test(value)
           || /\b(?:cp|readdir(?:Sync)?|glob(?:Sync)?)\s*\([^;\n]{0,200}$/u.test(text.slice(Math.max(0, match.index - 200), match.index));
         const globPrefix = target.split(/[?*[{]/u, 1)[0];
         const referenced = references.get(target) ?? references.get(target + "/index")
