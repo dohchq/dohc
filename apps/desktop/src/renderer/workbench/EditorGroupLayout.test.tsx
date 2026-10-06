@@ -47,6 +47,36 @@ describe("EditorGroupLayout", () => {
     ).toBe("right");
   });
 
+  // EditorTabs reads the data attributes to mark the active group's strip,
+  // and aria-current says the same to a screen reader.
+  it("marks a split and its active group, and leaves a single group unmarked", () => {
+    renderLayout();
+    expect(screen.getByTestId("editor-group-layout").dataset.split).toBe("true");
+    const [first, second] = [
+      screen.getByRole("region", { name: "Editor group 1" }),
+      screen.getByRole("region", { name: "Editor group 2" }),
+    ];
+    expect(first.dataset.active).toBe("true");
+    expect(first.getAttribute("aria-current")).toBe("true");
+    expect(second.dataset.active).toBeUndefined();
+    expect(second.getAttribute("aria-current")).toBeNull();
+    cleanup();
+
+    render(
+      <EditorGroupLayout
+        groups={[{ id: "only", size: 1, content: <button type="button">Editor</button> }]}
+        activeGroupId="only"
+        onFocusGroup={vi.fn()}
+        onResizeGroups={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("editor-group-layout").dataset.split).toBeUndefined();
+    const only = screen.getByRole("region", { name: "Editor group 1" });
+    expect(only.getAttribute("aria-current")).toBeNull();
+    // No frame around the group: the strip carries the mark in a split.
+    expect(only.className).not.toContain("ring");
+  });
+
   it("previews pointer moves locally and commits adjacent groups once on release", () => {
     const { onResizeGroups } = renderLayout();
     const layout = screen.getByTestId("editor-group-layout");

@@ -1,23 +1,28 @@
-import { AlertTriangle, CheckCircle2, MoreHorizontal } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
+import { AlertTriangle, Bot, CheckCircle2, MoreHorizontal } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { DocumentMenu } from "../DocumentMenu";
+import { BlockMenu } from "../editor/blockControls";
+import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
-import { CopyDetailsButton } from "../shell/copyDetails";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
-import { CopyButton } from "../ui/CopyButton";
+import { CopyButton, CopyField } from "../ui/CopyButton";
 import { DangerButton, EmptyState, IconButton, Pill, PrimaryButton, SecondaryButton, SectionLabel } from "../ui/controls";
+import { MENU_SEPARATOR, Menu, type MenuEntry } from "../ui/Menu";
 import { MoreMenu } from "../ui/MoreMenu";
 import { SegmentedControl } from "../ui/SegmentedControl";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { SAVE_STATE, StateMark, type SaveStateKey } from "../ui/StateMark";
 import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
+import { EditorTabs } from "../workbench/EditorTabs";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
-import { PanelLoading } from "../workbench/PanelLoading";
 import { closeStatesPage } from "./statesRoute";
 
 // Every shared part in every state, light beside dark, on one development
@@ -104,6 +109,56 @@ function Swatch(props: { label: string; className: string }) {
 
 const noop = () => undefined;
 
+const NO_RECOVERY: ReadonlySet<string> = new Set();
+
+// One group's strip over a strip of paper, as the shell lays a group out.
+function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs: string[]; active: string | null }) {
+  return (
+    <>
+      <EditorTabs
+        groupId={props.groupId}
+        groupNumber={props.groupNumber}
+        tabs={props.tabs.map((path) => ({ path }))}
+        activeTab={props.active}
+        activeTabDirty={false}
+        recoveryPaths={NO_RECOVERY}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+        onCloseGroup={noop}
+      />
+      {/* Tall enough to hold the tab list, which the capture opens, and its
+          shadow. */}
+      <div className="h-28 bg-bg" />
+    </>
+  );
+}
+
+// A split of two groups where one has tabs and the other none. A strip with
+// tabs carries the tab-list menu, and a part opens one menu, so each part
+// holds one strip with tabs.
+function EditorGroupsSpecimen(props: { activeHasTabs: boolean }) {
+  const tabbed = { tabs: ["plan.md", "notes.md"], active: "plan.md" };
+  const empty = { tabs: [], active: null };
+  const [first, second] = props.activeHasTabs ? [tabbed, empty] : [empty, tabbed];
+  return (
+    <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
+      <EditorGroupLayout
+        groups={[
+          { id: "first", size: 1, content: <EditorGroupSpecimen groupId="first" groupNumber={1} {...first} /> },
+          { id: "second", size: 1, content: <EditorGroupSpecimen groupId="second" groupNumber={2} {...second} /> },
+        ]}
+        activeGroupId="first"
+        onFocusGroup={noop}
+        onResizeGroups={noop}
+      />
+    </div>
+  );
+}
+
 function treeRow(name: string, folder = false): VisibleRow {
   return {
     fullPath: name,
@@ -135,7 +190,6 @@ function Row(props: {
   folder?: boolean;
   selected?: boolean;
   active?: boolean;
-  focused?: boolean;
   drop?: boolean;
   force?: string;
 }) {
@@ -146,12 +200,51 @@ function Row(props: {
         collection={false}
         selected={props.selected ?? false}
         active={props.active ?? false}
-        focused={props.focused ?? false}
         tabbable={false}
         dropPreview={props.drop ? { kind: "move", role: "target" } : null}
         {...treeRowCallbacks}
       />
     </div>
+  );
+}
+
+// A file of every kind in the registry, so each glyph is drawn the way the
+// Explorer draws it. A `Record` over the kinds, so a new kind is a compile
+// error here until the page shows it.
+const KIND_SAMPLES: Record<FileDisplayKind, string> = {
+  markdown: "plan.md",
+  drawing: "flow.excalidraw",
+  csv: "budget.csv",
+  json: "package.json",
+  text: "notes.txt",
+  code: "app.ts",
+  image: "photo.png",
+  audio: "memo.m4a",
+  pdf: "report.pdf",
+  database: "ledger.sqlite",
+  binary: "archive.bin",
+};
+const KINDS = Object.values(FILE_KIND_RECORDS);
+
+function KindRows(props: { label: string; selected: boolean }) {
+  return (
+    <ul role="tree" aria-label={props.label} className="m-0 w-52 list-none rounded-lg border border-line bg-panel py-1">
+      {KINDS.map((kind) => (
+        <TreeRow
+          key={kind.displayKind}
+          row={{
+            ...treeRow(KIND_SAMPLES[kind.displayKind]),
+            kind: kind.displayKind === "database" ? "database" : "file",
+          }}
+          collection={false}
+          selected={props.selected}
+          active={false}
+          tabbable={false}
+          dropPreview={null}
+          {...treeRowCallbacks}
+        />
+      ))}
+    </ul>
   );
 }
 
@@ -230,6 +323,139 @@ const menuItems = [
 
 const avatarSizes = ["post", "comment", "strip"] as const;
 
+const SYNC_CODE = "dohc-sync:ws_7f3a:wss://relay.dohc.dev";
+
+function failToCopy(): never {
+  throw new Error("nothing to copy");
+}
+
+// One row per form: rest, hover, keyboard focus, then the two answers.
+function CopySpecimens(props: { theme: "light" | "dark"; form: "icon" | "words" }) {
+  const { theme, form } = props;
+  const iconOnly = form === "icon";
+  return (
+    <Specimen label={`${iconOnly ? "icon only" : "with words"}: rest, hover, focus-visible, copied, failed`}>
+      <CopyButton iconOnly={iconOnly} label="Copy details" pinName getText={() => RELAY_ERROR} />
+      <span data-force-state="hover" data-force-target="button">
+        <CopyButton iconOnly={iconOnly} label="Copy details" pinName getText={() => RELAY_ERROR} />
+      </span>
+      <span data-force-state="focus-visible" data-force-target="button">
+        <CopyButton iconOnly={iconOnly} label="Copy details" pinName getText={() => RELAY_ERROR} />
+      </span>
+      <CopyButton
+        iconOnly={iconOnly}
+        label="Copy details" pinName
+        getText={() => RELAY_ERROR}
+        testId={`states-copy-${form}-copied-${theme}`}
+      />
+      <CopyButton
+        iconOnly={iconOnly}
+        label="Copy details" pinName
+        getText={failToCopy}
+        testId={`states-copy-${form}-failed-${theme}`}
+      />
+    </Specimen>
+  );
+}
+
+// A shell menu as its owner holds it: the open state here, the rows given.
+function MenuSpecimen(props: { label: string; items: readonly MenuEntry[]; width: number; testId: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Menu
+      label={props.label}
+      testId={props.testId}
+      open={open}
+      onOpenChange={setOpen}
+      items={props.items}
+      width={props.width}
+      closeOnPick={false}
+    />
+  );
+}
+
+const versionRows: MenuEntry[] = [
+  { id: "main", label: "Main", checked: true, onSelect: noop },
+  { id: "draft", label: "Draft two", checked: false, onSelect: noop },
+  MENU_SEPARATOR,
+];
+const radioMenuItems: MenuEntry[] = [
+  ...versionRows,
+  { id: "try", label: "Try in a version…", icon: <Bot size={14} aria-hidden />, onSelect: noop },
+  { id: "compare", label: "Compare with Main", onSelect: noop },
+  { id: "merge", label: "Merge into Main…", disabled: true, onSelect: noop },
+];
+const fieldMenuItems: MenuEntry[] = [
+  ...versionRows,
+  {
+    id: "new",
+    field: {
+      label: "New version name",
+      value: "Draft three",
+      onChange: noop,
+      onSubmit: noop,
+      onCancel: noop,
+      hint: "Press Enter to create and start working in it.",
+    },
+  },
+];
+const overflowMenuItems: MenuEntry[] = [
+  { id: "plan", label: "plan.md", current: true, onSelect: noop },
+  { id: "long", label: "quarterly-planning-notes-for-the-whole-team.md", onSelect: noop },
+  { id: "notes", label: "notes.md", onSelect: noop },
+  { id: "budget", label: "budget.csv", onSelect: noop },
+];
+const dangerMenuItems: MenuEntry[] = [
+  { id: "reveal", label: "Reveal in folder", onSelect: noop },
+  { id: "forget", label: "Forget", danger: true, onSelect: noop },
+];
+
+// The editor's menus draw themselves at fixed places. Laid out inside a box
+// with `contain: layout`, which is the containing block for fixed children,
+// they land in their part. The box leaves room for the shadow.
+const EDITOR_MENU_BOX = "relative [contain:layout]";
+
+const BLOCK_MENU_OPEN = {
+  open: true,
+  pos: 0,
+  x: 0,
+  y: 0,
+  maxHeight: 420,
+  placement: "below",
+  trigger: null,
+} as const;
+
+const TABLE_MENU_ROWS: readonly TableMenuRow[] = [
+  { label: "Insert column left" },
+  { label: "Insert column right" },
+  { label: "Align left", separatorBefore: true },
+  { label: "Align center" },
+  { label: "Align right" },
+  { label: "Duplicate column" },
+  { label: "Delete column", destructive: true, separatorBefore: true },
+];
+
+// The grip menu is built from the DOM, as the table controls build it, with
+// its destructive row active.
+function TableMenuSpecimen(props: { menuId: string }) {
+  const host = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const element = host.current;
+    if (!element) return;
+    const { menu, buttons } = buildTableMenu(element.ownerDocument, TABLE_MENU_ROWS, props.menuId);
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+    const active = buttons.at(-1);
+    if (active) {
+      active.toggleAttribute("data-active", true);
+      menu.setAttribute("aria-activedescendant", active.id);
+    }
+    element.append(menu);
+    return () => menu.remove();
+  }, [props.menuId]);
+  return <div ref={host} className={`${EDITOR_MENU_BOX} h-[300px] w-[260px]`} />;
+}
+
 function Pane(props: { theme: "light" | "dark" }) {
   const { theme } = props;
   return (
@@ -301,36 +527,23 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* The copied and refused ones are pressed by the capture; press them
-          yourself on the page. */}
+      {/* The copied and failed ones are pressed by the capture; press them
+          yourself on the page. A failed copy here says so in place only:
+          the page has no notice owner to report to. */}
       <Section part="copy" title="Copy">
-        <Specimen label="copy: rest, hover, copied, refused">
-          <CopyButton getText={() => ""} testId={`states-copy-${theme}`} />
-          <span data-force-state="hover" data-force-target="button">
-            <CopyButton getText={() => ""} testId={`states-copy-hover-${theme}`} />
-          </span>
-          <CopyButton getText={() => "wss://relay.dohc.dev"} testId={`states-copy-copied-${theme}`} />
-          <CopyButton
-            getText={() => {
-              throw new Error("nothing to copy");
-            }}
-            testId={`states-copy-refused-${theme}`}
-          />
-        </Specimen>
-        <Specimen label="copy details: rest, icon, copied, icon copied">
-          <CopyDetailsButton label="Copy details" details={() => ""} />
-          <CopyDetailsButton iconOnly label="Copy details" details={() => ""} />
-          <CopyDetailsButton
-            label="Copy details"
-            details={() => RELAY_ERROR}
-            data-testid={`states-copy-details-copied-${theme}`}
-          />
-          <CopyDetailsButton
-            iconOnly
-            label="Copy details"
-            details={() => RELAY_ERROR}
-            data-testid={`states-copy-details-icon-copied-${theme}`}
-          />
+        <CopySpecimens theme={theme} form="icon" />
+        <CopySpecimens theme={theme} form="words" />
+        <Specimen label="field: rest, copied">
+          <div className="w-64">
+            <CopyField getText={() => SYNC_CODE}>
+              <code title={SYNC_CODE}>{SYNC_CODE}</code>
+            </CopyField>
+          </div>
+          <div className="w-64">
+            <CopyField copyTestId={`states-copy-field-copied-${theme}`} getText={() => SYNC_CODE}>
+              <code title={SYNC_CODE}>{SYNC_CODE}</code>
+            </CopyField>
+          </div>
         </Specimen>
       </Section>
 
@@ -473,23 +686,25 @@ function Pane(props: { theme: "light" | "dark" }) {
         <ul role="tree" aria-label="Rows" className="m-0 w-64 list-none rounded-lg border border-line bg-panel py-1">
           <Row name="rest" folder />
           <Row name="hover" force="hover" />
+          <Row name="focused" force="focus-visible" />
           <Row name="selected" selected />
+          <Row name="focused, selected" selected force="focus-visible" />
           <Row name="active" active />
-          <Row name="focused" focused />
+          <Row name="focused, hover" force="hover focus-visible" />
           <Row name="drop target" folder drop />
         </ul>
       </Section>
 
       {/* Both menus are opened by the capture, one at a time, and their
           boxes are tall enough for the open menu and its shadow. A menu's
-          first row takes keyboard focus when it opens; forcing focus there
-          draws the same row the same way whether or not focus has since
-          moved on. */}
+          first row takes keyboard focus when it opens; forcing focus and
+          focus-visible there draws the row as a keyboard user sees it,
+          whether or not focus has since moved on. */}
       <Section part="menu" title="Menu">
         <Specimen label="rows: keyboard-active, hover, rest, disabled">
           <div
             className="flex h-56 w-56 items-start justify-end"
-            data-force-state="focus"
+            data-force-state="focus focus-visible"
             data-force-target="[role=menuitem]:nth-child(1)"
           >
             <div data-force-state="hover" data-force-target="[role=menuitem]:nth-child(2)">
@@ -502,7 +717,7 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="document-menu" title="Document menu">
         <div
           className="flex h-64 w-56 items-start justify-end"
-          data-force-state="focus"
+          data-force-state="focus focus-visible"
           data-force-target="[role=menuitem]:nth-child(1)"
         >
           <DocumentMenu workspaceId="states" suggestedName="states" getMarkdown={() => null} />
@@ -518,9 +733,16 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="loading" title="Loading">
-        <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
-          <PanelLoading label="files" />
-        </div>
+        <Specimen label="list">
+          <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
+            <SkeletonRows layout="panel" label="Loading files..." />
+          </div>
+        </Specimen>
+        <Specimen label="editor">
+          <div className="flex h-40 w-96 flex-col rounded-lg border border-line bg-bg">
+            <SkeletonRows layout="document" label="Loading…" className="pt-12" />
+          </div>
+        </Specimen>
       </Section>
 
       <Section part="toasts" title="Toasts">
@@ -548,6 +770,109 @@ function Pane(props: { theme: "light" | "dark" }) {
 
       <Section part="dialog" title="Dialog">
         <DialogSpecimen theme={theme} />
+      </Section>
+
+      {/* The shell's menus, one part each, after the dialog so the parts
+          above keep their places. */}
+      <Section part="menu-radio" title="Menu with radio rows">
+        <Specimen label="checked: keyboard-active; unchecked: hover; icon; disabled">
+          <div
+            className="flex h-64 w-64 items-start justify-end"
+            data-force-state="focus focus-visible"
+            data-force-target="[role=menuitemradio]:nth-child(1)"
+          >
+            <div data-force-state="hover" data-force-target="[role=menuitemradio]:nth-child(2)">
+              <MenuSpecimen label="Versions" items={radioMenuItems} width={208} testId={`states-menu-radio-${theme}`} />
+            </div>
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="menu-field" title="Menu with a name field">
+        <Specimen label="field: focus, hint">
+          <div className="flex h-48 w-72 items-start justify-end" data-force-state="focus" data-force-target="input">
+            <MenuSpecimen label="Versions" items={fieldMenuItems} width={240} testId={`states-menu-field-${theme}`} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="menu-overflow" title="Overflow menu">
+        <Specimen label="current; long name: keyboard-active; rest">
+          <div
+            className="flex h-56 w-72 items-start justify-end"
+            data-force-state="focus focus-visible"
+            data-force-target="[role=menuitem]:nth-child(2)"
+          >
+            <MenuSpecimen
+              label="Tabs in editor group 1"
+              items={overflowMenuItems}
+              width={240}
+              testId={`states-menu-overflow-${theme}`}
+            />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="menu-danger" title="Menu with a destructive row">
+        <Specimen label="rest; destructive: keyboard-active">
+          <div
+            className="flex h-36 w-56 items-start justify-end"
+            data-force-state="focus focus-visible"
+            data-force-target="[role=menuitem]:nth-child(2)"
+          >
+            <MenuSpecimen label="More for Research" items={dangerMenuItems} width={176} testId={`states-menu-danger-${theme}`} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* After the menus, so the parts above keep their places. The capture
+          opens each part's tab list. */}
+      <Section part="editor-groups" title="Editor groups">
+        <Specimen label="split: the active group with tabs, then an empty one">
+          <EditorGroupsSpecimen activeHasTabs />
+        </Specimen>
+      </Section>
+
+      <Section part="editor-groups-empty" title="Editor groups, empty active group">
+        <Specimen label="split: an empty active group, then one with tabs">
+          <EditorGroupsSpecimen activeHasTabs={false} />
+        </Specimen>
+      </Section>
+
+      {/* After the editor groups, so the parts above keep their places. */}
+      <Section part="kind-glyph" title="Kind glyph">
+        <Specimen label="kind">
+          <ul className="m-0 list-none border border-transparent py-1 font-mono text-[11px] text-subtle">
+            {KINDS.map((kind) => (
+              <li key={kind.displayKind} className="flex h-7 items-center">
+                {kind.displayKind} · {kind.name}
+              </li>
+            ))}
+          </ul>
+        </Specimen>
+        <Specimen label="rest">
+          <KindRows label="Kinds" selected={false} />
+        </Specimen>
+        <Specimen label="selected">
+          <KindRows label="Kinds, selected" selected />
+        </Specimen>
+      </Section>
+
+      {/* The editor's menus, after the shell's so the parts above keep their
+          places. Their active row is the one Enter acts on, keyboard or
+          pointer, and always draws the outline. */}
+      <Section part="block-menu" title="Block menu">
+        <Specimen label="sections; first row active; destructive with Del">
+          <div className={`${EDITOR_MENU_BOX} h-[410px] w-[270px]`}>
+            <BlockMenu state={BLOCK_MENU_OPEN} onSelect={noop} onClose={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      <Section part="table-menu" title="Table menu">
+        <Specimen label="separators; destructive row active, with Del">
+          <TableMenuSpecimen menuId={`states-table-menu-${theme}`} />
+        </Specimen>
       </Section>
     </section>
   );

@@ -6,6 +6,7 @@ import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
 import { inputClass } from "./collections/FieldForm";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 
 interface Props {
   workspaceId: string; datasetPath: string;
@@ -80,7 +81,7 @@ function Permissions({ workspaceId, datasetPath, dataset, onClose, onError }: Pr
       <div><PrimaryButton type="submit" disabled={busy || !grantId || !selected.length}>Save access</PrimaryButton></div>
     </form>
     <div className="flex flex-col gap-2"><h3 className="m-0 text-sm font-semibold text-ink">People and apps with access</h3>
-      {!page ? <p className="m-0 text-[12px] text-muted">{busy ? "Loading access…" : "Load access to review people and apps."}</p> : !page.permissions.length ? <p className="m-0 text-[12px] text-muted">Only you have access.</p> : page.permissions.map(permission =>
+      {!page ? busy ? <SkeletonRows rows={2} label="Loading access…" /> : <p className="m-0 text-[12px] text-muted">Load access to review people and apps.</p> : !page.permissions.length ? <p className="m-0 text-[12px] text-muted">Only you have access.</p> : page.permissions.map(permission =>
         <div key={`${permission.kind}:${permission.principal}`} className="flex items-center justify-between gap-3 border-b border-line py-2">
           <div className="min-w-0 text-[12px] text-ink"><span>{permission.kind === "app" ? "App" : "Person"}{permission.current ? "" : " · Rules changed"}</span>
             <div className="truncate font-mono text-muted" title={permission.principal}>{permission.principal}</div>

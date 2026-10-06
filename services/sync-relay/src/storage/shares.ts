@@ -9,6 +9,8 @@ import {
   type SyncRelayLinkSessionRow,
   type SyncRelayShareWithGrantRow,
   type SyncRelayGrantedShareRow,
+  type SyncRelayGrantedInventoryCursor,
+  type SyncRelayGrantedInventoryPage,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
   type SyncRelayLinkInventoryRow,
@@ -27,7 +29,7 @@ import {
 } from "./rows";
 import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import { LINK_SESSION_RENEWAL_GRACE_MS } from "../linkSecurity";
-import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
+import { RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT, GRANTED_INVENTORY_PAGE_SIZE, LINK_INVENTORY_PAGE_SIZE, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT } from "./limits";
 
 function dependentGrantIdsMatch(
   dependents: readonly SyncRelayShareGrantRow[],
@@ -66,6 +68,7 @@ export function createShare(storage: StorageContext, input: {
   }
 
 export function createFileLinkShare(storage: StorageContext, input: {
+    operation?: { operationId: string; requestJson: string };
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
     credential: SyncRelayLinkCredentialRow;
@@ -96,6 +99,8 @@ export function createFileLinkShare(storage: StorageContext, input: {
       insertShare(storage, share);
       insertShareGrant(storage, grant);
       insertLinkCredential(storage, credential);
+      if (input.operation) storage.db.prepare("INSERT INTO sync_relay_link_creations(workspace_id,operation_id,owner_user_id,share_id,grant_id,request_json) VALUES(?,?,?,?,?,?)")
+        .run(share.workspaceId,input.operation.operationId,share.granterUserId,share.shareId,grant.grantId,input.operation.requestJson);
       return true;
     });
   }
@@ -730,6 +735,34 @@ export function listSharesGrantedBy(storage: StorageContext, granterUserId: stri
       .map((row) => ({ ...rowToShareWithGrantRow(row), automationsGeneration: automationsGenerationOf(row) }));
   }
 
+export function listSharesGrantedPage(
+  storage: StorageContext,
+  granterUserId: string,
+  workspaceId: string,
+  cursor?: SyncRelayGrantedInventoryCursor,
+): SyncRelayGrantedInventoryPage {
+  const rows = storage.db.prepare(
+    `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
+            s.created_at_ms, g.grant_id, g.share_id AS grant_share_id,
+            g.principal_kind, g.principal_user_id, g.principal_email, g.access,
+            g.generation, g.status, g.created_at_ms AS grant_created_at_ms,
+            g.revoked_at_ms, g.parent_grant_id,
+            ${AUTOMATIONS_GENERATION_SQL("g")} AS automations_generation
+     FROM sync_relay_shares s
+     JOIN sync_relay_share_grants g ON g.share_id = s.share_id
+     WHERE s.granter_user_id = ? AND s.workspace_id = ?
+       AND g.parent_grant_id IS NULL AND g.principal_kind != 'link'
+       ${cursor ? "AND g.grant_id > ?" : ""}
+     ORDER BY g.grant_id
+     LIMIT ${GRANTED_INVENTORY_PAGE_SIZE + 1}`,
+  ).all(granterUserId, workspaceId, ...(cursor ? [cursor.grantId] : []));
+  const granted = rows.slice(0, GRANTED_INVENTORY_PAGE_SIZE).map((row) => ({
+    ...rowToShareWithGrantRow(row), automationsGeneration: automationsGenerationOf(row),
+  }));
+  const last = granted.at(-1);
+  return {granted, nextCursor: rows.length > GRANTED_INVENTORY_PAGE_SIZE && last ? {grantId: last.grant.grantId} : null};
+}
+
 // The newest grant generation at which a grant wrote a Collection's
 // automations.yaml directly (ADR 0013), or null. A write names each path in
 // paths_json, so a Collection's automations.yaml ends in
@@ -774,6 +807,7 @@ export function listLinkGrantsByWorkspace(
            LIMIT ${LINK_INVENTORY_PAGE_SIZE}
          )
          SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
+                (SELECT request_json FROM sync_relay_link_creations c WHERE c.share_id=s.share_id LIMIT 1) AS creation_provenance_json,
                 s.created_at_ms AS share_created_at_ms,
                 link.grant_id AS link_grant_id, link.share_id AS link_share_id,
                 link.principal_kind AS link_principal_kind,

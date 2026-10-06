@@ -54,6 +54,7 @@ export interface OwnerAdmissionPending {
 }
 
 export interface PushWorkspaceToRelayResult {
+  hasMore: boolean;
   ownerAdmissionPending: OwnerAdmissionPending[];
   pushed: number;
   originsPushed: string[];

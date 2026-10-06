@@ -6,7 +6,8 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildEnvironment, directoryFingerprint, engineArtifactMatches, hashFile, repairOwnedEngineExecutable, sourceFingerprint } from "./build.mjs";
-import { changedFiles, desktopProofCommand, postgres, selectedGates, readSelfHostNativeProof } from "./verify.mjs";
+import { changedFiles, desktopProofCommand, postgres, readSelfHostNativeProof } from "./verify.mjs";
+import { selectedGates } from "./selection.mjs";
 import { repoRoot, run } from "./process.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
@@ -60,6 +61,7 @@ test("Windows setup uses pnpm.cmd and stops after failed or missing installation
   };
   try {
     put("apps/desktop/package.json", "{}");
+    put("tools/rust-engine-program/git-read.mjs", readFileSync(new URL("../../tools/rust-engine-program/git-read.mjs", import.meta.url)));
     for (const name of ["setup.mjs", "process.mjs", "windows-command.mjs", "windows-job.ps1"]) {
       mkdirSync(join(root, "scripts/verification"), { recursive: true });
       copyFileSync(new URL(`./${name}`, import.meta.url), join(root, "scripts/verification", name));
@@ -813,6 +815,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       "scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
       "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+      "tools/rust-engine-program/git-read.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml",
     ]) {
       mkdirSync(dirname(join(root, file)), { recursive: true });
@@ -833,18 +836,31 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     const childScript = `
       import assert from "node:assert/strict";
       import childProcess from "node:child_process";
-      import { rmSync } from "node:fs";
+      import { rmSync, readdirSync, readFileSync } from "node:fs";
       import { syncBuiltinESMExports } from "node:module";
       const exec = childProcess.execFileSync;
+      const spawn = childProcess.spawnSync;
       const fault = process.env.FIXTURE_PROVENANCE_FAULT;
+      const target = fault.split(":")[1];
       let changed = false;
+      let failures = 0;
       childProcess.execFileSync = (command, ...args) => {
         if (command !== "git") throw new Error("Unavailable code tool: " + command);
-        if (fault === "path-recovery" && !changed && args[0].includes("--git-path")) {
-          changed = true;
-          throw new Error("Fixture cannot resolve the HEAD log path");
+        return exec(command, ...args);
+      };
+      childProcess.spawnSync = (command, ...args) => {
+        if (command !== "git") throw new Error("Unavailable code tool: " + command);
+        const matches = target === "log-path" ? args[0].includes("--git-path")
+          : args[0][0] === target && (target !== "rev-parse" || args[0][1] === "HEAD");
+        if (matches && (fault.startsWith("persistent:") || fault.startsWith("transient:") && failures === 0)) {
+          failures += 1;
+          return {status:128,stderr:"Permission denied: fixture config failure " + failures};
         }
-        const result = exec(command, ...args);
+        if (fault === "path-recovery" && failures < 4 && args[0].includes("--git-path")) {
+          failures += 1;
+          return {status:128,stderr:"Fixture cannot resolve the HEAD log path"};
+        }
+        const result = spawn(command, ...args);
         if (!changed && args[0][0] === "reflog") {
           changed = true;
           if (fault === "removed-log") rmSync(".git/logs/HEAD");
@@ -859,7 +875,21 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       childProcess.spawn = command => { throw new Error("Unavailable code tool: " + command); };
       syncBuiltinESMExports();
       const { verify } = await import("./scripts/verification/verify.mjs");
-      if (fault === "path-recovery") await assert.rejects(verify(process.argv.slice(1)), /could not read the HEAD reflog/);
+      if (fault === "path-recovery") await assert.rejects(verify(process.argv.slice(1)), /Fixture cannot resolve the HEAD log path/);
+      if (fault.startsWith("persistent:")) {
+        await assert.rejects(verify(process.argv.slice(1)), /Permission denied: fixture config failure 4/);
+        const directory = readdirSync(".agent-artifacts/verification").sort().at(-1);
+        const report = JSON.parse(readFileSync(".agent-artifacts/verification/" + directory + "/result.json"));
+        assert.equal(report.verdict, "FAIL");
+        assert.match(report.error, /Permission denied: fixture config failure 4/);
+        if (target === "rev-list" || target === "reflog") {
+          assert.equal(report.provenance.status, "FAIL");
+          assert.equal(report.provenance.stamp, "UNATTRIBUTABLE");
+        }
+        assert.ok(report.timings.some(row => row.verdict === "FAIL" && /Permission denied/.test(row.error)));
+        console.log(JSON.stringify(report));
+        process.exit(0);
+      }
       const report = await verify(process.argv.slice(1));
       console.log(JSON.stringify(report));
     `;
@@ -882,6 +912,15 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.equal(report.doctor, undefined);
     assert.equal(report.build, undefined);
     assert.match(report.reason, /No code gate applies/);
+
+    for (const target of ["log-path", "rev-parse", "status", "rev-list", "reflog", "diff"]) {
+      for (const behavior of ["transient", "persistent"]) {
+        const result = invoke([], behavior + ":" + target);
+        assert.equal(result.error, undefined);
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1)).verdict, behavior === "transient" ? "PASS" : "FAIL");
+      }
+    }
 
     const headLog = join(root, ".git/logs/HEAD");
     const originalLog = readFileSync(headLog);

@@ -80,13 +80,22 @@ export function createPresenceRoutes(
   // snapshot for a scope the caller no longer has.
   const respondPresence = async (
     request: Request,
+    workspaceId: string,
     scopeKey: string,
     userId: string,
+    ownerUserId: string,
     reauthorize?: () => unknown,
   ): Promise<Response> => {
     if (request.method === "POST") {
       const input = await readJsonObject(request);
       const clientId = parseString(input.clientId, "clientId", MAX_CLIENT_ID_CHARS);
+      // Reserved agent identities belong to the authenticated workspace owner.
+      if (
+        clientId.startsWith("agent:") &&
+        (clientId !== `agent:${workspaceId}` || userId !== ownerUserId)
+      ) {
+        throw notFound();
+      }
       if (input.leave === true) {
         return presenceResponse(presence.leave(scopeKey, userId, clientId, nowMs()));
       }
@@ -165,8 +174,10 @@ export function createPresenceRoutes(
     // flows through the outer catch into errorResponse.
     return await respondPresence(
       request,
+      share.workspaceId,
       presenceScopeKey(share.workspaceId, topic),
       actorUserId,
+      share.granterUserId,
       authorizeShare,
     );
   };
@@ -185,7 +196,9 @@ export function createPresenceRoutes(
     // `await` is load-bearing: see the share-presence route above.
     return await respondPresence(
       request,
+      workspaceId,
       presenceScopeKey(workspaceId, topic),
+      actorUserId,
       actorUserId,
       () => {
         if (!storage.workspaceIsOwnedBy(workspaceId, actorUserId)) throw notFound();

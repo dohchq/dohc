@@ -1,3 +1,4 @@
+import { desktopPins } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun, seedWorkspaceManifest } from "./helpers/workspace";
@@ -10,7 +11,7 @@ test("emoji reactions and floating mentions stay visible without moving the comp
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
-    await page.getByTestId("titlebar-chats-sidebar").click();
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     await page.getByTestId("chats-channel").click();
     await page.getByTestId("chats-new-thread-composer").fill("Polished reactions");
     await page.getByTestId("chats-new-thread-composer").press("Enter");

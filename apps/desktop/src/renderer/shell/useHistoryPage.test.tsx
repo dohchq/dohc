@@ -643,3 +643,92 @@ describe("history page readiness and lifetime", () => {
     expect(it0.hook().loadingMore).toBe(false);
   });
 });
+
+
+describe("History policy read failure", () => {
+  beforeEach(() => vi.useFakeTimers());
+  const blocked = { status: "policy-unreadable" as const, policyErrors: ["files.toml could not be read"] };
+  it("hides the previous page without retrying, keeps the typed cause, and recovers", async () => {
+    const it0 = mount();
+    await committed(it0, page("old"));
+    const pending = it0.refresh();
+    await settle(reads.at(-1)!, blocked);
+    expect(it0.hook().page).toBeNull();
+    expect(it0.hook().readState).toBe("failed");
+    expect(it0.hook().policyError).toEqual(blocked);
+    expect(reads).toHaveLength(2);
+    await pending;
+    await committed(it0, page("fixed"));
+    expect(it0.hook().policyError).toBeNull();
+    expect(it0.ids()).toEqual(["fixed"]);
+  });
+
+  it("retracts the whole page when pagination discovers a broken policy", async () => {
+    const it0 = mount();
+    await committed(it0, page("old", { nextBeforeMomentOrder: 10 }));
+    const pending = it0.loadMore();
+    await settle(reads.at(-1)!, blocked);
+    await pending;
+    expect(it0.hook().page).toBeNull();
+    expect(it0.hook().policyError).toEqual(blocked);
+    expect(it0.hook().loadingMore).toBe(false);
+    await pending;
+  });
+
+  it("does not let an older success repaint policy-hidden history", async () => {
+    const it0 = mount();
+    const older = it0.refresh();
+    const newer = it0.refresh();
+    await settle(reads[1]!, blocked);
+    expect(it0.hook().policyError).toEqual(blocked);
+    await newer;
+    await settle(reads[0]!, page("stale"));
+    await older;
+    expect(it0.hook().page).toBeNull();
+    expect(it0.hook().policyError).toEqual(blocked);
+  });
+
+  it("ignores a stale policy failure after a newer success or unmount", async () => {
+    const it0 = mount();
+    const older = it0.refresh();
+    await committed(it0, page("new"));
+    await settle(reads[0]!, blocked);
+    await older;
+    expect(it0.ids()).toEqual(["new"]);
+    expect(it0.hook().policyError).toBeNull();
+    const gone = it0.refresh();
+    it0.view.unmount();
+    await settle(reads.at(-1)!, blocked);
+    await gone;
+  });
+});
+
+
+it("keeps a newer committed pagination when an older refresh reports unreadable policy", async () => {
+  vi.useFakeTimers();
+  const it0 = mount();
+  await committed(it0, page("newest", { nextBeforeMomentOrder: 10 }));
+  const refresh = it0.refresh();
+  const olderPage = it0.loadMore();
+  await settle(reads[2]!, page("older"));
+  await olderPage;
+  await settle(reads[1]!, { status: "policy-unreadable", policyErrors: ["files.toml"] });
+  expect(it0.ids()).toEqual(["newest", "older"]);
+  expect(it0.hook().policyError).toBeNull();
+  await refresh;
+});
+
+it("never appends an old pagination after a policy refusal hides the page", async () => {
+  vi.useFakeTimers();
+  const it0 = mount();
+  await committed(it0, page("newest", { nextBeforeMomentOrder: 10 }));
+  const olderPage = it0.loadMore();
+  const refresh = it0.refresh();
+  await settle(reads[2]!, { status: "policy-unreadable", policyErrors: ["files.toml"] });
+  expect(it0.hook().page).toBeNull();
+  await refresh;
+  await settle(reads[1]!, page("older"));
+  await olderPage;
+  expect(it0.hook().page).toBeNull();
+  expect(it0.hook().policyError).toMatchObject({ status: "policy-unreadable" });
+});

@@ -1,3 +1,4 @@
+export * from "./actorIdentity";
 export * from "./chatMentions";
 export * from "./collection";
 export * from "./collectionData";
@@ -9,3 +10,4 @@ export type {
   KeyEnvelopeUploadResult,
   MomentAuthor,
 } from "./engine";
+export * from "./kinds";

@@ -86,7 +86,7 @@ function engineMomentBaseForIpc(
     ...(author?.kind === "named"
       ? { namedAuthor: { userId: author.userId, label: names.named(author) } }
       : {}),
-    ...(moment.metadata.summary !== undefined
+    ...(moment.operation !== "rename" && moment.metadata.summary !== undefined
       ? { summary: moment.metadata.summary }
       : {}),
     ...(moment.metadata.correlationId !== undefined

@@ -1,13 +1,12 @@
 import { useLayoutEffect, useRef, type RefObject } from "react";
+import { topModalPanel } from "../modalFocus";
 
 type FocusTarget = () => HTMLElement | null | undefined;
 
 export function focusSurface(...targets: (HTMLElement | null | undefined)[]): void {
-  const modals = document.querySelectorAll<HTMLElement>("[data-dohc-modal='true'] > div");
-  const modal = modals[modals.length - 1];
   for (const target of [
     ...targets,
-    modal,
+    topModalPanel(),
     document.querySelector<HTMLElement>('[data-focus-surface="editor"][data-active="true"]'),
     document.querySelector<HTMLElement>('[data-focus-surface="workspace"]'),
   ]) {

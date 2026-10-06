@@ -153,6 +153,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   let stopped = false;
   let nextBackoffMs = initialBackoffMs;
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  let continuationTimer: ReturnType<typeof setTimeout> | undefined;
   let backoffTimer: ReturnType<typeof setTimeout> | undefined;
   // A pull the Chats polls asked for while local writes held the debounce.
   let pullTimer: ReturnType<typeof setTimeout> | undefined;
@@ -214,6 +215,10 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // The timers that would start another pass. A pass leaves the wait on the
   // relay running.
   function clearPassTimers(): void {
+    if (continuationTimer !== undefined) {
+      clearTimeout(continuationTimer);
+      continuationTimer = undefined;
+    }
     if (debounceTimer !== undefined) {
       clearTimeout(debounceTimer);
       debounceTimer = undefined;
@@ -340,11 +345,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
   // then reads `syncing`, so a quiet pass must announce that it ended.
   async function doPass(retryClaim: boolean): Promise<boolean> {
     const beforePending = pendingChangeCount;
+    const recovered = syncFailure !== null;
     const bootstrapPass = bootstrapPullPending;
     // This pass pulls whatever change the relay reported before it started.
     const servedChange = changeReported;
     changeReported = undefined;
     let passOwnerPending = ownerAdmissionPending;
+    let pushHasMore = false;
     const claim = async () => {
       claimingIdentity = true;
       emitChange();
@@ -367,6 +374,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       const result = await pushWithIdentity({ push: () => operations.push(), claim });
       passSharingDeclined.push(...result.sharingDeclined);
       passOwnerPending = result.ownerAdmissionPending;
+      pushHasMore = result.hasMore;
     };
     const passSharingDeclined: PushWorkspaceToRelayResult["sharingDeclined"] = [];
     const pullResult = await options.capture.runRelaySync(
@@ -416,7 +424,7 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     pulled = { cursor: pullResult.nextCursor, servedChange };
     if (options.afterSuccessfulPull) {
       try {
-        await options.afterSuccessfulPull({ recovered: syncFailure !== null });
+        await options.afterSuccessfulPull({ recovered });
       } catch (error) {
         console.error(`[desktop] post-pull work failed for ${options.rootDir}:`, error);
       }
@@ -445,16 +453,20 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
       : conflictCount + pullResult.conflictsOpened;
     sharingDeclined = nextSharingDeclined;
     ownerAdmissionPending = passOwnerPending;
-    pendingChangeCount = Math.max(ownerAdmissionPending.length, pendingChangeCount - beforePending);
+    pendingChangeCount = Math.max(
+      ownerAdmissionPending.length,
+      pushHasMore ? pendingChangeCount : pendingChangeCount - beforePending,
+    );
     lastSyncedAtMs = nowMs();
     nextBackoffMs = initialBackoffMs;
     setSyncFailure(null);
-    if (ownerAdmissionPending.length > 0) scheduleBackoff();
-    // The bootstrap pull done, immediately queue the first normal pass so
-    // local identity/journal ops reconcile without waiting for an edit.
-    if (bootstrapPass && !stopped && !authExpired && debounceTimer === undefined) {
-      debounceTimer = setTimeout(() => {
-        debounceTimer = undefined;
+    if (ownerAdmissionPending.length > 0 && !pushHasMore) scheduleBackoff();
+    // Release the capture chain between bounded pushes. Each pass pulls before
+    // the next timer admits more work, so document opens and writes can proceed.
+    // Bootstrap also needs a normal pass after its initial pull.
+    if ((pushHasMore || bootstrapPass) && !stopped && !authExpired) {
+      continuationTimer = setTimeout(() => {
+        continuationTimer = undefined;
         void runPass(false);
       }, 0);
     }

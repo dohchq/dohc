@@ -221,6 +221,50 @@ table {
   animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
 }
 
+/* What says something is still loading (ui/SkeletonRows, a document's
+ * "Opening…"): blank for 150ms, so a quick load never flashes, then one fade.
+ * `backwards` holds it blank only during the wait, so nothing stays on a layer
+ * afterwards. Reduced motion (above) drops the fade and keeps the wait. */
+@keyframes dohc-reveal-if-slow {
+  from {
+    opacity: 0;
+  }
+}
+
+.dohc-reveal-if-slow {
+  animation: dohc-reveal-if-slow 120ms ease-out 150ms backwards;
+}
+
+/* A menu enters from its trigger's side: 4px and a fade, no scale. The Menu
+ * part's menuEnterFrom sets --dohc-menu-from to -4px under its trigger and
+ * 4px over it, or --dohc-menu-from-x beside it. */
+@keyframes dohc-menu-in {
+  from {
+    opacity: 0;
+    transform: translate(var(--dohc-menu-from-x, 0px), var(--dohc-menu-from, -4px));
+  }
+}
+
+.dohc-menu-in {
+  animation: dohc-menu-in 130ms ease-out both;
+}
+
+/* Reduced motion turns the entrance into a 60ms fade with no movement. It
+ * follows the global reduced-motion rule so it wins over it; :where keeps
+ * it at no specificity, so a rule later in the page can still stop it. */
+@keyframes dohc-menu-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(.dohc-menu-in) {
+    animation-name: dohc-menu-fade !important;
+    animation-duration: 60ms !important;
+  }
+}
+
 /* Faint paper grid for brand moments (first-run) — texture, not decoration. */
 .dohc-paper-grid {
   background-image:
@@ -998,8 +1042,7 @@ body {
   background: var(--dohc-agent);
 }
 
-.dohc-code-language-select,
-.dohc-code-copy-btn {
+.dohc-code-language-select {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -1011,15 +1054,10 @@ body {
     border-color 120ms ease-out;
 }
 
-.dohc-code-language-select:hover,
-.dohc-code-copy-btn:hover {
+.dohc-code-language-select:hover {
   border-color: var(--dohc-line);
   @apply bg-hover;
   color: var(--dohc-ink);
-}
-
-.dohc-code-copy-btn {
-  padding: 2px 7px;
 }
 
 /* Shared popover box treatment. `overflow` is deliberately NOT shared: the
@@ -1550,89 +1588,12 @@ body {
 
 /* ── block menu ── */
 
-.dohc-block-menu-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 69;
-}
-
+/* Where the block menu sits. Its frame and rows are the Menu part's recipe
+ * (blockControls.tsx). */
 .dohc-block-menu {
   position: fixed;
   z-index: 70;
   width: 240px;
-  overflow: auto;
-  padding: 5px;
-  border: 1px solid var(--dohc-line);
-  border-radius: 10px;
-  background: var(--dohc-panel);
-  box-shadow:
-    0 1px 2px rgba(28, 27, 24, 0.05),
-    0 8px 24px rgba(28, 27, 24, 0.12);
-  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
-}
-
-.dohc-block-menu:focus {
-  outline: none;
-}
-
-[data-theme='dark'] .dohc-block-menu {
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.3),
-    0 10px 28px rgba(0, 0, 0, 0.45);
-}
-
-.dohc-block-menu__section {
-  padding: 6px 8px 3px;
-  color: var(--dohc-subtle);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.dohc-block-menu__item {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 7px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dohc-ink);
-  text-align: left;
-}
-
-.dohc-block-menu__item.is-selected {
-  @apply bg-selected;
-}
-
-.dohc-block-menu__item.is-danger.is-selected,
-.dohc-block-menu__item.is-danger:hover {
-  color: var(--dohc-danger, #b3261e);
-}
-
-.dohc-block-menu__glyph {
-  display: inline-grid;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 auto;
-  place-items: center;
-  border: 1px solid var(--dohc-line);
-  border-radius: 6px;
-  background: var(--dohc-bg);
-  color: var(--dohc-muted);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-}
-
-.dohc-block-menu__label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 500;
 }
 
 /* ── table controls ──
@@ -2025,62 +1986,12 @@ body {
   height: 11px;
 }
 
-/* Grip menu (insert/delete row or column, toggle header, delete table) —
- * same box treatment as .dohc-slash-menu, kept as its own rule set since
- * that shared selector group lives earlier in the file. */
+/* Where the grip menu sits. Its frame and rows are the Menu part's recipe
+ * (tableControls.tsx). */
 .dohc-table-menu {
   position: fixed;
   z-index: 70;
   width: 220px;
-  overflow: auto;
-  border: 1px solid var(--dohc-line);
-  border-radius: 10px;
-  background: var(--dohc-panel);
-  padding: 5px;
-  box-shadow:
-    0 1px 2px rgba(28, 27, 24, 0.05),
-    0 8px 24px rgba(28, 27, 24, 0.12);
-  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
-}
-
-[data-theme='dark'] .dohc-table-menu {
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.3),
-    0 10px 28px rgba(0, 0, 0, 0.45);
-}
-
-.dohc-table-menu__item {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  padding: 6px 8px;
-  color: var(--dohc-ink);
-  text-align: left;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-
-.dohc-table-menu__item:hover {
-  @apply bg-hover;
-}
-
-.dohc-table-menu__item.is-selected {
-  @apply bg-selected;
-}
-
-.dohc-table-menu__item--danger {
-  color: var(--dohc-danger);
-}
-
-.dohc-table-menu__item--separated {
-  margin-top: 5px;
-  border-top: 1px solid var(--dohc-line);
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
-  padding-top: 9px;
 }
 
 /* Column resizing (TableKit's `resizable: true`, turned on in
