@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +9,7 @@ import test from "node:test";
 import { gateInputMessage, isGateReader, readWorkspacePackages, selectJavaScript, uncoveredGateInputs, uncoveredWorkspaceInputs } from "./selection.mjs";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
+const yaml = createRequire(new URL("../../apps/desktop/package.json", import.meta.url))("js-yaml");
 const packages = readWorkspacePackages(root);
 const select = (files, options) => selectJavaScript(files, packages, options);
 
@@ -317,7 +319,7 @@ const gateWorkflow = `jobs:
             js:
               - 'scripts/**'
 `;
-const gateFinding = (reader, input, gate) => ({ reader, input, gate, filterLine: `- '${input}'` });
+const gateFinding = (reader, input, gate) => ({ reader, input, gate, filterLine: `- '${input.replaceAll("'", "''")}'` });
 const gateFixture = (reader, source, input) => uncoveredGateInputs([{ path: reader, source }], [reader, input], gateWorkflow);
 
 test("gate input guard rejects a relative fixture outside the reader's gate", () => {
@@ -339,6 +341,57 @@ test("gate input guard admits read_to_string without another read or path word",
   const reader = "scripts/read.mjs";
   assert.deepEqual(gateFixture(reader, 'read_to_string("LICENSE");', "LICENSE"),
     [gateFinding(reader, "LICENSE", "js")]);
+});
+
+test("gate input guard resolves bare URL inputs from the reader directory", () => {
+  const reader = "scripts/read.mjs";
+  const input = "scripts/fixture.json";
+  const workflow = gateWorkflow.replace("scripts/**", reader);
+  for (const source of ['readFileSync(new URL("fixture.json", import.meta.url));',
+    "new URL('fixture.json', import.meta.url);", 'new URL(`fixture.json`, import.meta.url);',
+    'new URL(/* input */ "fixture.json" /* note */, /* base */ import.meta.url);']) {
+    assert.deepEqual(uncoveredGateInputs([{path: reader, source}], [reader, input, "fixture.json"], workflow),
+      [gateFinding(reader, input, "js")], source);
+  }
+  assert.deepEqual(uncoveredGateInputs([{path: reader, source: 'new URL("fixture.json", otherBase);'}],
+    [reader, input], workflow), []);
+});
+
+test("gate input guard checks direct reads against each possible working directory", () => {
+  const reader = "apps/tool/src/read.mjs";
+  const inputs = ["apps/tool/src/fixture.json", "apps/tool/fixture.json", "fixture.json"];
+  const workflow = gateWorkflow.replace("scripts/**", reader);
+  const tracked = [reader, ...inputs, "apps/package.json", "apps/tool/package.json", "apps/fixture.json"];
+  for (const reference of ["./fixture.json", "fixture.json"]) {
+    const source = 'readFileSync("' + reference + '"); readFileSync("' + reference + '");';
+    assert.deepEqual(uncoveredGateInputs([{path: reader, source}], tracked, workflow),
+      inputs.map(input => gateFinding(reader, input, "js")), reference);
+  }
+  assert.deepEqual(uncoveredGateInputs([{path: reader, source: 'readFileSync("../fixture.json");'}], tracked, workflow),
+    [gateFinding(reader, "apps/tool/fixture.json", "js"), gateFinding(reader, "apps/fixture.json", "js")]);
+  const covered = workflow.replace("- '" + reader + "'", "- '" + reader + "'\n              - '" + inputs[0] + "'");
+  assert.deepEqual(uncoveredGateInputs([{path: reader, source: 'readFile("./fixture.json");'}], tracked, covered),
+    inputs.slice(1).map(input => gateFinding(reader, input, "js")));
+});
+
+test("gate input guard keeps URL and directory joins file-relative", () => {
+  const reader = "apps/tool/src/read.mjs";
+  const input = "apps/tool/src/fixture.json";
+  const workflow = gateWorkflow.replace("scripts/**", reader);
+  for (const source of ['new URL("./fixture.json", import.meta.url);', 'join(import.meta.dirname, "./fixture.json");',
+    'resolve(import.meta.dirname, "./fixture.json");']) {
+    assert.deepEqual(uncoveredGateInputs([{path: reader, source}],
+      [reader, input, "apps/tool/package.json", "apps/tool/fixture.json", "fixture.json"], workflow),
+      [gateFinding(reader, input, "js")], source);
+  }
+});
+
+test("gate input guard emits valid YAML for paths with apostrophes", () => {
+  const reader = "scripts/read.mjs";
+  const input = "assets/it's.json";
+  const findings = gateFixture(reader, 'readFileSync("assets/it\'s.json");', input);
+  assert.deepEqual(findings, [{reader, input, gate: "js", filterLine: "- 'assets/it''s.json'"}]);
+  assert.deepEqual(yaml.load(findings[0].filterLine), [input]);
 });
 
 test("gate input guard ignores comment mentions and commented reads", () => {

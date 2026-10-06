@@ -229,7 +229,11 @@ function* javascriptGateInputs(path, source, couldFind) {
     if (!literal || /[\\\r\n]/u.test(literal)) continue;
     let firstArgument = node.parent.firstChild.nextSibling;
     while (["LineComment", "BlockComment"].includes(firstArgument?.name)) firstArgument = firstArgument.nextSibling;
-    yield { reference: literal, call, directRead: node.from === firstArgument.from && gateReadCalls.has(call) };
+    let secondArgument = firstArgument.nextSibling;
+    while (["LineComment", "BlockComment", ","].includes(secondArgument?.name)) secondArgument = secondArgument.nextSibling;
+    const fileRelativeURL = call === "URL" && node.from === firstArgument.from
+      && secondArgument && source.slice(secondArgument.from, secondArgument.to) === "import.meta.url";
+    yield { reference: literal, call, fileRelativeURL, directRead: node.from === firstArgument.from && gateReadCalls.has(call) };
   } while (cursor.next());
 }
 
@@ -302,9 +306,9 @@ function* rustGateInputs(source) {
   }
 }
 
-function crateRoot(reader, tracked) {
+function manifestRoot(reader, tracked, manifest) {
   for (let directory = posix.dirname(reader);; directory = posix.dirname(directory)) {
-    if (tracked.has(posix.join(directory, "Cargo.toml"))) return directory;
+    if (tracked.has(posix.join(directory, manifest))) return directory;
     if (directory === ".") return ".";
   }
 }
@@ -328,27 +332,27 @@ export function uncoveredGateInputs(files, trackedPaths, workflow) {
     const gates = Object.entries(gatesFor(reader))
       .filter(([gate, selected]) => selected && (gate === "rust") === rust).map(([gate]) => gate);
     if (!gates.length) continue;
-    const runtimeBase = rust ? crateRoot(reader, tracked) : ".";
-    const resolveReference = ({ reference, directRead, call }) => {
-      const include = rust && (call === "include_str!" || call === "include_bytes!");
-      if (include) return posix.join(posix.dirname(reader), reference);
-      if (/^\.{1,2}\//u.test(reference)) {
-        return posix.join(rust ? runtimeBase : posix.dirname(reader), reference);
-      }
-      if (directRead) return posix.join(runtimeBase, reference);
-      return null;
+    const readerDirectory = posix.dirname(reader);
+    const runtimeBase = manifestRoot(reader, tracked, rust ? "Cargo.toml" : "package.json");
+    const runtimeBases = rust ? [runtimeBase] : [...new Set([readerDirectory, runtimeBase, "."])];
+    const resolveReferences = ({ reference, directRead, call, fileRelativeURL }) => {
+      if (rust && (call === "include_str!" || call === "include_bytes!")) return [posix.join(readerDirectory, reference)];
+      // A direct read uses cwd, which is not known from its source file.
+      if (directRead) return runtimeBases.map(base => posix.join(base, reference));
+      if (fileRelativeURL) return [posix.join(readerDirectory, reference)];
+      if (/^\.{1,2}\//u.test(reference)) return [posix.join(rust ? runtimeBase : readerDirectory, reference)];
+      return [];
     };
-    const couldFind = reference => {
-      const input = resolveReference({ reference, directRead: true });
-      return tracked.has(input) && gates.some(gate => !gatesFor(input)[gate]);
-    };
+    const couldFind = reference => resolveReferences({ reference, directRead: true })
+      .some(input => tracked.has(input) && gates.some(gate => !gatesFor(input)[gate]));
     const inputs = rust ? rustGateInputs(source) : javascriptGateInputs(reader, source, couldFind);
     for (const reference of inputs) {
-      const input = resolveReference(reference);
-      if (!input || !tracked.has(input)) continue;
-      for (const gate of gates) {
-        if (!gatesFor(input)[gate]) findings.set(`${gate}|${reader}|${input}`,
-          { reader, input, gate, filterLine: `- '${input}'` });
+      for (const input of resolveReferences(reference)) {
+        if (!tracked.has(input)) continue;
+        for (const gate of gates) {
+          if (!gatesFor(input)[gate]) findings.set(`${gate}|${reader}|${input}`,
+            { reader, input, gate, filterLine: `- '${input.replaceAll("'", "''")}'` });
+        }
       }
     }
   }
