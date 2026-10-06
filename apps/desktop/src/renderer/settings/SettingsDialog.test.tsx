@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { desktopPins, settingsSectionPin } from "../../testPins";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -186,7 +187,7 @@ describe("SettingsDialog", () => {
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
     expect(screen.getByTestId("settings-section-general")).toBeTruthy();
     await user.type(screen.getByTestId("settings-search"), "theme");
-    expect(screen.getByTestId("settings-section-appearance")).toBeTruthy();
+    expect(screen.getByTestId(settingsSectionPin("appearance"))).toBeTruthy();
     await user.clear(screen.getByTestId("settings-search"));
     await user.type(screen.getByTestId("settings-search"), "launch");
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
@@ -222,7 +223,7 @@ describe("SettingsDialog", () => {
       </>,
     );
 
-    await screen.findByTestId("settings-dialog");
+    await screen.findByTestId(desktopPins.settingsDialog);
     const higherOverlayAction = screen.getByTestId("higher-overlay-action");
     higherOverlayAction.focus();
     const higherOverlay = Symbol("higher-overlay-test");
