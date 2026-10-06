@@ -220,8 +220,12 @@ pub(crate) fn lane_before_in_tx(
     if !uses_file_preimage {
         return Ok(None);
     }
-    let last = crate::enrolment::last_file_export_in_tx(tx, key)?;
-    crate::enrolment::file_version_before_in_tx(tx, key, last.as_ref()).map(Some)
+    match crate::enrolment::last_file_export_in_tx(tx, key)? {
+        crate::enrolment::LastFileExport::Known(last) => {
+            crate::enrolment::file_version_before_in_tx(tx, key, last.as_ref()).map(Some)
+        }
+        crate::enrolment::LastFileExport::UnexplainedGap => Ok(None),
+    }
 }
 
 pub(crate) fn published_moment_append_payload_in_tx(

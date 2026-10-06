@@ -1283,7 +1283,7 @@ fn lane_uses_genuine_present_bootstrap_and_intervening_publications() {
 }
 
 #[test]
-fn published_moment_removed_without_rollback_cannot_fall_back_to_an_older_export() {
+fn unexplained_export_gap_does_not_block_local_write_or_push() {
     let (_scratch, _, mut source) = owner();
     write(
         &mut source,
@@ -1306,15 +1306,75 @@ fn published_moment_removed_without_rollback_cannot_fall_back_to_an_older_export
         20,
     );
     drain(&mut source);
-    let result = source.write_with(&NoFaults, |tx| {
-        tx.execute("DELETE FROM moments WHERE moment_id='v2'", [])
-            .map_err(SyncError::persist)?;
-        crate::enrolment::last_file_export_in_tx(tx, &DocKey::new("ws", "main", "doc").unwrap())
-    });
-    assert!(
-        result.is_err(),
-        "a non-rollback deleter must not silently substitute v1"
+    source
+        .write_with(&NoFaults, |tx| {
+            tx.execute("DELETE FROM moments WHERE moment_id='v2'", [])
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    write(&mut source, "doc", "v3", "doc.md", "owner-only", "ydoc", 30);
+    let input = WriteText {
+        workspace_id: "ws".into(),
+        version_id: "main".into(),
+        object_id: "doc".into(),
+        moment_id: "outside".into(),
+        path: "doc.md".into(),
+        text: "outside edit".into(),
+        metadata_origin: "api".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 40,
+        request_id: None,
+    };
+    source
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::write_text_in_tx(tx, &input).map_err(SyncError::corrupt)?;
+            journal_moment_append_in_tx(tx, "ws", "outside")
+        })
+        .expect("sync metadata must not block the local write transaction");
+    assert_eq!(exports(&source)[2].payload["beforeLatestMomentId"], "v3");
+    assert_eq!(
+        exports(&source)[2].payload["payloadBeforeBlobSha256"],
+        dohc_engine_storage::hex_sha256(b"owner-only")
     );
+    write(
+        &mut source,
+        "doc",
+        "v4",
+        "doc.md",
+        "next settle",
+        "ydoc",
+        50,
+    );
+    write(
+        &mut source,
+        "doc",
+        "v5",
+        "doc.md",
+        "selected settle",
+        "ydoc",
+        55,
+    );
+    let client = RelaySyncClient::new(RecordingRelay::default());
+    client
+        .push_workspace(&mut source, "ws", &NoFaults, &NoLiveLeases, 60, 0)
+        .expect("sync selection must not fail on an unexplained export gap");
+    let selected = exports(&source);
+    assert_eq!(selected.last().unwrap().payload["momentId"], "v5");
+    assert_eq!(
+        selected.last().unwrap().payload["beforeLatestMomentId"],
+        "v4"
+    );
+    assert_eq!(
+        selected.last().unwrap().payload["payloadBeforeBlobSha256"],
+        dohc_engine_storage::hex_sha256(b"next settle")
+    );
+    let pushes = client.transport().pushes.lock().unwrap();
+    assert!(pushes.iter().flat_map(|p| &p.ops).any(|op| {
+        op.payload["momentId"] == "v5" && op.payload["beforeLatestMomentId"] == "v4"
+    }));
 }
 
 #[test]

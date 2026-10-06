@@ -516,10 +516,15 @@ pub(crate) const LAST_FILE_EXPORT_SQL: &str = "SELECT r.payload_json,m.moment_or
              WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)))
          ORDER BY m.moment_order DESC,r.rowid DESC LIMIT 1";
 
+pub(crate) enum LastFileExport {
+    Known(Option<serde_json::Value>),
+    UnexplainedGap,
+}
+
 pub(crate) fn last_file_export_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
-) -> Result<Option<serde_json::Value>, SyncError> {
+) -> Result<LastFileExport, SyncError> {
     let mut last: Option<(String, (i64, bool, i64))> = tx
         .query_row(
             LAST_FILE_EXPORT_SQL,
@@ -566,11 +571,13 @@ pub(crate) fn last_file_export_in_tx(
             )
             .optional()
             .map_err(SyncError::corrupt)?;
-        let order = order.ok_or_else(|| {
-            SyncError::corrupt(std::io::Error::other(
-                "published moment is missing without its rollback compensator",
-            ))
-        })?;
+        let Some(order) = order else {
+            eprintln!(
+                "engine: published moment {id} is missing without its rollback compensator in {}/{}/{}; publishing the real preimage",
+                key.workspace_id, key.version_id, key.object_id
+            );
+            return Ok(LastFileExport::UnexplainedGap);
+        };
         let rank = (order, false, rowid);
         if last.as_ref().is_none_or(|(_, previous)| rank > *previous) {
             last = Some((json, rank));
@@ -578,6 +585,7 @@ pub(crate) fn last_file_export_in_tx(
     }
     last.map(|(json, _)| serde_json::from_str(&json).map_err(SyncError::corrupt))
         .transpose()
+        .map(LastFileExport::Known)
 }
 
 pub(crate) fn file_version_before_in_tx(
@@ -608,7 +616,7 @@ pub(crate) fn journal_file_version_in_tx(
     let last = last_file_export_in_tx(tx, key)?;
     let (current, _) =
         crate::outbound::moment_append_payload_in_tx(tx, &key.workspace_id, moment_id)?;
-    if let Some(last) = last.as_ref()
+    if let LastFileExport::Known(Some(last)) = &last
         && last["operation"] != "delete"
         && [
             "payloadAfterBlobSha256",
@@ -620,7 +628,10 @@ pub(crate) fn journal_file_version_in_tx(
     {
         return Ok(true);
     }
-    let before = file_version_before_in_tx(tx, key, last.as_ref())?;
+    let before = match &last {
+        LastFileExport::Known(last) => file_version_before_in_tx(tx, key, last.as_ref())?,
+        LastFileExport::UnexplainedGap => crate::outbound::PortableBefore::bootstrap(&current),
+    };
     let payload = crate::outbound::moment_append_payload_from_in_tx(
         tx,
         &key.workspace_id,
