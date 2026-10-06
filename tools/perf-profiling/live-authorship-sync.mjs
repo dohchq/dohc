@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
-import { acquireVerificationSlot } from '../rust-engine-program/build-slot.mjs';
+import { acquireProfilingSlot } from './admission.mjs';
 import { run, pnpm } from '../../scripts/verification/process.mjs';
 import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -60,25 +60,38 @@ await writeFile(configPath, `export default { root: ${JSON.stringify(root)}, res
 const vitest = resolve(dirname(require.resolve('vitest/package.json')), 'vitest.mjs');
 const startedAt = new Date().toISOString();
 let lane;
-await writeFile(resolve(output, 'process.json'), JSON.stringify({ ownerPid: process.pid, startedAt, state: 'queued', settings }, null, 2) + '\n');
+await writeFile(resolve(output, 'process.json'), JSON.stringify({ ownerPid: process.pid, startedAt, state: 'admitting', settings }, null, 2) + '\n');
 try {
-  lane = await acquireVerificationSlot();
-  await run(...pnpm(['--filter', '@dohc/app-backend-runtime', 'build']), { cwd: root, log: resolve(output, 'runtime-build.log'), timeoutMs: 300000,
+  lane = acquireProfilingSlot(process.env, { metadata: { purpose: 'live authorship admission benchmark', checkout: root, phase: 'runtime build' } });
+  await run(...pnpm(['--filter', '@dohc/app-backend-runtime', 'build']), { cwd: root, log: resolve(output, 'runtime-build.log'), timeoutMs: 300000, signal: lane.signal,
     onSpawn(child) { writeFileSync(resolve(output, 'runtime-build-process.json'), JSON.stringify({ pid: child.pid, ownerPid: process.pid, startedAt, output: 'packages/app-backend-runtime/dist' }, null, 2) + '\n'); } });
   if (sha(await readFile(journalPath)) !== sources.currentSha256 || sha(await readFile(resolve(root, 'tools/perf-profiling/live-authorship-sync.bench.ts'))) !== sources.harnessSha256)
-    throw Error('Benchmark source changed while waiting for the verification slot. Restart the command.');
-  await run(process.execPath, [vitest, 'run', '--config', configPath], { cwd: root, log: resolve(output, 'benchmark.log'), timeoutMs: runDeadlineMs,
+    throw Error('Benchmark source changed during preparation. Restart the command.');
+  lane.check();
+  lane.update({ phase: 'measurement' });
+  await run(process.execPath, [vitest, 'run', '--config', configPath], { cwd: root, log: resolve(output, 'benchmark.log'), timeoutMs: runDeadlineMs, signal: lane.signal,
     onSpawn(child) {
       writeFileSync(resolve(output, 'process.json'), JSON.stringify({ ownerPid: process.pid, pid: child.pid, startedAt, state: 'running',
         slot: lane?.name ?? null, executable: process.execPath, args: [vitest, 'run', '--config', configPath], settings }, null, 2) + '\n');
     } });
   if (sha(await readFile(journalPath)) !== sources.currentSha256 || sha(await readFile(resolve(root, 'tools/perf-profiling/live-authorship-sync.bench.ts'))) !== sources.harnessSha256)
     throw Error('Benchmark source changed during the measured run.');
+  lane.check();
+  const result = JSON.parse(await readFile(settings.resultPath, 'utf8'));
+  await writeFile(settings.resultPath, JSON.stringify({ ...result, hostContext: lane.evidence }, null, 2) + '\n');
   console.log('Evidence: ' + resolve(output, 'result.json'));
 } catch (error) {
-  await writeFile(resolve(output, 'result.json'), JSON.stringify({ status: 'failed', startedAt, settings, error: String(error) }, null, 2) + '\n');
-  throw error;
+  const failure = lane?.signal.reason ?? error;
+  let measurements = {};
+  try { measurements = JSON.parse(await readFile(settings.resultPath, 'utf8')); }
+  catch (readError) { if (readError.code !== 'ENOENT') throw readError; }
+  await writeFile(settings.resultPath, JSON.stringify({ ...measurements, status: 'failed', startedAt, settings,
+    error: String(failure), hostContext: lane?.evidence ?? error.hostContext }, null, 2) + '\n');
+  throw failure;
 } finally {
   lane?.release();
-  await Promise.all([runtimePath, testPath, configPath].map(path => rm(path, { force: true })));
+  await Promise.all([
+    ...(lane ? [writeFile(resolve(output, 'host-context.json'), JSON.stringify(lane.evidence, null, 2) + '\n')] : []),
+    ...[runtimePath, testPath, configPath].map(path => rm(path, { force: true })),
+  ]);
 }
