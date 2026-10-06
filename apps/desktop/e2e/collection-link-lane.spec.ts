@@ -6,6 +6,8 @@ import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { resolveEngineBinary } from "../src/testing/engineBinary";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { relayJson } from "./helpers/relayPeer";
+import { startServerProxy } from "./helpers/selfHostOnboarding";
+import { mintLocalhostCa } from "../../../services/share-web/src/testing/localhostCa";
 import { sharedDatasetViewerOrigin, startSharedDatasetBrowser } from "./helpers/sharedDatasetBrowser";
 import { relayAdoptedIdentity, spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import {
@@ -69,6 +71,7 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
   const ownerTemp = await createTempWorkspace();
   const exchangeKey = randomBytes(32).toString("base64url");
   let relay: SyncRelayHandle | null = null;
+  let relayProxy: Awaited<ReturnType<typeof startServerProxy>> | null = null;
   let owner: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   let shared: Awaited<ReturnType<typeof startSharedDatasetBrowser>> | null = null;
   let nudge = 0;
@@ -80,8 +83,23 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
 
   try {
     // Edit links are released on a relay deployed the self-hosted way.
-    relay = await spawnSyncRelay({ dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"), editLinks: { engineExecutable: resolveEngineBinary() },
-      linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: exchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin } });
+    const ca = await mintLocalhostCa(ownerTemp.baseDir);
+    relayProxy = await startServerProxy(ca);
+    relay = await spawnSyncRelay({
+      dbPath: join(ownerTemp.baseDir, "relay", "relay.sqlite"),
+      editLinks: {
+        engineExecutable: resolveEngineBinary(),
+        publicOrigin: relayProxy.origin,
+        trustEnv: {
+          NODE_EXTRA_CA_CERTS: ca.caPath,
+          DOHC_ENGINE_TEST_RELAY_CA_MODE: "1",
+          DOHC_ENGINE_TEST_RELAY_CA_FILE: ca.caPath,
+          DOHC_E2E_ALLOW_INSECURE_LOOPBACK_RELAY: "0",
+        },
+      },
+      linkBoundary: { linkKey: randomBytes(32).toString("base64url"), relayExchangeKey: exchangeKey, publicViewerOrigin: sharedDatasetViewerOrigin },
+    });
+    relayProxy.routeRelayTo(relay.baseUrl);
 
     // --- The owner's synced workspace holds a Collection -------------------
     await seedWorkspaceManifest(ownerTemp, WORKSPACE_ID);
@@ -206,6 +224,7 @@ test("@link-lane a browser and an agent change a Collection through an Edit link
     try { await shared?.close(); } catch (error) { console.error("Browser cleanup failed:", error); }
     try { await owner?.close(); } catch (error) { console.error("Owner cleanup failed:", error); }
     try { await relay?.stop(); } catch (error) { console.error("Relay cleanup failed:", error); }
+    try { await relayProxy?.close(); } catch (error) { console.error("Relay proxy cleanup failed:", error); }
     try { await ownerTemp.cleanup(); } catch (error) { console.error("Owner workspace cleanup failed:", error); }
   }
 });

@@ -59,6 +59,8 @@ import type {
   LinkHandoffRedeemResult,
   SyncRelayShareWithGrantRow,
   SyncRelayGrantedShareRow,
+  SyncRelayGrantedInventoryCursor,
+  SyncRelayGrantedInventoryPage,
   SyncRelayLinkInventoryCursor,
   SyncRelayLinkInventoryPage,
   SyncRelayIndependentGrantInventoryCursor,
@@ -174,6 +176,8 @@ export {
   type LinkGrantTransitionResult,
   type SyncRelayShareWithGrantRow,
   type SyncRelayGrantedShareRow,
+  type SyncRelayGrantedInventoryCursor,
+  type SyncRelayGrantedInventoryPage,
   type SyncRelayLinkInventoryRow,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
@@ -819,7 +823,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return sharesStorage.createShare(this, input);
   }
 
+  readLinkCreation(workspaceId: string, operationId: string, ownerUserId: string): { shareId: string; grantId: string; requestJson: string } | null {
+    if (!this.workspaceIsOwnedBy(workspaceId, ownerUserId)) return null;
+    const row = this.db.prepare("SELECT * FROM sync_relay_link_creations WHERE workspace_id=? AND operation_id=? AND owner_user_id=?").get(workspaceId,operationId,ownerUserId);
+    return row ? {shareId: String(row.share_id),grantId: String(row.grant_id),requestJson: String(row.request_json)} : null;
+  }
+
   createFileLinkShare(input: {
+    operation?: { operationId: string; requestJson: string };
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
     credential: SyncRelayLinkCredentialRow;
@@ -1043,6 +1054,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   listSharesGrantedBy(granterUserId: string): SyncRelayGrantedShareRow[] {
     return sharesStorage.listSharesGrantedBy(this, granterUserId);
+  }
+
+  listSharesGrantedPage(granterUserId: string, workspaceId: string, cursor?: SyncRelayGrantedInventoryCursor): SyncRelayGrantedInventoryPage {
+    return sharesStorage.listSharesGrantedPage(this, granterUserId, workspaceId, cursor);
   }
 
   listLinkGrantsByWorkspace(

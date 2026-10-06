@@ -302,6 +302,7 @@ type MomentsGetParams = JsonObject & { momentId: string };
 
 type HistoryPageParams = JsonObject & {
   workspaceId: string;
+  objectId?: string;
   limit?: number;
   beforeMomentOrder?: number;
 };

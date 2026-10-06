@@ -1,5 +1,6 @@
 import {
   checkManifest,
+  ReservedWorkspaceIdError,
   createWorkspaceManifest,
   defaultWorkspaceMode,
   validateAttachedFolder,
@@ -49,6 +50,9 @@ async function inspectManifest(metadataDir: string): Promise<ManifestState> {
       workspaceKind: check.manifest.kind,
       mode: check.manifest.mode,
     };
+  }
+  if (check.status === "reserved-id") {
+    throw new ReservedWorkspaceIdError(check.workspaceId);
   }
   if (check.status === "newer-version") {
     return {

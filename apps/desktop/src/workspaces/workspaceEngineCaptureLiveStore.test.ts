@@ -1761,7 +1761,7 @@ describe("createCaptureLiveStores", () => {
     );
 
     await expect(
-      store.listHistoryPage({ workspaceId: WORKSPACE_ID, limit: 200 }),
+      store.listHistoryPage({ workspaceId: WORKSPACE_ID, objectId: "object-1", limit: 200 }),
     ).resolves.toMatchObject({
       activeVersion: { id: "main" },
       textMomentPage: { moments: [], nextBeforeMomentOrder: null },
@@ -1783,6 +1783,7 @@ describe("createCaptureLiveStores", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.params).toEqual({
       workspaceId: WORKSPACE_ID,
+      objectId: "object-1",
       limit: 200,
     });
   });

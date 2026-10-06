@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./actor-identity": "./src/actorIdentity.ts",
     "./automation-schedule": "./src/automationSchedule.ts",
     "./automations": "./src/automations.ts",
     "./automation-controls": "./src/automationControls.ts",
@@ -21,6 +22,7 @@
     "./domain-values": "./src/domainValues.ts",
     "./engine": "./src/engine.ts",
     "./file-version": "./src/fileVersion.ts",
+    "./kinds": "./src/kinds.ts",
     "./live-documents": "./src/liveDocuments.ts",
     "./path-floor": "./src/pathFloor.ts",
     "./relay": "./src/relay.ts",

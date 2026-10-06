@@ -24,21 +24,17 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
+    // #1122 creates empty workspaces. Own the capture baseline in this fixture.
+    await writeWorkspaceFiles(temp, [
+      { path: "startup.md", contents: "Startup capture baseline.\n" },
+    ]);
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
 
-    // History lives in the left History view (the right panel is Chats now).
-    // Open it before the first edit and wait for the workspace's startup
-    // capture to surface: the first-run seed files render as engine moments —
-    // grouped under "Reconciled offline edits" when the startup reconcile
-    // recorded them, standalone when the live watcher won that race. Waiting
-    // here pins the ordering: the daemon's baseline is done and its watcher
-    // is live, so the write below is deterministically a live capture (calm
-    // "Edited plan.md" copy, no reconcile group), and its row can only appear
-    // through the daemon's capture.momentRecorded -> workspace-activity
-    // refresh chain — the exact seam this spec exists to prove in daemon
-    // mode.
+    // Wait for this fixture's startup capture before editing. The next moment
+    // must arrive through capture.momentRecorded and the History refresh,
+    // rather than through startup reconciliation.
     await page.getByTestId(activityPin("history")).click();
     await expect(
       page

@@ -35,7 +35,7 @@ import {
 // Spec 1 (grant side): the app user shares a file by email from the
 //   explorer context menu, gets a copyable share code, manages it under
 //   Settings → Sync and sharing, and ends it — after which the recipient's relay
-//   access is a byte-identical 404.
+//   access returns 404 with the removed-recipient explanation (#1438).
 // Spec 2 (receive side, the full loop): grant → open the share in the app
 //   → browse/search the read-only view → granter edits → refresh sees it →
 //   revoke → refresh surfaces "this share was ended" honestly.
@@ -256,15 +256,26 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     await row.getByTestId("shared-by-me-revoke").click();
     await expect(row).toContainText("Ended — was shared with");
 
-    // Revocation is live: the recipient's next fetch is the byte-identical
-    // generic 404.
+    // Revocation is live: the recipient's next fetch returns 404 with the
+    // owner-removed explanation (#1438).
     const revokedFetch = await relayJson(
       relay.baseUrl,
       RECIPIENT_TOKEN,
       `/sync/shares/${shareId}/log?since=0`,
     );
     expect(revokedFetch.status).toBe(404);
-    expect(revokedFetch.body).toBe(missingFetch.body);
+    expect(JSON.parse(revokedFetch.body)).toEqual({
+      ok: false,
+      error: "The owner removed your access.",
+      code: "share_access_removed",
+    });
+    const strangerAfterRemoval = await relayJson(
+      relay.baseUrl,
+      "test:e2e-stranger",
+      `/sync/shares/${shareId}/log?since=0`,
+    );
+    expect(strangerAfterRemoval.status).toBe(404);
+    expect(strangerAfterRemoval.body).toBe(missingFetch.body);
   } finally {
     // Stop the relay child before removing the temp tree it holds open, or
     // Windows leaks the dir with EBUSY (POSIX tolerates the reverse order).
@@ -592,7 +603,12 @@ confidentialTest.describe("View link lifecycle", () => {
         neverValidCredential,
         "/sync/link/share",
       );
-      expect(neverValidRead.status).toBe(401);
+      // #1422 normalizes unverified link refusals to the same opaque 404.
+      expect(neverValidRead.status).toBe(404);
+      expect(JSON.parse(neverValidRead.body)).toEqual({
+        ok: false,
+        error: "not found",
+      });
       const oldCapabilityAfterReset = await readViewLink(
         relay.baseUrl,
         oldCapability,
@@ -670,7 +686,30 @@ confidentialTest.describe("View link lifecycle", () => {
         "/sync/shares/never-valid/log?since=0&limit=500",
       );
       expect(missingNamedShare.status).toBe(404);
-      expect(namedAfterEnd).toEqual(missingNamedShare);
+      expect(JSON.parse(missingNamedShare.body)).toEqual({
+        ok: false,
+        error: "not found",
+        code: "not_found",
+      });
+      // #1438 explains removal to former recipients while strangers stay opaque.
+      expect(namedAfterEnd.status).toBe(404);
+      expect(JSON.parse(namedAfterEnd.body)).toEqual({
+        ok: false,
+        error: "The owner removed your access.",
+        code: "share_access_removed",
+      });
+      const strangerAfterRemoval = await relayJson(
+        relay.baseUrl,
+        "test:e2e-stranger",
+        `/sync/shares/${shareId}/log?since=0&limit=500`,
+      );
+      const missingFetch = await relayJson(
+        relay.baseUrl,
+        "test:e2e-stranger",
+        "/sync/shares/never-valid/log?since=0&limit=500",
+      );
+      expect(strangerAfterRemoval.status).toBe(404);
+      expect(strangerAfterRemoval.body).toBe(missingFetch.body);
     } finally {
       await relay?.stop();
       if (desktop) await cleanupDesktopWorkspace(desktop, temp);

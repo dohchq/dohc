@@ -94,7 +94,8 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await share.getByRole("button", { name: "Copy", exact: true }).click();
     await expect(share.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
     await share.getByRole("button", { name: "Close", exact: true }).click();
-    await page.getByRole("button", { name: "Review and open app", exact: true }).click();
+    await expect(page.getByTestId("site-preview-page").getByRole("button", { name: "Open in browser", exact: true })).toBeVisible();
+    await page.getByTestId("site-preview-publish").click();
     const shareLink = publication.getByRole("combobox", { name: "Publication share link" });
     await expect(shareLink.locator("option")).toHaveCount(2);
     await shareLink.selectOption({ index: 1 });

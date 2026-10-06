@@ -66,6 +66,25 @@ afterEach(() => {
 });
 
 describe("LiveDocumentsDialog", () => {
+  it("stands lines in for the first page, and keeps the words while a Reload keeps the list", async () => {
+    const h = harness();
+    const first = deferred<LiveDocumentPage>();
+    h.load.mockReturnValueOnce(first.promise);
+    render(<LiveDocumentsDialog workspaceId="ws" {...h} />);
+    const status = screen.getByRole("status");
+    expect(status.querySelector(".sr-only")?.textContent).toBe("Loading live documents…");
+    expect(screen.getByTestId("live-documents-dialog").querySelector(".dohc-reveal-if-slow")).toBeTruthy();
+    await act(async () => first.resolve(page([row("a.md")])));
+    const reload = deferred<LiveDocumentPage>();
+    h.load.mockReturnValueOnce(reload.promise);
+    fireEvent.click(screen.getByTestId("live-documents-reload"));
+    expect(status.textContent).toBe("Loading live documents…");
+    expect(status.querySelector(".sr-only")).toBeNull();
+    expect(screen.getByTestId("live-document-row-a.md")).toBeTruthy();
+    expect(screen.getByTestId("live-documents-dialog").querySelector(".dohc-reveal-if-slow")).toBeNull();
+    await act(async () => reload.resolve(page([row("a.md")])));
+  });
+
   it("runs a retry queued during a paged read instead of silently dropping it", async () => {
     const h = harness(), reading = deferred<LiveDocumentPage>();
     h.load.mockResolvedValue(page([row("a.md")], "cursor"));

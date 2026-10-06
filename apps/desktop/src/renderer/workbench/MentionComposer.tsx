@@ -9,6 +9,7 @@ import {
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
 import { ChatAvatar } from "./ChatAvatar";
+import { SkeletonRows } from "../ui/SkeletonRows";
 
 export interface FileMentionCandidate {
   path: string;
@@ -376,7 +377,9 @@ export function MentionComposer(props: {
                 </button>
               </li>
               {fileStage.loading ? (
-                <li className="px-2 py-1.5 text-[11px] text-subtle">Loading headings…</li>
+                <li role="presentation" className="px-2 py-1.5">
+                  <SkeletonRows rows={2} label="Loading headings…" />
+                </li>
               ) : null}
               {fileStage.headings.map((heading, headingIndex) => {
                 const index = headingIndex + 1;

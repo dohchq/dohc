@@ -5,6 +5,7 @@ import { bridge } from "../bridge";
 import { Overlay } from "../Overlay";
 import { relativeTime } from "../relativeTime";
 import { SecondaryButton } from "../ui/controls";
+import { SkeletonLines } from "../ui/SkeletonRows";
 import { useRequestSequence } from "../useRequestSequence";
 import { HISTORY_READ_FAILED } from "./useRecordHistory";
 
@@ -271,6 +272,7 @@ export function RecordHistoryDialog(props: {
     reports.current.onRunsUnchecked(oldest.current, lookupError.current, unknown);
   }, [page, located, loading]);
 
+  const firstLoad = failed === null && page === null;
   const status = failed !== null ? HISTORY_READ_FAILED
     : page === null ? "Loading history…"
     : page.entries.length === 0 ? "No field of this record has changed yet." : "";
@@ -313,8 +315,10 @@ export function RecordHistoryDialog(props: {
           ))}
         </ul>
       )}
-      {/* One status line that stays mounted, so a screen reader hears each change of its words. */}
-      <div className={status === "" ? "sr-only" : "flex items-center gap-2"}>
+      {firstLoad ? <SkeletonLines rows={2} /> : null}
+      {/* One status line that stays mounted, so a screen reader hears each change of its words.
+          While the first page loads, the lines above show it and the words are for the screen reader. */}
+      <div className={status === "" || firstLoad ? "sr-only" : "flex items-center gap-2"}>
         <p role="status" className="m-0 text-[12px] text-muted">{status}</p>
         {failed === null ? null : (
           <SecondaryButton
