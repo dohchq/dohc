@@ -130,6 +130,7 @@ interface Scope {
   group: string;
   entries: Map<string, PresenceEntry>;
   version: number;
+  snapshot?: PresenceSnapshot;
 }
 
 interface GroupStats {
@@ -162,14 +163,11 @@ export class PresenceHub {
 
   constructor(options: PresenceHubOptions = {}) {
     this.entryTtlMs = options.entryTtlMs ?? DEFAULT_PRESENCE_ENTRY_TTL_MS;
-    this.maxEntriesPerScope =
-      options.maxEntriesPerScope ?? DEFAULT_PRESENCE_MAX_ENTRIES_PER_SCOPE;
+    this.maxEntriesPerScope = options.maxEntriesPerScope ?? DEFAULT_PRESENCE_MAX_ENTRIES_PER_SCOPE;
     this.maxScopes = options.maxScopes ?? DEFAULT_PRESENCE_MAX_SCOPES;
     this.maxTotalEntries = options.maxTotalEntries ?? DEFAULT_PRESENCE_MAX_TOTAL_ENTRIES;
-    this.maxScopesPerGroup =
-      options.maxScopesPerGroup ?? DEFAULT_PRESENCE_MAX_SCOPES_PER_GROUP;
-    this.maxEntriesPerGroup =
-      options.maxEntriesPerGroup ?? DEFAULT_PRESENCE_MAX_ENTRIES_PER_GROUP;
+    this.maxScopesPerGroup = options.maxScopesPerGroup ?? DEFAULT_PRESENCE_MAX_SCOPES_PER_GROUP;
+    this.maxEntriesPerGroup = options.maxEntriesPerGroup ?? DEFAULT_PRESENCE_MAX_ENTRIES_PER_GROUP;
     this.waiters = new WaiterRegistry({
       maxTotal: options.maxTotalWaiters ?? DEFAULT_PRESENCE_MAX_TOTAL_WAITERS,
       maxPerGroup: options.maxWaitersPerScope ?? DEFAULT_PRESENCE_MAX_WAITERS_PER_SCOPE,
@@ -210,7 +208,14 @@ export class PresenceHub {
       }
     }
     const scope = this.scopeFor(scopeKey); // may throw on the scope-count caps
-    this.setEntry(scope, key, { userId, clientId, state, updatedAtMs: nowMs, shareId, sessionId: scope.entries.get(key)?.sessionId ?? randomUUID() });
+    this.setEntry(scope, key, {
+      userId,
+      clientId,
+      state,
+      updatedAtMs: nowMs,
+      shareId,
+      sessionId: scope.entries.get(key)?.sessionId ?? randomUUID(),
+    });
     this.bump(scopeKey, scope);
     return this.snapshotOf(scope);
   }
@@ -345,15 +350,16 @@ export class PresenceHub {
 
   private bump(scopeKey: string, scope: Scope): void {
     scope.version += 1;
+    scope.snapshot = undefined;
     if (this.waiters.waiting(scopeKey) === 0) return;
     this.waiters.wake(scopeKey, this.snapshotOf(scope));
   }
 
   private snapshotOf(scope: Scope): PresenceSnapshot {
-    return {
+    return (scope.snapshot ??= {
       version: scope.version,
       peers: [...scope.entries.values()].map((entry) => ({ ...entry })),
-    };
+    });
   }
 
   // Reclaim an empty, unwatched scope so a workspace that opens and closes

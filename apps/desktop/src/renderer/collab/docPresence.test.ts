@@ -11,7 +11,13 @@ function sharedRelay() {
   let version = 0;
   const waiters = new Set<(s: PresenceSnapshot) => void>();
   function snapshot(clientId?: string): PresenceSnapshot {
-    return { version, peers: [...entries.values()].map((e) => ({ ...e, isSelf: e.sessionToken === clientId })) };
+    return {
+      version,
+      peers: [...entries.values()].map((e) => ({
+        ...e,
+        isSelf: e.sessionToken === clientId,
+      })),
+    };
   }
   function bump() {
     version += 1;
@@ -22,7 +28,15 @@ function sharedRelay() {
   function make(): PresenceTransport {
     return {
       async publish({ clientId, state }) {
-        entries.set(clientId, { faceToken: clientId, sessionToken: clientId, isSelf: false, displayName: clientId === "a" ? "Alice" : "Bob", paletteSlot: 0, state, updatedAtMs: 0 });
+        entries.set(clientId, {
+          faceToken: clientId,
+          sessionToken: clientId,
+          isSelf: false,
+          displayName: clientId === "a" ? "Alice" : "Bob",
+          paletteSlot: 0,
+          state,
+          updatedAtMs: 0,
+        });
         bump();
         return snapshot(clientId);
       },
@@ -32,9 +46,18 @@ function sharedRelay() {
       poll({ clientId, since, signal }) {
         if (version !== since) return Promise.resolve(snapshot(clientId));
         return new Promise((resolve) => {
-          const w = (s: PresenceSnapshot) => resolve({ ...s, peers: s.peers.map(peer => ({ ...peer, isSelf: peer.sessionToken === clientId })) });
+          const w = (s: PresenceSnapshot) =>
+            resolve({
+              ...s,
+              peers: s.peers.map((peer) => ({
+                ...peer,
+                isSelf: peer.sessionToken === clientId,
+              })),
+            });
           waiters.add(w);
-          signal.addEventListener("abort", () => resolve(snapshot(clientId)), { once: true });
+          signal.addEventListener("abort", () => resolve(snapshot(clientId)), {
+            once: true,
+          });
         });
       },
     };
@@ -150,7 +173,10 @@ describe("bindDocPresence", () => {
     const aliceYc = aliceAw.clientID;
     const alicePeer: PresencePeer = {
       faceToken: "alice",
-      sessionToken: "pa", isSelf: false, displayName: "Alice", paletteSlot: 0,
+      sessionToken: "pa",
+      isSelf: false,
+      displayName: "Alice",
+      paletteSlot: 0,
       state: {
         yc: aliceYc,
         update: Buffer.from(encodeAwarenessUpdate(aliceAw, [aliceYc])).toString("base64"),
@@ -203,7 +229,10 @@ describe("bindDocPresence", () => {
       alicePeer,
       {
         faceToken: "mallory",
-        sessionToken: "pm", isSelf: false, displayName: null, paletteSlot: 0,
+        sessionToken: "pm",
+        isSelf: false,
+        displayName: null,
+        paletteSlot: 0,
         state: { yc: aliceYc, update: forgedUpdate(aliceYc, "Impostor") },
         updatedAtMs: 0,
       },
@@ -219,12 +248,17 @@ describe("bindDocPresence", () => {
       alicePeer,
       {
         faceToken: "mallory",
-        sessionToken: "pm", isSelf: false, displayName: null, paletteSlot: 0,
+        sessionToken: "pm",
+        isSelf: false,
+        displayName: null,
+        paletteSlot: 0,
         state: { yc: localYc, update: forgedUpdate(localYc, "Impostor") },
         updatedAtMs: 0,
       },
     ]);
-    const localState = binding.awareness.getLocalState() as { user?: { name?: string } };
+    const localState = binding.awareness.getLocalState() as {
+      user?: { name?: string };
+    };
     expect(localState?.user?.name).toBe("Me");
 
     // (3) Mallory claims her own (unowned) yc but smuggles Alice's id into the
@@ -233,19 +267,18 @@ describe("bindDocPresence", () => {
     smuggleDoc.clientID = 424242;
     const smuggleAw = new Awareness(smuggleDoc);
     smuggleAw.setLocalState({ user: { name: "Mallory", color: "#000" } });
-    applyAwarenessUpdate(
-      smuggleAw,
-      Buffer.from(forgedUpdate(aliceYc, "Clone"), "base64"),
-      "test",
+    applyAwarenessUpdate(smuggleAw, Buffer.from(forgedUpdate(aliceYc, "Clone"), "base64"), "test");
+    const smuggled = Buffer.from(encodeAwarenessUpdate(smuggleAw, [424242, aliceYc])).toString(
+      "base64",
     );
-    const smuggled = Buffer.from(
-      encodeAwarenessUpdate(smuggleAw, [424242, aliceYc]),
-    ).toString("base64");
     await push([
       alicePeer,
       {
         faceToken: "mallory",
-        sessionToken: "pm", isSelf: false, displayName: null, paletteSlot: 0,
+        sessionToken: "pm",
+        isSelf: false,
+        displayName: null,
+        paletteSlot: 0,
         state: { yc: 424242, update: smuggled },
         updatedAtMs: 0,
       },
@@ -271,20 +304,54 @@ describe("bindDocPresence", () => {
     // thing keeping the `string[]` contract of onPeers.
     const rogueDoc = new Y.Doc();
     const rogueAwareness = new Awareness(rogueDoc);
-    rogueAwareness.setLocalState({ user: { name: { evil: true }, color: "#000" } });
+    rogueAwareness.setLocalState({
+      user: { name: { evil: true }, color: "#000" },
+    });
     const rogueUpdate = Buffer.from(
       encodeAwarenessUpdate(rogueAwareness, [rogueAwareness.clientID]),
     ).toString("base64");
 
     const malformedPeers: PresencePeer[] = [
       // Non-numeric yc / non-string update: skipped entirely.
-      { faceToken: "p1", sessionToken: "p1", isSelf: false, displayName: null, paletteSlot: 0, state: { yc: "not-a-number", update: 42 }, updatedAtMs: 0 },
+      {
+        faceToken: "p1",
+        sessionToken: "p1",
+        isSelf: false,
+        displayName: null,
+        paletteSlot: 0,
+        state: { yc: "not-a-number", update: 42 },
+        updatedAtMs: 0,
+      },
       // Garbage update payload: applyAwarenessUpdate throws, caught locally.
-      { faceToken: "p2", sessionToken: "p2", isSelf: false, displayName: null, paletteSlot: 0, state: { yc: 7, update: "%%%not-base64%%%" }, updatedAtMs: 0 },
+      {
+        faceToken: "p2",
+        sessionToken: "p2",
+        isSelf: false,
+        displayName: null,
+        paletteSlot: 0,
+        state: { yc: 7, update: "%%%not-base64%%%" },
+        updatedAtMs: 0,
+      },
       // Null state: skipped.
-      { faceToken: "p3", sessionToken: "p3", isSelf: false, displayName: null, paletteSlot: 0, state: null, updatedAtMs: 0 },
+      {
+        faceToken: "p3",
+        sessionToken: "p3",
+        isSelf: false,
+        displayName: null,
+        paletteSlot: 0,
+        state: null,
+        updatedAtMs: 0,
+      },
       // Valid update, but the advertised name is not a string.
-      { faceToken: "p4", sessionToken: "p4", isSelf: false, displayName: null, paletteSlot: 0, state: { yc: rogueAwareness.clientID, update: rogueUpdate }, updatedAtMs: 0 },
+      {
+        faceToken: "p4",
+        sessionToken: "p4",
+        isSelf: false,
+        displayName: null,
+        paletteSlot: 0,
+        state: { yc: rogueAwareness.clientID, update: rogueUpdate },
+        updatedAtMs: 0,
+      },
     ];
 
     const onPeers = vi.fn();
@@ -323,4 +390,127 @@ describe("bindDocPresence", () => {
     rogueAwareness.destroy();
     rogueDoc.destroy();
   });
+});
+
+it("batches remote changes and skips unchanged snapshots while retaining presentation updates", async () => {
+  let notify!: (snapshot: PresenceSnapshot) => void;
+  let version = 0;
+  const transport: PresenceTransport = {
+    async publish() {
+      return { version, peers: [] };
+    },
+    async leave() {},
+    poll({ signal }) {
+      return new Promise((resolve) => {
+        notify = resolve;
+        signal.addEventListener("abort", () => resolve({ version, peers: [] }), { once: true });
+      });
+    },
+  };
+  const doc = new Y.Doc();
+  const onPeers = vi.fn();
+  const binding = bindDocPresence({
+    doc,
+    transport,
+    topic: "notes/a.md",
+    clientId: "me",
+    user: { name: "Me", color: "#fff" },
+    onPeers,
+  });
+  await flush();
+  const changes = vi.fn();
+  binding.awareness.on("change", changes);
+  const docs = [new Y.Doc(), new Y.Doc(), new Y.Doc()];
+  const awareness = docs.map((doc) => new Awareness(doc));
+  const peers: PresencePeer[] = awareness.map((aw, i) => {
+    aw.setLocalState({ pointer: { x: i, y: i, tool: "pointer" } });
+    return {
+      faceToken: "face-" + i,
+      sessionToken: "session-" + i,
+      isSelf: false,
+      displayName: null,
+      paletteSlot: i,
+      updatedAtMs: 0,
+      state: {
+        yc: aw.clientID,
+        update: Buffer.from(encodeAwarenessUpdate(aw, [aw.clientID])).toString("base64"),
+      },
+    };
+  });
+  const push = async (peers: PresencePeer[]) => {
+    notify({ version: ++version, peers });
+    await flush();
+  };
+  try {
+    await push(peers);
+    expect(changes).toHaveBeenCalledTimes(1);
+    expect(changes.mock.calls[0]![0].added).toHaveLength(3);
+    expect(onPeers.mock.calls.at(-1)?.[0]).toEqual(["Someone", "Someone", "Someone"]);
+    for (const aw of awareness) {
+      expect(binding.awareness.getStates().get(aw.clientID)?.user.name).toBe("Someone");
+    }
+    changes.mockClear();
+    await push(peers);
+    expect(changes).not.toHaveBeenCalled();
+    await push(
+      peers.map((peer) => ({
+        ...peer,
+        displayName: "Named editor",
+        paletteSlot: 6,
+      })),
+    );
+    expect(changes).toHaveBeenCalledTimes(1);
+    expect(changes.mock.calls[0]![0].updated).toHaveLength(3);
+    changes.mockClear();
+    await push([peers[0]!]);
+    expect(changes).toHaveBeenCalledTimes(1);
+    expect(changes.mock.calls[0]![0].removed).toHaveLength(2);
+    expect(changes.mock.calls[0]![0].updated).toHaveLength(1);
+  } finally {
+    await binding.destroy();
+    doc.destroy();
+    awareness.forEach((aw) => aw.destroy());
+    docs.forEach((doc) => doc.destroy());
+  }
+});
+
+it("groups named sessions by face rather than equal display names", async () => {
+  const onPeers = vi.fn();
+  const doc = new Y.Doc();
+  const peer = (faceToken: string, sessionToken: string): PresencePeer => ({
+    faceToken,
+    sessionToken,
+    isSelf: false,
+    displayName: "Same name",
+    paletteSlot: 0,
+    updatedAtMs: 0,
+    state: {},
+  });
+  const binding = bindDocPresence({
+    doc,
+    topic: "notes/a.md",
+    clientId: "me",
+    user: { name: "Me", color: "#fff" },
+    onPeers,
+    transport: {
+      async publish() {
+        return {
+          version: 1,
+          peers: [peer("a", "a1"), peer("a", "a2"), peer("b", "b1")],
+        };
+      },
+      async leave() {},
+      poll({ signal }) {
+        return new Promise((resolve) =>
+          signal.addEventListener("abort", () => resolve({ version: 1, peers: [] }), {
+            once: true,
+          }),
+        );
+      },
+    },
+  });
+  await flush();
+  expect(onPeers.mock.calls.at(-1)?.[0]).toEqual(["Same name", "Same name"]);
+  await binding.destroy();
+  doc.destroy();
 });

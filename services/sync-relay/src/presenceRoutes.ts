@@ -18,7 +18,12 @@ import type { AuthorizedShareAction } from "./shareAuthorization";
 import type { SyncRelayStorage } from "./storage";
 import { parseCursor, parseString, readJsonObject } from "./requestInputs";
 import { badRequest, notFound, relayError } from "./errors";
-import { createPresenceProjection, sanitizePresenceState } from "./presenceDisclosure";
+import {
+  createPresenceProjection,
+  sanitizePresenceState,
+  presenceStateForAccess,
+  type PreparedPresenceSnapshot,
+} from "./presenceDisclosure";
 
 const MAX_PRESENCE_TOPIC_CHARS = 1024;
 const MAX_CLIENT_ID_CHARS = 128;
@@ -69,7 +74,10 @@ export function parsePresenceObjectTopic(
 export function createPresenceRoutes(
   presence: PresenceHub,
   nowMs: () => number,
-  storage: Pick<SyncRelayStorage, "workspaceIsOwnedBy" | "currentObjectPath">,
+  storage: Pick<
+    SyncRelayStorage,
+    "workspaceIsOwnedBy" | "currentObjectPath" | "captureReadRevisionMatches"
+  >,
   claimPendingShares: (userId: string) => Promise<void>,
   requireShareAction: (
     shareId: string,
@@ -79,18 +87,16 @@ export function createPresenceRoutes(
   chatResolverFor: (workspaceId: string) => ChatShareThreadResolver,
   lookupLabel?: (userId: string) => string | null | Promise<string | null>,
 ) {
-  const project = createPresenceProjection(lookupLabel);
+  const project = createPresenceProjection(lookupLabel, nowMs);
   const authorizeObject = (
     workspaceId: string,
     topic: string,
-    authorized?: AuthorizedShareAction,
+    authorized: AuthorizedShareAction,
   ) => {
     const object = parsePresenceObjectTopic(topic);
     if (!object) return false;
     if (object.workspaceId !== workspaceId) throw notFound();
-    const files = authorized
-      ? fileSideOf(authorized.effectiveSelector)
-      : { paths: [], versionId: object.versionId, access: "edit" as const };
+    const files = fileSideOf(authorized.effectiveSelector);
     if (!files || object.versionId !== targetVersionId(files)) throw notFound();
     const path = storage.currentObjectPath(object);
     if (!path || visibleSharePath(files, path) !== path) throw notFound();
@@ -115,6 +121,49 @@ export function createPresenceRoutes(
     return authorized;
   };
 
+  const preparedSnapshots = new WeakMap<
+    PresenceSnapshot,
+    {
+      value: PreparedPresenceSnapshot;
+      current(): boolean;
+    }
+  >();
+  const prepareSnapshot = (snapshot: PresenceSnapshot, workspaceId: string, topic: string) => {
+    const cached = preparedSnapshots.get(snapshot);
+    if (cached?.current()) return cached.value;
+    const current = storage.captureReadRevisionMatches();
+    const resolver = chatResolverFor(workspaceId);
+    const thread = parseChatThreadTopic(topic);
+    const chatAttribution =
+      parsePresenceObjectTopic(topic) === null &&
+      (thread !== null
+        ? resolver.threadChannelWireId(thread) != null || resolver.threadFileBinding(thread) != null
+        : resolver.channelKind(topic) != null);
+    const peers: PreparedPresenceSnapshot["peers"] = [];
+    for (const peer of snapshot.peers) {
+      try {
+        const isOwner = storage.workspaceIsOwnedBy(workspaceId, peer.userId);
+        let canEdit = isOwner;
+        if (peer.shareId) {
+          const auth = authorizeShare(peer.shareId, peer.userId, topic);
+          if (auth.share.workspaceId !== workspaceId) continue;
+          canEdit = fileSideOf(auth.effectiveSelector)?.access === "edit";
+        } else if (!isOwner) continue;
+        peers.push({
+          peer,
+          isOwner,
+          state: presenceStateForAccess(peer.state, canEdit),
+        });
+      } catch {
+        // A peer whose grant or selected path no longer admits it is absent.
+      }
+    }
+    const value = { peers, chatAttribution };
+    if (!current()) throw notFound();
+    preparedSnapshots.set(snapshot, { value, current });
+    return value;
+  };
+
   const respondPresence = async (
     request: Request,
     workspaceId: string,
@@ -130,7 +179,6 @@ export function createPresenceRoutes(
         return fileSideOf(authorized.effectiveSelector)?.access === "edit";
       }
       if (!storage.workspaceIsOwnedBy(workspaceId, userId)) throw notFound();
-      authorizeObject(workspaceId, topic);
       return true;
     };
     let canEdit = authorize();
@@ -170,35 +218,13 @@ export function createPresenceRoutes(
         throw relayError("presence_capacity", error.message);
       throw error;
     }
-    const resolver = chatResolverFor(workspaceId);
-    const thread = parseChatThreadTopic(topic);
-    const objectTopic = parsePresenceObjectTopic(topic) !== null;
-    const isChatTopic = () =>
-      !objectTopic &&
-      (thread !== null
-        ? resolver.threadChannelWireId(thread) != null || resolver.threadFileBinding(thread) != null
-        : resolver.channelKind(topic) != null);
+
     const response = await project(snapshot, {
       scopeKey,
       viewerUserId: userId,
       viewerClientId,
-      disclose: (peer) =>
-        storage.workspaceIsOwnedBy(workspaceId, userId) ||
-        peer.userId === userId ||
-        storage.workspaceIsOwnedBy(workspaceId, peer.userId) ||
-        isChatTopic(),
-      canEdit: (peer) => {
-        try {
-          if (peer.shareId) {
-            const auth = authorizeShare(peer.shareId, peer.userId, topic);
-            if (auth.share.workspaceId !== workspaceId) return null;
-            return fileSideOf(auth.effectiveSelector)?.access === "edit";
-          }
-          return storage.workspaceIsOwnedBy(workspaceId, peer.userId) ? true : null;
-        } catch {
-          return null;
-        }
-      },
+      viewerIsOwner: storage.workspaceIsOwnedBy(workspaceId, userId),
+      prepare: () => prepareSnapshot(snapshot, workspaceId, topic),
     });
     // Account-label lookup can await too. Recheck the viewer immediately before sending.
     authorize();

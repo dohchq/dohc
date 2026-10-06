@@ -8,17 +8,6 @@ function record(value: unknown): Record<string, unknown> | null {
     ? (value as Record<string, unknown>)
     : null;
 }
-function hasIdentity(value: unknown): boolean {
-  const fields = record(value);
-  if (!fields) return Array.isArray(value) && value.some(hasIdentity);
-  return Object.entries(fields).some(
-    ([key, item]) =>
-      /^(user|userId|clientId|name|displayName|email|access|color|actor|actorKey|identity|ownerDisplayName)$/i.test(
-        key,
-      ) ||
-      (key !== "selectedElementIds" && hasIdentity(item)),
-  );
-}
 function position(value: unknown): boolean {
   if (value === null) return true;
   const r = record(value);
@@ -107,7 +96,7 @@ function validateUpdate(update: string, yc: number): void {
     if (offset + length !== bytes.length) throw new Error();
     const decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(offset));
     const state: unknown = JSON.parse(decoded);
-    if (hasIdentity(state) || !validAwareness(state)) throw new Error();
+    if (!validAwareness(state)) throw new Error();
   } catch {
     throw badRequest("invalid presence awareness");
   }
@@ -130,10 +119,7 @@ export function sanitizePresenceState(
     state.activity = r.activity;
   }
   if (r.update !== undefined || r.yc !== undefined) {
-    if (
-      hasIdentity(r) ||
-      Object.keys(r).some((key) => !["yc", "update", "typing", "state"].includes(key))
-    )
+    if (Object.keys(r).some((key) => !["yc", "update", "typing", "state"].includes(key)))
       throw badRequest("invalid presence awareness");
     if (
       typeof r.yc !== "number" ||
@@ -157,57 +143,93 @@ function paletteSlot(value: string): number {
   return hash % 7;
 }
 
+export interface PreparedPresencePeer {
+  peer: PresenceEntry;
+  isOwner: boolean;
+  state: unknown;
+}
+export interface PreparedPresenceSnapshot {
+  peers: PreparedPresencePeer[];
+  chatAttribution: boolean;
+}
+
+// Published state has already been validated. Downgrades remove awareness without decoding it again.
+export function presenceStateForAccess(value: unknown, canEdit: boolean): unknown {
+  if (canEdit || value === null) return value;
+  const { yc: _yc, update: _update, ...state } = record(value) ?? {};
+  return state;
+}
+
+const ACCOUNT_LABEL_TTL_MS = 30_000;
+const MAX_ACCOUNT_LABELS = 4_096;
+
 export function createPresenceProjection(
   lookupLabel: ((userId: string) => string | null | Promise<string | null>) | undefined,
+  nowMs: () => number,
 ) {
   const secret = randomBytes(32);
   const token = (...parts: string[]) =>
     createHmac("sha256", secret).update(JSON.stringify(parts)).digest("base64url");
+  const labels = new Map<string, { expiresAtMs: number; value: Promise<string | null> }>();
+  const labelFor = (userId: string) => {
+    const now = nowMs();
+    const cached = labels.get(userId);
+    if (cached && cached.expiresAtMs > now) return cached.value;
+    labels.delete(userId);
+    if (labels.size >= MAX_ACCOUNT_LABELS) labels.delete(labels.keys().next().value!);
+    const value = accountDisplayName(lookupLabel, userId).then((label) =>
+      label !== null && /[^\s@]+@[^\s@]+\.[^\s@]+/.test(label) ? null : label,
+    );
+    labels.set(userId, { expiresAtMs: now + ACCOUNT_LABEL_TTL_MS, value });
+    return value;
+  };
   return async (
     snapshot: PresenceSnapshot,
     input: {
       scopeKey: string;
       viewerUserId: string;
       viewerClientId: string | null;
-      disclose(peer: PresenceEntry): boolean;
-      canEdit(peer: PresenceEntry): boolean | null;
+      viewerIsOwner: boolean;
+      prepare(): PreparedPresenceSnapshot;
     },
   ) => {
-    const labels = new Map<string, string | null>();
-    const lookups = new Map<string, Promise<void>>();
-    for (const peer of snapshot.peers) {
-      if (input.canEdit(peer) === null || !input.disclose(peer) || lookups.has(peer.userId))
-        continue;
-      lookups.set(
-        peer.userId,
-        accountDisplayName(lookupLabel, peer.userId).then((label) => {
-          labels.set(
-            peer.userId,
-            label !== null && /[^\s@]+@[^\s@]+\.[^\s@]+/.test(label) ? null : label,
-          );
+    const disclose = (item: PreparedPresencePeer, prepared: PreparedPresenceSnapshot) =>
+      input.viewerIsOwner ||
+      item.isOwner ||
+      item.peer.userId === input.viewerUserId ||
+      prepared.chatAttribution;
+    const permittedLabels = new Map<string, string | null>();
+    const initial = input.prepare();
+    await Promise.all(
+      initial.peers
+        .filter((item) => disclose(item, initial))
+        .map(async ({ peer }) => {
+          permittedLabels.set(peer.userId, await labelFor(peer.userId));
         }),
-      );
-    }
-    await Promise.all(lookups.values());
-    // Everything below is synchronous. A revoke/downgrade during a label lookup takes effect here.
-    const admitted = snapshot.peers.flatMap((peer) => {
-      const canEdit = input.canEdit(peer);
-      return canEdit === null ? [] : [{ peer, canEdit }];
-    });
-    const faces = new Map<string, string>();
-    for (const { peer } of admitted)
-      if (!faces.has(peer.userId)) faces.set(peer.userId, peer.sessionId);
-    const peers = admitted.map(({ peer, canEdit }) => {
-      const displayName = input.disclose(peer) ? (labels.get(peer.userId) ?? null) : null;
+    );
+    // A grant/path change during label lookup invalidates the shared admission snapshot.
+    const prepared = input.prepare();
+    const peers = prepared.peers.map((item) => {
+      const { peer } = item;
+      const displayName = disclose(item, prepared)
+        ? (permittedLabels.get(peer.userId) ?? null)
+        : null;
       const sessionToken = token("session", input.viewerUserId, input.scopeKey, peer.sessionId);
-      const faceToken = token("face", input.viewerUserId, input.scopeKey, faces.get(peer.userId)!);
+      const faceToken = token(
+        "face",
+        input.viewerUserId,
+        input.scopeKey,
+        displayName === null ? peer.sessionId : peer.userId,
+      );
       return {
         faceToken,
         sessionToken,
-        isSelf: peer.userId === input.viewerUserId && peer.clientId === input.viewerClientId,
+        isSelf:
+          peer.userId === input.viewerUserId &&
+          (input.viewerClientId === null || peer.clientId === input.viewerClientId),
         displayName,
         paletteSlot: paletteSlot(displayName === null ? sessionToken : peer.userId),
-        state: sanitizePresenceState(peer.state, canEdit, true),
+        state: item.state,
         updatedAtMs: peer.updatedAtMs,
       };
     });

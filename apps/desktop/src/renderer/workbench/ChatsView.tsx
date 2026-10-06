@@ -105,7 +105,6 @@ import type {
 import type { PresenceScopeInput } from "../../ipc/bridgeContract";
 import {
   CHAT_AGENT_PRESENCE_TOPIC,
-  agentPresenceClientId,
   resolveAgentPresenceActivity,
 } from "../../collab/agentPresence";
 
@@ -2944,19 +2943,14 @@ export function ChatsView(props: {
     clientId: collaboration?.clientId ?? "",
     displayName: collaboration?.displayName ?? "",
   });
-  const conversationAgentActivity = resolveAgentPresenceActivity(
-    presence.others,
-    workspaceId,
-  );
+  const conversationAgentActivity = resolveAgentPresenceActivity(presence.others);
   const agentSummaryActivity = resolveAgentPresenceActivity(
     agentSummaryPresence.others,
-    workspaceId,
   );
-  const reservedAgentClientId = agentPresenceClientId(workspaceId);
   const peoplePresence = useMemo(
     () =>
       presence.others.filter((peer) => (peer.state as { agent?: unknown } | null)?.agent !== true),
-    [presence.others, reservedAgentClientId],
+    [presence.others],
   );
 
   const refreshShares = useCallback(async () => {

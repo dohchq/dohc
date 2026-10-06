@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { PresenceHub } from "./presence";
 import {
   claimWorkspace,
@@ -116,10 +116,20 @@ it("uses different anonymous tokens per viewer, topic, and session; groups overl
   expect(both).toHaveLength(2);
   expect(both[0]!.faceToken).toBe(both[1]!.faceToken);
   expect(both[0]!.sessionToken).not.toBe(both[1]!.sessionToken);
+  const anonymous = ((await f.poll("alice", a)).peers as Array<Record<string, unknown>>).filter(
+    (p) => p.displayName === null,
+  );
+  expect(anonymous).toHaveLength(3);
+  expect(anonymous[0]!.faceToken).not.toBe(anonymous[2]!.faceToken);
+  const secondSession = anonymous[2]!;
   await f.post("bob", "/sync/shares/" + b + "/presence?topic=notes/a.md", {
     clientId: "bob",
     leave: true,
   });
+  const remaining = ((await f.poll("alice", a)).peers as Array<Record<string, unknown>>).find(
+    (p) => p.sessionToken === secondSession.sessionToken,
+  )!;
+  expect(remaining.faceToken).toBe(secondSession.faceToken);
   await f.pub("bob", b);
   const again = ((await f.poll("alice", a)).peers as Array<Record<string, unknown>>).at(-1)!;
   expect(again.sessionToken).not.toBe(bobA.sessionToken);
@@ -136,7 +146,11 @@ it("makes a missing account label anonymous and strips client identity and neste
     typing: true,
   });
   expect(body.peers).toEqual([
-    expect.objectContaining({ displayName: null, state: { typing: true }, isSelf: true }),
+    expect.objectContaining({
+      displayName: null,
+      state: { typing: true },
+      isSelf: true,
+    }),
   ]);
   expect(JSON.stringify(body)).not.toContain("leak.test");
 });
@@ -193,7 +207,14 @@ async function append(
   f.storage.appendLogBatch({
     workspaceId: "w",
     originId: "owner-origin",
-    ops: [{ originSeq: seq, opKind, recordedAtMs: seq + 1, payloadJson: JSON.stringify(payload) }],
+    ops: [
+      {
+        originSeq: seq,
+        opKind,
+        recordedAtMs: seq + 1,
+        payloadJson: JSON.stringify(payload),
+      },
+    ],
   });
 }
 async function moment(
@@ -204,7 +225,12 @@ async function moment(
   objectId = "object",
 ) {
   const sha256 = createHash("sha256").update("").digest("hex");
-  f.storage.putBlob({ workspaceId: "w", sha256, content: new Uint8Array(), createdAtMs: 1 });
+  f.storage.putBlob({
+    workspaceId: "w",
+    sha256,
+    content: new Uint8Array(),
+    createdAtMs: 1,
+  });
   await append(f, seq, "moment.append", {
     objectId,
     versionId,
@@ -318,7 +344,10 @@ it("keeps View and Comment faces, restricts carets to Edit, and drops revoked pe
   const f = await fixture();
   const a = await f.share("alice", "view");
   const b = await f.share("bob", "comment");
-  const state = { yc: 7, update: awareness(7, { pointer: { x: 1, y: 2, tool: "pointer" } }) };
+  const state = {
+    yc: 7,
+    update: awareness(7, { pointer: { x: 1, y: 2, tool: "pointer" } }),
+  };
   await f.pub("alice", a, "notes/a.md", state);
   await f.pub("bob", b, "notes/a.md", state);
   const before = await f.poll("owner", null);
@@ -438,3 +467,147 @@ it("does not let a Group folder grant presence in another channel with a collidi
   });
   expect(r.status).toBe(404);
 });
+
+it.each([2, 5, 10])("authorizes %i waiting polls with linear per-wake work", async (count) => {
+  const f = await fixture();
+  const grants: string[] = [];
+  const encoded = awareness(17, { pointer: { x: 1, y: 2, tool: "pointer" } });
+  let version = 0;
+  for (let i = 0; i < count; i++) {
+    const id = "viewer-" + i;
+    f.names[id] = "Viewer " + i;
+    const share = await f.share(id);
+    grants.push(share);
+    version = (await f.pub(id, share, "notes/a.md", { yc: 17, update: encoded })).version as number;
+  }
+  const authorization = vi.spyOn(f.storage, "listActiveShareGrantsForRecipient");
+  const decode = vi.spyOn(Buffer, "from");
+  try {
+    const polls = grants.map((share, i) =>
+      f.h(
+        request(
+          "viewer-" + i,
+          "/sync/shares/" +
+            share +
+            "/presence?topic=notes/a.md&clientId=viewer-" +
+            i +
+            "&since=" +
+            version +
+            "&hold=30000",
+        ),
+      ),
+    );
+    await expect.poll(() => f.presence.stats().waiters, { timeout: 30_000 }).toBe(count);
+    authorization.mockClear();
+    decode.mockClear();
+    await f.pub("owner", null);
+    const responses = await Promise.all(polls);
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    const authorizationCalls = authorization.mock.calls.length;
+    const awarenessDecodes = decode.mock.calls.filter((call) => call[0] === encoded).length;
+    console.info(
+      JSON.stringify({
+        waitingPolls: count,
+        authorizationCalls,
+        awarenessDecodes,
+      }),
+    );
+    expect(authorizationCalls).toBeLessThanOrEqual(3 * count);
+    expect(awarenessDecodes).toBe(0);
+  } finally {
+    authorization.mockRestore();
+    decode.mockRestore();
+    f.presence.dispose();
+  }
+});
+
+it("lets the owner join an untouched fork drawing without object moments", async () => {
+  const f = await fixture();
+  const blobSha256 = createHash("sha256").update("").digest("hex");
+  await moment(f, 0, "notes/a.md");
+  await append(f, 1, "version.create", {
+    versionId: "fork",
+    forkSnapshots: [
+      {
+        path: "notes/a.md",
+        objectId: "object",
+        blobSha256,
+        contentKind: "text",
+      },
+    ],
+  });
+  expect(
+    f.storage.currentObjectPath({
+      workspaceId: "w",
+      versionId: "fork",
+      objectId: "object",
+    }),
+  ).toBeNull();
+  const topic = 'scene:["w","fork","object"]';
+  expect((await f.pub("owner", null, topic)).peers).toHaveLength(1);
+  expect((await f.poll("owner", null, topic)).peers).toEqual([
+    expect.objectContaining({ isSelf: true, displayName: "Owner label" }),
+  ]);
+});
+
+it("marks an old poll without clientId's own account sessions as self", async () => {
+  const f = await fixture();
+  const a = await f.share("alice");
+  const b = await f.share("bob");
+  await f.pub("alice", a);
+  await f.pub("bob", b);
+  const r = await f.h(request("alice", "/sync/shares/" + a + "/presence?topic=notes/a.md&hold=0"));
+  expect((await json(r)).peers).toEqual([
+    expect.objectContaining({ displayName: "Alice label", isSelf: true }),
+    expect.objectContaining({ displayName: null, isSelf: false }),
+  ]);
+});
+
+it.each(["revoke", "downgrade", "rename"])(
+  "invalidates shared peer admission during awaited labels: %s",
+  async (action) => {
+    const f = await fixture();
+    const b = await f.share("bob");
+    const topic = 'doc:["w","main","object"]';
+    await moment(f, 0, "notes/a.md");
+    await f.pub("bob", b, topic, { yc: 7, update: awareness(7, {}) });
+    let release!: (label: string) => void;
+    let started!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const lookup = new Promise<string>((resolve) => {
+      release = resolve;
+    });
+    const h = testHandler(f.storage, {
+      presence: f.presence,
+      nowMs: () => Date.now(),
+      lookupUserDisplayName: () => {
+        started();
+        return lookup;
+      },
+    });
+    const response = h(
+      request("owner", "/sync/w/presence?topic=" + encodeURIComponent(topic) + "&hold=0"),
+    );
+    await lookupStarted;
+    if (action === "revoke") {
+      await f.h(request("owner", "/sync/shares/" + b + "/revoke", { method: "POST" }));
+    } else if (action === "downgrade") {
+      const grant = f.storage.listActiveShareGrantsForRecipient(b, "bob")[0]!;
+      inspectDatabase(storagePath(f.storage))
+        .prepare("UPDATE sync_relay_share_grants SET access = ? WHERE grant_id = ?")
+        .run("view", grant.grantId);
+    } else {
+      await moment(f, 1, "outside/a.md");
+    }
+    release("Bob label");
+    expect((await response).status).toBe(200);
+    const body = await json(await response);
+    expect(body.peers).toEqual(
+      action === "downgrade"
+        ? [expect.objectContaining({ displayName: "Bob label", state: {} })]
+        : [],
+    );
+  },
+);
