@@ -33,7 +33,7 @@ const argumentsOf = node => elements(node.getChild("ArgList"));
 const isReference = node => node?.name === "VariableName"
   || node?.name === "PropertyDefinition" && children(node.parent).length === 1;
 const isBindingDefinition = node => node?.name === "VariableDefinition"
-  || node?.name === "PropertyName" && node.parent.name === "PatternProperty" && !node.parent.getChild("VariableDefinition");
+  || node?.name === "PropertyName" && node.parent.name === "PatternProperty" && !children(node.parent).some(child => [":", "Spread"].includes(child.name));
 function unwrap(node) {
   while (node && (node.name === "ParenthesizedExpression" || node.name === "InstantiationExpression"
     || node.name === "PrefixCast" || node.name === "PostfixExpression" && node.lastChild?.name === "LogicOp"
@@ -70,7 +70,7 @@ export function extractIpcSites(path, source) {
   const calls = [], candidates = [], bindings = new Map();
   const addBinding = (name, value, scope, property, declaration, entry, kind = "const") => {
     if (!bindings.has(name)) bindings.set(name, []);
-    bindings.get(name).push({ value, scope, property, declaration, entry, kind });
+    bindings.get(name).unshift({ value, scope, property, declaration, entry, kind });
   };
   const cursor = tree.cursor();
   do {
@@ -78,12 +78,16 @@ export function extractIpcSites(path, source) {
     const node = cursor.node;
     if (node.name === "CallExpression") calls.push(node);
     // Collect uncalled transports and outside collection uses during the binding walk.
-    if (isReference(node) || node.name === "MemberExpression" && source.slice(node.from, node.to).includes("invoke")) candidates.push(node);
+    if (isReference(node) || node.name === "MemberExpression") candidates.push(node);
     if (isBindingDefinition(node)) {
       const declaration = ancestor(node, parent => isFunction(parent) || parent.name === "VariableDeclaration");
-      if (declaration?.parent?.name === "ExportDeclaration") candidates.push(node);
-      const binding = ancestor(node, parent => isScope(parent) || /^(?:ForOfSpec|ForInSpec)$/u.test(parent.name));
-      if (["ForOfSpec", "ForInSpec", "CatchClause"].includes(binding?.name)) addBinding(canonical(node, source), null, ancestor(node, isScope));
+      if (declaration?.parent?.name === "ExportDeclaration" || bindings.get(canonical(node, source))?.some(binding => binding.property
+        && node.from >= binding.declaration?.from && node.to <= binding.declaration?.to)) candidates.push(node);
+      const scope = ancestor(node, isScope), name = canonical(node, source);
+      if (node.parent?.name !== "FunctionDeclaration" && !bindings.get(name)?.some(binding => binding.scope?.from === scope?.from
+        && node.from >= binding.declaration?.from && node.to <= binding.declaration?.to)) {
+        addBinding(name, null, scope);
+      }
     }
     if (node.name === "ImportDeclaration" && canonical(node.getChild("String"), source) === '"electron"') {
       const group = children(node.getChild("ImportGroup") ?? node);
@@ -106,15 +110,16 @@ export function extractIpcSites(path, source) {
         if (pattern.name === "VariableDefinition") addBinding(canonical(pattern, source), value, scope, null, declaration, null, parts[0].name);
         for (const prop of children(pattern).filter(child => child.name === "PatternProperty")) {
           const key = prop.getChild("PropertyName");
-          addBinding(canonical(prop.getChild("VariableDefinition") ?? key, source), value, scope, canonical(key, source), declaration, null, parts[0].name);
+          const definition = prop.getChild("VariableDefinition") ?? (isBindingDefinition(key) ? key : null);
+          if (definition) addBinding(canonical(definition, source), value, scope, canonical(key, source), declaration, null, parts[0].name);
         }
       }
     }
     if (node.name === "FunctionDeclaration") addBinding(canonical(node.getChild("VariableDefinition"), source), node, ancestor(node, isScope));
-    if (node.name === "VariableDefinition" && node.parent.name === "ParamList") addBinding(canonical(node, source), null, ancestor(node, isFunction));
   } while (cursor.next());
   const references = candidates.filter(ref => (ref.name === "MemberExpression" || isBindingDefinition(ref)
-    || bindings.has(source.slice(ref.from, ref.to))) && !ancestor(ref, node => /^(?:Type|Interface)/u.test(node.name)));
+    || bindings.has(source.slice(ref.from, ref.to)) || ["ipcRenderer", "ipcMain"].includes(canonical(ref, source)))
+    && !ancestor(ref, node => /^(?:Type|Interface|ImportDeclaration)/u.test(node.name)));
   const bindingFor = node => {
     const candidates = bindings.get(canonical(node, source));
     if (!candidates) return;
@@ -180,7 +185,7 @@ export function extractIpcSites(path, source) {
     const pattern = spec?.getChild("ArrayPattern");
     const names = pattern ? elements(pattern) : [spec?.getChild("VariableDefinition")];
     const index = names.findIndex(node => canonical(node, source) === canonical(argument, source));
-    if (of < 0 || index < 0) return [canonical(argument, source)];
+    if (of < 0 || index < 0 || !bindingFor(argument) || bindingFor(argument) !== bindingFor(names[index])) return [canonical(argument, source)];
     const collection = parts[of + 1];
     const outside = (node, seen = new Set()) => {
       node = unwrap(node);
@@ -211,8 +216,7 @@ export function extractIpcSites(path, source) {
   const helpers = new Set(), tableHelpers = new Set(), callees = new Map();
   for (const call of calls) {
     const callee = entryName(call.firstChild);
-    // Nested calls can start together, but their closing positions differ.
-    callees.set(call.to, callee);
+    callees.set(call.from + ":" + call.to, callee);
     if (callee === "ipcRenderer.invoke") {
       const owner = ancestor(call, isFunction);
       if (owner) helpers.add(owner.from);
@@ -230,7 +234,7 @@ export function extractIpcSites(path, source) {
     sites.push({ fingerprint: occurrence === 1 ? key : key + " #" + occurrence, line: source.slice(0, node.from).split("\n").length });
   };
   for (const call of calls) {
-    const callee = callees.get(call.to);
+    const callee = callees.get(call.from + ":" + call.to);
     const handCall = isHandName(callee) || helpers.has(resolved(call.firstChild)?.from);
     if (!handCall) continue;
     const owner = ancestor(call, isFunction), argument = resolved(argumentsOf(call)[0]);
@@ -246,17 +250,18 @@ export function extractIpcSites(path, source) {
   }
   for (const ref of references) {
     if (isBindingDefinition(ref) && !bindingFor(ref)?.property && !isFunction(unwrap(bindingFor(ref)?.value))) continue;
-    if (isReference(ref) && !bindingFor(ref)?.value) continue;
     let expression = ref;
     while (expression.parent && unwrap(expression.parent)?.from === ref.from && unwrap(expression.parent)?.to === ref.to) expression = expression.parent;
-    const parent = expression.parent;
-    if (parent?.name === "CallExpression" && parent.firstChild.from === expression.from) continue;
-    if (parent?.name === "ArgList" && callees.get(parent.parent.to) === "operationBridge"
+    const parent = expression.parent, name = entryName(ref), receiver = ["ipcRenderer", "ipcMain"].includes(name);
+    const rawInvoke = name === "ipcRenderer.invoke", registration = ["ipcMain.handle", "ipcMain.handleOnce"].includes(name);
+    if (!receiver && parent?.name === "CallExpression" && parent.firstChild.from === expression.from) continue;
+    if (!receiver && !rawInvoke && !registration && parent?.name === "ArgList" && callees.get(parent.parent.from + ":" + parent.parent.to) === "operationBridge"
       && argumentsOf(parent.parent)[1]?.from === expression.from) continue;
-    if (ref.name === "MemberExpression" && canonical(children(ref)[2], source).replace(/^"|"$/gu, "") !== "invoke") continue;
-    const rawInvoke = entryName(ref) === "ipcRenderer.invoke";
-    if (!rawInvoke && !helpers.has(resolved(ref)?.from)) continue;
-    addSite(ref, "invoke transport reference: " + (rawInvoke ? "ipcRenderer.invoke" : canonical(ref, source)));
+    if (receiver && isBindingDefinition(ref)) continue;
+    if (receiver && parent?.name === "MemberExpression" && parent.firstChild.from === expression.from) continue;
+    if (!receiver && !rawInvoke && !registration && !helpers.has(resolved(ref)?.from)) continue;
+    addSite(ref, receiver ? "IPC receiver reference: " + name : registration ? "registration transport reference: " + name
+      : "invoke transport reference: " + (rawInvoke ? name : canonical(ref, source)));
   }
   return sites;
 }
@@ -277,7 +282,7 @@ export function checkIpcSites(root, inventory) {
   const sites = collectIpcSites(root), allowed = new Set(inventory.sites), current = new Set(sites.map(site => site.fingerprint));
   const added = sites.filter(site => !allowed.has(site.fingerprint)), stale = [...allowed].filter(site => !current.has(site));
   const failures = added.map(site => site.fingerprint + " (line " + site.line + "): new hand-written IPC site. "
-    + (site.fingerprint.endsWith(" referenced outside its loop") ? collectionFix : fix)
+    + (site.fingerprint.includes(" referenced outside its loop") ? collectionFix : fix)
     + " Adding its fingerprint to " + inventoryPath + " is not a fix.");
   for (const site of stale) failures.push(site + ": stale entry. Remove it from " + inventoryPath + "; the inventory only shrinks.");
   const isMove = (old, replacement) => {
@@ -287,7 +292,7 @@ export function checkIpcSites(root, inventory) {
   };
   const movedOld = stale.filter(old => added.some(site => isMove(old, site.fingerprint)));
   const movedNew = added.filter(site => stale.some(old => isMove(old, site.fingerprint)));
-  if (movedNew.length) failures[0] += "\nIf this change only moves existing hand sites, replace the stale fingerprints with these."
+  if (movedNew.length) failures[added.indexOf(movedNew[0])] += "\nIf this change only moves existing hand sites, replace the stale fingerprints with these."
     + "\nStale fingerprints:\n" + movedOld.join("\n") + "\nReplacement fingerprints:\n" + movedNew.map(site => site.fingerprint).join("\n");
   return { failures, sites };
 }
