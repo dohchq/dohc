@@ -20,7 +20,7 @@ export async function runCanonicalCancellationFixture(root, sourceRoot) {
   put('scripts/verification/doctor.mjs','export const doctor=()=>({checks:[]});');
   put('scripts/verification/admission.mjs',"export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;export const verificationAdmission=()=>({lightweight:false,reason:'fixture full lane'});");
   put('scripts/verification/build.mjs',`export const prepare=async()=>{}; export const assertPrepared=()=>({}); export const sourceFingerprint=()=> 'fixture'; export const buildEnvironment=()=>process.env; export const stagedEnginePath='fixture-engine'; export const assertIndependentStagedEngine=()=>{}; export const hashFile=()=>{throw Error('native proof started after cancellation');};`);
-  put('tools/rust-engine-program/build-slot.mjs','export const acquireVerificationSlot=()=>null;');
+  put('tools/rust-engine-program/build-slot.mjs','export const acquireExclusiveSlot=()=>null;export const acquireVerificationSlot=()=>null;');
   put('tools/rust-engine-program/tree-provenance.mjs',"export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
   const packages = ['ydoc-projection','workspace-auth','z-queued'];
   for(const name of packages) put(`packages/${name}/package.json`,JSON.stringify({name:`@dohc/${name}`,scripts:{test:'vitest run'}}));

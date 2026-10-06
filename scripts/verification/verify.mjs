@@ -11,7 +11,7 @@ import { testWorkspace } from "./js-tests.mjs";
 import { readWorkspacePackages, selectJavaScript, selectedGates, workflowFilters } from "./selection.mjs";
 import { readFocusedRendererSelection } from "./renderer-selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
-import { acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
+import { acquireExclusiveSlot, acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
 import { admissionPreflight, installedDependenciesMatch, verificationAdmission } from "./admission.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 import { finishRustEvidence, refreshRustReuse, rustIdentity } from "./rust-reuse.mjs";
@@ -179,6 +179,7 @@ export async function verify(args) {
   const save = () => writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
   const measure = (name, action) => {
     lane?.update?.({phase: name});
+    checkoutOwner?.update?.({phase: name});
     const row = {name};
     report.timings.push(row);
     return timed(row, action, save);
@@ -203,6 +204,7 @@ export async function verify(args) {
   }
   let database;
   let lane;
+  let checkoutOwner;
   const previousIncremental = process.env.CARGO_INCREMENTAL;
   let desktopEnvironment;
   let originalRustIdentity;
@@ -210,6 +212,7 @@ export async function verify(args) {
   async function checkedStep(row, action, checkpoint = () => cancellation.checkpoint()) {
     await checkpoint();
     lane?.update?.({phase: row.name});
+    checkoutOwner?.update?.({phase: row.name});
     report.steps.push(row); save();
     const result = await timed(row, action, save);
     await checkTree(row.name);
@@ -232,6 +235,10 @@ export async function verify(args) {
       recordTree("start");
       return selected;
     });
+    if (mode === "pr") checkoutOwner = await measure("checkout", () => acquireExclusiveSlot({
+      root: join(repoRoot, ".dohc-dev/verification"), kind: "verification-checkout",
+      metadata: {purpose: `PR verification (${report.scope})`, checkout: repoRoot, commit: report.commit, phase: "selection"},
+    }));
     if (mode === "pr" && report.dirty) throw new Error("Commit the worktree before running the PR gate.");
     if (reuseRust && !gates.rust) throw new Error("--reuse-rust requires a selected Rust job. Use --job rust when needed.");
     if (mode === "pr" && !gates.js && !gates.rust) {
@@ -377,7 +384,9 @@ export async function verify(args) {
     throw error;
   }
   finally {
+    try {
     lane?.update?.({phase: "cleanup"});
+    checkoutOwner?.update?.({phase: "cleanup"});
     try { await database?.stop(); }
     catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
     const interrupted = await cancellation.dispose();
@@ -401,6 +410,7 @@ export async function verify(args) {
     }
     finishTiming(); Object.assign(report, total);
     save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
+    } finally { checkoutOwner?.release(); }
   }
 }
 

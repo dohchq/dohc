@@ -837,7 +837,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
       mkdirSync(dirname(join(root, file)), { recursive: true });
       copyFileSync(join(repoRoot, file), join(root, file));
     }
-    writeFileSync(join(root, ".gitignore"), ".agent-artifacts/\n");
+    writeFileSync(join(root, ".gitignore"), ".agent-artifacts/\n.dohc-dev/\n");
     writeFileSync(join(root, "package.json"), '{"type":"module"}\n');
     writeFileSync(join(root, "apps/desktop/package.json"), '{}\n');
     git(["init"]); git(["config", "core.logAllRefUpdates", "true"]);
@@ -924,7 +924,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.deepEqual(report.gates, { rust: false, js: false });
     assert.deepEqual(report.steps, []);
     assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
-    assert.deepEqual(report.timings.map(phase => phase.name), ["selection", "source-check:finish"]);
+    assert.deepEqual(report.timings.map(phase => phase.name), ["selection", "checkout", "source-check:finish"]);
     assert.equal(report.doctor, undefined);
     assert.equal(report.build, undefined);
     assert.match(report.reason, /No code gate applies/);
