@@ -502,6 +502,60 @@ describe("commit-time publication, reentrancy, pending, and handler errors", () 
   });
 });
 
+describe("ownerAppResponses command capability", () => {
+  it.each(["load", "action"] as const)("%s data executors cannot reach ownerAppResponses", async (hook) => {
+    const compareWorkspaceVersions = vi.fn().mockResolvedValue({ files: [{ path: "notes.md" }], nextAfterPath: null });
+    const ownerAppResponses = vi.fn();
+    desktop({ compareWorkspaceVersions, ownerAppResponses });
+    const success = vi.fn();
+    const failure = vi.fn();
+    async function readPaths(api: ReadDesktop, input: { workspaceId: string }) {
+      const page = await api.compareWorkspaceVersions({ workspaceId: input.workspaceId, versionId: "v" });
+      return { hasOwnerAppResponses: "ownerAppResponses" in api, paths: page.files.map(file => file.path) };
+    }
+    let task: DesktopTask;
+    let run = () => {};
+    function Viewer() {
+      useDesktopLoad([], readPaths, hook === "load" ? { workspaceId: "w" } : null, { success, failure });
+      const [read] = useDesktopAction([], readPaths, { success, failure });
+      run = () => { task = read({ workspaceId: "w" }); };
+      return null;
+    }
+    render(<Viewer />);
+    if (hook === "action") {
+      act(() => run());
+      await act(async () => { await whenSettled(task!); });
+    }
+    await vi.waitFor(() => expect(success).toHaveBeenCalledOnce());
+    expect(success).toHaveBeenCalledExactlyOnceWith({ hasOwnerAppResponses: false, paths: ["notes.md"] });
+    expect(compareWorkspaceVersions).toHaveBeenCalledExactlyOnceWith({ workspaceId: "w", versionId: "v" });
+    expect(ownerAppResponses).not.toHaveBeenCalled();
+    expect(failure).not.toHaveBeenCalled();
+  });
+
+  it("useDesktopCommand sends ownerAppResponses undo and delivers its result", async () => {
+    const result = { action: "undo", items: [{ acceptanceId: "a", status: "deleted", momentId: "m" }], nextCursor: null };
+    const ownerAppResponses = vi.fn().mockResolvedValue(result);
+    desktop({ ownerAppResponses });
+    const input = { action: "undo", workspaceId: "w", grantId: "g", operationId: "undo-a", limit: 100 } as const;
+    const success = vi.fn();
+    const failure = vi.fn();
+    let task: DesktopTask;
+    let run = () => {};
+    function Viewer() {
+      const [undo] = useDesktopCommand([], "ownerAppResponses", { scope: { live: () => true }, success, failure });
+      run = () => { task = undo(input); };
+      return null;
+    }
+    render(<Viewer />);
+    act(() => run());
+    await act(async () => { await whenSettled(task!); });
+    expect(ownerAppResponses).toHaveBeenCalledExactlyOnceWith(input);
+    expect(success).toHaveBeenCalledExactlyOnceWith(result, input, undefined);
+    expect(failure).not.toHaveBeenCalled();
+  });
+});
+
 describe("mutations, events, and metadata", () => {
   it("overlapping revokes keep their own target; a failure after close still reaches Notices with its own retry", async () => {
     const replies = { A: deferred<{ undo?: { undoId: string; expiresAtMs: number } }>(), B: deferred<{ undo?: { undoId: string; expiresAtMs: number } }>(), C: deferred<{ undo?: { undoId: string; expiresAtMs: number } }>() };

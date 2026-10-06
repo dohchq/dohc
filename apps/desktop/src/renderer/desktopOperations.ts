@@ -1,6 +1,7 @@
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 
 // Reads have no side effects and may be superseded; commands have effects whose outcomes must survive the view.
+// A member is a command if any of its actions mutates state.
 export type MemberKind = { readonly kind: "read" | "command" | "event" | "metadata"; readonly owner?: string; readonly requiredInput?: readonly string[] };
 
 export const desktopMembers = {
@@ -10,7 +11,7 @@ export const desktopMembers = {
   stopOwnerLiveDocument: { kind: "command" },
   resumeOwnerLiveDocument: { kind: "command" },
   publishOwnerApp: { kind: "command" },
-  ownerAppResponses: { kind: "read" },
+  ownerAppResponses: { kind: "command" },
   dataset: { kind: "command" },
   ownerRestore: { kind: "command" },
   platform: { kind: "metadata" },

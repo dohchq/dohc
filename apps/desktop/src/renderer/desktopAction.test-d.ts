@@ -61,6 +61,10 @@ export function Valid(props: { workspaceId: string; includeChatMentions: boolean
   });
   void revoking;
   revoke({ shareId: "A" }, { selector: "Plans", recipient: "sam@example.com" });
+  const [undoResponses] = useDesktopCommand([], "ownerAppResponses", {
+    scope: workspaceOutcomes, success: () => {}, failure: () => {},
+  });
+  undoResponses({ action: "undo", workspaceId: props.workspaceId, grantId: "g", operationId: "undo-a", limit: 100 });
   return desktopMetadata().platform;
 }
 
@@ -71,6 +75,11 @@ export function Invalid(props: { workspaceId: string }) {
   // A mutation cannot go through the replaceable read hook.
   // @ts-expect-error revokeRelayShare is a command
   useDesktopAction([], "revokeRelayShare", { success: () => {}, failure: () => {} });
+  // A member with a mutating action cannot use either read hook.
+  // @ts-expect-error ownerAppResponses includes undo and is a command
+  useDesktopLoad([], "ownerAppResponses", { action: "undo", workspaceId: props.workspaceId, grantId: "g", operationId: "undo-a", limit: 100 }, { success: () => {}, failure: () => {} });
+  // @ts-expect-error ownerAppResponses includes undo and is a command
+  useDesktopAction([], "ownerAppResponses", { success: () => {}, failure: () => {} })[0]({ action: "undo", workspaceId: props.workspaceId, grantId: "g", operationId: "undo-a", limit: 100 });
   // A read cannot go through the command hook.
   // @ts-expect-error readWorkspaceGraph is a read
   useDesktopCommand([], "readWorkspaceGraph", { scope: workspaceOutcomes, success: () => {}, failure: () => {} });
@@ -85,6 +94,8 @@ export function Invalid(props: { workspaceId: string }) {
     await desktop.listChatReactions(input);
     // @ts-expect-error revokeRelayShare is not on ReadDesktop
     await desktop.revokeRelayShare({ shareId: "A" });
+    // @ts-expect-error ownerAppResponses is not on ReadDesktop
+    await desktop.ownerAppResponses({ action: "undo", workspaceId: input.workspaceId, grantId: "g", operationId: "undo-a", limit: 100 });
     return null;
   };
   void sneaky;
