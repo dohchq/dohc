@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineDocSaveState } from "../collab/engineDocLease";
 import type { FileSaveState } from "../fileInspectorUi";
 import type { SettingsSaveState } from "../settings/SettingsDialog";
@@ -70,19 +71,76 @@ describe("StateMark", () => {
     expect(screen.getByTestId("mark").getAttribute("title")).toBe("The disk is full.");
   });
 
-  // A narrow header cuts the label short, so its tooltip carries the whole
-  // label and what it means. The chip's own title stays as it was.
-  it("puts the whole label and its explanation in a truncated label's tooltip", () => {
-    render(<StateMark testId="mark" state="pending-share" shown="pending-share" truncate />);
-    const mark = screen.getByTestId("mark");
-    const label = mark.querySelector(".truncate");
-    expect(label?.textContent).toBe("Saved locally · Pending share");
-    expect(label?.getAttribute("title")).toBe(
-      "Saved locally · Pending share\nYour edits are saved on this device. The shared file update is pending.",
-    );
-    expect(mark.getAttribute("title")).toBe(SAVE_STATE["pending-share"].title);
-    cleanup();
-    render(<StateMark testId="mark" state="saved" shown="saved" truncate />);
-    expect(screen.getByTestId("mark").querySelector(".truncate")?.getAttribute("title")).toBe("Saved");
+  // A narrow header cuts the label short. The chip then takes focus and its
+  // tooltip carries the whole label and what it means; the chip's own title,
+  // test id and text stay as they were.
+  describe("cut short", () => {
+    // jsdom lays nothing out, so the test says how wide the label is.
+    function laidOut(scrollWidth: number, clientWidth: number) {
+      vi.spyOn(Element.prototype, "scrollWidth", "get").mockReturnValue(scrollWidth);
+      vi.spyOn(Element.prototype, "clientWidth", "get").mockReturnValue(clientWidth);
+    }
+    afterEach(() => vi.restoreAllMocks());
+
+    it("takes focus, shows the whole label and its explanation, and closes on Escape", async () => {
+      laidOut(300, 100);
+      render(<StateMark testId="mark" state="pending-share" shown="pending-share" truncate />);
+      const chip = screen.getByTestId("mark");
+      expect(chip.getAttribute("tabindex")).toBe("0");
+      expect(screen.queryByRole("tooltip")).toBeNull();
+
+      await userEvent.setup().tab();
+      expect(document.activeElement).toBe(chip);
+      const tooltip = screen.getByRole("tooltip");
+      expect(tooltip.textContent).toBe(
+        "Saved locally · Pending shareYour edits are saved on this device. The shared file update is pending.",
+      );
+      expect(chip.getAttribute("aria-describedby")).toBe(tooltip.id);
+      expect(chip.textContent).toBe("Saved locally · Pending share");
+      expect(chip.getAttribute("title")).toBe(SAVE_STATE["pending-share"].title);
+
+      fireEvent.keyDown(chip, { key: "Escape" });
+      expect(screen.queryByRole("tooltip")).toBeNull();
+      expect(chip.getAttribute("aria-describedby")).toBeNull();
+    });
+
+    // A chip near a pane's left edge would push a right-aligned tooltip off
+    // the window, where a pane or panel edge cuts it off.
+    it("keeps its tooltip under the chip and inside the window", async () => {
+      laidOut(300, 100);
+      vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({ left: 40, right: 120, top: 10, bottom: 26, width: 80, height: 16, x: 40, y: 10, toJSON: () => ({}) });
+      vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(288);
+      render(<StateMark testId="mark" state="pending-share" shown="pending-share" truncate />);
+      await userEvent.setup().tab();
+      const tooltip = screen.getByRole("tooltip");
+      expect(tooltip.style.left, "right-aligned to the chip, it starts 168px left of the window").toBe("4px");
+      expect(tooltip.style.top).toBe("30px");
+    });
+
+    it("opens on hover and closes when the pointer leaves", () => {
+      laidOut(300, 100);
+      render(<StateMark testId="mark" state="pending-share" shown="pending-share" truncate />);
+      const chip = screen.getByTestId("mark");
+      fireEvent.mouseEnter(chip.parentElement!);
+      expect(screen.getByRole("tooltip")).toBeTruthy();
+      fireEvent.mouseLeave(chip.parentElement!);
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    });
+
+    it("is not a tab stop and shows no tooltip while its label has room", async () => {
+      laidOut(100, 100);
+      render(
+        <>
+          <StateMark testId="mark" state="pending-share" shown="pending-share" truncate />
+          <button type="button">next</button>
+        </>,
+      );
+      const chip = screen.getByTestId("mark");
+      expect(chip.getAttribute("tabindex")).toBeNull();
+      await userEvent.setup().tab();
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "next" }));
+      fireEvent.mouseEnter(chip.parentElement!);
+      expect(screen.queryByRole("tooltip")).toBeNull();
+    });
   });
 });

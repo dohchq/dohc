@@ -179,7 +179,10 @@ describe("markdown document opening state", () => {
     const [, , status, ...controls] = [...(header?.children ?? [])];
     const control = (el: Element) => el.querySelector("button") ?? el;
     return {
-      status: [...(status?.children ?? [])].map((el) => el.getAttribute("data-testid")),
+      // A truncating save state sits in a wrapper beside its tooltip.
+      status: [...(status?.children ?? [])].map(
+        (el) => el.getAttribute("data-testid") ?? el.querySelector("[data-testid]")?.getAttribute("data-testid"),
+      ),
       controls: controls.map((el) =>
         el.tagName === "BUTTON" && !el.getAttribute("aria-label")
           ? "toggle"

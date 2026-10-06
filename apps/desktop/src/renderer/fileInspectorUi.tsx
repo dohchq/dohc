@@ -43,7 +43,10 @@ const KIND_ICONS: Record<FileDisplayKind, LucideIcon> = {
 // while it loads or when it cannot open (DocumentControls). Share and the
 // controls never shrink. `status` (a save state, "Opening…") sits left of
 // them and gives way first: its words can change width without moving a
-// control, and in a narrow pane it ends in an ellipsis.
+// control, and in a narrow pane it ends in an ellipsis. The status slot takes
+// only the room the path leaves (flex-1 from a zero basis), so the file name
+// stays whole until the status is down to its mark and an ellipsis; only then
+// does the path shrink.
 export function ViewHeader(props: {
   path: string;
   onShare?: () => void;
@@ -62,7 +65,8 @@ export function ViewHeader(props: {
         {dir ? <span className="text-subtle">{dir}</span> : null}
         <span className="font-medium text-ink">{leaf}</span>
       </span>
-      <div className="ml-auto flex min-w-0 items-center gap-2">{props.status}</div>
+      {/* 25px: the widest mark (12px), its gap and an ellipsis. */}
+      <div className="flex min-w-[25px] flex-1 items-center justify-end gap-2 empty:min-w-0">{props.status}</div>
       {props.onShare ? (
         <IconButton
           data-testid="file-share"

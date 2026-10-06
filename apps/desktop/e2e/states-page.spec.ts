@@ -328,14 +328,24 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       await closeMenu(page, trigger, menu);
     }
     // A file header keeps Share and the document's controls inside itself at
-    // any width, and only its save state gives way. The narrow specimen must
-    // really have cut its save state short, or the check proves nothing.
+    // any width, and its save state gives way before its file name: the path
+    // is cut only once the save state shows no more than one character and an
+    // ellipsis (13px of 11px mono). The narrow specimen must really have cut
+    // its save state short, or the check proves nothing.
     for (const theme of THEMES) {
       const part = page.getByTestId(`states-${theme}`).locator('[data-part="file-header"]');
       for (const header of await part.locator("header").all()) {
         const edge = await header.evaluate((el) => el.getBoundingClientRect().right - parseFloat(getComputedStyle(el).paddingRight));
         const rights = await header.locator("button").evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
         if (rights.some((right) => right > edge + 0.5)) failures.push(`a file header control (${theme}) runs past its header`);
+        const order = await header.evaluate((el) => {
+          const path = el.querySelector(":scope > span");
+          const label = el.querySelector(":scope > div .truncate");
+          return { pathCut: !!path && path.scrollWidth > path.clientWidth, statusWidth: label?.clientWidth ?? 0 };
+        });
+        if (order.pathCut && order.statusWidth >= 13) {
+          failures.push(`a file header (${theme}) cut its file name while its save state still had ${order.statusWidth}px of words`);
+        }
       }
       const label = page.getByTestId(`states-file-header-pending-${theme}`).locator(".truncate");
       if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
