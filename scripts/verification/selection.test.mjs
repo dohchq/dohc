@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { readWorkspacePackages, selectJavaScript, uncoveredWorkspaceInputs } from "./selection.mjs";
+import { readWorkspacePackages, selectJavaScript, uncoveredGateInputs, uncoveredWorkspaceInputs } from "./selection.mjs";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const packages = readWorkspacePackages(root);
@@ -304,4 +304,99 @@ test("canonical repository checks include every script contract except the Docke
   for (const path of tracked) {
     assert.ok(listed.has(path) || optIn.has(path), `Missing canonical repository contract: ${path}`);
   }
+});
+
+const gateWorkflow = `jobs:
+  changes:
+    steps:
+      - with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'scripts/rust-input.mjs'
+            js:
+              - 'scripts/**'
+`;
+const gateFinding = (reader, input, gate) => ({ reader, input, gate, filterLine: `- '${input}'` });
+const gateFixture = (reader, source, input) => uncoveredGateInputs([{ path: reader, source }], [reader, input], gateWorkflow);
+
+test("gate input guard rejects a relative fixture outside the reader's gate", () => {
+  const reader = "crates/engine/src/fixture.rs";
+  const input = "packages/scenes/fixtures/canonical.json";
+  assert.deepEqual(gateFixture(reader, 'include_str!("../../../packages/scenes/fixtures/canonical.json")', input),
+    [gateFinding(reader, input, "rust")]);
+});
+
+test("gate input guard rejects a bare direct read outside the reader's gate", () => {
+  const reader = "scripts/compose.test.mjs";
+  const input = "docker-compose.self-host.yml";
+  assert.deepEqual(gateFixture(reader, 'readFileSync("docker-compose.self-host.yml", "utf8")', input),
+    [gateFinding(reader, input, "js")]);
+  assert.deepEqual(gateFixture(reader, 'readFile("LICENSE")', "LICENSE"), [gateFinding(reader, "LICENSE", "js")]);
+});
+
+test("gate input guard ignores comment mentions and commented reads", () => {
+  const source = `// readFileSync("docker-compose.self-host.yml")
+/*
+readFileSync("docker-compose.self-host.yml")
+*/
+const value = 1; // readFileSync("docker-compose.self-host.yml")`;
+  assert.deepEqual(gateFixture("scripts/compose.test.mjs", source, "docker-compose.self-host.yml"), []);
+});
+
+test("gate input guard ignores selector assertions and strings outside call arguments", () => {
+  const reader = "scripts/selection.test.mjs";
+  const input = ".config/nextest.toml";
+  const source = 'readFileSync("scripts/covered.mjs"); assert.deepEqual(selectedGates([".config/nextest.toml"], workflow), {});';
+  assert.deepEqual(gateFixture(reader, source, input), []);
+  for (const source of ['readFileSync(variable) + "./missing.json";', 'readFileSync("./missing.json" + suffix);',
+    'readFileSync(`./${name}.json`);']) {
+    assert.deepEqual(gateFixture(reader, source, "scripts/missing.json"), []);
+  }
+});
+
+test("JavaScript files inside the Rust filter are inputs rather than Rust readers", () => {
+  const reader = "scripts/rust-input.mjs";
+  const input = "scripts/js-only.mjs";
+  assert.deepEqual(gateFixture(reader, 'readFileSync("./js-only.mjs")', input), []);
+});
+
+test("gate input guard accepts covered inputs and ignores bare path-builder arguments", () => {
+  const reader = "scripts/compose.test.mjs";
+  assert.deepEqual(gateFixture(reader, 'readFileSync("./covered.mjs")', "scripts/covered.mjs"), []);
+  for (const source of ['join(temp, "docker-compose.self-host.yml")', 'new URL("docker-compose.self-host.yml", import.meta.url)',
+    'readFileSync(variable, "docker-compose.self-host.yml")']) {
+    assert.deepEqual(gateFixture(reader, source, "docker-compose.self-host.yml"), []);
+  }
+});
+
+test("gate input guard checks literal read and path call arguments and deduplicates findings", () => {
+  const reader = "crates/engine/src/fixture.rs";
+  const input = "packages/scenes/fixtures/canonical.json";
+  for (const call of ["include_str!", "include_bytes!", "read_to_string", "fs::read", "File::open", "Path::new", "PathBuf::from",
+    "readFileSync", "readFile", "createReadStream", "new URL", "join", "resolve", "existsSync"]) {
+    const source = `${call}("../../../packages/scenes/fixtures/canonical.json"); ${call}("../../../packages/scenes/fixtures/canonical.json");`;
+    assert.deepEqual(gateFixture(reader, source, input), [gateFinding(reader, input, "rust")], call);
+  }
+});
+
+test("current workspace literal gate inputs are covered", () => {
+  const paths = execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 })
+    .split("\0").filter(Boolean);
+  const files = paths.filter(path => /\.(?:rs|[cm]?[jt]sx?)$/u.test(path))
+    .map(path => ({ path, source: readFileSync(resolve(root, path), "utf8") }));
+  const workflow = readFileSync(join(root, ".github/workflows/pr-checks.yml"), "utf8");
+  const findings = uncoveredGateInputs(files, paths, workflow);
+  assert.deepEqual(findings, [], findings.map(({ reader, input, gate, filterLine }) =>
+    `${reader} reads ${input}, but changes to it do not select the ${gate} gate. Add ${filterLine} to the ${gate} filter in .github/workflows/pr-checks.yml.`).join("\n"));
+});
+
+test("regex quotes do not hide a later literal read and division keeps its read arguments", () => {
+  const reader = "scripts/compose.test.mjs";
+  const input = ".env.self-host.example";
+  const source = String.raw`if (/[\r\n'\x00]/.test(name)) throw new Error('invalid');
+readFileSync(new URL('../.env.self-host.example', import.meta.url));`;
+  assert.deepEqual(gateFixture(reader, source, input), [gateFinding(reader, input, "js")]);
+  assert.deepEqual(gateFixture(reader, 'numerator / readFileSync(".env.self-host.example") / denominator;', input),
+    [gateFinding(reader, input, "js")]);
 });

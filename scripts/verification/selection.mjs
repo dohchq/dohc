@@ -2,6 +2,8 @@ import { globSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, posix, relative } from "node:path";
 
+import { selectedGates } from "./verify.mjs";
+
 const require = createRequire(new URL("../../apps/desktop/package.json", import.meta.url));
 const dependencyFields = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
 const productionInputs = { "@dohc/site": ["@dohc/desktop"] };
@@ -178,4 +180,74 @@ export function uncoveredWorkspaceInputs(files, packages) {
     }
   }
   return findings;
+}
+
+const gateReadCalls = new Set(["include_str!", "include_bytes!", "read_to_string", "fs::read", "File::open",
+  "readFileSync", "readFile", "createReadStream", "existsSync"]);
+const gatePathCalls = new Set(["Path::new", "PathBuf::from", "newURL", "join", "resolve"]);
+
+function* literalGateInputs(source, rust) {
+  const stack = [];
+  const tokenPattern = /\s+|\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\\r\n])*'|`(?:\\.|[^`\\])*`|[\w$]+|[^\s]/gu;
+  const regexPattern = /\/(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\r\n\[])+\/[dgimsuvy]*/y;
+  const regexPrefixes = new Set(["(", "[", "{", "=", ",", ":", "!", "?", "|", "&", ";", "return", "=>"]);
+  const tokens = [];
+  for (let match; (match = tokenPattern.exec(source));) {
+    const token = match[0];
+    if (/^\s/u.test(token) || token.startsWith("//") || token.startsWith("/*")) continue;
+    if (!rust && token === "/" && (!tokens.length || regexPrefixes.has(tokens.at(-1)))) {
+      regexPattern.lastIndex = match.index;
+      const regex = regexPattern.exec(source);
+      if (regex) { tokens.push(regex[0]); tokenPattern.lastIndex = regexPattern.lastIndex; continue; }
+    }
+    tokens.push(token);
+  }
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    const previous = tokens[index - 1];
+    if (token === "(") {
+      const prefix = tokens.slice(Math.max(0, index - 4), index).join("");
+      const call = [...gateReadCalls, ...gatePathCalls].find(name => prefix.endsWith(name)
+        && !/[\w$]/u.test(prefix.at(-name.length - 1) ?? ""));
+      stack.push({ token, call, first: true });
+    } else if (token === "[" || token === "{") {
+      stack.push({ token });
+    } else if (token === ")" || token === "]" || token === "}") {
+      stack.pop();
+    } else {
+      const argument = stack.at(-1);
+      if (argument?.call && (previous === "(" || previous === ",")) {
+        const literal = token.match(/^(["'`])([^"'`\r\n\\]+)\1$/u);
+        if (literal && !literal[2].includes("${") && [",", ")"].includes(tokens[index + 1])) yield { reference: literal[2], directRead: argument.first && gateReadCalls.has(argument.call) };
+      }
+      if (token === "," && argument) argument.first = false;
+    }
+  }
+}
+
+export function uncoveredGateInputs(files, trackedPaths, workflow) {
+  const tracked = new Set(trackedPaths);
+  const selections = new Map();
+  const gatesFor = path => {
+    if (!selections.has(path)) selections.set(path, selectedGates([path], workflow));
+    return selections.get(path);
+  };
+  const findings = new Map();
+  for (const { path: reader, source } of files) {
+    if (!/\.(?:rs|[cm]?[jt]sx?)$/u.test(reader)) continue;
+    const gates = Object.entries(gatesFor(reader))
+      .filter(([gate, selected]) => selected && (gate === "rust") === reader.endsWith(".rs")).map(([gate]) => gate);
+    if (!gates.length) continue;
+    for (const { reference, directRead } of literalGateInputs(source, reader.endsWith(".rs"))) {
+      const input = /^\.{1,2}\//u.test(reference)
+        ? posix.normalize(posix.join(posix.dirname(reader), reference))
+        : directRead ? posix.normalize(reference) : null;
+      if (!input || !tracked.has(input)) continue;
+      for (const gate of gates) {
+        if (!gatesFor(input)[gate]) findings.set(`${gate}|${reader}|${input}`,
+          { reader, input, gate, filterLine: `- '${input}'` });
+      }
+    }
+  }
+  return [...findings.values()];
 }
