@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { desktopPins, settingsSectionPin } from "../../testPins";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -186,7 +187,7 @@ describe("SettingsDialog", () => {
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
     expect(screen.getByTestId("settings-section-general")).toBeTruthy();
     await user.type(screen.getByTestId("settings-search"), "theme");
-    expect(screen.getByTestId("settings-section-appearance")).toBeTruthy();
+    expect(screen.getByTestId(settingsSectionPin("appearance"))).toBeTruthy();
     await user.clear(screen.getByTestId("settings-search"));
     await user.type(screen.getByTestId("settings-search"), "launch");
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
@@ -222,7 +223,7 @@ describe("SettingsDialog", () => {
       </>,
     );
 
-    await screen.findByTestId("settings-dialog");
+    await screen.findByTestId(desktopPins.settingsDialog);
     const higherOverlayAction = screen.getByTestId("higher-overlay-action");
     higherOverlayAction.focus();
     const higherOverlay = Symbol("higher-overlay-test");
@@ -618,7 +619,7 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("agent-setup-guide")).toBeTruthy();
   });
 
-  it("does not claim an enabled MCP server is connected", async () => {
+  it("reports an external agent connection without requiring the runner or claiming a client", async () => {
     mcpEnabled = true;
     render(
       <SettingsDialog
@@ -629,15 +630,22 @@ describe("SettingsDialog", () => {
       />,
     );
 
-    expect((await screen.findByTestId("agent-setup-status")).textContent).toContain(
-      "Needs setup",
-    );
-    expect(screen.getByTestId("agent-setup-mcp-action").textContent).toContain(
-      "MCP enabled · copy config below",
-    );
+    const mcpState = await screen.findByTestId("agent-setup-mcp-state");
+    expect(mcpState.textContent).toBe("Server running");
+    expect(mcpState.getAttribute("data-state")).toBe("running");
+    const action = screen.getByTestId("agent-setup-mcp-action");
+    expect(action.textContent).toBe("Copy config");
+    await userEvent.setup().click(action);
+    await waitFor(() => expect(action.textContent).toBe("Copied"));
+    expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
+    expect(screen.getByTestId("agent-setup-runner-state").getAttribute("data-state")).toBe("missing");
+    expect(screen.getByTestId("agent-setup-runner-state").textContent).toBe("No runner command");
+    const guide = screen.getByTestId("agent-setup-guide");
+    expect(guide.getAttribute("data-state")).toBeNull();
+    expect(guide.textContent).not.toMatch(/Needs setup|Ready|Connected/);
   });
 
-  it("shows an enabled named agent as ready without a personal name", async () => {
+  it("shows an enabled named runner as ready without a personal name", async () => {
     bridge.getUserSettings.mockResolvedValueOnce({
       settings: {
         ...DEFAULT_USER_SETTINGS,
@@ -647,7 +655,33 @@ describe("SettingsDialog", () => {
       source: "default",
     });
     render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
-    await waitFor(() => expect(screen.getByTestId("agent-setup-status").textContent).toBe("Ready"));
+    await waitFor(() => expect(screen.getByTestId("agent-setup-runner-state").textContent).toBe("Dispatch ready"));
+    expect((await screen.findByTestId("agent-setup-mcp-state")).textContent).toBe("Server stopped");
+    expect(screen.getByTestId("agent-setup-mcp-action").textContent).toBe("Enable MCP");
+  });
+
+  it("keeps focus on the guide's MCP action when enabling the server", async () => {
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    const action = await screen.findByTestId("agent-setup-mcp-action");
+    await screen.findByTestId("mcp-config-snippet");
+    await userEvent.setup().click(action);
+    await waitFor(() => expect(action.textContent).toBe("Copy config"));
+    expect(screen.getByTestId("agent-setup-mcp-action")).toBe(action);
+    expect(document.activeElement).toBe(action);
+    expect(screen.getByTestId("agent-setup-mcp-state").textContent).toBe("Server running");
+  });
+
+  it("does not call an enabled runner ready without an agent name to post as", async () => {
+    bridge.getUserSettings.mockResolvedValueOnce({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        runner: { ...DEFAULT_USER_SETTINGS.runner, enabled: true, command: "node agent.mjs" },
+      },
+      source: "default",
+    });
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId("agent-setup-runner-state").getAttribute("data-state")).toBe("unnamed"));
+    expect(screen.getByTestId("agent-setup-runner-state").textContent).toBe("Agent name needed");
   });
 
   it("shows the trusted runner controls and persists command, toggle, and timeout", async () => {

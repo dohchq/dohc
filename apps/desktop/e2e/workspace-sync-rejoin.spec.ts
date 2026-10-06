@@ -1,3 +1,4 @@
+import { activityPin } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -488,7 +489,7 @@ test("join flow: paste the sync code, pick a folder, and the workspace arrives w
     }
 
     // Pulled file content is searchable through the engine index.
-    await page.getByTestId("activity-search").click();
+    await page.getByTestId(activityPin("search")).click();
     await expect(page.getByTestId("search-view")).toBeVisible();
     await page.getByTestId("search-input").fill("galaxy-brain");
     await expect(

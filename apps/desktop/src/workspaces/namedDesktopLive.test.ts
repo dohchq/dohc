@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { createNamedDesktopLiveCapture } from "./namedDesktopLive";
-import { preserveNamedLiveDraft } from "./namedLiveDraftRecovery";
+import { preserveLiveDraft } from "./liveDraftRecovery";
 
 const transport = vi.hoisted(() => ({ factory: vi.fn() }));
 vi.mock("@dohc/ydoc-projection/named-live-browser-transport", async importOriginal => {
@@ -107,12 +107,12 @@ it("writes exact recovery under its original local workspace without admitting s
   const directory = await mkdtemp(join(tmpdir(), "dohc-named-recovery-"));
   cleanup.push(() => rm(directory, {recursive: true, force: true}));
   const draft = {path: "docs/a.md", objectId: "object", remoteWorkspaceId: "owner-workspace", update: new Uint8Array([0, 0])};
-  await preserveNamedLiveDraft(directory, "recipient-workspace", draft);
+  await preserveLiveDraft(directory, "recipient-workspace", draft);
   const names = await readdir(directory);
   expect(names).toHaveLength(1);
   const row = JSON.parse(await readFile(join(directory, names[0]!), "utf8"));
   expect(row.workspaceId).toBe("recipient-workspace");
   expect(Buffer.from(row.updateBase64, "base64")).toEqual(Buffer.from(draft.update));
-  await expect(preserveNamedLiveDraft(directory, "other-workspace", {...draft, path: ".env"})).rejects.toThrow("cannot enter draft recovery");
+  await expect(preserveLiveDraft(directory, "other-workspace", {...draft, path: ".env"})).rejects.toThrow("cannot enter draft recovery");
   expect(await readdir(directory)).toEqual(names);
 });

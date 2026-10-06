@@ -226,6 +226,37 @@ describe("persistent dataset worker",()=>{
     });
   });
 
+  it("returns only a completed timed replay prefix and rejects invalid durations",async()=>{
+    await fixture(async({open})=>{
+      const writer=await open(),recovered=await open();
+      const first=event(await writer.prepare(operation(initial,{id:1,value:'first'})));await writer.finalize(first);
+      const second=event(await writer.prepare(operation(first,{id:2,value:'second'})),first);await writer.finalize(second);
+      await expect(recovered.applyBatch([first,second],-1)).rejects.toMatchObject({code:'invalid_input'});
+      await expect(recovered.applyBatch([first,second],60_001)).rejects.toMatchObject({code:'invalid_input'});
+      expect(await recovered.applyBatch([first,second],0)).toEqual({revision:1,digest:first.digest});
+      expect((await recovered.prepare({...operation(first),readOnly:true})).result).toEqual([{id:1,value:'first'}]);
+      expect(await recovered.applyBatch([second],0)).toEqual({revision:2,digest:second.digest});
+    });
+  });
+
+  it("checks foreign keys before returning a timed prefix and closes a failed copy",async()=>{
+    await fixture(async({root,open})=>{
+      const sql='CREATE TABLE parents(id INTEGER PRIMARY KEY); CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL,parent INTEGER REFERENCES parents(id));';
+      const raw=new DatabaseSync(join(root,'raw.sqlite'),{enableForeignKeyConstraints:false});raw.exec(sql);
+      let session=raw.createSession();raw.exec("INSERT INTO items VALUES(1,'child',1)");
+      const firstChanges=session.changeset();session.close();
+      session=raw.createSession();raw.exec('INSERT INTO parents VALUES(1)');
+      const secondChanges=session.changeset();session.close();raw.close();
+      const first={revision:1,digest:hash('first'),previousDigest:initial.digest,changeset:firstChanges,changesetSha256:hash(firstChanges)};
+      const second={revision:2,digest:hash('second'),previousDigest:first.digest,changeset:secondChanges,changesetSha256:hash(secondChanges)};
+      const input={schemaSql:sql,tables:['parents','items']};
+      const complete=await open(input);expect(await complete.applyBatch([first,second])).toMatchObject({revision:2});
+      const chunked=await open(input);
+      await expect(chunked.applyBatch([first,second],0)).rejects.toMatchObject({code:'invalid_changeset'});
+      await expect(chunked.snapshot(join(root,'invalid.sqlite'))).rejects.toThrow();
+    });
+  });
+
   it("kills a partially applied batch and recovers again from the authority checkpoint",async()=>{
     await fixture(async({open})=>{
       const writer=await open(),recovered=await open();

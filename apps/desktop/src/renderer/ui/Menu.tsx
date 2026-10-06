@@ -156,8 +156,10 @@ export function moveInMenu(key: string, current: number, labels: readonly string
 }
 
 // The Menu part's own rows take DOM focus, so focus carries the fill, and
-// the global :focus-visible outline marks the row for the keyboard.
-const ROW = `${MENU_ROW} focus:bg-selected`;
+// the accent :focus-visible outline marks the row for the keyboard. The list
+// scrolls, so the outline sits inside the row, where the scroller cannot clip
+// it on a row scrolled to an edge.
+const ROW = `${MENU_ROW} focus:bg-selected focus-visible:-outline-offset-2`;
 // Hover paints only after the pointer moves, so a menu opened from the
 // keyboard under a still pointer shows one active row.
 const ROW_TONE = {

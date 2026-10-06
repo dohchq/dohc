@@ -1157,6 +1157,31 @@ impl Ydoc {
         markdown: &str,
         reading: MarkdownReading,
     ) -> Result<Vec<u8>, CollabError> {
+        self.rewrite_content_to_markdown_checked(content_kind, markdown, reading, false)
+    }
+
+    /// Rewrite a file fold, refusing quote-depth overflow before changing the
+    /// document. A new fold also invalidates the previous exact-source witness.
+    pub fn rewrite_content_to_markdown_for_fold(
+        &self,
+        content_kind: ContentKind,
+        markdown: &str,
+    ) -> Result<Vec<u8>, CollabError> {
+        self.rewrite_content_to_markdown_checked(
+            content_kind,
+            markdown,
+            MarkdownReading::Projection,
+            true,
+        )
+    }
+
+    fn rewrite_content_to_markdown_checked(
+        &self,
+        content_kind: ContentKind,
+        markdown: &str,
+        reading: MarkdownReading,
+        file_fold: bool,
+    ) -> Result<Vec<u8>, CollabError> {
         let update = match content_kind {
             ContentKind::Plaintext => {
                 let t = self.doc.get_or_insert_text(ROOT_PLAINTEXT);
@@ -1181,7 +1206,19 @@ impl Ydoc {
                 let normalized_body = uses_crlf.then(|| body.replace("\r\n", "\n"));
                 let blocks =
                     parse_markdown_blocks(normalized_body.as_deref().unwrap_or(body), reading);
+                if file_fold && quote_fold_overflows(&blocks, 0) {
+                    return Err(CollabError::MarkdownQuoteDepthExceeded);
+                }
                 self.with_delta(|txn| {
+                    if file_fold {
+                        for key in [
+                            MARKDOWN_SOURCE_META_KEY,
+                            MARKDOWN_SOURCE_SHA_META_KEY,
+                            MARKDOWN_SOURCE_PROJECTION_SHA_META_KEY,
+                        ] {
+                            meta.remove(txn, key);
+                        }
+                    }
                     if uses_crlf {
                         meta.insert(txn, MARKDOWN_CRLF_META_KEY, true);
                     } else {
@@ -1363,6 +1400,12 @@ impl Ydoc {
             let _ = staged.rewrite_content_to_markdown(content_kind, markdown)?;
             Ok(())
         })
+    }
+
+    /// Bind a non-canonical file fold to its exact source. The caller has
+    /// already rewritten the body and must append both deltas together.
+    pub fn preserve_folded_markdown_source(&self, markdown: &str) -> Result<Vec<u8>, CollabError> {
+        self.stage_source_preserving_edit(markdown, |_| Ok(()))
     }
 
     pub(crate) fn rewrite_richdoc_preserving_source_bounded(
@@ -2268,28 +2311,21 @@ fn parse_markdown_blocks(body: &str, reading: MarkdownReading) -> Vec<MdBlock> {
     parse_markdown_blocks_at(body, 0, reading)
 }
 
-/// How many nested blockquote levels the fold will build before it stops
-/// recursing and keeps the remaining quoted lines as verbatim paragraph text.
-///
-/// This is a RECURSION BUDGET against hostile input, not a fidelity ceiling —
-/// the earlier comment here claimed the latter and was wrong on both counts.
-/// `markdown_node` increments projection depth by one per level, not two, and
-/// the projector renders far deeper than 60: measured in-tree, a fold
-/// round-trips byte-exactly at 40, 100 and 120 levels.
-///
-/// The overflow is also not lossless, which the old comment asserted and the
-/// fold relied on: a paragraph holding `> > …` re-projects with its leading
-/// markers escaped as `&gt;`. That is why the caller
-/// (`fold_resolution_into_ydoc_in_tx`) re-projects and compares before it
-/// commits anything — past this bound a resolution is refused, never silently
-/// stored as bytes the user did not choose.
-///
-/// 120 sits under the projector's own `MAX_PROJECTION_DEPTH`, so a document
-/// the projection can render is one the fold can rebuild, and the refusal
-/// above it costs no representable content. Real prose nests single digits
-/// deep; the budget exists so a megabyte of `> ` prefixes inside one resolve
-/// frame cannot exhaust the parser stack or the actor thread.
+/// Maximum quote nesting before the parser keeps the rest as paragraph text.
+/// A file fold refuses that overflow because projection escapes its `>` markers.
+/// Ordinary imports can still keep it as text. This budget is below the
+/// projector's depth limit and bounds parser recursion on hostile input.
 const QUOTE_FOLD_MAX_DEPTH: usize = 120;
+
+fn quote_fold_overflows(blocks: &[MdBlock], depth: usize) -> bool {
+    blocks.iter().any(|block| match block {
+        MdBlock::Quote(inner) => quote_fold_overflows(inner, depth + 1),
+        MdBlock::Paragraph(text) if depth >= QUOTE_FOLD_MAX_DEPTH => {
+            text == ">" || text.starts_with("> ") || text.starts_with(">\n")
+        }
+        _ => false,
+    })
+}
 
 /// `depth` bounds blockquote recursion at [`QUOTE_FOLD_MAX_DEPTH`].
 fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) -> Vec<MdBlock> {
@@ -2297,6 +2333,9 @@ fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) 
     let lines: Vec<&str> = body.split('\n').collect();
     let mut blocks = Vec::new();
     let mut index = 0usize;
+    // Find fence closers once; repeated unclosed openers must not rescan the body.
+    let mut closers: Option<Vec<usize>> = None;
+    let mut next_closer = 0usize;
     while index < lines.len() {
         let line = lines[index];
         if line.is_empty() {
@@ -2304,23 +2343,17 @@ fn parse_markdown_blocks_at(body: &str, depth: usize, reading: MarkdownReading) 
             continue;
         }
         if let Some(fence_language) = line.strip_prefix("```") {
-            let mut content = Vec::new();
-            let mut cursor = index + 1;
-            let mut closed = false;
-            while cursor < lines.len() {
-                if lines[cursor] == "```" {
-                    closed = true;
-                    break;
-                }
-                content.push(lines[cursor]);
-                cursor += 1;
+            let closers = closers
+                .get_or_insert_with(|| (0..lines.len()).filter(|&at| lines[at] == "```").collect());
+            while closers.get(next_closer).is_some_and(|&at| at <= index) {
+                next_closer += 1;
             }
-            if closed {
+            if let Some(&closer) = closers.get(next_closer) {
                 blocks.push(MdBlock::CodeBlock {
                     language: fence_language.to_string(),
-                    content: content.join("\n"),
+                    content: lines[index + 1..closer].join("\n"),
                 });
-                index = cursor + 1;
+                index = closer + 1;
                 continue;
             }
             // An unclosed fence is not a code block: fall through to text.
@@ -5794,6 +5827,42 @@ mod projection_tests {
     }
 
     #[test]
+    fn file_fold_quote_guard_allows_code_and_preserves_the_document_on_overflow() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, "original")
+            .unwrap();
+        let before = doc.encode_full_state();
+        let deep = format!("{}deep", "> ".repeat(QUOTE_FOLD_MAX_DEPTH + 1));
+        assert!(matches!(
+            doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &deep),
+            Err(CollabError::MarkdownQuoteDepthExceeded)
+        ));
+        assert_eq!(doc.encode_full_state(), before);
+        let code = format!("```\n{deep}\n```");
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &code)
+            .unwrap();
+        assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, code);
+        for depth in [QUOTE_FOLD_MAX_DEPTH - 1, QUOTE_FOLD_MAX_DEPTH] {
+            let quote = format!("{}deep", "> ".repeat(depth));
+            doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &quote)
+                .unwrap();
+            assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, quote);
+        }
+    }
+
+    #[test]
+    fn a_canonical_file_fold_clears_the_old_source_witness_without_storing_a_copy() {
+        let doc = Ydoc::wire();
+        doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "old\n")
+            .unwrap();
+        assert!(doc.markdown_source_reference().is_some());
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, "old")
+            .unwrap();
+        assert!(doc.markdown_source_reference().is_none());
+        assert_eq!(doc.project(ContentKind::Richdoc).unwrap().content, "old");
+    }
+
+    #[test]
     fn scene_rejects_markdown_replacement() {
         let doc = Ydoc::wire();
         let error = doc
@@ -8415,5 +8484,76 @@ mod owner_source_public_limits {
                 canonical
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fence_projection_tests {
+    use super::*;
+    /// The fold before fences were found in one pass, reduced to the lines
+    /// the test alphabet holds: blanks, paragraphs and fences.
+    fn forward_scan_blocks(lines: &[&str]) -> Vec<MdBlock> {
+        let mut blocks = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let line = lines[index];
+            if line.is_empty() {
+                index += 1;
+                continue;
+            }
+            if let Some(language) = line.strip_prefix("```") {
+                if let Some(offset) = lines[index + 1..].iter().position(|next| *next == "```") {
+                    let closer = index + 1 + offset;
+                    blocks.push(MdBlock::CodeBlock {
+                        language: language.to_owned(),
+                        content: lines[index + 1..closer].join("\n"),
+                    });
+                    index = closer + 1;
+                    continue;
+                }
+            }
+            let start = index;
+            index += 1;
+            while index < lines.len()
+                && !lines[index].is_empty()
+                && !lines[index].starts_with("```")
+            {
+                index += 1;
+            }
+            blocks.push(MdBlock::Paragraph(lines[start..index].join("\n")));
+        }
+        blocks
+    }
+
+    #[test]
+    fn fences_close_where_a_forward_scan_closes_them() {
+        const ALPHABET: [&str; 4] = ["```", "```x", "a", ""];
+        for length in 1..=7_u32 {
+            for mut code in 0..ALPHABET.len().pow(length) {
+                let mut lines = Vec::new();
+                for _ in 0..length {
+                    lines.push(ALPHABET[code % ALPHABET.len()]);
+                    code /= ALPHABET.len();
+                }
+                let body = lines.join("\n");
+                for reading in [MarkdownReading::Projection, MarkdownReading::Source] {
+                    assert_eq!(
+                        parse_markdown_blocks(&body, reading),
+                        forward_scan_blocks(&lines),
+                        "{body:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unclosed_fences_remain_paragraphs() {
+        let openers = 16_000;
+        let blocks = parse_markdown_blocks(&"```x\n".repeat(openers), MarkdownReading::Projection);
+        assert_eq!(blocks.len(), openers);
+        assert!(blocks
+            .iter()
+            .all(|block| *block == MdBlock::Paragraph("```x".to_owned())));
     }
 }

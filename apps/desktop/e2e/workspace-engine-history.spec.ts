@@ -1,3 +1,4 @@
+import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -34,7 +35,7 @@ test("a workspace shows engine moments and restores a file end-to-end", async ()
     // Wait for this fixture's startup capture before editing. The next moment
     // must arrive through capture.momentRecorded and the History refresh,
     // rather than through startup reconciliation.
-    await page.getByTestId("activity-history").click();
+    await page.getByTestId(activityPin("history")).click();
     await expect(
       page
         .locator(
