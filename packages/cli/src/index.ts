@@ -8,11 +8,14 @@ import {
   CLI_JSON_SCHEMA_VERSION,
   CLI_PROTOCOL_VERSION,
   documentEditTextSchema,
+  commentBodySchema,
+  MAX_COMMENT_BODY_BYTES,
   parseCliResult,
   type CliRequestWithoutToken,
   type CliResultByVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
+import { readStdinText } from "./stdin";
 
 const DEFAULT_RESPONSE_TIMEOUT_MS = 30_000;
 
@@ -31,14 +34,6 @@ interface CliExecutionOptions {
   client?: CliClientOptions;
 }
 
-async function processStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
 async function bodyForCommand(
   command: ParsedCliCommand,
   readStdin: () => Promise<string>,
@@ -50,6 +45,7 @@ async function bodyForCommand(
   }
   if (command.verb === "fileChatStart") {
     const body = command.stdin ? await readStdin() : command.body;
+    if (!commentBodySchema.safeParse(body).success) throw new DohcCliError("comment body is at most 64 KiB as UTF-8");
     if (!body.trim()) throw new DohcCliError("comment body must contain text that is not all whitespace");
     return body;
   }
@@ -301,7 +297,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     const env = options.env ?? process.env;
     const command = parseCliArguments(options.argv, env);
     if ("help" in command) return { exitCode: 0, stdout: renderCliHelp(command), stderr: "" };
-    const stdinBody = await bodyForCommand(command, options.readStdin ?? processStdin);
+    const stdinBody = await bodyForCommand(command, options.readStdin ?? (() => readStdinText(process.stdin, command.verb === "fileChatStart" ? MAX_COMMENT_BODY_BYTES : undefined)));
     const request = buildCliRequest(
       command,
       options.cwd ?? process.cwd(),

@@ -273,7 +273,7 @@ const DOCUMENT_VERBS = {
       { name: "--request-id", value: "key", text: "Set a key for safe retries. Use 1 to 64 printable ASCII characters. A retry with the same key and the same payload returns the existing result. A retry with the same key and a changed payload is refused." },
       { name: "--run-id", value: "id", text: "Set the run ID. The value must not be empty. This flag overrides DOHC_RUN_ID." },
     ],
-    notes: [stdinNote, "The default output shows the result as JSON.", "Add --json to include schemaVersion in the output."],
+    notes: [stdinNote, "The first message allows at most 64 KiB of UTF-8."],
     parse: (input) => {
       const [path, body, ...extra] = input.operands;
       if (!path) fail("document requires a path");
@@ -944,7 +944,7 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
 /** Every command and verb the CLI dispatches. Help reads this table too. */
 export const CLI_COMMANDS: Readonly<Record<string, CliCommandSpec>> = {
   document: {
-    summary: "Read, edit, and create live Markdown documents.",
+    summary: "Read, edit, and create live Markdown documents, and comment on tracked text files.",
     notes: ["Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP.",
       "A refusal exits with status 1 and prints its reason to stderr, including with --json."],
     verbs: DOCUMENT_VERBS,

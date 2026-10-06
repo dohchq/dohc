@@ -15,7 +15,7 @@ import mainIpc from "./ipcExposure.main.json";
 import clipboardIpc from "./ipcExposure.pr1639.json";
 import mainCli from "./cliExposure.main.json";
 import publicationCli from "./cliExposure.pr1659.json";
-import commentsCli from "./cliExposure.comments.json";
+import commentsCli from "./cliExposure.pr1700.json";
 import admission from "./operationAdmission.json";
 
 const rows: OperationDefinition[] = OPERATION_TABLES.flatMap(table => Object.values(table));

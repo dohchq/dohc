@@ -2313,10 +2313,13 @@ describe("CLI socket server", () => {
     await expect(store.listMessages({ workspaceId: WORKSPACE_ID, threadId: first.threadId }))
       .resolves.toMatchObject([{ author: { kind: "agent", displayName: "Nova" } }]);
 
-    for (const path of ["untracked.md", "../outside.md", ".dohc/private.md"]) {
+    for (const [path, reason] of [
+      ["untracked.md", "dohc does not track untracked.md yet, so it cannot have chats. Only text files dohc tracks can. Try again once dohc lists the file."],
+      ["../outside.md", "path rejected (traversal): ../outside.md"],
+      [".dohc/private.md", "path rejected (reserved): .dohc/private.md"],
+    ] as const) {
       const denied = await comment(path, "T", "B");
-      expect(denied.exitCode, path).toBe(1);
-      expect(denied.stdout).toBe("");
+      expect(denied).toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${reason}\n` });
     }
     const beforeReadOnly = calls.writes;
     // A shared view refuses before the chat module is reached.

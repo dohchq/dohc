@@ -487,7 +487,7 @@ Two environment variables also change what the CLI does:
 
 ### `dohc document`
 
-Read, edit, and create live Markdown documents.
+Read, edit, and create live Markdown documents, and comment on tracked text files.
 
 Paths resolve from your current folder. Changes are recorded as an agent's, as with MCP. A refusal exits with status 1 and prints its reason to stderr, including with --json.
 
@@ -543,7 +543,7 @@ dohc document comment <path> [-] [options]
 
 Start a chat linked to a file with its first message.
 
-Use - as the body to read it from stdin. The default output shows the result as JSON. Add --json to include schemaVersion in the output.
+Use - as the body to read it from stdin. The first message allows at most 64 KiB of UTF-8.
 
 - `--title <title>`: Set the chat title. Use 1 to 200 characters that are not all whitespace.
 - `--text <markdown>`: Set the first message as Markdown. The message must contain text that is not all whitespace.
