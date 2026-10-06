@@ -265,7 +265,7 @@ export async function verify(args) {
     report.doctor = await measure("doctor", () => doctor({engine: native, desktop: needs.desktop, browser: Boolean(proofs.accounts || desktopProofTags(proofs).selected.length)})); save();
     await cancellation.checkpoint();
     if (report.doctor.checks.some((check) => check.state === "FAIL")) throw new Error("Preflight failed. Read result.json and run pnpm setup:worktree.");
-    await step("app-backend-runtime", ...pnpm(["--filter", "@dohc/app-backend-runtime", "build"]));
+    if (!report.admission?.lightweight) await step("app-backend-runtime", ...pnpm(["--filter", "@dohc/app-backend-runtime", "build"]));
     const preparedOptions = {engineOnly: !needs.desktop, engineBinary: stagedEnginePath};
     if (needs.engine || needs.desktop) {
       await measure("prepare", () => prepare({ ...preparedOptions, output, install: mode !== "pr" }));
