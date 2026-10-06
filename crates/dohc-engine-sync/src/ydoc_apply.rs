@@ -1459,7 +1459,12 @@ fn deferred_ydoc_refusal(
 /// The deterministic per-envelope moment id the projection mints. Also the
 /// incoming-side anchor of a base-divergence conflict, so a crash-redelivery
 /// can recount the conflict it opened.
-fn ydoc_apply_moment_id(key: &DocKey, path: &str, origin_id: &str, origin_seq: i64) -> String {
+pub(crate) fn ydoc_apply_moment_id(
+    key: &DocKey,
+    path: &str,
+    origin_id: &str,
+    origin_seq: i64,
+) -> String {
     let fingerprint = format!(
         "{}\0{}\0{}\0{}\0{}\0{}",
         key.workspace_id, key.version_id, key.object_id, path, origin_id, origin_seq
@@ -1897,7 +1902,7 @@ pub fn reconcile_local_resulting_head_in_tx(
             // A blocked settlement write must not refuse this head forever.
             dohc_engine_collab::author_coverage::supersede_in(tx, &key, now_ms)
                 .map_err(map_collab_hard_error)?;
-            match fold_complete_ydoc_lineage_in_tx(
+            let folded = fold_complete_ydoc_lineage_in_tx(
                 tx,
                 &complete,
                 path,
@@ -1908,7 +1913,8 @@ pub fn reconcile_local_resulting_head_in_tx(
                 },
                 now_ms,
                 true,
-            )? {
+            )?;
+            match folded {
                 LineageFold::Folded(facts) => Ok(facts.map(|facts| *facts)),
                 LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
                     tx,
@@ -1944,6 +1950,69 @@ pub(crate) enum LineageFold {
     /// The lineage holds the text now, with the record fields its append
     /// changed, if any. Boxed, since the facts dwarf the empty variant.
     Folded(Option<Box<dohc_engine_domain::CollectionRecordApplyFacts>>),
+}
+
+fn pristine_empty_seed_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    complete: &CompleteYdocLineage,
+) -> Result<bool, SyncError> {
+    let key = &complete.key;
+    let Some((marker, doc)) = &complete.state else {
+        return Ok(false);
+    };
+    if marker.content_kind != ContentKind::Richdoc
+        || marker.head_update_seq != 1
+        || marker.head_snapshot_seq != 0
+    {
+        return Ok(false);
+    }
+    let pristine: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM ydoc_docs d JOIN blobs b ON b.sha256=d.seed_source_sha256 \
+         WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3 \
+           AND b.text='' AND (d.settle_seq=0 OR EXISTS(SELECT 1 FROM moments m \
+             WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 \
+               AND m.moment_order=d.settle_seq AND m.after_blob_sha256=b.sha256)) \
+           AND (d.last_settled_sha IS NULL OR d.last_settled_sha=b.sha256) \
+           AND (SELECT COUNT(*) FROM ydoc_updates u WHERE u.workspace_id=?1 \
+             AND u.version_id=?2 AND u.object_id=?3)=1 \
+           AND NOT EXISTS(SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=?1 \
+             AND s.version_id=?2 AND s.object_id=?3 AND s.up_to_seq<>0))",
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    Ok(pristine
+        && project_ydoc_with_store(tx, key, doc, ContentKind::Richdoc)?
+            .content
+            .is_empty())
+}
+
+fn empty_seed_never_replicated_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<bool, SyncError> {
+    // The journal retains both outbound and received updates. A queued base is
+    // already replication authority, even before it reaches the relay. The
+    // marker and candidate rows also retain relay authority after compaction.
+    // Owner and live-device bindings provide independent routes to a peer.
+    tx.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 \
+           AND op_kind='ydoc.update' AND json_extract(payload_json,'$.versionId')=?2 \
+           AND json_extract(payload_json,'$.objectId')=?3) \
+         AND NOT EXISTS(SELECT 1 FROM ydoc_base_relay_candidates WHERE workspace_id=?1 \
+           AND version_id=?2 AND object_id=?3) \
+         AND NOT EXISTS(SELECT 1 FROM live_device_application_bindings WHERE workspace_id=?1 \
+           AND main_version_id=?2 AND object_id=?3) \
+         AND NOT EXISTS(SELECT 1 FROM ydoc_owner_bindings WHERE workspace_id=?1 \
+           AND main_version_id=?2 AND object_id=?3) \
+         AND EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 \
+           AND object_id=?3 AND base_origin_id IS NULL AND base_origin_seq IS NULL \
+           AND base_relay_seq IS NULL)",
+        params![key.workspace_id, key.version_id, key.object_id],
+        |row| row.get(0),
+    )
+    .map_err(SyncError::corrupt)
 }
 
 /// Finalize an imported file mutation without creating a second CRDT edit.
@@ -2115,6 +2184,8 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     }
     let mut record_facts = None;
     let projection = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
+    // Keep this witness from before the rewrite mutates the in-memory doc.
+    let pristine_empty = projection.content.is_empty() && pristine_empty_seed_in_tx(tx, complete)?;
     if projection.content != chosen_text {
         if marker.content_kind == ContentKind::Scene {
             // A scene has no Markdown fold, and refusing here would roll
@@ -2127,39 +2198,10 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             return retire_complete_ydoc_lineage_in_tx(tx, complete)
                 .map(|()| LineageFold::Folded(None));
         }
-        let canonical_projection = doc
-            .project(marker.content_kind)
-            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
-        let source_preserved = marker.content_kind == ContentKind::Richdoc
-            && projection.content != canonical_projection.content
-            && doc.markdown_source_reference().is_some_and(|reference| {
-                reference.source_sha256 == hex_sha256(projection.content.as_bytes())
-                    && reference.projection_sha256
-                        == hex_sha256(canonical_projection.content.as_bytes())
-            });
-        let update = if source_preserved {
-            doc.rewrite_content_to_markdown_preserving_source(marker.content_kind, chosen_text)
-        } else {
-            doc.rewrite_content_to_markdown(marker.content_kind, chosen_text)
-        }
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "the content kind does not support Markdown conflict resolution",
-        })?;
-        // VERIFY THE FOLD'S OWN OUTPUT. The markdown parser behind the
-        // rewrite is asserted to be the projector's inverse, and nothing
-        // makes that true: a construct it does not model round-trips through
-        // the projector's escaping (a deep `>` chain returns as `&gt;`), and
-        // the fold would then commit a lineage whose projection is not the
-        // chosen text while stamping last_settled_sha with the chosen text's
-        // hash in the same statement — the head file saying one thing, the
-        // CRDT another, and the marker asserting they agree. That is the
-        // silent reversal this whole PR exists to close, reintroduced by the
-        // fold. Re-project and compare instead of trusting the parser: the
-        // doc and the transaction are already in hand, so the check is one
-        // projection, and it covers every construct the parser will ever
-        // fail to model rather than the ones known today.
-        // SIZE FIRST: check length before the projection below — an
-        // oversized doc trips a bare, limit-less `InvalidInput` there.
+        let mut update = doc
+            .rewrite_content_to_markdown_for_fold(marker.content_kind, chosen_text)
+            .map_err(map_fold_edit_error)?;
+        // Check the delta before projection, which has a separate byte cap.
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(SyncError::BlobTooLarge {
                 constraint: "MAX_YDOC_UPDATE_BYTES (conflict resolution fold)",
@@ -2167,8 +2209,49 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
                 observed_bytes: update.len(),
             });
         }
-        let refolded = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
+        let canonical = doc
+            .project(marker.content_kind)
+            .map_err(|error| map_projection_error(error, "ydoc projection is invalid"))?;
+        // Canonical files use the ordinary rewrite and projection. Only a
+        // lexical variant needs source storage, scratch replay, and validation.
+        if marker.content_kind == ContentKind::Richdoc && canonical.content != chosen_text {
+            let source_update = doc
+                .preserve_folded_markdown_source(chosen_text)
+                .map_err(map_fold_edit_error)?;
+            update = dohc_engine_collab::merge_updates(&[update, source_update])
+                .map_err(map_fold_edit_error)?;
+        }
+        // Capture already installed the chosen snapshot here. Peers still
+        // hold the lineage's previous settled source, so only that body may
+        // use the settled-rule exception. New bodies must pass the strict rule.
+        let refolded = if canonical.content == chosen_text {
+            canonical
+        } else {
+            let mut projection = canonical;
+            if marker.content_kind == ContentKind::Richdoc
+                && let Some(source) = doc.settled_markdown_source(&projection.content, || {
+                    tx.query_row(
+                        "SELECT b.text FROM ydoc_docs d JOIN blobs b \
+                         ON b.sha256=COALESCE(d.last_settled_sha, \
+                           CASE WHEN d.settle_seq=0 THEN d.seed_source_sha256 END) \
+                         WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3",
+                        params![key.workspace_id, key.version_id, key.object_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()
+                    .map(Option::flatten)
+                    .map_err(SyncError::corrupt)
+                })?
+            {
+                projection.content = source;
+            }
+            projection
+        };
         if refolded.content != chosen_text {
+            if pristine_empty && empty_seed_never_replicated_in_tx(tx, key)? {
+                retire_complete_ydoc_lineage_in_tx(tx, complete)?;
+                return Ok(LineageFold::NoContent);
+            }
             return Err(SyncError::InvalidInput {
                 reason: "ydoc-resolution-not-representable",
             });
@@ -2181,9 +2264,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
             attribution,
             now_ms,
         )
-        .map_err(|error| {
-            map_collab_payload_error(error, "conflict resolution fold could not be appended")
-        })?;
+        .map_err(map_fold_edit_error)?;
         // Journal only when this workspace actually replicates: a receiver
         // that never enrolled has no sync identity, and its choice needs no
         // peer. `emit_outbound` alone cannot gate this — a claimed lineage
@@ -4814,6 +4895,28 @@ fn refuse_ydoc_with_reason(
     })
 }
 
+fn map_fold_edit_error(error: CollabError) -> SyncError {
+    match error {
+        CollabError::UpdateTooLarge { actual, max } => SyncError::BlobTooLarge {
+            constraint: "MAX_YDOC_UPDATE_BYTES (conflict resolution fold)",
+            limit_bytes: max,
+            observed_bytes: actual,
+        },
+        CollabError::ProjectionTooLarge { actual, max } => SyncError::BlobTooLarge {
+            constraint: "MAX_TEXT_BYTES (conflict resolution fold)",
+            limit_bytes: max,
+            observed_bytes: actual,
+        },
+        CollabError::MarkdownQuoteDepthExceeded => SyncError::InvalidInput {
+            reason: "ydoc-resolution-not-representable",
+        },
+        CollabError::MarkdownRewriteUnsupported { .. } => SyncError::InvalidInput {
+            reason: "the content kind does not support Markdown conflict resolution",
+        },
+        other => map_collab_payload_error(other, "Markdown conflict resolution fold failed"),
+    }
+}
+
 fn map_collab_payload_error(error: CollabError, reason: &'static str) -> SyncError {
     match error {
         CollabError::AuthorCapacity => SyncError::RetryableState {
@@ -5101,6 +5204,29 @@ mod tests {
 
         assert_eq!(settled.content, canonical.content);
         assert_ne!(settled.content, PLANTED);
+    }
+
+    #[test]
+    fn a_fold_source_full_state_size_failure_maps_to_blob_too_large() {
+        let doc = dohc_engine_collab::Ydoc::wire();
+        // Both individual edits fit. Tombstones retained under skip_gc make
+        // their combined full state exceed the wire cap before source staging.
+        let text = "x".repeat(8_500_000);
+        doc.rewrite_content_to_markdown(ContentKind::Richdoc, &text)
+            .unwrap();
+        doc.rewrite_content_to_markdown_for_fold(ContentKind::Richdoc, &text)
+            .unwrap();
+        let error = doc
+            .preserve_folded_markdown_source(&format!("{text}\n"))
+            .unwrap_err();
+        assert!(matches!(error, CollabError::UpdateTooLarge { .. }));
+        assert!(matches!(
+            map_fold_edit_error(error),
+            SyncError::BlobTooLarge {
+                limit_bytes: dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES,
+                ..
+            }
+        ));
     }
 
     #[test]

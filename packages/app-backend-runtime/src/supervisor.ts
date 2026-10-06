@@ -43,6 +43,7 @@ export interface DatasetInvocation extends DatasetAccess {
 /** A committed change, with each approved table's columns in the order a changeset records them. */
 export interface DatasetCommit extends JournalCommit { columns: Readonly<Record<string, readonly string[]>> }
 export interface DatasetMigration extends DatasetAccess {
+  approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null;
   expected: DatasetCursor;
   newTables: string[];
   schemaSql: string;
@@ -71,6 +72,7 @@ export interface DatasetMigrationCandidateAccess extends DatasetAccess {
   authorityKey: string;
 }
 export interface DatasetMigrationApproval extends DatasetMigrationCandidateAccess {
+  approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null;
   checkpointSha256: string;
   account?: TransitionCheckpointInput["account"];
   accountStage?: DatasetMigration["accountStage"];
@@ -656,7 +658,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       standing(input);
       const current=head(input);
       if(!current.active||!sameCursor(current.cursor,captured.cursor))throw new Error("The Collection changed while dohc applied this change. Preview it again.");
-      const committed=options.journal.transitionCheckpoint({expected:captured.cursor,hostEpoch:captured.cursor.hostEpoch,
+      const committed=options.journal.transitionCheckpoint({approvalAgent:input.approvalAgent,expected:captured.cursor,hostEpoch:captured.cursor.hostEpoch,
         approvedRevisionHash:input.approvedRevisionHash,source:input.source,schemaSql:input.schemaSql,definitionJson:input.definitionJson,
         checkpoint:stage,capacityBytes:captured.capacityBytes,authorize:()=>standing(input),account:input.account});
       stage=undefined;

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Overlay } from "./Overlay";
 import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
 import { EmptyState, SecondaryButton } from "./ui/controls";
+import { SkeletonLines } from "./ui/SkeletonRows";
 import { useRequestSequence } from "./useRequestSequence";
 
 export type LiveDocumentRow = {
@@ -445,6 +446,7 @@ export function LiveDocumentsDialog({
     (refusalState.kind === "ready" && refusalCursor.current !== undefined);
   // An enrollment retry owns the document list too, so its controls rest.
   const listBusy = busy !== null || (refusalBusy !== null && refusalBusy.kind !== "page");
+  const statusText = busy ? busyLabel(busy) : refusalBusy ? refusalBusyLabel(refusalBusy) : "";
 
   return (
     <Overlay
@@ -482,10 +484,13 @@ export function LiveDocumentsDialog({
         </SecondaryButton>
       </div>
 
-      {/* One live region for the dialog, so two announcements never overlap. */}
+      {/* One live region for the dialog, so two announcements never overlap.
+          Before the first page, lines stand in for the list and its words
+          are for a screen reader; a Reload keeps the list and says so. */}
       <p role="status" aria-live="polite" className="mt-3 h-4 truncate text-[12px] text-muted">
-        {busy ? busyLabel(busy) : refusalBusy ? refusalBusyLabel(refusalBusy) : ""}
+        {state.kind === "loading" ? <span className="sr-only">{statusText}</span> : statusText}
       </p>
+      {state.kind === "loading" ? <SkeletonLines rows={2} className="py-2" /> : null}
 
       {state.kind === "ready" ? (
         state.rows.length ? (

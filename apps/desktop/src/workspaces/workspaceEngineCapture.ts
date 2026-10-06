@@ -85,6 +85,7 @@ import {
   type ActiveAgentRun,
 } from "../agents/activeAgentRun";
 import {
+  historyMomentPathsAdmitted,
   historyPathAdmission,
   readWorkspaceEnginePolicy,
   type WorkspaceEnginePolicySnapshot,
@@ -1090,6 +1091,13 @@ export class RestoreFolderInUseError extends Error {
   constructor(readonly path: string) {
     super(`${path} shares its folder with other files.`);
     this.name = "RestoreFolderInUseError";
+  }
+}
+
+export class RestorePolicyRefusalError extends Error {
+  constructor(readonly reason: "path-not-admitted" | "policy-unreadable", detail: string) {
+    super(detail);
+    this.name = "RestorePolicyRefusalError";
   }
 }
 
@@ -6267,6 +6275,7 @@ export function createWorkspaceEngineCapture(
       const author = structuredClone(person);
       return enqueueResult("restore file", async () => {
         const policy = await readPolicyForTask();
+        if (policy.errors.length) throw new RestorePolicyRefusalError("policy-unreadable", policy.errors.join("; "));
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
         await engine.flushCapture?.();
@@ -6365,6 +6374,9 @@ export function createWorkspaceEngineCapture(
             restoredMomentId: result.restoredMomentId,
             path: secretPath,
           };
+        }
+        if (!historyMomentPathsAdmitted(historyPathAdmission(policy), moment)) {
+          throw new RestorePolicyRefusalError("path-not-admitted", "This history moment is no longer available.");
         }
         if (moment.versionId !== activeVersionId) {
           throw new Error(

@@ -18,6 +18,12 @@ export function initializeAppPublicationSchema(db: SqliteDb): void {
       FOREIGN KEY (grant_id, share_id) REFERENCES sync_relay_share_grants(grant_id, share_id) ON DELETE CASCADE,
       FOREIGN KEY (workspace_id, manifest_sha256) REFERENCES sync_relay_blobs(workspace_id, sha256)
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS sync_relay_app_publication_approvals (
+      publication_id TEXT NOT NULL REFERENCES sync_relay_app_publications(publication_id) ON DELETE CASCADE,
+      authority_revision INTEGER NOT NULL,
+      facts_json TEXT NOT NULL,
+      PRIMARY KEY (publication_id, authority_revision)
+    ) STRICT;
     CREATE TABLE IF NOT EXISTS sync_relay_app_publication_blobs (
       publication_id TEXT NOT NULL,
       workspace_id TEXT NOT NULL,

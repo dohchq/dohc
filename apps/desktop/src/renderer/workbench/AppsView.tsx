@@ -13,6 +13,7 @@ import { AskAgentButton, type AskAgent } from "../askAgent";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { IconButton, PrimaryButton } from "../ui/controls";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import { siteTabPath } from "./workbenchState";
 import { ipcErrorMessage } from "../ipcError";
@@ -119,9 +120,7 @@ export function AppsView(props: {
       </div>
 
       {state.status === "loading" ? (
-        <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
-          Loading apps…
-        </div>
+        <SkeletonRows inSlot layout="panel" label="Loading apps…" />
       ) : state.status === "error" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
           <AlertTriangle size={18} aria-hidden className="text-warning" />

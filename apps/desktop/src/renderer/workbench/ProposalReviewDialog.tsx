@@ -5,6 +5,7 @@ import type {
   ShareProposalOperation,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { Overlay } from "../Overlay";
 import { ipcErrorMessage } from "../ipcError";
 import {
@@ -154,9 +155,7 @@ function ProposalFileSection(props: {
         </p>
       ) : null}
       {open && content?.status === "loading" ? (
-        <p className="m-0 px-3 py-2 text-xs leading-5 text-muted" role="status">
-          Loading this file…
-        </p>
+        <SkeletonRows rows={2} label="Loading this file…" className="px-3 py-2" />
       ) : null}
       {open && content?.status === "error" ? (
         <p
@@ -264,9 +263,7 @@ export function ProposalReviewDialog(props: {
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
           {load.status === "loading" ? (
-            <p className="m-0 text-xs leading-5 text-muted" role="status">
-              Loading these changes…
-            </p>
+            <SkeletonRows label="Loading these changes…" />
           ) : null}
           {load.status === "error" ? (
             <p className="m-0 text-xs leading-5 text-danger" role="alert">

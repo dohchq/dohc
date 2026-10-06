@@ -5,6 +5,7 @@ import type { CollectionRecordGroup } from "@dohc/workspace-contracts";
 import type { CollectionTableView } from "./collectionTableViews";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { IconButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { display, object, parsePage, type TransactionalCursor, type TransactionalField, type TransactionalPage, type TransactionalRow } from "./transactionalCollectionModel";
 import { BOARD_GROUP_PAGE_SIZE, calendarRange, parseCalendarPage, parseGroups, visualRecord, visualSchema, type GroupCursor } from "./transactionalVisualQueries";
 
@@ -139,7 +140,7 @@ export function TransactionalCollectionViews(props: Props) {
       <IconButton aria-label={`Previous records in ${label}`} title={`Previous records in ${label}`} disabled={disabled||!position.history.length} onClick={()=>onChange({after:position.history.at(-1)??null,history:position.history.slice(0,-1)})}><ChevronLeft size={14} strokeWidth={1.9} aria-hidden /></IconButton>
       <IconButton aria-label={`Next records in ${label}`} title={`Next records in ${label}`} disabled={disabled||!page.nextCursor} onClick={()=>onChange({after:page.nextCursor,history:[...position.history,position.after]})}><ChevronRight size={14} strokeWidth={1.9} aria-hidden /></IconButton></div>;
   }
-  if(!loaded) return <div role="status" className="text-sm text-muted">{busy ? "Loading view…" : "This view could not open. Refresh to try again."}</div>;
+  if(!loaded) return busy ? <SkeletonRows label="Loading view…" /> : <div role="status" className="text-sm text-muted">This view could not open. Refresh to try again.</div>;
   const visibleFields = [...props.fields.filter(field=>field.type==="text"),...props.fields.filter(field=>field.type!=="text")].map(field=>field.fieldId);
   return <div className="flex min-h-0 flex-1 flex-col gap-2" aria-busy={busy}>
     {props.view.kind==="board" ? <>

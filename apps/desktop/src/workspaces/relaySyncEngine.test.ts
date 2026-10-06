@@ -138,7 +138,7 @@ beforeEach(() => {
   recoverMock.mockReset();
   pushMock.mockImplementation(async () => ({
     pushed: 0,
-    originsPushed: [], ownerAdmissionPending: [],
+    hasMore: false, originsPushed: [], ownerAdmissionPending: [],
     sharingDeclined: [],
   }));
   pullMock.mockImplementation(async () => pullResult());
@@ -155,6 +155,118 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("releases document opens and authored writes and pulls between drain passes", async () => {
+    const events: string[] = [];
+    let captureChain: Promise<unknown> = Promise.resolve();
+    function enqueue<T>(task: () => Promise<T>): Promise<T> {
+      const result = captureChain.then(task);
+      captureChain = result.catch(() => undefined);
+      return result;
+    }
+    const serialCapture = Object.assign(capture(), {
+      runRelaySync: <T>(task: Parameters<WorkspaceEngineCapture["runRelaySync"]>[0]) =>
+        enqueue(() => task(async () => undefined)) as Promise<T>,
+      openYDocSession: vi.fn(() => enqueue(async () => {
+        events.push("document opened");
+        return {} as Awaited<ReturnType<WorkspaceEngineCapture["openYDocSession"]>>;
+      })),
+      writeAuthoredFile: vi.fn(() => enqueue(async () => {
+        events.push("authored write");
+        return { resolvedAbsolutePath: "/tmp/workspace/note.md", materializeOutcome: undefined };
+      })),
+    });
+    const sync = engine({ capture: serialCapture });
+    await sync.start();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    pushMock.mockImplementationOnce(async () => {
+      events.push("push 1");
+      entered.resolve();
+      await release.promise;
+      return { pushed: 500, hasMore: true, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] };
+    });
+    pushMock.mockImplementationOnce(async () => {
+      events.push("push 2");
+      return { pushed: 12, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] };
+    });
+    pullMock.mockImplementation(async () => { events.push("pull"); return pullResult(); });
+    sync.queueSync();
+    const pass = sync.retryNow({ countsAsAttempt: true });
+    await entered.promise;
+    const opened = serialCapture.openYDocSession();
+    const written = serialCapture.writeAuthoredFile();
+    release.resolve();
+    await Promise.all([pass, opened, written]);
+    expect(events).toEqual(["push 1", "pull", "document opened", "authored write"]);
+    expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 1, syncFailure: null });
+    // New edits must not postpone a drain's continuation until the debounce.
+    sync.queueSync();
+    await vi.advanceTimersToNextTimerAsync();
+    expect(events).toEqual(["push 1", "pull", "document opened", "authored write", "push 2", "pull"]);
+    expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 0, syncFailure: null });
+    await sync.stop();
+  });
+
+  it("keeps a failure until the continuation pass pulls successfully and resets backoff", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const afterSuccessfulPull = vi.fn();
+    const sync = engine({ capture: capture(), afterSuccessfulPull });
+    await sync.start();
+    sync.queueSync();
+    pushMock.mockRejectedValueOnce(new RelayUnreachableError());
+    await vi.advanceTimersByTimeAsync(100);
+    const failure = sync.snapshot().syncFailure;
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    pushMock.mockResolvedValueOnce({
+      pushed: 500, hasMore: true, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [],
+    });
+    pullMock.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      return pullResult();
+    });
+    const retried = sync.retryNow({ countsAsAttempt: true });
+    await entered.promise;
+    expect(sync.snapshot()).toMatchObject({ syncing: true, pendingChangeCount: 1, syncFailure: failure });
+    release.resolve();
+    await retried;
+    expect(sync.snapshot()).toMatchObject({ syncing: false, pendingChangeCount: 1, syncFailure: null });
+    pushMock.mockRejectedValueOnce(new RelayUnreachableError());
+    await vi.advanceTimersToNextTimerAsync();
+    expect(sync.snapshot().syncFailure?.attempts).toBe(1);
+    const pushes = pushMock.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(499);
+    expect(pushMock).toHaveBeenCalledTimes(pushes);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(pushMock).toHaveBeenCalledTimes(pushes + 1);
+    expect(sync.snapshot()).toMatchObject({ pendingChangeCount: 0, syncFailure: null });
+    expect(afterSuccessfulPull).toHaveBeenLastCalledWith({ recovered: true });
+    await sync.stop();
+    errorSpy.mockRestore();
+  });
+
+  it("preserves failure history when a bounded push succeeds but its pull fails", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = engine({ capture: capture() });
+    await sync.start();
+    sync.queueSync();
+    pushMock.mockRejectedValueOnce(new RelayUnreachableError());
+    await vi.advanceTimersByTimeAsync(100);
+    const failure = sync.snapshot().syncFailure;
+    pushMock.mockResolvedValueOnce({
+      pushed: 500, hasMore: true, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [],
+    });
+    pullMock.mockRejectedValueOnce(new RelayUnreachableError());
+    await sync.retryNow({ countsAsAttempt: true });
+    expect(sync.snapshot()).toMatchObject({ pendingChangeCount: 1,
+      syncFailure: { sinceMs: failure!.sinceMs, attempts: 2 } });
+    await sync.stop();
+    await vi.runAllTimersAsync();
+    expect(pushMock).toHaveBeenCalledTimes(3);
+    errorSpy.mockRestore();
+  });
+
   it("claims again when an established engine reports a pending identity", async () => {
     const sync = engine({ capture: capture() });
     await sync.start();
@@ -280,7 +392,7 @@ describe("relaySyncEngine", () => {
       claim: claimMock,
       push: vi.fn(async () => ({
         pushed: 1,
-        originsPushed: [], ownerAdmissionPending: [],
+        hasMore: false, originsPushed: [], ownerAdmissionPending: [],
         sharingDeclined: [],
       })),
       pull: vi.fn(async () => pullResult()),
@@ -312,7 +424,7 @@ describe("relaySyncEngine", () => {
         .mockRejectedValueOnce(new RelayOriginDivergedError())
         .mockResolvedValue({
           pushed: 1,
-          originsPushed: [], ownerAdmissionPending: [],
+          hasMore: false, originsPushed: [], ownerAdmissionPending: [],
           sharingDeclined: [],
         }),
       pull: vi.fn(async () => pullResult()),
@@ -540,7 +652,7 @@ describe("relaySyncEngine", () => {
       .mockRejectedValueOnce(new RelayOriginDivergedError())
       .mockResolvedValue({
         pushed: 1,
-        originsPushed: ["origin_new"], ownerAdmissionPending: [],
+        hasMore: false, originsPushed: ["origin_new"], ownerAdmissionPending: [],
         sharingDeclined: [],
       });
     const sync = engine({ capture: cap });
@@ -1540,7 +1652,7 @@ describe("relaySyncEngine", () => {
 
 it("keeps owner admission pending after a successful pull and clears it only after publication", async () => {
   const pending={workspaceId:"workspace",originId:"origin",originSeq:4,versionId:"main",objectId:"object",path:"notes.md"};
-  pushMock.mockResolvedValueOnce({pushed:0,originsPushed:[],sharingDeclined:[],ownerAdmissionPending:[pending]});
+  pushMock.mockResolvedValueOnce({pushed:0,hasMore: false, originsPushed:[],sharingDeclined:[],ownerAdmissionPending:[pending]});
   const sync=engine({capture:capture()});await sync.start();
   expect(sync.snapshot().ownerAdmissionPending).toEqual([pending]);
   expect(sync.snapshot().pendingChangeCount).toBe(1);

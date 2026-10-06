@@ -122,6 +122,7 @@ import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
 import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
 export type MarkdownEditorHandle = {
@@ -1235,11 +1236,8 @@ const MarkdownEditorCollabLoader = forwardRef<
 
   if (load.status === "loading") {
     return (
-      <div
-        className="dohc-tiptap-editor flex h-full items-center justify-center text-xs text-subtle"
-        data-collab-state={props.collab?.status ?? "connecting"}
-      >
-        Loading editor...
+      <div className="dohc-tiptap-editor h-full" data-collab-state={props.collab?.status ?? "connecting"}>
+        <SkeletonRows layout="document" label="Loading editor..." className="pt-1.5" />
       </div>
     );
   }

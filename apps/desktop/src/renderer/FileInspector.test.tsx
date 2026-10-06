@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyForView } from "./fileViewKind";
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { lineSpanInText } from "./FileInspector.text-fixture";
 import { markdownEditorBody, mergeMarkdownEditorBody } from "./markdown/frontmatter";
 import {
@@ -365,7 +365,7 @@ describe("resolveWikilinkNavigation", () => {
   });
 });
 
-describe("classifyForView dispatch", () => {
+describe("file kind dispatch", () => {
   const cases: Array<[string, string]> = [
     ["notes/today.md", "markdown"],
     ["readme.markdown", "markdown"],
@@ -380,19 +380,19 @@ describe("classifyForView dispatch", () => {
     ["finance/wallet.sqlite", "database"],
     ["archive/old.db", "database"],
     [`finance/${legacyAppPath("ledger", LEGACY_APP_MANIFEST)}`, "json"],
-    [`finance/${legacyAppPath("ledger", "src", "App.tsx")}`, "text"],
+    [`finance/${legacyAppPath("ledger", "src", "App.tsx")}`, "code"],
     ["uploads/mystery.bin", "binary"],
   ];
 
   for (const [path, expected] of cases) {
     it(`classifies ${path} as ${expected}`, () => {
-      expect(classifyForView(path)).toBe(expected);
+      expect(fileKindForPath(path).displayKind).toBe(expected);
     });
   }
 
   it("treats legacy app-folder paths as ordinary files", () => {
-    expect(classifyForView(`x/${legacyAppPath("ledger", LEGACY_APP_MANIFEST)}`)).toBe("json");
-    expect(classifyForView(`x/${legacyAppPath("ledger", "src", "App.tsx")}`)).toBe("text");
+    expect(fileKindForPath(`x/${legacyAppPath("ledger", LEGACY_APP_MANIFEST)}`).displayKind).toBe("json");
+    expect(fileKindForPath(`x/${legacyAppPath("ledger", "src", "App.tsx")}`).displayKind).toBe("code");
   });
 });
 

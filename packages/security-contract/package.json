@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./approval-provenance": "./src/approvalProvenance.ts",
     "./link-refusal": "./src/linkRefusal.ts",
     "./dataset-conversion": "./src/datasetConversion.ts",
     "./dataset-attempts": "./src/datasetAttempts.ts",

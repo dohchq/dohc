@@ -3,7 +3,7 @@ import type { EngineWorkspace, EngineWorkspaceSessions } from "@dohc/workspace-e
 import {
   ListCollectionsPayload, ListCollectionsResult, GetCollectionPayload, GetCollectionResult,
   QueryCollectionRecordsPayload, QueryCollectionRecordsResult, ListEngineMomentsPayload,
-  ReadEngineMomentPayload, ReadEngineMomentResult, RestoreEngineMomentFilePayload,
+  ReadEngineMomentPayload, ReadEngineMomentResult, HistoryPolicyUnreadableResult, RestoreEngineMomentFilePayload,
   RestoreEngineMomentFileResult, RetryCloudSyncPayload, WorkspaceIdPayload, SyncStatusResult,
   RebuildEngineStorePayload, RebuildEngineStoreResult, engineStoreRefusalRecovery,
   GetCollectionRecordHistoryPayload, GetCollectionRecordHistoryResult, RECORD_HISTORY_PAGE,
@@ -22,6 +22,7 @@ import type { createReceivedShareEngineAccess } from "../workspaces/receivedShar
 import type { createEngineYDocSessionIpc, EngineYDocIpcSender } from "../workspaces/engineYDocSessionIpc";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { sharedViewHistory } from "../workspaces/sharedViewHistory";
+import { historyPathAdmission, historyMomentPathsAdmitted, type readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { collectionListSources, collectionReadSource, mountedCollectionSchema, receivedCollectionQuery } from "../workspaces/receivedShareCollections";
 
@@ -51,6 +52,7 @@ export function createWorkspaceEngineIpc<
   requireEngineCapture(workspaceId: string, feature: "Engine history"): Promise<{
     capture: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment" | "restoreFileToBeforeMoment">;
   }>;
+  readWorkspaceEnginePolicy: typeof readWorkspaceEnginePolicy;
   localAgentDisplayName(): string;
   localPersonId(): string;
   /** This computer's person as History names them. */
@@ -94,7 +96,7 @@ export function createWorkspaceEngineIpc<
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
     receivedShareEngine, withEngineAdapter, requireEngineCapture, localAgentDisplayName, localPersonId, localPersonName, localPerson,
-    automationAuthor, namedAuthorLabels,
+    automationAuthor, namedAuthorLabels, readWorkspaceEnginePolicy,
     automationRunOnThisComputer, serverRuns, signedInAccount,
     notifyRenderer, requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection,
     activity, workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
@@ -253,10 +255,11 @@ export function createWorkspaceEngineIpc<
     // history it already imported, as it keeps its files, and gains nothing new.
     async function readHistory<Result>(
       event: Event, workspaceId: string,
-      read: (history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment">) => Promise<Result>,
+      read: (history: Pick<WorkspaceEngineCapture, "listMoments" | "readMoment">, rootPath: string | null) => Promise<Result>,
     ): Promise<Result> {
       if (!shareViewIsPresent(requireWorkspace(workspaceId).shareView)) {
-        return read((await requireEngineCapture(workspaceId, "Engine history")).capture);
+        const { capture } = await requireEngineCapture(workspaceId, "Engine history");
+        return read(capture, requireWorkspace(workspaceId).rootPath);
       }
       return withRendererWorkspaceOperation(event.sender, workspaceId,
         "History stopped loading because this window changed workspaces.", async (operation) => {
@@ -265,33 +268,51 @@ export function createWorkspaceEngineIpc<
           const store = receivedShareEngine.storeFor({
             engineWorkspaceId: workspace.workspaceId, rootPath: workspace.rootPath, attachmentId: workspace.attachmentId,
           });
-          return read(sharedViewHistory(store, workspace.workspaceId));
+          return read(sharedViewHistory(store, workspace.workspaceId), null);
         });
     }
 
     registerHandler(CHANNELS.listEngineMoments, async (event, payload) => {
       assertTrustedSender(event);
       const input = ListEngineMomentsPayload.parse(payload);
-      return readHistory(event, input.workspaceId, (history) => listEngineMomentsForIpc(
-        () =>
-          history.listMoments({
-            ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
-            ...(input.limit !== undefined ? { limit: input.limit } : {}),
-            ...(input.beforeMomentOrder !== undefined
-              ? { beforeMomentOrder: input.beforeMomentOrder }
-              : {}),
-          }),
-        authorNames(input.workspaceId),
-      ));
+      return readHistory(event, input.workspaceId, async (history, rootPath) => {
+        const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
+        if (policy?.errors.length) return HistoryPolicyUnreadableResult.parse({ status: "policy-unreadable", policyErrors: policy.errors });
+        const admitted = policy ? historyPathAdmission(policy) : null;
+        return listEngineMomentsForIpc(
+          async () => {
+            let beforeMomentOrder = input.beforeMomentOrder;
+            let protectedTruncated = false;
+            // Skip retired pages, but leave a continuation after a bounded scan.
+            for (let pageIndex = 0; ; pageIndex += 1) {
+              const page = await history.listMoments({
+                ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
+                ...(input.limit !== undefined ? { limit: input.limit } : {}),
+                ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
+              });
+              if (!admitted) return page;
+              protectedTruncated ||= page.protectedTruncated;
+              const moments = page.moments.filter(moment => moment.protected || admitted(moment.path));
+              if (moments.length > 0 || page.nextBeforeMomentOrder === null || pageIndex === 9) {
+                return { ...page, moments, protectedTruncated };
+              }
+              beforeMomentOrder = page.nextBeforeMomentOrder;
+            }
+          },
+          authorNames(input.workspaceId),
+        );
+      });
     });
 
     registerHandler(CHANNELS.readEngineMoment, async (event, payload) => {
       assertTrustedSender(event);
       const input = ReadEngineMomentPayload.parse(payload);
-      return readHistory(event, input.workspaceId, async (history) => {
+      return readHistory(event, input.workspaceId, async (history, rootPath) => {
+        const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
+        if (policy?.errors.length) return ReadEngineMomentResult.parse({ moment: null, status: "policy-unreadable", policyErrors: policy.errors });
         const moment = await history.readMoment(input.momentId);
         return ReadEngineMomentResult.parse({
-          moment: moment
+          moment: moment && (moment.protected || !policy || historyMomentPathsAdmitted(historyPathAdmission(policy), moment.moment))
             ? engineMomentDetailForIpc(moment, authorNames(input.workspaceId))
             : null,
         });
