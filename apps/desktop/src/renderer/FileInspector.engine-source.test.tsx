@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -132,7 +132,9 @@ describe("engine markdown source view", () => {
           };
         },
       ),
-      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      applyEngineYDocUpdate: vi.fn<DohcDesktopBridge["applyEngineYDocUpdate"]>(
+        async () => ({ accepted: true }),
+      ),
       closeEngineYDocSession: vi.fn(async () => undefined),
       onEngineYDocRemoteUpdate: vi.fn(
         (listener: (event: {
@@ -369,7 +371,7 @@ describe("engine markdown source view", () => {
     );
   });
 
-  // Read-only with nothing waiting still asks once, and keeps the text copyable.
+  // Read-only with nothing waiting still asks once, and has nothing to set aside.
   it("reports a read-only turn with no edit waiting once", async () => {
     const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", bridgeMock);
@@ -381,13 +383,99 @@ describe("engine markdown source view", () => {
     await waitFor(() => expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("read-only"));
     act(() => pushSaveState("read-only", 0));
     expect(readOnly).toHaveBeenCalledTimes(1);
-    expect(screen.getByTestId("orphaned-draft-notice").textContent).toContain(
-      "This document became read-only. Copy your text to keep it.",
+    expect(screen.getByTestId("markdown-save-state").getAttribute("title")).toBe(
+      "This document is shared with you to read.",
     );
-    expect(screen.getByTestId("orphaned-draft-copy")).toBeTruthy();
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("false"),
+    );
     // The session stays read-only; a later report is not a new turn.
     act(() => pushSaveState("saved", 0));
     expect(readOnly).toHaveBeenCalledTimes(1);
+  });
+
+  // The ended share's lifecycle: the live session reports read-only as a
+  // status whether or not an edit is waiting, then the shell re-renders the
+  // file through the read-only view.
+  async function endAccessAfterTyping(options: { saved: boolean; olderDraft?: boolean }) {
+    const user = userEvent.setup();
+    const { bridgeMock, pushSaveState } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    if (options.olderDraft) captureOrphanedDraft("ws-1", "a.md", "Older set-aside text");
+    const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+
+    await user.type(screen.getByTestId("page-title"), " Recipient continued.");
+    const deliveredSeq = () => bridgeMock.applyEngineYDocUpdate.mock.lastCall?.[0].seq ?? 0;
+    await waitFor(() => expect(deliveredSeq()).toBeGreaterThan(0));
+    if (options.saved) {
+      // Main reports an outcome for each settle; the last covers every
+      // delivered edit.
+      await waitFor(() => {
+        act(() => pushSaveState("saved", deliveredSeq()));
+        expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("saved");
+      });
+    }
+    act(() => pushSaveState("read-only", 0));
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("false"),
+    );
+
+    view.rerender(<FileInspector workspaceId="ws-1" path="a.md" readOnly />);
+    await waitFor(() => expect(screen.queryByTestId("markdown-source-toggle")).toBeNull());
+    expect((screen.getByTestId("markdown-edit-toggle") as HTMLButtonElement).disabled).toBe(true);
+    const delivered = bridgeMock.applyEngineYDocUpdate.mock.calls.length;
+    await user.type(screen.getByTestId("page-title"), " Typed after access stopped.");
+    expect(bridgeMock.applyEngineYDocUpdate).toHaveBeenCalledTimes(delivered);
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    expect(document.querySelector('[contenteditable="true"]')).toBeNull();
+    return { user };
+  }
+
+  // Another person's change is not this window's work to set aside.
+  it("sets nothing aside when access ends after another person's change", async () => {
+    const { bridgeMock, pushSaveState, pushRemoteMarkdown } = makeEngineBridge(DOC_MARKDOWN);
+    vi.stubGlobal("dohcDesktop", bridgeMock);
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await screen.findByTestId("markdown-source-toggle");
+
+    act(() => pushRemoteMarkdown(DOC_MARKDOWN.replace("Base paragraph.", "Owner restored.")));
+    await waitFor(() => expect(screen.getByTestId("markdown-editor").textContent).toContain("Owner restored."));
+    act(() => pushSaveState("read-only", 0));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-editor").getAttribute("contenteditable")).toBe("false"),
+    );
+    expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("read-only");
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    expect(bridgeMock.applyEngineYDocUpdate).not.toHaveBeenCalled();
+  });
+
+  it("sets nothing aside when access ends after the edit saved", async () => {
+    await endAccessAfterTyping({ saved: true });
+
+    expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
+    // The read-only view may show no save chip at all; it must not show recovery.
+    expect(screen.queryByTestId("markdown-save-state")?.dataset.state).not.toBe("recovery");
+  });
+
+  it("keeps an unsaved edit copyable and explained after access ends", async () => {
+    // An older draft keeps its own words beside the new one.
+    const { user } = await endAccessAfterTyping({ saved: false, olderDraft: true });
+
+    expect(screen.getByTestId("markdown-save-state").dataset.state).toBe("recovery");
+    const notices = screen.getAllByTestId("orphaned-draft-notice");
+    expect(notices.map((notice) => notice.querySelector("span")?.textContent)).toEqual([
+      "This document reopened before your last edit saved. Copy your text to keep it.",
+      "This document became read-only. Copy your text to keep it.",
+    ]);
+    await user.click(within(notices[1]!).getByTestId("orphaned-draft-copy"));
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(
+        "---\ntitle: Plan Recipient continued.\nstatus: draft\n---\n\n# Plan\n\nBase paragraph.",
+      ),
+    );
   });
 
   it("does not relabel an older set-aside edit as part of a read-only turn", async () => {

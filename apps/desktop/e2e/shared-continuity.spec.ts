@@ -25,6 +25,8 @@ import {
 // restores the document to before it, and the result survives a restart. The
 // owner and the agent then continue the restored document, and a third account
 // opens a new share, sees all of it, and edits. The stopped access stays ended.
+// The owner then ends the new share while that recipient's last typing is
+// still on its way, and the typing stays copyable on the recipient's desktop.
 //
 // The recipient's Markdown file is a snapshot. The owner's live document is the
 // authority, so the recipient's disk is not asserted.
@@ -44,6 +46,7 @@ const R1 = "Recipient continued.";
 const H2 = "Human continued after restore.";
 const A2 = "Agent continued after restore.";
 const R2 = "New recipient continued.";
+const RP = "New recipient typed as access ended.";
 const HA = "Agent edited while hosted.";
 const AGENT = "trip-agent";
 const HOSTED_AGENT = "trip-agent-hosted";
@@ -205,6 +208,87 @@ async function openShare(recipient: LaunchedDesktopApp, temp: TempWorkspace, app
   await openDocument(page);
   await expect(explorerRow(page, "private")).toHaveCount(0);
   return shared.workspaceId;
+}
+
+// Holds main's handler for one desktop's editor updates behind a gate, as in
+// workspace-agent-documents.spec.ts. Electron 43 looks the handler up in
+// ipcMain._invokeHandlers on each invoke (lib/browser/ipc-dispatch.ts), so the
+// swap holds every update the editor sends. Release puts the original back
+// and lets the held calls through it. The state counts the calls and keeps
+// their outcomes, not their bytes.
+type InvokeHandler = (...args: unknown[]) => unknown;
+type HeldOutcome = { accepted: boolean | null; reason: string | null } | { error: string };
+interface HeldUpdates { entered: number; settled: number; outcomes: HeldOutcome[]; released: boolean }
+type HeldGate = { state: HeldUpdates; release(): void };
+
+async function holdEditorUpdates(desktop: LaunchedDesktopApp): Promise<void> {
+  await desktop.app.evaluate(({ ipcMain }) => {
+    const scope = globalThis as { __dohcHeldEditorUpdates?: HeldGate };
+    if (scope.__dohcHeldEditorUpdates && !scope.__dohcHeldEditorUpdates.state.released) throw new Error("editor updates are already held");
+    const handlers = (ipcMain as unknown as { _invokeHandlers: Map<string, InvokeHandler> })._invokeHandlers;
+    const channel = "desktop:engine-ydoc-apply-update";
+    const original = handlers.get(channel);
+    if (!original) throw new Error("main has no editor update handler");
+    let open!: () => void;
+    const gate = new Promise<void>(resolve => { open = resolve; });
+    const state: HeldUpdates = { entered: 0, settled: 0, outcomes: [], released: false };
+    const held: InvokeHandler = async (...args) => {
+      state.entered += 1;
+      await gate;
+      try {
+        const result = await original(...args) as { accepted?: boolean; reason?: string } | undefined;
+        state.outcomes.push({ accepted: result?.accepted ?? null, reason: result?.reason ?? null });
+        return result;
+      } catch (error) {
+        state.outcomes.push({ error: error instanceof Error ? error.message : String(error) });
+        throw error;
+      } finally {
+        state.settled += 1;
+      }
+    };
+    handlers.set(channel, held);
+    scope.__dohcHeldEditorUpdates = { state, release() {
+      if (state.released) return;
+      state.released = true;
+      // Put back only this gate's wrapper, and open the gate either way.
+      const ours = handlers.get(channel) === held;
+      if (ours) handlers.set(channel, original);
+      open();
+      if (!ours) throw new Error("the editor update handler changed while held");
+    } };
+  });
+}
+
+async function heldEditorUpdates(desktop: LaunchedDesktopApp): Promise<HeldUpdates | null> {
+  return desktop.app.evaluate(() => (globalThis as { __dohcHeldEditorUpdates?: HeldGate }).__dohcHeldEditorUpdates?.state ?? null);
+}
+
+async function releaseEditorUpdates(desktop: LaunchedDesktopApp): Promise<void> {
+  await desktop.app.evaluate(() => {
+    const gate = (globalThis as { __dohcHeldEditorUpdates?: HeldGate }).__dohcHeldEditorUpdates;
+    if (!gate) throw new Error("editor updates are not held");
+    gate.release();
+  });
+}
+
+/**
+ * The set-aside drafts this window stored for the document, read from the
+ * renderer's store (orphanedDraftStorage.ts). A draft still carries the
+ * recovery marker until the projection refines it to Markdown.
+ */
+async function storedDrafts(page: Page, workspaceId: string): Promise<{ id: number; text: string; refined: boolean }[]> {
+  return page.evaluate(({ workspaceId, path }) => {
+    const drafts: { id: number; text: string; refined: boolean }[] = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith("dohc-set-aside-drafts:")) continue;
+      const row = JSON.parse(localStorage.getItem(key) ?? "null") as { id: number; workspaceId: string; path: string; text: string } | null;
+      if (row?.workspaceId === workspaceId && row.path === path) {
+        drafts.push({ id: row.id, text: row.text, refined: !row.text.includes("dohc-ydoc-recovery-v1") });
+      }
+    }
+    return drafts;
+  }, { workspaceId, path: PATH });
 }
 
 type Authors = EngineMomentRecord["authors"];
@@ -636,12 +720,18 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(editor(owner!.page)).toContainText(HA);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA], [R1]), { timeout: 60_000 }).toBe(true);
       const page = recipient!.page;
-      await expect(saveState(page)).toHaveAttribute("data-state", "read-only", { timeout: 60_000 });
-      await expect(editor(page)).toHaveAttribute("contenteditable", "false");
+      // The relay, the editor and the owner's access list prove the stop. The
+      // save chip does not: the read-only view may show none.
+      await expect.poll(() => page.evaluate(shareId =>
+        (window as unknown as { dohcDesktop: Api }).dohcDesktop.getRelayReceivedShare({ shareId }), share.shareId), { timeout: 60_000 })
+        .toMatchObject({ found: false });
+      await expect(editor(page)).toHaveAttribute("contenteditable", "false", { timeout: 60_000 });
       await editor(page).getByText(H1).click();
       await page.keyboard.type(" Typed after access stopped.");
       await expect(editor(page)).not.toContainText("Typed after access stopped.");
       await expectActiveAccess(owner!.page, []);
+      // The recipient's edit saved before the stop, so nothing is set aside.
+      await expect(page.getByTestId("orphaned-draft-notice")).toHaveCount(0);
     });
 
     await test.step("the restored document and the stopped access survive the owner's restart", async () => {
@@ -686,15 +776,15 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     const newShare = await test.step("the owner shares the continued document with a new recipient", () =>
       shareForEdit(owner!.page, workspace.workspaceId, newRecipientAccount.email));
 
-    await test.step("the new recipient sees the restored and continued document and edits it", async () => {
+    const newRecipientWorkspaceId = await test.step("the new recipient sees the restored and continued document and edits it", async () => {
       newRecipient = await launch(newRecipientTemp);
-      const newRecipientWorkspaceId = await openShare(newRecipient, newRecipientTemp, newRecipientPage, origin, newRecipientAccount, newShare.shareCode);
+      const sharedWorkspaceId = await openShare(newRecipient, newRecipientTemp, newRecipientPage, origin, newRecipientAccount, newShare.shareCode);
       const page = newRecipient.page;
       for (const text of [H1, A1, HA, H2, A2]) await expect(editor(page)).toContainText(text);
       await expect(editor(page)).not.toContainText(R1);
       // Both agents' changes reach the new recipient's history, before and after the restore.
-      provenance.hostedNewRecipient = await expectDeclaredMoment(page, newRecipientWorkspaceId, HA, admittedAgent(hosted!.change.authorSnapshot));
-      provenance.nextNewRecipient = await expectDeclaredMoment(page, newRecipientWorkspaceId, A2, admittedAgent(next!.change.authorSnapshot));
+      provenance.hostedNewRecipient = await expectDeclaredMoment(page, sharedWorkspaceId, HA, admittedAgent(hosted!.change.authorSnapshot));
+      provenance.nextNewRecipient = await expectDeclaredMoment(page, sharedWorkspaceId, A2, admittedAgent(next!.change.authorSnapshot));
       await typeAfter(page, H2, ` ${R2}`);
       await expect(saveState(page)).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
       await expect(editor(owner!.page)).toContainText(R2, { timeout: 60_000 });
@@ -702,29 +792,109 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, H2, A2, R2], [R1]), { timeout: 60_000 }).toBe(true);
       await expect(owner!.page.getByTestId("sync-status")).toHaveAttribute("data-state", "synced", { timeout: 60_000 });
       await expectNoCollectionNotice(page);
+      return sharedWorkspaceId;
     });
 
     await test.step("the stopped recipient's access stays ended", async () => {
       const page = recipient!.page;
       expect(await page.evaluate(shareId =>
         (window as unknown as { dohcDesktop: Api }).dohcDesktop.getRelayReceivedShare({ shareId }), share.shareId)).toMatchObject({ found: false });
-      await expect(saveState(page)).toHaveAttribute("data-state", "read-only");
       await expect(editor(page)).toHaveAttribute("contenteditable", "false");
       await expect(editor(page)).not.toContainText(R2);
       // The window says the share ended without the person asking: the
       // document turning read-only made it ask the relay, and the relay said so.
       await expect(page.getByTestId("shared-view-banner")).toContainText(/This share was ended/, { timeout: 60_000 });
       await expect(page.getByTestId("shared-view-refresh")).toHaveCount(0);
-      // The text this window held when access ended stays copyable.
-      await expect(page.getByTestId("orphaned-draft-notice").first())
-        .toContainText("Copy your text to keep it.");
-      await recipient!.app.evaluate(({ clipboard }) => clipboard.writeText(""));
-      await page.getByTestId("orphaned-draft-copy").first().click();
-      await expect.poll(() => recipient!.app.evaluate(({ clipboard }) => clipboard.readText())).toContain(R1);
+      // The saved edit stays in the owner's History, not in a set-aside draft.
+      await expect(page.getByTestId("orphaned-draft-notice")).toHaveCount(0);
       await expect(editor(page)).toHaveAttribute("contenteditable", "false");
       await expectNoCollectionNotice(page);
       await attachScreen(testInfo, page, "stopped recipient");
       await expectActiveAccess(owner!.page, [newRecipientAccount.email]);
+    });
+
+    await test.step("the new recipient's unsaved typing stays copyable when the owner ends their share", async () => {
+      const desktop = newRecipient!;
+      const page = desktop.page;
+      let drafts: Awaited<ReturnType<typeof storedDrafts>> = [];
+      let copied: string | null = null;
+      let failed = false;
+      await holdEditorUpdates(desktop);
+      try {
+        // Main holds the editor's updates, so this typing is in the
+        // recipient's editor and nowhere else when the share ends.
+        await typeAfter(page, R2, ` ${RP}`);
+        await expect(editor(page)).toContainText(`${R2} ${RP}`);
+        await expect.poll(async () => (await heldEditorUpdates(desktop))?.entered ?? 0, { timeout: 30_000 }).toBeGreaterThan(0);
+        expect(await heldEditorUpdates(desktop)).toMatchObject({ settled: 0, released: false });
+        expect(await cliRead(ownerTemp)).not.toContain(RP);
+        // The owner ends the share through the same call as Shared by me.
+        await owner!.page.evaluate(shareId =>
+          (window as unknown as { dohcDesktop: Api }).dohcDesktop.revokeRelayShare({ shareId }), newShare.shareId);
+        await expect.poll(async () => (await page.evaluate(shareId =>
+          (window as unknown as { dohcDesktop: Api }).dohcDesktop.getRelayReceivedShare({ shareId }), newShare.shareId)).found, { timeout: 60_000 })
+          .toBe(false);
+        await expect(editor(page)).toHaveAttribute("contenteditable", "false", { timeout: 60_000 });
+        // Access ended while main still held the typing.
+        expect(await heldEditorUpdates(desktop)).toMatchObject({ settled: 0, released: false });
+        await editor(page).getByText(H1).click();
+        await page.keyboard.type(" Typed after the share ended.");
+        await expect(editor(page)).not.toContainText("Typed after the share ended.");
+        await expect(page.getByTestId("shared-view-banner")).toContainText(/This share was ended/, { timeout: 60_000 });
+        const notice = page.getByTestId("orphaned-draft-notice");
+        await expect(notice).toHaveCount(1);
+        await expect(notice).toContainText("This document became read-only. Copy your text to keep it.");
+        await expect.poll(async () => {
+          drafts = await storedDrafts(page, newRecipientWorkspaceId);
+          return drafts.length === 1 && drafts[0]!.refined;
+        }, { message: "The recipient's window stored one refined draft.", timeout: 30_000 }).toBe(true);
+        const draft = drafts[0]!.text;
+        for (const text of [H1, A1, HA, H2, A2, `${R2} ${RP}`]) expect(draft).toContain(text);
+        expect(draft).not.toContain(R1);
+        expect(draft).not.toContain("Typed after the share ended.");
+        await desktop.app.evaluate(({ clipboard }) => clipboard.writeText(""));
+        await page.getByTestId("orphaned-draft-copy").click();
+        // Chromium writes plain text with CRLF line endings on Windows.
+        await expect.poll(async () => (copied = await desktop.app.evaluate(({ clipboard }) => clipboard.readText())).replace(/\r\n/g, "\n"), { timeout: 30_000 })
+          .toBe(draft);
+        await attachScreen(testInfo, page, "new recipient's set-aside typing");
+        await expect(editor(owner!.page)).not.toContainText(RP);
+        await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, H2, A2, R2], [R1, RP]), { timeout: 60_000 }).toBe(true);
+        await expectActiveAccess(owner!.page, []);
+      } catch (error) {
+        failed = true;
+        const read = <T>(value: Promise<T>) => value.catch((cause: unknown) => ({ error: cause instanceof Error ? cause.message : String(cause) }));
+        await testInfo.attach("new recipient held typing", { contentType: "application/json", body: JSON.stringify({
+          gate: await read(heldEditorUpdates(desktop)),
+          drafts: await read(storedDrafts(page, newRecipientWorkspaceId)),
+          copied,
+          shareFound: await read(page.evaluate(shareId =>
+            (window as unknown as { dohcDesktop: Api }).dohcDesktop.getRelayReceivedShare({ shareId }).then(share => share.found), newShare.shareId)),
+          editable: await read(editor(page).evaluateAll(nodes => nodes.map(node => node.getAttribute("contenteditable")))),
+          saveState: await read(saveState(page).evaluateAll(nodes => nodes.map(node => node.getAttribute("data-state")))),
+          notices: await read(page.getByTestId("orphaned-draft-notice").allInnerTexts()),
+          copyLabels: await read(page.getByTestId("orphaned-draft-copy").allInnerTexts()),
+        }, null, 2) }).catch(() => undefined);
+        throw error;
+      } finally {
+        // The gate opens before the step ends, so no close waits on it.
+        await releaseEditorUpdates(desktop).catch(async (error: unknown) => {
+          if (!failed) throw error;
+          await testInfo.attach("held typing release failure", { contentType: "text/plain",
+            body: error instanceof Error ? error.message : String(error) }).catch(() => undefined);
+        });
+      }
+      // Main takes the held typing only now, after access ended, and refuses it.
+      await expect.poll(async () => {
+        const state = await heldEditorUpdates(desktop);
+        return state !== null && state.released && state.settled === state.entered;
+      }, { timeout: 30_000 }).toBe(true);
+      const { outcomes } = (await heldEditorUpdates(desktop))!;
+      expect(outcomes.length).toBeGreaterThan(0);
+      for (const outcome of outcomes) expect(outcome).toMatchObject({ accepted: false });
+      await expect(page.getByTestId("orphaned-draft-notice")).toHaveCount(1);
+      expect(await storedDrafts(page, newRecipientWorkspaceId)).toEqual(drafts);
+      await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, H2, A2, R2], [R1, RP]), { timeout: 30_000 }).toBe(true);
     });
 
     await test.step("both hosted agents' attribution survives the owner's last restart", async () => {
@@ -733,7 +903,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       owner = await launch(ownerTemp);
       await openWorkspaceFromFirstRun(owner.page, ownerTemp);
       await waitForCliEndpoint(ownerTemp.homeDir);
-      await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, H2, A2, R2], [R1]), { timeout: 30_000 }).toBe(true);
+      await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, H2, A2, R2], [R1, RP]), { timeout: 30_000 }).toBe(true);
       expect(await expectDeclaredMoment(owner.page, workspace.workspaceId, HA, admittedAgent(hosted!.change.authorSnapshot))).toEqual(provenance.hostedOwner);
       expect(await expectDeclaredMoment(owner.page, workspace.workspaceId, A2, admittedAgent(next!.change.authorSnapshot))).toEqual(provenance.nextOwner);
       expectAuditKept(hosted!);

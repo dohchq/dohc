@@ -277,8 +277,11 @@ export function DrawingView({
   // Three reasons a drawing is read-only, named in the order they are known:
   // the share is read-only, the live session cannot take edits (its notice
   // says why), or the bounded read cut the file short.
+  // A read-only status after every edit saved sets nothing aside.
   const drawingShown = engine.readOnlyWhileEditing
-    ? "read-only-transition"
+    ? engine.saveState === "read-only" && engine.readOnlyDraftId === null
+      ? "read-only"
+      : "read-only-transition"
     : drawingChipState !== "read-only"
       ? drawingChipState
       : readOnly

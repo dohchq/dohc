@@ -453,7 +453,9 @@ export function EngineHistoryView(props: {
       <LegendList
         role="list"
         data-testid="engine-history-list"
-        className="m-0 min-h-0 flex-1 list-none p-0"
+        // `isolate` keeps the sticky day headings' z-index inside History,
+        // under any overlay.
+        className="isolate m-0 min-h-0 flex-1 list-none p-0"
         data={rows}
         keyExtractor={(row) => row.key}
         estimatedItemSize={56}

@@ -1876,6 +1876,10 @@ export function MarkdownView(props: {
   // The restore half of #567: each set-aside draft stays copyable until the
   // user takes it or dismisses it. Rendered in both branches below — the
   // reopen can resolve into either editor.
+  // The read-only view that follows an ended share closes the live session,
+  // so the draft that turn set aside is remembered here to keep its words.
+  const readOnlyDraftId = useRef<number | null>(null);
+  if (engine.readOnlyDraftId !== null) readOnlyDraftId.current = engine.readOnlyDraftId;
   const documentNotices = (
     <>
       {engine.deletedWhileEditing ? (
@@ -1888,7 +1892,7 @@ export function MarkdownView(props: {
         workspaceId={props.workspaceId}
         path={props.path}
         message="This document became read-only. Copy your text to keep it."
-        messageDraftId={engine.readOnlyDraftId}
+        messageDraftId={readOnlyDraftId.current}
       />
     </>
   );
@@ -1928,7 +1932,12 @@ export function MarkdownView(props: {
               <StateMark
                 testId="markdown-save-state"
                 state={engineChipState}
-                shown={engine.readOnlyWhileEditing ? "read-only-transition" : engineChipState}
+                shown={
+                  engine.readOnlyWhileEditing &&
+                  !(engine.saveState === "read-only" && engine.readOnlyDraftId === null)
+                    ? "read-only-transition"
+                    : engineChipState
+                }
                 title={
                   (engineChipState === "deleted" ||
                     engineChipState === "object-changed") &&

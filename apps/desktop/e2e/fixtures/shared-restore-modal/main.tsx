@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
+import type { EngineMomentRecord } from "../../../src/ipc/bridgeContract";
 import { OwnerRestoreDialog } from "../../../src/renderer/OwnerRestoreDialog";
+import { EngineHistoryView } from "../../../src/renderer/workbench/EngineHistory";
 import { NoticeCenter, type WorkspaceErrorNotice } from "../../../src/renderer/workbench/NoticeCenter";
 import "./styles.css";
 
@@ -60,6 +62,16 @@ const workspaceErrors: WorkspaceErrorNotice[] = [{
   details: "Notice: Sharing refresh failed", atMs: 1_788_922_800_000, canRetry: true, seen: false,
 }];
 const ignore = () => {};
+// Several days of History, so a day heading sticks at the top of the list.
+const moments: EngineMomentRecord[] = Array.from({ length: 40 }, (_, index) => ({
+  id: `moment-${index}`,
+  versionId: "main",
+  path,
+  recordedAtMs: new Date(2026, 8, 17, 18).getTime() - index * 3 * 3_600_000,
+  operation: "write",
+  origin: "local-file",
+  momentOrder: 40 - index,
+}));
 
 function SharedRestoreFixture() {
   const [open, setOpen] = useState(false);
@@ -83,6 +95,19 @@ function SharedRestoreFixture() {
           onDismissWorkspaceError={ignore}
         />
       </nav>
+      {/* The History panel at the desktop sidebar's width. Its top offset
+          stands in for the window and panel headers above it, which puts a
+          day heading level with the review's title. */}
+      <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-panel-2 pt-20">
+        <EngineHistoryView
+          moments={moments}
+          hasMore={false}
+          loadingMore={false}
+          protectedTruncated={false}
+          onLoadMore={ignore}
+          onOpenMoment={ignore}
+        />
+      </aside>
       <section className="flex-1 p-6">
         <button type="button" onClick={() => setOpen(true)}>Open restore review</button>
         <output aria-label="Restore result">{restored ? "restored" : ""}</output>

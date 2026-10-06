@@ -114,8 +114,8 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
 // shows. "file-locked" = the same stale disk, but transient by contract:
 // another program holds the file's handle and the engine retries until it
 // releases, so the copy names the blocker instead of advising an edit.
-// "read-only" = the workspace is a read-only shared view and the edit
-// was discarded outright; retrying cannot help, so it gets its own copy.
+// "read-only" = the workspace is a read-only shared view; an edit still
+// waiting was discarded outright. Retrying cannot help, so it gets its own copy.
 // "changed-on-disk" = the file was edited outside dohc while this document was
 // open, and dohc kept that edit instead of overwriting it.
 // "deleted" and "object-changed" = this document is gone from its path: the
@@ -441,6 +441,11 @@ function createEngineDocSession(
   let deliveryPending = false;
   let pendingSavedSeq: number | null = null;
   let pendingSavedState: "saved" | "saved-to-host" = "saved";
+  // The last local edit a "saved" report covered. Remote deltas also show
+  // "saving", but they are not this window's work.
+  let savedLocalSeq = 0;
+  const localEditsSaved = (): boolean =>
+    !deliveryPending && savedLocalSeq >= localSeq.current;
   const retiredDraftObservers = new Map<Y.Doc, () => void>();
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
@@ -507,6 +512,7 @@ function createEngineDocSession(
     authorCapacity = false,
   ): void => {
     saveStateRef.current = state;
+    if (state === "saved") savedLocalSeq = localSeq.current;
     publish((current) => ({ ...current, saveState: state, saveError: error, authorCapacity }));
   };
 
@@ -683,6 +689,17 @@ function createEngineDocSession(
             deletion: { token, draftId: slot.draftId, cause: deletionCause },
           }));
         }
+        // An edit after a read-only status that set nothing aside.
+        if (
+          transition === "read-only" &&
+          slot === recovery &&
+          snapshot.readOnlyTransition?.draftId !== slot.draftId
+        ) {
+          publish((current) => ({
+            ...current,
+            readOnlyTransition: { token, draftId: slot.draftId },
+          }));
+        }
         if (!sceneRecovery) return;
         // Asset I/O must not hold the recovery queue. A later scene update
         // must replace the immediate draft now, even if this older image
@@ -769,28 +786,32 @@ function createEngineDocSession(
     );
   };
 
-  const captureReadOnlyTransition = (doc: Y.Doc): void => {
+  // A refused update always leaves work behind. A read-only status can also
+  // arrive after every edit saved; then `forceCreate` is false, nothing is set
+  // aside, and a later edit still starts a draft through the snapshot.
+  const captureReadOnlyTransition = (doc: Y.Doc, forceCreate: boolean): void => {
     writesRefused.current = true;
     recovery.transition = "read-only";
     const bytes = Y.encodeStateAsUpdate(doc);
     recovery.snapshotBytes = bytes;
     const sceneRecovery =
-      documentKind === "scene" && binding
+      forceCreate && documentKind === "scene" && binding
         ? prepareSceneRecovery(bytes, binding)
         : null;
-    // Main sends this state only after it has discarded a local update.
-    // Persist the rejected document synchronously before the session closes.
-    recovery.draftId = captureOrphanedDraft(
-      workspaceId,
-      path,
-      sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
-    );
+    // Persist the waiting document synchronously before the session closes.
+    if (forceCreate) {
+      recovery.draftId = captureOrphanedDraft(
+        workspaceId,
+        path,
+        sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
+      );
+    }
     publish((current) => ({
       ...current,
       readOnlyTransition: { token, draftId: recovery.draftId },
     }));
     reportSaveState("read-only");
-    enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
+    enqueueRecoverySnapshot(bytes, forceCreate, recovery.transition, sceneRecovery);
   };
 
   const refreshRecoveryDraft = (doc: Y.Doc): void => {
@@ -877,7 +898,7 @@ function createEngineDocSession(
       error instanceof EngineYDocDeliveryRefusedError &&
       error.reason === "read-only"
     ) {
-      captureReadOnlyTransition(source);
+      captureReadOnlyTransition(source, true);
       releaseBinding();
       return;
     }
@@ -948,10 +969,10 @@ function createEngineDocSession(
     if (event.state === "read-only") {
       pendingSavedSeq = null;
       const doc = binding?.doc;
-      // Unlike deletion, this report answers a local update, so it cannot
-      // precede the binding that allowed that update.
+      // Unlike deletion, this report needs a session that allowed edits, so
+      // it cannot precede the binding.
       if (!doc) return;
-      captureReadOnlyTransition(doc);
+      captureReadOnlyTransition(doc, !localEditsSaved());
       releaseBinding();
       return;
     }

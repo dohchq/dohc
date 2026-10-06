@@ -812,6 +812,58 @@ it("sets aside a refused scene, freezes writes, and releases the session", async
   });
 });
 
+// A shared session reports read-only as a status whenever it stops being
+// live, with or without an edit waiting. Saved work is already in the file.
+it("sets nothing aside when a read-only status follows a saved edit", async () => {
+  await mountBound();
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  act(() => harness.emitNow("saved", harness.applied.at(-1)!.seq));
+  await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("saved"));
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(screen.getByTestId("state").textContent).toBe("read-only");
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(screen.getByTestId("draft-count").textContent).toBe("0");
+});
+
+it("sets aside a keystroke that races a read-only status after a saved edit", async () => {
+  await mountBound();
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  act(() => harness.emitNow("saved", harness.applied.at(-1)!.seq));
+  await waitFor(() => expect(screen.getByTestId("state").textContent).toBe("saved"));
+  const appliedAtStatus = harness.applied.length;
+
+  act(() => {
+    harness.emitNow("read-only", 0);
+    screen.getByTestId("type").click();
+  });
+  await flushLocalBatch();
+
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!!"));
+  expect(screen.getByTestId("draft-count").textContent).toBe("1");
+  expect(screen.getByTestId("read-only-transition").textContent).toBe("true");
+  expect(harness.applied).toHaveLength(appliedAtStatus);
+});
+
+it("sets aside an unsaved edit when a read-only status arrives", async () => {
+  await mountBound();
+  act(() => screen.getByTestId("type").click());
+  await flushLocalBatch();
+  const appliedAtStatus = harness.applied.length;
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(screen.getByTestId("state").textContent).toBe("read-only");
+  expect(screen.getByTestId("draft-count").textContent).toBe("1");
+  await waitFor(() => expect(screen.getByTestId("draft").textContent).toBe("seed!"));
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(harness.applied).toHaveLength(appliedAtStatus);
+});
+
 it("replaces the same deletion's draft when a keystroke lands before read-only commits", async () => {
   await mountBound();
 
