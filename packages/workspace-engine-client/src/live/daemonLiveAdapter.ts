@@ -212,7 +212,7 @@ export function isEngineStoreBusyRefusal(error: unknown): boolean {
 
 // Native live operations reserve shared slots and bytes before reading state.
 // A competing operation can release this capacity without any user action.
-function isLiveSettlementCapacityRefusal(error: unknown): boolean {
+export function isLiveSettlementCapacityRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "live-settlement-capacity";
 }
 

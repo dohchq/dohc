@@ -11,6 +11,7 @@ export {
   isConflictStaleTargetRefusal,
   isInvalidInputRefusal,
   isEngineStoreBusyRefusal,
+  isLiveSettlementCapacityRefusal,
   isFileLockedRefusal,
   isIdempotencyKeyReuseRefusal,
   isYdocUpdateAdmissionRefusal,
