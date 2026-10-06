@@ -1,3 +1,4 @@
+import { RESERVED_WORKSPACE_ID_TITLE } from "@dohc/workspace-core";
 import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 
 // Electron hands a rejected handler's error to the renderer as one string,
@@ -114,6 +115,18 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     stale_revision: "The Collection changed while dohc was working on it. Try again.",
     "*": null,
   },
+  // A restore History's current rules refuse. An unreadable rules file's
+  // message leads with the files dohc can't read, then the parser's own text,
+  // which only Copy details carry. "It" is dohc, the caller's sentence's actor.
+  RestorePolicyRefusalError: {
+    ".dohc/files.toml": "It can't read .dohc/files.toml. Fix the file, then try again.",
+    ".dohc/visibility.toml": "It can't read .dohc/visibility.toml. Fix the file, then try again.",
+    ".dohc/files.toml and .dohc/visibility.toml":
+      "It can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
+    ".dohc": "It can't read this workspace's .dohc folder. Fix the folder, then try again.",
+    "path-not-admitted": "History no longer tracks this file. Track it in .dohc/files.toml, then try again.",
+    "*": null,
+  },
   // The file system's codes. A plain error with no listed code keeps its
   // message, because dohc writes those for people.
   Error: {
@@ -177,6 +190,7 @@ function parse(error: unknown) {
 }
 
 export interface ReadError {
+  title?: string;
   /** What a person reads, or null when only the caller's sentence applies. */
   words: string | null;
   /**
@@ -190,6 +204,9 @@ export interface ReadError {
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (name === "ReservedWorkspaceIdError") {
+    return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
+  }
   const plain = name === "Error" && code === undefined;
   const entry = ERROR_WORDS[name];
   const lead = message.split(": ")[0];

@@ -327,7 +327,19 @@ pub(super) fn sharing_declined_json(
     declines
         .into_iter()
         .map(|declined| {
+            (
+                (declined.version_id.clone(), declined.object_id.clone()),
+                declined,
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>()
+        .into_values()
+        .map(|declined| {
             json!({
+                "objectId": declined.object_id,
+                "versionId": declined.version_id,
+                "lineagePruned": declined.lineage_pruned,
+                "headBlobSha256": declined.head_blob_sha256,
                 "path": declined.path,
                 "constraint": declined.constraint,
                 "limitBytes": declined.limit_bytes,
@@ -632,24 +644,17 @@ impl EngineService {
             })
         };
         let mut outcome = self
-            .relay_execute(ctx, &open, configuration.clone(), push()?, "sync.push")
+            .relay_execute(ctx, &open, configuration, push()?, "sync.push")
             .await?;
         // A push can be what makes enrollment ready. The sweep inside it left
-        // each open document to its session, so claim those now and send
-        // them in this same push rather than waiting for the next one.
+        // each open document to its session. Claim those now, then request a
+        // fresh push budget for the newly queued bytes.
         let (claimed, declined) = self.originate_live_sessions(ctx, &open).await?;
         if claimed > 0
-            && let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { pushed, .. }) = &outcome
-        {
-            let pushed_before = *pushed;
-            outcome = self
-                .relay_execute(ctx, &open, configuration, push()?, "sync.push")
-                .await?;
-            if let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { pushed, .. }) =
+            && let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { has_more, .. }) =
                 &mut outcome
-            {
-                *pushed += pushed_before;
-            }
+        {
+            *has_more = true;
         }
         if let RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
             sharing_declined, ..
@@ -1625,6 +1630,34 @@ mod tests {
     }
 
     #[test]
+    fn sharing_declined_json_keeps_distinct_versions_of_an_object() {
+        let main = dohc_engine_sync::SharingDeclined {
+            object_id: "object-1".to_owned(),
+            version_id: "main".to_owned(),
+            lineage_pruned: false,
+            head_blob_sha256: None,
+            path: "notes/large.md".to_owned(),
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limit_bytes: 20,
+            observed_bytes: 21,
+        };
+        let draft = dohc_engine_sync::SharingDeclined {
+            version_id: "draft".to_owned(),
+            ..main.clone()
+        };
+        let renamed_draft = dohc_engine_sync::SharingDeclined {
+            path: "notes/renamed.md".to_owned(),
+            ..draft.clone()
+        };
+        let values = super::sharing_declined_json(vec![main, draft, renamed_draft]);
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["versionId"], "draft");
+        assert_eq!(values[0]["path"], "notes/renamed.md");
+        assert_eq!(values[1]["versionId"], "main");
+        assert_eq!(values[1]["path"], "notes/large.md");
+    }
+
+    #[test]
     fn sync_outcome_json_surfaces_an_undrained_complete_pass() {
         let value = sync_outcome_json(SyncPassOutcome::Complete {
             owner_admission_pending: Vec::new(),
@@ -1639,6 +1672,10 @@ mod tests {
             changed_paths: Vec::new(),
             refusals: Vec::new(),
             sharing_declined: vec![dohc_engine_sync::SharingDeclined {
+                object_id: "notes/oversized.md".to_owned(),
+                version_id: "main".to_owned(),
+                lineage_pruned: false,
+                head_blob_sha256: None,
                 path: "notes/oversized.md".to_owned(),
                 constraint: "MAX_YDOC_UPDATE_BYTES",
                 limit_bytes: 20,
@@ -1655,6 +1692,10 @@ mod tests {
         assert_eq!(
             value["sharingDeclined"],
             json!([{
+                "objectId": "notes/oversized.md",
+                "versionId": "main",
+                "lineagePruned": false,
+                "headBlobSha256": null,
                 "path": "notes/oversized.md",
                 "constraint": "MAX_YDOC_UPDATE_BYTES",
                 "limitBytes": 20,

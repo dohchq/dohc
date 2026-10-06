@@ -385,8 +385,11 @@ export function createDesktopCliServer<State>(
           }),
       filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
       listMoments: async ({ limit, objectId }) => {
+        // Unreadable rules hide every change, as the desktop's History does.
+        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+        if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
         const page = await capture.listMoments({ limit, ...(objectId ? { objectId } : {}) });
-        const admitted = historyPathAdmission(await readWorkspaceEnginePolicy(workspace.rootPath));
+        const admitted = historyPathAdmission(policy);
         return page.moments
           .filter(
             (moment): moment is typeof moment & { objectId: string; protected: false } =>
@@ -410,13 +413,16 @@ export function createDesktopCliServer<State>(
           }));
       },
       readMoment: async (momentId) => {
+        // Unreadable rules hide every change, as the desktop's History does,
+        // so the answer says nothing about this change.
+        const policy = await readWorkspaceEnginePolicy(workspace.rootPath);
+        if (policy.errors.length) return { status: "policy-unreadable", unreadable: policy.unreadable };
         const detail = await capture.readMoment(momentId);
         if (!detail || detail.protected) return null;
         const { moment } = detail;
         // History reads come from the active version, as the list does.
         if (moment.versionId !== (await capture.listVersions()).activeVersionId) return null;
-        const admitted = historyPathAdmission(await readWorkspaceEnginePolicy(workspace.rootPath));
-        return historyMomentPathsAdmitted(admitted, moment) ? moment : null;
+        return historyMomentPathsAdmitted(historyPathAdmission(policy), moment) ? moment : { status: "untracked" };
       },
     };
   }

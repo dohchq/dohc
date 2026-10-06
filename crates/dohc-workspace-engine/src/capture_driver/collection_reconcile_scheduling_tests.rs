@@ -434,6 +434,15 @@ async fn lease_blocked_collection_candidate_does_not_starve_other_adoptions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
+    assert_changed_record_reconciles(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watcher_record_change_retries_deferred_adoption_with_matching_id() {
+    assert_changed_record_reconciles(true).await;
+}
+
+async fn assert_changed_record_reconciles(deferred_same_id: bool) {
     let scratch = ScratchDir::new().expect("scratch");
     let collection_dir = scratch.path().join("tasks");
     let record_path = collection_dir.join("alpha.md");
@@ -561,7 +570,16 @@ async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
         .await
         .expect("acknowledge the already-captured adopted-file baseline");
 
-    std::fs::write(&record_path, b"Alpha task").expect("strip adopted record id");
+    let expected = if deferred_same_id {
+        rusqlite::Connection::open(&db).unwrap().execute(
+            "UPDATE collection_records SET adoption_state='deferred-conflict' WHERE file_path='tasks/alpha.md'", []).unwrap();
+        let changed = adopted.replace("Alpha task", "Changed task");
+        std::fs::write(&record_path, &changed).unwrap();
+        changed
+    } else {
+        std::fs::write(&record_path, b"Alpha task").expect("strip adopted record id");
+        adopted
+    };
     wait_for_watcher_dirty(&handle).await;
     let changed_root = bind_capture_root(scratch.path()).expect("bind changed run root");
     let changed = handle
@@ -607,13 +625,25 @@ async fn watcher_edit_stripping_adopted_record_id_reasserts_the_binding() {
         "the changed record capture settles cleanly"
     );
     let restored = std::fs::read_to_string(&record_path).expect("read restored record");
+    let state: String = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT adoption_state FROM collection_records WHERE file_path='tasks/alpha.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        state, "adopted",
+        "a Changed record must finish its deferred adoption"
+    );
 
     watcher.stop().expect("stop watcher");
     files.close().await;
     supervisor.close(&db).expect("close actor");
 
     assert_eq!(
-        restored, adopted,
+        restored, expected,
         "the established binding must reassert its id after an ordinary edit strips it"
     );
 }

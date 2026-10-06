@@ -1138,12 +1138,14 @@ export class VersionedLiveAdapter {
 
   async readHistoryPage(input: {
     workspaceId: string;
+    objectId?: string;
     limit?: number;
     beforeMomentOrder?: number;
   }): Promise<VersionedMethodResultMap["history.page"]> {
     this.assertWorkspace(input.workspaceId);
     return this.request(VERSIONED_METHOD.historyPage, {
       workspaceId: input.workspaceId,
+      ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
       ...(input.limit !== undefined ? { limit: input.limit } : {}),
       ...(input.beforeMomentOrder !== undefined
         ? { beforeMomentOrder: input.beforeMomentOrder }

@@ -371,6 +371,15 @@ export interface SyncRelayGrantedShareRow extends SyncRelayShareWithGrantRow {
   automationsGeneration: number | null;
 }
 
+export interface SyncRelayGrantedInventoryCursor {
+  grantId: string;
+}
+
+export interface SyncRelayGrantedInventoryPage {
+  granted: SyncRelayGrantedShareRow[];
+  nextCursor: SyncRelayGrantedInventoryCursor | null;
+}
+
 export interface SyncRelayLinkInventoryRow extends SyncRelayShareWithGrantRow {
   dependents: SyncRelayShareGrantRow[];
   lastUsedAtMs: number | null;
@@ -970,6 +979,7 @@ export interface SyncRelayStorage {
     recipientUserId: string,
   ): SyncRelayShareGrantRow[];
   listSharesGrantedBy(granterUserId: string): SyncRelayGrantedShareRow[];
+  listSharesGrantedPage(granterUserId: string, workspaceId: string, cursor?: SyncRelayGrantedInventoryCursor): SyncRelayGrantedInventoryPage;
   listLinkGrantsByWorkspace(
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,

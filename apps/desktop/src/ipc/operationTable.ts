@@ -1,3 +1,4 @@
+import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
 
 // One row per renderer-to-main operation: the channel, the payload main
@@ -9,16 +10,24 @@ type OperationRow<Payload extends z.ZodType> = {
   readonly channel: `desktop:${string}`;
   readonly payload: Payload;
   readonly result?: z.ZodType;
-};
+} & (
+  | { readonly capabilityId: CapabilityId; readonly capabilityIdsByAction?: never }
+  | { readonly capabilityId?: never; readonly capabilityIdsByAction: Readonly<Record<string, CapabilityId>> }
+);
 
 export type OperationDefinition =
   // Any trusted window may call it.
-  | (OperationRow<z.ZodType> & { readonly guard: "trusted-sender" })
+  | (OperationRow<z.ZodType> & { readonly guard: "trusted-sender" } & (
+      | { readonly scope: "device" }
+      // Describes existing handler admission without wrapping its lifetime.
+      | { readonly scope: "workspace"; readonly handlerCheck: { readonly check: string; readonly reason: string } }
+    ))
   // The handler runs inside the sending window's workspace operation. It fails
   // with inactiveMessage, before or after the handler, unless the payload's
   // workspace is the one open in that window.
   | (OperationRow<z.ZodType<{ readonly workspaceId: string }>> & {
       readonly guard: "active-workspace";
+      readonly scope: "workspace";
       readonly inactiveMessage: string;
     });
 

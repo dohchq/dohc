@@ -89,6 +89,8 @@ export interface EngineYdocProviderSessionOptions {
   onResyncNeeded?: (error: YdocResyncNeededError) => void;
   onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[]) => void;
   onSessionError?: (error: unknown) => void;
+  // Complete a durable set-aside handoff before a terminal release drops unsent state.
+  preserveUnsentState?: (doc: Y.Doc) => Promise<void>;
   // A settle is going to the engine now, identified by `token`. Every
   // outcome below echoes the same token, so a caller pairs start to outcome
   // by identity. The chain belongs to one provider generation; a caller can
@@ -379,6 +381,12 @@ export async function openEngineYdocProviderSession(
   });
   if (session.ownerDraft) requestSettle();
 
+  async function preserveMissingState(error: unknown): Promise<void> {
+    if (!session.missingLocalState) return;
+    if (isTransientEngineRefusal(error)) throw error;
+    await options.preserveUnsentState?.(session.doc);
+  }
+
   async function beginTeardown(): Promise<boolean> {
     if (closeComplete) return true;
     closed = true;
@@ -538,19 +546,7 @@ export async function openEngineYdocProviderSession(
           preCloseError = error;
         }
       }
-      // Releasing while the engine is still behind discards that only copy:
-      // the doc holding the text goes away with the release, and a caller
-      // that saw a clean "released, settle failed" would arm a retry that
-      // reopens, settles what the lineage holds, and reports a save of a
-      // document missing the edit.
-      //
-      // Only for a TRANSIENT failure, which is the one class the close ladder
-      // above retries. A terminal refusal cannot be waited out, so refusing
-      // the teardown for one would wedge the entry forever holding a lease
-      // nobody can release — worse than reporting the loss.
-      if (session.missingLocalState && isTransientEngineRefusal(preCloseError)) {
-        throw preCloseError;
-      }
+      await preserveMissingState(preCloseError);
       try {
         try {
           await session.close({ settle: false });
@@ -595,16 +591,8 @@ export async function openEngineYdocProviderSession(
       } catch (error) {
         resendError = error;
       }
-      // Evicting while the engine is still behind discards the only copy: the
-      // doc holding the text goes away with the session. Refuse only for a
-      // TRANSIENT failure, the one class a retry can clear — a terminal
-      // refusal cannot be waited out, and wedging the entry forever holding a
-      // lease nobody can release is worse than reporting the loss.
-      if (session.missingLocalState && isTransientEngineRefusal(resendError)) {
-        closeError = resendError;
-        throw resendError;
-      }
       try {
+        await preserveMissingState(resendError);
         await session.evict();
       } catch (error) {
         closeError = error;

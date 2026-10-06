@@ -6,6 +6,10 @@
   "bin": {
     "dohc-mcp": "./bin/dohc-mcp.js"
   },
+  "exports": {
+    "./tools": "./src/tools.ts",
+    "./capability-exposure-fixture": "./src/capabilityExposure.fixture.ts"
+  },
   "scripts": {
     "dev": "tsx src/server.ts",
     "test": "vitest run",

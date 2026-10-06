@@ -1,3 +1,4 @@
+import { editorTabTestId } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -38,7 +39,7 @@ async function createDocument(page: Page, name: string): Promise<void> {
   await expect(fileName).toBeFocused();
   await fileName.fill(name);
   await page.keyboard.press("Enter");
-  await expect(page.getByTestId(`tab-${name}`)).toHaveAttribute("data-active", "true", {
+  await expect(page.getByTestId(editorTabTestId(name))).toHaveAttribute("data-active", "true", {
     timeout: 15_000,
   });
 }

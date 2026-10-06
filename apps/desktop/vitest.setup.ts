@@ -41,6 +41,21 @@ if (
   });
 }
 
+// jsdom has window.scrollTo but no Element.prototype.scrollTo. The editor tab
+// strip calls it to reveal the active tab, which a test that gives elements a
+// width reaches. With nothing laid out there is nothing to scroll, so it does
+// nothing. A test that checks scrolling installs its own.
+if (
+  typeof Element !== "undefined" &&
+  typeof Element.prototype.scrollTo !== "function"
+) {
+  Object.defineProperty(Element.prototype, "scrollTo", {
+    configurable: true,
+    writable: true,
+    value: () => undefined,
+  });
+}
+
 // Testing Library's own 1 s default for waitFor and findBy* failed loaded runs
 // with "Unable to find" while the product was healthy. A full gate beside other
 // work then missed a 5 s wait for the source-view toggle that passes alone.

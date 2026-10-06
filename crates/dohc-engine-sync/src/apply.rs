@@ -99,6 +99,10 @@ mod diagnostic_tests {
     #[test]
     fn sharing_decline_survives_a_skipped_primary_outcome() {
         let declined = crate::SharingDeclined {
+            object_id: "notes/skipped.md".to_owned(),
+            version_id: "main".to_owned(),
+            lineage_pruned: false,
+            head_blob_sha256: None,
             path: "notes/skipped.md".to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: 20,
@@ -135,6 +139,10 @@ mod diagnostic_tests {
             },
         ];
         let declined = crate::SharingDeclined {
+            object_id: "notes/first.md".to_owned(),
+            version_id: "main".to_owned(),
+            lineage_pruned: false,
+            head_blob_sha256: None,
             path: "notes/first.md".to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: 20,
@@ -143,6 +151,10 @@ mod diagnostic_tests {
         let declines = vec![
             declined.clone(),
             crate::SharingDeclined {
+                object_id: "notes/second.md".to_owned(),
+                version_id: "main".to_owned(),
+                lineage_pruned: false,
+                head_blob_sha256: None,
                 path: "notes/second.md".to_owned(),
                 ..declined
             },

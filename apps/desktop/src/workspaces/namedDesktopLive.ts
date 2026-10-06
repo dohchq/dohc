@@ -5,14 +5,14 @@ import { parseLiveUpdateIdentifier } from "@dohc/live-session-contract/live-upda
 import { createNamedLiveBrowserTransport, parseNamedLiveBrowserLimits, type NamedLiveSelection } from "@dohc/ydoc-projection/named-live-browser-transport";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
 import { RELAY_FETCH_TIMEOUT_MS, relayApiFetch } from "./sharedChannels";
-import type { NamedLiveDraft } from "./namedLiveDraftRecovery";
+import type { LiveDraft } from "./liveDraftRecovery";
 import type { ShareViewSelector } from "./shareViewInfo";
 import type { EngineYDocSessionCapture, EngineYDocSessionProvider } from "./engineYDocSessionIpc";
 
 interface Credentials { relayUrl: string; token: string; userId: string; signal: AbortSignal }
 export function createNamedDesktopLiveCapture(options: {
   shareId: string; selector: ShareViewSelector; credentials: Credentials; assertCurrent(): void; fetch?: typeof fetch;
-  preserveDraft(draft: NamedLiveDraft): Promise<void>;
+  preserveDraft(draft: LiveDraft): Promise<void>;
 }): EngineYDocSessionCapture {
   const credentials = { ...options.credentials }, origin = new URL(credentials.relayUrl);
   if (origin.protocol !== "https:" || origin.username || origin.password || origin.search || origin.hash) throw new Error("Invalid live relay.");

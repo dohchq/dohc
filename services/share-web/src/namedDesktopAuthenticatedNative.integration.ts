@@ -2,7 +2,7 @@ import { createNamedDesktopLive as createDesktopAdmission } from "../../sync-rel
 import { createLiveTickets } from "../../sync-relay/src/liveTickets.js";
 import { createLiveHostReports } from "../../sync-relay/src/namedLiveHostReports.js";
 import { createNamedDesktopLiveCapture } from "../../../apps/desktop/src/workspaces/namedDesktopLive.js";
-import { preserveNamedLiveDraft } from "../../../apps/desktop/src/workspaces/namedLiveDraftRecovery.js";
+import { preserveLiveDraft } from "../../../apps/desktop/src/workspaces/liveDraftRecovery.js";
 import { createEngineYDocSessionIpc } from "../../../apps/desktop/src/workspaces/engineYDocSessionIpc.js";
 import { bindEngineYDoc, EngineYDocDeliveryRefusedError } from "../../../apps/desktop/src/renderer/collab/engineYDocProvider.js";
 import { CHANNELS } from "../../../apps/desktop/src/ipc/channels.js";
@@ -166,7 +166,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
       const capture = createNamedDesktopLiveCapture({shareId: overrides.shareId ?? `share-${index}`,
         selector: {access: "edit", versionId: null, paths: ["docs"]},
         credentials: {relayUrl: audience, token: overrides.token ?? tokens[index]!, userId: users[index]!.id, signal: credentials.signal},
-        assertCurrent, preserveDraft: draft => preserveNamedLiveDraft(join(root, "profile"), localWorkspaceId, draft)});
+        assertCurrent, preserveDraft: draft => preserveLiveDraft(join(root, "profile"), localWorkspaceId, draft)});
       const ipc = createEngineYDocSessionIpc({sessionFor: () => ({workspaceId: localWorkspaceId, generation: 1, isCurrent: () => current}),
         acquireWorkspace: () => ({workspace: {workspaceId: localWorkspaceId, rootPath: localRoot, attachmentId: Symbol.for(localWorkspaceId)}, assertCurrent, release() {}}),
         captureFor: () => {ordinaryCaptureCalls++; throw new Error("Ordinary capture must not handle shared live editing.");},
