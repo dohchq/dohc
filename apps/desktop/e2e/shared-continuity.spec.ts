@@ -829,6 +829,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
     });
 
     await test.step("the new recipient's unsaved typing stays copyable when the owner ends their share", async () => {
+      await openDocument(owner!.page);
       const desktop = newRecipient!;
       const page = desktop.page;
       let drafts: Awaited<ReturnType<typeof storedDrafts>> = [];
