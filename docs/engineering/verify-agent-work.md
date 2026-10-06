@@ -77,7 +77,10 @@ Site-only changes run the site's tests and two desktop renderer compatibility fi
 Account API and Postgres inputs retain desktop preparation and account and desktop browser proofs, without unrelated desktop unit or packaging tests.
 Share-web inputs retain desktop preparation, desktop browser proofs, and the native delivery proof.
 Combined site changes retain both renderer compatibility files and those proofs.
-Desktop production changes and shared inputs retain the complete desktop suite, packaging tests, and proofs.
+Desktop process, storage, shared, and unclassified inputs retain the complete desktop suite, packaging tests, and proofs.
+Isolated renderer changes run their tracked test consumers and the site suite when every dependency stays within that boundary.
+The runner keeps persistence smoke and the Windows pixel gallery for those changes.
+Unknown imports, native resources, uncovered sources, and consumers outside that boundary retain broader selection.
 Desktop renderer changes, and changes to the states page itself, also run the `@states-page` pixel gallery on Windows, where its baselines were taken.
 Desktop-only changes run the Y.Doc compatibility files that import desktop code.
 Changes to Y.Doc projection or its other inputs run the complete Y.Doc suite, including the checkpoint boundary test.
@@ -119,6 +122,8 @@ Older records without that metadata have an unknown purpose.
 Wait estimates use the median duration of up to twenty completed runs in the same lane.
 A cold history has no estimate. Estimates do not reject or reorder work.
 Full runs wait up to six hours. A live holder keeps its slot even if its heartbeat stops; investigate its recorded PID before changing its resources.
+Use verification queues for PR checks. A verification slot does not provide an idle host for benchmarks.
+Performance measurements must record concurrent host work and use the shared build budget when running Cargo.
 
 The full lane count defaults to one. To compare one and two lanes, use an isolated root and explicit trial flags in PowerShell:
 
