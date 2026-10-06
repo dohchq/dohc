@@ -6,7 +6,7 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildEnvironment, directoryFingerprint, engineArtifactMatches, hashFile, repairOwnedEngineExecutable, sourceFingerprint } from "./build.mjs";
-import { changedFiles, desktopProofCommand, postgres, readSelfHostNativeProof } from "./verify.mjs";
+import { changedFiles, desktopProofCommand, desktopProofTags, postgres, readSelfHostNativeProof } from "./verify.mjs";
 import { selectedGates } from "./selection.mjs";
 import { repoRoot, run } from "./process.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
@@ -28,6 +28,21 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   for (const platform of ["win32", "darwin"]) assert.deepEqual(desktopProofCommand(args, {platform, env: {}}), direct);
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {DISPLAY: ":99"}}), direct);
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
+});
+
+test("focused smoke runs on every platform and gallery retains Windows baselines", () => {
+  assert.deepEqual(desktopProofTags({statesPage: true}, {platform: "win32"}), {selected: ["@states-page"], required: ["@states-baselines"]});
+  assert.deepEqual(desktopProofTags({statesPage: true}, {platform: "linux"}), {selected: [], required: []});
+  assert.deepEqual(desktopProofTags({smoke: true, statesPage: true}, {platform: "win32"}), {
+    selected: ["@verification-smoke", "@states-page"], required: ["@verification-smoke", "@states-baselines"],
+  });
+  assert.deepEqual(desktopProofTags({smoke: true, statesPage: true}, {platform: "linux"}), {
+    selected: ["@verification-smoke"], required: ["@verification-smoke"],
+  });
+  assert.deepEqual(desktopProofTags({desktop: true, statesPage: true}, {platform: "win32"}), {
+    selected: ["@verification-smoke", "@self-host-onboarding", "@states-page"],
+    required: ["@verification-smoke", "@self-host-onboarding", "@states-baselines"],
+  });
 });
 
 test("native proof evidence rejects skips, wrong binaries, and incomplete delivery", () => {
@@ -813,7 +828,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   try {
     for (const file of [
       "scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
-      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs",
+      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "tools/rust-engine-program/git-read.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml",

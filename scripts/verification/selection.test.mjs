@@ -3,15 +3,165 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { gateInputMessage, isGateReader, readWorkspacePackages, selectJavaScript, uncoveredGateInputs, uncoveredWorkspaceInputs } from "./selection.mjs";
+import { focusedRendererSelection, rendererInputGraph, readRendererFiles } from "./renderer-selection.mjs";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 const yaml = createRequire(new URL("../../apps/desktop/package.json", import.meta.url))("js-yaml");
 const packages = readWorkspacePackages(root);
 const select = (files, options) => selectJavaScript(files, packages, options);
+
+const rendererPath = "apps/desktop/src/renderer/";
+function rendererFixture(extra = []) {
+  return [
+    {path: `${rendererPath}Widget.tsx`, source: "export const Widget = () => null;"},
+    {path: `${rendererPath}Widget.test.tsx`, source: 'import {Widget} from "./Widget.js";'},
+    {path: `${rendererPath}tokens.test.ts`, source: "// reads the renderer source tree"},
+    ...extra,
+  ];
+}
+
+test("isolated renderer changes select their test consumers, smoke, and gallery", () => {
+  const files = rendererFixture([{path: "apps/site/src/Demo.tsx", source: 'export {Widget} from "../../desktop/src/renderer/Widget";'}]);
+  const plan = focusedRendererSelection([`${rendererPath}Widget.tsx`], files);
+  assert.deepEqual(plan.testFiles, {"@dohc/desktop": ["src/renderer/Widget.test.tsx", "src/renderer/tokens.test.ts"]});
+  assert.deepEqual(plan.packages, ["@dohc/desktop", "@dohc/site"]);
+  assert.deepEqual(plan.proofs, {accounts: false, selfHostNative: false, desktop: false, smoke: true, statesPage: true});
+  assert.deepEqual(plan.needs, {postgres: false, engine: true, desktop: true});
+  assert.equal(plan.desktopScripts, false);
+  assert.equal(plan.repository, "source");
+});
+
+test("renderer impact follows reexports, type and dynamic imports, resource reads, and cycles", () => {
+  const files = rendererFixture([
+    {path: `${rendererPath}wrapper.ts`, source: 'export * from "./Widget.js"; import "./cycle";'},
+    {path: `${rendererPath}cycle.ts`, source: 'import "./wrapper";'},
+    {path: `${rendererPath}consumer.test.tsx`, source: 'import type {Widget} from "./wrapper"; import("./cycle");'},
+    {path: `${rendererPath}Widget.css`, source: ".widget {}"},
+    {path: `${rendererPath}css.test.ts`, source: 'readFile(new URL("./Widget.css", import.meta.url));'},
+  ]);
+  assert.ok(focusedRendererSelection([`${rendererPath}Widget.tsx`], files).testFiles["@dohc/desktop"].includes("src/renderer/consumer.test.tsx"));
+  assert.ok(focusedRendererSelection([`${rendererPath}Widget.css`], files).testFiles["@dohc/desktop"].includes("src/renderer/css.test.ts"));
+  assert.ok(rendererInputGraph(files).consumers.get(`${rendererPath}Widget.tsx`).has(`${rendererPath}Widget.test.tsx`));
+});
+
+test("native, IPC, test and browser-fixture consumers retain broad renderer selection", () => {
+  for (const path of ["apps/desktop/src/ipc/main.ts", "apps/desktop/src/workspaces/read.test.ts", "apps/desktop/e2e/fixtures/widget/main.tsx",
+    "packages/ydoc-projection/src/delivery.test.ts", "services/share-web/src/native.integration.ts", "examples/fixture/read.test.ts",
+    "tools/fixture/read.test.mjs", "scripts/fixture.test.mjs"]) {
+    const reference = posix.relative(posix.dirname(path), `${rendererPath}Widget.js`);
+    assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], rendererFixture([{path, source: `import "${reference.startsWith(".") ? reference : "./" + reference}";`}])), null, path);
+  }
+});
+
+test("ambiguous, missing, deleted, added and mixed renderer inputs retain existing selection", () => {
+  for (const changed of [[`${rendererPath}missing.ts`], [`${rendererPath}fixture.json`], [`${rendererPath}Widget.tsx`, "apps/site/src/main.tsx"], []]) {
+    assert.equal(focusedRendererSelection(changed, rendererFixture()), null);
+  }
+  assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], rendererFixture(), {baseFiles: new Set()}), null);
+  for (const source of ['import(path);', 'import(`./${name}.tsx`);', 'import.meta.glob("./*.tsx");', 'import "./missing.js";']) {
+    assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], rendererFixture([{path: `${rendererPath}new.tsx`, source}])), null, source);
+  }
+  assert.equal(focusedRendererSelection([`${rendererPath}uncovered.tsx`], rendererFixture([{path: `${rendererPath}uncovered.tsx`, source: "export const uncovered = 1;"}])), null);
+});
+
+test("renderer test dependency closure retains native and database resources", () => {
+  for (const source of ['import "node:child_process";', 'import "pg";', 'import "@dohc/workspace-postgres";', 'import(target);']) {
+    const files = rendererFixture([
+      {path: "apps/desktop/src/testing/runtime.ts", source},
+      {path: "packages/workspace-postgres/package.json", source: '{"name":"@dohc/workspace-postgres","exports":{".":"./src/index.ts"}}'},
+      {path: "packages/workspace-postgres/src/index.ts", source: "export const database = {};"},
+    ]);
+    files.find(file => file.path.endsWith("Widget.test.tsx")).source += 'import "../testing/runtime";';
+    assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], files), null, source);
+  }
+  const files = rendererFixture([
+    {path: "packages/native/package.json", source: '{"name":"@dohc/native","exports":{".":"./src/index.ts"}}'},
+    {path: "packages/native/src/index.ts", source: 'export * from "./worker.js";'},
+    {path: "packages/native/src/worker.ts", source: 'import "node:child_process";'},
+  ]);
+  files.find(file => file.path.endsWith("Widget.test.tsx")).source += 'import "@dohc/native";';
+  assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], files), null);
+});
+
+test("type-only native imports keep impact coverage without requesting runtime resources", () => {
+  for (const statement of ['import type {Native} from "../testing/native";', 'import {type Native} from "../testing/native";',
+    'type Native = import("../testing/native").Native;']) {
+    const files = rendererFixture([{path: "apps/desktop/src/testing/native.ts", source: 'import "node:child_process"; export interface Native {}'}]);
+    files.find(file => file.path.endsWith("Widget.test.tsx")).source += statement;
+    assert.ok(focusedRendererSelection([`${rendererPath}Widget.tsx`], files), statement);
+  }
+});
+
+test("real renderer selection activates for pure changes and rejects native edges", () => {
+  const files = readRendererFiles(root);
+  const graph = rendererInputGraph(files);
+  const plan = focusedRendererSelection([`${rendererPath}workbench/quick-open-rank.ts`], files, {graph});
+  assert.ok(plan, "The focused renderer path must remain reachable in this repository.");
+  assert.ok(plan.testFiles["@dohc/desktop"].includes("src/renderer/workbench/quick-open-rank.test.ts"));
+  assert.equal(plan.proofs.smoke, true);
+  for (const path of ["collab/engineYDocProvider.ts", "tokens.ts", "workbench/workbenchState.ts", "collab/presenceChannel.ts",
+    "workbench/EngineHistory.tsx", "shareSkipNotice.ts", "workbench/chatFileMentions.ts"]) {
+    assert.equal(focusedRendererSelection([`${rendererPath}${path}`], files, {graph}), null, path);
+  }
+});
+
+test("renderer directory reads and computed literal prefixes outside the renderer retain package selection", () => {
+  for (const source of ['readdirSync(new URL("../renderer", import.meta.url));', 'import(`../renderer/${name}.js`);',
+    'import(`../renderer/Wid${name}.js`);']) {
+    assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], rendererFixture([
+      {path: "apps/desktop/src/testing/read.test.ts", source},
+    ])), null, source);
+  }
+});
+
+test("tracked JSON and raw HTML inputs resolve without disabling renderer focus", () => {
+  const files = rendererFixture([
+    {path: `${rendererPath}data.json`, source: ""},
+    {path: "apps/site/index.html", source: ""},
+    {path: "apps/site/src/main.test.js", source: 'import html from "../index.html?raw";'},
+  ]);
+  files.find(file => file.path.endsWith("Widget.tsx")).source += 'import("./data.json");';
+  assert.ok(focusedRendererSelection([`${rendererPath}Widget.tsx`], files));
+});
+
+test("bundle directory paths and document hrefs do not create source directory edges", () => {
+  const files = rendererFixture([
+    {path: "apps/desktop/src/window/createMainWindow.ts", source: 'join(import.meta.dirname, "../renderer/");'},
+    {path: `${rendererPath}unrelated.test.tsx`, source: 'const href = "./#overview"; const parent = "../";'},
+    {path: `${rendererPath}links.ts`, source: 'const href = `./${decodedPath}`;'},
+    {path: `${rendererPath}native.test.tsx`, source: 'import "node:child_process";'},
+  ]);
+  files.find(file => file.path.endsWith("Widget.test.tsx")).source += 'const href = "./#notes.md"; const parent = "../";';
+  const graph = rendererInputGraph(files);
+  assert.deepEqual([...graph.consumers.get(`${rendererPath}Widget.tsx`)], [`${rendererPath}Widget.test.tsx`]);
+  assert.deepEqual(focusedRendererSelection([`${rendererPath}Widget.tsx`], files).testFiles["@dohc/desktop"],
+    ["src/renderer/Widget.test.tsx", "src/renderer/tokens.test.ts"]);
+});
+
+test("conditional exports resolve tracked source without requiring generated output", () => {
+  const files = rendererFixture([
+    {path: "packages/fixture/package.json", source: '{"name":"@dohc/fixture","exports":{".":{"types":"./src/index.ts","default":"./dist/index.js"}}}'},
+    {path: "packages/fixture/src/index.ts", source: "export interface Value {}"},
+  ]);
+  files.find(file => file.path.endsWith("Widget.tsx")).source += 'import {type Value} from "@dohc/fixture";';
+  assert.ok(focusedRendererSelection([`${rendererPath}Widget.tsx`], files));
+});
+
+test("selection falls back before installation when its parser is unavailable", () => {
+  const loadParser = () => { throw Object.assign(new Error("Cannot find module '@babel/parser'"), {code: "MODULE_NOT_FOUND"}); };
+  assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], rendererFixture(), {loadParser}), null);
+});
+
+test("long focused test arguments retain package selection and its full resources", () => {
+  const tests = Array.from({length: 180}, (_, index) => ({
+    path: `${rendererPath}long-consumer-${index}.test.tsx`, source: 'import "./Widget.js";',
+  }));
+  assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], rendererFixture(tests)), null);
+});
 
 test("workspace discovery follows declared globs, exclusions, and nested packages", t => {
   const fixture = mkdtempSync(join(tmpdir(), "dohc-selection-"));

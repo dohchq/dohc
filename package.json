@@ -51,6 +51,7 @@
   },
   "packageManager": "pnpm@11.20.0",
   "devDependencies": {
+    "@babel/parser": "7.29.8",
     "@playwright/test": "^1.62.1",
     "@types/node": "^24.13.3",
     "js-yaml": "5.2.3",

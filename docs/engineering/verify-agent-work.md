@@ -72,6 +72,16 @@ Fetch the PR's target branch. Use its fetched ref as `<target-ref>` below, such 
 Run `pnpm verify:plan --base <target-ref>` to see the applicable workflow gates.
 The plan also lists selected JavaScript packages, test files, integration proofs, and required services.
 JavaScript selection follows workspace dependencies and declared external test inputs.
+Existing renderer source edits can select affected renderer test files and the site suite.
+This scope retains whole-workspace typechecking, repository source checks, desktop preparation, Electron editing and restart smoke, and the Windows pixel gallery.
+It omits untouched desktop unit tests, onboarding, native sharing, desktop scripts, and the Y.Doc, sync-relay, and share-web suites.
+It also omits Postgres when selected tests need no database.
+The selector follows literal module imports, resource paths, and computed module loads with a literal renderer prefix.
+It also follows explicit renderer directory reads in outside tests, e2e helpers, and tooling scripts.
+Unknown module loads within renderer or site, missing tests, native resources, new or deleted files, and outside consumers retain package selection.
+Computed paths elsewhere need declared coverage; the selector cannot resolve arbitrary runtime values.
+An unavailable parser or a test-file list exceeding the command budget also retains package selection and its services.
+Mixed changes and `--full` also retain package selection.
 Site-only changes run the site's tests and two desktop renderer compatibility files, without desktop packaging or native proofs.
 Account API and Postgres inputs retain desktop preparation and account and desktop browser proofs, without unrelated desktop unit or packaging tests.
 Share-web inputs retain desktop preparation, desktop browser proofs, and the native delivery proof.

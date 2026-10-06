@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, wr
 import fs from "node:fs";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { Writable } from "node:stream";
 import { repoRoot, run } from "./process.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
@@ -72,28 +72,38 @@ test("verification selects packages and proofs and prepares before parallel jobs
     ["pr", null, null, "packages/mcp/src/index.ts"],
     ["pr", null, null, "services/workspace-api/src/index.ts"],
     ["pr", null, null, "apps/site/src/index.ts"],
+    ["pr", null, null, "apps/desktop/src/renderer/Widget.tsx"],
+    ["pr", "js", "desktop-skipped", "apps/desktop/src/renderer/Widget.tsx"],
+    ["pr", "js", "smoke-missing", "apps/desktop/src/renderer/Widget.tsx"],
+    ["pr", null, null, "apps/desktop/src/renderer/Widget.tsx", true],
+    ...(process.platform === "win32" ? [["pr", "js", "gallery-missing", "apps/desktop/src/renderer/Widget.tsx"]] : []),
     ["pr", null, null, null, true], ["pr", "js", null, null, true], ["pr", "rust", null, null, true],
     ["pr", "js", null, null],
   ]) cases.push(t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : ""].filter(Boolean).join(" "), async (context) => {
     const rust = mode === "pr" && job !== "js" && (full || job === "rust" || changed === "pnpm-lock.yaml");
     const js = mode === "pr" && job !== "rust";
     const siteOnly = changed === "apps/site/src/index.ts" && !full;
+    const rendererOnly = changed === "apps/desktop/src/renderer/Widget.tsx" && !full;
     const selected = changed === "packages/fixture/src/index.ts" ? ["@dohc/fixture"]
       : changed === "packages/mcp/src/index.ts" ? ["@dohc/mcp", "@dohc/share-web"]
       : changed === "services/workspace-api/src/index.ts" ? ["@dohc/desktop", "@dohc/workspace-api"]
-      : siteOnly ? ["@dohc/desktop", "@dohc/site"]
+      : siteOnly || rendererOnly ? ["@dohc/desktop", "@dohc/site"]
       : ["@dohc/desktop", "@dohc/fixture", "@dohc/mcp", "@dohc/share-web", "@dohc/site", "@dohc/unrelated", "@dohc/workspace-api"];
-    const selectedDesktopFiles = siteOnly ? siteFiles : changed === "services/workspace-api/src/index.ts" ? serviceFiles : undefined;
+    const selectedDesktopFiles = rendererOnly ? ["src/renderer/Widget.test.tsx", "src/renderer/tokens.test.ts"]
+      : siteOnly ? siteFiles : changed === "services/workspace-api/src/index.ts" ? serviceFiles : undefined;
     const desktopScripts = js && selected.includes("@dohc/desktop") && !selectedDesktopFiles;
-    const desktop = mode !== "pr" || desktopScripts || js && changed === "services/workspace-api/src/index.ts";
+    const desktop = mode !== "pr" || desktopScripts || js && (changed === "services/workspace-api/src/index.ts" || rendererOnly);
+    const desktopProof = desktop && !rendererOnly;
+    const smoke = js && rendererOnly;
     const nativeProof = js && selected.includes("@dohc/share-web");
     const accounts = js && selected.includes("@dohc/workspace-api");
     // The gallery is selected for renderer inputs and for everything; only Windows runs it, where its pixels compare.
-    const statesPage = desktop && js && (full || changed === "pnpm-lock.yaml" || job === "js" && !changed);
+    const statesPage = desktop && js && (rendererOnly || full || changed === "pnpm-lock.yaml" || job === "js" && !changed);
     const gallery = statesPage && process.platform === "win32";
     const prepare = desktop || nativeProof;
-    const database = js && (desktop || nativeProof || accounts);
-    const browser = js && (desktop || accounts);
+    const database = js && (desktopProof || nativeProof || accounts);
+    const browser = js && (desktopProof || smoke || gallery || accounts);
+    const proofsSelected = nativeProof || accounts || desktopProof && js || smoke || statesPage;
     const previousIncremental = fault === "source" || full && !job ? undefined : "1";
     const expectedIncremental = mode === "pr" ? "0" : previousIncremental;
     const root = mkdtempSync(join(tmpdir(), "dohc-verify-build-order-"));
@@ -108,7 +118,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
       createPrepareFixture(root, new URL("./build.mjs", import.meta.url), { commit: false });
       git(["config", "core.logAllRefUpdates", "true"]);
       mkdirSync(join(root, ".dohc-dev"), { recursive: true });
-      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+      for (const path of ["scripts/verification/verify.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
         "tools/rust-engine-program/git-read.mjs",
         "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml"]) {
         put(path, readFileSync(join(repoRoot, path)));
@@ -131,6 +141,8 @@ test("verification selects packages and proofs and prepares before parallel jobs
       put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/.env.local\n");
       put("apps/desktop/package.json", '{"name":"@dohc/desktop","scripts":{"test":"unused","test:unit":"vitest run","test:scripts":"scripts","test:scripts:isolated":"isolated","test:scripts:runtime":"runtime"}}');
       for (const file of [...siteFiles, ...serviceFiles]) put(`apps/desktop/${file}`, "// fixture compatibility test\n");
+      put("apps/desktop/src/renderer/Widget.tsx", "export const value = 1;\n");
+      put("apps/desktop/src/renderer/Widget.test.tsx", 'import "./Widget.js";\n');
       for (const name of ["fixture", "mcp", "share-web", "site", "unrelated", "workspace-api"]) {
         const path = `${name === "workspace-api" ? "services" : name === "site" ? "apps" : "packages"}/${name}`;
         put(`${path}/package.json`, JSON.stringify({name:`@dohc/${name}`,scripts:{test:"vitest run"}}));
@@ -290,9 +302,9 @@ test("verification selects packages and proofs and prepares before parallel jobs
             if(${desktop})assertPrepared({engineBinary:stagedEnginePath});
             const pr=process.env.FIXTURE_MODE==='pr';
             if(pr) {
-              assert.equal(options.env.POSTGRES_URL,'postgres://dohc:dohc@127.0.0.1:1234/dohc');
+              assert.equal(options.env.POSTGRES_URL,${JSON.stringify(database ? "postgres://dohc:dohc@127.0.0.1:1234/dohc" : "")});
               assert.equal(options.env.DOHC_REQUIRE_POSTGRES,'1');
-              assert.equal(existsSync(join(repoRoot,'.dohc-dev/database-started')),true);
+              assert.equal(existsSync(join(repoRoot,'.dohc-dev/database-started')),${database});
               assert.equal(existsSync(join(repoRoot,'.dohc-dev/database-stopped')),false);
               assert.equal(existsSync(join(repoRoot,'.dohc-dev/browser-installed')),true);
             }
@@ -303,9 +315,9 @@ test("verification selects packages and proofs and prepares before parallel jobs
               return {stdout:''};
             }
             assert.ok(${desktop},'Unselected desktop proof');
-            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke|@self-host-onboarding'+(${gallery}?'|@states-page':''):'@verification-smoke'];
+            const expected=process.env.FIXTURE_MODE==='e2e'?['--project','fixture']:['--grep',pr?'@verification-smoke'+(${desktopProof}?'|@self-host-onboarding':'')+(${gallery}?'|@states-page':''):'@verification-smoke'];
             assert.ok(args.some((arg,index)=>arg===expected[0] && args[index+1]===expected[1]));
-            const titles=['@verification-smoke persistence',...(pr?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
+            const titles=[process.env.FIXTURE_FAULT==='smoke-missing'?'unrelated passing spec':'@verification-smoke persistence',...(pr && ${desktopProof}?[process.env.FIXTURE_FAULT==='onboarding-missing'?'@verification-smoke another persistence':'@self-host-onboarding account and sync']:[]),...(${gallery}?[process.env.FIXTURE_FAULT==='gallery-missing'?'@states-page the page stays closed':'@states-page @states-baselines every shared part']:[])];
             writeFileSync(options.env.PLAYWRIGHT_JSON_OUTPUT_NAME,JSON.stringify({
               stats:{expected:pr?2:1,unexpected:process.env.FIXTURE_FAULT==='desktop-cancelled'?1:0,flaky:0,skipped:process.env.FIXTURE_FAULT==='desktop-skipped'?1:0},
               suites:[{suites:[{specs:titles.map(title=>({title,ok:true,tests:[{results:[{status:'passed'}]}]}))}]}],
@@ -350,7 +362,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
           writeFileSync('.dohc-dev/incremental.json',JSON.stringify({value:process.env.CARGO_INCREMENTAL??null,present:Object.hasOwn(process.env,'CARGO_INCREMENTAL')}));
         }
       `, ...args], { cwd: root, timeout: 120_000, signal: context.signal, env: { ...process.env,
-        NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "",
+        NODE_PATH: ["js-yaml", "@babel/parser"].map(name => join(dirname(require.resolve(`${name}/package.json`)), ...name.split("/").map(() => ".."))).join(delimiter), FIXTURE_MODE: mode, FIXTURE_FAULT: fault ?? "",
         CARGO_INCREMENTAL: previousIncremental,
         POSTGRES_URL:"postgres://must-not-use-inherited-database/foreign" } });
       assert.equal(result.error, undefined, result.stderr);
@@ -377,13 +389,14 @@ test("verification selects packages and proofs and prepares before parallel jobs
           "accounts-cancelled": /Account browser verification did not complete without failures or skips/,
           "desktop-cancelled": /Desktop verification did not complete a passing test run/,
           "desktop-skipped": /A mandatory desktop smoke test was skipped/,
+          "smoke-missing": /did not pass every required proof: @verification-smoke/,
           "onboarding-missing": /did not pass every required proof: @verification-smoke, @self-host-onboarding/,
           "gallery-missing": /did not pass every required proof: .*@states-baselines/,
         };
         assert.match(result.stderr, messages[fault]);
         const ranJs = js;
         assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), prepare);
-        assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), ranJs);
+        assert.equal(existsSync(join(root, ".dohc-dev/database-stopped")), database);
         assert.equal(report.steps.some(step => step.name === "typecheck"), ranJs);
         if (["rust", "rust-verdict", "rust-and-js"].includes(fault)) {
           const failedStep = fault === "rust-verdict" ? "rust-verdict" : "rust";
@@ -407,7 +420,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
           ...(rust ? ["cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
           ...(js ? ["typecheck", "tests"] : []),
           ...(nativeProof ? ["self-host-native"] : []), ...(browser ? ["browser-install"] : []),
-          ...(accounts ? ["accounts"] : []), ...(desktop ? ["desktop"] : []),
+          ...(accounts ? ["accounts"] : []), ...(desktopProof || smoke || gallery ? ["desktop"] : []),
         ].sort());
         if (rust && js) assert.equal(readFileSync(join(root, '.dohc-dev/jobs-overlapped'), 'utf8'), 'yes');
         assert.equal(report.verdict, "PASS");
@@ -425,12 +438,16 @@ test("verification selects packages and proofs and prepares before parallel jobs
         assert.equal(report.full,full);
         if (js) {
           assert.deepEqual(report.javascript.packages,selected);
-          assert.deepEqual(report.javascript.proofs,{accounts,selfHostNative:nativeProof,desktop,statesPage});
+          assert.deepEqual(report.javascript.proofs,{accounts,selfHostNative:nativeProof,desktop:desktopProof,...(rendererOnly?{smoke:true}:{}),statesPage});
+          if (statesPage && process.platform !== "win32") {
+            assert.equal(report.statesPage, `not run: the states page compares pixels on win32 only, and this host is ${process.platform}`);
+            assert.ok(report.desktopProofs.some(title => title.includes("@verification-smoke")));
+          }
           assert.equal(report.javascript.desktopScripts, desktopScripts);
           assert.deepEqual(report.javascript.testFiles, selectedDesktopFiles ? {"@dohc/desktop": selectedDesktopFiles} : {});
           const tests=JSON.parse(readFileSync(report.jsTests,"utf8"));
-          assert.equal(tests.proofs, nativeProof || browser);
-          assert.equal(tests.steps.filter(step => step.name === "proofs").length, nativeProof || browser ? 1 : 0);
+          assert.equal(tests.proofs, proofsSelected);
+          assert.equal(tests.steps.filter(step => step.name === "proofs").length, proofsSelected ? 1 : 0);
           assert.equal(tests.desktopScripts, desktopScripts);
           assert.deepEqual(tests.selectedPackages,selected);
           assert.deepEqual(tests.packages.map(pkg=>pkg.name).sort(),selected);
