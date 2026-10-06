@@ -104,6 +104,19 @@ An explicit `--job` runs that job even when the filters omit it.
 Use it when a build or test step reads a changed file outside the filters.
 For a forced JavaScript job with no matching changes, the runner selects the complete JavaScript suite.
 
+After a renderer fix, reuse completed Rust evidence with `pnpm verify:pr --base <target-ref> --reuse-rust <original-result.json>`.
+The current run must select Rust. Add `--job rust` to request that job explicitly.
+The verifier accepts an original Rust pass from a completed PR run, including one whose JavaScript job failed.
+The original report must contain a Rust identity and every required passing gate check.
+Older reports without this identity require a fresh Rust run.
+The verifier compares Git content, tools, platform, environment, and Cargo configuration.
+Only renderer source changes and commits with identical inputs can reuse Rust evidence.
+All other tracked changes require a fresh Rust job, including dependencies, fixtures, and verification scripts.
+Every reuse runs the pinned tool probes, `cargo deny check`, and `cargo audit` again.
+Read the current report's `rustEvidence` reference and `rust-reuse` step to distinguish reused checks from executed checks.
+The reference keeps the original tested commit, report hash, gate log hash, and changed paths.
+Keep the original report and logs until review finishes. Reused evidence cannot become another reuse source.
+
 Run `pnpm verify:pr --base <target-ref> --full` for comprehensive verification before a release or when impact is uncertain.
 This runs both gates, every package, and every mandatory integration proof, including when the diff is empty.
 Combine `--full` with `--job js` or `--job rust` to run one complete job.

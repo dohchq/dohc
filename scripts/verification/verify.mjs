@@ -12,6 +12,7 @@ import { readWorkspacePackages, selectJavaScript, selectedGates, workflowFilters
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
+import { refreshRustReuse, rustIdentity, sealRustEvidence } from "./rust-reuse.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 export function desktopProofCommand(args, { platform = process.platform, env = process.env } = {}) {
@@ -130,6 +131,11 @@ export async function verify(args) {
   const jobIndex = args.indexOf("--job");
   const job = jobIndex < 0 ? null : args[jobIndex + 1];
   const full = args.includes("--full");
+  const reuseIndex = args.indexOf("--reuse-rust");
+  const reuseRust = reuseIndex < 0 ? null : args[reuseIndex + 1];
+  if (reuseIndex >= 0 && (mode !== "pr" || !reuseRust || reuseRust.startsWith("--") || job === "js")) {
+    throw new Error("Use --reuse-rust <canonical-result.json> with a PR run that includes Rust.");
+  }
   if (full && !["pr", "plan"].includes(mode)) throw new Error("--full is available only for PR verification and planning.");
   if (jobIndex >= 0 && (mode !== "pr" || !["rust", "js"].includes(job))) throw new Error("--job rust|js is available only for PR verification.");
   if (["pr", "plan"].includes(mode) && (!base || base.startsWith("--"))) throw new Error("Supply --base <ref> for PR gate selection.");
@@ -180,6 +186,8 @@ export async function verify(args) {
   let lane;
   const previousIncremental = process.env.CARGO_INCREMENTAL;
   let desktopEnvironment;
+  let originalRustIdentity;
+  let rustTools;
   async function checkedStep(row, action, checkpoint = () => cancellation.checkpoint()) {
     await checkpoint();
     report.steps.push(row); save();
@@ -205,6 +213,7 @@ export async function verify(args) {
       return selected;
     });
     if (mode === "pr" && report.dirty) throw new Error("Commit the worktree before running the PR gate.");
+    if (reuseRust && !gates.rust) throw new Error("--reuse-rust requires a selected Rust job. Use --job rust when needed.");
     if (mode === "pr" && !gates.js && !gates.rust) {
       report.reason = "No code gate applies to the changed files.";
       await checkTree("finish");
@@ -235,10 +244,22 @@ export async function verify(args) {
       if (mode !== "pr" || !gates.rust) return;
       try {
         const pins = require("js-yaml").load(workflow).env;
+        rustTools = Object.fromEntries(report.doctor.checks.filter(check => ["rustc", "cargo"].includes(check.name) && check.state === "PASS")
+          .map(check => [check.name, check.detail]));
         for (const [tool, variable] of [["deny", "CARGO_DENY_VERSION"], ["audit", "CARGO_AUDIT_VERSION"], ["nextest", "CARGO_NEXTEST_VERSION"]]) {
           const result = await step(`cargo-${tool}-version`, "cargo", [tool, "--version"]);
           if (result.stdout.split(/\r?\n/)[0].split(/\s+/)[1] !== pins[variable]) throw new Error(`Install cargo-${tool} ${pins[variable]} to match the workflow.`);
+          rustTools[tool] = result.stdout.trim();
         }
+        const identity = rustIdentity({root: repoRoot, engine: sourceFingerprint("engine"), tools: rustTools});
+        if (reuseRust) {
+          report.rustEvidence = await checkedStep({name: "rust-reuse", reused: true, report: resolve(reuseRust)},
+            () => refreshRustReuse(reuseRust, {root: repoRoot, identity,
+              step: (name, command, args) => step(name, command, args, buildEnvironment())}));
+          save();
+          return;
+        }
+        originalRustIdentity = identity;
         await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
         await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
       } catch (error) {
@@ -327,6 +348,19 @@ export async function verify(args) {
     const interrupted = await cancellation.dispose();
     lane?.release();
     if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
+    finishTiming(); Object.assign(report, total);
+    if (originalRustIdentity && !interrupted && !report.rustError && !report.cleanupError) {
+      try {
+        recordTree("rust-receipt:finish");
+        report.provenance = classifyTreeProvenance(report.treeReadings);
+        const finalIdentity = rustIdentity({root: repoRoot, engine: sourceFingerprint("engine"), tools: rustTools});
+        if (JSON.stringify(finalIdentity) !== JSON.stringify(originalRustIdentity)) throw new Error("Rust inputs changed before the receipt finished.");
+        report.rustEvidence = sealRustEvidence(report, originalRustIdentity);
+      } catch (error) {
+        report.rustEvidence = {kind: "unavailable", reason: error.message};
+        report.verdict = "FAIL"; report.error ??= error.message; process.exitCode = 1;
+      }
+    }
     if (mode === "pr") {
       if (previousIncremental === undefined) delete process.env.CARGO_INCREMENTAL;
       else process.env.CARGO_INCREMENTAL = previousIncremental;
