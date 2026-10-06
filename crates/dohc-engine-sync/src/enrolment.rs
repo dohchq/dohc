@@ -566,11 +566,14 @@ pub(crate) fn last_file_export_in_tx(
             )
             .optional()
             .map_err(SyncError::corrupt)?;
-        if let Some(order) = order {
-            let rank = (order, false, rowid);
-            if last.as_ref().is_none_or(|(_, previous)| rank > *previous) {
-                last = Some((json, rank));
-            }
+        let order = order.ok_or_else(|| {
+            SyncError::corrupt(std::io::Error::other(
+                "published moment is missing without its rollback compensator",
+            ))
+        })?;
+        let rank = (order, false, rowid);
+        if last.as_ref().is_none_or(|(_, previous)| rank > *previous) {
+            last = Some((json, rank));
         }
     }
     last.map(|(json, _)| serde_json::from_str(&json).map_err(SyncError::corrupt))

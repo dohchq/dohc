@@ -7173,6 +7173,71 @@ mod tests {
         );
     }
 
+    fn exported_before_relay_vector() -> Value {
+        let mut payload = validate_conflict_resolve_v1(
+            &compact_path_change(),
+            ConflictResolveEnvelopeContext {
+                workspace_id: "workspace-a",
+                recorded_at_ms: 21,
+            },
+        )
+        .unwrap()
+        .payload;
+        payload.lineage_transition = None;
+        payload.paths.push("docs/exported.md".to_owned());
+        let mut exported = payload.current.present().unwrap().clone();
+        exported.path_ref = 2;
+        exported.latest_moment_id = "moment-exported".to_owned();
+        exported.blob_sha256 = dohc_engine_storage::hex_sha256(b"last exported text");
+        exported.byte_length = 18;
+        exported.updated_at_ms = 5;
+        payload.exported_before = Some(HeadV1::Present(exported));
+        let built = build_conflict_resolve_v1(payload).unwrap();
+        json!({"payload":built.value,"shadows":built.validated.shadows})
+    }
+
+    const RELAY_VECTOR_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../services/sync-relay/src/server.test.ts"
+    );
+    const RELAY_VECTOR_BEGIN: &str = "// BEGIN RUST EXPORTED-BEFORE VECTOR\n";
+    const RELAY_VECTOR_END: &str = "// END RUST EXPORTED-BEFORE VECTOR";
+    const RELAY_VECTOR_DECLARATION: &str = "const RUST_EXPORTED_BEFORE_VECTOR = ";
+
+    #[test]
+    fn exported_before_carrier_matches_the_shared_rust_relay_vector() {
+        let source = std::fs::read_to_string(RELAY_VECTOR_PATH)
+            .unwrap()
+            .replace("\r\n", "\n");
+        let (_, vector) = source.split_once(RELAY_VECTOR_BEGIN).unwrap();
+        let (vector, _) = vector.split_once(RELAY_VECTOR_END).unwrap();
+        let encoded = vector
+            .trim()
+            .strip_prefix(RELAY_VECTOR_DECLARATION)
+            .unwrap()
+            .strip_suffix(';')
+            .unwrap();
+        let checked_in: Value = serde_json::from_str(encoded).unwrap();
+        assert_eq!(
+            checked_in,
+            exported_before_relay_vector(),
+            "regenerate with update_exported_before_relay_vector"
+        );
+    }
+
+    // Like protocol/examples/update_fixtures.rs, Rust is the fixture's only writer.
+    #[test]
+    #[ignore = "regenerates the Rust-owned vector in relay server.test.ts"]
+    fn update_exported_before_relay_vector() {
+        let source = std::fs::read_to_string(RELAY_VECTOR_PATH)
+            .unwrap()
+            .replace("\r\n", "\n");
+        let (prefix, rest) = source.split_once(RELAY_VECTOR_BEGIN).unwrap();
+        let (_, suffix) = rest.split_once(RELAY_VECTOR_END).unwrap();
+        let generated = serde_json::to_string_pretty(&exported_before_relay_vector()).unwrap();
+        std::fs::write(RELAY_VECTOR_PATH, format!("{prefix}{RELAY_VECTOR_BEGIN}{RELAY_VECTOR_DECLARATION}{generated};\n{RELAY_VECTOR_END}{suffix}")).unwrap();
+    }
+
     #[test]
     fn lineage_artifact_preimage_mismatch_is_refused_without_mutating_input() {
         let mut payload = compact_path_change();

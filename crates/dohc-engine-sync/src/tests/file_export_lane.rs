@@ -1283,6 +1283,41 @@ fn lane_uses_genuine_present_bootstrap_and_intervening_publications() {
 }
 
 #[test]
+fn published_moment_removed_without_rollback_cannot_fall_back_to_an_older_export() {
+    let (_scratch, _, mut source) = owner();
+    write(
+        &mut source,
+        "doc",
+        "v1",
+        "doc.md",
+        "first export",
+        "ydoc",
+        10,
+    );
+    lane(&mut source, "doc");
+    drain(&mut source);
+    write(
+        &mut source,
+        "doc",
+        "v2",
+        "doc.md",
+        "second export",
+        "ydoc",
+        20,
+    );
+    drain(&mut source);
+    let result = source.write_with(&NoFaults, |tx| {
+        tx.execute("DELETE FROM moments WHERE moment_id='v2'", [])
+            .map_err(SyncError::persist)?;
+        crate::enrolment::last_file_export_in_tx(tx, &DocKey::new("ws", "main", "doc").unwrap())
+    });
+    assert!(
+        result.is_err(),
+        "a non-rollback deleter must not silently substitute v1"
+    );
+}
+
+#[test]
 fn lane_divergence_uses_existing_conflict_and_never_echoes_imports() {
     let (_scratch, _, mut source) = owner();
     write(&mut source, "doc", "a", "doc.md", "A", "ydoc", 10);
