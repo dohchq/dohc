@@ -501,6 +501,237 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
+  it("retries a capacity refusal while opening a pending collection adoption provider", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const path = "tasks/pending.md";
+    const recordId = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const markdown = `---\nid: ${recordId}\n---\n\n# Keep this body\n`;
+    await write(root, path, markdown);
+    let pending = true;
+    const store = {
+      ensureMainVersion: async () => undefined,
+      flushCapture: async () => undefined,
+      listPendingCollectionAdoptions: async () => ({
+        adoptions: pending ? [{ versionId: "main", recordId, collectionPath: "tasks",
+          filePath: path, objectId: "pending-object" }] : [], nextCursor: null,
+      }),
+      reconcileCapture: async () => { pending = false; },
+    } as unknown as CaptureVersionedTextStore;
+    const sessions = { run: async (_workspace: unknown, task: (binding: unknown) => unknown) =>
+      task({ client: {}, workspace: "workspace" }) } as unknown as EngineWorkspaceSessions;
+    const capacity = new DaemonRefusalError({ code: "OVERLOADED",
+      message: "live-settlement-capacity", retry: "afterBackoff" }, undefined);
+    const evict = vi.fn(async () => undefined);
+    const open = vi.fn(async (input: EngineYdocProviderSessionOptions) =>
+      ({ path: input.path, evict }) as unknown as EngineYdocProviderSession)
+      .mockRejectedValueOnce(capacity);
+    const errors: unknown[] = [];
+    const engine = capture(root, { store, rustEngineSessions: sessions,
+      openRustYDocProviderSession: open, onError: (_context, error) => errors.push(error) });
+    try {
+      await engine.flush();
+      expect(open).toHaveBeenCalledTimes(2);
+      expect(evict).toHaveBeenCalledTimes(1);
+      expect(pending).toBe(false);
+      expect(await readFile(join(root, path), "utf8")).toBe(markdown);
+      await engine.flush();
+      expect(open).toHaveBeenCalledTimes(2);
+      expect(errors).toEqual([]);
+    } finally {
+      await engine.stop();
+    }
+    expect(evict).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a capacity refusal from an open collection adoption without closing its session", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const path = "tasks/pending.md";
+    const objectId = "pending-object";
+    const recordId = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, objectId, text: "# Keep this body\n" });
+    const sessions = mockLiveSessions(loopback);
+    const liveStore = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root,
+      attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    let pending = true;
+    const store = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "flushCapture") return async () => undefined;
+        if (property === "listPendingCollectionAdoptions") return async () => ({
+          adoptions: pending ? [{ versionId: "main", recordId, collectionPath: "tasks",
+            filePath: path, objectId }] : [], nextCursor: null,
+        });
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("Name", "Manual");
+    doc.getText("body").insert(0, "# Keep this body\n");
+    const close = vi.fn(async () => undefined);
+    const evict = vi.fn(async () => undefined);
+    const capacity = new DaemonRefusalError({ code: "OVERLOADED",
+      message: "live-settlement-capacity", retry: "afterBackoff" }, undefined);
+    const adopt = vi.fn(async () => {
+      doc.getMap("frontmatter").set("id", recordId);
+      pending = false;
+      return "settled" as const;
+    }).mockRejectedValueOnce(capacity);
+    const open = vi.fn(async () => ({
+      doc, initialUpdate: Y.encodeStateAsUpdate(doc), contentKind: "richdoc" as const,
+      path, objectId, versionId: "main", head: "present" as const, lineage: "existing" as const,
+      unsettled: false, close, evict, adoptCollectionRecord: adopt,
+      applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); },
+    }) as unknown as EngineYdocProviderSession);
+    const errors: unknown[] = [];
+    const engine = capture(root, { store, rustEngineSessions: sessions,
+      openRustYDocProviderSession: open, onError: (_context, error) => errors.push(error) });
+    const session = await engine.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    try {
+      await engine.flush();
+      expect(adopt).toHaveBeenCalledTimes(2);
+      expect(pending).toBe(false);
+      expect(session.doc.getMap("frontmatter").toJSON()).toEqual({ Name: "Manual", id: recordId });
+      expect(session.doc.getText("body").toString()).toBe("# Keep this body\n");
+      await engine.flush();
+      expect(adopt).toHaveBeenCalledTimes(2);
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(close).not.toHaveBeenCalled();
+      expect(evict).not.toHaveBeenCalled();
+      expect(errors).toEqual([]);
+    } finally {
+      await session.close({ settle: false });
+      await engine.stop();
+      doc.destroy();
+    }
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(evict).not.toHaveBeenCalled();
+  });
+
+  it("keeps a capacity-refused live adoption deferred while another provider proceeds", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const path = "tasks/pending.md";
+    const objectId = "pending-object";
+    const recordId = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, objectId, text: "# Keep this body\n" });
+    const sessions = mockLiveSessions(loopback);
+    const liveStore = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root,
+      attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    let pending = true;
+    let healthyPending = true;
+    let admissionReleased = false;
+    const flushCapture = vi.fn(async () => undefined);
+    const reconcile = vi.fn(async () => {
+      if (pending) throw new DaemonRefusalError({ code: "COLLECTION_RECONCILIATION_LEASE_HELD",
+        message: "A document is still open.", retry: "afterBackoff" }, undefined);
+    });
+    const store = new Proxy(liveStore, {
+      get(target, property) {
+        if (property === "flushCapture") return flushCapture;
+        if (property === "reconcileCapture") return reconcile;
+        if (property === "listPendingCollectionAdoptions") return async () => ({
+          adoptions: [
+            ...(pending ? [{ versionId: "main", recordId, collectionPath: "tasks", filePath: path, objectId }] : []),
+            ...(healthyPending ? [{ versionId: "main", recordId: "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+              collectionPath: "tasks", filePath: "tasks/healthy.md", objectId: "healthy-object" }] : []),
+          ], nextCursor: null,
+        });
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("Name", "Manual");
+    doc.getText("body").insert(0, "# Keep this body\n");
+    const close = vi.fn(async () => undefined);
+    const evict = vi.fn(async () => undefined);
+    const healthyEvict = vi.fn(async () => { healthyPending = false; });
+    const capacity = new DaemonRefusalError({ code: "OVERLOADED",
+      message: "live-settlement-capacity", retry: "afterBackoff" }, undefined);
+    const adopt = vi.fn(async () => {
+      if (!admissionReleased) throw capacity;
+      doc.getMap("frontmatter").set("id", recordId);
+      pending = false;
+      return "settled" as const;
+    });
+    const open = vi.fn(async (input: EngineYdocProviderSessionOptions) => input.path !== path
+      ? { path: input.path, evict: healthyEvict } as unknown as EngineYdocProviderSession
+      : ({ doc, initialUpdate: Y.encodeStateAsUpdate(doc), contentKind: "richdoc" as const,
+        path, objectId, versionId: "main", head: "present" as const, lineage: "existing" as const,
+        unsettled: false, close, evict, adoptCollectionRecord: adopt,
+        applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); },
+      }) as unknown as EngineYdocProviderSession);
+    const errors: unknown[] = [];
+    const engine = capture(root, { store, rustEngineSessions: sessions,
+      openRustYDocProviderSession: open, onError: (_context, error) => errors.push(error) });
+    const session = await engine.openYDocSession({ path, contentKind: "richdoc", onRemoteUpdate: () => undefined });
+    try {
+      await engine.flush();
+      expect(flushCapture).toHaveBeenCalledTimes(1);
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      expect(healthyEvict).toHaveBeenCalledTimes(1);
+      expect(healthyPending).toBe(false);
+      expect(pending).toBe(true);
+      expect(adopt).toHaveBeenCalledTimes(2);
+      expect(session.objectId).toBe(objectId);
+      expect(session.doc.getMap("frontmatter").toJSON()).toEqual({ Name: "Manual" });
+      expect(session.doc.getText("body").toString()).toBe("# Keep this body\n");
+      expect(errors).toEqual([]);
+      admissionReleased = true;
+      await engine.flush();
+      expect(flushCapture).toHaveBeenCalledTimes(2);
+      expect(adopt).toHaveBeenCalledTimes(3);
+      expect(pending).toBe(false);
+      expect(session.doc.getMap("frontmatter").toJSON()).toEqual({ Name: "Manual", id: recordId });
+      expect(session.doc.getText("body").toString()).toBe("# Keep this body\n");
+      expect(open).toHaveBeenCalledTimes(2);
+      expect(close).not.toHaveBeenCalled();
+      expect(evict).not.toHaveBeenCalled();
+      expect(errors).toEqual([]);
+    } finally {
+      admissionReleased = true;
+      await session.close({ settle: false });
+      pending = false;
+      healthyPending = false;
+      await engine.stop();
+      doc.destroy();
+    }
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(evict).not.toHaveBeenCalled();
+    expect(healthyEvict).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { code: "OVERLOADED" as const, message: "file-locked" },
+    { code: "OVERLOADED" as const, message: "settlement-materialization-pending" },
+    { code: "LIMIT_EXCEEDED" as const, message: "ydoc-author-capacity" },
+  ])("reports $message during collection adoption", async ({ code, message }) => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    let listed = false;
+    const store = {
+      ensureMainVersion: async () => undefined,
+      flushCapture: async () => undefined,
+      listPendingCollectionAdoptions: async () => {
+        if (listed) return { adoptions: [], nextCursor: null };
+        listed = true;
+        return { adoptions: [{ versionId: "main", recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+          collectionPath: "tasks", filePath: "tasks/pending.md", objectId: "pending-object" }], nextCursor: null };
+      },
+    } as unknown as CaptureVersionedTextStore;
+    const refusal = new DaemonRefusalError({ code, message, retry: "afterBackoff" }, undefined);
+    const errors: Array<{ context: string; error: unknown }> = [];
+    const engine = capture(root, { store,
+      openRustYDocProviderSession: async () => { throw refusal; },
+      onError: (context, error) => errors.push({ context, error }) });
+    try {
+      await engine.flush();
+      expect(errors).toEqual([{ context: "collection adoption of tasks/pending.md", error: refusal }]);
+    } finally {
+      await engine.stop();
+    }
+  });
+
   it("continues draining pending collection adoptions after one adoption fails", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     let listed = false;

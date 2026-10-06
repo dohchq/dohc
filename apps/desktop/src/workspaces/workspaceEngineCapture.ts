@@ -43,6 +43,7 @@ import {
   engineStoreRefusalOf,
   isConflictStaleTargetRefusal,
   isEngineStoreBusyRefusal,
+  isLiveSettlementCapacityRefusal,
   isFileLockedRefusal,
   isYdocUpdateAdmissionRefusal,
   ydocUpdateDependsOn,
@@ -3836,7 +3837,10 @@ export function createWorkspaceEngineCapture(
           } else {
             pendingCollectionAdoptionProviders.delete(adoptionKey);
           }
-          if (isEngineStoreBusyRefusal(error)) continue;
+          if (isEngineStoreBusyRefusal(error) || isLiveSettlementCapacityRefusal(error)) {
+            deferred = true;
+            continue;
+          }
           onError(`collection adoption of ${adoption.filePath}`, error);
         }
       }
