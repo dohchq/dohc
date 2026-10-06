@@ -168,8 +168,10 @@ export function EngineMomentDiffPage({
       .catch(() => {
         if (read !== readToken.current) return;
         // A failed re-read leaves the last answer on screen, which cannot
-        // settle a restore request.
-        if (restoreRequest.current !== null && restoreRequest.current !== "taken") {
+        // settle a restore request. Only a read issued after the request may
+        // drop it, as only such a read may answer it.
+        const request = restoreRequest.current;
+        if (request !== null && request !== "taken" && read > request.after) {
           restoreRequest.current = "taken";
           onRestoreRequestTaken();
         }

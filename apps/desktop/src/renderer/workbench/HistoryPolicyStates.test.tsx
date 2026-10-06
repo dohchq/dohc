@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineMomentDetailRecord, HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
@@ -249,6 +250,75 @@ describe("a History diff the rules hide", () => {
     await waitFor(() => expect(page.onRestoreRequestTaken).toHaveBeenCalledOnce());
     expect(screen.getByTestId("engine-diff-lines")).toBeTruthy();
     expect(screen.queryByTestId("engine-diff-restore-confirm")).toBeNull();
+  });
+
+  // Under act, React renders the fresh read in the same flush as the request,
+  // so nothing can land between them. In the app the fresh read waits for
+  // the next task. This test sets the request outside act, and a sibling
+  // rejects the earlier read in the same commit, after the page's effects.
+  it("leaves the request to the fresh read when an earlier read fails after Try again", async () => {
+    const earlier = deferred<{ moment: EngineMomentDetailRecord }>();
+    const read = vi.fn()
+      .mockResolvedValueOnce({ moment: moment() })
+      .mockReturnValueOnce(earlier.promise)
+      .mockResolvedValue({ moment: moment() });
+    vi.stubGlobal("dohcDesktop", { readEngineMoment: read, restoreEngineMomentFile: vi.fn() });
+    const taken = vi.fn();
+    const onPathResolved = vi.fn();
+    const rejectEarlier = () => earlier.reject(new Error("dohc is busy."));
+    let setRequested: (requested: boolean) => void = noop;
+    function RejectInSameCommit(props: { when: boolean }) {
+      useEffect(() => {
+        if (props.when) rejectEarlier();
+      }, [props.when]);
+      return null;
+    }
+    function Harness(props: { answer: number }) {
+      const [requested, setRequestedState] = useState(false);
+      setRequested = setRequestedState;
+      const historyAnswer = useMemo(() => ({ answer: props.answer }), [props.answer]);
+      const takeRequest = useCallback(() => {
+        taken();
+        setRequestedState(false);
+      }, []);
+      return (
+        <>
+          <EngineMomentDiffPage
+            workspaceId="ws-1"
+            tabPath={momentDiffTabPath("m-1")}
+            onBeforeRestore={async () => noop}
+            onOpenFile={noop}
+            onPathResolved={onPathResolved}
+            registerActiveUndo={noop}
+            onRestored={noop}
+            onStopAndRestore={noop}
+            onError={noop}
+            onSettled={noop}
+            historyAnswer={historyAnswer}
+            onReopenRestore={noop}
+            restoreRequested={requested}
+            onRestoreRequestTaken={takeRequest}
+          />
+          <RejectInSameCommit when={requested} />
+        </>
+      );
+    }
+    const view = render(<Harness answer={1} />);
+    await screen.findByTestId("engine-diff-lines");
+    // A History refresh starts a read, which is still out when Try again comes.
+    view.rerender(<Harness answer={2} />);
+    expect(read).toHaveBeenCalledTimes(2);
+
+    const actEnvironment = Reflect.get(globalThis, "IS_REACT_ACT_ENVIRONMENT");
+    Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", false);
+    try {
+      setRequested(true);
+      await waitFor(() => expect(screen.getByTestId("engine-diff-restore-confirm")).toBeTruthy());
+    } finally {
+      Reflect.set(globalThis, "IS_REACT_ACT_ENVIRONMENT", actEnvironment);
+    }
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(taken).toHaveBeenCalledOnce();
   });
 
   it("holds a restore request until its own change has an answer", async () => {
