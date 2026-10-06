@@ -262,17 +262,10 @@ test("a killed runtime build releases ownership on retry while live owners remai
     assert.match(competing.stderr, new RegExp(`pid ${child.pid}`));
     assert.equal(readFileSync(join(runtime, "dist/index.mjs"), "utf8"), "held output");
     process.kill(child.pid, 0);
-    const interruptedFileLock = join(root, ".dohc-dev/verification/runtime-build.json.lock");
-    writeFileSync(interruptedFileLock, JSON.stringify({pid: child.pid}));
-    const liveFileOwner = spawnSync(process.execPath, [buildScript], {encoding: "utf8"});
-    assert.equal(liveFileOwner.status, 1);
-    assert.match(liveFileOwner.stderr, new RegExp(`pid ${child.pid}`));
-    assert.equal(JSON.parse(readFileSync(interruptedFileLock, "utf8")).pid, child.pid);
     child.kill("SIGKILL");
     await closed;
     assert.equal(JSON.parse(readFileSync(ownerPath, "utf8")).pid, child.pid);
     assert.doesNotMatch(execFileSync(process.execPath, [buildScript], {encoding: "utf8"}), /reuse/);
-    assert.throws(() => readFileSync(interruptedFileLock), {code: "ENOENT"});
     assert.equal(readFileSync(join(runtime, "dist/index.mjs"), "utf8"), "completed output");
     assert.match(execFileSync(process.execPath, [buildScript], {encoding: "utf8"}), /reuse prepared bundle/);
   } finally {

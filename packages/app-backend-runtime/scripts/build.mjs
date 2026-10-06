@@ -1,6 +1,6 @@
 import { build } from "esbuild";
 import { fileURLToPath } from "node:url";
-import { existsSync, lstatSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
@@ -23,26 +23,8 @@ function runtimeBuildPrepared() {
   }
 }
 
-function clearInterruptedFileLock() {
-  const path = receiptPath + ".lock";
-  try {
-    const file = lstatSync(path);
-    if (!file.isFile() || process.getuid && file.uid !== process.getuid()) {
-      throw new Error(`Cannot reclaim runtime build lock ${path}: owner unavailable.`);
-    }
-    const owner = JSON.parse(readFileSync(path, "utf8"));
-    if (!Number.isInteger(owner.pid) || owner.pid <= 0) {
-      throw new Error(`Cannot reclaim runtime build lock ${path}: owner unavailable.`);
-    }
-    try { process.kill(owner.pid, 0); }
-    catch (error) { if (error.code === "ESRCH") { unlinkSync(path); return; } }
-    throw new Error(`Another runtime build owns ${path}: pid ${owner.pid}.`);
-  } catch (error) { if (error.code !== "ENOENT") throw error; }
-}
-
 let lease;
 if (cache) {
-  clearInterruptedFileLock();
   const {acquireExclusiveSlot} = await import("../../../tools/rust-engine-program/build-slot.mjs");
   lease = acquireExclusiveSlot({root: dirname(receiptPath), kind: "runtime-build", cooperativeCancellation: false,
     metadata: {purpose: "runtime build", checkout: resolve(root), phase: "build"}});
