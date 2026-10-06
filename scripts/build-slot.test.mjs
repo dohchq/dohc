@@ -26,6 +26,7 @@ import { join } from "node:path";
 import { setTimeout as poll } from "node:timers/promises";
 import {
   acquireBuildSlot,
+  acquireExclusiveSlot,
   acquireVerificationSlot,
   buildQueueStatus,
   capBuildParallelism,
@@ -35,6 +36,31 @@ import {
 } from "../tools/rust-engine-program/build-slot.mjs";
 
 const slotRoot = () => mkdtempSync(join(tmpdir(), "dohc-build-slot-"));
+
+test("exclusive local ownership rejects live owners without creating a queue", t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const options = {root, kind: "checkout", metadata: {purpose: "light verification", checkout: "fixture-checkout", commit: "fixture-sha"}};
+  const owner = acquireExclusiveSlot(options);
+  t.after(() => owner.release());
+  assert.throws(() => acquireExclusiveSlot(options), new RegExp(`pid ${process.pid}.*light verification.*fixture-checkout.*fixture-sha`));
+  assert.equal(existsSync(join(root, "checkout-queue")), false);
+  owner.release();
+  const next = acquireExclusiveSlot(options);
+  next.release();
+});
+
+test("exclusive local ownership recovers a dead PID but protects incomplete claims", t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const dir = join(root, "checkout-1");
+  mkdirSync(dir);
+  assert.throws(() => acquireExclusiveSlot({root, kind: "checkout"}), /Another run owns/);
+  writeFileSync(join(dir, "owner.json"), JSON.stringify({pid: deadPid(), start: new Date().toISOString()}));
+  const owner = acquireExclusiveSlot({root, kind: "checkout"});
+  owner.release();
+  assert.equal(existsSync(dir), false);
+});
 
 function queueProbe(root, script) {
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", `

@@ -581,6 +581,29 @@ export function acquireBuildSlot(options) {
   return acquireSlot({ ...options, kind: "build-slot", lanes: "cargo lanes" });
 }
 
+/** Fail-fast ownership for mutable local resources; this creates no waiter queue. */
+export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancellation = true }) {
+  mkdirSync(root, { recursive: true });
+  const dir = slotDir(root, 1, kind);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try { mkdirSync(dir); }
+    catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (attempt) throw new Error(`Another run owns ${dir}: ${holders(root, 1, kind) || "owner unavailable"}.`);
+      let staleMs = 30 * 60_000;
+      try {
+        const { pid } = JSON.parse(readFileSync(join(dir, "owner.json"), "utf8"));
+        // Live PIDs remain protected by the existing reclaimer. Incomplete
+        // claims keep its grace period across the mkdir/write window.
+        if (Number.isInteger(pid) && pid > 0) staleMs = -1;
+      } catch { /* Preserve a recent incomplete claim. */ }
+      reclaimStaleSlots({ root, slots: 1, kind, staleMs });
+      continue;
+    }
+    return claimSlot(dir, `${kind}-1`, defaultHeartbeatMs, cooperativeCancellation, () => {}, root, kind, metadata);
+  }
+}
+
 /**
  * Hold the host's single verification lane for a whole PR gate, so two gates
  * never compete for the same cores and disk. Null on a single-tenant host.
