@@ -155,7 +155,6 @@ describe("Explorer kind glyphs", () => {
           collection={false}
           selected
           active={false}
-          focused={false}
           tabbable={false}
           dropPreview={{ kind: "blocked", role: "target" }}
           registerRef={noop}

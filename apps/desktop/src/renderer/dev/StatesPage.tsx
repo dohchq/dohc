@@ -238,7 +238,6 @@ function KindRows(props: { label: string; selected: boolean }) {
           collection={false}
           selected={props.selected}
           active={false}
-          focused={false}
           tabbable={false}
           dropPreview={null}
           {...treeRowCallbacks}
@@ -771,7 +770,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last on the page, so the parts above keep their places. */}
+      {/* After the editor groups, so the parts above keep their places. */}
       <Section part="kind-glyph" title="Kind glyph">
         <Specimen label="kind">
           <ul className="m-0 list-none border border-transparent py-1 font-mono text-[11px] text-subtle">
