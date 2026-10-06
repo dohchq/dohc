@@ -46,6 +46,7 @@ const PARTS = [
   "steps", "folder-chip", "hue-control", "color-control", "list-rows", "menu", "document-menu",
   "empty", "loading", "toasts", "notices", "dialog", "menu-radio", "menu-field", "menu-overflow", "menu-danger",
   "editor-groups", "editor-groups-empty",
+  "kind-glyph",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and

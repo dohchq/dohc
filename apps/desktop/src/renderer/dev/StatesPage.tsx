@@ -1,3 +1,4 @@
+import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
 import { AlertTriangle, Bot, CheckCircle2, MoreHorizontal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -203,6 +204,46 @@ function Row(props: {
         {...treeRowCallbacks}
       />
     </div>
+  );
+}
+
+// A file of every kind in the registry, so each glyph is drawn the way the
+// Explorer draws it. A `Record` over the kinds, so a new kind is a compile
+// error here until the page shows it.
+const KIND_SAMPLES: Record<FileDisplayKind, string> = {
+  markdown: "plan.md",
+  drawing: "flow.excalidraw",
+  csv: "budget.csv",
+  json: "package.json",
+  text: "notes.txt",
+  code: "app.ts",
+  image: "photo.png",
+  audio: "memo.m4a",
+  pdf: "report.pdf",
+  database: "ledger.sqlite",
+  binary: "archive.bin",
+};
+const KINDS = Object.values(FILE_KIND_RECORDS);
+
+function KindRows(props: { label: string; selected: boolean }) {
+  return (
+    <ul role="tree" aria-label={props.label} className="m-0 w-52 list-none rounded-lg border border-line bg-panel py-1">
+      {KINDS.map((kind) => (
+        <TreeRow
+          key={kind.displayKind}
+          row={{
+            ...treeRow(KIND_SAMPLES[kind.displayKind]),
+            kind: kind.displayKind === "database" ? "database" : "file",
+          }}
+          collection={false}
+          selected={props.selected}
+          active={false}
+          tabbable={false}
+          dropPreview={null}
+          {...treeRowCallbacks}
+        />
+      ))}
+    </ul>
   );
 }
 
@@ -726,6 +767,25 @@ function Pane(props: { theme: "light" | "dark" }) {
       <Section part="editor-groups-empty" title="Editor groups, empty active group">
         <Specimen label="split: an empty active group, then one with tabs">
           <EditorGroupsSpecimen activeHasTabs={false} />
+        </Specimen>
+      </Section>
+
+      {/* After the editor groups, so the parts above keep their places. */}
+      <Section part="kind-glyph" title="Kind glyph">
+        <Specimen label="kind">
+          <ul className="m-0 list-none border border-transparent py-1 font-mono text-[11px] text-subtle">
+            {KINDS.map((kind) => (
+              <li key={kind.displayKind} className="flex h-7 items-center">
+                {kind.displayKind} · {kind.name}
+              </li>
+            ))}
+          </ul>
+        </Specimen>
+        <Specimen label="rest">
+          <KindRows label="Kinds" selected={false} />
+        </Specimen>
+        <Specimen label="selected">
+          <KindRows label="Kinds, selected" selected />
         </Specimen>
       </Section>
     </section>
