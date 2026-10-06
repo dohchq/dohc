@@ -443,12 +443,18 @@ it("caches a replay that rebuilt the dataset so the next reopen does not repeat 
   // Replaying the swap row by row breaks the UNIQUE index, so the worker rebuilds the dataset.
   await f.invoke({swap:true},{idempotencyKey:"swap"});
   await f.supervisor.close();
-  const opened:number[]=[],replayed:number[]=[],steps:string[]=[];
+  const time=vi.spyOn(performance,'now').mockReturnValue(0);
+  cleanups.push(async()=>{time.mockRestore();});
+  const opened:number[]=[],replayed:number[]=[],steps:string[]=[],batches=new Map<number,number[]>();
   const launch=launcher((command,controls)=>{
     if(command.command.kind==="open")opened.push(command.command.input.cursor.revision);
-    if(command.command.kind==="applyBatch")replayed.push(...command.command.input.map((event:{revision:number})=>event.revision));
+    if(command.command.kind==="applyBatch")batches.set(command.id,command.command.input.map((event:{revision:number})=>event.revision));
     controls.deliver();
-  },message=>{const step=(message as {progress?:unknown}).progress;if(typeof step==="string")steps.push(step);});
+  },message=>{
+    const reply=message as {id:number;ok?:boolean;result?:{revision:number};progress?:unknown};
+    if(typeof reply.progress==="string")steps.push(reply.progress);
+    if(reply.ok&&batches.has(reply.id)){replayed.push(...batches.get(reply.id)!.filter(revision=>revision<=reply.result!.revision));batches.delete(reply.id);}
+  });
   const read={scope:f.scope,tables:["items"],operation:"run",caller:{kind:"owner"},callerKey:"owner",input:{},idempotencyKey:"read",payloadSha256:hash("{}"),readOnly:true,authorize:f.authorize};
   const swapped=[{id:"a",value:"y"},{id:"b",value:"x"}];
   for(const round of [1,2]) {
@@ -884,4 +890,167 @@ it.each(["abort","deadline"])("settles %s promptly when its own old worker is be
     expect(outcome).toBeInstanceOf(Error);
     expect((await pending).message).toContain(kind==="abort"?"cancelled":"stopped waiting");
   }finally{vi.useRealTimers();release!();await other;await pending;}
+});
+
+
+it("checkpoints a hostile 64-swap replay before each later worker failure and resumes without repeating saved work",async()=>{
+  const swapSchema="CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL UNIQUE); INSERT INTO items VALUES(1,'left'),(2,'right');";
+  const swapSource=`globalThis.operations={run(ctx,input){
+    if(input.swap){const rows=ctx.db.query('SELECT value FROM items ORDER BY id');
+      ctx.db.execute('UPDATE items SET value=? WHERE id=1',['temporary']);
+      ctx.db.execute('UPDATE items SET value=? WHERE id=2',[rows[0].value]);
+      ctx.db.execute('UPDATE items SET value=? WHERE id=1',[rows[1].value]);}
+    return ctx.db.query('SELECT * FROM items ORDER BY id');
+  }}`;
+  const f=await fixture({schemaSql:swapSchema,source:swapSource});
+  for(let index=0;index<64;index++)await f.invoke({swap:true},{idempotencyKey:String(index)});
+  await f.supervisor.close();
+  // Faults stay at saved boundaries; adaptive checkpoint cost has its own test.
+  const time=vi.spyOn(performance,'now').mockReturnValue(0);
+  cleanups.push(async()=>{time.mockRestore();});
+  const saved:number[]=[],applied:number[]=[],pids:number[]=[];
+  const journal={...f.journal,cacheMaterialization(input:Parameters<DatasetJournal['cacheMaterialization']>[0]){
+    const result=f.journal.cacheMaterialization(input);saved.push(result.cursor.revision);return result;
+  }};
+  let clock=0,attempt=0,inAttempt=0;
+  const launch:AppRuntimeLauncher=options=>{
+    const child=spawn(process.execPath,['--disable-warning=ExperimentalWarning',options.entryPath],{cwd:options.cwd,env:options.env,stdio:['ignore','ignore','ignore','ipc'],serialization:'advanced',windowsHide:true});
+    pids.push(child.pid!);
+    const batches=new Set<number>();
+    child.on('error',options.onError);child.on('close',options.onExit);
+    child.on('message',message=>{
+      const reply=message as {id:number;ok?:boolean;result?:{revision:number}};
+      if(reply.ok&&batches.delete(reply.id)){applied.push(reply.result!.revision);inAttempt++;}
+      options.onMessage(message);
+    });
+    return {postMessage(message){const request=message as {id:number;command:{kind:string}};
+      if(request.command.kind==='applyBatch'){
+        // Stop at an admitted chunk boundary after sixteen completed chunks.
+        if(inAttempt===16&&attempt<4){child.kill('SIGKILL');return;}
+        batches.add(request.id);
+      }
+      child.send(message as object);
+    },kill(){child.kill('SIGKILL');}};
+  };
+  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},nowMs:()=>clock,
+    replayCacheMs:0,maintenanceStorage:{authorize(){},account(){}}});
+  cleanups.push(()=>supervisor.close());
+  const read={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
+  for(attempt=1;attempt<=4;attempt++){
+    inAttempt=0;
+    if(attempt<4){
+      const error=await supervisor.invoke(read).catch(error=>error);
+      expect(error).toMatchObject({code:'worker_stopped',retryAfterMs:5000*2**(attempt-1)});
+      expect(saved.at(-1)).toBe(attempt*16);
+      await expect(supervisor.invoke(read)).rejects.toMatchObject({code:'dataset_reopen_wait'});
+      clock+=error.retryAfterMs;
+    }else expect((await supervisor.invoke(read)).result).toEqual([{id:1,value:'left'},{id:2,value:'right'}]);
+  }
+  expect(applied).toEqual(Array.from({length:64},(_,index)=>index+1));
+  expect(saved).toEqual(applied);
+  await supervisor.close();
+  const reopened=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch}});
+  try{expect((await reopened.invoke(read)).revision).toBe(64);expect(applied).toHaveLength(64);}
+  finally{await reopened.close();}
+  for(const pid of pids)expect(()=>process.kill(pid,0)).toThrow();
+});
+
+
+it("retains an earlier recovery checkpoint when a later chunk cannot be sealed",async()=>{
+  const f=await fixture();
+  for(let index=1;index<=3;index++)await f.invoke({id:String(index),value:'saved'},{idempotencyKey:String(index)});
+  await f.supervisor.close();
+  const time=vi.spyOn(performance,'now').mockReturnValue(0);
+  cleanups.push(async()=>{time.mockRestore();});
+  let seals=0,broken=true,clock=0;
+  const applied:number[]=[],commands=new Map<number,number>();
+  const launch=launcher((request,controls)=>{
+    if(request.command.kind==='applyBatch')commands.set(request.id,request.command.input[0].revision);
+    controls.deliver();
+  },message=>{const reply=message as {id:number;ok?:boolean;result?:{revision:number}};
+    if(reply.ok&&commands.delete(reply.id))applied.push(reply.result!.revision);
+  });
+  const journal={...f.journal,async sealMaterializationCheckpoint(input:Parameters<DatasetJournal['sealMaterializationCheckpoint']>[0]){
+    if(++seals===2&&broken)throw Error('disk full');return f.journal.sealMaterializationCheckpoint(input);
+  }};
+  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},nowMs:()=>clock,replayCacheMs:0,
+    maintenanceStorage:{authorize(){},account(){}},onMaintenanceError(){}});
+  cleanups.push(()=>supervisor.close());
+  const read={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({code:'replay_not_saved',retryAfterMs:5000});
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})!.cursor.revision).toBe(1);
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toHaveLength(0);
+  broken=false;clock=5000;
+  expect((await supervisor.invoke(read)).revision).toBe(3);
+  expect(applied).toEqual([1,2,2,3]);
+});
+
+it("measures benign 64-event recovery including a fully installed checkpoint",async()=>{
+  const f=await fixture({
+    schemaSql:schemaSql+"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<256) INSERT INTO items SELECT CAST(i AS TEXT),printf('%04096d',i) FROM n;",
+    source:`globalThis.operations={run(ctx,input){if(input.write)ctx.db.execute('UPDATE items SET value=? WHERE id=?',['changed',String(input.write)]);return ctx.db.query('SELECT count(*) AS count FROM items');}}`,
+  });
+  for(let index=1;index<=64;index++)await f.invoke({write:index},{idempotencyKey:String(index)});
+  await f.supervisor.close();
+  const batches:number[]=[],snapshots:number[]=[];
+  const pending=new Map<number,number>();let elapsed=0,checkpointStarted=0,checkpointMs=0;
+  const realNow=performance.now.bind(performance);
+  // Make the cache eligible without a wall-clock sleep or artificial CPU load.
+  // The worker uses its real clock and still applies benign events in one chunk.
+  const time=vi.spyOn(performance,'now').mockImplementation(()=>realNow()+elapsed);
+  const launch=launcher((request,controls)=>{
+    if(request.command.kind==='applyBatch'){batches.push(request.command.input.length);elapsed+=1000;}
+    if(request.command.kind==='snapshot'){checkpointStarted=Date.now();pending.set(request.id,checkpointStarted);}
+    controls.deliver();
+  },message=>{const reply=message as {id:number;ok?:boolean};if(reply.ok&&pending.has(reply.id)){snapshots.push(Date.now()-pending.get(reply.id)!);pending.delete(reply.id);}});
+  const journal={...f.journal,cacheMaterialization(input:Parameters<DatasetJournal['cacheMaterialization']>[0]){
+    const result=f.journal.cacheMaterialization(input);checkpointMs=Date.now()-checkpointStarted;return result;
+  }};
+  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},replayCacheMs:1000,
+    maintenanceStorage:{authorize(){},account(){}}});
+  const started=Date.now();
+  try{
+    const result=await supervisor.invoke({scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize});
+    const totalMs=Date.now()-started;
+    const cached=f.journal.materialization({scope:f.scope,authorize:f.authorize})!;
+    expect(result.result).toEqual([{count:256}]);expect(cached.cursor.revision).toBe(64);
+    expect(batches).toEqual([64]);expect(snapshots).toHaveLength(1);
+    const measurement=JSON.stringify({scenario:'benign-64-recovery',totalMs,checkpointMs,snapshotMs:snapshots[0],checkpointBytes:cached.byteLength,batches,includes:'open, replay, foreign-key check, snapshot, hashing, staging, verification, installation, read',cacheEligibility:'host clock advanced 1000 ms; worker and measured wall clock unchanged'});
+    if(process.env.DOHC_RECOVERY_MEASUREMENT_PATH)await writeFile(process.env.DOHC_RECOVERY_MEASUREMENT_PATH,measurement+'\n');
+  }finally{time.mockRestore();await supervisor.close();}
+});
+
+
+it.each([{nextCost:50,replayMs:100,saved:[1,9,11]},{nextCost:20,replayMs:100,saved:[1,9,10,11]},{nextCost:100,replayMs:100,saved:[1,9,11]},{nextCost:100,replayMs:9,saved:[]}])("spaces recovery checkpoints with $replayMs ms batches and a $nextCost ms next checkpoint",async({nextCost,replayMs,saved:expected})=>{
+  const f=await fixture();
+  for(let index=1;index<=11;index++)await f.invoke({id:String(index),value:'saved'},{idempotencyKey:String(index)});
+  await f.supervisor.close();
+  let elapsed=0,seals=0;
+  const saved:number[]=[],pending=new Set<number>();
+  const time=vi.spyOn(performance,'now').mockImplementation(()=>elapsed);
+  cleanups.push(async()=>{time.mockRestore();});
+  const launch=launcher((request,controls)=>{
+    if(request.command.kind==='applyBatch')pending.add(request.id);
+    controls.deliver();
+  },message=>{const reply=message as {id:number;ok?:boolean};if(reply.ok&&pending.delete(reply.id))elapsed+=replayMs;});
+  const journal={...f.journal,
+    events(input:Parameters<DatasetJournal['events']>[0]){return f.journal.events({...input,limit:1});},
+    async sealMaterializationCheckpoint(input:Parameters<DatasetJournal['sealMaterializationCheckpoint']>[0]){
+      const value=await f.journal.sealMaterializationCheckpoint(input);
+      elapsed+=++seals===1 ? 200 : nextCost;
+      return value;
+    },
+    cacheMaterialization(input:Parameters<DatasetJournal['cacheMaterialization']>[0]){
+      const value=f.journal.cacheMaterialization(input);saved.push(value.cursor.revision);return value;
+    },
+  };
+  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},replayCacheMs:100,
+    maintenanceStorage:{authorize(){},account(){}}});
+  cleanups.push(()=>supervisor.close());
+  const result=await supervisor.invoke({scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize});
+  expect(result.revision).toBe(11);expect(result.result).toHaveLength(11);
+  // After a 200 ms checkpoint, wait 800 ms of replay between saves.
+  // Cheaper checkpoints lower that interval, bounded by replayCacheMs.
+  // Save a costly replay's final tail; a 99 ms whole replay stays uncached.
+  expect(saved).toEqual(expected);
 });
