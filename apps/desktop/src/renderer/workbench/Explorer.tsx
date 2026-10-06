@@ -318,7 +318,6 @@ export const TreeRow = memo(function TreeRow(props: {
   collection: boolean;
   selected: boolean;
   active: boolean;
-  focused: boolean;
   tabbable: boolean;
   dropPreview: RowDropPreview | null;
   registerRef: (path: string, el: HTMLButtonElement | null) => void;
@@ -369,19 +368,20 @@ export const TreeRow = memo(function TreeRow(props: {
         onDrop={(event) => props.onRowDrop(row.fullPath, event)}
         onDragLeave={props.onRowDragLeave}
         onDragEnd={props.onRowDragEnd}
-        // One selected fill, a weight and a ring (VS Code list semantics):
-        // the ACTIVE-tab row and selected-not-active rows share the selected
-        // fill (Delete/drag act on the whole selection), the active row
+        // One selected fill and a weight (VS Code list semantics): the
+        // ACTIVE-tab row and selected-not-active rows share the selected
+        // fill (Delete/drag act on the whole selection), and the active row
         // alone is medium weight so it still reads inside a multi-selection
-        // once the tree loses focus, and the keyboard-FOCUSED row adds an
-        // inset ring. An attenuated fill for the selected-not-active rows
-        // sat between hover and selected, too close to either to read. The
-        // drag drop-target is a filled tint (list.drop-Background style) —
-        // box-shadow/background only, never `outline`:
-        // the base outline-none nulls --tw-outline-style later in the same
-        // cascade layer, which made an outline-based highlight unrenderable.
+        // once the tree loses focus. An attenuated fill for the
+        // selected-not-active rows sat between hover and selected, too close
+        // to either to read. The keyboard-focused row draws the accent focus
+        // outline inset, inside its own rounded box, so the tree's scroller
+        // cannot clip it on a row scrolled to an edge. It holds 3:1 against
+        // every fill. The
+        // drag drop-target is a filled tint with a solid bar (list.drop-
+        // Background style).
         style={{ height: TREE_ROW_HEIGHT }}
-        className={`relative flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] outline-none transition-colors duration-75 ${
+        className={`relative flex w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] transition-colors duration-75 focus-visible:-outline-offset-2 ${
           props.dropPreview
             ? dropClass
             : props.active
@@ -389,7 +389,7 @@ export const TreeRow = memo(function TreeRow(props: {
               : props.selected
                 ? "bg-selected text-ink"
                 : "text-muted hover:bg-hover hover:text-ink"
-        } ${props.focused ? "ring-1 ring-inset ring-ink/30" : ""}`}
+        }`}
       >
         {props.dropPreview ? (
           <span
@@ -1592,7 +1592,6 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           collection={row.isFolder && props.collectionFolders.has(row.fullPath)}
           selected={selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
-          focused={focusedPath === row.fullPath}
           tabbable={tabbablePath === row.fullPath}
           dropPreview={dropPreviewForRow(row)}
           registerRef={registerRef}
@@ -1757,7 +1756,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                             data-group-id={group.id}
                             data-path={tab.path}
                             data-active={active}
-                            className={`group mx-1 flex h-7 items-center rounded-md transition-colors duration-75 ${
+                            // The open button spans the row, so its inset
+                            // focus outline follows the row's rounded fill;
+                            // the close button sits on top at the right.
+                            className={`group relative mx-1 flex h-7 items-center rounded-md transition-colors duration-75 ${
                               active
                                 ? "bg-selected text-ink"
                                 : "text-muted hover:bg-hover hover:text-ink"
@@ -1767,7 +1769,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                               type="button"
                               title={tab.path}
                               onClick={() => props.onActivateTab(group.id, tab.path)}
-                              className="flex h-full min-w-0 flex-1 items-center gap-1.5 py-0 pl-8 pr-2 text-left text-[13px] outline-none"
+                              className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-md py-0 pl-8 pr-9 text-left text-[13px] focus-visible:-outline-offset-2"
                             >
                               <OpenEditorIcon
                                 path={tab.path}
@@ -1791,7 +1793,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
                                 event.stopPropagation();
                                 props.onCloseTab(group.id, tab.path);
                               }}
-                              className={`mr-1 grid size-6 shrink-0 place-items-center rounded text-subtle hover:bg-hover hover:text-ink focus:opacity-100 ${
+                              className={`absolute right-1 top-0.5 grid size-6 place-items-center rounded text-subtle hover:bg-hover hover:text-ink focus:opacity-100 focus-visible:-outline-offset-2 ${
                                 active ? "opacity-100" : "opacity-0 group-hover:opacity-100"
                               }`}
                             >
