@@ -669,6 +669,18 @@ describe("SettingsDialog", () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Copy" })));
   });
 
+  it("does not move focus to Copy when the guide's enable fails", async () => {
+    bridge.startAgentRun.mockRejectedValueOnce(new Error("MCP server did not start"));
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    const action = await screen.findByTestId<HTMLButtonElement>("agent-setup-mcp-action");
+    await screen.findByTestId("mcp-config-snippet");
+    await userEvent.setup().click(action);
+    expect((await screen.findByTestId("mcp-load-error")).textContent).toContain("Could not update MCP server.");
+    await waitFor(() => expect(action.disabled).toBe(false));
+    expect(screen.getByTestId("agent-setup-mcp-state").textContent).toBe("Server stopped");
+    expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "Copy" }));
+  });
+
   it("does not move focus to Copy when the server row enables the server", async () => {
     const user = userEvent.setup();
     render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);

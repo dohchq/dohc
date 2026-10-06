@@ -224,7 +224,7 @@ export function AgentsMcpSettings(props: {
           <div className="px-4 py-3">
             <p className="m-0 text-[11px] font-medium text-ink">Connect an existing agent</p>
             <p className="m-0 mt-1 text-[10px] leading-relaxed text-subtle">
-              Enable the workspace-scoped MCP server, then copy the MCP config below into your
+              Enable the workspace-scoped MCP server. Then copy the MCP config below into your
               existing agent. Sign-in status stays with that provider.
             </p>
             {status ? (
