@@ -45,6 +45,7 @@ const PARTS = [
   "surfaces", "buttons", "copy", "segmented", "switch", "state-mark", "chips", "avatars", "badges", "text-inputs",
   "steps", "folder-chip", "hue-control", "color-control", "list-rows", "menu", "document-menu",
   "empty", "loading", "toasts", "notices", "dialog", "menu-radio", "menu-field", "menu-overflow", "menu-danger",
+  "editor-groups", "editor-groups-empty",
   "kind-glyph",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an

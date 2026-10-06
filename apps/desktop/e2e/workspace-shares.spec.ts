@@ -1,3 +1,4 @@
+import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -243,8 +244,8 @@ test("grant side: share a file by email from the explorer, copy the code, and en
     expect(strangerFetch.body).toBe(missingFetch.body);
 
     // Settings → Sync and sharing → "Shared by me": the grant is listed and endable.
-    await page.getByTestId("activity-settings").click();
-    await page.getByTestId("settings-nav-cloud").click();
+    await page.getByTestId(activityPin("settings")).click();
+    await page.getByTestId(settingsNavPin("cloud")).click();
     const row = page.getByTestId("shared-by-me-row");
     await expect(row).toBeVisible();
     await expect(row).toContainText("docs/plan.md");
@@ -788,7 +789,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await expect(page.getByText("The comet-tail draft.")).toBeVisible();
 
     // Search: the shared view is locally searchable.
-    await page.getByTestId("activity-search").click();
+    await page.getByTestId(activityPin("search")).click();
     await page.getByTestId("search-input").fill("comet-tail");
     await expect(
       page.locator('[data-testid="search-result-group"][data-path="docs/shared.md"]'),
@@ -1306,8 +1307,8 @@ test("Comment handoff opens files without creating a second generic chat", async
     );
     await revealExplorerPath(page, "docs/shared.md");
     await explorerRow(page, "docs/shared.md").click();
-    if ((await page.getByTestId("chats-panel").count()) === 0) {
-      await page.getByTestId("titlebar-chats-sidebar").click();
+    if ((await page.getByTestId(desktopPins.chatsPanel).count()) === 0) {
+      await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     }
     await expect(page.getByTestId("linked-chat-readonly-note")).toBeVisible();
     await expect(page.getByTestId("linked-chat-composer")).toHaveCount(0);
@@ -1434,8 +1435,8 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
 
     await revealExplorerPath(page, "docs/shared.md");
     await explorerRow(page, "docs/shared.md").click();
-    if ((await page.getByTestId("chats-panel").count()) === 0) {
-      await page.getByTestId("titlebar-chats-sidebar").click();
+    if ((await page.getByTestId(desktopPins.chatsPanel).count()) === 0) {
+      await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     }
     await expect(page.getByTestId("linked-chat-readonly-note")).toBeVisible();
     await expect(page.getByTestId("linked-chat-composer")).toHaveCount(0);

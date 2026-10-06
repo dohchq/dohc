@@ -1,3 +1,4 @@
+import { desktopPins, activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename } from "node:fs/promises";
@@ -32,7 +33,7 @@ test("@apps opens a static workspace app in the sandboxed preview", async () => 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await page.getByTestId("activity-sites").click();
+    await page.getByTestId(activityPin("sites")).click();
     await expect(page.getByTestId("sites-view")).toBeVisible();
     const app = page.locator('[data-testid="sites-row"][data-root="demo"]');
     await expect(app).toBeVisible({ timeout: 20_000 });
@@ -97,7 +98,7 @@ test("@apps closes Preview options when a click lands in the preview", async () 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await page.getByTestId("activity-sites").click();
+    await page.getByTestId(activityPin("sites")).click();
     await page.locator('[data-testid="sites-row"][data-root="demo"]').click();
     const frame = page.frameLocator('[data-testid="site-preview-frame"]');
     await expect(frame.getByRole("button", { name: "Inside the app" })).toBeVisible({ timeout: 20_000 });
@@ -105,7 +106,7 @@ test("@apps closes Preview options when a click lands in the preview", async () 
     // The titlebar stops being a drag region while the menu is open, so a
     // press on it reaches the page too.
     const titlebarRegion = () =>
-      page.getByTestId("titlebar").evaluate((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region"));
+      page.getByTestId(desktopPins.titlebar).evaluate((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region"));
     expect(await titlebarRegion()).toBe("drag");
     await page.getByTestId("site-preview-options").click();
     const staticMode = page.getByTestId("site-preview-static");
@@ -131,7 +132,7 @@ test("@apps creates and opens the first app inside an existing app folder", asyn
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    await page.getByTestId("activity-sites").click();
+    await page.getByTestId(activityPin("sites")).click();
     await expect(page.getByTestId("sites-count")).toContainText("0 apps");
     await page.screenshot({ path: test.info().outputPath("apps-empty.png") });
     await page.getByRole("button", { name: "Create app" }).click();
@@ -177,7 +178,7 @@ test("@apps finds an app declared only by app.publish.json and publishes it agai
     desktop = await launchDesktopApp({ workspace });
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
-    await page.getByTestId("activity-sites").click();
+    await page.getByTestId(activityPin("sites")).click();
 
     const publishAndOpen = async (root: string) => {
       await page.locator(`[data-testid="sites-row"][data-root="${root}"]`).click();
@@ -292,7 +293,7 @@ test("@apps publishes a static app that a guest opens by link", async ({}, info)
     const { page } = desktop;
     await openWorkspaceFromFirstRun(page, workspace);
 
-    await page.getByTestId("activity-sites").click();
+    await page.getByTestId(activityPin("sites")).click();
     await page.locator('[data-testid="sites-row"][data-root="reading-list"]').click();
     await expect(page.getByTestId("site-preview-page")).toBeVisible();
     await page.getByTestId("site-preview-publish").click();

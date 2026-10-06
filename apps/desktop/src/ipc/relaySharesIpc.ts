@@ -151,7 +151,7 @@ export function registerRelaySharesIpcHandlers<
   sharesChanged(workspaceId: string | null): void;
   // An authenticated account listing, applied to this machine's received
   // shares so a share the owner restored resumes.
-  reconcileReceivedShares(listing: unknown): void;
+  reconcileReceivedShares(listing: unknown): Promise<void>;
 }): void {
   const {
     registerHandler,
@@ -379,7 +379,10 @@ export function registerRelaySharesIpcHandlers<
         removed?: unknown;
       }>("/sync/shares"),
     });
-    reconcileReceivedShares(result);
+    await awaitCredentialGeneration({
+      capturedGeneration, currentGeneration: currentCredentialGeneration,
+      run: () => reconcileReceivedShares(result),
+    });
     const relayUrl = currentCredentials()?.relayUrl;
     const withCode = (row: Record<string, unknown>) => ({
       ...row,

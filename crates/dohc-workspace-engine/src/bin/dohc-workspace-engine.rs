@@ -71,15 +71,30 @@ impl From<Envelope> for OutputItem {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["--projection-only"] {
+        if std::env::var_os("DOHC_ENGINE_LIVE_HOST_CONFIG").is_some()
+            || std::env::var_os("DOHC_ENGINE_OWNER_HOST_CONFIG").is_some()
+        {
+            return Err(io::Error::other("projection mode takes no configuration").into());
+        }
+        dohc_workspace_engine::projection_stdio::run(
+            &mut io::stdin().lock(),
+            &mut io::stdout().lock(),
+        )?;
+        return Ok(());
+    }
+    if !args.is_empty() {
+        return Err(io::Error::other("unknown engine arguments").into());
+    }
     let auth_token = std::env::var(AUTH_TOKEN_ENV)
         .ok()
         .filter(|token| !token.is_empty())
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "engine auth token missing")
         })?;
-    run_stdio(auth_token).await
+    tokio::runtime::Runtime::new()?.block_on(run_stdio(auth_token))
 }
 
 async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {

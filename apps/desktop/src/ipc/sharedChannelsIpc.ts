@@ -87,7 +87,7 @@ export function registerSharedChannelsIpcHandlers<
   sharesChanged(workspaceId: string): void;
   // An authenticated account listing, applied to this machine's received
   // shares so a share the owner restored resumes.
-  reconcileReceivedShares(listing: unknown): void;
+  reconcileReceivedShares(listing: unknown): Promise<void>;
 }) {
   const {
     registerHandler, assertTrustedSender, withRendererWorkspaceOperation,
@@ -411,7 +411,8 @@ export function registerSharedChannelsIpcHandlers<
             assertCurrentShareSession();
             // Before the joined answers below are read, so a row this listing
             // resumes answers as live.
-            reconcileReceivedShares(listing);
+            await reconcileReceivedShares(listing);
+            assertCurrentShareSession();
             const receivedShareIds = Array.isArray(listing.received)
               ? listing.received.flatMap((row) => {
                   const selector = row.selector as

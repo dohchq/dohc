@@ -840,6 +840,15 @@ describe("sync relay handler", () => {
     expect(absentBody).not.toContain("blob_not_found");
   });
 
+  it.each(["link-lane-owner", "linkx", "link-exchange-owner", "link-refresh", "link-handoff", "link-redeem"])("keeps the missing key envelope code for workspace %s", async workspaceId => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h, "a", workspaceId);
+    const missing = await h(request("a", `/sync/${workspaceId}/keys`, {method: "GET"}));
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({code: "key_envelope_not_found"});
+  });
+
   it("stores one opaque key envelope per owned workspace with size and JSON validation", async () => {
     const storage = await testStorage();
     const h = handler(storage);

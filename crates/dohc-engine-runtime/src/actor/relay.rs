@@ -8,8 +8,8 @@ use dohc_engine_sync::{
     EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse,
     KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest, LogCoordinateResponse,
     MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, RecoverResponse, RelayCursor, RelayError, RelaySyncClient, RelayTransport,
-    ShareBlobRequest, ShareBlobUploadRequest, ShareCollectionWriteRequest,
+    PushResponse, PushWorkspaceProgress, RecoverResponse, RelayCursor, RelayError, RelaySyncClient,
+    RelayTransport, ShareBlobRequest, ShareBlobUploadRequest, ShareCollectionWriteRequest,
     ShareCollectionWriteResponse, ShareCursor, ShareLogPushRequest, ShareProposalSubmitOutcome,
     ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareViewPullOutcome,
     ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
@@ -205,6 +205,7 @@ struct DeferredRelayState {
 #[derive(Clone, Default)]
 struct DeferredRelayTransport {
     state: Arc<Mutex<DeferredRelayState>>,
+    push_progress: Arc<Mutex<PushWorkspaceProgress>>,
 }
 
 impl DeferredRelayTransport {
@@ -232,21 +233,33 @@ impl DeferredRelayTransport {
                     | RelayIoRequest::DownloadKeyEnvelope(_)
                     | RelayIoRequest::ShareBlob(_)
                     | RelayIoRequest::ShareProposalSubmit(_)
-            ) || matches!(
-                &state.completed[index].1,
-                Ok(RelayIoResponse::BlobsHave(response)) if response.missing.is_empty()
             );
-            let uploaded = matches!(state.completed[index].0, RelayIoRequest::UploadBlob(_));
+            let uploaded = match &state.completed[index].0 {
+                RelayIoRequest::UploadBlob(upload) => Some((
+                    upload.workspace_id.clone(),
+                    upload.replication_epoch.clone(),
+                    upload.stream_identity.clone(),
+                    upload.sha256.clone(),
+                )),
+                _ => None,
+            };
             let projected = match &mut state.completed[index].1 {
                 Ok(response) => project(response).ok_or(RelayError::InvalidResponse),
                 Err(error) => Err(error.clone()),
             };
             if release && projected.is_ok() {
                 let _ = state.completed.swap_remove(index);
-                if uploaded {
-                    state
-                        .completed
-                        .retain(|(request, _)| !matches!(request, RelayIoRequest::BlobsHave(_)));
+                if let Some((workspace, epoch, stream, sha)) = uploaded {
+                    for (request, result) in &mut state.completed {
+                        if let RelayIoRequest::BlobsHave(have) = request
+                            && have.workspace_id == workspace
+                            && have.replication_epoch == epoch
+                            && have.stream_identity == stream
+                            && let Ok(RelayIoResponse::BlobsHave(response)) = result
+                        {
+                            response.missing.retain(|missing| missing != &sha);
+                        }
+                    }
                 }
             }
             return projected;
@@ -456,6 +469,10 @@ impl RelayTransport for DeferredRelayTransport {
 #[cfg(test)]
 #[path = "relay_bench.rs"]
 mod relay_bench;
+
+#[cfg(test)]
+#[path = "relay_push_tests.rs"]
+mod relay_push_tests;
 
 #[cfg(test)]
 mod deferred_relay_tests {
@@ -777,7 +794,7 @@ mod deferred_relay_tests {
     }
 
     #[test]
-    fn completed_empty_blob_inventory_is_released_without_an_upload() {
+    fn completed_empty_blob_inventory_answers_later_page_replays() {
         let transport = DeferredRelayTransport::default();
         let request = BlobHaveRequest {
             workspace_id: "workspace".to_owned(),
@@ -791,22 +808,16 @@ mod deferred_relay_tests {
                 missing: Vec::new(),
             })),
         );
-        assert!(
-            transport
-                .blobs_have(request)
-                .expect("consume inventory")
-                .missing
-                .is_empty()
-        );
-        assert!(
-            transport
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .completed
-                .is_empty(),
-            "retaining a successful all-present inventory holds its request vector"
-        );
+        for _ in 0..2 {
+            assert!(
+                transport
+                    .blobs_have(request.clone())
+                    .expect("consume inventory")
+                    .missing
+                    .is_empty()
+            );
+        }
+        assert!(transport.take_pending().is_none());
     }
 
     #[test]
@@ -1226,11 +1237,34 @@ impl ActorHandle {
         token: CancellationToken,
         reservation: Option<Arc<dyn Send + Sync>>,
     ) -> Result<RelayOperationOutcome, RuntimeError> {
-        let transport = DeferredRelayTransport::default();
         if token.is_cancelled() {
             return Err(RuntimeError::Cancelled);
         }
         let http_transport = Arc::new(build_http_transport(configuration)?);
+        // Keep the deferred I/O state out of callers' inline RPC futures.
+        Box::pin(self.relay_with_io(
+            operation,
+            leases,
+            token,
+            reservation,
+            move |request, token| execute_http_request(Arc::clone(&http_transport), request, token),
+        ))
+        .await
+    }
+
+    async fn relay_with_io<F, Fut>(
+        &self,
+        operation: RelayOperation,
+        leases: LeaseRegistry,
+        token: CancellationToken,
+        reservation: Option<Arc<dyn Send + Sync>>,
+        execute_io: F,
+    ) -> Result<RelayOperationOutcome, RuntimeError>
+    where
+        F: Fn(RelayIoRequest, CancellationToken) -> Fut,
+        Fut: std::future::Future<Output = Result<RelayIoResponse, RelayError>>,
+    {
+        let transport = DeferredRelayTransport::default();
         loop {
             if token.is_cancelled() {
                 return Err(RuntimeError::Cancelled);
@@ -1269,16 +1303,11 @@ impl ActorHandle {
                     let request = transport
                         .take_pending()
                         .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
-                    let http_transport = Arc::clone(&http_transport);
                     let io_request = request.clone();
                     let result = tokio::select! {
                         biased;
                         () = token.cancelled() => return Err(RuntimeError::Cancelled),
-                        result = execute_http_request(
-                            http_transport,
-                            io_request,
-                            token.clone(),
-                        ) => result,
+                        result = execute_io(io_request, token.clone()) => result,
                     };
                     transport.complete(request, result);
                 }
@@ -1554,13 +1583,18 @@ fn run_relay_operation(
             now_ms,
             max_read_bytes,
         } => client
-            .push_workspace(
+            .resume_push_workspace(
                 store,
                 &workspace_id,
                 &NoFaults,
                 leases,
                 now_ms,
                 max_read_bytes,
+                &mut client
+                    .transport()
+                    .push_progress
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
             )
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),

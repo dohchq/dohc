@@ -607,8 +607,9 @@ describe("workspace engine IPC registrations", () => {
     await h.invoke(CHANNELS.listEngineMoments);
     expect(h.requireEngineCapture).toHaveBeenCalledWith("workspace", "Engine history");
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({});
-    await h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 7, beforeMomentOrder: 19 });
-    expect(h.capture.listMoments).toHaveBeenLastCalledWith({ limit: 7, beforeMomentOrder: 19 });
+    await h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object-1", limit: 7, beforeMomentOrder: 19 });
+    expect(h.capture.listMoments).toHaveBeenLastCalledWith({ objectId: "object-1", limit: 7, beforeMomentOrder: 19 });
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "" })).rejects.toThrow();
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "moment" })).resolves.toEqual({ moment: null });
   });
 
@@ -625,10 +626,10 @@ describe("workspace engine IPC registrations", () => {
     const h = await harness({ listHistoryPage, getMoment } as unknown as SharedHistoryStore);
     h.readPolicy.mockRejectedValue(new Error("Receiver policy must not gate imported history."));
     h.requireEngineCapture.mockRejectedValue(new Error("dohc could not start Engine history for this workspace."));
-    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", limit: 5 })).resolves.toMatchObject({
+    await expect(h.invoke(CHANNELS.listEngineMoments, { workspaceId: "workspace", objectId: "object", limit: 5 })).resolves.toMatchObject({
       moments: [{ id: "shared", agentAuthorName: "trip-agent-hosted" }], protectedTruncated: false,
     });
-    expect(listHistoryPage).toHaveBeenCalledWith({ workspaceId: "workspace", limit: 5 });
+    expect(listHistoryPage).toHaveBeenCalledWith({ workspaceId: "workspace", objectId: "object", limit: 5 });
     // The store opens the renderer's own attachment as a share mount; the payload names only the workspace.
     expect(h.storeWorkspaces).toEqual([expect.objectContaining({ workspaceId: "workspace", shareMount: true, attachmentId: h.physical.attachmentId })]);
     await expect(h.invoke(CHANNELS.readEngineMoment, { workspaceId: "workspace", momentId: "shared" })).resolves.toMatchObject({
