@@ -471,6 +471,8 @@ type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
 };
 
 export interface WorkspaceEngineCapture {
+  // Cancel convergence waits before producers and live sessions drain.
+  beginShutdown(): void;
   // Starts the daemon capture health poll on the capture chain.
   start(): void;
   // Enqueues a settled watcher batch for engine capture. Synchronous and
@@ -757,6 +759,7 @@ export interface WorkspaceEngineCaptureOptions {
   settleDebounceMs?: number;
   openSettleGate?: () => Promise<void>;
   onError?: (context: string, error: unknown) => void;
+  preserveUnsentState?: (input: { path: string; objectId: string; contentKind: YdocContentKind; doc: Y.Doc }) => Promise<void>;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
   // reconciliation passes). With the engine as the workspace's sole
   // recorder, a persistently failing store means history capture fails
@@ -1664,6 +1667,7 @@ export function createWorkspaceEngineCapture(
     liveStores ??= createCaptureLiveStores(
       { workspaceId, rootPath, attachmentId },
       options.rustEngineSessions,
+      captureWaitAbort.signal,
     );
     return liveStores;
   }
@@ -1674,6 +1678,7 @@ export function createWorkspaceEngineCapture(
   let observationDrainUnavailable = false;
   let observationResync: Promise<void> = Promise.resolve();
   let stopped = false;
+  const ydocOpenAbort = new AbortController();
   const captureWaitAbort = new AbortController();
   let daemonCaptureHealthTimer: ReturnType<typeof setTimeout> | null = null;
   let daemonCaptureHealthQueued = false;
@@ -2451,6 +2456,20 @@ export function createWorkspaceEngineCapture(
               }
               retired.destroy();
             },
+            preserveUnsentState: options.preserveUnsentState ? async doc => {
+              try {
+                if (!sessionObjectId || opened === null) throw new Error("Y.Doc recovery has no object identity.");
+                await options.preserveUnsentState!({
+                  path: input.path, objectId: sessionObjectId, contentKind: opened.contentKind, doc,
+                });
+              } catch (error) {
+                const name = input.path.split("/").at(-1) ?? input.path;
+                const message = `Unsent changes to ${name} are not saved. ${errorMessage(error)} Copy them from the open document before you quit dohc.`;
+                onError(`draft preservation of ${input.path}`, error);
+                input.onEditRefused?.("draft-preservation", message);
+                throw error;
+              }
+            } : undefined,
             onLocalEditError: requestReconnect,
             onLocalUpdateAcknowledged: (id) => {
               for (const record of pendingRecords) {
@@ -3376,7 +3395,7 @@ export function createWorkspaceEngineCapture(
   // on shutdown.
   let chain: Promise<void> = Promise.resolve();
   function enqueue(context: string, task: () => Promise<void>): void {
-    if (stopped) return;
+    if (stopped || captureWaitAbort.signal.aborted) return;
     chain = chain.then(async () => {
       try {
         await task();
@@ -3804,6 +3823,7 @@ export function createWorkspaceEngineCapture(
                   expectedObjectId: adoption.objectId,
                   contentKind: "richdoc",
                   seedAbsentLineage: true,
+                  // File-backed adoption state needs no draft writer; terminal eviction releases its lease.
                   onRemoteUpdate: () => undefined,
                 });
                 retained = { binding, provider };
@@ -3927,7 +3947,7 @@ export function createWorkspaceEngineCapture(
         options.rustEngineSessions.withRetryBudget(
           YDOC_OPEN_RETRY_DEADLINE_MS,
           openYDocSessionTask,
-          captureWaitAbort.signal,
+          ydocOpenAbort.signal,
         ),
       );
 
@@ -5714,7 +5734,13 @@ export function createWorkspaceEngineCapture(
       });
     },
 
+    beginShutdown() {
+      ydocOpenAbort.abort();
+      captureWaitAbort.abort();
+    },
+
     settleAndCloseAllLiveSessions() {
+      ydocOpenAbort.abort();
       return enqueueResult("close live sessions for workspace close", () =>
         settleAndCloseLiveYDocSessions(
           () => true,
@@ -7237,6 +7263,9 @@ export function createWorkspaceEngineCapture(
     },
 
     flush() {
+      if (captureWaitAbort.signal.aborted) {
+        return Promise.reject(captureWaitAbort.signal.reason);
+      }
       return enqueueResult("flush capture", async () => {
         const engine = await engineStore();
         await drainPendingCollectionAdoptions(engine);
@@ -7249,7 +7278,7 @@ export function createWorkspaceEngineCapture(
       // Everything already enqueued (including the watcher's final settled
       // batch) still runs; only new work is refused.
       stopped = true;
-      captureWaitAbort.abort();
+      ydocOpenAbort.abort();
       if (daemonCaptureHealthTimer !== null) {
         clearTimeout(daemonCaptureHealthTimer);
         daemonCaptureHealthTimer = null;
@@ -7259,15 +7288,20 @@ export function createWorkspaceEngineCapture(
         if (store) {
           try {
             await drainPendingCollectionAdoptions(store);
-            await store.flushCapture?.();
+            // Normal stop captures the last disk edits. Explicit shutdown
+            // cancels convergence before session retirement and skips this wait.
+            if (!captureWaitAbort.signal.aborted) await store.flushCapture?.();
           } catch (error) {
             // A refused store was never opened, so nothing is pending in
             // it. Failing the stop here would block the move-aside rebuild,
             // which closes the capture first.
-            if (engineStoreRefusalOf(error) === null) throw error;
+            const cancelled = captureWaitAbort.signal.aborted &&
+              error === captureWaitAbort.signal.reason;
+            if (!cancelled && engineStoreRefusalOf(error) === null) throw error;
           }
         }
       } finally {
+        captureWaitAbort.abort();
         await releaseRetainedCollectionAdoptionProviders(new Set());
         // App quit may abandon a dead generation's retained release obligation:
         // the daemon process exits immediately afterward and releases every

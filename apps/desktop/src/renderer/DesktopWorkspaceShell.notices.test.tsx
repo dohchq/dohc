@@ -48,6 +48,25 @@ it("reports an edit refusal once through Notices, without an ineffective retry",
   expect(screen.queryByText("Another workspace refused an edit.")).toBeNull();
 });
 
+it("shows unsent draft failures through the existing toast and Notices reporter with Copy", async () => {
+  const bridge = makeBridge(Promise.resolve(null));
+  const listeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
+  bridge.onEngineYDocSaveState = vi.fn(listener => {listeners.add(listener); return () => {listeners.delete(listener);};});
+  renderShell(bridge);
+  await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+  const message = "Unsent changes to a.md are not saved. Draft storage refused. Copy them from the open document before you quit dohc.";
+  const event: EngineYDocSaveStateEvent = {sessionId: "session-1", seq: 1, state: "error",
+    editRefusal: {workspaceId: WORKSPACE.workspaceId, path: "notes/a.md", requestId: "draft-preservation", message}};
+  act(() => {for (const listener of listeners) listener(event);});
+  expect(await screen.findByText(message)).toBeTruthy();
+  await userEvent.setup().click(await screen.findByTestId("notice-center-toggle"));
+  const notices = await screen.findByTestId("notice-center");
+  expect(within(notices).getAllByText(message)).toHaveLength(1);
+  expect(within(notices).getByRole("button", {name: "Copy error details"})).toBeTruthy();
+  act(() => {for (const listener of listeners) listener({...event, editRefusal: {...event.editRefusal!, workspaceId: OTHER_WORKSPACE.workspaceId, message: "Wrong workspace draft."}});});
+  expect(screen.queryByText("Wrong workspace draft.")).toBeNull();
+});
+
 describe("engine store recovery", () => {
   const refusedStatus = {
     ...SYNC_STATUS,
