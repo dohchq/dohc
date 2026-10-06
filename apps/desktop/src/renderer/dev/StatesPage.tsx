@@ -17,6 +17,8 @@ import { FolderChip, Step } from "../ui/Step";
 import { AgentBadge } from "../workbench/AgentBadge";
 import { AutomationBadge } from "../workbench/AutomationBadge";
 import { ChatAvatar } from "../workbench/ChatAvatar";
+import { EditorGroupLayout } from "../workbench/EditorGroupLayout";
+import { EditorTabs } from "../workbench/EditorTabs";
 import { TreeRow, type VisibleRow } from "../workbench/Explorer";
 import { LocalNoticeRow, WorkspaceErrorToast } from "../workbench/NoticeCenter";
 import { closeStatesPage } from "./statesRoute";
@@ -104,6 +106,56 @@ function Swatch(props: { label: string; className: string }) {
 }
 
 const noop = () => undefined;
+
+const NO_RECOVERY: ReadonlySet<string> = new Set();
+
+// One group's strip over a strip of paper, as the shell lays a group out.
+function EditorGroupSpecimen(props: { groupId: string; groupNumber: number; tabs: string[]; active: string | null }) {
+  return (
+    <>
+      <EditorTabs
+        groupId={props.groupId}
+        groupNumber={props.groupNumber}
+        tabs={props.tabs.map((path) => ({ path }))}
+        activeTab={props.active}
+        activeTabDirty={false}
+        recoveryPaths={NO_RECOVERY}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+        onCloseGroup={noop}
+      />
+      {/* Tall enough to hold the tab list, which the capture opens, and its
+          shadow. */}
+      <div className="h-28 bg-bg" />
+    </>
+  );
+}
+
+// A split of two groups where one has tabs and the other none. A strip with
+// tabs carries the tab-list menu, and a part opens one menu, so each part
+// holds one strip with tabs.
+function EditorGroupsSpecimen(props: { activeHasTabs: boolean }) {
+  const tabbed = { tabs: ["plan.md", "notes.md"], active: "plan.md" };
+  const empty = { tabs: [], active: null };
+  const [first, second] = props.activeHasTabs ? [tabbed, empty] : [empty, tabbed];
+  return (
+    <div className="flex w-[640px] overflow-hidden rounded-lg border border-line">
+      <EditorGroupLayout
+        groups={[
+          { id: "first", size: 1, content: <EditorGroupSpecimen groupId="first" groupNumber={1} {...first} /> },
+          { id: "second", size: 1, content: <EditorGroupSpecimen groupId="second" groupNumber={2} {...second} /> },
+        ]}
+        activeGroupId="first"
+        onFocusGroup={noop}
+        onResizeGroups={noop}
+      />
+    </div>
+  );
+}
 
 function treeRow(name: string, folder = false): VisibleRow {
   return {
@@ -660,6 +712,20 @@ function Pane(props: { theme: "light" | "dark" }) {
           >
             <MenuSpecimen label="More for Research" items={dangerMenuItems} width={176} testId={`states-menu-danger-${theme}`} />
           </div>
+        </Specimen>
+      </Section>
+
+      {/* After the menus, so the parts above keep their places. The capture
+          opens each part's tab list. */}
+      <Section part="editor-groups" title="Editor groups">
+        <Specimen label="split: the active group with tabs, then an empty one">
+          <EditorGroupsSpecimen activeHasTabs />
+        </Specimen>
+      </Section>
+
+      <Section part="editor-groups-empty" title="Editor groups, empty active group">
+        <Specimen label="split: an empty active group, then one with tabs">
+          <EditorGroupsSpecimen activeHasTabs={false} />
         </Specimen>
       </Section>
     </section>

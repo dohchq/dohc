@@ -19,9 +19,8 @@ import {
 } from "./workbenchState";
 
 beforeEach(() => {
-  // jsdom doesn't implement scrollIntoView; the strip reveals the active
-  // tab with it. Nor pointer capture, which the scrollbar thumb drag uses.
-  Element.prototype.scrollIntoView = vi.fn();
+  // jsdom doesn't implement pointer capture, which the scrollbar thumb drag
+  // uses.
   Element.prototype.setPointerCapture = vi.fn();
   Element.prototype.hasPointerCapture = vi.fn(() => false);
   Object.defineProperty(document, "elementFromPoint", {
@@ -165,11 +164,30 @@ describe("EditorTabs strip scrolling", () => {
     expect(strip.className).toContain("dohc-tab-strip");
   });
 
-  it("reveals the active tab when activation changes by any means", () => {
+  // Only the strip scrolls: scrollIntoView would scroll every scrolling
+  // ancestor too, the window included.
+  it("reveals the active tab when activation changes by any means, scrolling only the strip", () => {
+    // jsdom has no layout: each tab is 100px wide at 100px steps, and the
+    // strip shows 150px from its left edge.
+    const geometry = [
+      vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
+        return ["a.md", "b.md", "c.md"].indexOf(this.dataset.testid?.slice(4) ?? "") * 100;
+      }),
+      vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(100),
+      vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(150),
+    ];
+    const scrollTo = vi.fn(function (this: HTMLElement, options: ScrollToOptions) {
+      this.scrollLeft = options.left ?? 0;
+    });
+    HTMLElement.prototype.scrollTo = scrollTo as unknown as HTMLElement["scrollTo"];
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const windowScroll = vi.spyOn(window, "scrollTo").mockImplementation(() => undefined);
+    try {
     const { rerender } = renderTabs("a.md");
-    const scroll = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
-    // Mount reveals the initially active tab.
-    expect(scroll).toHaveBeenCalledTimes(1);
+    const strip = screen.getByRole("tablist");
+    // The first tab is already in view, so mounting scrolls nothing.
+    expect(scrollTo).not.toHaveBeenCalled();
 
     rerender(
       <EditorTabs
@@ -187,10 +205,37 @@ describe("EditorTabs strip scrolling", () => {
         onCreateGroupRight={noop}
       />,
     );
-    expect(scroll).toHaveBeenCalledTimes(2);
-    expect(scroll).toHaveBeenLastCalledWith(
-      expect.objectContaining({ block: "nearest", inline: "nearest" }),
+    // c.md ends at 300px, past the strip's 150px view: just enough to show it.
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+    expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ left: 150 }));
+    expect(scrollTo.mock.contexts[0]).toBe(strip);
+
+    rerender(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={tabs}
+        activeTab="a.md"
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
     );
+    // a.md starts left of the scrolled view: back to the start.
+    expect(scrollTo).toHaveBeenCalledTimes(2);
+    expect(scrollTo).toHaveBeenLastCalledWith(expect.objectContaining({ left: 0 }));
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(windowScroll).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of geometry) spy.mockRestore();
+      windowScroll.mockRestore();
+      delete (HTMLElement.prototype as { scrollTo?: unknown }).scrollTo;
+    }
   });
 
   it("translates a vertical wheel into horizontal scroll when overflowing", () => {

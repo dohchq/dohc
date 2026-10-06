@@ -100,9 +100,16 @@ const DECORATION = "pointer-events-none absolute size-[9px] overflow-hidden";
 const DECORATION_ARC =
   "absolute inset-0 border-line transition-[border-radius] duration-[160ms] ease-[cubic-bezier(0.2,0.8,0.3,1)]";
 const TAB_JOIN = `${DECORATION} -bottom-px`;
-const TAB_JOIN_ARC = `${DECORATION_ARC} border-b shadow-[0_0_0_8px_var(--color-bg)]`;
+const TAB_JOIN_ARC = `${DECORATION_ARC} border-b shadow-[0_0_0_8px_var(--dohc-bg)]`;
 const PANE_CORNER = `${DECORATION} top-0`;
-const PANE_CORNER_ARC = `${DECORATION_ARC} border-t shadow-[0_0_0_8px_var(--color-panel)]`;
+const PANE_CORNER_ARC = `${DECORATION_ARC} border-t shadow-[0_0_0_8px_var(--dohc-panel)]`;
+// Read from the attributes EditorGroupLayout sets: `data-split` on the
+// layout, `data-active` on the group that takes opened files. In a split the
+// active group's strip shows an accent line along its whole top, so the mark
+// stays in view however the strip scrolls and on a group with no tabs. The
+// other groups' active tabs recede to muted text.
+const ACTIVE_GROUP_LINE = "[[data-split]_[data-editor-group-id][data-active]_&]:block";
+const INACTIVE_GROUP_TAB = "[[data-split]_[data-editor-group-id]:not([data-active])_&]:text-muted";
 
 // Memoized so the dirty flips while typing (saveState ticks every autosave)
 // re-render only the active tab, not the whole strip (FileRow precedent —
@@ -122,16 +129,22 @@ const Tab = memo(function Tab(props: {
 }) {
   const name = fileName(props.path, props.label);
   // Reveal on activation, however it happened (sidebar click, open-file,
-  // Ctrl+Tab, close-neighbor). `nearest` makes it a no-op when already
-  // visible, so plain clicks on visible tabs never nudge the strip.
+  // Ctrl+Tab, close-neighbor). Only the strip scrolls, and only when the tab
+  // is out of its view: scrollIntoView would also scroll every scrolling
+  // ancestor, the window included. A tab's offsetLeft is its position in the
+  // strip's content, because the strip starts at its frame's left edge.
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    if (!props.active) return;
-    ref.current?.scrollIntoView({
-      behavior: prefersReducedMotion() ? "auto" : "smooth",
-      block: "nearest",
-      inline: "nearest",
-    });
+    const tab = ref.current;
+    const strip = tab?.parentElement;
+    if (!props.active || !tab || !strip) return;
+    const left = tab.offsetLeft;
+    const right = left + tab.offsetWidth;
+    const target =
+      left < strip.scrollLeft ? left
+      : right > strip.scrollLeft + strip.clientWidth ? right - strip.clientWidth
+      : null;
+    if (target !== null) strip.scrollTo({ left: target, behavior: prefersReducedMotion() ? "auto" : "smooth" });
   }, [props.active]);
   return (
     <div
@@ -175,9 +188,10 @@ const Tab = memo(function Tab(props: {
       // would re-layout the strip on every crossing. `transform`
       // transitions slide displaced neighbours; the dragged tab itself
       // follows the pointer with no interpolation.
+      // In a split, an inactive group's active tab recedes to muted text.
       className={`group relative flex h-8 shrink-0 select-none items-center gap-1.5 self-end border px-3 text-[13px] [transform:translateX(0)] transition-[background-color,color,transform] duration-150 data-dragging:z-20 data-dragging:cursor-grabbing data-dragging:transition-none ${
         props.active
-          ? "z-10 rounded-t-lg border-line border-b-bg bg-bg text-ink"
+          ? `z-10 rounded-t-lg border-line border-b-bg bg-bg text-ink ${INACTIVE_GROUP_TAB}`
           : "cursor-default border-transparent border-b-line text-muted before:absolute before:inset-y-2 before:-left-px before:w-px before:bg-line first:before:hidden [[data-active]+&::before]:hidden hover:bg-hover hover:text-ink"
       }`}
     >
@@ -847,6 +861,11 @@ export const EditorTabs = memo(function EditorTabs(props: {
       data-testid="editor-tabs"
       className="group/strip relative flex h-9 shrink-0 bg-panel"
     >
+      <span
+        aria-hidden
+        data-testid="editor-tabs-active-group"
+        className={`pointer-events-none absolute inset-x-0 top-0 hidden h-0.5 bg-accent ${ACTIVE_GROUP_LINE}`}
+      />
       <div
         ref={stripRef}
         role="tablist"
