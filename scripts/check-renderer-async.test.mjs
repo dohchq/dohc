@@ -296,3 +296,33 @@ test("factory copies, namespace factories, and extracted methods keep distinct c
     ['import { bridge } from "./bridge"; const read = bridge().read; const copy = read; const r = copy(); show(r);', 3],
   ]) assert.equal(rawBridgeReferences(source), expected, source);
 });
+
+for (const [form, setup, read, count] of [
+  ['F16b bound method', 'const api = bridge(); const read = api.getWorkspaceRegistry.bind(api);', 'read();', 4],
+  ['F17a nested object spread', 'const { api: d } = { ...{ api: bridge() } };', 'd.getWorkspaceRegistry();', 2],
+  ['F17b dependency object spread', 'const deps = { api: bridge() }; const { api: d } = { ...deps };', 'd.getWorkspaceRegistry();', 3],
+  ['F17c offset array spread', 'const [, d] = [...([0, bridge()] as const)];', 'd.getWorkspaceRegistry();', 2],
+]) test(form + ' retains authority and rejects an added read', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dohc-u4-preserved-'));
+  try {
+    const source = 'import { bridge } from "./bridge";\n' + setup + '\n' + read + '\n';
+    const inventory = { counts: { 'Legacy.tsx': count } };
+    assert.equal(rawBridgeReferences(source), count, form + ' one read');
+    writeFileSync(join(root, 'Legacy.tsx'), source);
+    assert.deepEqual(checkRawBridge(root, inventory), []);
+    assert.equal(rawBridgeReferences(source + read + '\n'), count + 1, form + ' two reads');
+    writeFileSync(join(root, 'Legacy.tsx'), source + read + '\n');
+    assert.deepEqual(checkRawBridge(root, inventory), ['RATCHET Legacy.tsx:2,3,4: raw bridge references exceed inventory count ' + count + ' -> ' + (count + 1) + ". Use desktopAction or the operation's owner."]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test('binding preserves methods while method calls and data spreads stay data', () => {
+  const prefix = 'import { bridge } from "./bridge"; ';
+  for (const [body, expected] of [
+    ['const api = bridge(); const read = api.list.bind(api); const r = api.list(); read(); show(r); show(r.items);', 5],
+    ['const api = bridge(); const r = api.list.call(api); show(r); show(r.items);', 3],
+    ['const api = bridge(); const r = api.list.apply(api, []); show(r); show(r.items);', 3],
+    ['const { items } = { ...await bridge().list() }; show(items); show(items.length);', 1],
+    ['const [, items] = [...await bridge().list()]; show(items); show(items.length);', 1],
+    ['const r = helper(bridge()); show(r); show(r.items);', 1],
+  ]) assert.equal(rawBridgeReferences(prefix + body), expected, body);
+});

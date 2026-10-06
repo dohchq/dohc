@@ -38,8 +38,12 @@ export function rawBridgeReferences(source, path = "renderer.tsx", parsed = pars
         : value.properties.find(entry => memberName(entry) === memberName(property))?.value;
       else if (value && property.type !== "RestElement") selected = { type: "MemberExpression", object: value, property: property.key, computed: property.computed };
       bind(property.value ?? property.argument, scope, selected, raw || desktop, assignment);
+      if (value?.type === "ObjectExpression") for (const entry of value.properties) if (entry.type === "SpreadElement") bind(property.value ?? property.argument, scope, entry.argument, raw, assignment);
     });
-    else if (pattern.type === "ArrayPattern") pattern.elements.forEach((element, index) => bind(element, scope, value?.type === "ArrayExpression" ? element?.type === "RestElement" ? { ...value, elements: value.elements.slice(index) } : value.elements[index] : value, raw, assignment));
+    else if (pattern.type === "ArrayPattern") pattern.elements.forEach((element, index) => {
+      bind(element, scope, value?.type === "ArrayExpression" ? element?.type === "RestElement" ? { ...value, elements: value.elements.slice(index) } : value.elements[index] : value, raw, assignment);
+      if (value?.type === "ArrayExpression") for (const entry of value.elements.slice(0, index + 1)) if (entry?.type === "SpreadElement") bind(element, scope, entry.argument, raw, assignment);
+    });
   };
   const visit = (node, scope, parent) => {
     if (node.type.startsWith("TS") && unwrap(node) === node && !["TSEnumDeclaration", "TSEnumBody", "TSEnumMember", "TSModuleDeclaration", "TSModuleBlock", "TSExportAssignment", "TSParameterProperty"].includes(node.type)) return;
@@ -77,6 +81,7 @@ export function rawBridgeReferences(source, path = "renderer.tsx", parsed = pars
     const ref = byNode.get(node);
     if (node.type === "ImportExpression") return kind !== "factory" && ref?.raw;
     if (node.type === "CallExpression") return kind === "raw" && derived(node.callee, "factory")
+      || kind === "raw" && unwrap(node.callee).type === "MemberExpression" && memberName(unwrap(node.callee)) === "bind" && derived(unwrap(node.callee).object)
       || (unwrap(node.callee)?.name === "useRef" || memberName(node.callee) === "useRef") && node.arguments.some(argument => derived(argument, kind));
     if (kind === "factory" && node.type === "MemberExpression") return memberName(node) === "bridge" && derived(node.object, "module");
     return kind === "raw" && ref?.raw || ref?.binding?.[kind] || children(node).some(child => derived(child, kind));
