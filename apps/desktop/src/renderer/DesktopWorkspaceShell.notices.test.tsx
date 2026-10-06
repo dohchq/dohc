@@ -2242,3 +2242,88 @@ describe("unavailable MCP launcher settings", () => {
     ).toBe(true);
   });
 });
+
+// The folder holds only the active version's files, so a document too large
+// for live editing opens only in the version its refusal names.
+describe("documents too large for live editing", () => {
+  const declinedIn = (versionId: string): SyncStatusResult => ({
+    ...SYNC_STATUS,
+    sharingDeclined: [{
+      path: "notes/large.md",
+      objectId: "object-1",
+      versionId,
+      lineagePruned: true,
+      headBlobSha256: "a".repeat(64),
+      constraint: "MAX_YDOC_UPDATE_BYTES",
+      limitBytes: 262_144,
+      observedBytes: 280_001,
+    }],
+  });
+
+  it("opens the document when its refusal is in the active version", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => declinedIn("main"));
+    bridge.getSyncStatus = vi.fn(async () => declinedIn("main"));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("sharing-declined-toast-open"));
+    expect(await screen.findByTestId("tab-notes/large.md")).toBeTruthy();
+  });
+
+  it("names the version to switch to instead of opening the active version's file", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.openWorkspace = vi.fn(async () => declinedIn("draft"));
+    bridge.getSyncStatus = vi.fn(async () => declinedIn("draft"));
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        { id: "main", name: "Main", kind: "main" as const, createdAtMs: 0, canMergeIntoMain: false },
+        { id: "draft", name: "Draft", kind: "named" as const, createdAtMs: 1, canMergeIntoMain: true },
+      ],
+      activeVersionId: "main",
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("sharing-declined-toast-open"));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      '"notes/large.md" is in the version "Draft". Switch to that version to open it.',
+    );
+    expect(screen.queryByTestId("tab-notes/large.md")).toBeNull();
+  });
+
+  it("opens the selected version when an object has two declines", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const status = {
+      ...SYNC_STATUS,
+      sharingDeclined: [
+        ...declinedIn("main").sharingDeclined!,
+        ...declinedIn("draft").sharingDeclined!,
+      ],
+    };
+    bridge.openWorkspace = vi.fn(async () => status);
+    bridge.getSyncStatus = vi.fn(async () => status);
+    bridge.listWorkspaceVersions = vi.fn(async () => ({
+      versions: [
+        { id: "main", name: "Main", kind: "main" as const, createdAtMs: 0, canMergeIntoMain: false },
+        { id: "draft", name: "Draft", kind: "named" as const, createdAtMs: 1, canMergeIntoMain: true },
+      ],
+      activeVersionId: "main",
+    }));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await screen.findByTestId("sharing-declined-toast-open");
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByTestId("notice-sharing-declined-draft:object-1"))
+      .getByRole("button", { name: "Open document" }));
+    expect((await screen.findByTestId("workspace-shell-error")).textContent).toContain(
+      '"notes/large.md" is in the version "Draft". Switch to that version to open it.',
+    );
+    expect(screen.queryByTestId("tab-notes/large.md")).toBeNull();
+    await user.click(screen.getByTestId("notice-center-toggle"));
+    await user.click(within(screen.getByTestId("notice-sharing-declined-main:object-1"))
+      .getByRole("button", { name: "Open document" }));
+    expect(await screen.findByTestId("tab-notes/large.md")).toBeTruthy();
+  });
+});

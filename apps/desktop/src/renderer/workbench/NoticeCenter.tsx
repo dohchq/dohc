@@ -238,6 +238,32 @@ const OWNER_LIVE_REFUSALS_TITLE = "Some shares could not start live editing";
 const OWNER_LIVE_REFUSALS_BODY =
   "Open Live documents to see which files are affected and try again.";
 
+// An oversized unclaimed lineage cannot share changes made in dohc.
+type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
+const SHARING_DECLINED_TITLE = "Too large to share your edits";
+function sharingDeclinedBody(declined: SharingDeclined): string {
+  const fileName = declined.path.split("/").pop() ?? declined.path;
+  return `People you share ${fileName} with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.`;
+}
+function sharingDeclinedDetails(workspaceId: string, declined: SharingDeclined): string {
+  return errorDetails([
+    ["Notice", SHARING_DECLINED_TITLE],
+    ["Detail", sharingDeclinedBody(declined)],
+    ["File", declined.path],
+    ["Size", `${declined.observedBytes} bytes`],
+    ["Limit", `${declined.limitBytes} bytes`],
+    ["Constraint", declined.constraint],
+    ["Object id", declined.objectId],
+    ["Version id", declined.versionId],
+    ["Saved file sha256", declined.headBlobSha256],
+    ["Workspace id", workspaceId],
+  ]);
+}
+// One refusal of one saved file: a rename keeps it, and a refusal after a new
+// save is announced again. The head is null only before the first save.
+const sharingDeclinedKey = (workspaceId: string, declined: SharingDeclined): string =>
+  JSON.stringify([workspaceId, declined.objectId, declined.versionId, declined.headBlobSha256]);
+
 // Corner hosts need room above the bell; rail hosts use the bottom-right corner.
 export type NoticeHostPlacement = "rail" | "corner";
 
@@ -440,6 +466,8 @@ export function NoticeCenter(props: {
   // that repeats itself changes nothing here.
   onRetryLiveDelivery?: () => void;
   onOpenLiveDocuments?: () => void;
+  // Opens the refused document by version and object.
+  onOpenSharingDeclined?: (versionId: string, objectId: string) => void;
   // Changes a share recipient sent to this workspace, awaiting the granter.
   // One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
@@ -728,6 +756,29 @@ export function NoticeCenter(props: {
     [refusalsKey, props.workspaceId],
   );
 
+  // Closing a toast keeps its row; dismissing the row removes both.
+  const [closedDeclines, setClosedDeclines] = useState<ReadonlySet<string>>(new Set());
+  const [dismissedDeclines, setDismissedDeclines] = useState<ReadonlySet<string>>(new Set());
+  const sharingDeclined = useMemo(
+    () =>
+      (props.syncStatus?.sharingDeclined ?? []).filter(
+        (declined) => !dismissedDeclines.has(sharingDeclinedKey(props.workspaceId, declined)),
+      ),
+    [dismissedDeclines, props.syncStatus?.sharingDeclined, props.workspaceId],
+  );
+  const declineToast =
+    sharingDeclined.find(
+      (declined) => !closedDeclines.has(sharingDeclinedKey(props.workspaceId, declined)),
+    ) ?? null;
+  const closeDecline = useCallback(
+    (declined: SharingDeclined) =>
+      setClosedDeclines((current) =>
+        new Set(current).add(sharingDeclinedKey(props.workspaceId, declined)),
+      ),
+    [props.workspaceId],
+  );
+  const { onOpenSharingDeclined } = props;
+
   const installUpdate = useCallback(async () => {
     if (installPending) return;
     try {
@@ -974,12 +1025,28 @@ export function NoticeCenter(props: {
       });
     }
 
-    for (const declined of props.syncStatus?.sharingDeclined ?? []) {
+    for (const declined of sharingDeclined) {
       next.push({
-        id: `sharing-declined-${declined.path}`,
+        id: `sharing-declined-${encodeURIComponent(declined.versionId)}:${encodeURIComponent(declined.objectId)}`,
         tone: "warning",
-        title: "File is too large to sync",
-        body: `Your edit is saved on this machine. "${declined.path}" uses ${declined.observedBytes.toLocaleString("en-US")} bytes after encoding. Sync allows ${declined.limitBytes.toLocaleString("en-US")} bytes. Reduce the file to sync it.`,
+        title: SHARING_DECLINED_TITLE,
+        body: sharingDeclinedBody(declined),
+        ...(onOpenSharingDeclined
+          ? {
+              actions: [{
+                label: "Open document",
+                onClick: () => {
+                  closeDecline(declined);
+                  onOpenSharingDeclined(declined.versionId, declined.objectId);
+                },
+              }],
+            }
+          : {}),
+        onDismiss: () =>
+          setDismissedDeclines((current) =>
+            new Set(current).add(sharingDeclinedKey(props.workspaceId, declined)),
+          ),
+        copyText: sharingDeclinedDetails(props.workspaceId, declined),
         Icon: AlertTriangle,
       });
     }
@@ -1110,6 +1177,10 @@ export function NoticeCenter(props: {
     props.onReviewShareChanges,
     props.shareChangeNotices,
     props.syncStatus,
+    props.workspaceId,
+    sharingDeclined,
+    closeDecline,
+    onOpenSharingDeclined,
     liveDelivery,
     liveDeliveryAction,
     liveDeliveryDetails,
@@ -1358,6 +1429,49 @@ export function NoticeCenter(props: {
                 type="button"
                 aria-label="Dismiss live editing refusals notice"
                 onClick={() => setDismissedRefusalsKey(refusalsKey)}
+                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+              >
+                <X size={12} aria-hidden />
+              </button>
+            </div>
+          ) : null}
+          {declineToast ? (
+            <div
+              data-testid="sharing-declined-toast"
+              role="status"
+              aria-live="polite"
+              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+            >
+              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
+                {SHARING_DECLINED_TITLE}. {sharingDeclinedBody(declineToast)}
+              </span>
+              {onOpenSharingDeclined ? (
+                <button
+                  type="button"
+                  data-testid="sharing-declined-toast-open"
+                  onClick={() => {
+                    closeDecline(declineToast);
+                    onOpenSharingDeclined(declineToast.versionId, declineToast.objectId);
+                  }}
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                >
+                  Open document
+                </button>
+              ) : null}
+              <CopyButton
+                key={sharingDeclinedKey(props.workspaceId, declineToast)}
+                iconOnly
+                pinName
+                label="Copy error details"
+                testId="sharing-declined-toast-copy"
+                getText={() => sharingDeclinedDetails(props.workspaceId, declineToast)}
+              />
+              {/* Closing ends the announcement; the row stays in Notices. */}
+              <button
+                type="button"
+                aria-label={`Close notice for ${declineToast.path}`}
+                onClick={() => closeDecline(declineToast)}
                 className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 <X size={12} aria-hidden />
