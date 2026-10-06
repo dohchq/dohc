@@ -237,3 +237,62 @@ test("the ratchet rejects growth through a destructuring-assigned handle", () =>
     assert.deepEqual(checkRawBridge(root, { counts: { "Legacy.tsx": 4 } }), []);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("bridge method results remain data through await, then, and destructuring", () => {
+  const prefix = 'import { bridge } from "./bridge"; ';
+  for (const body of [
+    'const r = await bridge().list(); setX(r.items); console.log(r.items.length);',
+    'const r = await bridge().list(); const n = r.items.length; show(n); show(n + 1);',
+    'bridge().list().then(r => { setX(r.items); log(r); });',
+    'const { items } = await bridge().list(); show(items); show(items.length);',
+    'let stops; ({ stops } = await bridge().automationShareImpact()); const warning = stops.length; show(warning);',
+    'const read = bridge().list; const r = await read(); show(r.items);',
+    'const d = bridge(); const r = await d.list(); show(r.items);',
+  ]) assert.equal(rawBridgeReferences(prefix + body), body.includes('const read =') || body.includes('const d =') ? 2 : 1, body);
+  const root = mkdtempSync(join(tmpdir(), "dohc-u4-result-"));
+  try {
+    const source = readFileSync(resolve(import.meta.dirname, '../apps/desktop/src/renderer/automationShareCheck.tsx'), 'utf8');
+    assert.equal(rawBridgeReferences(source), 1);
+    writeFileSync(join(root, 'automationShareCheck.tsx'), source.replace('const warning =', 'if (stops.length > 10) console.info("many stops");\n  const warning ='));
+    assert.equal(rawBridgeReferences(readFileSync(join(root, 'automationShareCheck.tsx'), 'utf8')), 1);
+    assert.deepEqual(checkRawBridge(root, { counts: { 'automationShareCheck.tsx': 1 } }), []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("logical assignments retain bridge handles and reject added reads", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-u4-logical-"));
+  try {
+    for (const operator of ['??=', '||=', '&&=']) {
+      const source = 'import { bridge } from "./bridge";\nlet d; d ' + operator + ' bridge();\nd.read();\n';
+      assert.equal(rawBridgeReferences(source), 3, operator);
+      writeFileSync(join(root, 'Legacy.tsx'), source);
+      assert.deepEqual(checkRawBridge(root, { counts: { 'Legacy.tsx': 3 } }), []);
+      writeFileSync(join(root, 'Legacy.tsx'), source + 'd.read();\n');
+      assert.deepEqual(checkRawBridge(root, { counts: { 'Legacy.tsx': 3 } }), ["RATCHET Legacy.tsx:2,3,4: raw bridge references exceed inventory count 3 -> 4. Use desktopAction or the operation's owner."]);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("literal destructuring gives authority only to the selected value", () => {
+  const prefix = 'import { bridge } from "./bridge"; ';
+  for (const [body, expected] of [
+    ['const { api: d, label } = { api: bridge(), label: "Ready" }; d.read(); console.log(label); console.log(label);', 2],
+    ['let d, label; ({ api: d, label } = { api: bridge(), label: "Ready" }); d.read(); console.log(label); console.log(label);', 3],
+    ['const [d, label] = [bridge(), "Ready"]; d.read(); console.log(label);', 2],
+    ['let d, label; [d, label] = [bridge(), "Ready"]; d.read(); console.log(label);', 3],
+    ['const { nested: { api: d, label } } = { nested: { api: bridge(), label: "Ready" } }; d.read(); show(label);', 2],
+    ['const { ["api"]: d, [`label`]: label } = { [`api`]: bridge(), label: "Ready" }; d.read(); show(label);', 2],
+    ['const { label = "Ready", api: d } = { api: bridge() }; d.read(); show(label);', 2],
+    ['const { label, ...rest } = { api: bridge(), label: "Ready" }; rest.api.read(); show(label);', 2],
+    ['const { api: d, ...rest } = { api: bridge(), label: "Ready" }; d.read(); show(rest.label);', 2],
+    ['const [d, ...labels] = [bridge(), "Ready"]; d.read(); show(labels);', 2],
+  ]) assert.equal(rawBridgeReferences(prefix + body), expected, body);
+});
+test("factory copies, namespace factories, and extracted methods keep distinct call results", () => {
+  for (const [source, expected] of [
+    ['import { bridge } from "./bridge"; const b = bridge; const copy = b; const d = copy(); d.read();', 4],
+    ['import * as module from "./bridge"; const d = module.bridge(); d.read();', 2],
+    ['const module = await import("./bridge"); const d = module.bridge(); d.read();', 3],
+    ['const { bridge: b } = await import("./bridge"); const d = b(); d.read();', 3],
+    ['import { bridge } from "./bridge"; const d = useRef(bridge()).current; const r = await d.read(); show(r);', 2],
+    ['import { bridge } from "./bridge"; const read = bridge().read; const copy = read; const r = copy(); show(r);', 3],
+  ]) assert.equal(rawBridgeReferences(source), expected, source);
+});

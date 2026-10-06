@@ -16,13 +16,15 @@ export function rawBridgeReferences(source, path = "renderer.tsx", parsed = pars
   const bridgeModule = spec => typeof spec === "string" && /(?:^|[\\/])bridge\.(?:[cm]?ts|tsx)$/u.test(resolveModule(path, spec));
   const bind = (pattern, scope, value, raw = false, assignment = false) => {
     if (!pattern) return;
+    value = unwrap(value);
     if (pattern.type === "Identifier") {
       if (!assignment) declared.add(pattern);
       let owner = scope;
       if (assignment) while (owner && !owner.names.has(pattern.name)) owner = owner.parent;
       if (!owner) return;
-      const binding = owner.names.get(pattern.name) ?? { raw, values: [] };
-      binding.raw ||= raw;
+      const binding = owner.names.get(pattern.name) ?? { raw: false, factory: false, module: false, values: [] };
+      binding.raw ||= Boolean(raw);
+      if (typeof raw === "string") binding[raw] = true;
       if (value) binding.values.push(value);
       owner.names.set(pattern.name, binding); bindings.push(binding);
     } else if (pattern.type === "AssignmentPattern") { bind(pattern.left, scope, value, raw, assignment); bind(pattern.left, scope, pattern.right, raw, assignment); }
@@ -30,9 +32,14 @@ export function rawBridgeReferences(source, path = "renderer.tsx", parsed = pars
     else if (pattern.type === "ObjectPattern") pattern.properties.forEach(property => {
       const desktop = ["window", "globalThis"].includes(unwrap(value)?.name) && memberName(property) === "dohcDesktop";
       if (desktop) references.push({ node: property, scope, raw: true });
-      bind(property.value ?? property.argument, scope, value, raw || desktop, assignment);
+      let selected = value;
+      if (value?.type === "ObjectExpression") selected = property.type === "RestElement"
+        ? { ...value, properties: value.properties.filter(entry => !pattern.properties.some(key => key.type !== "RestElement" && memberName(key) === memberName(entry))) }
+        : value.properties.find(entry => memberName(entry) === memberName(property))?.value;
+      else if (value && property.type !== "RestElement") selected = { type: "MemberExpression", object: value, property: property.key, computed: property.computed };
+      bind(property.value ?? property.argument, scope, selected, raw || desktop, assignment);
     });
-    else if (pattern.type === "ArrayPattern") pattern.elements.forEach(element => bind(element, scope, value, raw, assignment));
+    else if (pattern.type === "ArrayPattern") pattern.elements.forEach((element, index) => bind(element, scope, value?.type === "ArrayExpression" ? element?.type === "RestElement" ? { ...value, elements: value.elements.slice(index) } : value.elements[index] : value, raw, assignment));
   };
   const visit = (node, scope, parent) => {
     if (node.type.startsWith("TS") && unwrap(node) === node && !["TSEnumDeclaration", "TSEnumBody", "TSEnumMember", "TSModuleDeclaration", "TSModuleBlock", "TSExportAssignment", "TSParameterProperty"].includes(node.type)) return;
@@ -43,7 +50,7 @@ export function rawBridgeReferences(source, path = "renderer.tsx", parsed = pars
     if (node.type === "ClassExpression") bind(node.id, scope);
     if (node.type === "CatchClause") bind(node.param, scope);
     if (node.type === "ImportDeclaration") {
-      node.specifiers.forEach(spec => bind(spec.local, scope, null, node.importKind !== "type" && spec.importKind !== "type" && bridgeModule(node.source.value) && (spec.imported?.name === "bridge" || spec.type === "ImportNamespaceSpecifier")));
+      node.specifiers.forEach(spec => bind(spec.local, scope, null, node.importKind !== "type" && spec.importKind !== "type" && bridgeModule(node.source.value) && (spec.imported?.name === "bridge" ? "factory" : spec.type === "ImportNamespaceSpecifier" && "module")));
       return;
     }
     if (node.type === "VariableDeclarator") {
@@ -51,7 +58,7 @@ export function rawBridgeReferences(source, path = "renderer.tsx", parsed = pars
       if (parent.kind === "var") while (owner.parent && !owner.fn) owner = owner.parent;
       bind(node.id, owner, node.init);
     }
-    if (node.type === "AssignmentExpression" && node.operator === "=") assignments.push({ node, scope });
+    if (node.type === "AssignmentExpression" && ["=", "??=", "||=", "&&="].includes(node.operator)) assignments.push({ node, scope });
     const dynamicBridge = node.type === "ImportExpression" && bridgeModule(node.source.value);
     const globalBridge = node.type === "MemberExpression" && memberName(node) === "dohcDesktop" && ["window", "globalThis"].includes(unwrap(node.object)?.name);
     const staticName = (parent?.type === "MemberExpression" && parent.property === node || ["Property", "MethodDefinition", "PropertyDefinition"].includes(parent?.type) && parent.key === node) && !parent.computed || parent?.type === "ExportSpecifier" && parent.exported === node;
@@ -64,16 +71,21 @@ export function rawBridgeReferences(source, path = "renderer.tsx", parsed = pars
     for (let scope = reference.scope; scope; scope = scope.parent) if (scope.names.has(reference.node.name)) { reference.binding = scope.names.get(reference.node.name); break; }
   }
   const byNode = new Map(references.map(ref => [ref.node, ref]));
-  const derived = node => {
+  const derived = (node, kind = "raw") => {
+    node = unwrap(node);
     if (/^(?:Function|ArrowFunction)/u.test(node.type)) return false;
     const ref = byNode.get(node);
-    return ref?.raw || ref?.binding?.raw || children(node).some(derived);
+    if (node.type === "ImportExpression") return kind !== "factory" && ref?.raw;
+    if (node.type === "CallExpression") return kind === "raw" && derived(node.callee, "factory")
+      || (unwrap(node.callee)?.name === "useRef" || memberName(node.callee) === "useRef") && node.arguments.some(argument => derived(argument, kind));
+    if (kind === "factory" && node.type === "MemberExpression") return memberName(node) === "bridge" && derived(node.object, "module");
+    return kind === "raw" && ref?.raw || ref?.binding?.[kind] || children(node).some(child => derived(child, kind));
   };
   // Copies and destructured values retain authority, but shadowing creates a separate binding.
   let changed;
   do {
     changed = false;
-    for (const binding of bindings) if (!binding.raw && binding.values.some(derived)) { binding.raw = true; changed = true; }
+    for (const binding of bindings) for (const kind of ["raw", "factory", "module"]) if (!binding[kind] && binding.values.some(value => derived(value, kind))) { binding[kind] = true; changed = true; }
   } while (changed);
   const counted = references.filter(ref => ref.raw || ref.binding?.raw);
   lines?.push(...counted.map(ref => source.slice(0, ref.node.start).split("\n").length));
