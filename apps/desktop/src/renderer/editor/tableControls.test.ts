@@ -11,6 +11,7 @@ import {
   resolveTableMenuPosition,
 } from "./tableControls";
 import { DohcTableRowHeight } from "./extensions";
+import { SafeTrailingNode } from "./safeTrailingNode";
 
 // ProseMirror's resize/drop plugins ask the browser for a hit-test while these
 // tests dispatch synthetic pointer/drag events. jsdom has no layout engine, so
@@ -200,6 +201,18 @@ function drag(source: Element, target: Element): void {
   dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
   dispatchPointer(source, "pointerup", { clientX: 10, clientY: 10 });
   elementFromPointResult = null;
+}
+
+// The witness observes any gesture DOM change, including ignored grip attributes.
+// ProseMirror registered its real observer first and settles before this callback.
+function afterDOMMutation(root: Node): Promise<void> {
+  return new Promise((resolve) => {
+    const witness = new MutationObserver(() => {
+      witness.disconnect();
+      resolve();
+    });
+    witness.observe(root, { attributes: true, childList: true, subtree: true });
+  });
 }
 
 // `editor.getJSON()`'s type is inferred from the registered extensions
@@ -1050,6 +1063,221 @@ describe("table controls grips", () => {
     ).toBeNull();
     expect(document.body.querySelector(".dohc-table-drop-indicator")).toBeNull();
   });
+
+  it.each(["row", "column", "resize"] as const)(
+    "keeps a fresh table-ending document unchanged during %s gesture feedback and cancellation",
+    async (gesture) => {
+      editor = new Editor({
+        extensions: [
+          StarterKit.configure({ trailingNode: false }),
+          SafeTrailingNode.configure({ node: "paragraph", notAfter: ["paragraph"] }),
+          DohcTableRowHeight,
+          TableKit.configure({ table: { resizable: true } }),
+          testTableControls,
+        ],
+        content: { type: "doc", content: [labeledTable()] },
+      });
+      const view = editor.view;
+      document.body.append(view.dom);
+      try {
+        const table = renderedTable(editor, 0);
+        const selector = gesture === "resize"
+          ? '.dohc-table-row-resize[data-table-row-resize="1"]'
+          : gesture === "row"
+            ? '.dohc-table-grip--row[data-row="1"]'
+            : '.dohc-table-grip--col[data-col="1"]';
+        const source = table.querySelector<HTMLElement>(selector)!;
+        const originalDoc = editor.state.doc;
+        const originalContent = editor.getJSON();
+        const expectUnchangedDocument = () => {
+          expect(editor!.state.doc).toBe(originalDoc);
+          expect(editor!.getJSON()).toEqual(originalContent);
+          expect(editor!.state.doc.childCount).toBe(1);
+          expect(editor!.state.doc.lastChild?.type.name).toBe("table");
+        };
+        if (gesture === "resize") {
+          Object.defineProperty(table.rows[1]!, "getBoundingClientRect", {
+            configurable: true,
+            value: () => ({ top: 0, bottom: 40, left: 0, right: 240, width: 240, height: 40 }),
+          });
+        }
+        expectUnchangedDocument();
+        const startSettled = afterDOMMutation(view.dom);
+        elementFromPointResult = source;
+        dispatchPointer(source, "pointerdown", { clientY: 100 });
+        if (gesture !== "resize") {
+          dispatchPointer(source, "pointermove", { clientX: 8, clientY: 108 });
+        }
+        await startSettled;
+        expectUnchangedDocument();
+        expect(source.getAttribute("aria-grabbed")).toBe("true");
+
+        const feedbackSettled = afterDOMMutation(view.dom);
+        elementFromPointResult = gesture === "row" ? table.rows[2]!.cells[0]! : table.rows[1]!.cells[2]!;
+        dispatchPointer(view.dom, "pointermove", { clientX: 20, clientY: 134 });
+        await feedbackSettled;
+        expectUnchangedDocument();
+        if (gesture === "resize") {
+          expect(table.rows[1]!.style.height).toBe("74px");
+          expect(tableNode(editor).content?.[1]?.attrs?.height).toBeNull();
+        } else {
+          expect(document.body.querySelector<HTMLElement>(".dohc-table-drop-indicator.is-visible")?.dataset.label)
+            .toBe(`Drop to ${gesture} 3`);
+        }
+
+        const cancelSettled = afterDOMMutation(view.dom);
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        await cancelSettled;
+        expectUnchangedDocument();
+        expect(source.getAttribute("aria-grabbed")).toBe("false");
+        expect(table.querySelector(".is-dragging, .is-resizing, .dohc-table-drag-source, .dohc-table-row-is-resizing")).toBeNull();
+        expect(document.body.querySelector(".dohc-table-drag-preview, .dohc-table-drop-indicator")).toBeNull();
+        if (gesture === "resize") expect(table.rows[1]!.style.height).toBe("");
+        dispatchPointer(view.dom, "pointerup", { clientX: 20, clientY: 134 });
+        expectUnchangedDocument();
+      } finally {
+        view.dom.remove();
+      }
+    },
+  );
+
+  it.each(["row", "column"] as const)(
+    "keeps a %s drag through actual observer settlement",
+    async (band) => {
+      editor = createLabeledTableEditor();
+      // Settle StarterKit's trailing paragraph before the gesture's document snapshot.
+      editor.commands.setTextSelection(textPos(editor, "A1"));
+      const view = editor.view;
+      document.body.append(view.dom);
+      try {
+        const table = renderedTable(editor, 0);
+        const selector = band === "row"
+          ? '.dohc-table-grip--row[data-row="1"]'
+          : '.dohc-table-grip--col[data-col="1"]';
+        const source = table.querySelector<HTMLElement>(selector)!;
+        const originalDoc = editor.state.doc;
+        elementFromPointResult = source;
+        dispatchPointer(source, "pointerdown");
+        const sourceSettled = afterDOMMutation(view.dom);
+        dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+        await sourceSettled;
+        expect.soft(source.isConnected).toBe(true);
+        expect.soft(table.querySelector(selector)).toBe(source);
+        expect.soft(source.getAttribute("aria-grabbed")).toBe("true");
+        expect.soft(editor.state.doc).toBe(originalDoc);
+
+        const targetSettled = afterDOMMutation(view.dom);
+        elementFromPointResult = band === "row" ? table.rows[2]!.cells[0]! : table.rows[1]!.cells[2]!;
+        dispatchPointer(view.dom, "pointermove", { clientX: 20, clientY: 20 });
+        await targetSettled;
+        expect.soft(table.querySelector(selector)).toBe(source);
+        expect.soft(source.getAttribute("aria-grabbed")).toBe("true");
+        expect.soft(document.body.querySelector<HTMLElement>(".dohc-table-drop-indicator.is-visible")?.dataset.label)
+          .toBe(`Drop to ${band} 3`);
+        expect.soft(editor.state.doc).toBe(originalDoc);
+
+        elementFromPointResult = band === "row" ? table.rows[2]!.cells[0]! : table.rows[1]!.cells[2]!;
+        dispatchPointer(view.dom, "pointerup", { clientX: 20, clientY: 20 });
+        expect.soft(document.body.querySelector(".dohc-table-drag-preview, .dohc-table-drop-indicator")).toBeNull();
+        expect(tableTextGrid(editor)).toEqual(band === "row"
+          ? [["A1", "A2", "A3"], ["C1", "C2", "C3"], ["B1", "B2", "B3"]]
+          : [["A1", "A3", "A2"], ["B1", "B3", "B2"], ["C1", "C3", "C2"]]);
+      } finally {
+        view.dom.remove();
+      }
+    },
+  );
+
+  it("keeps a pointer row resize through actual observer settlement", async () => {
+    editor = createLabeledTableEditor();
+    // Settle StarterKit's trailing paragraph before the gesture's document snapshot.
+    editor.commands.setTextSelection(textPos(editor, "A1"));
+    const view = editor.view;
+    document.body.append(view.dom);
+    try {
+      const table = renderedTable(editor, 0);
+      const row = table.rows[1]!;
+      const handle = row.querySelector<HTMLElement>(".dohc-table-row-resize")!;
+      const originalDoc = editor.state.doc;
+      Object.defineProperty(row, "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ top: 0, bottom: 40, left: 0, right: 240, width: 240, height: 40 }),
+      });
+      const downSettled = afterDOMMutation(view.dom);
+      dispatchPointer(handle, "pointerdown", { clientY: 100 });
+      await downSettled;
+      expect.soft(table.rows[1]).toBe(row);
+      expect.soft(handle.isConnected).toBe(true);
+      expect.soft(table.rows[1]!.querySelector(".dohc-table-row-resize")).toBe(handle);
+      expect.soft(editor.state.doc).toBe(originalDoc);
+      const moveSettled = afterDOMMutation(row);
+      dispatchPointer(view.dom, "pointermove", { clientY: 134 });
+      await moveSettled;
+      expect.soft(table.rows[1]!.style.height).toBe("74px");
+      expect.soft(editor.state.doc).toBe(originalDoc);
+      dispatchPointer(view.dom, "pointerup", { clientY: 134 });
+      expect(tableNode(editor).content?.[1]?.attrs?.height).toBe(74);
+      expect(table.rows[1]!.style.height).toBe("74px");
+    } finally {
+      view.dom.remove();
+    }
+  });
+
+  it.each(["Escape", "click"] as const)(
+    "keeps a saved row height after pointer resize %s and observer settlement",
+    async (ending) => {
+      editor = createLabeledTableEditor();
+      const savedRow = editor.state.doc.nodeAt(1)!;
+      editor.view.dispatch(editor.state.tr.setNodeMarkup(1, undefined, {
+        ...savedRow.attrs,
+        height: 74,
+      }));
+      const view = editor.view;
+      document.body.append(view.dom);
+      try {
+        const table = renderedTable(editor, 0);
+        const row = table.rows[0]!;
+        const handle = row.querySelector<HTMLElement>(".dohc-table-row-resize")!;
+        const originalDoc = editor.state.doc;
+        Object.defineProperty(row, "getBoundingClientRect", {
+          configurable: true,
+          value: () => ({ top: 0, bottom: 74, left: 0, right: 240, width: 240, height: 74 }),
+        });
+        expect(row.dataset.rowHeight).toBe("74");
+        expect(row.style.height).toBe("74px");
+        const downSettled = afterDOMMutation(view.dom);
+        dispatchPointer(handle, "pointerdown", { clientY: 100 });
+        await downSettled;
+        expect(table.rows[0]).toBe(row);
+        expect(editor.state.doc).toBe(originalDoc);
+
+        if (ending === "Escape") {
+          const moveSettled = afterDOMMutation(view.dom);
+          dispatchPointer(view.dom, "pointermove", { clientY: 134 });
+          await moveSettled;
+          expect(table.rows[0]!.style.height).toBe("108px");
+          expect(tableNode(editor).content?.[0]?.attrs?.height).toBe(74);
+          expect(editor.state.doc).toBe(originalDoc);
+        }
+
+        const endSettled = afterDOMMutation(view.dom);
+        if (ending === "Escape") {
+          window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+        } else {
+          dispatchPointer(view.dom, "pointerup", { clientY: 100 });
+        }
+        await endSettled;
+        expect(editor.state.doc).toBe(originalDoc);
+        expect(tableNode(editor).content?.[0]?.attrs?.height).toBe(74);
+        expect(table.rows[0]!.dataset.rowHeight).toBe("74");
+        expect(table.rows[0]!.style.height).toBe("74px");
+        expect(handle.getAttribute("aria-grabbed")).toBe("false");
+        expect(table.querySelector(".is-resizing, .dohc-table-row-is-resizing")).toBeNull();
+      } finally {
+        view.dom.remove();
+      }
+    },
+  );
 
   it("resizes a row from its bottom edge and persists the height on the row node", () => {
     editor = createTableEditor(2, 2);

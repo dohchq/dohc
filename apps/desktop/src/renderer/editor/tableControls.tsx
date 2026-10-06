@@ -106,6 +106,7 @@ type TableDropTarget = {
   side: TableDropSide;
   destination: number;
   bandElement: HTMLElement;
+  decoration: Decoration;
 };
 
 type TableDragState = {
@@ -123,18 +124,18 @@ type TableDragState = {
 type TableRowResizeState = {
   rowPos: number;
   rowIndex: number;
-  rowElement: HTMLTableRowElement;
   tableElement: HTMLTableElement;
   handle: HTMLButtonElement;
   pointerId: number;
   startY: number;
   startHeight: number;
   currentHeight: number;
-  originalInlineHeight: string;
 };
 
 type TableControlsRuntime = {
   instanceId: number;
+  // A gesture ended by the plugin view's destroy must not dispatch.
+  mounted: boolean;
   activeDrag: TableDragState | null;
   activeRowResize: TableRowResizeState | null;
   cancelPointer: (() => void) | null;
@@ -145,6 +146,7 @@ type TableControlsRuntime = {
 function createTableControlsRuntime(): TableControlsRuntime {
   return {
     instanceId: nextTableControlsInstanceId++,
+    mounted: false,
     activeDrag: null,
     activeRowResize: null,
     cancelPointer: null,
@@ -279,9 +281,10 @@ function setTableRowHeight(
   view: EditorView,
   rowPos: number,
   height: number | null,
+  tr = view.state.tr,
 ): void {
   if (view.editable === false) return;
-  const row = view.state.doc.nodeAt(rowPos);
+  const row = tr.doc.nodeAt(rowPos);
   if (!row || row.type.name !== "tableRow") return;
   const normalized =
     height === null ? null : Math.max(MIN_ROW_HEIGHT, Math.round(height));
@@ -293,7 +296,7 @@ function setTableRowHeight(
     return;
   }
   view.dispatch(
-    view.state.tr.setNodeMarkup(rowPos, undefined, {
+    tr.setNodeMarkup(rowPos, undefined, {
       ...row.attrs,
       height: normalized,
     }),
@@ -666,48 +669,113 @@ function openGripMenu(
   runtime.closeMenu = close;
 }
 
-function clearTableDropTargetChrome(view: EditorView): void {
-  view.dom
-    .querySelectorAll<HTMLElement>(
-      ".dohc-table-grip.is-drop-target, .dohc-table-drop-before, .dohc-table-drop-after",
-    )
-    .forEach((element) =>
-      element.classList.remove(
-        "is-drop-target",
-        "dohc-table-drop-before",
-        "dohc-table-drop-after",
-      ),
-    );
-}
-
-function clearTableDragChrome(view: EditorView): void {
-  clearTableDropTargetChrome(view);
-  view.dom
-    .querySelectorAll<HTMLElement>(
-      ".dohc-table-grip.is-dragging, .dohc-table-drag-source, table.is-reordering",
-    )
-    .forEach((element) =>
-      element.classList.remove(
-        "is-dragging",
-        "dohc-table-drag-source",
-        "is-reordering",
-      ),
-    );
-}
-
-function markTableBand(
-  table: HTMLTableElement,
-  band: TableBand,
-  index: number,
-  className: string,
+// Gesture chrome on rows and cells is a decoration. ProseMirror owns those
+// nodes and redraws one whose attributes change outside a transaction, which
+// replaces the handle that owns the gesture. Handles are widgets and the
+// table view ignores its <table> attributes, so their classes stay direct.
+function setTableGesture(
+  runtime: TableControlsRuntime,
+  view: EditorView,
+  decorations: Decoration[],
 ): void {
-  if (band === "row") {
-    table.rows[index]?.classList.add(className);
+  if (!runtime.mounted) return;
+  if (
+    decorations.length === 0 &&
+    tableControlsKey.getState(view.state)?.gesture === DecorationSet.empty
+  ) {
     return;
   }
-  Array.from(table.rows).forEach((row) =>
-    row.cells[index]?.classList.add(className),
+  // A chrome-only transaction must not let the trailing-node plugin append a
+  // paragraph: the edit would cancel the gesture. Tiptap's TrailingNode and
+  // SafeTrailingNode both honor this meta.
+  view.dispatch(
+    view.state.tr
+      .setMeta(tableControlsKey, DecorationSet.create(view.state.doc, decorations))
+      .setMeta("skipTrailingNode", true),
   );
+}
+
+function clearTableDragChrome(runtime: TableControlsRuntime, view: EditorView): void {
+  view.dom
+    .querySelectorAll<HTMLElement>(
+      ".dohc-table-grip.is-dragging, .dohc-table-grip.is-drop-target, table.is-reordering",
+    )
+    .forEach((element) =>
+      element.classList.remove("is-dragging", "is-drop-target", "is-reordering"),
+    );
+  setTableGesture(runtime, view, []);
+}
+
+// The dragged row, or every cell of the dragged logical column. A spanning
+// cell fills several TableMap slots and is decorated once.
+function tableBandDecorations(
+  doc: PMNode,
+  cellPos: number,
+  band: TableBand,
+  index: number,
+): Decoration[] {
+  const attrs = { class: "dohc-table-drag-source" };
+  const $cell = doc.resolve(cellPos);
+  if (band === "row") return [Decoration.node($cell.before(), $cell.after(), attrs)];
+  const table = $cell.node(-1);
+  const tableStart = $cell.start(-1);
+  const map = TableMap.get(table);
+  const offsets = new Set<number>();
+  for (let row = 0; row < map.height; row += 1) {
+    offsets.add(map.map[row * map.width + index]);
+  }
+  return Array.from(offsets).flatMap((offset) => {
+    const cell = table.nodeAt(offset);
+    return cell
+      ? [Decoration.node(tableStart + offset, tableStart + offset + cell.nodeSize, attrs)]
+      : [];
+  });
+}
+
+function showTableDragChrome(
+  runtime: TableControlsRuntime,
+  view: EditorView,
+  drag: TableDragState,
+): void {
+  const target = drag.dropTarget;
+  const shown = target && target.destination !== drag.index ? target : undefined;
+  drag.tableElement
+    .querySelector(".dohc-table-grip.is-drop-target")
+    ?.classList.remove("is-drop-target");
+  if (shown) {
+    drag.tableElement
+      .querySelector(
+        drag.band === "row"
+          ? `[data-table-row="${shown.index}"]`
+          : `[data-table-column="${shown.index}"]`,
+      )
+      ?.classList.add("is-drop-target");
+  }
+  const cellPos = drag.cellPos();
+  const decorations =
+    cellPos === undefined
+      ? []
+      : tableBandDecorations(view.state.doc, cellPos, drag.band, drag.index);
+  if (shown) decorations.push(shown.decoration);
+  setTableGesture(runtime, view, decorations);
+}
+
+function showRowResizeChrome(
+  runtime: TableControlsRuntime,
+  view: EditorView,
+  resize: TableRowResizeState,
+): void {
+  const row = view.state.doc.nodeAt(resize.rowPos);
+  if (!row) return;
+  setTableGesture(runtime, view, [
+    Decoration.node(resize.rowPos, resize.rowPos + row.nodeSize, {
+      class: "dohc-table-row-is-resizing",
+      style:
+        resize.currentHeight === resize.startHeight
+          ? undefined
+          : `height: ${resize.currentHeight}px`,
+    }),
+  ]);
 }
 
 // The live region an editor parks on its host. Keyed by view so the plugin's
@@ -873,10 +941,14 @@ function tableDropTargetFromPoint(
   const scaled = fraction * span;
   const index = logicalStart + Math.floor(scaled);
   const side: TableDropSide = scaled - Math.floor(scaled) < 0.5 ? "before" : "after";
+  const bandDepth = drag.band === "row" ? cellDepth - 1 : cellDepth;
   return {
     index,
     side,
     bandElement,
+    decoration: Decoration.node($cell.before(bandDepth), $cell.after(bandDepth), {
+      class: side === "before" ? "dohc-table-drop-before" : "dohc-table-drop-after",
+    }),
     destination: resolveTableDropDestination({
       sourceIndex: drag.index,
       targetIndex: index,
@@ -884,25 +956,6 @@ function tableDropTargetFromPoint(
       bandCount: drag.band === "row" ? map.height : map.width,
     }),
   };
-}
-
-function markTableDropTarget(
-  view: EditorView,
-  drag: TableDragState,
-  target: TableDropTarget,
-): void {
-  clearTableDropTargetChrome(view);
-  const gripSelector =
-    drag.band === "row"
-      ? `[data-table-row="${target.index}"]`
-      : `[data-table-column="${target.index}"]`;
-  drag.tableElement
-    .querySelector(gripSelector)
-    ?.classList.add("is-drop-target");
-  target.bandElement.classList.add(
-    target.side === "before" ? "dohc-table-drop-before" : "dohc-table-drop-after",
-  );
-  positionTableDropIndicator(drag, target);
 }
 
 function findVerticalScrollContainer(view: EditorView): HTMLElement | null {
@@ -936,6 +989,7 @@ function autoScrollTableDrag(drag: TableDragState, clientY: number): void {
 }
 
 function updateTableDragTarget(
+  runtime: TableControlsRuntime,
   view: EditorView,
   drag: TableDragState,
   hitTarget: Element | null,
@@ -943,26 +997,21 @@ function updateTableDragTarget(
   clientY: number,
 ): TableDropTarget | null {
   const target = tableDropTargetFromPoint(view, drag, hitTarget, clientX, clientY);
-  if (!target) {
-    clearTableDropTargetChrome(view);
-    drag.indicator.classList.remove("is-visible");
-    drag.dropTarget = undefined;
-    return null;
-  }
-
-  autoScrollTableDrag(drag, clientY);
-
-  const changed =
-    drag.dropTarget?.index !== target.index ||
-    drag.dropTarget?.side !== target.side;
-  drag.dropTarget = target;
-  if (target.destination === drag.index) {
-    clearTableDropTargetChrome(view);
-    drag.indicator.classList.remove("is-visible");
+  const previous = drag.dropTarget;
+  drag.dropTarget = target ?? undefined;
+  if (target) autoScrollTableDrag(drag, clientY);
+  if (target && target.destination !== drag.index) {
+    positionTableDropIndicator(drag, target);
   } else {
-    markTableDropTarget(view, drag, target);
+    drag.indicator.classList.remove("is-visible");
   }
-  if (changed) {
+
+  const changed = previous?.index !== target?.index || previous?.side !== target?.side;
+  // Moves within one band leave the document chrome as it is.
+  if (changed || previous?.bandElement !== target?.bandElement) {
+    showTableDragChrome(runtime, view, drag);
+  }
+  if (target && changed) {
     const label = drag.band === "row" ? "row" : "column";
     announceTableDrag(
       view,
@@ -1031,7 +1080,7 @@ function finishTableDrop(
     );
   }
   runtime.activeDrag = null;
-  clearTableDragChrome(view);
+  clearTableDragChrome(runtime, view);
 }
 
 function configureGripDrag(
@@ -1086,7 +1135,7 @@ function configureGripDrag(
       if (message) announceTableDrag(view, message);
     }
     runtime.activeDrag = null;
-    clearTableDragChrome(view);
+    clearTableDragChrome(runtime, view);
     pointerSession = undefined;
     releasePointer(session.pointerId);
   };
@@ -1115,12 +1164,12 @@ function configureGripDrag(
 
     // Do not create a ProseMirror row/column selection here. That dispatches a
     // transaction, rebuilds the table decorations, and detaches the handle
-    // that currently owns pointer capture. The drag-source classes below give
+    // that currently owns pointer capture. The drag-source decoration gives
     // the same visual feedback without invalidating the active gesture.
     tableElement.classList.add("is-reordering");
     button.classList.add("is-dragging");
     button.setAttribute("aria-grabbed", "true");
-    markTableBand(tableElement, band, index, "dohc-table-drag-source");
+    showTableDragChrome(runtime, view, drag);
     announceTableDrag(
       view,
       `Moving ${band} ${index + 1}. Drag over any cell to choose a new position.`,
@@ -1149,7 +1198,7 @@ function configureGripDrag(
     const previousTarget = drag.dropTarget;
     const target =
       (hitTarget
-        ? updateTableDragTarget(view, drag, hitTarget, clientX, clientY)
+        ? updateTableDragTarget(runtime, view, drag, hitTarget, clientX, clientY)
         : null) ?? previousTarget;
     pointerSession = undefined;
     releasePointer(session.pointerId);
@@ -1174,7 +1223,7 @@ function configureGripDrag(
     event.stopPropagation();
     positionTableDragPreview(pointerSession.preview, event.clientX, event.clientY);
     const hitTarget = editorElementFromPoint(view, event.clientX, event.clientY);
-    updateTableDragTarget(view, drag, hitTarget, event.clientX, event.clientY);
+    updateTableDragTarget(runtime, view, drag, hitTarget, event.clientX, event.clientY);
   }
 
   function handleWindowMouseUp(event: MouseEvent): void {
@@ -1273,22 +1322,32 @@ function configureRowResize(
     runtime.cancelPointer = null;
     runtime.activeRowResize = null;
     resize.tableElement.classList.remove("is-resizing-row");
-    resize.rowElement.classList.remove("dohc-table-row-is-resizing");
     button.classList.remove("is-resizing");
     button.setAttribute("aria-grabbed", "false");
     releasePointer(resize.pointerId);
     if (commit && heightChanged) {
-      setTableRowHeight(view, resize.rowPos, resize.currentHeight);
+      // Storing the height in the transaction that removes the live height
+      // redraws the row once, at its stored size.
+      setTableRowHeight(
+        view,
+        resize.rowPos,
+        resize.currentHeight,
+        view.state.tr.setMeta(tableControlsKey, DecorationSet.empty),
+      );
       announceTableDrag(
         view,
         `Row ${resize.rowIndex + 1} height set to ${Math.round(resize.currentHeight)} pixels.`,
       );
-    } else {
-      resize.rowElement.style.height = resize.originalInlineHeight;
-      if (!commit) {
-        announceTableDrag(view, `Row ${resize.rowIndex + 1} resize cancelled.`);
-      }
+    } else if (!commit) {
+      announceTableDrag(view, `Row ${resize.rowIndex + 1} resize cancelled.`);
     }
+    setTableGesture(runtime, view, []);
+    // Removing the live height from a row patched in place also removes the
+    // height the row renders for itself.
+    const pos = rowPos();
+    const row = pos === undefined ? null : (view.nodeDOM(pos) as HTMLElement | null);
+    const ownHeight = row?.dataset.rowHeight ? `${row.dataset.rowHeight}px` : "";
+    if (row && row.style.height !== ownHeight) row.style.height = ownHeight;
   };
 
   function onPointerMove(event: PointerEvent): void {
@@ -1298,11 +1357,13 @@ function configureRowResize(
     }
     event.preventDefault();
     event.stopPropagation();
-    resize.currentHeight = Math.max(
+    const height = Math.max(
       MIN_ROW_HEIGHT,
       Math.round(resize.startHeight + event.clientY - resize.startY),
     );
-    resize.rowElement.style.height = `${resize.currentHeight}px`;
+    if (height === resize.currentHeight) return;
+    resize.currentHeight = height;
+    showRowResizeChrome(runtime, view, resize);
   }
 
   function onPointerUp(event: PointerEvent): void {
@@ -1339,23 +1400,22 @@ function configureRowResize(
       MIN_ROW_HEIGHT,
       Math.round(measuredHeight || Number(rowElement.dataset.rowHeight) || MIN_ROW_HEIGHT),
     );
-    runtime.activeRowResize = {
+    const resize: TableRowResizeState = {
       rowPos: startRowPos,
       rowIndex,
-      rowElement,
       tableElement,
       handle: button,
       pointerId: event.pointerId,
       startY: event.clientY,
       startHeight,
       currentHeight: startHeight,
-      originalInlineHeight: rowElement.style.height,
     };
+    runtime.activeRowResize = resize;
     runtime.cancelPointer = () => finish(false);
     tableElement.classList.add("is-resizing-row");
-    rowElement.classList.add("dohc-table-row-is-resizing");
     button.classList.add("is-resizing");
     button.setAttribute("aria-grabbed", "true");
+    showRowResizeChrome(runtime, view, resize);
     try {
       button.setPointerCapture?.(event.pointerId);
     } catch {
@@ -1773,25 +1833,12 @@ function changedTables(doc: PMNode, changes: DocChange[]): Map<number, ChangedTa
 function updateTableControlDecorations(
   decorations: DecorationSet,
   changes: DocChange[],
+  mapping: Mapping,
   after: PMNode,
   runtime: TableControlsRuntime,
   rowResizeEnabled: boolean,
 ): DecorationSet {
-  if (changes.length === 0) return decorations;
-  // Map through the diff rather than the transaction: a collaboration
-  // update replaces the whole document even when one cell changed.
-  const mapped = decorations.map(
-    new Mapping([
-      new StepMap(
-        changes.flatMap((change) => [
-          change.fromA,
-          change.toA - change.fromA,
-          change.toB - change.fromB,
-        ]),
-      ),
-    ]),
-    after,
-  );
+  const mapped = decorations.map(mapping, after);
   const stale: Decoration[] = [];
   const fresh: Decoration[] = [];
   changedTables(after, changes).forEach(({ node, structural }, pos) => {
@@ -1804,8 +1851,11 @@ function updateTableControlDecorations(
 
 // The changes the view has not seen yet. Plugin state records the diff its
 // transaction produced; it applies only when the view moved across exactly
-// that transaction.
+// that transaction. `decorations` draws the controls and the gesture chrome
+// together.
 type TableControlsState = {
+  controls: DecorationSet;
+  gesture: DecorationSet;
   decorations: DecorationSet;
   before: PMNode | null;
   after: PMNode;
@@ -2004,30 +2054,61 @@ export function makeTableControlsPlugin(
     key: tableControlsKey,
     state: {
       init(_, instance) {
+        const controls = buildTableControlDecorations(
+          instance.doc,
+          runtime,
+          rowResizeEnabled,
+        );
         return {
-          decorations: buildTableControlDecorations(
-            instance.doc,
-            runtime,
-            rowResizeEnabled,
-          ),
+          controls,
+          gesture: DecorationSet.empty,
+          decorations: controls,
           before: null,
           after: instance.doc,
           changes: [],
         };
       },
       apply(tr, old, oldState) {
-        if (!tr.docChanged) return old;
-        const changes = findDocChanges(oldState.doc, tr.doc);
+        const chrome = tr.getMeta(tableControlsKey) as DecorationSet | undefined;
+        if (!tr.docChanged && !chrome) return old;
+        let { controls, gesture, before, after, changes } = old;
+        if (tr.docChanged) {
+          changes = findDocChanges(oldState.doc, tr.doc);
+          before = oldState.doc;
+          after = tr.doc;
+          if (changes.length > 0) {
+            // Map through the diff rather than the transaction: a collaboration
+            // update replaces the whole document even when one cell changed.
+            const mapping = new Mapping([
+              new StepMap(
+                changes.flatMap((change) => [
+                  change.fromA,
+                  change.toA - change.fromA,
+                  change.toB - change.fromB,
+                ]),
+              ),
+            ]);
+            controls = updateTableControlDecorations(
+              controls,
+              changes,
+              mapping,
+              tr.doc,
+              runtime,
+              rowResizeEnabled,
+            );
+            gesture = gesture.map(mapping, tr.doc);
+          }
+        }
+        if (chrome) gesture = chrome;
         return {
-          decorations: updateTableControlDecorations(
-            old.decorations,
-            changes,
-            tr.doc,
-            runtime,
-            rowResizeEnabled,
-          ),
-          before: oldState.doc,
-          after: tr.doc,
+          controls,
+          gesture,
+          decorations:
+            gesture === DecorationSet.empty
+              ? controls
+              : controls.add(tr.doc, gesture.find()),
+          before,
+          after,
           changes,
         };
       },
@@ -2055,6 +2136,7 @@ export function makeTableControlsPlugin(
       },
     },
     view(view) {
+      runtime.mounted = true;
       if (typeof requestAnimationFrame === "function") {
         requestAnimationFrame(() => sizeAllAppendStrips(view));
       }
@@ -2111,6 +2193,7 @@ export function makeTableControlsPlugin(
           }
         },
         destroy() {
+          runtime.mounted = false;
           runtime.cancelPointer?.();
           runtime.cancelPointer = null;
           runtime.closeMenu?.();
