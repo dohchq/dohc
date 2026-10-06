@@ -43,11 +43,12 @@ Every release job runs on a self-hosted runner. Cloud runners stay off.
 
 A job waits in the queue until a runner with its labels is online.
 Each runner needs Git with bash, rustup, and the platform's native build tools.
-The Windows runner also needs the GitHub CLI, `gh`, for publishing.
+The Windows runner also needs the GitHub CLI, `gh`, for the version check and publishing.
+Run it in a signed-in desktop session for the packaged app check.
 The Linux runner also needs `xvfb-run` for the fuse smoke.
 The package and publish jobs receive the environment's secrets.
 Register only runners that the release owner controls.
-On this shared Windows PC, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.
+On a shared Windows runner, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.
 This keeps release engine builds within the local disk, slot, and compiler budget, even when Actions sets `CI=true`.
 Start the runner's `run.cmd` when building a release.
 The runner can stay offline between releases.
@@ -72,7 +73,8 @@ The Windows runner performs every job for this selection.
 The workflow generates the nightly version from the package version, UTC date, run number, and run attempt.
 Download the run's `desktop-Windows-x64` artifact after every job passes.
 Verify its files with the artifact command below.
-Run the packaged executable with an isolated profile before publishing the first testing build.
+Pass `--channel nightly` and the run's generated version to that command.
+The Windows package job checks the executable with an isolated profile and test workspace before uploading it.
 For publication, dispatch again with `dry_run=false`.
 The new dispatch generates a new nightly version.
 The published prerelease records the source commit and includes generated release notes.
@@ -80,6 +82,8 @@ The published prerelease records the source commit and includes generated releas
 Use `platforms=all` when Windows, macOS, and Linux runners are available.
 Only the selected platforms receive installers and update packages.
 Choose `all` when the release must update existing installations on every supported platform.
+If previous releases on this channel included macOS or Linux, continue selecting `all`.
+Their updaters cannot find a platform manifest in a Windows-only release.
 
 Private repository downloads require repository access.
 The packaged updater also needs an authenticated private feed or a public download host.
@@ -101,7 +105,6 @@ Its last step publishes the draft, and GitHub then creates the version's tag.
 Updaters never read a draft.
 A dispatch stops before packaging if its version already has a tag or a release, published or draft.
 Then bump the version, or delete the draft that a stopped run left, and dispatch again.
-To build a nightly, dispatch `Desktop Release` from `main` with `channel=nightly`.
 A push to `main` starts no release.
 A second dispatch on the same channel waits for the running one to finish.
 GitHub keeps one waiting run per channel, and a newer dispatch replaces it.
@@ -138,6 +141,9 @@ following:
 
 The Linux job also runs the packaged fuse smoke. It boots an asar assembled
 from the built desktop files and verifies that the packaged window can start.
+Windows-only selections skip that Linux check.
+The Windows job runs the packaged executable with an isolated profile and test workspace.
+It checks startup, editing, disk persistence, and restart before uploading artifacts.
 
 These checks do not prove code signing, OS installer registration, update
 installation, or an upgrade that preserves a user's profile. Release owners

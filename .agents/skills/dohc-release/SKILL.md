@@ -12,6 +12,8 @@ Use the repository's release scripts for versioning and artifact checks.
 
 Confirm the requested channel, source commit, platforms, and publication intent from the conversation.
 Default testing builds to the nightly channel and Windows x64.
+Check previous releases on the requested channel before selecting platforms.
+Continue including platforms that already receive updates on that channel.
 A request to prepare a release authorizes preparation and a dry run.
 A request to cut or publish a nightly authorizes publishing that testing build.
 Preserve any broader publication authorization already given in the conversation.

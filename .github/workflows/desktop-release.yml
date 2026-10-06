@@ -285,6 +285,16 @@ jobs:
           DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"
         run: xvfb-run -a pnpm smoke:fuses:desktop
 
+      - name: Windows packaged smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          node tools/perf-profiling/packaged-benchmark.mjs `
+            --binary apps/desktop/release/win-unpacked/dohc.exe `
+            --package-commit '${{ github.sha }}' `
+            --output .agent-artifacts/release-package-smoke `
+            --label candidate --runs 1 --idle-seconds 1 --keystrokes 5 --switches 1
+
       - name: Upload packaged artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

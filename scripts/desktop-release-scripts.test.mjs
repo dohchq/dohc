@@ -472,6 +472,11 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   const onSection = topLevelSection(workflow, "on");
   const packageDesktop = stepBlock(workflow, "Package desktop");
   const fuseSmoke = stepBlock(workflow, "Fuse smoke");
+  const windowsSmoke = stepBlock(workflow, "Windows packaged smoke");
+  assert.match(windowsSmoke, /if: runner\.os == 'Windows'/);
+  assert.match(windowsSmoke, /--binary apps\/desktop\/release\/win-unpacked\/dohc\.exe/);
+  assert.match(windowsSmoke, /--package-commit '\$\{\{ github\.sha \}\}'/);
+  assert.ok(workflow.indexOf(windowsSmoke) < workflow.indexOf(stepBlock(workflow, "Upload packaged artifacts")));
   const packageSteps = stepBlocks(workflow).filter((step) =>
     step.includes("electron-builder")
   );
