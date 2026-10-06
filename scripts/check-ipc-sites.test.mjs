@@ -365,12 +365,12 @@ test("uncalled invoke transports and helper references are sites", t => {
       ...(expression.includes('ipcRenderer.invoke') ? [preload + ' | IPC receiver reference: ipcRenderer'] : []),
     ], expression);
   }
-  const provider = 'apps/desktop/src/bridge/auditTransport.ts';
+  const provider = 'apps/desktop/src/bridge/transport.ts';
   const { dir } = fixture(t, {
     [preload]: '',
     [provider]: 'import { ipcRenderer } from "electron"; export const invoke = ipcRenderer.invoke.bind(ipcRenderer);',
-    'apps/desktop/src/bridge/auditIndex.ts': 'export { invoke as requestFromMain } from "./auditTransport";',
-    'apps/desktop/src/bridge/auditMethods.ts': 'import { requestFromMain } from "./auditIndex"; export const getStatus = () => requestFromMain(CHANNELS.new);',
+    'apps/desktop/src/bridge/index.ts': 'export { invoke as requestFromMain } from "./transport";',
+    'apps/desktop/src/bridge/methods.ts': 'import { requestFromMain } from "./index"; export const getStatus = () => requestFromMain(CHANNELS.new);',
   });
   const { sites, failures } = checkIpcSites(dir, { sites: [] });
   assert.deepEqual(sites.map(site => site.fingerprint), [
@@ -411,28 +411,28 @@ test("mutable channel aliases never inherit their initializer or table exemption
 
 test("loop and catch shadows have their own binding identities", () => {
   for (const body of [
-    'for (const channel of ["desktop:sol-audit-new"]) void ipcRenderer.invoke(channel); return ipcRenderer.invoke(channel, payload);',
+    'for (const channel of ["desktop:new"]) void ipcRenderer.invoke(channel); return ipcRenderer.invoke(channel, payload);',
     'for (const channel of [CHANNELS.x]) void ipcRenderer.invoke(channel); return ipcRenderer.invoke(channel, payload);',
     'for (const channel in channels) void ipcRenderer.invoke(channel); return ipcRenderer.invoke(channel, payload);',
     'for (let channel = 0; channel < 1; channel++) void ipcRenderer.invoke(channel); return ipcRenderer.invoke(channel, payload);',
-    'try { throw "desktop:sol-audit-new"; } catch (channel) { void ipcRenderer.invoke(channel as string); } return ipcRenderer.invoke(channel, payload);',
+    'try { throw "desktop:new"; } catch (channel) { void ipcRenderer.invoke(channel as string); } return ipcRenderer.invoke(channel, payload);',
     'try { return ipcRenderer.invoke(channel, payload); } catch (channel) { return ipcRenderer.invoke(channel); }',
   ]) {
     const result = extractIpcSites(preload, 'operationBridge(scheduleHostOperations, (channel, payload) => { ' + body + ' });').map(site => site.fingerprint);
-    assert.deepEqual(result, [preload + ' | ' + (body.includes('of ["') ? '"desktop:sol-audit-new"'
+    assert.deepEqual(result, [preload + ' | ' + (body.includes('of ["') ? '"desktop:new"'
       : body.includes('of [CHANNELS') ? 'CHANNELS.x' : '<inline>/<inline> forwards channel to ipcRenderer.invoke')], body);
   }
   assert.deepEqual(extractIpcSites(preload, 'import { ipcRenderer as ipc } from "electron"; for (const { ipc: plugin } of plugins) ipc.invoke("desktop:new");')
     .map(site => site.fingerprint), [preload + ' | "desktop:new"']);
   for (const body of [
-    'const plugins = [{ invoke: (_channel: string) => undefined }]; for (const ipc of plugins) ipc.invoke("desktop:sol-audit-new");',
-    'for (const ipc in plugins) ipc.invoke("desktop:sol-audit-new");',
-    'try {} catch (ipc) { ipc.invoke("desktop:sol-audit-new"); }',
+    'const plugins = [{ invoke: (_channel: string) => undefined }]; for (const ipc of plugins) ipc.invoke("desktop:new");',
+    'for (const ipc in plugins) ipc.invoke("desktop:new");',
+    'try {} catch (ipc) { ipc.invoke("desktop:new"); }',
   ]) assert.deepEqual(extractIpcSites(preload, 'import { ipcRenderer as ipc } from "electron"; ' + body), [], body);
 });
 
 test("collection mutations in another declarator count as outside uses", t => {
-  const source = 'const rows: Array<readonly [string, boolean]> = [[CHANNELS.stopOwnerLiveDocument, true], [CHANNELS.resumeOwnerLiveDocument, false]], appended = rows.push(["desktop:sol-audit-new", true]); for (const [channel, stop] of rows) registerHandler(channel, handler);';
+  const source = 'const rows: Array<readonly [string, boolean]> = [[CHANNELS.stopOwnerLiveDocument, true], [CHANNELS.resumeOwnerLiveDocument, false]], appended = rows.push(["desktop:new", true]); for (const [channel, stop] of rows) registerHandler(channel, handler);';
   assert.deepEqual(extractIpcSites(registrar, source).map(site => site.fingerprint), [registrar + ' | collection(rows) referenced outside its loop']);
   const { dir } = fixture(t, { [registrar]: '{ ' + source + ' } { ' + source + ' }' });
   const { failures, sites } = checkIpcSites(dir, { sites: [oldSite] });
@@ -445,14 +445,14 @@ test("collection mutations in another declarator count as outside uses", t => {
 
 test("entry identities survive alias chains and Electron namespace forms", () => {
   for (const source of [
-    'const { ipcRenderer } = require("electron"); const renderer = ipcRenderer; renderer.invoke("desktop:sol-audit-new");',
-    'import * as electron from "electron"; const { ipcRenderer: renderer } = electron; renderer.invoke("desktop:sol-audit-new");',
-    'import electron from "electron"; electron.ipcRenderer.invoke("desktop:sol-audit-new");',
-    'require("electron").ipcRenderer.invoke("desktop:sol-audit-new");',
-    'const electronModule = require("electron"); electronModule.ipcRenderer.invoke("desktop:sol-audit-new");',
-    'const electronModule = require("electron"); const { ipcRenderer: r } = electronModule; r.invoke("desktop:sol-audit-new");',
+    'const { ipcRenderer } = require("electron"); const renderer = ipcRenderer; renderer.invoke("desktop:new");',
+    'import * as electron from "electron"; const { ipcRenderer: renderer } = electron; renderer.invoke("desktop:new");',
+    'import electron from "electron"; electron.ipcRenderer.invoke("desktop:new");',
+    'require("electron").ipcRenderer.invoke("desktop:new");',
+    'const electronModule = require("electron"); electronModule.ipcRenderer.invoke("desktop:new");',
+    'const electronModule = require("electron"); const { ipcRenderer: r } = electronModule; r.invoke("desktop:new");',
   ]) assert.deepEqual(extractIpcSites(preload, source).map(site => site.fingerprint), [
-    preload + ' | "desktop:sol-audit-new"',
+    preload + ' | "desktop:new"',
     ...(source.includes('const renderer = ipcRenderer') ? [preload + ' | IPC receiver reference: ipcRenderer'] : []),
   ], source);
   assert.deepEqual(extractIpcSites(main, 'const handleIpc = createHandleIpc(ipcMain); const register = handleIpc; register(CHANNELS.new, h);')
@@ -467,10 +467,10 @@ test("exported table helper declarations are transport escapes", t => {
     'export const { invoke } = ipcRenderer;',
     'export const invoke = ((channel, payload) => ipcRenderer.invoke(channel, payload)); operationBridge(ops, invoke);',
   ]) {
-    const provider = 'apps/desktop/src/bridge/auditTransport.ts';
+    const provider = 'apps/desktop/src/bridge/transport.ts';
     const reference = source.includes('const {') ? 'ipcRenderer.invoke' : 'invoke';
     const { dir } = fixture(t, { [preload]: '', [provider]: source,
-      'apps/desktop/src/bridge/auditMethods.ts': 'import { invoke } from "./auditTransport"; export const getAuditStatus = () => invoke("desktop:sol-audit-new", undefined);',
+      'apps/desktop/src/bridge/methods.ts': 'import { invoke } from "./transport"; export const getStatus = () => invoke("desktop:new", undefined);',
     });
     const { failures, sites } = checkIpcSites(dir, { sites: [] });
     assert.deepEqual(sites.map(site => site.fingerprint), [
@@ -514,18 +514,18 @@ test("type positions do not create uncalled transport references", () => {
 });
 
 test("renderer receiver escapes are conservative sites", t => {
-  const provider = 'apps/desktop/src/bridge/auditTransport.ts';
-  const consumer = 'apps/desktop/src/bridge/auditMethods.ts';
+  const provider = 'apps/desktop/src/bridge/transport.ts';
+  const consumer = 'apps/desktop/src/bridge/methods.ts';
   const sources = [
     'import { ipcRenderer } from "electron"; export const renderer = ipcRenderer;',
-    'import { ipcRenderer } from "electron"; function install(override?: Electron.IpcRenderer) { const renderer = override ?? ipcRenderer; return renderer.invoke("desktop:sol-audit-new"); } install();',
-    'import { ipcRenderer } from "electron"; function install(renderer: Electron.IpcRenderer = ipcRenderer) { return renderer.invoke("desktop:sol-audit-new"); } install();',
+    'import { ipcRenderer } from "electron"; function install(override?: Electron.IpcRenderer) { const renderer = override ?? ipcRenderer; return renderer.invoke("desktop:new"); } install();',
+    'import { ipcRenderer } from "electron"; function install(renderer: Electron.IpcRenderer = ipcRenderer) { return renderer.invoke("desktop:new"); } install();',
     'import { ipcRenderer as ipc } from "electron"; export const renderer = ipc;',
     'import * as electron from "electron"; export const renderer = electron.ipcRenderer;',
   ];
   for (const source of sources) {
     const { dir } = fixture(t, { [preload]: '', [provider]: source,
-      [consumer]: 'import { renderer } from "./auditTransport"; renderer.invoke("desktop:sol-audit-new");',
+      [consumer]: 'import { renderer } from "./transport"; renderer.invoke("desktop:new");',
     });
     const { sites, failures } = checkIpcSites(dir, { sites: [] });
     assert.deepEqual(sites.map(site => site.fingerprint), [provider + ' | IPC receiver reference: ipcRenderer'], source);
@@ -535,7 +535,7 @@ test("renderer receiver escapes are conservative sites", t => {
 });
 
 test("main registration member escapes are conservative sites", t => {
-  const provider = 'apps/desktop/src/bridge/auditTransport.ts';
+  const provider = 'apps/desktop/src/bridge/transport.ts';
   for (const expression of [
     'export const register = ipcMain.handle.bind(ipcMain);',
     'export const { handle: register } = ipcMain;',
@@ -544,7 +544,7 @@ test("main registration member escapes are conservative sites", t => {
     const method = expression.includes('handleOnce') ? 'handleOnce' : 'handle';
     const { dir } = fixture(t, { [preload]: '',
       [provider]: 'import { ipcMain } from "electron"; ' + expression,
-      'apps/desktop/src/bridge/auditMethods.ts': 'import { register } from "./auditTransport"; register("desktop:sol-audit-new", async () => undefined);',
+      'apps/desktop/src/bridge/methods.ts': 'import { register } from "./transport"; register("desktop:new", async () => undefined);',
     });
     const { sites, failures } = checkIpcSites(dir, { sites: [] });
     assert.ok(sites.some(site => site.fingerprint === provider + ' | registration transport reference: ipcMain.' + method), expression);
@@ -554,35 +554,72 @@ test("main registration member escapes are conservative sites", t => {
 });
 
 test("loop expansion requires the declared channel binding", () => {
-  const path = 'apps/desktop/src/ipc/relaySharesIpc.ts';
-  const source = readFileSync(join(root, path), 'utf8');
-  const before = extractIpcSites(path, source).map(site => site.fingerprint);
-  const loopStart = source.indexOf('for (const [channel, stop] of [');
-  assert.ok(loopStart >= 0);
-  const registration = source.indexOf('registerHandler(channel, async (event, payload) => {', loopStart);
-  assert.ok(registration > loopStart);
-  const edited = source.slice(0, registration)
-    + 'const register = (channel: string, handler: Parameters<typeof registerHandler>[1]) => registerHandler(channel, handler);\n'
-    + 'register(stop ? "desktop:sol-audit-new" : channel, async (event, payload) => {'
-    + source.slice(registration + 'registerHandler(channel, async (event, payload) => {'.length);
-  const after = extractIpcSites(path, edited).map(site => site.fingerprint);
-  assert.deepEqual(after.filter(site => !before.includes(site)), [path + ' | register forwards channel to registerHandler']);
-  assert.deepEqual(before.filter(site => !after.includes(site)), [path + ' | CHANNELS.stopOwnerLiveDocument', path + ' | CHANNELS.resumeOwnerLiveDocument']);
+  const before = extractIpcSites(registrar,
+    'for (const [channel, stop] of [[CHANNELS.stop, true], [CHANNELS.resume, false]] as const) { registerHandler(channel, handler); }')
+    .map(site => site.fingerprint);
+  assert.deepEqual(before, [registrar + ' | CHANNELS.stop', registrar + ' | CHANNELS.resume']);
+  const after = extractIpcSites(registrar,
+    'for (const [channel, stop] of [[CHANNELS.stop, true], [CHANNELS.resume, false]] as const) { '
+    + 'const register = (channel: string, handler: Parameters<typeof registerHandler>[1]) => registerHandler(channel, handler); '
+    + 'register(stop ? "desktop:new" : channel, handler); }').map(site => site.fingerprint);
+  assert.deepEqual(after, [registrar + ' | register forwards channel to registerHandler']);
+  assert.deepEqual(after.filter(site => !before.includes(site)), [registrar + ' | register forwards channel to registerHandler']);
+  assert.deepEqual(before.filter(site => !after.includes(site)), [registrar + ' | CHANNELS.stop', registrar + ' | CHANNELS.resume']);
 });
 
 test("destructured and uninitialized locals shadow Electron aliases", t => {
   const prefix = 'import { ipcRenderer as ipc } from "electron"; ';
   for (const body of [
-    'const plugins = [{ invoke: (_channel: string) => undefined }]; function run({ ipc }: { ipc: typeof plugins[number] }) { ipc.invoke("desktop:sol-audit-new"); } run({ ipc: plugins[0] });',
-    'const plugin = { invoke: (_channel: string) => undefined }; function run() { let ipc: typeof plugin; ipc = plugin; ipc.invoke("desktop:sol-audit-new"); } run();',
-    'const { item: { ipc } } = plugins; ipc.invoke("desktop:sol-audit-new");',
-    'function run({ item: { ipc } }) { ipc.invoke("desktop:sol-audit-new"); } run(plugins);',
-    'function run([ipc]) { ipc.invoke("desktop:sol-audit-new"); } run(plugins);',
+    'const plugins = [{ invoke: (_channel: string) => undefined }]; function run({ ipc }: { ipc: typeof plugins[number] }) { ipc.invoke("desktop:new"); } run({ ipc: plugins[0] });',
+    'const plugin = { invoke: (_channel: string) => undefined }; function run() { let ipc: typeof plugin; ipc = plugin; ipc.invoke("desktop:new"); } run();',
+    'const { item: { ipc } } = plugins; ipc.invoke("desktop:new");',
+    'function run({ item: { ipc } }) { ipc.invoke("desktop:new"); } run(plugins);',
+    'function run([ipc]) { ipc.invoke("desktop:new"); } run(plugins);',
   ]) {
     const { dir } = fixture(t, { [preload]: prefix + body });
     assert.deepEqual(checkIpcSites(dir, { sites: [] }), { failures: [], sites: [] }, body);
   }
   assert.deepEqual(extractIpcSites(preload, prefix
-    + 'function run({ item: { ipc } }) { ipc.invoke("desktop:sol-audit-new"); } ipc.invoke(CHANNELS.new);')
+    + 'function run({ item: { ipc } }) { ipc.invoke("desktop:new"); } ipc.invoke(CHANNELS.new);')
     .map(site => site.fingerprint), [preload + ' | CHANNELS.new']);
 });
+
+for (const [form, path, source] of [
+  ['class method', preload, 'import { ipcRenderer as ipc } from "electron"; class Plugin { run(ipc: X) { ipc.invoke(CHANNELS.fake); } } ipc.invoke(CHANNELS.new);'],
+  ['object method', preload, 'import { ipcRenderer as ipc } from "electron"; const plugin = { run(ipc: X) { ipc.invoke(CHANNELS.fake); } }; ipc.invoke(CHANNELS.new);'],
+  ['namespace method', preload, 'import * as electron from "electron"; class Plugin { run(electron: unknown) { electron.ipcRenderer.invoke(CHANNELS.fake); } } electron.ipcRenderer.invoke(CHANNELS.new);'],
+  ['main method', main, 'import { ipcMain as electronMain } from "electron"; class Plugin { run(electronMain: unknown) { electronMain.handle(CHANNELS.fake, handler); } } electronMain.handle(CHANNELS.new, handler);'],
+  ['function type', preload, 'import { ipcRenderer as ipc } from "electron"; type Subscribe = (ipc: Electron.IpcRenderer) => void; ipc.invoke("desktop:new");'],
+  ['interface method', preload, 'import { ipcRenderer as ipc } from "electron"; interface Hooks { install(ipc: Electron.IpcRenderer): void; } ipc.invoke("desktop:new");'],
+  ['declare function', preload, 'import { ipcRenderer as ipc } from "electron"; declare function hook(ipc: unknown): void; ipc.invoke(CHANNELS.new);'],
+  ['overload', preload, 'import { ipcRenderer as ipc } from "electron"; function hook(ipc: unknown): void; function hook(value: unknown) {} ipc.invoke(CHANNELS.new);'],
+  ['function declaration', preload, 'import { ipcRenderer as ipc } from "electron"; function run(ipc: X) { ipc.invoke(CHANNELS.fake); } ipc.invoke(CHANNELS.new);'],
+  ['function expression', preload, 'import { ipcRenderer as ipc } from "electron"; const run = function(ipc: X) { ipc.invoke(CHANNELS.fake); }; ipc.invoke(CHANNELS.new);'],
+  ['arrow function', preload, 'import { ipcRenderer as ipc } from "electron"; const run = (ipc: X) => ipc.invoke(CHANNELS.fake); ipc.invoke(CHANNELS.new);'],
+]) {
+  test("parameter shadows stay within their owner: " + form, t => {
+    const expected = path + ' | ' + (['function type', 'interface method'].includes(form) ? '"desktop:new"' : 'CHANNELS.new');
+    const { dir } = fixture(t, { [preload]: '', [path]: source });
+    const { sites, failures } = checkIpcSites(dir, { sites: [] });
+    assert.deepEqual(sites.map(site => site.fingerprint), [expected]);
+    assert.equal(failures.length, 1);
+    assert.ok(failures[0].startsWith(expected + ' (line 1): new hand-written IPC site.'));
+  });
+}
+
+for (const [form, imported, exported] of [
+  ['named', 'ipcRenderer', 'ipcRenderer'],
+  ['aliased', 'ipcRenderer as ipc', 'ipc'],
+]) {
+  test("type-only receiver exports do not escape: " + form, t => {
+    const provider = 'apps/desktop/src/bridge/transport.ts';
+    const prefix = 'import { ' + imported + ' } from "electron"; ';
+    const { dir, write } = fixture(t, { [preload]: '', [provider]: prefix + 'export type { ' + exported + ' };' });
+    assert.deepEqual(checkIpcSites(dir, { sites: [] }), { failures: [], sites: [] });
+    assert.deepEqual(extractIpcSites(provider, prefix + 'export { type ' + exported + ' };'), []);
+    write(provider, prefix + 'export { ' + exported + ' };');
+    const { sites, failures } = checkIpcSites(dir, { sites: [] });
+    assert.deepEqual(sites.map(site => site.fingerprint), [provider + ' | IPC receiver reference: ipcRenderer']);
+    assert.equal(failures.length, 1);
+  });
+}

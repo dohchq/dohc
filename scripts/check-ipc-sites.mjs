@@ -70,8 +70,11 @@ export function extractIpcSites(path, source) {
   const calls = [], candidates = [], bindings = new Map();
   const addBinding = (name, value, scope, property, declaration, entry, kind = "const") => {
     if (!bindings.has(name)) bindings.set(name, []);
+    // Later declarations in a scope take precedence over earlier bindings.
     bindings.get(name).unshift({ value, scope, property, declaration, entry, kind });
   };
+  const coveredByDeclaration = (node, scope) => bindings.get(canonical(node, source))?.some(binding => binding.scope?.from === scope?.from
+    && node.from >= binding.declaration?.from && node.to <= binding.declaration?.to);
   const cursor = tree.cursor();
   do {
     if (!["CallExpression", "VariableDeclaration", "FunctionDeclaration", "VariableDefinition", "ImportDeclaration", "VariableName", "PropertyDefinition", "PropertyName", "MemberExpression"].includes(cursor.name)) continue;
@@ -83,9 +86,9 @@ export function extractIpcSites(path, source) {
       const declaration = ancestor(node, parent => isFunction(parent) || parent.name === "VariableDeclaration");
       if (declaration?.parent?.name === "ExportDeclaration" || bindings.get(canonical(node, source))?.some(binding => binding.property
         && node.from >= binding.declaration?.from && node.to <= binding.declaration?.to)) candidates.push(node);
-      const scope = ancestor(node, isScope), name = canonical(node, source);
-      if (node.parent?.name !== "FunctionDeclaration" && !bindings.get(name)?.some(binding => binding.scope?.from === scope?.from
-        && node.from >= binding.declaration?.from && node.to <= binding.declaration?.to)) {
+      const list = ancestor(node, parent => isScope(parent) || parent.name === "ParamList");
+      const scope = list?.name === "ParamList" ? list.parent : ancestor(node, isScope), name = canonical(node, source);
+      if (node.parent?.name !== "FunctionDeclaration" && !coveredByDeclaration(node, scope)) {
         addBinding(name, null, scope);
       }
     }
@@ -119,7 +122,8 @@ export function extractIpcSites(path, source) {
   } while (cursor.next());
   const references = candidates.filter(ref => (ref.name === "MemberExpression" || isBindingDefinition(ref)
     || bindings.has(source.slice(ref.from, ref.to)) || ["ipcRenderer", "ipcMain"].includes(canonical(ref, source)))
-    && !ancestor(ref, node => /^(?:Type|Interface|ImportDeclaration)/u.test(node.name)));
+    && !ancestor(ref, node => /^(?:Type|Interface|ImportDeclaration)/u.test(node.name)
+      || node.name === "ExportDeclaration" && node.getChild("type")));
   const bindingFor = node => {
     const candidates = bindings.get(canonical(node, source));
     if (!candidates) return;
@@ -252,16 +256,17 @@ export function extractIpcSites(path, source) {
     if (isBindingDefinition(ref) && !bindingFor(ref)?.property && !isFunction(unwrap(bindingFor(ref)?.value))) continue;
     let expression = ref;
     while (expression.parent && unwrap(expression.parent)?.from === ref.from && unwrap(expression.parent)?.to === ref.to) expression = expression.parent;
-    const parent = expression.parent, name = entryName(ref), receiver = ["ipcRenderer", "ipcMain"].includes(name);
-    const rawInvoke = name === "ipcRenderer.invoke", registration = ["ipcMain.handle", "ipcMain.handleOnce"].includes(name);
-    if (!receiver && parent?.name === "CallExpression" && parent.firstChild.from === expression.from) continue;
-    if (!receiver && !rawInvoke && !registration && parent?.name === "ArgList" && callees.get(parent.parent.from + ":" + parent.parent.to) === "operationBridge"
+    const parent = expression.parent, name = entryName(ref);
+    const kind = ["ipcRenderer", "ipcMain"].includes(name) ? "receiver" : name === "ipcRenderer.invoke" ? "invoke"
+      : ["ipcMain.handle", "ipcMain.handleOnce"].includes(name) ? "registration" : helpers.has(resolved(ref)?.from) ? "helper" : null;
+    if (!kind) continue;
+    if (kind === "receiver" && (isBindingDefinition(ref)
+      || parent?.name === "MemberExpression" && parent.firstChild.from === expression.from)) continue;
+    if (kind !== "receiver" && parent?.name === "CallExpression" && parent.firstChild.from === expression.from) continue;
+    if (kind === "helper" && parent?.name === "ArgList" && callees.get(parent.parent.from + ":" + parent.parent.to) === "operationBridge"
       && argumentsOf(parent.parent)[1]?.from === expression.from) continue;
-    if (receiver && isBindingDefinition(ref)) continue;
-    if (receiver && parent?.name === "MemberExpression" && parent.firstChild.from === expression.from) continue;
-    if (!receiver && !rawInvoke && !registration && !helpers.has(resolved(ref)?.from)) continue;
-    addSite(ref, receiver ? "IPC receiver reference: " + name : registration ? "registration transport reference: " + name
-      : "invoke transport reference: " + (rawInvoke ? name : canonical(ref, source)));
+    addSite(ref, kind === "receiver" ? "IPC receiver reference: " + name : kind === "registration" ? "registration transport reference: " + name
+      : "invoke transport reference: " + (kind === "invoke" ? name : canonical(ref, source)));
   }
   return sites;
 }
