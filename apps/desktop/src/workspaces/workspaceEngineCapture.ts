@@ -6179,27 +6179,9 @@ export function createWorkspaceEngineCapture(
     async listMoments(input = {}) {
       await chain;
       const engine = await engineStore();
-      if (input.objectId !== undefined) {
-        const activeVersionId = await activeVersionIdOf(engine);
-        const page = await engine.listMoments({
-          workspaceId,
-          versionId: activeVersionId,
-          objectId: input.objectId,
-          ...(input.limit !== undefined ? { limit: input.limit } : {}),
-          ...(input.beforeMomentOrder !== undefined
-            ? { beforeMomentOrder: input.beforeMomentOrder }
-            : {}),
-        });
-        return {
-          moments: page.moments.map((moment) => ({ ...moment, protected: false as const })),
-          nextBeforeMomentOrder: page.nextBeforeMomentOrder,
-          latestMomentOrder: page.latestMomentOrder,
-          activeVersionId,
-          protectedTruncated: false,
-        };
-      }
       const history = await engine.listHistoryPage({
         workspaceId,
+        ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.beforeMomentOrder !== undefined
           ? { beforeMomentOrder: input.beforeMomentOrder }

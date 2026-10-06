@@ -14,9 +14,9 @@ export function sharedViewHistory(store: HistoryStore, workspaceId: string):
   Pick<WorkspaceEngineCapture, "listMoments" | "readMoment"> {
   return {
     async listMoments(input = {}) {
-      if (input.objectId !== undefined) throw new Error("A shared view lists its whole history.");
       const history = await store.listHistoryPage({
         workspaceId,
+        ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
         ...(input.limit !== undefined ? { limit: input.limit } : {}),
         ...(input.beforeMomentOrder !== undefined ? { beforeMomentOrder: input.beforeMomentOrder } : {}),
       });

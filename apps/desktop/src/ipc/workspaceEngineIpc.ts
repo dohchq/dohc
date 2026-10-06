@@ -286,6 +286,7 @@ export function createWorkspaceEngineIpc<
             // Skip retired pages, but leave a continuation after a bounded scan.
             for (let pageIndex = 0; ; pageIndex += 1) {
               const page = await history.listMoments({
+                ...(input.objectId !== undefined ? { objectId: input.objectId } : {}),
                 ...(input.limit !== undefined ? { limit: input.limit } : {}),
                 ...(beforeMomentOrder !== undefined ? { beforeMomentOrder } : {}),
               });
