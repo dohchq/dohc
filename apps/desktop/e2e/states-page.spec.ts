@@ -47,6 +47,7 @@ const PARTS = [
   "empty", "loading", "toasts", "notices", "dialog", "menu-radio", "menu-field", "menu-overflow", "menu-danger",
   "editor-groups", "editor-groups-empty",
   "kind-glyph",
+  "block-menu", "table-menu",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and

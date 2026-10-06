@@ -268,6 +268,8 @@ Text input: `w-full rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px
 
 List row (menus, trees, results): `flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75` + state: active and selected-not-active share `bg-selected text-ink`; the active row adds `font-medium`; the keyboard-focused row keeps the global accent `:focus-visible` outline and never takes `outline-none` or an ink ring in its place (a 30% ink ring measures under 3:1 against the selected fill). A row inside a scroller draws that outline inset with the row's radius (`rounded-md focus-visible:-outline-offset-2`), so the scroller cannot clip it; a row outside a scroller keeps the global outline · rest `text-muted hover:bg-hover hover:text-ink`. Never attenuate a state fill (`bg-selected/85`): it lands between hover and selected, and tokens.test.ts rejects it (inset rows in panels: parent gets `px-1`, row keeps `rounded-md`)
 
+Active option (a list whose focus stays on its frame or input, with `aria-activedescendant` naming the option: menus the editor builds, pickers, listboxes): the active option draws the accent outline inside the row whenever it is active, whether the keyboard or the pointer moved it, because it is where Enter acts. Compose `MENU_ACTIVE_OPTION` from `ui/Menu.tsx` (`data-active:bg-selected` plus `outline-2 outline-accent -outline-offset-2`). The fill alone measures about 1.2:1.
+
 Card / grouped section: `rounded-lg border border-line bg-panel p-3` (modal cards: `rounded-xl p-5` + `dohc-elevated`)
 
 kbd chip: `rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle`
