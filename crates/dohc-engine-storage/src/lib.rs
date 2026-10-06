@@ -39,6 +39,9 @@ pub mod store;
 
 pub(crate) mod migration;
 pub(crate) mod schema;
+mod search_generation;
+
+pub use search_generation::search_generation;
 
 pub use backup::{
     BackupManifest, BackupOutcome, BackupRecord, FreeSpaceProbe, RealFreeSpace,

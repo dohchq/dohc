@@ -328,6 +328,10 @@ async fn query_page_byte_budget_pages_an_oversized_result_set() {
             }),
         )
         .await;
+        assert_eq!(
+            page["restartRequired"], false,
+            "unchanged search results must keep their cursor"
+        );
         let rows = page["results"].as_array().expect("results");
         let serialized_row_bytes: usize = rows
             .iter()

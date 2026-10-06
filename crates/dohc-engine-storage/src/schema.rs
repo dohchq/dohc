@@ -294,6 +294,7 @@ pub(crate) fn open_engine_db_with_root_token(
     validate_v2(&conn)?;
     integrity_check(&conn)?;
     stop_counting(&conn)?;
+    crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
     Ok(OpenedEngineDb {
         conn,
         freshly_created: disposition == Disposition::Fresh,
@@ -319,6 +320,7 @@ pub(crate) fn open_engine_db_read_only(
     validate_v2(&conn)?;
     integrity_check(&conn)?;
     stop_counting(&conn)?;
+    crate::search_generation::install(&conn).map_err(StorageError::corrupt)?;
     Ok(OpenedEngineDb {
         conn,
         freshly_created: false,

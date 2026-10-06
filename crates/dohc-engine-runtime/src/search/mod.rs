@@ -172,8 +172,8 @@ pub enum SearchPageDisposition {
     Restart,
 }
 
-/// Actor-owned bounded page. `generation` is the monotonic SQLite connection
-/// change counter captured after index ensure.
+/// Actor-owned bounded page. `generation` counts search-relevant writes on
+/// this SQLite connection, captured after index ensure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchPageBatch {
     pub disposition: SearchPageDisposition,
@@ -329,7 +329,7 @@ fn preview_line_matches_after(
     out
 }
 
-/// Ensure the index, bind the read to a monotonic connection generation, and
+/// Ensure the index, bind the read to a search-data generation, and
 /// return a keyset page. Chat candidates hydrate only the exact matching
 /// message; canonical message placement is derived from `(created_at_ms,
 /// message_id)` ranks without loading the rest of the thread.
@@ -349,7 +349,7 @@ pub fn search_workspace_page(
     if normalized.is_empty() {
         return Ok(SearchPageBatch {
             disposition: SearchPageDisposition::Results,
-            generation: conn.total_changes(),
+            generation: dohc_engine_storage::search_generation(conn)?,
             results: Vec::new(),
             has_more: false,
             continuation: None,
@@ -359,7 +359,7 @@ pub fn search_workspace_page(
     if limit <= 0 {
         return Ok(SearchPageBatch {
             disposition: SearchPageDisposition::Results,
-            generation: conn.total_changes(),
+            generation: dohc_engine_storage::search_generation(conn)?,
             results: Vec::new(),
             has_more: false,
             continuation: None,
@@ -377,7 +377,7 @@ pub fn search_workspace_page(
         now_ms,
         &dohc_engine_storage::NoFaults,
     )?;
-    let generation = conn.total_changes();
+    let generation = dohc_engine_storage::search_generation(conn)?;
     if expected_generation.is_some_and(|expected| expected != generation) {
         return Ok(SearchPageBatch {
             disposition: SearchPageDisposition::Restart,
