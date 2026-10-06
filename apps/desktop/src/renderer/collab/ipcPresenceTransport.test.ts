@@ -1,3 +1,4 @@
+import { PresenceResult } from "../../ipc/bridgeContract";
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createIpcPresenceTransport } from "./ipcPresenceTransport";
@@ -154,5 +155,33 @@ describe("createIpcPresenceTransport", () => {
     });
     const arg = JSON.stringify(bridgeMock.presencePublish.mock.calls[0][0]);
     expect(arg).not.toMatch(/token|bearer|authorization/i);
+  });
+});
+
+
+describe("presence owner authority over IPC", () => {
+  it("preserves authenticated owner identity on publish and poll", async () => {
+    const result = PresenceResult.parse({ ok: true, snapshot: {
+      version: 4, ownerUserId: "granter", peers: [{
+        userId: "granter", clientId: "agent:owner-workspace", state: { agent: true, activity: "working" }, updatedAtMs: 1,
+      }],
+    } });
+    bridgeMock.presencePublish.mockResolvedValue(result);
+    bridgeMock.presencePoll.mockResolvedValue(result);
+    const transport = createIpcPresenceTransport({ kind: "share", workspaceId: "recipient-workspace", shareId: "share" });
+    const published = await transport.publish({ topic: "chat:agent", clientId: "recipient", incarnationId: INCARNATION_ID, state: {} });
+    const polled = await transport.poll({ topic: "chat:agent", since: 0, signal: new AbortController().signal });
+    expect(published.ownerUserId).toBe("granter");
+    expect(polled).toEqual(published);
+  });
+
+  it.each([null, {}, "", 42])("keeps ordinary peers when owner metadata is malformed: %j", async (ownerUserId) => {
+    const result = PresenceResult.parse({ ok: true, snapshot: {
+      version: 1, ownerUserId, peers: [{ userId: "person", clientId: "phone", state: {}, updatedAtMs: 1 }],
+    } });
+    bridgeMock.presencePublish.mockResolvedValue(result);
+    const snapshot = await createIpcPresenceTransport(SCOPE).publish({ topic: "t", clientId: "me", incarnationId: INCARNATION_ID, state: {} });
+    expect(snapshot.ownerUserId).toBeUndefined();
+    expect(snapshot.peers[0]?.userId).toBe("person");
   });
 });

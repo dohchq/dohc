@@ -156,9 +156,9 @@ function topicAwareTransport() {
   const topics: string[] = [];
   const snapshotFor = (topic: string) =>
     snapshots.get(topic) ?? { version: 0, peers: [] };
-  function set(topic: string, peers: PresencePeer[]) {
+  function set(topic: string, peers: PresencePeer[], ownerUserId: string | undefined = "me") {
     const current = snapshotFor(topic);
-    const snapshot = { version: current.version + 1, peers };
+    const snapshot = { version: current.version + 1, peers, ownerUserId };
     snapshots.set(topic, snapshot);
     for (const resolve of [...(waiters.get(topic) ?? [])]) resolve(snapshot);
     waiters.delete(topic);
@@ -358,6 +358,14 @@ describe("ChatsView presence (MU-C1)", () => {
     await waitFor(() => expect(t.topics).toContain("chat:agent"));
     expect(screen.queryByTestId("chats-my-agent-presence")).toBeNull();
 
+    await act(async () => {
+      t.set("chat:agent", [{
+        userId: "recipient", clientId: "agent:workspace-a",
+        state: { agent: true, activity: "working", userId: "me" }, updatedAtMs: 0,
+      }]);
+    });
+    expect(screen.queryByTestId("chats-my-agent-presence")).toBeNull();
+
     act(() => {
       t.set("chat:agent", [
         { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
@@ -429,6 +437,15 @@ describe("ChatsView presence (MU-C1)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chats-thread-agent-presence").textContent).toBe("working"),
     );
+
+    // A fresh snapshot without authority must not reuse the previous owner.
+    await act(async () => {
+      t.set("chat:thread:thread-agent", [{
+        userId: "me", clientId: "agent:workspace-a",
+        state: { agent: true, activity: "working" }, updatedAtMs: 0,
+      }], "");
+    });
+    expect(screen.queryByTestId("chats-thread-agent-presence")).toBeNull();
 
     // A lookalike payload without the reserved client id is not agent status.
     act(() => {

@@ -489,3 +489,41 @@ describe("resolvePeerDisplayName", () => {
     expect(resolvePeerDisplayName(peer({ displayName: 42 }))).toBe("Someone");
   });
 });
+
+
+describe("relay presence owner authority", () => {
+  it.each(["owner", null, "", 17, { userId: "owner" }])("admits only a server owner ID string: %j", async (ownerUserId) => {
+    const transport = createRelayPresenceTransport({
+      baseUrl: "https://relay.test", token: "test-token", scope: { kind: "share", shareId: "shared" },
+      fetch: vi.fn(async () => new Response(JSON.stringify({
+        ok: true, version: 2, ownerUserId,
+        peers: [{ userId: "person", clientId: "phone", state: {}, updatedAtMs: 1 }],
+      }))) as typeof fetch,
+    });
+    const published = await transport.publish({ topic: "chat:agent", clientId: "phone", state: { ownerUserId: "fake" } });
+    const polled = await transport.poll({ topic: "chat:agent", since: 0, signal: new AbortController().signal });
+    expect(published.ownerUserId).toBe(ownerUserId === "owner" ? "owner" : undefined);
+    expect(polled).toEqual(published);
+    expect(published.peers[0]?.userId).toBe("person");
+  });
+
+  it("emits each snapshot's peers and owner identity together, including missing identity", async () => {
+    const snapshots: PresenceSnapshot[] = [
+      { version: 1, ownerUserId: "owner", peers: [{ userId: "owner", clientId: "agent:w", state: {}, updatedAtMs: 1 }] },
+      { version: 2, peers: [{ userId: "recipient", clientId: "agent:w", state: {}, updatedAtMs: 2 }] },
+    ];
+    const onPeers = vi.fn();
+    const transport: PresenceTransport = {
+      publish: vi.fn(async () => snapshots.shift()!),
+      leave: vi.fn(async () => {}),
+      poll: ({ signal }) => new Promise(resolve => signal.addEventListener("abort", () => resolve({ version: 0, peers: [] }), { once: true })),
+    };
+    const channel = createPresenceChannel({ transport, topic: "chat:agent", clientId: "me", initialState: {}, onPeers });
+    await flush();
+    expect(onPeers.mock.calls[0]?.[1]).toBe("owner");
+    channel.setState({});
+    await flush();
+    expect(onPeers.mock.calls[1]).toEqual([[{ userId: "recipient", clientId: "agent:w", state: {}, updatedAtMs: 2 }], undefined]);
+    await channel.stop();
+  });
+});

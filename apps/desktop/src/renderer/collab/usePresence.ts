@@ -5,6 +5,7 @@ import {
   resolvePeerDisplayName,
   type PresenceChannel,
   type PresencePeer,
+  type PresenceSnapshot,
   type PresenceTransport,
 } from "./presenceChannel";
 
@@ -42,6 +43,7 @@ interface UsePresenceInput {
 }
 
 export interface PresenceResult {
+  ownerUserId: string | null;
   // Peers other than this client (self is filtered out by clientId).
   others: PresencePeer[];
   // Display names of others currently typing.
@@ -67,12 +69,13 @@ function peerState(peer: PresencePeer): Partial<PresenceLocalState> {
   return (peer.state ?? {}) as Partial<PresenceLocalState>;
 }
 
-const EMPTY_PEERS: PresencePeer[] = [];
+const EMPTY_PRESENCE: Pick<PresenceSnapshot, "peers" | "ownerUserId"> = { peers: [] };
 
 export function usePresence(input: UsePresenceInput): PresenceResult {
   const { enabled, transport, topic, clientId, displayName } = input;
   const typingIdleMs = input.typingIdleMs ?? 5_000;
-  const [peers, setPeers] = useState<PresencePeer[]>(EMPTY_PEERS);
+  const [snapshot, setSnapshot] = useState<typeof EMPTY_PRESENCE>(EMPTY_PRESENCE);
+  const { peers } = snapshot;
   // Bumped by restart() to force the channel effect below to tear down (a
   // no-op — it is already stopped) and stand up a fresh channel (#742 P2,
   // round 3), without needing any of the scope inputs to actually change.
@@ -88,7 +91,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
   useEffect(() => {
     if (!active || !transport) {
       // Solo/offline: build nothing, show nothing.
-      setPeers(EMPTY_PEERS);
+      setSnapshot(EMPTY_PRESENCE);
       return;
     }
     const token = requests.next();
@@ -99,11 +102,11 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
       topic,
       clientId,
       initialState: { displayName, typing: false } satisfies PresenceLocalState,
-      onPeers: (next) => {
+      onPeers: (next, ownerUserId) => {
         // Drop a stale response: a newer channel (topic/workspace switch)
         // superseded this one, or the effect already cleaned up.
         if (!requests.isCurrent(token)) return;
-        setPeers(next);
+        setSnapshot({ peers: next, ownerUserId });
       },
     });
     channelRef.current = channel;
@@ -113,7 +116,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
       void channel.stop();
       if (channelRef.current === channel) channelRef.current = null;
-      setPeers(EMPTY_PEERS);
+      setSnapshot(EMPTY_PRESENCE);
     };
   }, [active, transport, topic, clientId, displayName, restartGeneration]);
 
@@ -165,5 +168,8 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
     [],
   );
 
-  return { others, typingNames, setTyping, leave, restart };
+  return {
+    ownerUserId: snapshot.ownerUserId ?? null,
+    others, typingNames, setTyping, leave, restart,
+  };
 }

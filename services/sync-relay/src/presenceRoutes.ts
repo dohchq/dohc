@@ -47,8 +47,8 @@ function assertPresenceStateSize(state: unknown): void {
   }
 }
 
-function presenceResponse(snapshot: PresenceSnapshot): Response {
-  return jsonResponse({ ok: true, version: snapshot.version, peers: snapshot.peers });
+function presenceResponse(snapshot: PresenceSnapshot, ownerUserId: string): Response {
+  return jsonResponse({ ok: true, ownerUserId, version: snapshot.version, peers: snapshot.peers });
 }
 
 // Capacity refusals (scope/entry/waiter caps) are a client-visible 429 so a
@@ -80,20 +80,30 @@ export function createPresenceRoutes(
   // snapshot for a scope the caller no longer has.
   const respondPresence = async (
     request: Request,
+    workspaceId: string,
     scopeKey: string,
     userId: string,
-    reauthorize?: () => unknown,
+    ownerUserId: string,
+    reauthorize: () => string,
   ): Promise<Response> => {
     if (request.method === "POST") {
       const input = await readJsonObject(request);
       const clientId = parseString(input.clientId, "clientId", MAX_CLIENT_ID_CHARS);
+      // Reserved agent identities belong to the authenticated workspace owner.
+      if (
+        clientId.startsWith("agent:") &&
+        (clientId !== `agent:${workspaceId}` || userId !== ownerUserId)
+      ) {
+        throw notFound();
+      }
       if (input.leave === true) {
-        return presenceResponse(presence.leave(scopeKey, userId, clientId, nowMs()));
+        return presenceResponse(presence.leave(scopeKey, userId, clientId, nowMs()), ownerUserId);
       }
       assertPresenceStateSize(input.state);
       try {
         return presenceResponse(
           presence.publish(scopeKey, userId, clientId, input.state ?? null, nowMs()),
+          ownerUserId,
         );
       } catch (error) {
         throw presenceCapacityAs429(error);
@@ -116,8 +126,8 @@ export function createPresenceRoutes(
       }
       // A 25s park is long enough for a revoke to land mid-poll; re-run the
       // route's authorization before returning anything.
-      if (reauthorize) await reauthorize();
-      return presenceResponse(snapshot);
+      const currentOwnerUserId = reauthorize();
+      return presenceResponse(snapshot, currentOwnerUserId);
     }
     throw relayError("method_not_allowed");
   };
@@ -165,9 +175,11 @@ export function createPresenceRoutes(
     // flows through the outer catch into errorResponse.
     return await respondPresence(
       request,
+      share.workspaceId,
       presenceScopeKey(share.workspaceId, topic),
       actorUserId,
-      authorizeShare,
+      share.granterUserId,
+      () => authorizeShare().granterUserId,
     );
   };
 
@@ -185,10 +197,13 @@ export function createPresenceRoutes(
     // `await` is load-bearing: see the share-presence route above.
     return await respondPresence(
       request,
+      workspaceId,
       presenceScopeKey(workspaceId, topic),
+      actorUserId,
       actorUserId,
       () => {
         if (!storage.workspaceIsOwnedBy(workspaceId, actorUserId)) throw notFound();
+        return actorUserId;
       },
     );
   };
