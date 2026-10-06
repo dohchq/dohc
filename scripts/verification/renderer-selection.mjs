@@ -1,15 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { builtinModules, createRequire } from "node:module";
 import { join, posix } from "node:path";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 
 const renderer = "apps/desktop/src/renderer/";
 const site = "apps/site/";
 const tokensTest = `${renderer}tokens.test.ts`;
-const onboardingSpec = "apps/desktop/e2e/self-host-onboarding.spec.ts";
 const sourceFile = /\.(?:[cm]?[jt]sx?|css)$/u;
 const unitTest = /\.test\.tsx?$/u;
 const require = createRequire(import.meta.url);
+const nodeModules = new Set(builtinModules.map(name => name.replace(/^node:/u, "")));
 
 function candidates(path) {
   const stem = path.replace(/\.[cm]?jsx?$/u, "");
@@ -26,9 +26,9 @@ function moduleReferences(path, source, parse) {
   let ambiguous = false;
   let failed = false;
   let opaqueLoader = false;
-  const add = (value, {module = false, type = false, escaped = false} = {}) => {
+  const add = (value, {module = false, type = false, escaped = false, imported = false} = {}) => {
     if (typeof value !== "string") { if (module) ambiguous = true; return; }
-    references.push({value, module, type, escaped});
+    references.push({value, module, type, escaped, imported});
   };
   if (path.endsWith(".css")) {
     for (const match of source.matchAll(/@import\s+(["'])([^"']+)\1/gu)) add(match[2], {module: true, escaped: match[2].includes("\\")});
@@ -65,7 +65,7 @@ function moduleReferences(path, source, parse) {
     if (["ImportDeclaration", "ExportAllDeclaration", "ExportNamedDeclaration"].includes(node.type) && node.source) {
       const type = node.importKind === "type" || node.exportKind === "type" || node.specifiers?.length > 0
         && node.specifiers.every(specifier => specifier.importKind === "type" || specifier.exportKind === "type");
-      addModule(node.source, {type});
+      addModule(node.source, {type, imported: node.type === "ImportDeclaration"});
       return;
     }
     if (node.type === "TSImportType") { addModule(node.argument, {type: true}); return; }
@@ -162,7 +162,7 @@ export function rendererInputGraph(files, {runtime = false, seeds, parse} = {}) 
     return [manifest.name, {path: posix.dirname(file.path), manifest}];
   }));
   const sources = new Map(files.map(file => [file.path, file.source]));
-  const inputs = new Map(), consumers = new Map(), uncertain = new Set(), native = new Set(), escaped = new Set(), opaque = new Set();
+  const inputs = new Map(), consumers = new Map(), uncertain = new Set(), native = new Set(), escaped = new Set(), opaque = new Set(), nodeOnly = new Set();
   const pending = new Set(seeds ?? paths);
   if (runtime) parse ??= require("@babel/parser").parse;
   for (const path of pending) {
@@ -187,7 +187,8 @@ export function rendererInputGraph(files, {runtime = false, seeds, parse} = {}) 
     }
     for (const {value, module: moduleInput, type: typeOnly, directory} of references) {
       if (runtime && typeOnly) continue;
-      if (runtime && moduleInput && /^(?:(?:node:)?(?:child_process|worker_threads|sqlite)(?:\/|$)|electron(?:\/|$)|pg(?:\/|$)|@dohc\/workspace-postgres(?:\/|$))/u.test(value)) native.add(path);
+      if (runtime && moduleInput && (value.startsWith("node:") || nodeModules.has(value))) nodeOnly.add(path);
+      if (runtime && moduleInput && /^(?:(?:node:)?(?:child_process|worker_threads|sqlite|test)(?:\/|$)|electron(?:\/|$)|pg(?:\/|$)|@dohc\/workspace-postgres(?:\/|$))/u.test(value)) native.add(path);
       if (!/^(?:\.{1,2}\/|@dohc\/)/u.test(value)) {
         if (runtime && moduleInput && /^(?:#|@\/|~\/)/u.test(value)) uncertain.add(path);
         continue;
@@ -228,7 +229,7 @@ export function rendererInputGraph(files, {runtime = false, seeds, parse} = {}) 
       consumers.get(dependency).add(path);
     }
   }
-  return {inputs, consumers, uncertain, native, escaped, opaque};
+  return {inputs, consumers, uncertain, native, escaped, opaque, nodeOnly};
 }
 
 function closure(seeds, graph) {
@@ -237,75 +238,32 @@ function closure(seeds, graph) {
   return reached;
 }
 
-function onboardingImpact(affected, sources, inputs, parse, baseSources, uncertain) {
-  if (!sources.has(onboardingSpec)) return "unknown";
-  const selectors = new Set(), ids = new Set();
-  let uncertainProof = false, uncertainRenderer = false;
-  const scan = (path, source, proof) => {
-    if (!/getByTestId|data-testid|\btestId\b/u.test(source) && (proof || !path.endsWith(".tsx"))) return;
-    try {
-      const tree = parse(source, {sourceType: "unambiguous", createImportExpressions: true,
-        plugins: [...(/\.[cm]?tsx?$/u.test(path) ? ["typescript"] : []), ...(/\.[jt]sx$/u.test(path) ? ["jsx"] : [])]});
-      const literal = node => node?.type === "StringLiteral" ? node.value
-        : node?.type === "TemplateLiteral" && !node.expressions.length ? node.quasis[0].value.cooked : undefined;
-      const name = node => node?.name ?? node?.property?.name ?? node?.property?.value;
-      const walk = (node, parent) => {
-        if (!node || typeof node !== "object") return;
-        if (proof && ["MemberExpression", "OptionalMemberExpression"].includes(node.type) && name(node) === "getByTestId") {
-          const value = parent?.callee === node && literal(parent.arguments?.[0]);
-          if (typeof value === "string") selectors.add(value);
-          else uncertainProof = true;
-        }
-        if (proof && node.type === "ObjectProperty" && name(node.key) === "getByTestId") uncertainProof = true;
-        if (!proof && node.type === "JSXAttribute" && ["data-testid", "testId"].includes(node.name.name)) {
-          const value = literal(node.value?.type === "JSXExpressionContainer" ? node.value.expression : node.value);
-          if (typeof value === "string") ids.add(value);
-          else uncertainRenderer = true;
-        }
-        if (!proof && node.type === "JSXSpreadAttribute") uncertainRenderer = true;
-        for (const [key, child] of Object.entries(node)) {
-          if (["loc", "comments", "leadingComments", "trailingComments", "innerComments", "extra"].includes(key)) continue;
-          if (Array.isArray(child)) child.forEach(value => walk(value, node));
-          else if (child && typeof child === "object") walk(child, node);
-        }
-      };
-      walk(tree);
-    } catch { if (proof) uncertainProof = true; else uncertainRenderer = true; }
-  };
-  for (const path of closure([onboardingSpec], inputs)) {
-    const source = sources.get(path);
-    if (source === undefined) return "unknown";
-    if (path.startsWith("apps/desktop/e2e/") && uncertain.has(path)) {
-      // The literal graph also sees bootstrap strings. Confirm actual helper
-      // imports before treating those strings as missing UI proof inputs.
-      const parsed = moduleReferences(path, source, parse);
-      if (parsed.ambiguous || parsed.failed || parsed.references.some(reference => reference.module && !reference.type
-        && reference.value.startsWith(".") && !candidates(posix.join(posix.dirname(path), reference.value)).some(candidate => sources.has(candidate)))) return "unknown";
-    }
-    scan(path, source, true);
-  }
-  if (!selectors.size || uncertainProof) return "unknown";
-  for (const path of affected) if (path.startsWith(renderer) && !unitTest.test(path)) {
-    scan(path, sources.get(path) ?? "", false);
-    if (baseSources?.has(path)) scan(path, baseSources.get(path), false);
-  }
-  if ([...ids].some(id => selectors.has(id))) return "affected";
-  return uncertainRenderer ? "unknown" : "unaffected";
-}
-
-// This scope excludes main-process, storage, IPC, and sharing inputs. The old
-// package selection remains the fallback whenever a renderer consumer escapes.
-export function focusedRendererSelection(changed, files, {baseFiles, baseSources, graph, loadParser = () => require("@babel/parser").parse} = {}) {
+// Main-process, storage, IPC, and sharing consumers retain package selection.
+export function focusedRendererSelection(changed, files, {baseFiles, graph, loadParser = () => require("@babel/parser").parse} = {}) {
   if (!changed.length || changed.some(path => !path.startsWith(renderer) || !/\.(?:tsx?|css)$/u.test(path))) return null;
   const sources = new Map(files.map(file => [file.path, file.source]));
   if (!sources.has(tokensTest) || changed.some(path => !sources.has(path) || baseFiles && !baseFiles.has(path))) return null;
-  const {inputs, consumers, uncertain, escaped, opaque} = graph ?? rendererInputGraph(files);
+  const {consumers, uncertain, escaped, opaque} = graph ?? rendererInputGraph(files);
   if (escaped?.size || opaque?.size) return null;
   const affected = closure(changed, consumers);
-  if ([...affected].some(path => !path.startsWith(renderer) && !path.startsWith(site))) return null;
   // A computed module load in the renderer or site could hide a reverse edge.
   if ([...uncertain].some(path => path.startsWith(renderer) || path.startsWith(site))) return null;
-  const tests = [...affected].filter(path => path.startsWith(renderer) && unitTest.test(path));
+  // Planning happens before the canonical frozen install. Retain package
+  // selection when the parser is unavailable.
+  let parse;
+  try { parse = loadParser(); }
+  catch (error) { if (error.code === "MODULE_NOT_FOUND") return null; throw error; }
+  const desktopTest = path => path.startsWith("apps/desktop/src/") && unitTest.test(path);
+  const externalTests = [...affected].filter(path => !path.startsWith(renderer) && !path.startsWith(site));
+  for (const path of externalTests) {
+    if (!desktopTest(path) || /\.e2e\.test\./u.test(path)) return null;
+    const source = sources.get(path) ?? "";
+    if (/@vitest-environment\s+node\b/u.test(source)) return null;
+    const parsed = moduleReferences(path, source, parse);
+    if (parsed.ambiguous || parsed.failed || !parsed.references.some(reference => reference.module
+      && reference.imported && !reference.type && reference.value === "vitest")) return null;
+  }
+  const tests = [...affected].filter(desktopTest);
   // A source edit without a test consumer needs the complete existing gate.
   for (const path of changed) {
     if (path.endsWith(".css")) continue;
@@ -314,14 +272,8 @@ export function focusedRendererSelection(changed, files, {baseFiles, baseSources
   // These source scans are broader than imports: tokens.test.ts reads every
   // renderer module, and the site's Tailwind @source reads the renderer tree.
   tests.push(tokensTest);
-  // Planning happens before the canonical frozen install. An older checkout
-  // can use package selection until that install provides the parser.
-  let parse;
-  try { parse = loadParser(); }
-  catch (error) { if (error.code === "MODULE_NOT_FOUND") return null; throw error; }
-  const onboarding = onboardingImpact(affected, sources, inputs, parse, baseSources, uncertain);
-  if (onboarding === "unknown") return null;
   const runtimeGraph = rendererInputGraph(files, {runtime: true, seeds: tests, parse});
+  for (const path of closure(externalTests, runtimeGraph.inputs)) if (runtimeGraph.nodeOnly.has(path)) return null;
   const testInputs = closure(tests, runtimeGraph.inputs);
   for (const path of testInputs) {
     if (runtimeGraph.uncertain.has(path) || runtimeGraph.native.has(path)
@@ -335,11 +287,12 @@ export function focusedRendererSelection(changed, files, {baseFiles, baseSources
   if (testFiles.reduce((length, path) => length + path.length + 3, 0) > 6000) return null;
   return {
     packages: ["@dohc/desktop", "@dohc/site"], affected: ["@dohc/desktop", "@dohc/site"], full: false,
-    reason: "Renderer inputs and test consumers stay within the renderer and site.",
+    reason: "Renderer inputs reach only renderer, site, and audited desktop Vitest consumers.",
     testFiles: {"@dohc/desktop": testFiles},
     desktopScripts: false, repository: "source",
-    proofs: {accounts: false, selfHostNative: false, desktop: onboarding === "affected", smoke: true, statesPage: true},
-    needs: {postgres: onboarding === "affected", engine: true, desktop: true},
+    // Onboarding uses generated selectors and shared shell surfaces.
+    proofs: {accounts: false, selfHostNative: false, desktop: true, smoke: true, statesPage: true},
+    needs: {postgres: true, engine: true, desktop: true},
   };
 }
 
@@ -357,6 +310,5 @@ export function readFocusedRendererSelection(root, changed, baseCommit) {
   if (changed.some(path => !trackedPaths.has(path) || !existsSync(join(root, path)))) return null;
   const baseFiles = baseCommit ? new Set(readGit(["ls-tree", "-r", "--name-only", "-z", baseCommit], root).split("\0")) : undefined;
   if (baseFiles && changed.some(path => !baseFiles.has(path))) return null;
-  const baseSources = baseCommit ? new Map(changed.map(path => [path, readGit(["show", `${baseCommit}:${path}`], root)])) : undefined;
-  return focusedRendererSelection(changed, files, {baseFiles, baseSources});
+  return focusedRendererSelection(changed, files, {baseFiles});
 }

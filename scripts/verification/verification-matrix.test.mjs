@@ -95,7 +95,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
       : siteOnly ? siteFiles : changed === "services/workspace-api/src/index.ts" ? serviceFiles : undefined;
     const desktopScripts = js && selected.includes("@dohc/desktop") && !selectedDesktopFiles;
     const desktop = mode !== "pr" || desktopScripts || js && (changed === "services/workspace-api/src/index.ts" || rendererOnly);
-    const desktopProof = desktop && (!rendererOnly || onboarding);
+    const desktopProof = desktop;
     const smoke = js && rendererOnly;
     const nativeProof = js && selected.includes("@dohc/share-web");
     const accounts = js && selected.includes("@dohc/workspace-api");

@@ -78,11 +78,12 @@ Account API and Postgres inputs retain desktop preparation and account and deskt
 Share-web inputs retain desktop preparation, desktop browser proofs, and the native delivery proof.
 Combined site changes retain both renderer compatibility files and those proofs.
 Desktop process, storage, shared, and unclassified inputs retain the complete desktop suite, packaging tests, and proofs.
-Isolated renderer changes run their tracked test consumers and the site suite when every dependency stays within that boundary.
+Isolated renderer changes run their tracked test consumers and the site suite.
+Pure desktop Vitest consumers outside the renderer join that selection after their runtime dependencies pass the same safety checks.
+External tests with a Node environment or Node built-in dependencies retain broader selection.
 The runner keeps persistence smoke and the Windows pixel gallery for those changes.
-Affected onboarding surfaces also retain the onboarding proof and its Postgres setup.
-The runner checks literal test IDs in the onboarding spec and its helpers against affected renderer consumers.
-Unknown imports, native resources, uncovered sources, and consumers outside that boundary retain broader selection.
+Every focused renderer plan retains the onboarding proof and its Postgres setup.
+Unknown imports, native resources, uncovered sources, and other consumers outside that boundary retain broader selection.
 Desktop renderer changes, and changes to the states page itself, also run the `@states-page` pixel gallery on Windows, where its baselines were taken.
 Desktop-only changes run the Y.Doc compatibility files that import desktop code.
 Changes to Y.Doc projection or its other inputs run the complete Y.Doc suite, including the checkpoint boundary test.
