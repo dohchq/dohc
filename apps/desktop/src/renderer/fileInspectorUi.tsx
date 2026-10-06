@@ -1,43 +1,20 @@
-import { fileKindForPath, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
-import {
-  Database,
-  FileText,
-  Image as ImageIcon,
-  Music,
-  Shapes,
-  Share2,
-  Table,
-  type LucideIcon,
-} from "lucide-react";
+import { Share2 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { bridge } from "./bridge";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton } from "./ui/controls";
+import { KindGlyph } from "./ui/KindGlyph";
 import type { SaveState } from "./useAutosavedTextDraft";
 
-// The icon each file view draws for its kind. KindGlyph's header section
-// replaces this map with the kind record's glyph.
-const KIND_ICONS: Record<FileDisplayKind, LucideIcon> = {
-  markdown: FileText,
-  drawing: Shapes,
-  csv: Table,
-  json: FileText,
-  text: FileText,
-  code: FileText,
-  image: ImageIcon,
-  audio: Music,
-  pdf: FileText,
-  database: Database,
-  binary: FileText,
-};
-
 // The one header over every file view. It is final on the click frame: the
-// icon comes from the path, and the icon says the kind, so loading, ready and
+// kind's glyph comes from the path, the same glyph Explorer draws, and it says
+// the kind, so loading, ready and
 // failed views of one file draw the same header. `actions` are the view's
 // controls, right of Share; a view that has controls draws them, disabled,
 // while it loads or when it cannot open (DocumentControls). Share and the
@@ -53,14 +30,13 @@ export function ViewHeader(props: {
   status?: ReactNode;
   actions?: ReactNode;
 }) {
-  const Icon = KIND_ICONS[fileKindForPath(props.path).displayKind];
   // Breadcrumb weighting: the folder path recedes, the file name carries ink.
   const slash = props.path.lastIndexOf("/");
   const dir = slash >= 0 ? props.path.slice(0, slash + 1) : "";
   const leaf = slash >= 0 ? props.path.slice(slash + 1) : props.path;
   return (
     <header className="flex items-center gap-2 border-b border-line px-4 py-1.5 text-[13px]">
-      <Icon size={13} aria-hidden className="shrink-0" />
+      <KindGlyph kind={fileKindForPath(props.path)} size={13} />
       <span className="min-w-0 truncate font-mono">
         {dir ? <span className="text-subtle">{dir}</span> : null}
         <span className="font-medium text-ink">{leaf}</span>
