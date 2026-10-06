@@ -41,7 +41,7 @@ export async function spawnSyncRelay(input: {
    * whose live host runs this engine. Needs the link boundary, and a database
    * path in a folder of its own, which the deployment's files sit beside.
    */
-  editLinks?: { engineExecutable: string; publicOrigin?: string; trustEnv?: Record<string, string> };
+  editLinks?: { engineExecutable: string; publicOrigin: string; trustEnv?: Record<string, string> };
 }): Promise<SyncRelayHandle> {
   const started = performance.now();
   const deployment = input.editLinks ? join(dirname(dirname(input.dbPath)), "relay-deployment") : null;
@@ -89,8 +89,8 @@ export async function spawnSyncRelay(input: {
               DOHC_RELAY_SERVICE_HOST_ROOT: join(deployment, "live-host"),
               DOHC_RELAY_ENGINE_EXECUTABLE: input.editLinks.engineExecutable,
               DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
-              DOHC_RELAY_PUBLIC_ORIGIN: input.editLinks.publicOrigin ?? "https://relay.example.com",
-              DOHC_RELAY_NAMED_LIVE_HOSTS: new URL(input.editLinks.publicOrigin ?? "https://relay.example.com").host,
+              DOHC_RELAY_PUBLIC_ORIGIN: input.editLinks.publicOrigin,
+              DOHC_RELAY_NAMED_LIVE_HOSTS: new URL(input.editLinks.publicOrigin).host,
               ...input.editLinks.trustEnv,
             }
           : {}),

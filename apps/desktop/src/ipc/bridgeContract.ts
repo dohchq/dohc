@@ -1,6 +1,7 @@
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
+import { PublicationAgent } from "@dohc/cli/app-publication";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
 import type { DatasetRequest, DatasetResult } from "@dohc/cli/dataset";
 import type {OwnerAppResponsesRequest,OwnerAppResponsesResult} from "@dohc/cli/app-responses";
@@ -1548,6 +1549,7 @@ export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 
 export const ListEngineMomentsPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  objectId: OPAQUE_ID.optional(),
   limit: z.number().int().min(1).max(500).optional(),
   beforeMomentOrder: z.number().int().nonnegative().optional(),
 });
@@ -1573,9 +1575,16 @@ const ListEngineMomentsUpdatingResult = z.object({
 type ListEngineMomentsUpdatingResult = z.infer<
   typeof ListEngineMomentsUpdatingResult
 >;
+export const HistoryPolicyUnreadableResult = z.object({
+  status: z.literal("policy-unreadable"),
+  policyErrors: z.array(z.string()).min(1),
+});
+export type HistoryPolicyUnreadableResult = z.infer<typeof HistoryPolicyUnreadableResult>;
+
 export const ListEngineMomentsResponse = z.union([
   ListEngineMomentsResult,
   ListEngineMomentsUpdatingResult,
+  HistoryPolicyUnreadableResult,
 ]);
 export type ListEngineMomentsResponse = z.infer<
   typeof ListEngineMomentsResponse
@@ -1612,9 +1621,10 @@ export const EngineMomentDetailRecord = EngineMomentRecord.omit({
 });
 export type EngineMomentDetailRecord = z.infer<typeof EngineMomentDetailRecord>;
 
-export const ReadEngineMomentResult = z.object({
-  moment: EngineMomentDetailRecord.nullable(),
-});
+export const ReadEngineMomentResult = z.union([
+  HistoryPolicyUnreadableResult.extend({ moment: z.null() }),
+  z.object({ moment: EngineMomentDetailRecord.nullable() }),
+]);
 export type ReadEngineMomentResult = z.infer<typeof ReadEngineMomentResult>;
 
 export const RestoreEngineMomentFilePayload = ReadEngineMomentPayload;
@@ -3643,6 +3653,7 @@ const RelayShareLinkRowBase = z.object({
   revokedAtMs: z.number().int().nonnegative().nullable(),
   lastUsedAtMs: z.number().int().nonnegative().nullable(),
   urlIssuedAtMs: z.number().int().nonnegative().nullable(),
+  creationProvenance: z.object({ agent: PublicationAgent.nullable(), selector: z.unknown(), access: z.string(), subjectName: z.string().nullable() }).optional(),
   dependents: z.array(RelayShareLinkDependent).max(1000),
 });
 
@@ -4886,6 +4897,17 @@ export const UndoStopAndRestorePayload = z.object({
   restoredMomentIds: z.array(OPAQUE_ID).min(1).max(20_000),
 }).strict();
 export type UndoStopAndRestorePayload = z.infer<typeof UndoStopAndRestorePayload>;
+export const UndoStopAndRestoreResult = z.object({
+  errorMessage: z.string().max(2_000).nullable(),
+  // Outcomes identify the submitted restore moment, newest first.
+  files: z.array(z.discriminatedUnion("kind", [
+    z.object({ momentId: OPAQUE_ID, kind: z.literal("restored"),
+      receipt: z.object({ path: PATH_STRING, restoredMomentId: OPAQUE_ID }).strict(),
+    }).strict(),
+    z.object({ momentId: OPAQUE_ID, kind: z.literal("refused"), detail: z.string().max(2_000) }).strict(),
+  ])),
+}).strict();
+export type UndoStopAndRestoreResult = z.infer<typeof UndoStopAndRestoreResult>;
 
 // A current editor allows a step that became reachable only because an
 // editor left. `seq` names the hold the person saw.
@@ -6377,7 +6399,7 @@ export interface DohcDesktopBridge
   listAutomationPeople(payload: ListAutomationPeoplePayload): Promise<ListAutomationPeopleResult>;
   checkCollectionAutomation(payload: CheckCollectionAutomationPayload): Promise<CheckCollectionAutomationResult>;
   stopAndRestore(payload: StopAndRestorePayload): Promise<StopAndRestoreResult>;
-  undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<void>;
+  undoStopAndRestore(payload: UndoStopAndRestorePayload): Promise<UndoStopAndRestoreResult>;
   confirmCollectionAutomationStep(payload: ConfirmCollectionAutomationStepPayload): Promise<ConfirmCollectionAutomationStepResult>;
   listAutomationHolds(payload: ListAutomationHoldsPayload): Promise<ListAutomationHoldsResult>;
   listServerAutomationHolds(payload: ListServerAutomationHoldsPayload): Promise<ListServerAutomationHoldsResult>;

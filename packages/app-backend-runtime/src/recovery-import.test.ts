@@ -45,9 +45,9 @@ async function fixture(large = false, mutable = false){
     const result=journal.commitOperation({expected:head,proposalId:value,operation:"read",callerKey:retry?.callerKey ?? "owner",idempotencyKey:value,payloadSha256:retry?.payloadSha256 ?? hash(value),resultJson:JSON.stringify({value}),changeset,changesetSha256:hash(changeset),attachedFileIds:attached,authorize,accountAndAttach(){}});
     if(result.kind!=="committed")throw Error("unexpected replay");head=result.event.cursor;return result.event;
   }
-  async function migrate(){
+  async function migrate(approvalAgent?:import("@dohc/security-contract/approval-provenance").ApprovalAgent){
     const operationSource=source+"\n// revision two", next=describeDatasetRevision({definition,revision:2,schemaSql,operationSource});
-    head=journal.transitionCheckpoint({expected:head,hostEpoch:"host",approvedRevisionHash:next.revisionSha256,source:operationSource,schemaSql,definitionJson:JSON.stringify(next),checkpoint:await readFile(seedPath),authorize,account(){
+    head=journal.transitionCheckpoint({approvalAgent,expected:head,hostEpoch:"host",approvedRevisionHash:next.revisionSha256,source:operationSource,schemaSql,definitionJson:JSON.stringify(next),checkpoint:await readFile(seedPath),authorize,account(){
       db.prepare("INSERT INTO dohc_dataset_catalog_history VALUES(?,?,?,?,?)").run(scope.workspaceId,scope.datasetId,1,JSON.stringify(revision),JSON.stringify({schemaSql,operationSource:source}));
       db.prepare("UPDATE dohc_dataset_catalog SET revision_json=?,artifacts_json=?").run(JSON.stringify(next),JSON.stringify({schemaSql,operationSource}));
     }}); return head;
@@ -259,4 +259,16 @@ it("preserves cancelled retry tombstones through recovery and rejects their reus
     expect(restored.request(selected, {action: "save", idempotencyKey: "new", input: {}}, f.authorize).attempt).not.toBeNull();
     expect(t.transaction(() => cancelDatasetAttempt(t.db, f.scope, reference))).toBe(0);
   } finally { await valid.dispose(); }
+});
+
+
+it("preserves agent-declared approval history through export and recovery installation",async()=>{
+  const f=await fixture(),agent={kind:"agent" as const,label:"Builder",labelSource:"agent-declared" as const};
+  await f.migrate(agent);
+  const valid=await validateDatasetRecovery({staged:await f.stage(),authorize:f.authorize}),t=target(f);
+  try {
+    await t.installer.install({},{transferId:"provenance-transfer",manifestSha256:recoveryManifestSha256(valid.manifest,limits),recovery:valid,authorize:f.authorize});
+    const exported=t.journal.exportPage({scope:f.scope,through:f.head(),afterRevision:-1,authorize:f.authorize});
+    expect(exported[1]).toMatchObject({kind:"checkpoint",approvalAgent:agent});
+  }finally{await valid.dispose();}
 });

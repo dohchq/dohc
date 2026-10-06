@@ -56,6 +56,7 @@ import {registerOwnerAppResponsesIpc,createOwnerAppResponsesHandler} from "./ipc
 import type { OwnerAppPublicationRequest, OwnerAppPublicationResult } from "@dohc/cli/app-publication";
 import { createInstalledAppCompiler } from "./workspaces/installedAppCompiler";
 import { createPresenceIpc } from "./ipc/presenceIpc";
+import { readWorkspaceEnginePolicy } from "./workspaces/workspaceEnginePolicyFile";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
 import { registerDirectMessagesIpcHandlers, peekReceivedGrantKindForShare } from "./ipc/directMessagesIpc";
@@ -217,6 +218,7 @@ import {
 import {
   recipientShareNeedsRecheck,
   readReceivedShareListing,
+  reconcileRecipientSharesAfterLookup,
 } from "./workspaces/recipientShareReconciliation";
 import { createShareRosters, rosterAuthorLabel, rosterPersonLabel } from "./automations/shareRoster";
 import { listRosterGrants, readStoredRoster } from "@dohc/automation-executor/roster-listing";
@@ -1300,22 +1302,30 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
   return relayShareJsonWithCredentials(credentials, path, init);
 }
 
-// Every authenticated `/sync/shares` listing this app reads is applied to the
-// received-share records of every registered workspace it speaks for: an
-// ended record whose share is active again resumes, and the owner's confirmed
-// removals are recorded. See recipientShareReconciliation.ts.
-function reconcileReceivedShares(listing: unknown): void {
+// Live account listings record removals; an exact-share read confirms resumptions.
+async function reconcileReceivedShares(listing: unknown): Promise<void> {
   const parsed = readReceivedShareListing(listing);
   const credentials = cachedCredentials;
+  const generation = credentialCacheGeneration;
   if (!parsed || !credentials?.relayUrl) return;
   for (const entry of listWorkspaces()) {
-    let changed = false;
     try {
-      changed = reconcileWorkspaceRecipientShares(entry.workspaceId, parsed, credentials);
+      const changed = await reconcileRecipientSharesAfterLookup({
+        listing: parsed,
+        credentials,
+        currentEntry: () => findWorkspace(entry.workspaceId),
+        updateEntry: (reconcile) => reconcileWorkspaceRecipientShares(entry.workspaceId, reconcile),
+        isCurrent: () => generation === credentialCacheGeneration,
+        lookupShare: (shareId) => relayShareJsonWithCredentials<unknown>(
+          credentials, `/sync/shares/${encodeURIComponent(shareId)}`,
+        ),
+        onLookupError: (shareId, error) =>
+          console.warn(`[desktop] received share lookup for ${shareId}:`, error),
+      });
+      if (changed) notifyRenderer({ workspaceId: entry.workspaceId });
     } catch (error) {
       console.warn(`[desktop] received share reconciliation for ${entry.workspaceId}:`, error);
     }
-    if (changed) notifyRenderer({ workspaceId: entry.workspaceId });
   }
 }
 
@@ -1338,7 +1348,7 @@ async function recheckRemovedShares(workspaceId: string): Promise<void> {
         currentGeneration: () => credentialCacheGeneration,
         run: () => relayShareJsonWithCredentials<unknown>(credentials, "/sync/shares"),
       });
-      reconcileReceivedShares(listing);
+      await reconcileReceivedShares(listing);
     } catch (error) {
       console.warn(`[desktop] share removal recheck for ${workspaceId}:`, error);
     }
@@ -4269,16 +4279,16 @@ const chatWrites = createChatWrites({
   notifyRenderer: (workspaceId) => notifyRenderer({ workspaceId }),
 });
 
-let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest) => Promise<OwnerAppPublicationResult>) | undefined;
+let ownerAppPublicationForCli: ((input: OwnerAppPublicationRequest, agent: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null) => Promise<OwnerAppPublicationResult>) | undefined;
 let ownerAppResponsesForCli:((input:import("@dohc/cli/app-responses").OwnerAppResponsesRequest)=>Promise<import("@dohc/cli/app-responses").OwnerAppResponsesResult>)|undefined;
 const { startDesktopCliServer } = createDesktopCliServer({
   dataset: (input, agent) => {
     if (!datasetForCli) throw new Error("Collections are not ready. Try again.");
     return datasetForCli(input, agent);
   },
-  ownerAppPublication: input => {
+  ownerAppPublication: (input, agent) => {
     if (!ownerAppPublicationForCli) throw new Error("App publication is not ready. Try again.");
-    return ownerAppPublicationForCli(input);
+    return ownerAppPublicationForCli(input, agent);
   },
   ownerAppResponses:input=>{
     if(!ownerAppResponsesForCli)throw new Error("App responses are not ready. Try again.");
@@ -5367,7 +5377,8 @@ function registerIpcHandlers(): void {
     roots: workspaceRootApproval,
     effectiveHome,
     workspaceSummaries,
-    prioritizePreferredWorkspace,
+    prioritizePreferredWorkspace: (workspaces, event) =>
+      prioritizePreferredWorkspace(workspaces, event.sender),
     createWorkspaceFolder,
     forgetWorkspace,
     showItemInFolder: (path) => shell.showItemInFolder(path),
@@ -5428,7 +5439,7 @@ function registerIpcHandlers(): void {
   >({
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
-    withEngineAdapter, requireEngineCapture, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
+    withEngineAdapter, requireEngineCapture, readWorkspaceEnginePolicy, localAgentDisplayName: () => cachedAgentName ?? "Agent", localPersonId: localUserId,
     localPersonName: localUserDisplayName, localPerson,
     automationPersonName: (workspaceId, userId) => {
       const workspace = findWorkspace(workspaceId);
@@ -5775,7 +5786,7 @@ function registerIpcHandlers(): void {
     callerKey: workspaceId => `local-owner-cli:${workspaceId}`,
     withWorkspaceOperation: (_caller, workspaceId, work) => workspaceAuthorities.withOperation(workspaceId, work),
   });
-  ownerAppPublicationForCli = input => cliOwnerPublication(input.workspaceId, input);
+  ownerAppPublicationForCli = (input, agent) => cliOwnerPublication(input.workspaceId, input, agent);
   const undoAcceptedResponse=async(workspace:DesktopRendererWorkspaceOperation["workspace"],input:AppResponseUndoSelection,author?:MomentWriteAuthor)=>{
     await openWorkspaceActivity(workspace);
     const capture=activity.engineCaptureFor(workspace.workspaceId,workspace.rootPath);
@@ -6059,8 +6070,8 @@ function registerIpcHandlers(): void {
     assertTrustedSender,
     withPhysicalWorkspaceOperation,
     rendererWorkspaceSessions,
-    setPreferredWorkspaceId: (workspaceId) => {
-      desktopWindows.setPreferredWorkspaceId(workspaceId);
+    setPreferredWorkspaceId: (workspaceId, sender) => {
+      desktopWindows.setPreferredWorkspaceId(workspaceId, sender);
     },
     markWorkspaceOpened,
     syncStatusWithOwnedProjection,

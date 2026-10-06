@@ -330,6 +330,7 @@ const VERSIONED_PARAM_SHAPES = {
   [VERSIONED_METHOD.momentsGet]: { requiredStrings: ["momentId"] },
   [VERSIONED_METHOD.historyPage]: {
     requiredStrings: ["workspaceId"],
+    optionalStrings: ["objectId"],
     optionalI64: ["limit", "beforeMomentOrder"],
   },
   [VERSIONED_METHOD.searchEnsureIndex]: {
@@ -2634,11 +2635,20 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
     const textMomentPage = this.momentsList(state, {
       versionId: activeVersionId,
+      ...(params.objectId !== undefined ? { objectId: params.objectId } : {}),
       ...(params.limit !== undefined ? { limit: params.limit } : {}),
       ...(params.beforeMomentOrder !== undefined
         ? { beforeMomentOrder: params.beforeMomentOrder }
         : {}),
     });
+    if (params.objectId !== undefined) {
+      return {
+        activeVersion: this.versionJson(this.version(state, activeVersionId)),
+        textMomentPage,
+        protectedMoments: [],
+        protectedTruncated: false,
+      };
+    }
     const textMoments = textMomentPage.moments;
     const beforeMomentOrder = optionalNumber(params, "beforeMomentOrder");
     const upperRecordedAtMs =

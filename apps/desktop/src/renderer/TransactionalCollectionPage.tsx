@@ -5,6 +5,7 @@ import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus } from "@dohc/cli/dataset";
 import type { CollectionTableView } from "./collectionTableViews";
 import { IconButton, PrimaryButton, SecondaryButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { FieldTypeIcon } from "./collections/FieldTypeIcon";
 import { AutomationFieldMark, type FieldMarks } from "./collections/collectionFieldMarks";
 import { inputClass, selectClass } from "./collections/FieldForm";
@@ -391,8 +392,9 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     </div>
     {props.copy ? <span role="status" className="text-[12px] text-muted">{savedPages ? "Offline · Saved pages only" : props.copy.offline ? "Offline copy · Read-only" : "Saved on this device"} · {new Date(props.copy.savedAtMs).toLocaleString()}</span> : null}
     {pending && !busy ? <div className="flex flex-wrap items-center gap-2 text-[12px] text-muted"><span>Change not confirmed</span><span>Browse records while you wait. Retry this change before making another.</span><SecondaryButton onClick={() => void execute(pending)}>Try again</SecondaryButton></div> : null}
-    {busy ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : null}
-    {visual && selectedView ? <Suspense fallback={<p role="status" className="text-sm text-muted">Opening view…</p>}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search])} view={selectedView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} onReadInPlace={showOpenRecord}
+    {/* Lines stand in only for records not yet shown; a page already shown keeps its records and says it is loading. */}
+    {busy ? pending || page ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : <SkeletonRows label="Loading records…" /> : null}
+    {visual && selectedView ? <Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search])} view={selectedView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} onReadInPlace={showOpenRecord}
       disabled={busy || pending !== null || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={onError}
       read={(input,signal)=>invoke(request(read,input,crypto.randomUUID()),signal)}
       onOpen={row=>{trigger.current=document.activeElement instanceof HTMLElement ? document.activeElement : null;setDetails(row);}}

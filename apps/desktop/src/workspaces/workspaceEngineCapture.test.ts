@@ -53,6 +53,7 @@ import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/li
 import { deferred } from "../testing/deferred";
 
 import { createTestScratch } from "./testTemp";
+import { createRelaySyncEngine } from "./relaySyncEngine";
 
 // The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
@@ -392,6 +393,8 @@ describe("workspaceEngineCapture batch capture", () => {
       ["plan.md", "object-plan", false],
     ]);
     expect(page.activeVersionId).toBe("main");
+    expect(requests.filter((request) => request.method === VERSIONED_METHOD.historyPage)).toEqual([expect.objectContaining({ params: { workspaceId: WORKSPACE_ID, objectId: "object-plan", limit: 10 } })]);
+    expect(requests.some((request) => request.method === VERSIONED_METHOD.momentsList)).toBe(false);
     expect((await engine.listMoments({ limit: 10 })).moments).toHaveLength(3);
     await engine.stop();
   });
@@ -1316,6 +1319,70 @@ describe("workspaceEngineCapture batch capture", () => {
     expect((await store.readTextFile(target))?.text).toBe("current");
     expect(await readFile(join(root, target.path))).toEqual(disk);
     await engine.stop();
+  });
+
+  it.each(["moment", "before", "after"])("admits the %s path inside restore before any mutation", async side => {
+    const root = await createTestScratch("dohc-restore-path-admission-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "notes/a.md", metadata: { origin: "api" as const } };
+    await store.writeTextFile({ ...target, text: "old" });
+    const changed = await store.writeTextFile({ ...target, text: "current" });
+    await write(root, target.path, "current");
+    await write(root, ".dohc/files.toml", '[[rule]]\npath = "private/**"\ntracked = false\n');
+    const original = changed.moment;
+    vi.spyOn(store, "getMoment").mockResolvedValue({ ...original,
+      path: side === "moment" ? "private/a.md" : original.path,
+      payload: { before: { ...original.payload.before!, path: side === "before" ? "private/a.md" : target.path },
+        after: { ...original.payload.after, path: side === "after" ? "private/a.md" : target.path } },
+    });
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    try {
+      await expect(engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER)).rejects.toThrow("This history moment is no longer available.");
+      expect((await store.readTextFile(target))?.text).toBe("current");
+      expect((await store.listMoments({ workspaceId: WORKSPACE_ID, limit: 20 })).moments).toHaveLength(2);
+      expect(await readFile(join(root, target.path), "utf8")).toBe("current");
+    } finally {
+      await engine.stop();
+    }
+  });
+
+  it.each(["untracked", "malformed"])("reads %s policy inside the queued restore before writing", async state => {
+    const root = await createTestScratch("dohc-restore-queued-policy-");
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine());
+    const store = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root, attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
+    await store.ensureMainVersion({ workspaceId: WORKSPACE_ID });
+    const target = { workspaceId: WORKSPACE_ID, versionId: "main", path: "notes/a.md", metadata: { origin: "api" as const } };
+    await store.writeTextFile({ ...target, text: "old" });
+    const changed = await store.writeTextFile({ ...target, text: "current" });
+    await write(root, target.path, "current");
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const originalList = store.listMoments.bind(store);
+    vi.spyOn(store, "flushCapture").mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    const engine = capture(root, { store, rustEngineSessions: sessions });
+    const pendingList = engine.flush();
+    await entered.promise;
+    const pendingRestore = engine.restoreFileToBeforeMoment(changed.moment.id, RESTORER);
+    const refused = expect(pendingRestore).rejects.toMatchObject({ name: "RestorePolicyRefusalError",
+      reason: state === "malformed" ? "policy-unreadable" : "path-not-admitted",
+      message: expect.stringContaining(state === "malformed" ? "files.toml" : "This history moment is no longer available."),
+    });
+    await write(root, ".dohc/files.toml", state === "malformed" ? "[[rules] invalid" : '[[rule]]\npath = "notes/**"\ntracked = false\n');
+    release.resolve();
+    await pendingList;
+    try {
+      await refused;
+      expect((await store.readTextFile(target))?.text).toBe("current");
+      expect((await originalList({ workspaceId: WORKSPACE_ID, limit: 20 })).moments).toHaveLength(2);
+      expect(await readFile(join(root, target.path), "utf8")).toBe("current");
+    } finally {
+      await engine.stop();
+    }
   });
 
   it("preserves the outside file when History restore publication conflicts", async () => {
@@ -3280,6 +3347,70 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
       } as never;
     };
   }
+
+  it("opens a document and publishes an authored file between bounded relay passes", async () => {
+    const root = await createTestScratch("dohc-drain-interleave-");
+    const loopback = new VersionedLoopbackEngine();
+    const path = "note.md";
+    await write(root, path, "existing document");
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, text: "existing document" });
+    const events: string[] = [];
+    const engine = liveCapture(root, loopback, {
+      openRustYDocProviderSession: async options => {
+        events.push("document opened");
+        return recordingProvider([])(options);
+      },
+    });
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const continued = deferred<void>();
+    const releaseContinuation = deferred<void>();
+    let pushes = 0;
+    const sync = createRelaySyncEngine({
+      rootDir: root, relay: { baseUrl: "http://relay.test", token: "test" }, capture: engine,
+      onChange: () => undefined,
+      operations: {
+        claim: async () => undefined,
+        recoverOrigin: async () => { throw new Error("unexpected origin recovery"); },
+        push: async () => {
+          pushes += 1;
+          events.push(`push ${pushes}`);
+          if (pushes === 1) { entered.resolve(); await release.promise; }
+          else { continued.resolve(); await releaseContinuation.promise; }
+          return { pushed: 1, hasMore: pushes === 1, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] };
+        },
+        pull: async () => {
+          events.push("pull");
+          return { fetched: 0, applied: 0, skipped: 0, conflictsOpened: 0,
+            fastForwardedPaths: [], nextCursor: pushes, sharingDeclined: [] };
+        },
+      },
+    });
+    try {
+      const pass = sync.start();
+      await entered.promise;
+      const opened = engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
+      const written = engine.writeAuthoredFile(join(root, "agent.txt"), "authored content",
+        { kind: "agent", agentId: "agent", onBehalfOf: "local" }).then(result => {
+        events.push("authored write");
+        return result;
+      });
+      release.resolve();
+      const [, session] = await Promise.all([pass, opened, written]);
+      await continued.promise;
+      expect(events).toEqual(["push 1", "pull", "document opened", "authored write", "push 2"]);
+      expect(await readFile(join(root, "agent.txt"), "utf8")).toBe("authored content");
+      releaseContinuation.resolve();
+      await sync.stop();
+      expect(events.at(-1)).toBe("pull");
+      await session.close({ settle: false });
+    } finally {
+      release.resolve();
+      releaseContinuation.resolve();
+      await sync.stop();
+      await engine.stop();
+    }
+  });
 
   it("hydrates a live artifact asset by its workspace-scoped blob after its head is retired", async () => {
     const root = await createTestScratch("dohc-engine-capture-");

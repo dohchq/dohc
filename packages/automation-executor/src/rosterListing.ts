@@ -7,9 +7,9 @@ import {
 } from "@dohc/security-contract/share-selector";
 import type { FormerEditor, ReachRoster, RosterGrant, RosterProblem } from "./automationReach";
 
-// 50 pages of 1,000 share links. Past this the listing is not one dohc can
+// 50 pages of 1,000 grants or share links. Past this the listing is not one dohc can
 // check.
-const MAX_LINK_PAGES = 50;
+const MAX_INVENTORY_PAGES = 50;
 
 const ID = z.string().min(1).max(256);
 const PATHS = z.array(z.string().refine(isShareablePath)).max(MAX_SHARE_PATHS);
@@ -28,6 +28,7 @@ const GroupGrant = z.object({
   ...BASE,
   selector: z.object({ kind: z.literal("group"), channelWireId: ID, paths: PATHS.min(1), versionId: z.null() }),
   access: CHAT_ACCESS,
+  fileScope: z.enum(["served", "not-served"]),
 });
 const ChatGrant = z.object({
   ...BASE,
@@ -55,20 +56,19 @@ const ListedLinkSchema = z.object({
   grant: GrantSchema.refine((grant) => grant.recipientUserId === null && grant.recipientEmail === null),
   ended: z.boolean(),
   automationsGeneration: GENERATION.nullable(),
-}).refine((link) => link.automationsGeneration === null || coversFiles(link.grant));
+}).refine((link) => link.automationsGeneration === null || declaresFilePaths(link.grant));
 
-// A grant that wrote automations covered files by path. One that says it
-// wrote them and covers none, such as a chat grant, is damaged: read as
-// covering nothing, it would hold nothing.
-function coversFiles(grant: z.infer<typeof GrantSchema>): boolean {
-  return (rosterGrantOf(grant).files?.paths.length ?? 0) > 0;
+// A recorded automation write requires stored file paths. Group paths
+// remain historical scope when its channel no longer serves files.
+function declaresFilePaths(grant: z.infer<typeof GrantSchema>): boolean {
+  return grant.selector.kind !== "chat" && grant.selector.paths.length > 0;
 }
 export type ListedLink = z.infer<typeof ListedLinkSchema>;
 
 // A named grant that wrote a Collection's automations.yaml directly (ADR
 // 0013) and can no longer edit files: revoked, or narrowed below Edit.
 const FormerGrantSchema = z.object({ grant: ListedGrantSchema, automationsGeneration: GENERATION })
-  .refine((former) => coversFiles(former.grant));
+  .refine((former) => declaresFilePaths(former.grant));
 export type FormerGrant = z.infer<typeof FormerGrantSchema>;
 
 // A person's grant that was revoked without writing automations. Only
@@ -139,6 +139,7 @@ function rosterGrantOf(grant: ListedGrant): RosterGrant {
   const canPost = grant.access === "read-write";
   const channel = { wireId: grant.selector.channelWireId, canPost };
   if (isGroupGrant(grant)) {
+    if (grant.fileScope === "not-served") return {...recipient, files: null, channel: null};
     return { ...recipient, files: { paths: grant.selector.paths, versionId: null, access: canPost ? "edit" : "view" }, channel };
   }
   return { ...recipient, files: null, channel };
@@ -160,26 +161,26 @@ const LinkRow = z.object({
   dependents: z.array(z.object({ grantId: z.unknown(), recipientUserId: z.unknown(), recipientEmail: z.unknown(), access: z.unknown() })),
 });
 
+const GrantedPage = z.object({ granted: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() });
+
 const LinkPage = z.object({ links: z.array(z.unknown()), nextCursor: z.string().min(1).max(1024).optional() });
 
-// The owner's grants on this workspace from GET /sync/shares. Rows for other
-// workspaces are skipped before anything else is read, so their damage cannot
-// hide this workspace's grants. A revoked grant that wrote automations
-// directly stays as a former editor. Any other revoked grant that names a
-// person stays only as an ended grant, so History can still name them.
+// The parsed granted rows for the requested workspace.
+// Every row must belong to the requested workspace. A revoked grant that
+// wrote automations stays as a former editor. Other revoked named grants
+// stay only for History.
 function grantedListing(
   workspaceId: string,
-  shares: unknown,
+  rows: readonly unknown[],
 ): { grants: ListedGrant[]; formerGrants: FormerGrant[]; endedGrants: EndedGrant[] } | Extract<RosterListing, { grants: null }> {
-  const listing = z.object({ granted: z.array(z.unknown()) }).safeParse(shares);
-  if (!listing.success) return { grants: null, problem: { kind: "unusable-listing" } };
   const grants: ListedGrant[] = [];
   const formerGrants: FormerGrant[] = [];
   const endedGrants: EndedGrant[] = [];
-  for (const row of listing.data.granted) {
+  for (const row of rows) {
     const where = RowWorkspace.safeParse(row);
-    if (!where.success) return { grants: null, problem: { kind: "unusable-listing" } };
-    if (where.data.workspaceId !== workspaceId) continue;
+    if (!where.success || where.data.workspaceId !== workspaceId) {
+      return { grants: null, problem: { kind: "unusable-listing" } };
+    }
     // A relay from before grants reported their automations writes.
     if (row !== null && typeof row === "object" && !("automationsGeneration" in row)) {
       return { grants: null, problem: { kind: "outdated-server" } };
@@ -194,7 +195,7 @@ function grantedListing(
       continue;
     }
     const grant = ListedGrantSchema.safeParse(row);
-    if (!state.success || !grant.success || (generation !== null && !coversFiles(grant.data))) {
+    if (!state.success || !grant.success || (generation !== null && !declaresFilePaths(grant.data))) {
       const email = RecipientEmail.safeParse(row);
       return { grants: null, problem: { kind: "damaged-share", recipientEmail: email.success ? email.data.recipientEmail : null } };
     }
@@ -282,16 +283,33 @@ export async function listRosterGrants(
     return { ok: true, body: response.body };
   }
 
-  const shares = await read("/sync/shares");
-  if (!shares.ok) return shares.answer;
-  const granted = grantedListing(workspaceId, shares.body);
-  if (granted.grants === null) return answered(granted);
-  const { grants, formerGrants, endedGrants } = granted;
+  const grants: ListedGrant[] = [];
+  const formerGrants: FormerGrant[] = [];
+  const endedGrants: EndedGrant[] = [];
+  const grantedCursors = new Set<string>();
+  let grantedCursor: string | undefined;
+  for (let page = 0; ; page += 1) {
+    if (page === MAX_INVENTORY_PAGES) return UNUSABLE_ROSTER;
+    const query = `?workspaceId=${encodeURIComponent(workspaceId)}${grantedCursor === undefined ? "" : `&cursor=${encodeURIComponent(grantedCursor)}`}`;
+    const shares = await read(`/sync/shares${query}`);
+    if (!shares.ok) return shares.answer;
+    const body = GrantedPage.safeParse(shares.body);
+    if (!body.success) return UNUSABLE_ROSTER;
+    const granted = grantedListing(workspaceId, body.data.granted);
+    if (granted.grants === null) return answered(granted);
+    grants.push(...granted.grants);
+    formerGrants.push(...granted.formerGrants);
+    endedGrants.push(...granted.endedGrants);
+    grantedCursor = body.data.nextCursor;
+    if (grantedCursor === undefined) break;
+    if (grantedCursors.has(grantedCursor)) return UNUSABLE_ROSTER;
+    grantedCursors.add(grantedCursor);
+  }
   const links: ListedLink[] = [];
   const cursors = new Set<string>();
   let cursor: string | undefined;
   for (let page = 0; ; page += 1) {
-    if (page === MAX_LINK_PAGES) return UNUSABLE_ROSTER;
+    if (page === MAX_INVENTORY_PAGES) return UNUSABLE_ROSTER;
     const query = cursor === undefined ? "" : `?cursor=${encodeURIComponent(cursor)}`;
     const answer = await read(`/sync/${encodeURIComponent(workspaceId)}/shares/links${query}`);
     if (!answer.ok) return answer.answer;
@@ -337,17 +355,17 @@ export function ownerRoster(ownerUserId: string, listing: unknown, next: string)
 }
 
 // A grant that wrote automations directly, as the former editor it was: the
-// files it covered, read as Edit.
+// stored file paths it covered, even when a Group no longer serves them.
 function formerEditorOf(
   grant: ListedGrant | ListedLink["grant"],
   generation: number,
   holder: FormerEditor["holder"],
 ): FormerEditor[] {
-  const { files } = rosterGrantOf(grant);
-  if (files === null) return [];
+  if (grant.selector.kind === "chat") return [];
+  const {paths, versionId} = grant.selector;
   return [{
     grantId: grant.grantId, generation, holder, recipientEmail: grant.recipientEmail,
-    files: { paths: files.paths, versionId: files.versionId },
+    files: {paths, versionId},
   }];
 }
 

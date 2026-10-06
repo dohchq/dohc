@@ -632,24 +632,17 @@ impl EngineService {
             })
         };
         let mut outcome = self
-            .relay_execute(ctx, &open, configuration.clone(), push()?, "sync.push")
+            .relay_execute(ctx, &open, configuration, push()?, "sync.push")
             .await?;
         // A push can be what makes enrollment ready. The sweep inside it left
-        // each open document to its session, so claim those now and send
-        // them in this same push rather than waiting for the next one.
+        // each open document to its session. Claim those now, then request a
+        // fresh push budget for the newly queued bytes.
         let (claimed, declined) = self.originate_live_sessions(ctx, &open).await?;
         if claimed > 0
-            && let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { pushed, .. }) = &outcome
-        {
-            let pushed_before = *pushed;
-            outcome = self
-                .relay_execute(ctx, &open, configuration, push()?, "sync.push")
-                .await?;
-            if let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { pushed, .. }) =
+            && let RelayOperationOutcome::Sync(SyncPassOutcome::Complete { has_more, .. }) =
                 &mut outcome
-            {
-                *pushed += pushed_before;
-            }
+        {
+            *has_more = true;
         }
         if let RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
             sharing_declined, ..

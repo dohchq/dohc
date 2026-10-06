@@ -39,7 +39,11 @@ const RESULTS: Record<string, Record<string, z.ZodType>> = {
     pendingAttempts: resultOf(DatasetResult, "pending-attempts"),
     prepareRecovery: resultOf(DatasetResult, "recovery-prepared"),
   },
-  app: { list: resultOf(OwnerAppPublicationResult, "listed") },
+  app: {
+    createLink: z.union([resultOf(OwnerAppPublicationResult, "linkCreated"), resultOf(OwnerAppPublicationResult, "urlUnavailable")]),
+    prepare: resultOf(OwnerAppPublicationResult, "prepared"),
+    list: resultOf(OwnerAppPublicationResult, "listed"),
+  },
 };
 
 describe("CLI help", () => {
