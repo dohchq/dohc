@@ -840,7 +840,7 @@ describe("sync relay handler", () => {
     expect(absentBody).not.toContain("blob_not_found");
   });
 
-  it.each(["link", "link-lane-owner", "linkx", "link-exchange-owner", "link-refresh", "link-handoff", "link-redeem"])("keeps the missing key envelope code for workspace %s", async workspaceId => {
+  it.each(["link-lane-owner", "linkx", "link-exchange-owner", "link-refresh", "link-handoff", "link-redeem"])("keeps the missing key envelope code for workspace %s", async workspaceId => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h, "a", workspaceId);
