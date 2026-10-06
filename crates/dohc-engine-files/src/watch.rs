@@ -7,8 +7,9 @@
 //! the dirty-generation model then performs a full bounded rescan.
 //!
 //! Ordinary events strictly below `.dohc/engine` do not enter the debounce
-//! queue: both capture and observation exclude that subtree. Policy files and
-//! ancestor changes still trigger a rescan, as do errors and uncertain events.
+//! queue, except `secret.key`: restoring it must retry secret capture. Data
+//! scans exclude that subtree. Policy files and ancestor changes still trigger
+//! a rescan, as do errors and uncertain events.
 //! Symlink notifications are likewise harmless: the scanner uses
 //! lstat and never descends through a symlink, so only real in-root content can
 //! reach a capture plan.
@@ -512,10 +513,17 @@ fn engine_storage_event(root: &Path, event: &notify::Event) -> bool {
         let Some(Component::Normal(name)) = components.next() else {
             return false;
         };
-        name.to_str().is_some()
-            && components.all(
-                |component| matches!(component, Component::Normal(name) if name.to_str().is_some()),
-            )
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        if components.clone().next().is_none()
+            && crate::floor::normalize_segment(name) == "secret.key"
+        {
+            return false;
+        }
+        components.all(
+            |component| matches!(component, Component::Normal(name) if name.to_str().is_some()),
+        )
     })
 }
 
@@ -540,6 +548,36 @@ fn event_callback(
         }
         // A full queue already contains evidence of a relevant change.
         let _ = tx.try_send(ThreadMessage::Event);
+    }
+}
+
+/// Inject one path change through the callback and settle it without an OS
+/// backend or wall-clock wait. Available only with the test fault seam.
+#[cfg(feature = "fault-injection")]
+#[doc(hidden)]
+pub fn notify_settled_change_for_harness(root: PathBuf, path: PathBuf, handle: &FilesHandle) {
+    let (tx, rx) = mpsc::sync_channel(1);
+    let dirty_handle = handle.clone();
+    let dirty: Arc<dyn Fn() + Send + Sync> = Arc::new(move || dirty_handle.notify_overflow());
+    let mut callback = event_callback(
+        root,
+        Arc::clone(&dirty),
+        tx,
+        Arc::new(WatchState::default()),
+        Arc::new(AtomicBool::new(false)),
+    );
+    callback(Ok(
+        notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(path)
+    ));
+    let mut debounce = Debounce::default();
+    let now = Instant::now();
+    for message in rx.try_iter() {
+        if matches!(message, ThreadMessage::Event) && debounce.event(now) {
+            dirty();
+        }
+    }
+    if debounce.timeout(now + WATCH_SETTLE).is_some() {
+        dirty();
     }
 }
 
@@ -964,6 +1002,7 @@ mod callback_tests {
             root.join("notes/a.md"),
             root.join(".dohc/files.toml"),
             root.join(".dohc/visibility.toml"),
+            root.join(".dohc/engine/secret.key"),
         ] {
             for paths in [
                 [internal.clone(), destination.clone()],
@@ -980,6 +1019,40 @@ mod callback_tests {
                         .add_path(destination.clone()),
                 );
             }
+        }
+    }
+
+    #[test]
+    fn secret_key_restores_and_permission_repairs_still_queue() {
+        let root = ScratchDir::new_named("watch-callback").unwrap();
+        let mut callback = Callback::new(root.path(), 1);
+        let paths = [
+            ".dohc/engine/secret.key",
+            ".DOHC/ENGINE/SECRET.KEY",
+            ".do\u{200b}hc/engine/sec\u{200b}ret.key",
+            #[cfg(windows)]
+            ".dohc./engine /secret.key. ",
+        ];
+        for path in paths {
+            for kind in [
+                EventKind::Create(CreateKind::File),
+                EventKind::Modify(ModifyKind::Any),
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                EventKind::Modify(ModifyKind::Metadata(MetadataKind::Permissions)),
+            ] {
+                callback.expect_queued(notify::Event::new(kind).add_path(root.join(path)));
+            }
+        }
+        for path in [
+            ".dohc/engine/secret.key.tmp",
+            ".dohc/engine/secret.key-backup",
+            ".dohc/engine/secret.key/child",
+            ".dohc/engine/keys/secret.key",
+        ] {
+            (callback.send)(Ok(
+                notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(root.join(path))
+            ));
+            callback.expect_quiet();
         }
     }
 

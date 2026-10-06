@@ -404,6 +404,76 @@ async fn a_released_lease_retries_quarantined_capture_without_disk_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restored_secret_key_retries_quarantined_capture_without_content_changes() {
+    let harness = Harness::new();
+    let secret = harness.root.join(".env");
+    std::fs::write(&secret, "TOKEN=original").expect("secret artifact");
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .expect("files actor"),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    let key = harness
+        .root
+        .join(dohc_engine_crypto::SECRET_KEY_FILE_RELATIVE);
+    let staged_key = key.with_file_name("restored-key.tmp");
+    std::fs::rename(&key, &staged_key).expect("park original key outside its known location");
+    std::fs::write(&secret, "TOKEN=changed").expect("external secret edit");
+    files.handle().request_rescan();
+    for _ in 0..3 {
+        assert!(!harness.capture(&files.handle()).await);
+    }
+    let parked = files.handle().stats().await.expect("parked stats");
+    assert_eq!(
+        (parked.quarantined, parked.deferred, parked.dirty),
+        (1, 0, false)
+    );
+    assert!(
+        !key.exists(),
+        "capture must not mint over encrypted history"
+    );
+
+    // Deliver only the restored key through the callback queue and debounce.
+    // OS backends can also emit ancestor-directory events for the rename,
+    // which would hide a dropped key event. No lease or content event fires.
+    std::fs::rename(&staged_key, &key).expect("atomic key restore");
+    dohc_engine_files::watch::notify_settled_change_for_harness(
+        harness.root.clone(),
+        key,
+        &files.handle(),
+    );
+    let noticed = files.handle().stats().await.expect("callback stats").dirty;
+    if !noticed {
+        files.close().await;
+        harness.close();
+        panic!("key restore never reached callback/debounce rescan");
+    }
+    assert!(harness.capture(&files.handle()).await);
+    let recovered = files.handle().stats().await.expect("recovered stats");
+    assert_eq!(
+        (recovered.quarantined, recovered.deferred, recovered.dirty),
+        (0, 0, false)
+    );
+    let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).expect("store observer");
+    let loaded_key = dohc_engine_crypto::load_key_file(&harness.root)
+        .expect("load restored key")
+        .expect("original key restored");
+    let captured = dohc_engine_domain::SecretFileStore::new(&mut store, &loaded_key)
+        .materialize_secret_file(WORKSPACE_ID, "main", ".env")
+        .expect("decrypt captured secret")
+        .expect("secret tip");
+    assert_eq!(captured, "TOKEN=changed".into());
+    assert_eq!(
+        std::fs::read(&secret).expect("intact secret"),
+        captured.as_bytes()
+    );
+    drop(store);
+    files.close().await;
+    harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() {
     use dohc_engine_collab::{
         ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
