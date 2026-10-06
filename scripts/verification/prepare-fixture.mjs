@@ -15,6 +15,7 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
   put("scripts/verification/build.mjs", readFileSync(buildSource));
   put("scripts/verification/cancellation.mjs", readFileSync(new URL("./cancellation.mjs", import.meta.url)));
   put("tools/rust-engine-program/build-slot.mjs", "export const resolveBuildBudget=()=>null; export const freeDiskGb=()=>100; export const acquireBuildSlot=()=>{throw Error('not expected')};  export const acquireVerificationSlot=()=>null;");
+  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;export const verificationAdmission=()=>({lightweight:false,reason:'fixture full lane'});");
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
   put("scripts/verification/process.mjs", `
     import assert from 'node:assert/strict';

@@ -829,7 +829,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   try {
     for (const file of [
       "scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
-      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs",
+      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs", "scripts/verification/admission.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "tools/rust-engine-program/git-read.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml",
@@ -960,7 +960,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     writeFileSync(document, "Documentation only.\n");
     const forced = invoke(["--job", "rust"]);
     assert.notEqual(forced.status, 0);
-    assert.match(forced.stderr, /Unavailable code tool: rustc/);
+    assert.match(forced.stderr, process.platform === "win32" ? /Unavailable code tool: pwsh\.exe/ : /Unavailable code tool: rustc/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

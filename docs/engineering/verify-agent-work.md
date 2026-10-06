@@ -23,7 +23,8 @@ cargo install cargo-nextest --locked --version 0.9.143
 
 The PR verifier rejects missing tools or versions that differ from those workflow pins.
 
-Run `pnpm doctor` to inspect readiness without changing the checkout.
+Run `pnpm run doctor` to inspect readiness without changing the checkout.
+`pnpm doctor` invokes pnpm's own command and does not check this repository's readiness.
 Run `pnpm qa:prepare` to build the native engine and desktop.
 Preparation reconciles the installed dependencies with the frozen lockfile before reusing or building artifacts.
 Preparation records source and artifact hashes under `.dohc-dev/verification`.
@@ -95,8 +96,45 @@ It starts a dedicated Postgres container when selected tests or proofs need one.
 Selected integration suites must run; unavailable prerequisites cause failure rather than a silent skip.
 The native self-host editing proof checks the prepared engine and its complete delivery evidence when selected.
 The Rust gate uses the repository build budget and checks its summary verdict.
-On the shared Windows host, one PR verification runs at a time. A later run waits for the first to finish.
+On the shared Windows host, one full PR verification runs at a time. Full runs wait in FIFO order.
+Warm, narrow JavaScript plans can use one separate light lane beside the full lane.
+Light admission requires at most two audited Vitest suites, no Rust, native preparation, services, browser proofs, or desktop scripts.
+The site suite and its selected desktop renderer compatibility files qualify. Complete desktop suites do not.
+Unknown or custom test commands, broad repository contracts, and cold or unverifiable dependencies retain the full lane.
+The light lane keeps whole-workspace typecheck coverage, with one workspace command at a time.
+It runs repository source guards before sequential package tests, with one Vitest worker.
+`verify:plan` reports admission and the reason before a run joins either queue.
+The runner checks host tools before queueing and rechecks its source, tools, and disk after admission.
 The runner removes its Postgres container by the recorded container ID.
+
+Inspect the host's queues without joining them:
+
+```sh
+node tools/rust-engine-program/build-slot.mjs --status
+```
+
+Use `--root <directory>` to inspect another queue root. The command emits JSON and does not create directories or acquire slots.
+Each lane reports owners and waiters with their purpose, checkout, commit, phase, and elapsed time when recorded.
+Older records without that metadata have an unknown purpose.
+Wait estimates use the median duration of up to twenty completed runs in the same lane.
+A cold history has no estimate. Estimates do not reject or reorder work.
+Full runs wait up to six hours. A live holder keeps its slot even if its heartbeat stops; investigate its recorded PID before changing its resources.
+
+The full lane count defaults to one. To compare one and two lanes, use an isolated root and explicit trial flags in PowerShell:
+
+```powershell
+$env:DOHC_VERIFICATION_SLOT_ROOT = 'C:\w\_locks-verification-trial'
+$env:DOHC_VERIFICATION_TRIAL = '1'
+$env:DOHC_VERIFICATION_LANES = '2'
+pnpm verify:pr --base origin/main
+```
+
+Use that same trial root with `DOHC_VERIFICATION_LANES=1` for the comparison.
+Keep `DOHC_BUILD_SLOT_ROOT` unchanged. Cargo still uses the host's shared four-lane budget during a verification trial.
+Record other host builds and gates during the comparison; a separate outer queue does not isolate CPU, memory, or disk load.
+Compare elapsed time, queue time, failures, and peak host memory under matching work and cache conditions.
+Do not change the live queue root or remove another run's tickets to conduct a trial.
+Remove the three verification trial environment variables from the shell before returning to ordinary verification.
 
 To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
 Each report states its scope. Every selected job needs passing evidence that covers the change.

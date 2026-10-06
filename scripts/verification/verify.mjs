@@ -12,6 +12,7 @@ import { readWorkspacePackages, selectJavaScript, selectedGates, workflowFilters
 import { readFocusedRendererSelection } from "./renderer-selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
+import { admissionPreflight, installedDependenciesMatch, verificationAdmission } from "./admission.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 import { refreshRustReuse, rustIdentity, sealRustEvidence } from "./rust-reuse.mjs";
 
@@ -164,7 +165,12 @@ export async function verify(args) {
       || selectJavaScript(jsFiles, readWorkspacePackages(repoRoot), { full: forceFull })) : null;
     return { baseCommit, files, workflow, requiredGates, gates, javascript };
   }
-  if (mode === "plan") { const {baseCommit, files, gates, javascript} = selection(); console.log(JSON.stringify({base, baseCommit, files, gates, javascript}, null, 2)); return; }
+  if (mode === "plan") {
+    const {baseCommit, files, gates, javascript} = selection();
+    const admission = verificationAdmission({gates, javascript}, gates.js ? readWorkspacePackages(repoRoot) : [], installedDependenciesMatch(repoRoot));
+    console.log(JSON.stringify({base, baseCommit, files, gates, javascript, admission}, null, 2));
+    return;
+  }
   let treeState;
   const output = join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
@@ -172,6 +178,7 @@ export async function verify(args) {
   const reportPath = join(output, "result.json");
   const save = () => writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
   const measure = (name, action) => {
+    lane?.update?.({phase: name});
     const row = {name};
     report.timings.push(row);
     return timed(row, action, save);
@@ -202,6 +209,7 @@ export async function verify(args) {
   let rustTools;
   async function checkedStep(row, action, checkpoint = () => cancellation.checkpoint()) {
     await checkpoint();
+    lane?.update?.({phase: row.name});
     report.steps.push(row); save();
     const result = await timed(row, action, save);
     await checkTree(row.name);
@@ -232,14 +240,27 @@ export async function verify(args) {
       report.verdict = "PASS";
       return report;
     }
-    // One PR gate at a time per host; the wait is recorded as `queue`.
-    if (mode === "pr") lane = await measure("queue", () => acquireVerificationSlot());
     const needs = mode === "pr" ? (javascript?.needs ?? {engine: false, desktop: false, postgres: false}) : {engine: true, desktop: true};
     const proofs = mode === "pr" ? (javascript?.proofs ?? {}) : {desktop: true};
     const native = gates.rust || needs.engine || needs.desktop;
+    if (mode === "pr") {
+      const preflight = () => admissionPreflight({rust: gates.rust, native, root: repoRoot, pins: require("js-yaml").load(workflow).env});
+      await measure("preflight", preflight);
+      report.admission = verificationAdmission({gates, javascript}, readWorkspacePackages(repoRoot), installedDependenciesMatch(repoRoot));
+      lane = await measure("queue", () => acquireVerificationSlot(process.env, {
+        lightweight: report.admission.lightweight,
+        metadata: {purpose: report.admission.lightweight ? "light PR verification" : "full PR verification", checkout: repoRoot, commit: report.commit, phase: "admission"},
+      }));
+      await checkTree("admission");
+      await measure("preflight:admission", preflight);
+    }
     startSource = await measure("source-fingerprints:start", () => ({ ...(native ? {engine: sourceFingerprint("engine")} : {}), desktop: sourceFingerprint("desktop") }));
     await cancellation.checkpoint();
-    if (mode === "pr" && (gates.js || gates.rust)) await step("install", ...pnpm(["install", "--frozen-lockfile"]));
+    if (mode === "pr" && (gates.js || gates.rust)) {
+      if (report.admission.lightweight) {
+        if (!installedDependenciesMatch(repoRoot)) throw new Error("Installed dependencies changed while waiting. Rerun verification for full-lane admission.");
+      } else await step("install", ...pnpm(["install", "--frozen-lockfile"]));
+    }
     if (needs.desktop) await step("electron-install", process.execPath, ["apps/desktop/scripts/ensure-electron-installed.mjs"]);
     report.doctor = await measure("doctor", () => doctor({engine: native, desktop: needs.desktop, browser: Boolean(proofs.accounts || desktopProofTags(proofs).selected.length)})); save();
     await cancellation.checkpoint();
@@ -328,12 +349,13 @@ export async function verify(args) {
           report.postgres = { id: database.id }; save();
         }
         const env = { ...process.env, POSTGRES_URL: database?.url ?? "", DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath };
-        await step("typecheck", ...pnpm(["run", "typecheck"]), env);
+        await step("typecheck", ...pnpm(report.admission?.lightweight ? ["-r", "--workspace-concurrency=1", "--if-present", "typecheck"] : ["run", "typecheck"]), env);
         report.jsTests = join(output, "js-tests", "result.json");
         // Keep package groups under this owner so cancellation finishes their
         // escalation before database cleanup, without a competing parent timer.
         await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
           () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, selectedPackages: javascript.packages, testFiles: javascript.testFiles, repository: javascript.repository, desktopScripts: javascript.desktopScripts,
+            bounded: report.admission?.lightweight ?? false,
             beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled),
             ...(Object.values(proofs).some(Boolean) ? {runProofs: checkpoint => selectedProofs(env, checkpoint)} : {}) }));
       } else if (mode !== "pr") {
@@ -355,6 +377,7 @@ export async function verify(args) {
     throw error;
   }
   finally {
+    lane?.update?.({phase: "cleanup"});
     try { await database?.stop(); }
     catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
     const interrupted = await cancellation.dispose();

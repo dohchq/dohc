@@ -27,8 +27,11 @@ import { setTimeout as poll } from "node:timers/promises";
 import {
   acquireBuildSlot,
   acquireVerificationSlot,
+  buildQueueStatus,
+  capBuildParallelism,
   reclaimStaleSlots,
   resolveBuildBudget,
+  verificationLanes,
 } from "../tools/rust-engine-program/build-slot.mjs";
 
 const slotRoot = () => mkdtempSync(join(tmpdir(), "dohc-build-slot-"));
@@ -365,8 +368,8 @@ function queueHarness(t) {
       });
       console.log = message => process.send({ type: "waiting", message });
       try {
-        slot = await (${JSON.stringify(kind)} === "verification-slot"
-          ? acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: process.argv[1] })
+        slot = await (${JSON.stringify(kind)} !== "build-slot"
+          ? acquireVerificationSlot({ DOHC_BUILD_SLOT_ROOT: process.argv[1] }, { lightweight: ${JSON.stringify(kind)} === "verification-light-slot", ...JSON.parse(process.argv[2]) })
           : acquireBuildSlot({ root: process.argv[1], slots: 1, waitMs: 20_000, pollMs: 60_000, ...JSON.parse(process.argv[2]) }));
         process.send({ type: "acquired", name: slot.name });
       } catch (error) {
@@ -449,6 +452,111 @@ test("the budget is an even share of the cores across four slots", () => {
     ),
     null,
   );
+});
+
+test("inherited compiler and test settings cannot exceed a lane's budget", () => {
+  const source = {CARGO_BUILD_JOBS: "64", RUST_TEST_THREADS: "2", NEXTEST_TEST_THREADS: "num-cpus", OTHER: "keep"};
+  assert.deepEqual(capBuildParallelism(source, 8), {CARGO_BUILD_JOBS: "8", RUST_TEST_THREADS: "2", NEXTEST_TEST_THREADS: "8", OTHER: "keep"});
+  assert.equal(source.CARGO_BUILD_JOBS, "64");
+  assert.equal(capBuildParallelism({RUST_TEST_THREADS: "2"}, 8).NEXTEST_TEST_THREADS, "2");
+  const capped = capBuildParallelism({cargo_build_jobs: "2", CARGO_BUILD_JOBS: "99", RUST_TEST_THREADS: "-1"}, 4);
+  assert.equal(capped.CARGO_BUILD_JOBS, "4");
+  assert.equal(capped.cargo_build_jobs, undefined);
+  assert.equal(capped.RUST_TEST_THREADS, "4");
+  assert.throws(() => capBuildParallelism({}, 0), /positive integer/);
+});
+
+test("full capacity stays one unless an isolated two-lane trial is explicit", async t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  assert.equal(verificationLanes({}), 1);
+  for (const env of [{DOHC_VERIFICATION_LANES: "0"}, {DOHC_VERIFICATION_LANES: "3"},
+    {DOHC_VERIFICATION_LANES: "2"}, {DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: "1", DOHC_BUILD_SLOT_ROOT: root, DOHC_VERIFICATION_SLOT_ROOT: root}]) {
+    assert.throws(() => verificationLanes(env), /must be 1 or 2|isolated/);
+  }
+  const trial = join(root, "trial");
+  const env = {DOHC_BUILD_SLOT_ROOT: root, DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: "1"};
+  assert.equal(resolveBuildBudget(env).root, root);
+  const first = await acquireVerificationSlot(env);
+  const second = await acquireVerificationSlot(env);
+  try {
+    assert.notEqual(first.name, second.name);
+    assert.equal(first.dir, join(trial, first.name));
+    await assert.rejects(acquireVerificationSlot(env, {waitMs: 0}), /all 2 slots are held/);
+  } finally { first.release(); second.release(); }
+});
+
+test("queue status retains claim identity and estimates only from completed lane history", async t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const metadata = {purpose: "full PR verification", checkout: "C:\\work\\candidate", commit: "abc123", phase: "prepare"};
+  const slot = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {metadata});
+  try {
+    const original = readFileSync(join(slot.dir, "owner.json"), "utf8");
+    const ticket = plantTicket(root, 1, {pid: process.pid, kind: "verification-slot"});
+    let status = buildQueueStatus({root, slots: 1, kind: "verification-slot", ticketName: ticket.split(/[\\/]/u).at(-1)});
+    assert.equal(status.estimate.waitMs, null);
+    assert.equal(status.owners[0].phase, "prepare");
+    assert.equal(status.owners[0].checkout, metadata.checkout);
+    assert.equal(status.waiters[0].purpose, "unknown");
+    slot.update({phase: "typecheck"});
+    assert.equal(readFileSync(join(slot.dir, "owner.json"), "utf8"), original);
+    const owner = JSON.parse(original);
+    writeFileSync(join(root, "admission-history.jsonl"), [1000, 2000, 3000].map(elapsedMs => JSON.stringify({event: "release", kind: "verification-slot", elapsedMs})).join("\n") + "\n");
+    status = buildQueueStatus({root, slots: 1, kind: "verification-slot", ticketName: ticket.split(/[\\/]/u).at(-1), now: Date.parse(owner.start) + 500});
+    assert.deepEqual(status.estimate, {waitMs: 1500, serviceMs: 2000, samples: 3});
+    assert.equal(status.owners[0].phase, "typecheck");
+  } finally { slot.release(); }
+  assert.equal(existsSync(slot.dir), false);
+  assert.match(readFileSync(join(root, "admission-history.jsonl"), "utf8"), /"event":"release"/u);
+});
+
+test("status CLI reads absent queues without creating or acquiring anything", t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const absent = join(root, "absent");
+  const result = spawnSync(process.execPath, [new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).pathname.replace(/^\/(\w:)/u, "$1"), "--status", "--root", absent], {encoding: "utf8", timeout: 5000});
+  assert.equal(result.status, 0, result.stderr);
+  const status = JSON.parse(result.stdout);
+  assert.equal(status.lanes.length, 3);
+  assert.ok(status.lanes.every(lane => !lane.owners.length && !lane.queued));
+  assert.equal(existsSync(absent), false);
+});
+
+test("a bounded light gate completes while eighteen heavy waiters remain queued", async t => {
+  const {root, start, message} = queueHarness(t);
+  const holder = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root});
+  t.after(() => holder.release());
+  for (let i = 1; i <= 18; i += 1) plantTicket(root, i, {pid: process.pid, kind: "verification-slot"});
+  await assert.rejects(acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {waitMs: 0}), /all 1 slots are held/);
+  const started = performance.now();
+  const light = start("light", {kind: "verification-light-slot", metadata: {purpose: "light PR verification"}});
+  await message(light, "acquired");
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 5000, `light admission took ${elapsed.toFixed(1)}ms`);
+  assert.equal(tickets(root, "verification-slot").length, 18);
+  assert.equal(existsSync(holder.dir), true);
+  light.send("release");
+  await waitFor(() => light.closed, "light gate must finish while heavy holder remains");
+  assert.equal(existsSync(holder.dir), true);
+  t.diagnostic(`Isolated scheduler: light admission ${elapsed.toFixed(1)}ms; heavy backlog 18; heavy holder stayed active.`);
+});
+
+test("light admission remains capped, cleans up timeouts and cancellation, and preserves full owners", async t => {
+  const {root, start, message} = queueHarness(t);
+  const full = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root});
+  const light = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {lightweight: true});
+  t.after(() => {full.release(); light.release();});
+  await assert.rejects(acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root}, {lightweight: true, waitMs: 0}), /all 1 slots are held/);
+  assert.deepEqual(tickets(root, "verification-light-slot"), []);
+  const waiter = start("cancel-light", {kind: "verification-light-slot"});
+  await message(waiter, "waiting");
+  waiter.send("SIGINT");
+  await waitFor(() => waiter.closed, "cancelled light waiter must exit");
+  assert.equal(waiter.exitCode, 130);
+  assert.deepEqual(tickets(root, "verification-light-slot"), []);
+  assert.equal(existsSync(full.dir), true);
+  assert.equal(existsSync(light.dir), true);
 });
 
 test("Windows CI is uncapped unless an explicit slot root requests the workstation budget", () => {

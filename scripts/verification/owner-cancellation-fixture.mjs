@@ -21,6 +21,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
   put("tools/rust-engine-program/build-slot.mjs", "export const resolveBuildBudget=()=>null;export const freeDiskGb=()=>100;export const acquireBuildSlot=()=>{throw Error('unexpected slot acquisition')};export const acquireVerificationSlot=()=>null;");
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
   put("scripts/verification/doctor.mjs", "export const doctor=()=>({checks:[]});");
+  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;export const verificationAdmission=()=>({lightweight:false,reason:'fixture full lane'});");
   put("tools/rust-engine-program/tree-provenance.mjs", "export const readTreeState=()=>({head:'fixture'});export const classifyTreeProvenance=()=>({status:'PASS'});");
   put("tools/rust-engine-program/git-read.mjs", readFileSync(join(sourceRoot, "tools/rust-engine-program/git-read.mjs")));
   if (kind === "verify") put("scripts/verification/build.mjs", `
