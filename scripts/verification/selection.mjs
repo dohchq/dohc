@@ -183,7 +183,6 @@ export function uncoveredWorkspaceInputs(files, packages) {
 const gateReadCalls = new Set(["include_str!", "include_bytes!", "read_to_string", "fs::read", "File::open",
   "readFileSync", "readFile", "createReadStream", "existsSync"]);
 const gatePathCalls = new Set(["Path::new", "PathBuf::from", "URL", "join", "resolve"]);
-const { typescriptLanguage, tsxLanguage } = require("@codemirror/lang-javascript");
 
 export function workflowFilters(workflow) {
   const yaml = require("js-yaml");
@@ -204,7 +203,6 @@ export function selectedGates(files, workflow) {
 export const isGateReader = path => /\.(?:rs|[cm]?[jt]sx?)$/u.test(path);
 
 function* javascriptGateInputs(path, source, couldFind) {
-  if (!/\b(?:readFileSync|readFile|createReadStream|existsSync|URL|join|resolve)\b/u.test(source)) return;
   // Overlapping quotes retain candidates inside templates, comments, and regexes.
   // Treat every value as a direct read here; the parser decides its actual role.
   let candidate = false;
@@ -212,6 +210,7 @@ function* javascriptGateInputs(path, source, couldFind) {
     if (couldFind(match[2])) { candidate = true; break; }
   }
   if (!candidate) return;
+  const { typescriptLanguage, tsxLanguage } = require("@codemirror/lang-javascript");
   // Lezer treats a CRLF continuation differently from its equivalent LF source.
   source = source.replaceAll("\r\n", "\n");
   const language = /\.[jt]sx$/u.test(path) ? tsxLanguage : typescriptLanguage;
@@ -236,7 +235,7 @@ function* javascriptGateInputs(path, source, couldFind) {
 
 function rustTokens(source) {
   const tokens = [];
-  const pattern = /\s+|\/\/[^\n]*|(?:b|c)?"(?:\\[\s\S]|[^"\\])*"|(?:b)?'(?:\\(?:u\{[\da-fA-F]+\}|x[\da-fA-F]{2}|[\s\S])|[^'\\\r\n])'|[A-Za-z_]\w*|::|[^\s]/y;
+  const pattern = /\s+|\/\/[^\n]*|[bc]?"(?:\\[\s\S]|[^"\\])*"|b?'(?:\\(?:u\{[\da-fA-F]+\}|x[\da-fA-F]{2}|[\s\S])|[^'\\\r\n])'|[A-Za-z_]\w*|::|[^\s]/y;
   const rawStart = /(?:br|cr|r)(#*)"/y;
   for (let offset = 0; offset < source.length;) {
     if (source.startsWith("/*", offset)) {
@@ -265,7 +264,7 @@ function rustTokens(source) {
     const token = match[0];
     offset = pattern.lastIndex;
     if (/^\s/u.test(token) || token.startsWith("//")) continue;
-    const quoted = token.match(/^(?:b|c)?"([\s\S]*)"$/u);
+    const quoted = token.match(/^[bc]?"([\s\S]*)"$/u);
     const value = quoted?.[1].replace(/\\\r?\n\s*/gu, "");
     tokens.push({ token, value: value && !value.includes("\\") ? value : undefined });
   }
@@ -332,9 +331,12 @@ export function uncoveredGateInputs(files, trackedPaths, workflow) {
     const runtimeBase = rust ? crateRoot(reader, tracked) : ".";
     const resolveReference = ({ reference, directRead, call }) => {
       const include = rust && (call === "include_str!" || call === "include_bytes!");
-      return include || /^\.{1,2}\//u.test(reference)
-        ? posix.normalize(posix.join(include || !rust ? posix.dirname(reader) : runtimeBase, reference))
-        : directRead ? posix.normalize(posix.join(runtimeBase, reference)) : null;
+      if (include) return posix.join(posix.dirname(reader), reference);
+      if (/^\.{1,2}\//u.test(reference)) {
+        return posix.join(rust ? runtimeBase : posix.dirname(reader), reference);
+      }
+      if (directRead) return posix.join(runtimeBase, reference);
+      return null;
     };
     const couldFind = reference => {
       const input = resolveReference({ reference, directRead: true });

@@ -335,6 +335,12 @@ test("gate input guard rejects a bare direct read outside the reader's gate", ()
   assert.deepEqual(gateFixture(reader, 'readFile("LICENSE")', "LICENSE"), [gateFinding(reader, "LICENSE", "js")]);
 });
 
+test("gate input guard admits read_to_string without another read or path word", () => {
+  const reader = "scripts/read.mjs";
+  assert.deepEqual(gateFixture(reader, 'read_to_string("LICENSE");', "LICENSE"),
+    [gateFinding(reader, "LICENSE", "js")]);
+});
+
 test("gate input guard ignores comment mentions and commented reads", () => {
   const source = `// readFileSync("docker-compose.self-host.yml")
 /*
@@ -483,7 +489,6 @@ test("gate input guard admits a bare read after argument comments", () => {
     [gateFinding("scripts/read.mjs", "LICENSE", "js")]);
 });
 
-
 test("gate input prefilter preserves commented, optional, and later literal arguments", () => {
   const reader = "scripts/fixture.ts";
   const input = "LICENSE";
@@ -500,7 +505,6 @@ test("gate input prefilter preserves commented, optional, and later literal argu
     assert.deepEqual(gateFixture(reader, source, input), [gateFinding(reader, input, "js")], source);
   }
 });
-
 
 test("gate input prefilter retains overlapping quotes and mixed quotes in paths", () => {
   const reader = "scripts/fixture.mjs";

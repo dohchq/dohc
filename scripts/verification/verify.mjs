@@ -35,7 +35,6 @@ function passedSpecTitles(suites = []) {
     ...passedSpecTitles(suite.suites),
   ]);
 }
-export { selectedGates } from "./selection.mjs";
 
 export function changedFiles(baseCommit, includeUncommitted = false, root = repoRoot) {
   const paths = (args) => readGit(args, root).split("\0").filter(Boolean);
