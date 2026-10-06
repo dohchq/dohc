@@ -2,7 +2,7 @@ import type { BrowserWindow as ElectronWindow } from "electron";
 import {
   DesktopUserSettingsResult, DesktopMarksResult, ExitRoundAnswerPayload, LaunchMarksResult,
   OpenExternalUrlPayload, ReloadRendererRequestPayload, SetTitlebarThemePayload,
-  StepWindowZoomPayload, WriteClipboardTextPayload,
+  StepWindowZoomPayload,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import { isSafeExternalUrl } from "../security/electronSecurity";
@@ -20,7 +20,6 @@ export function createWindowIpc<
   assertTrustedSender(event: Event): void;
   prepareForRendererReload(sender: Sender, rendererDocumentId: string): Promise<boolean>;
   shell: { openExternal(url: string): Promise<void> };
-  clipboard: { writeText(text: string): void };
   BrowserWindow: { fromWebContents(sender: Sender): Partial<Pick<ElectronWindow, "setTitleBarOverlay">> | null };
   rememberChromeTheme: typeof RememberChromeTheme;
   titleBarOverlayOptions: typeof TitleBarOverlayOptions;
@@ -35,7 +34,7 @@ export function createWindowIpc<
 }) {
   const {
     registerHandler, registerEvent, assertTrustedSender, prepareForRendererReload,
-    shell, clipboard, BrowserWindow, rememberChromeTheme, titleBarOverlayOptions,
+    shell, BrowserWindow, rememberChromeTheme, titleBarOverlayOptions,
     stepWindowZoom, exitRounds, quitGuard, isTrustedFrame, launchMarks,
     desktopMarks, logLaunchMarksOnce, app,
   } = dependencies;
@@ -67,12 +66,6 @@ export function createWindowIpc<
   }
 
   function registerWindowControls(): void {
-    registerHandler(CHANNELS.writeClipboardText, async (event, payload) => {
-      assertTrustedSender(event);
-      const input = WriteClipboardTextPayload.parse(payload);
-      clipboard.writeText(input.text);
-    });
-
     // Theme flip → re-tint the OS window-control overlay. setTitleBarOverlay
     // only exists where the overlay does (Windows, newer Linux); macOS and
     // older Linux feature-detect to a no-op — never a crash.

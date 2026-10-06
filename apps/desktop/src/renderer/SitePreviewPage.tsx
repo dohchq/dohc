@@ -26,7 +26,7 @@ import { bridge } from "./bridge";
 import { openLinkExternally } from "./linkActivation";
 import { isLoopbackOrigin } from "../security/loopback";
 import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
-import { OwnerAppPublication } from "./OwnerAppPublication";
+import { OwnerAppEntry, OwnerAppPublication } from "./OwnerAppPublication";
 import { ipcErrorMessage } from "./ipcError";
 
 const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
@@ -238,6 +238,10 @@ export function SitePreviewPage(props: {
   // whichever one is set), so one field is the whole state instead of two
   // booleans that can only ever disagree by construction.
   const [idleReason, setIdleReason] = useState<"exited" | "stopped" | null>(null);
+  // Counts changes to this app's approval on this device, from either
+  // publication control, so the page entry reads the approval again.
+  const [localApprovals, setLocalApprovals] = useState(0);
+  const localApprovalChanged = useCallback(() => setLocalApprovals((value) => value + 1), []);
   const autoStartKeyRef = useRef<string | null>(null);
   const loadRequestRef = useRef(0);
   const previewStartRequestRef = useRef(0);
@@ -719,7 +723,7 @@ export function SitePreviewPage(props: {
           ) : null}
           {!props.sharedView && site?.authority.kind === "workspace" ? (
             <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} reportError={props.reportError}
-              onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} />
+              onLocalChange={localApprovalChanged} onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} />
           ) : null}
           {modes.length > 0 ? (
             <details
@@ -857,7 +861,9 @@ export function SitePreviewPage(props: {
           {!preview ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
               <Globe2 size={24} aria-hidden className="text-subtle" />
-              <div className="max-w-sm text-sm text-muted">
+              {needsPublication ? <OwnerAppEntry workspaceId={props.workspaceId} appRoot={props.siteRoot} reportError={props.reportError}
+                reload={localApprovals} onLocalChange={localApprovalChanged}
+                onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} /> : <div className="max-w-sm text-sm text-muted">
                 {modes.length > 0
                   ? idleReason === "exited"
                     ? "Dev server exited. Use Preview options to run it again."
@@ -866,11 +872,8 @@ export function SitePreviewPage(props: {
                     : runningMode
                     ? `Starting ${modeLabel(runningMode).toLowerCase()} preview…`
                     : "This app did not start automatically. Choose another mode in Preview options."
-                  : needsPublication ? "Review this app to open it on this device or publish it to a shared link."
                   : "This app has no previewable entry, dev script, or build output yet."}
-              </div>
-              {needsPublication ? <OwnerAppPublication workspaceId={props.workspaceId} appRoot={props.siteRoot} triggerLabel="Review and open app" reportError={props.reportError}
-                onShareSource={props.onShareSite ? () => props.onShareSite?.({ paths: [props.siteRoot], label: site.title }) : undefined} /> : null}
+              </div>}
               {idleReason === "exited" && previewLogs.length > 0 ? (
                 <LogsDetails
                   logs={previewLogs}

@@ -36,6 +36,7 @@ import {parseDeviceControlLimits} from "@dohc/live-session-contract/device-contr
 import { openRelayDeployment } from "./relayDeployment";
 import { guardRelayResponses } from "./relayResponseStanding";
 import { startServiceLiveHost } from "./serviceLiveHost";
+import { startEngineProjection } from "./engineProjection";
 import { parseNamedLiveConfig } from "./namedLiveConfig";
 import { readAppBackendParticipantLimit, readAppCollectionPolicy, readAppPublicationConfig } from "./appPublicationConfig";
 import { createNamedFrameChanges } from "./liveHostChanges";
@@ -44,6 +45,7 @@ import { createLiveTickets } from "./liveTickets";
 import { createLiveHostReports } from "./namedLiveHostReports";
 import {createLinkLiveBrowserResolver} from "./linkLiveBrowserAuth";
 import {normalizeLinkRefusal, opaqueLinkRefusal} from "./linkRefusal";
+import {isLinkEndpointPath, isLinkLivePath} from "./linkEndpointPath";
 import {createLinkLiveHttp} from "./linkLiveHttp";
 import {createLiveMembershipRegistry} from "./liveMembership";
 import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
@@ -241,6 +243,15 @@ const dbPath = process.env.SYNC_RELAY_DB_PATH ?? join(tmpdir(), "dohc-sync-relay
 const deploymentConfig = process.env.DOHC_RELAY_DEPLOYMENT_CONFIG;
 if (!isDevOrTest && !deploymentConfig) fatal("FATAL: DOHC_RELAY_DEPLOYMENT_CONFIG must name an initialized deployment outside development/test.");
 if (deploymentConfig && process.env.SYNC_RELAY_DB_PATH !== undefined) fatal("FATAL: The deployment config owns the relay database path. Remove SYNC_RELAY_DB_PATH.");
+const projectionExecutable = process.env.DOHC_RELAY_ENGINE_EXECUTABLE;
+const projectionOptIn = process.env.DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION;
+if (projectionOptIn !== undefined && !["0", "1"].includes(projectionOptIn)) fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION must be 0 or 1.");
+if (projectionOptIn !== undefined && !isDevOrTest) fatal("FATAL: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION is allowed only in development/test.");
+if (projectionOptIn === "1") console.warn("WARNING: DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION=1 permits document projection without OS memory isolation on non-Linux platforms.");
+if (!isDevOrTest && !projectionExecutable) fatal("FATAL: Document sharing requires DOHC_RELAY_ENGINE_EXECUTABLE outside development/test.");
+const documentProjection = projectionExecutable ? await startEngineProjection({engineExecutable: projectionExecutable,
+  allowUnisolatedProjection: projectionOptIn === "1"}).catch((error: unknown) => fatal(
+    `FATAL: Document projection could not start: ${error instanceof Error ? error.message : "unknown engine failure"}`)) : undefined;
 const storageOptions = { workspaceQuotaBytes, ...(namedLiveConfig ? { liveTickets: { ...namedLiveConfig.tickets, now: Date.now } } : {}) };
 const deployment = deploymentConfig ? openRelayDeployment(deploymentConfig, storageOptions) : undefined;
 const storage = deployment?.storage ?? openSyncRelayStorage(dbPath, storageOptions);
@@ -379,7 +390,6 @@ let linkLiveHttp: ReturnType<typeof createLinkLiveHttp> | undefined;
 let desktopLive: ReturnType<typeof createNamedLiveRoutes> | undefined;
 let desktopAdmission: ReturnType<typeof createNamedDesktopLive> | undefined;
 let serviceEnrollment: ReturnType<typeof createServiceHostEnrollmentRoutes> | undefined;
-const linkLivePaths = new Set(["/sync/live/link-tickets", "/sync/live/link-session", "/sync/live/link-document"]);
 const relayHandler = guardRelayResponses(storage, request => {
   const path = new URL(request.url).pathname;
   if (request.headers.get("authorization")?.startsWith("Bearer dohc-service-v1.")) return serviceReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
@@ -387,7 +397,7 @@ const relayHandler = guardRelayResponses(storage, request => {
   if (/^\/sync\/[^/]+\/live-host$/.test(path)) return serviceEnrollment?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/desktop-open") return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
-  if (linkLivePaths.has(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   return relayApplication(request);
 });
 const fetchHandler = async (request: Request): Promise<Response> => {
@@ -410,7 +420,7 @@ const fetchHandler = async (request: Request): Promise<Response> => {
   const refusal = relayApiVersionRefusal(request.headers);
   const result = refusal ? errorResponse(refusal) : await relayHandler(request);
   const path = new URL(request.url).pathname;
-  return /^\/sync\/link(?:[/-]|$)/.test(path) || linkLivePaths.has(path) ? normalizeLinkRefusal(result, path, linkLivePaths.has(path)) : result;
+  return normalizeLinkRefusal(result, path, isLinkLivePath(path));
 };
 
 // Headroom over the blob cap so a maximal valid blob PUT still passes; the
@@ -483,14 +493,14 @@ const server = serveFetchHandler({
     isAutomationPressPath(url.pathname) ? AUTOMATION_PRESS_MAX_BODY_BYTES :
     isAutomationServerPath(url.pathname) ? AUTOMATION_SERVER_MAX_BODY_BYTES :
     url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
-    (url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
+    (url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? MAX_LINK_EXCHANGE_BODY_BYTES
       : MAX_BODY_BYTES),
   oversized: (url) =>
-    /^\/sync\/link(?:[/-]|$)/.test(url.pathname) || linkLivePaths.has(url.pathname) ? opaqueLinkRefusal() :
-    url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/named-tickets" || linkLivePaths.has(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
+    isLinkEndpointPath(url.pathname) ? opaqueLinkRefusal() :
+    url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")
       : errorBody("payload_too_large"),
   // Never echo internal error details (or anything derived from the request)
@@ -647,6 +657,7 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
 installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
+    await documentProjection?.close();
     await ownerAdmissionRun?.close();
     await automations?.close();
     await selfHost?.close();

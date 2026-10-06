@@ -69,18 +69,103 @@ const GAP_PX = 4;
 
 type Place = { left: number; maxHeight: number; top?: number; bottom?: number; above: boolean };
 
-// The list-row ladder: hover 7%, and 11% for the current or checked row
-// whatever has focus. The focused row takes the same fill, and the global
-// :focus-visible outline marks it for the keyboard, so it still reads beside
-// a current one. The list's padding holds the outline and its offset.
-const ROW =
-  "flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 focus:bg-selected aria-disabled:opacity-50";
+// The Menu part's recipe. A menu whose DOM another owner builds, such as the
+// editor's block and table menus, draws itself from these too, so every
+// menu has one frame, one row, one ladder and one set of keys.
+
+/** The list's frame. The owner adds its position and width. */
+export const MENU_FRAME = "dohc-popover overflow-y-auto rounded-lg border border-line bg-panel p-1";
+/** One row. The list-row ladder: hover 7%, and 11% for the current or checked row whatever has focus. */
+export const MENU_ROW =
+  "flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-left text-[13px] transition-colors duration-75 aria-disabled:opacity-50";
+export const MENU_ROW_TONE = { rest: "text-muted", current: "bg-selected text-ink", danger: "text-danger" };
+/**
+ * The active option of a list whose focus stays on its frame, with
+ * aria-activedescendant naming the option: the selected fill and the accent
+ * outline inside the row, whether the keyboard or the pointer moved it, since
+ * it is where Enter acts. The fill alone measures about 1.2:1. A rest row
+ * also takes `data-active:text-ink`; a destructive row keeps its color.
+ */
+export const MENU_ACTIVE_OPTION =
+  "data-active:bg-selected data-active:outline-2 data-active:outline-accent data-active:-outline-offset-2";
+/** The leading icon column; a destructive row keeps its own color here. */
+export const MENU_ICON = "grid size-3.5 shrink-0 place-items-center";
+export const MENU_LABEL = "min-w-0 flex-1 truncate";
+/** A row's shortcut, after its label. Hidden from the row's name; the row says it with aria-keyshortcuts. */
+export const MENU_SHORTCUT = "shrink-0 rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
+
+/**
+ * The key that runs a menu's destructive row, labelled as the keyboard in
+ * front of the person labels it: ⌫ on macOS, where that key is Backspace,
+ * and Del elsewhere. `keys` is the row's aria-keyshortcuts.
+ */
+export function deleteShortcut(platform = window.dohcDesktop?.platform): { label: string; keys: string } {
+  return platform === "darwin" ? { label: "⌫", keys: "Backspace" } : { label: "Del", keys: "Delete" };
+}
+
+/**
+ * Scrolls a menu's list just enough to show a row, as block "nearest" would,
+ * keeping the list's own padding around it. Only the list scrolls:
+ * scrollIntoView would also scroll the editor's pane or the window. `start`
+ * is the element whose top must show too, such as the row's section label.
+ * For a list whose focus stays on its frame; a row that takes focus is
+ * revealed by the browser.
+ */
+export function revealMenuRow(list: HTMLElement, row: HTMLElement | null | undefined, start: HTMLElement | null = row ?? null): void {
+  if (!row || !start) return;
+  const style = list.ownerDocument.defaultView?.getComputedStyle(list);
+  const top = start.offsetTop - (Number.parseFloat(style?.paddingTop ?? "") || 0);
+  const bottom = row.offsetTop + row.offsetHeight + (Number.parseFloat(style?.paddingBottom ?? "") || 0);
+  if (top < list.scrollTop) list.scrollTop = Math.max(0, top);
+  else if (bottom > list.scrollTop + list.clientHeight) list.scrollTop = bottom - list.clientHeight;
+}
+export const MENU_SEPARATOR_LINE = "mx-1.5 my-1 h-px bg-line";
+export const MENU_SECTION = "dohc-section-label px-2 pb-1 pt-1.5";
+/** The entrance: 130ms, rising 4px from the trigger's side, a 60ms fade under reduced motion. */
+export const MENU_ENTER = "dohc-menu-in";
+/** The custom properties MENU_ENTER reads: where the list starts, toward its trigger. */
+export function menuEnterFrom(side: "above" | "below" | "left" | "right"): CSSProperties {
+  const offset = `${side === "below" || side === "right" ? "-" : ""}${GAP_PX}px`;
+  const properties: Record<string, string> =
+    side === "left" || side === "right"
+      ? { "--dohc-menu-from": "0px", "--dohc-menu-from-x": offset }
+      : { "--dohc-menu-from": offset };
+  return properties as CSSProperties;
+}
+
+/**
+ * Where a key moves a menu's active row among `labels`: the arrows wrap,
+ * Home and End jump, and a typed letter finds the next row whose label
+ * starts with it. Null for every other key, and for a letter no row starts with.
+ */
+export function moveInMenu(key: string, current: number, labels: readonly string[]): number | null {
+  const count = labels.length;
+  if (count === 0) return null;
+  const wrap = (index: number) => ((index % count) + count) % count;
+  if (key === "ArrowDown") return wrap(current + 1);
+  if (key === "ArrowUp") return wrap(current - 1);
+  if (key === "Home") return 0;
+  if (key === "End") return count - 1;
+  if (key.length !== 1 || key === " ") return null;
+  const letter = key.toLocaleLowerCase();
+  for (let step = 1; step <= count; step += 1) {
+    const index = wrap(current + step);
+    if (labels[index]?.trimStart().toLocaleLowerCase().startsWith(letter)) return index;
+  }
+  return null;
+}
+
+// The Menu part's own rows take DOM focus, so focus carries the fill, and
+// the accent :focus-visible outline marks the row for the keyboard. The list
+// scrolls, so the outline sits inside the row, where the scroller cannot clip
+// it on a row scrolled to an edge.
+const ROW = `${MENU_ROW} focus:bg-selected focus-visible:-outline-offset-2`;
 // Hover paints only after the pointer moves, so a menu opened from the
 // keyboard under a still pointer shows one active row.
 const ROW_TONE = {
-  rest: { base: "text-muted focus:text-ink", hover: "hover:bg-hover hover:text-ink" },
-  current: { base: "bg-selected text-ink", hover: "" },
-  danger: { base: "text-danger", hover: "hover:bg-hover" },
+  rest: { base: `${MENU_ROW_TONE.rest} focus:text-ink`, hover: "hover:bg-hover hover:text-ink" },
+  current: { base: MENU_ROW_TONE.current, hover: "" },
+  danger: { base: MENU_ROW_TONE.danger, hover: "hover:bg-hover" },
 };
 
 // During IME composition, Enter, Escape and the arrows work the candidate
@@ -186,30 +271,19 @@ export function Menu(props: {
     item.onSelect();
   };
   const typing = () => document.activeElement instanceof HTMLInputElement && !!list.current?.contains(document.activeElement);
-  const focusRow = (index: number) => rowElements.current[((index % count) + count) % count]?.focus();
   const current = () => rowElements.current.findIndex((row) => row === document.activeElement);
-  const typeahead = (key: string) => {
-    const from = current();
-    for (let step = 1; step <= count; step += 1) {
-      const row = rowElements.current[(from + step) % count];
-      if (row?.textContent?.trimStart().toLocaleLowerCase().startsWith(key.toLocaleLowerCase())) {
-        row.focus();
-        return;
-      }
-    }
-  };
   const onKeyDown = (event: KeyboardEvent) => {
     const inField = typing();
     if (inField && composing(event)) return;
-    const moves: Record<string, () => void> = {
-      ArrowDown: () => focusRow(current() + 1),
-      ArrowUp: () => focusRow(current() - 1),
-      ...(inField ? {} : { Home: () => focusRow(0), End: () => focusRow(-1) }),
-    };
-    const move = moves[event.key];
-    if (move) {
-      event.preventDefault();
-      move();
+    const arrow = event.key === "ArrowDown" || event.key === "ArrowUp";
+    const letter = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
+    // A field keeps Home, End and the typed letters; the arrows leave it.
+    const next = arrow || (!inField && (letter || event.key === "Home" || event.key === "End"))
+      ? moveInMenu(event.key, current(), rowElements.current.slice(0, count).map((row) => row?.textContent ?? ""))
+      : null;
+    if (next !== null) {
+      if (!letter) event.preventDefault();
+      rowElements.current[next]?.focus();
     } else if (event.key === "Escape") {
       // useDismiss already closed it; one Escape closes one surface.
       event.stopPropagation();
@@ -218,8 +292,6 @@ export function Menu(props: {
       // where the key goes, and otherwise the focus return puts focus on the
       // trigger before the browser moves on from it.
       onOpenChange(false);
-    } else if (!inField && event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && event.key !== " ") {
-      typeahead(event.key);
     }
   };
 
@@ -272,15 +344,15 @@ export function Menu(props: {
                   bottom: place.bottom,
                   maxHeight: place.maxHeight,
                   // The list enters from its trigger's side.
-                  "--dohc-menu-from": place.above ? `${GAP_PX}px` : `-${GAP_PX}px`,
+                  ...menuEnterFrom(place.above ? "above" : "below"),
                 }
               : { left: 0, top: 0 }),
           } as CSSProperties}
-          className={`dohc-popover fixed z-40 overflow-y-auto rounded-lg border border-line bg-panel p-1 ${place ? "dohc-menu-in" : ""}`}
+          className={`${MENU_FRAME} fixed z-40 ${place ? MENU_ENTER : ""}`}
         >
           {props.items.map((entry, entryIndex) => {
             if (entry === MENU_SEPARATOR) {
-              return <div key={`separator-${entryIndex}`} role="separator" className="mx-1.5 my-1 h-px bg-line" />;
+              return <div key={`separator-${entryIndex}`} role="separator" className={MENU_SEPARATOR_LINE} />;
             }
             const index = rowIndex++;
             const setElement = (element: HTMLElement | null) => {
@@ -350,11 +422,11 @@ export function Menu(props: {
                 className={`${ROW} ${tone.base} ${hover}`}
               >
                 {lead ? (
-                  <span className={`grid size-3.5 shrink-0 place-items-center ${entry.danger ? "" : "text-subtle"}`}>
+                  <span className={`${MENU_ICON} ${entry.danger ? "" : "text-subtle"}`}>
                     {entry.checked === undefined ? entry.icon : entry.checked ? <Check size={14} aria-hidden className="text-accent" /> : null}
                   </span>
                 ) : null}
-                <span className="min-w-0 flex-1 truncate">{entry.label}</span>
+                <span className={MENU_LABEL}>{entry.label}</span>
               </button>
             );
           })}

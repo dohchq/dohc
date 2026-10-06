@@ -50,7 +50,6 @@ async function harness(isPackaged = false) {
     },
     source: "stored" as const,
   }));
-  const clipboard = { writeText: vi.fn() };
   const shell = { openExternal: vi.fn(async (_url: string) => undefined) };
   const overlay = vi.fn();
   const windows = new Map<Sender, { setTitleBarOverlay?: typeof overlay }>([[first, { setTitleBarOverlay: overlay }]]);
@@ -73,7 +72,7 @@ async function harness(isPackaged = false) {
     },
     registerEvent: (channel, handler) => { events.set(channel, handler); order.push(channel); },
     assertTrustedSender: event => { if (!isTrustedFrame(event.senderFrame?.url ?? "")) throw new Error("untrusted"); },
-    prepareForRendererReload, shell, clipboard, BrowserWindow, rememberChromeTheme,
+    prepareForRendererReload, shell, BrowserWindow, rememberChromeTheme,
     titleBarOverlayOptions, stepWindowZoom, exitRounds, quitGuard, isTrustedFrame,
     launchMarks, desktopMarks, logLaunchMarksOnce, app: { isPackaged },
   });
@@ -81,7 +80,7 @@ async function harness(isPackaged = false) {
     ...capability, first, second, handlers, events, order, sessions, retiring,
     prepareForRendererReload, setRetirement: (next: Promise<void>) => { retirement = next; },
     quit, forceQuit, ask, quitGuard, exitRounds, requestIds, confirmProceed,
-    stepWindowZoom, clipboard, shell, overlay, windows,
+    stepWindowZoom, shell, overlay, windows,
     BrowserWindow, rememberChromeTheme, titleBarOverlayOptions, launchMarks, desktopMarks,
     logLaunchMarksOnce,
     registerAll() { capability.registerReload(); capability.registerExternalUrl(); capability.registerWindowControls(); capability.registerQuitAndMarks(); },
@@ -106,7 +105,7 @@ describe("registered window IPC", () => {
     h.registerQuitAndMarks();
     expect(h.order).toEqual([
       CHANNELS.reloadRenderer, "registry", CHANNELS.openExternalUrl, "handoff",
-      CHANNELS.writeClipboardText, CHANNELS.setTitlebarTheme, CHANNELS.stepWindowZoom,
+      CHANNELS.setTitlebarTheme, CHANNELS.stepWindowZoom,
       "ui-state", "updates", CHANNELS.exitRoundAnswer, CHANNELS.holdQuit,
       CHANNELS.resumeQuit, CHANNELS.firstPaint, CHANNELS.getLaunchMarks, CHANNELS.getDesktopMarks,
     ]);
@@ -119,7 +118,6 @@ describe("registered window IPC", () => {
       await expect(h.invoke(channel, undefined, h.first, { url: "http://localhost:5173.evil.test" })).rejects.toThrow("untrusted");
     }
     expect(h.prepareForRendererReload).not.toHaveBeenCalled();
-    expect(h.clipboard.writeText).not.toHaveBeenCalled();
     expect(h.shell.openExternal).not.toHaveBeenCalled();
     expect(h.rememberChromeTheme).not.toHaveBeenCalled();
     expect(h.stepWindowZoom).not.toHaveBeenCalled();
@@ -127,18 +125,15 @@ describe("registered window IPC", () => {
     expect(h.launchMarks.snapshot).not.toHaveBeenCalled();
   });
 
-  it("validates payloads before admitting reload, clipboard, theme, zoom or URL work", async () => {
+  it("validates payloads before admitting reload, theme, zoom or URL work", async () => {
     const h = await harness(); h.registerAll();
     for (const [channel, payload] of [
       [CHANNELS.reloadRenderer, { rendererDocumentId: "invalid" }],
-      [CHANNELS.writeClipboardText, { text: "" }],
-      [CHANNELS.writeClipboardText, { text: "a".repeat(20_001) }],
       [CHANNELS.setTitlebarTheme, { theme: "other" }],
       [CHANNELS.stepWindowZoom, { step: "twice" }],
       [CHANNELS.openExternalUrl, { url: 1 }],
     ] as const) await expect(h.invoke(channel, payload)).rejects.toThrow();
     expect(h.prepareForRendererReload).not.toHaveBeenCalled();
-    expect(h.clipboard.writeText).not.toHaveBeenCalled();
     expect(h.rememberChromeTheme).not.toHaveBeenCalled();
     expect(h.stepWindowZoom).not.toHaveBeenCalled();
     expect(h.shell.openExternal).not.toHaveBeenCalled();
@@ -202,13 +197,6 @@ describe("registered window IPC", () => {
     const h = await harness(); h.registerExternalUrl();
     h.shell.openExternal.mockRejectedValueOnce(new Error("browser failed"));
     await expect(h.invoke(CHANNELS.openExternalUrl, { url: "https://example.test" })).rejects.toThrow("browser failed");
-  });
-
-  it("copies the exact bounded text", async () => {
-    const h = await harness(); h.registerWindowControls();
-    const text = " a\n".padEnd(20_000, "x");
-    await h.invoke(CHANNELS.writeClipboardText, { text });
-    expect(h.clipboard.writeText).toHaveBeenCalledWith(text);
   });
 
   it("persists theme before tinting only the sender's window", async () => {

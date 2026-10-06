@@ -1,13 +1,14 @@
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { useRequestSequence } from "../useRequestSequence";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Bot, Check, Copy } from "lucide-react";
+import { Bot } from "lucide-react";
 import type {
   AgentRunStatusResult,
   McpConfigResult,
 } from "../../ipc/bridgeContract";
 import type { RunnerSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
+import { CopyButton } from "../ui/CopyButton";
 import { PreferredNameControl } from "./PreferredNameControl";
 import { RunnerSettingsCard } from "./RunnerSettingsCard";
 import { SettingRow } from "./SettingRow";
@@ -68,20 +69,10 @@ export function AgentsMcpSettings(props: {
   const [status, setStatus] = useState<AgentRunStatusResult | null>(null);
   const [config, setConfig] = useState<McpConfigResult | null>(null);
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   // Workspace async safety invariant: IPC responses are allowed to update this
   // panel only if they belong to the latest workspace/request version.
   const requestVersionRef = useRequestSequence();
-  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const clearCopyResetTimer = useCallback(() => {
-    if (copyResetTimerRef.current) {
-      clearTimeout(copyResetTimerRef.current);
-      copyResetTimerRef.current = null;
-    }
-  }, []);
 
   const isCurrentRequest = useCallback(
     (version: number) => requestVersionRef.isCurrent(version),
@@ -115,8 +106,6 @@ export function AgentsMcpSettings(props: {
     const version = requestVersionRef.next();
     setStatus(null);
     setConfig(null);
-    setCopied(false);
-    setCopyError(null);
     setLoadError(null);
     setBusy(false);
     void refresh(version).catch(() => {
@@ -126,17 +115,22 @@ export function AgentsMcpSettings(props: {
     });
     return () => {
       requestVersionRef.next();
-      clearCopyResetTimer();
     };
-  }, [clearCopyResetTimer, isCurrentRequest, refresh, workspaceId]);
+  }, [isCurrentRequest, refresh, workspaceId]);
 
   const enabled = status?.mcpEnabled ?? false;
   const runnerConfigured = configuredRunnerCommand(runner).length > 0;
-  // An enabled MCP server only means it is available to connect to. We do not
-  // have a trusted session signal proving that an external client copied the
-  // configuration and connected, so only the in-app runner can make this
-  // guide ready.
-  const setupReady = Boolean(props.agentName) && runner.enabled;
+  // Each way of connecting reports its own state; neither one is required. The
+  // runner dispatches only with an agent name to post as. An enabled MCP server
+  // is only available to connect to: no trusted signal proves that an external
+  // client copied the configuration, so this never claims one is connected.
+  const runnerState = runner.enabled
+    ? props.agentName
+      ? { state: "ready", label: "Dispatch ready" }
+      : { state: "unnamed", label: "Agent name needed" }
+    : runnerConfigured
+      ? { state: "configured", label: "Configured · dispatch off" }
+      : { state: "missing", label: "No runner command" };
 
   const toggle = useCallback(async () => {
     const version = requestVersionRef.current();
@@ -170,39 +164,21 @@ export function AgentsMcpSettings(props: {
     }
   }, [workspaceId, refresh, isCurrentRequest, status?.activeRun?.id, onAgentActiveChange]);
 
-  const copyConfig = useCallback(async () => {
-    if (!config || "unavailable" in config) return;
-    const version = requestVersionRef.current();
-    const text = configSnippet(config);
-    try {
-      if (window.dohcDesktop?.writeClipboardText) {
-        await bridge().writeClipboardText({ text });
-      } else {
-        await navigator.clipboard.writeText(text);
-      }
-    } catch {
-      if (isCurrentRequest(version)) {
-        clearCopyResetTimer();
-        setCopied(false);
-        setCopyError("Could not copy MCP config.");
-      }
-      return;
-    }
-    if (!isCurrentRequest(version)) return;
-    clearCopyResetTimer();
-    setCopyError(null);
-    setCopied(true);
-    copyResetTimerRef.current = setTimeout(() => {
-      copyResetTimerRef.current = null;
-      if (isCurrentRequest(version)) setCopied(false);
-    }, 1500);
-  }, [clearCopyResetTimer, config, isCurrentRequest]);
+  // The guide's Enable MCP hands focus to the config's Copy once the server
+  // runs. The guide button disables for the toggle, which drops focus in
+  // Chromium, and is gone once the server runs, so focus moves explicitly.
+  const configCopyRef = useRef<HTMLButtonElement>(null);
+  const focusCopyWhenRunning = useRef(false);
+  useEffect(() => {
+    if (busy || !focusCopyWhenRunning.current) return;
+    focusCopyWhenRunning.current = false;
+    if (enabled) configCopyRef.current?.focus();
+  }, [busy, enabled]);
 
   return (
     <div className="flex flex-col">
       <section
         data-testid="agent-setup-guide"
-        data-state={setupReady ? "ready" : "needs-setup"}
         className="my-4 overflow-hidden rounded-lg border border-line bg-panel-2"
         aria-labelledby="agent-setup-title"
       >
@@ -211,18 +187,9 @@ export function AgentsMcpSettings(props: {
             <Bot size={14} aria-hidden />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 id="agent-setup-title" className="m-0 text-[13px] font-medium text-ink">
-                Set up your agent
-              </h3>
-              <span
-                data-testid="agent-setup-status"
-                data-state={setupReady ? "ready" : "needs-setup"}
-                className="rounded-full border border-line bg-bg px-2 py-0.5 text-[10px] uppercase tracking-wide text-subtle"
-              >
-                {setupReady ? "Ready" : "Needs setup"}
-              </span>
-            </div>
+            <h3 id="agent-setup-title" className="m-0 text-[13px] font-medium text-ink">
+              Set up your agent
+            </h3>
             <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted">
               Choose how a local agent connects to this workspace. Provider names describe
               the connection; messages are always attributed to you.
@@ -248,27 +215,42 @@ export function AgentsMcpSettings(props: {
             </p>
             <span
               data-testid="agent-setup-runner-state"
-              data-state={runner.enabled ? "ready" : runnerConfigured ? "configured" : "missing"}
+              data-state={runnerState.state}
               className="mt-2 inline-block text-[10px] font-medium text-muted"
             >
-              {runner.enabled ? "Dispatch ready" : runnerConfigured ? "Configured · dispatch off" : "Runner command needed"}
+              {runnerState.label}
             </span>
           </div>
           <div className="px-4 py-3">
             <p className="m-0 text-[11px] font-medium text-ink">Connect an existing agent</p>
             <p className="m-0 mt-1 text-[10px] leading-relaxed text-subtle">
-              Enable the workspace-scoped MCP server, then copy its configuration into your
+              Enable the workspace-scoped MCP server. Then copy the MCP config below into your
               existing agent. Sign-in status stays with that provider.
             </p>
-            <button
-              type="button"
-              data-testid="agent-setup-mcp-action"
-              disabled={busy}
-              onClick={() => void toggle()}
-              className="mt-2 rounded-md border border-line bg-bg px-2.5 py-1 text-[10px] font-medium text-muted hover:text-ink disabled:opacity-50"
-            >
-              {enabled ? "MCP enabled · copy config below" : "Enable MCP"}
-            </button>
+            {status ? (
+              <span
+                data-testid="agent-setup-mcp-state"
+                data-state={enabled ? "running" : "stopped"}
+                className="mt-2 block text-[10px] font-medium text-muted"
+              >
+                {enabled ? "Server running" : "Server stopped"}
+              </span>
+            ) : null}
+            {/* Disable stays on the server row below, and Copy stays beside the MCP config. */}
+            {enabled ? null : (
+              <button
+                type="button"
+                data-testid="agent-setup-mcp-action"
+                disabled={busy}
+                onClick={() => {
+                  focusCopyWhenRunning.current = true;
+                  void toggle();
+                }}
+                className="mt-2 rounded-md border border-line bg-bg px-2.5 py-1 text-[10px] font-medium text-muted hover:text-ink disabled:opacity-50"
+              >
+                Enable MCP
+              </button>
+            )}
           </div>
         </div>
       </section>
@@ -340,26 +322,18 @@ export function AgentsMcpSettings(props: {
       ) : null}
 
       <section className="border-b border-line py-4">
-        <div className="mb-2 flex items-center gap-2">
+        <div className="mb-2 flex items-center justify-between gap-2">
           <h3 className="m-0 text-[13px] font-medium text-ink">MCP config</h3>
-          <button
-            type="button"
+          <CopyButton
+            key={workspaceId}
+            ref={configCopyRef}
             disabled={!config || "unavailable" in config}
-            onClick={() => void copyConfig()}
-            className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {copied ? <Check size={12} aria-hidden /> : <Copy size={12} aria-hidden />}
-            {copied ? "Copied" : "Copy"}
-          </button>
+            getText={() => (config && !("unavailable" in config) ? configSnippet(config) : null)}
+          />
         </div>
         <p className="m-0 mb-2 text-[11px] text-muted">
           Paste this into your AI tool to let it use this workspace.
         </p>
-        {copyError ? (
-          <p data-testid="mcp-copy-error" className="m-0 mb-2 text-[11px] text-danger">
-            {copyError}
-          </p>
-        ) : null}
         {config && "unavailable" in config ? (
           <p data-testid="mcp-unavailable" className="m-0 text-[11px] text-danger">
             {config.message}

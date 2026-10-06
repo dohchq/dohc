@@ -10,6 +10,7 @@
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import { COPY_FEEDBACK_MS } from "../ui/CopyButton";
 import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import type { UseEngineDoc } from "../collab/useEngineDoc";
@@ -224,6 +225,32 @@ describe("retained failures", () => {
     expect(onIndexed).not.toHaveBeenCalled();
   });
 
+  // The host sits outside every notice owner, and Discard cannot be undone,
+  // so a refused copy keeps saying how to copy by hand until the next copy.
+  it("keeps the instruction for a refused copy past the copy's own feedback", async () => {
+    docMock.current = engineDocState({ available: false });
+    render(<CollectionFieldWriteHost />);
+    enqueue({ ...CHANGE, value: "Keep me." });
+    const writeText = vi.fn(async (_text: string): Promise<void> => {
+      throw new Error("Document is not focused.");
+    });
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    fireEvent.click(screen.getByTestId("collection-write-copy"));
+    expect((await screen.findByTestId("collection-write-copy-refused")).textContent).toBe(
+      "Could not copy. Select the value above to copy it.",
+    );
+    // The button's own "Couldn't copy" lasts COPY_FEEDBACK_MS; the line stays.
+    await waitFor(() => expect(screen.getByTestId("collection-write-copy").textContent).toBe("Copy value"), {
+      timeout: COPY_FEEDBACK_MS * 3,
+    });
+    expect(screen.getByTestId("collection-write-copy-refused")).toBeTruthy();
+
+    writeText.mockImplementationOnce(async () => undefined);
+    fireEvent.click(screen.getByTestId("collection-write-copy"));
+    expect(screen.queryByTestId("collection-write-copy-refused")).toBeNull();
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("Keep me."));
+  });
+
   it("exposes the exact retained input for copying when its record cannot open", async () => {
     docMock.current = engineDocState({ available: false });
     render(<CollectionFieldWriteHost />);
@@ -288,7 +315,8 @@ describe("retained failures", () => {
 
     // Actionable with only the host mounted — no CollectionPage anywhere.
     screen.getByTestId("collection-write-failures");
-    expect(screen.getByRole("status").textContent).toContain("1 unsaved collection change needs attention.");
+    // The host's region comes first; the copy control has its own.
+    expect(screen.getAllByRole("status")[0]!.textContent).toContain("1 unsaved collection change needs attention.");
     screen.getByTestId("collection-write-retry");
     expect(
       screen.getByTestId("collection-write-discard").textContent,

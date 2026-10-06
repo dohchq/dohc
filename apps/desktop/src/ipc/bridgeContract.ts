@@ -1362,6 +1362,10 @@ const SYNC_STATUS_BASE_FIELDS = {
     .array(
       z.object({
         path: PATH_STRING,
+        objectId: z.string().min(1),
+        versionId: z.string().min(1),
+        lineagePruned: z.boolean(),
+        headBlobSha256: z.string().min(1).nullable(),
         constraint: z.string().min(1).max(200),
         limitBytes: z.number().int().nonnegative(),
         observedBytes: z.number().int().nonnegative(),
@@ -1549,6 +1553,7 @@ export type EngineMomentRecord = z.infer<typeof EngineMomentRecord>;
 
 export const ListEngineMomentsPayload = z.object({
   workspaceId: WORKSPACE_ID,
+  objectId: OPAQUE_ID.optional(),
   limit: z.number().int().min(1).max(500).optional(),
   beforeMomentOrder: z.number().int().nonnegative().optional(),
 });
@@ -5333,11 +5338,6 @@ export const SetWorkspaceSettingsPayload = z.object({
 }).strict();
 export type SetWorkspaceSettingsPayload = z.infer<typeof SetWorkspaceSettingsPayload>;
 
-export const WriteClipboardTextPayload = z.object({
-  text: z.string().min(1).max(20_000),
-}).strict();
-export type WriteClipboardTextPayload = z.infer<typeof WriteClipboardTextPayload>;
-
 // Native window chrome. The renderer mirrors its theme flip to
 // main so the OS titleBarOverlay (Windows/Linux) re-tints with the app; main
 // feature-detects overlay support and no-ops where it doesn't exist.
@@ -6612,7 +6612,6 @@ export interface DohcDesktopBridge
   resetWorkspaceSettings(
     payload: WorkspaceSettingsPayload,
   ): Promise<WorkspaceSettingsResult>;
-  writeClipboardText(payload: WriteClipboardTextPayload): Promise<void>;
   setTitlebarTheme(payload: SetTitlebarThemePayload): Promise<void>;
   onUserSettingsChanged(
     listener: (result: DesktopUserSettingsResult) => void,

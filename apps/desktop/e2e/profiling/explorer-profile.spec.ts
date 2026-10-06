@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { activityPin } from "../../src/testPins";
 import { explorerRow } from "../helpers/workspace";
 import { startCdpCapture } from "./cdpCapture";
 import {
@@ -12,7 +13,7 @@ test("profiles the expanded 5,000-file Explorer folder", async () => {
   const context = await launchFixture("large-flat", "profile-explorer");
   try {
     const { page, desktop, manifest } = context;
-    const explorerActivity = page.getByTestId("activity-explorer");
+    const explorerActivity = page.getByTestId(activityPin("explorer"));
     if ((await explorerActivity.getAttribute("aria-current")) !== "page") {
       await explorerActivity.click();
     }

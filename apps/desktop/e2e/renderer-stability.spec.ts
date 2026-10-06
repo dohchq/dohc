@@ -1,3 +1,4 @@
+import { activityPin, editorTabTestId } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { launchDesktopApp, type DesktopLogEntry } from "./helpers/desktopApp";
 import {
@@ -74,19 +75,19 @@ test("aggressive click-around keeps the shell mounted with no renderer errors", 
       // Open every file kind (markdown WYSIWYG, csv table, json/text editors).
       for (const path of paths) {
         await explorerRow(page, path).click();
-        await expect(page.getByTestId(`tab-${path}`)).toBeVisible();
+        await expect(page.getByTestId(editorTabTestId(path))).toBeVisible();
       }
 
       // Rapid tab switching straight across the strip.
       for (const path of paths) {
-        await page.getByTestId(`tab-${path}`).click();
+        await page.getByTestId(editorTabTestId(path)).click();
       }
 
       // Panel toggles: sidebar off/on, activity views, history rail off/on.
       await page.keyboard.press("Control+b");
       await page.keyboard.press("Control+b");
       for (const view of ["search", "graph", "history", "explorer"]) {
-        await page.getByTestId(`activity-${view}`).click();
+        await page.getByTestId(activityPin(view)).click();
       }
       const railToggle = page.getByTestId("history-collapse");
       if (await railToggle.isVisible()) {
@@ -102,10 +103,10 @@ test("aggressive click-around keeps the shell mounted with no renderer errors", 
       // Close every tab from the strip while views remount underneath.
       for (const path of [...paths].reverse()) {
         await page
-          .getByTestId(`tab-${path}`)
+          .getByTestId(editorTabTestId(path))
           .getByRole("button", { name: /^Close / })
           .click();
-        await expect(page.getByTestId(`tab-${path}`)).toHaveCount(0);
+        await expect(page.getByTestId(editorTabTestId(path))).toHaveCount(0);
       }
     }
 

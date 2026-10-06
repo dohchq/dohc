@@ -87,14 +87,15 @@ import { useShareMounts } from "./shell/useShareMounts";
 import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
-import { useShellError } from "./shell/useShellError";
+import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
 import { fitImportMessage, importedPathDetails, importStopSentence, namedPaths } from "./shell/importStop";
-import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
+import { errorDetails } from "./shell/copyDetails";
+import { CopyButton } from "./ui/CopyButton";
 import { useDesktopUpdateStateFeed } from "./useDesktopUpdateStateFeed";
 import { useTabTitles } from "./shell/useTabTitles";
 import { useWorkspaceListing } from "./shell/useWorkspaceListing";
@@ -1358,6 +1359,9 @@ export function DesktopWorkspaceShell(props: {
   // Bumped after an engine version operation or a main-process live-session
   // retirement so mounted editors release their old session before reopening.
   const [versionEpoch, setVersionEpoch] = useState(0);
+  // For a lookup that must not act on a version a later switch replaced.
+  const versionEpochRef = useRef(versionEpoch);
+  versionEpochRef.current = versionEpoch;
   const engineRebuildReturnFocusRef = useRef<HTMLButtonElement | null>(null);
   const engineRebuildOpen = engineRebuild !== null;
   useEffect(() => {
@@ -2032,6 +2036,71 @@ export function DesktopWorkspaceShell(props: {
       );
     },
     [openFile],
+  );
+  // A document too large for live editing. The folder holds only the active
+  // version's files, so it opens only when the refusal names that version;
+  // otherwise the notice names the version to switch to. The path comes from
+  // the newest status once the lookup answers, so a rename still lands on it
+  // and a refusal that has cleared opens nothing. A newer open, a version
+  // change, or another workspace drops the answer.
+  const openSharingDeclined = useCallback(
+    (versionId: string, objectId: string) => {
+      const declinedNow = () =>
+        syncStatusLane
+          .latest()
+          ?.sharingDeclined?.find((entry) =>
+            entry.versionId === versionId && entry.objectId === objectId,
+          );
+      const open = (): void => {
+        if (!declinedNow()) return;
+        const targetGroupId = wbRef.current.activeEditorGroup;
+        const requestSequence = invalidateDeferredFileOpen(targetGroupId);
+        const epoch = versionEpochRef.current;
+        const isCurrentRequest = () =>
+          fileOpenRequests.current.workspaceId === workspaceId &&
+          fileOpenRequests.current.sequenceByGroup.get(targetGroupId) ===
+            requestSequence &&
+          versionEpochRef.current === epoch;
+        void bridge()
+          .listWorkspaceVersions({ workspaceId })
+          .then(({ versions, activeVersionId }) => {
+            if (!isCurrentRequest()) return;
+            const declined = declinedNow();
+            if (!declined) return;
+            if (declined.versionId === activeVersionId) {
+              openFile(declined.path);
+              return;
+            }
+            const version = versions.find(({ id }) => id === declined.versionId);
+            reportShellFailure({
+              message: version
+                ? `"${declined.path}" is in the version "${version.name}". Switch to that version to open it.`
+                : `"${declined.path}" is not in the version you have open.`,
+              details: [
+                ["File", declined.path],
+                ["Version id", declined.versionId],
+                ["Active version id", activeVersionId],
+              ],
+            });
+          })
+          .catch((error: unknown) => {
+            if (!isCurrentRequest()) return;
+            reportShellFailure({
+              message: "dohc could not open this document.",
+              cause: error,
+              retry: open,
+            });
+          });
+      };
+      open();
+    },
+    [
+      invalidateDeferredFileOpen,
+      openFile,
+      reportShellFailure,
+      syncStatusLane,
+      workspaceId,
+    ],
   );
   // Opens an app of this workspace in its tab, as Apps does.
   const openAppTab = useCallback(
@@ -3480,14 +3549,14 @@ export function DesktopWorkspaceShell(props: {
     undoForEditor,
   ]);
 
-  const openWorkspaceFolder = useCallback(async () => {
+  const openWorkspaceFolder = useCallback(async function openWorkspaceFolder() {
     try {
       const picked = await bridge().pickWorkspaceRoot();
       if (!picked) return;
       const attached = await bridge().attachWorkspaceFolder({ rootPath: picked });
       props.onSwitchWorkspace(attached);
     } catch (error) {
-      reportShellError("Could not open that workspace folder.", error);
+      reportShellError("Could not open that workspace folder.", error, () => void openWorkspaceFolder());
     }
   }, [props.onSwitchWorkspace, reportShellError]);
 
@@ -4326,8 +4395,10 @@ export function DesktopWorkspaceShell(props: {
         id: error.id,
         ...(error.tone ? { tone: error.tone } : {}),
         message: error.message,
+        ...(error.title ? { title: error.title } : {}),
         details: errorDetails([
           [error.tone === "success" ? "Notice" : "Error", error.message],
+          ...(error.title ? [["Title", error.title] as const] : []),
           ...(error.details ?? []),
           ...reportFacts(),
         ]),
@@ -4504,6 +4575,7 @@ export function DesktopWorkspaceShell(props: {
     <AgentSettingsProvider settings={props.userSettings?.settings ?? null}>
     <CustomizeContext.Provider value={customizeContext}>
     <CollectionFieldMarksProvider workspaceId={workspaceId}>
+    <ShellErrorReporter.Provider value={reportShellFailure}>
     <div
       data-testid="workspace-shell"
       ref={focusRoot}
@@ -4753,6 +4825,7 @@ export function DesktopWorkspaceShell(props: {
               onHideWorkspaceError={hideWorkspaceError}
               onDismissWorkspaceError={dismissWorkspaceError}
               onRetryLiveDelivery={retryLiveDelivery}
+              onOpenSharingDeclined={openSharingDeclined}
               {...(shareView
                 ? {}
                 : {
@@ -5359,14 +5432,12 @@ export function DesktopWorkspaceShell(props: {
             >
               <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
                 <span className="dohc-section-label">Technical details</span>
-                <CopyDetailsButton
-                  data-testid="workspace-update-copy-details"
+                <CopyButton
+                  testId="workspace-update-copy-details"
                   label="Copy"
+                  pinName
                   iconOnly
-                  details={() => storeDetailsText}
-                  onError={(error) =>
-                    reportShellError("Could not copy the details.", error)
-                  }
+                  getText={() => storeDetailsText}
                 />
               </div>
               <dl className="m-0 grid select-text cursor-text grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 px-3 py-2.5 text-[12px] leading-snug">
@@ -5403,8 +5474,10 @@ export function DesktopWorkspaceShell(props: {
             >
               Try again
             </PrimaryButton>
-            <CopyDetailsButton
-              details={() =>
+            <CopyButton
+              label="Copy details"
+              pinName
+              getText={() =>
                 errorDetails([
                   ["Error", "Couldn't open this workspace"],
                   ["Detail", workspaceOpenFailure.message],
@@ -5872,6 +5945,7 @@ export function DesktopWorkspaceShell(props: {
       ) : null}
       <ExternalLinkConfirm workspaceId={workspaceId} />
     </div>
+    </ShellErrorReporter.Provider>
     </CollectionFieldMarksProvider>
     </CustomizeContext.Provider>
     </AgentSettingsProvider>

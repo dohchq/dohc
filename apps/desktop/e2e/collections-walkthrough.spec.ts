@@ -1,3 +1,4 @@
+import { editorTabTestId } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -20,8 +21,8 @@ import {
 
 type Desktop = Awaited<ReturnType<typeof launchDesktopApp>>;
 
-const PROJECTS_TAB = "tab-dohc://collection/projects";
-const CLIENTS_TAB = "tab-dohc://collection/clients";
+const PROJECTS_TAB = editorTabTestId("tab://collection/projects");
+const CLIENTS_TAB = editorTabTestId("tab://collection/clients");
 
 // Calendar month view opens on today, so the walkthrough's dates must land
 // in the current month. One clock read: deriving both dates from separate
@@ -45,7 +46,7 @@ async function newCollectionFromFileMenu(desktop: Desktop): Promise<void> {
 }
 
 async function closeTab(page: Page, path: string): Promise<void> {
-  const tab = page.getByTestId(`tab-${path}`);
+  const tab = page.getByTestId(editorTabTestId(path));
   await tab.hover();
   await tab.getByRole("button", { name: /^Close / }).click();
   await expect(tab).toHaveCount(0);
@@ -217,7 +218,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     // New record creates and opens the record's file tab; the walkthrough
     // returns to the collection to edit it inline.
     await page.getByTestId("collection-new-record").click();
-    await expect(page.getByTestId("tab-clients/Untitled.md")).toBeVisible({
+    await expect(page.getByTestId(editorTabTestId("clients/Untitled.md"))).toBeVisible({
       timeout: 15_000,
     });
     await closeTab(page, "clients/Untitled.md");
@@ -238,7 +239,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     // The Fields button lives on the populated collection header, so the
     // first record comes before the schema takes shape.
     await page.getByTestId("collection-new-record").click();
-    await expect(page.getByTestId("tab-projects/Untitled.md")).toBeVisible({
+    await expect(page.getByTestId(editorTabTestId("projects/Untitled.md"))).toBeVisible({
       timeout: 15_000,
     });
     await closeTab(page, "projects/Untitled.md");
@@ -302,7 +303,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     // --- A second record: the board's target column and the calendar's
     // second-date-field proof.
     await page.getByTestId("collection-new-record").click();
-    await expect(page.getByTestId("tab-projects/Untitled 2.md")).toBeVisible({
+    await expect(page.getByTestId(editorTabTestId("projects/Untitled 2.md"))).toBeVisible({
       timeout: 15_000,
     });
     await closeTab(page, "projects/Untitled 2.md");
@@ -371,7 +372,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
       )
       .toBe(true);
     // A completed drag is not a click: the record tab must not have opened.
-    await expect(page.getByTestId("tab-projects/Untitled.md")).toHaveCount(0);
+    await expect(page.getByTestId(editorTabTestId("projects/Untitled.md"))).toHaveCount(0);
 
     // --- Calendar rekey: keyed to Due only Website renders (day 10); keyed
     // to Started only Launch renders (day 20). The events moved with the key.
@@ -393,8 +394,8 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     // --- The whole walkthrough ran without the schema file on screen: no
     // editor tab for either collection.yaml ever opened (a tab is the only
     // way file content reaches the screen, and nothing closed one).
-    await expect(page.getByTestId("tab-projects/collection.yaml")).toHaveCount(0);
-    await expect(page.getByTestId("tab-clients/collection.yaml")).toHaveCount(0);
+    await expect(page.getByTestId(editorTabTestId("projects/collection.yaml"))).toHaveCount(0);
+    await expect(page.getByTestId(editorTabTestId("clients/collection.yaml"))).toHaveCount(0);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

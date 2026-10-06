@@ -59,6 +59,8 @@ import type {
   LinkHandoffRedeemResult,
   SyncRelayShareWithGrantRow,
   SyncRelayGrantedShareRow,
+  SyncRelayGrantedInventoryCursor,
+  SyncRelayGrantedInventoryPage,
   SyncRelayLinkInventoryCursor,
   SyncRelayLinkInventoryPage,
   SyncRelayIndependentGrantInventoryCursor,
@@ -174,6 +176,8 @@ export {
   type LinkGrantTransitionResult,
   type SyncRelayShareWithGrantRow,
   type SyncRelayGrantedShareRow,
+  type SyncRelayGrantedInventoryCursor,
+  type SyncRelayGrantedInventoryPage,
   type SyncRelayLinkInventoryRow,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
@@ -1050,6 +1054,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   listSharesGrantedBy(granterUserId: string): SyncRelayGrantedShareRow[] {
     return sharesStorage.listSharesGrantedBy(this, granterUserId);
+  }
+
+  listSharesGrantedPage(granterUserId: string, workspaceId: string, cursor?: SyncRelayGrantedInventoryCursor): SyncRelayGrantedInventoryPage {
+    return sharesStorage.listSharesGrantedPage(this, granterUserId, workspaceId, cursor);
   }
 
   listLinkGrantsByWorkspace(

@@ -355,6 +355,9 @@ describe("workspaceActivity cloud sync nudge", () => {
         sharingDeclined: [
           {
             path: "notes/large.md",
+            objectId: "notes/large.md",
+            versionId: "main",
+            lineagePruned: false, headBlobSha256: null,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 262_144,
             observedBytes: 280_001,
