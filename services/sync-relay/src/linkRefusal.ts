@@ -1,3 +1,5 @@
+import {relayPathSegments} from "./requestInputs";
+import {isLinkEndpointPath} from "./linkEndpointPath";
 import {LINK_REFUSALS, linkRefusalBody, parseLinkRefusal, type LinkRefusalCode} from "@dohc/security-contract/link-refusal";
 
 export function opaqueLinkRefusal(): Response {
@@ -9,13 +11,16 @@ export function linkRefusal(code: LinkRefusalCode): Response {
 }
 
 export async function normalizeLinkRefusal(response: Response, path: string, liveEditing = false): Promise<Response> {
+  if (!isLinkEndpointPath(path)) return response;
   if (response.status >= 500) {
     await response.body?.cancel().catch(() => undefined);
     return linkRefusal(liveEditing ? "link_live_unavailable" : "link_unavailable");
   }
   if (![401, 403, 404].includes(response.status)) return response;
   const body = await response.json().catch(() => null) as Record<string, unknown> | null;
-  if (body && ((path === "/sync/link/collection-writes" && response.status === 403 && body.code === "share_op_rejected") ||
+  const parts = relayPathSegments(path);
+  const collectionWrites = parts.length === 3 && parts[0] === "sync" && parts[1] === "link" && parts[2] === "collection-writes";
+  if (body && ((collectionWrites && response.status === 403 && body.code === "share_op_rejected") ||
       parseLinkRefusal(body, response.status) ||
       ["link_discussion_blocked", "link_discussion_paused", "discussion_limit_reached"].includes(String(body.code)))) {
     return Response.json(body, {status: response.status, headers: response.headers});

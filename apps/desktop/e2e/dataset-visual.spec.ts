@@ -1,3 +1,4 @@
+import { activityPin, settingsNavPin } from "../src/testPins";
 import { expect, test, type Locator } from "@playwright/test";
 import { launchDesktopApp, assertDesktopEngineHealthy } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
@@ -23,8 +24,8 @@ for (const theme of ["light", "dark"] as const) {
       await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1280, 900));
       await openWorkspaceFromFirstRun(page, workspace);
       await page.emulateMedia({ reducedMotion: "reduce" });
-      await page.getByTestId("activity-settings").click();
-      await page.getByTestId("settings-nav-appearance").click();
+      await page.getByTestId(activityPin("settings")).click();
+      await page.getByTestId(settingsNavPin("appearance")).click();
       await page.getByRole("radiogroup", { name: "Theme" }).getByRole("radio", { name: theme === "light" ? "Light" : "Dark", exact: true }).click();
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);

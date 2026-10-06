@@ -496,6 +496,23 @@ it("finishes a read and a read in place asked for in one render, and leaves noth
   expect((screen.getByRole("button", { name: "Refresh" }) as HTMLButtonElement).disabled).toBe(false);
 });
 
+it("stands lines in for records not yet shown, and keeps the words while a shown page reloads", async () => {
+  const first = deferred<{ result: AppBackendJson }>();
+  const invoke = vi.fn(async (): Promise<{ result: AppBackendJson }> => ({ result: page() }));
+  invoke.mockReturnValueOnce(first.promise);
+  const { props, rerender } = setup({ invoke });
+  const opening = (await screen.findByText("Loading records…")).closest("[role=status]");
+  expect(opening?.classList.contains("dohc-reveal-if-slow"), "a first open prints its loading words at once, over nothing").toBe(true);
+  await act(async () => first.resolve({ result: page() }));
+  await screen.findByText("Alice");
+  const again = deferred<{ result: AppBackendJson }>();
+  invoke.mockReturnValueOnce(again.promise);
+  rerender(<TransactionalCollectionPage {...props} recordsVersion={1} />);
+  expect((await screen.findByText("Loading records…")).tagName).toBe("P");
+  expect(screen.getByText("Alice")).toBeTruthy();
+  await act(async () => again.resolve({ result: page() }));
+});
+
 it("shows the ⚡ button beside New record, and a ⚡ that names the automations on each field they set", async () => {
   setup({
     automationsButton: <button type="button">Automations</button>,

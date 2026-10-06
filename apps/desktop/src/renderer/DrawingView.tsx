@@ -29,6 +29,7 @@ import {
   ViewHeader,
   type FileSaveState,
 } from "./fileInspectorUi";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { StateMark } from "./ui/StateMark";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
 import { useAutosavedTextDraft, type DraftFlush } from "./useAutosavedTextDraft";
@@ -342,12 +343,7 @@ export function DrawingView({
         </div>
       ) : null}
       {engine.opening ? (
-        <div
-          className="flex min-h-0 flex-1 items-center justify-center text-sm text-subtle"
-          data-testid="view-drawing-opening"
-        >
-          Loading drawing…
-        </div>
+        <SkeletonRows layout="panel" testId="view-drawing-opening" label="Loading drawing…" />
       ) : truncated && !engineMode ? (
         <AffordanceCard
           testId="view-drawing-truncated"
@@ -359,13 +355,7 @@ export function DrawingView({
           className="relative min-h-0 flex-1 overflow-hidden"
           data-testid="view-drawing"
         >
-          <Suspense
-            fallback={
-              <div className="flex h-full items-center justify-center text-sm text-subtle">
-                Loading drawing…
-              </div>
-            }
-          >
+          <Suspense fallback={<SkeletonRows layout="panel" label="Loading drawing…" className="h-full" />}>
             <LazyExcalidrawCanvas
               key={engineMode ? "engine-scene" : editor.valueRevision}
               document={

@@ -124,6 +124,7 @@ import { intraBlockRange, type IntraBlockMatch } from "./intraBlock";
 import { SafeTrailingNode } from "./safeTrailingNode";
 import { hasFormattableSelection, selectionFormat } from "./selectionFormat";
 import { createCollaborationHistoryHandle } from "./sharedCollaborationHistory";
+import { SkeletonRows } from "../ui/SkeletonRows";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 
 export type MarkdownEditorHandle = {
@@ -506,7 +507,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const blockMenuStateRef = useRef<BlockMenuState>(blockMenuState);
     const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {});
     const blockInsertRef = useRef<(pos: number) => void>(() => {});
-    const blockMenuOpenRef = useRef<(pos: number, rect: DOMRect) => void>(() => {});
+    const blockMenuOpenRef = useRef<(pos: number, handle: HTMLElement) => void>(() => {});
     const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(new Map());
     const applyingPendingUndoRef = useRef(false);
     const appliedPendingUndoToken = useRef<number | null>(null);
@@ -936,8 +937,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       [editor, openSlashMenuAtPosition],
     );
 
-    const openBlockMenu = useCallback((pos: number, rect: DOMRect) => {
-      setBlockMenuState(resolveBlockMenuState(pos, rect));
+    // The handle of the block whose menu is open closes it, like any trigger.
+    const openBlockMenu = useCallback((pos: number, handle: HTMLElement) => {
+      const current = blockMenuStateRef.current;
+      setBlockMenuState(
+        current.open && current.pos === pos
+          ? CLOSED_BLOCK_MENU_STATE
+          : resolveBlockMenuState(pos, handle),
+      );
     }, []);
 
     const closeBlockMenu = useCallback(() => {
@@ -1241,11 +1248,8 @@ const MarkdownEditorCollabLoader = forwardRef<
 
   if (load.status === "loading") {
     return (
-      <div
-        className="dohc-tiptap-editor flex h-full items-center justify-center text-xs text-subtle"
-        data-collab-state={props.collab?.status ?? "connecting"}
-      >
-        Loading editor...
+      <div className="dohc-tiptap-editor h-full" data-collab-state={props.collab?.status ?? "connecting"}>
+        <SkeletonRows layout="document" label="Loading editor..." className="pt-1.5" />
       </div>
     );
   }

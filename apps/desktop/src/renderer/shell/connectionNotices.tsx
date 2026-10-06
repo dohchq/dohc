@@ -77,8 +77,10 @@ export function useConnectionNotices() {
         ...(error.tone ? { tone: error.tone } : {}),
         id: error.id,
         message: error.message,
+        ...(error.title ? { title: error.title } : {}),
         details: errorDetails([
           ["Error", error.message],
+          ...(error.title ? [["Title", error.title] as const] : []),
           ...(error.details ?? []),
           ["Platform", bridge().platform],
           ["Time", new Date(error.atMs).toISOString()],

@@ -26,6 +26,7 @@ import { CopyField, type CopySecret } from "./ui/CopyButton";
 // copied again.
 const SHARE_LINK_SECRET: CopySecret = { what: "the share link", again: "Reset the link in Share to get a new one." };
 import { SegmentedControl } from "./ui/SegmentedControl";
+import { SkeletonRows } from "./ui/SkeletonRows";
 
 type LinkAccess = "view" | "comment" | "edit";
 
@@ -1744,8 +1745,14 @@ export function useRelayShareLinkPane(props: {
             Links
           </SectionLabel>
 
+          {/* Lines stand in only for links not yet shown; a refresh keeps the
+              links on screen and says so. */}
           {linksLoading ? (
-            <p className="m-0 text-xs text-muted">Loading links…</p>
+            visibleLinkGroups.length ? (
+              <p role="status" className="m-0 text-xs text-muted">Loading links…</p>
+            ) : (
+              <SkeletonRows rows={2} label="Loading links…" />
+            )
           ) : null}
 
           {linksError ? (
@@ -1924,7 +1931,11 @@ export function useRelayShareLinkPane(props: {
                         </div>
 
                         {ownerDiscussion.loading ? (
-                          <p className="m-0 text-xs text-muted">Loading comments…</p>
+                          ownerDiscussion.loaded ? (
+                            <p role="status" className="m-0 text-xs text-muted">Loading comments…</p>
+                          ) : (
+                            <SkeletonRows rows={2} label="Loading comments…" />
+                          )
                         ) : null}
 
                         {ownerDiscussion.loadError ? (

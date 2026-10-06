@@ -43,6 +43,7 @@ export interface DatasetInvocation extends DatasetAccess {
 /** A committed change, with each approved table's columns in the order a changeset records them. */
 export interface DatasetCommit extends JournalCommit { columns: Readonly<Record<string, readonly string[]>> }
 export interface DatasetMigration extends DatasetAccess {
+  approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null;
   expected: DatasetCursor;
   newTables: string[];
   schemaSql: string;
@@ -71,6 +72,7 @@ export interface DatasetMigrationCandidateAccess extends DatasetAccess {
   authorityKey: string;
 }
 export interface DatasetMigrationApproval extends DatasetMigrationCandidateAccess {
+  approvalAgent?: import("@dohc/security-contract/approval-provenance").ApprovalAgent | null;
   checkpointSha256: string;
   account?: TransitionCheckpointInput["account"];
   accountStage?: DatasetMigration["accountStage"];
@@ -102,7 +104,7 @@ export interface DatasetSupervisorOptions {
   nowMs?: () => number;
   /** Maximum journal events between successful materialization caches. */
   materializationEvents?: number;
-  /** A journal replay that takes at least this long is cached at once, so a later reopen does not repeat it. */
+  /** Minimum replay interval between checkpoints; a costly checkpoint extends it to four times its duration. */
   replayCacheMs?: number;
   /**
    * Longest wait before reopening a dataset whose last reopen or replay ran out of time or CPU. The wait keeps one
@@ -218,7 +220,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     try {
       authorize();
       const current=options.journal.head(lane.scope,storage.authorize);
-      if(!current.active||!sameCursor(current.cursor,expected))throw new Error("The Collection changed while dohc saved its records.");
+      if(!current.active||!sameAuthority(current.cursor,expected)||current.cursor.revision<expected.revision)throw new Error("The Collection changed while dohc saved its records.");
       const cached=options.journal.materialization({scope:lane.scope,authorize});
       const previous=cached&&cached.checkpointId!==lane.rejectedCacheId?cached:null;
       const after=previous?.cursor.revision??options.journal.captureExport({scope:lane.scope,authorize,capture:()=>null}).checkpoint.cursor.revision;
@@ -482,23 +484,30 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
   async function reopenAndReplay(lane: Lane, input: DatasetAccess, target: DatasetCursor, reopen: { admitted: boolean }): Promise<Worker> {
     const worker = lane.worker ?? await openWorker(lane, input, reopen);
     if (worker.cursor.revision > target.revision) throw new Error("This Collection's saved records are newer than its history.");
-    const replayStart = performance.now();
-    let replayed = false;
+    const replayStarted = performance.now();
+    let replayStart = replayStarted, checkpointIntervalMs = replayCacheMs, replayedSinceCheckpoint = false;
     while (!sameCursor(worker.cursor, target)) {
       const page = options.journal.events({ scope: input.scope, after: worker.cursor, limit: 64, authorize: () => standing(input) });
       if (!page.events.length) throw new Error("This Collection's history is incomplete.");
       for (const event of page.events) {
         if (event.cursor.revision > target.revision) throw new Error("The Collection changed while dohc reopened it. Try again.");
       }
-      await worker.runtime.applyBatch(page.events.map(event=>({...event.cursor,previousDigest:event.previousDigest,changeset:event.changeset,changesetSha256:event.changesetSha256})));
-      worker.cursor=page.events.at(-1)!.cursor;
+      const applied=await worker.runtime.applyBatch(page.events.map(event=>({...event.cursor,previousDigest:event.previousDigest,changeset:event.changeset,changesetSha256:event.changesetSha256})),replayCacheMs);
+      worker.cursor=page.events.find(event=>event.cursor.revision===applied.revision)!.cursor;
       standing(input);
-      replayed = true;
+      replayedSinceCheckpoint = true;
+      // Keep worker batches bounded while amortizing costly checkpoint copies
+      // across completed batches. The journal certifies each saved prefix.
+      if (performance.now() - replayStart >= checkpointIntervalMs) {
+        const checkpointStart=performance.now();
+        await maintainMaterialization(lane, true);
+        replayedSinceCheckpoint = false;
+        replayStart=performance.now();
+        checkpointIntervalMs=Math.max(replayCacheMs,4*(replayStart-checkpointStart));
+      }
     }
-    // An app's events can make every replay rebuild the whole dataset. Cache a
-    // costly replay now, before this job can fail and stop the worker, so no
-    // later reopen repeats it.
-    if (replayed && performance.now() - replayStart >= replayCacheMs) {
+    // Save a costly replay's final tail before this job can stop the worker.
+    if (replayedSinceCheckpoint && performance.now() - replayStarted >= replayCacheMs) {
       await maintainMaterialization(lane, true);
     }
     return worker;
@@ -656,7 +665,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       standing(input);
       const current=head(input);
       if(!current.active||!sameCursor(current.cursor,captured.cursor))throw new Error("The Collection changed while dohc applied this change. Preview it again.");
-      const committed=options.journal.transitionCheckpoint({expected:captured.cursor,hostEpoch:captured.cursor.hostEpoch,
+      const committed=options.journal.transitionCheckpoint({approvalAgent:input.approvalAgent,expected:captured.cursor,hostEpoch:captured.cursor.hostEpoch,
         approvedRevisionHash:input.approvedRevisionHash,source:input.source,schemaSql:input.schemaSql,definitionJson:input.definitionJson,
         checkpoint:stage,capacityBytes:captured.capacityBytes,authorize:()=>standing(input),account:input.account});
       stage=undefined;

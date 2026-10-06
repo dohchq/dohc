@@ -1,7 +1,9 @@
 import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
+import { modalReturnTarget } from "../modalFocus";
+import { createPortal } from "react-dom";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   ENGINE_STORE_UPDATE_NEXT_STEP,
@@ -54,6 +56,7 @@ export type Notice = {
 export interface WorkspaceErrorNotice {
   tone?: "success";
   id: string;
+  title?: string;
   message: string;
   details: string;
   atMs: number;
@@ -238,12 +241,18 @@ const OWNER_LIVE_REFUSALS_BODY =
 // Corner hosts need room above the bell; rail hosts use the bottom-right corner.
 export type NoticeHostPlacement = "rail" | "corner";
 
-// Toasts share the Notices panel's layer, below workbench modals and their
-// scrim, so they cannot cover a review's actions. Their rows stay in Notices.
+function inToastLayer(host: NoticeHostPlacement, stack: ReactElement): ReactNode {
+  return host === "corner" ? createPortal(stack, document.body) : stack;
+}
+
+// Toasts sit above every dialog and its scrim (z-30, warning z-50), so a
+// failure in a dialog is seen where it happens. A dialog keeps its actions
+// clear of them with scroll room (Overlay), and F6 reaches them from the
+// dialog's focus trap (modalFocus). Their rows stay in Notices.
 const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
-  rail: "fixed bottom-3 right-3 z-20 flex flex-col items-end gap-2",
+  rail: "fixed bottom-3 right-3 z-60 flex flex-col items-end gap-2",
   // The corner toggle is 36px tall on an 8px inset; 56px clears it with a gap.
-  corner: "fixed bottom-14 right-3 z-20 flex flex-col items-end gap-2",
+  corner: "fixed bottom-14 right-3 z-60 flex flex-col items-end gap-2",
 };
 
 const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
@@ -275,7 +284,8 @@ export function WorkspaceErrorToast(props: {
     >
       {error.tone === "success" ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" /> : <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />}
       <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-        {error.message}
+        {error.title ? <span className="block font-medium">{error.title}</span> : null}
+        <span className={error.title ? "block mt-0.5 text-muted" : undefined}>{error.message}</span>
       </span>
       {error.actionLabel && props.onAction ? (
         <button
@@ -483,7 +493,28 @@ export function NoticeCenter(props: {
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastsRef = useRef<HTMLDivElement>(null);
   useFocusReturn(open, centerRef, () => toggleRef.current);
-  useFocusSurface(toastsRef, () => toggleRef.current);
+  // A toast removed under focus hands it back to the open dialog, if there is
+  // one, at the control F6 left from: the toggle sits behind the dialog,
+  // outside its focus trap.
+  useFocusSurface(toastsRef, () => modalReturnTarget() ?? toggleRef.current);
+  // How far the toasts reach up from the window's bottom edge: the room an
+  // open dialog leaves below its content (Overlay). None while none show.
+  useLayoutEffect(() => {
+    const stack = toastsRef.current;
+    if (!stack) return;
+    const root = document.documentElement;
+    const measure = () => {
+      const room = stack.offsetHeight > 0 ? Math.ceil(window.innerHeight - stack.getBoundingClientRect().top) : 0;
+      root.style.setProperty("--dohc-toast-room", `${room}px`);
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(stack);
+    return () => {
+      observer?.disconnect();
+      root.style.removeProperty("--dohc-toast-room");
+    };
+  }, [open]);
   useFocusSurface(centerRef, () => centerRef.current);
   useEffect(() => {
     if (open) centerRef.current?.focus({ preventScroll: true });
@@ -788,8 +819,8 @@ export function NoticeCenter(props: {
       next.push({
         id: error.id,
         tone: error.tone ?? "danger",
-        title: error.message,
-        body: "",
+        title: error.title ?? error.message,
+        body: error.title ? error.message : "",
         actions: [
           ...(error.actionLabel && props.onWorkspaceErrorAction
             ? [{
@@ -1183,9 +1214,11 @@ export function NoticeCenter(props: {
       {/* One stack in the window's bottom-right corner: the toasts lay
           themselves out in order instead of counting row heights. Opening
           Notices hides it — every row is in the panel, and a toast must never
-          sit over it. */}
-      {open ? null : (
-        <div ref={toastsRef} data-testid="notice-toasts" className={TOAST_STACK_CLASS[host]}>
+          sit over it. A corner host renders the stack at the body, outside
+          its fixed wrapper's stacking context, so the toasts rise above
+          dialogs there too. */}
+      {open ? null : inToastLayer(host, (
+        <div ref={toastsRef} data-testid="notice-toasts" data-dohc-toasts className={TOAST_STACK_CLASS[host]}>
           {errorToast ? (
             <WorkspaceErrorToast
               error={errorToast}
@@ -1414,7 +1447,7 @@ export function NoticeCenter(props: {
             </div>
           ) : null}
         </div>
-      )}
+      ))}
 
       {open ? (
         <div

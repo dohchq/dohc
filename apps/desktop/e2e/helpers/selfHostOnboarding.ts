@@ -321,6 +321,7 @@ function selfHostLiveEnv(directory: string, origin: string): NodeJS.ProcessEnv {
     // The live host requires canonical paths.
     DOHC_RELAY_SERVICE_HOST_ROOT: realpathSync.native(join(deployment, "live-host")),
     DOHC_RELAY_ENGINE_EXECUTABLE: realpathSync.native(resolveEngineBinary()),
+    DOHC_RELAY_ALLOW_UNISOLATED_PROJECTION: "1",
     DOHC_RELAY_PUBLIC_ORIGIN: origin,
     DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
     DOHC_RELAY_NAMED_LIVE_HOSTS: new URL(origin).host,

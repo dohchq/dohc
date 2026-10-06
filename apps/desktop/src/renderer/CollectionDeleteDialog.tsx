@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { DatasetCursor } from "@dohc/app-backend-runtime/journal";
 import { Overlay } from "./Overlay";
 import { DangerButton, SecondaryButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog";
 
 export interface CollectionDeletePreview {
@@ -66,7 +67,7 @@ function Delete(props: CollectionDeleteDialogProps) {
       <p className="m-0 text-[13px] text-muted">Save a recovery file first to preserve a separate copy. Recovery requires another clean host with this workspace's identity. That host must never have stored or deleted this Collection.</p>
       <p className="m-0 text-[13px] text-muted">App source files and recovery files you saved stay in place.</p>
       <div className="min-h-0 overflow-auto"><h3 className="mb-2 mt-0 text-[12px] font-semibold">Affected apps</h3>
-        {!page ? <p className="m-0 text-[12px] text-muted">{busy ? "Loading affected apps…" : "Refresh to see affected apps."}</p> : page.apps.length ? <ul className="m-0 list-none p-0">{page.apps.map(app => <li key={app.appId} className="border-b border-line py-2 text-[12px]"><div className="truncate font-mono" title={app.appId}>{app.appId}</div><div className="text-muted">{app.binding.operationIds.length} approved actions</div></li>)}</ul> : <p className="m-0 text-[12px] text-muted">No affected apps on this page.</p>}
+        {!page ? busy ? <SkeletonRows rows={2} label="Loading affected apps…" /> : <p className="m-0 text-[12px] text-muted">Refresh to see affected apps.</p> : page.apps.length ? <ul className="m-0 list-none p-0">{page.apps.map(app => <li key={app.appId} className="border-b border-line py-2 text-[12px]"><div className="truncate font-mono" title={app.appId}>{app.appId}</div><div className="text-muted">{app.binding.operationIds.length} approved actions</div></li>)}</ul> : <p className="m-0 text-[12px] text-muted">No affected apps on this page.</p>}
       </div>
       <div className="flex gap-2"><SecondaryButton disabled={busy} onClick={()=>void load()}>Refresh preview</SecondaryButton>{page?.nextCursor && <SecondaryButton disabled={busy} onClick={() => void load(page.nextCursor!)}>More apps</SecondaryButton>}</div>
       {props.onExport && <SecondaryButton disabled={busy} onClick={() => setExporting(true)}>{exported ? "Save another recovery file" : "Save recovery file first"}</SecondaryButton>}

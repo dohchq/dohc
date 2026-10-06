@@ -12,6 +12,7 @@ import { ShareAccessBadge } from "./ShareAccessBadge";
 import { DangerButton } from "../ui/controls";
 import { CopyButton } from "../ui/CopyButton";
 import { BROWSER_INVITATION_SECRET, SHARE_CODE_SECRET } from "../shareCopySecrets";
+import { SkeletonRows } from "../ui/SkeletonRows";
 
 // "Shared by me": the management list for relay share grants. Lives
 // in Settings → Cloud. Calm inventory: what's shared, with whom, and one
@@ -146,7 +147,7 @@ export function SharedByMeList(props: {
   }
 
   if (load.status === "loading") {
-    return <p className="m-0 text-[11px] text-subtle">Loading your shares…</p>;
+    return <SkeletonRows rows={2} label="Loading your shares…" />;
   }
   if (load.status === "error") {
     return (

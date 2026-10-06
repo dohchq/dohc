@@ -1,3 +1,4 @@
+import { desktopPins } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -77,7 +78,7 @@ test("@ui-audit adding an agent, its screen, and an answered question", async ()
     const page = desktop.page;
     await waitForAgentChannel(page);
 
-    await page.getByTestId("titlebar-chats-sidebar").click();
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
 
     // No runner yet: Agents says so and offers Add an agent.

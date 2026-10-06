@@ -16,6 +16,7 @@ import { CollectionPermissionsDialog } from "./CollectionPermissionsDialog";
 import { CollectionRecoveryExportDialog } from "./CollectionRecoveryExportDialog";
 import { CollectionPendingResponsesDialog } from "./CollectionPendingResponsesDialog";
 import { SecondaryButton } from "./ui/controls";
+import { SkeletonRows } from "./ui/SkeletonRows";
 import { CreateDatasetFormDialog } from "./CreateDatasetFormDialog";
 import { DeleteCollectionRecordDialog } from "./DeleteCollectionRecordDialog";
 import { CollectionMigrationReviewDialog } from "./CollectionMigrationReviewDialog";
@@ -162,9 +163,10 @@ function ScopedCollection({ workspaceId, datasetPath, tableId, onError, onFormCr
     return result.savedPath;
   }
   if (deleted) return <div className="flex flex-1 items-center justify-center p-6 text-sm text-muted">Collection deleted</div>;
-  if (!dataset || !columns) return <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
-    <span className="text-sm text-muted">{loading ? "Opening collection…" : "Open this collection to see its records."}</span>
-    {!loading && <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>}
+  // The same place as the tab's fallback lines, which these take over.
+  if (!dataset || !columns) return loading ? <SkeletonRows inSlot layout="panel" label="Opening collection…" /> : <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6">
+    <span className="text-sm text-muted">Open this collection to see its records.</span>
+    <SecondaryButton onClick={() => { void refresh(); }}>Try again</SecondaryButton>
   </div>;
   async function restore() {
     if (restoreLock.current || !owner || copy?.offline) return;
