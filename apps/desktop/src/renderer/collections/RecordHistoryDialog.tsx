@@ -1,12 +1,12 @@
 import { History as HistoryIcon, LoaderCircle, Zap } from "lucide-react";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import type { RecordHistoryEntry } from "../../ipc/bridgeContract";
-import { bridge } from "../bridge";
+import { useDesktopAction, useDesktopLoad } from "../desktopAction";
+import { readRecordHistoryPage } from "../data/recordHistory";
 import { Overlay } from "../Overlay";
 import { relativeTime } from "../relativeTime";
 import { SecondaryButton } from "../ui/controls";
 import { SkeletonLines } from "../ui/SkeletonRows";
-import { useRequestSequence } from "../useRequestSequence";
 import { HISTORY_READ_FAILED } from "./useRecordHistory";
 
 // A record's History: its field changes, newest first, a page at a time,
@@ -23,6 +23,16 @@ type RunState = "available" | "unavailable" | "unknown" | "pending";
 
 // Asked at once, so a page of runs does not flood the relay.
 const LOOKUPS_AT_ONCE = 4;
+type RunLookup = { key: string; automationId: string; claimId: string; scope: string };
+
+function HistoryRunLookup(props: { workspaceId: string; recordId: string; run: RunLookup; onLocated: (run: RunLookup, state: RunState, error: unknown) => void }) {
+  useDesktopLoad([props.recordId, props.run.key], "locateRecordHistoryRun",
+    { workspaceId: props.workspaceId, automationId: props.run.automationId, claimId: props.run.claimId }, {
+      success: result => props.onLocated(props.run, result.location, null),
+      failure: error => props.onLocated(props.run, "unknown", error),
+    });
+  return null;
+}
 
 /** Changes one author made together: an automation run's, or one change. */
 interface Group {
@@ -149,9 +159,10 @@ export function RecordHistoryDialog(props: {
   onRunsChecked: (runs: readonly string[]) => void;
 }) {
   const { workspaceId, collectionPath, recordId } = props;
+  const recordScope = JSON.stringify([workspaceId, collectionPath, recordId]);
   const [page, setPage] = useState<{ entries: RecordHistoryEntry[]; next: number | null } | null>(null);
   // The page being read: the first, or the one after the last shown.
-  const [loading, setLoading] = useState<"first" | "older" | null>(null);
+  const [loadingKind, setLoadingKind] = useState<"first" | "older" | null>(null);
   // A page could not be read, so the dialog says so and offers Try again inside it; null when none failed.
   const [failed, setFailed] = useState<number | "first" | null>(null);
   const panel = useRef<HTMLDivElement | null>(null);
@@ -163,16 +174,14 @@ export function RecordHistoryDialog(props: {
   const focusRetry = useRef(false);
   // A caller may pass new functions each render; a read must not start again for that.
   const reports = useRef(props);
-  reports.current = props;
-  // A slow answer for another record, workspace, or an earlier read never lands.
-  const request = useRequestSequence([workspaceId, collectionPath, recordId]);
+  useLayoutEffect(() => { reports.current = props; });
   // Where each run this computer does not keep can be opened, by runOf.
   const [located, setLocated] = useState<ReadonlyMap<string, RunState>>(new Map());
   // Each run is asked about once, a few at a time, while the record stays.
-  const lookups = useRequestSequence([workspaceId, collectionPath, recordId]);
   const asked = useRef(new Set<string>());
-  const queue = useRef<Array<{ key: string; automationId: string; claimId: string }>>([]);
+  const queue = useRef<RunLookup[]>([]);
   const asking = useRef(0);
+  const [activeRuns, setActiveRuns] = useState<RunLookup[]>([]);
   const lookupError = useRef<unknown>(null);
   // The runs Notices already says dohc could not place.
   const reportedUnchecked = useRef(new Set<string>());
@@ -180,69 +189,59 @@ export function RecordHistoryDialog(props: {
   const oldest = useRef<number | null>(null);
 
   const lookUp = useCallback((): void => {
-    const epoch = lookups.current();
+    const started: RunLookup[] = [];
     while (asking.current < LOOKUPS_AT_ONCE && queue.current.length > 0) {
-      const run = queue.current.shift()!;
-      asking.current += 1;
-      void (async () => {
-        let state: RunState;
-        let error: unknown = null;
-        try {
-          state = (await bridge().locateRecordHistoryRun({ workspaceId, automationId: run.automationId, claimId: run.claimId })).location;
-        } catch (caught) {
-          state = "unknown";
-          error = caught;
-        }
-        if (!lookups.isCurrent(epoch)) return;
-        asking.current -= 1;
-        if (state === "unknown") lookupError.current ??= error;
-        setLocated((current) => new Map(current).set(run.key, state));
-        lookUp();
-      })();
+      started.push(queue.current.shift()!);
+      asking.current++;
     }
-  }, [workspaceId, lookups]);
+    if (started.length) setActiveRuns(current => [...current, ...started]);
+  }, []);
+  const locatedRun = useCallback((run: RunLookup, state: RunState, error: unknown) => {
+    asking.current--;
+    if (state === "unknown") lookupError.current ??= error;
+    setLocated(current => new Map(current).set(run.key, state));
+    setActiveRuns(current => current.filter(active => active.key !== run.key));
+    lookUp();
+  }, [lookUp]);
 
-  const load = useCallback((before: number | null) => {
-    const token = request.next();
-    setLoading(before === null ? "first" : "older");
-    void bridge()
-      .getCollectionRecordHistory({ workspaceId, collectionPath, recordId, ...(before === null ? {} : { beforeHistoryId: before }) })
-      .then((result) => {
-        if (!request.isCurrent(token)) return;
-        reports.current.onRead(result.nextBeforeHistoryId);
-        const focused = document.activeElement;
-        focusPanel.current = focused === retry.current || (focused === older.current && result.nextBeforeHistoryId === null);
-        setFailed(null);
-        oldest.current = before;
-        for (const { author } of result.entries) {
-          if (author?.kind !== "automation" || author.run?.location !== "unchecked") continue;
-          const key = runOf(author)!;
-          if (asked.current.has(key)) continue;
-          asked.current.add(key);
-          queue.current.push({ key, automationId: author.automationId, claimId: author.run.claimId });
-        }
-        lookUp();
-        setPage((current) => {
-          if (before === null || current === null) return { entries: result.entries, next: result.nextBeforeHistoryId };
-          const shown = new Set(current.entries.map((entry) => entry.historyId));
-          return { entries: [...current.entries, ...result.entries.filter((entry) => !shown.has(entry.historyId))], next: result.nextBeforeHistoryId };
-        });
-        // Read on until the page asked for is shown.
-        const until = reports.current.until ?? null;
-        const next = result.nextBeforeHistoryId;
-        if (until !== null && next !== null && next >= until) load(next);
-      })
-      .catch((error: unknown) => {
-        if (request.isCurrent(token)) {
-          focusRetry.current = document.activeElement === older.current;
-          setFailed(before ?? "first");
-          reports.current.onFailed(before, error);
-        }
-      })
-      .finally(() => {
-        if (request.isCurrent(token)) setLoading(null);
+  const [issueHistory, pending] = useDesktopAction([workspaceId, collectionPath, recordId], readRecordHistoryPage, {
+    success: ({ page: result, before }) => {
+      reports.current.onRead(result.nextBeforeHistoryId);
+      const focused = document.activeElement;
+      focusPanel.current = focused === retry.current || (focused === older.current && result.nextBeforeHistoryId === null);
+      setFailed(null);
+      oldest.current = before;
+      for (const { author } of result.entries) {
+        if (author?.kind !== "automation" || author.run?.location !== "unchecked") continue;
+        const key = runOf(author)!;
+        if (asked.current.has(key)) continue;
+        asked.current.add(key);
+        queue.current.push({ key, automationId: author.automationId, claimId: author.run.claimId, scope: recordScope });
+      }
+      lookUp();
+      setPage(current => {
+        if (before === null || current === null) return { entries: result.entries, next: result.nextBeforeHistoryId };
+        const shown = new Set(current.entries.map(entry => entry.historyId));
+        return { entries: [...current.entries, ...result.entries.filter(entry => !shown.has(entry.historyId))], next: result.nextBeforeHistoryId };
       });
-  }, [workspaceId, collectionPath, recordId, request, lookUp]);
+      const until = reports.current.until ?? null;
+      const next = result.nextBeforeHistoryId;
+      if (until !== null && next !== null && next >= until) load(next);
+    },
+    failure: error => {
+      const before = requestedBefore.current;
+      focusRetry.current = document.activeElement === older.current;
+      setFailed(before ?? "first");
+      reports.current.onFailed(before, error);
+    },
+  });
+  const requestedBefore = useRef<number | null>(null);
+  const load = useCallback((before: number | null) => {
+    requestedBefore.current = before;
+    setLoadingKind(before === null ? "first" : "older");
+    issueHistory({ workspaceId, collectionPath, recordId, ...(before === null ? {} : { beforeHistoryId: before }) });
+  }, [issueHistory, workspaceId, collectionPath, recordId]);
+  const loading = pending ? loadingKind : null;
 
   useEffect(() => {
     setPage(null);
@@ -251,6 +250,7 @@ export function RecordHistoryDialog(props: {
     asked.current = new Set();
     queue.current = [];
     asking.current = 0;
+    setActiveRuns([]);
     lookupError.current = null;
     reportedUnchecked.current = new Set();
     oldest.current = null;
@@ -301,6 +301,7 @@ export function RecordHistoryDialog(props: {
         className: "dohc-elevated dohc-pop-in flex max-h-[85vh] w-[min(560px,92vw)] flex-col gap-3 rounded-xl border border-line bg-panel p-5 text-ink",
       }}
     >
+      {activeRuns.filter(run => run.scope === recordScope).map(run => <HistoryRunLookup key={`${workspaceId}\n${collectionPath}\n${recordId}\n${run.key}`} workspaceId={workspaceId} recordId={recordId} run={run} onLocated={locatedRun} />)}
       <div className="flex items-center justify-between gap-3">
         <h2 className="m-0 flex min-w-0 items-center gap-2 text-sm font-semibold">
           <HistoryIcon size={16} strokeWidth={1.9} aria-hidden className="shrink-0" />

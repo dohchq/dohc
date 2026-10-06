@@ -17,6 +17,7 @@ import {
   navigatorView,
   mentionRoster,
 } from "./ChatsView.testHarness";
+import { deferred } from "../../testing/deferred";
 import { runnerProgram } from "./ChatsView";
 
 describe("ChatsView My agent", () => {
@@ -648,4 +649,31 @@ describe("group details", () => {
     expect((screen.getByTestId("chats-new-channel-purpose") as HTMLInputElement).value).toBe("");
     expect(screen.getByRole("radio", { name: "Posts" }).getAttribute("aria-checked")).toBe("true");
   });
+});
+
+it("an obsolete lane answer cannot replace agents or seed the next cache hit", async () => {
+  const group = channel({ id: "c-chat", wireId: "w-chat", type: "chat" });
+  bridgeMock.listChatChannels.mockResolvedValue({ channels: [group], fileThreads: [] });
+  bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ joined: [{
+    shareId: "share-chat", channelWireId: "w-chat", granterEmail: "owner@example.test", access: "read-write", ended: false,
+  }] }));
+  bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ id: "lane", channelId: "c-chat", updatedAtMs: 10 })] });
+  const old = deferred<{ messages: ChatMessageRecord[] }>();
+  bridgeMock.listChatMessages.mockReturnValueOnce(old.promise).mockResolvedValue({ messages: [
+    message({ id: "fresh", threadId: "lane", authorKind: "agent", authorDisplayName: "Current agent", authorUserId: "current" }),
+  ] });
+  const view = render(navigatorView(0, { threadRevision: 0 }));
+  await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledOnce());
+  view.rerender(navigatorView(0, { threadRevision: 1 }));
+  await screen.findByText("Current agent");
+  await act(async () => {
+    old.resolve({ messages: [message({ id: "old", threadId: "lane", authorKind: "agent", authorDisplayName: "Obsolete agent", authorUserId: "old" })] });
+    await old.promise;
+  });
+  expect(screen.queryByText("Obsolete agent")).toBeNull();
+  const before = bridgeMock.listChannelThreads.mock.calls.length;
+  view.rerender(navigatorView(0, { threadRevision: 2 }));
+  await waitFor(() => expect(bridgeMock.listChannelThreads.mock.calls.length).toBeGreaterThan(before));
+  expect(screen.getByText("Current agent")).toBeTruthy();
+  expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(2);
 });

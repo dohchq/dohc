@@ -9,8 +9,7 @@ import {
   type RefObject,
 } from "react";
 import type { WorkspaceGraphResult } from "../../ipc/bridgeContract";
-import { bridge } from "../bridge";
-import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
+import { useDesktopLoad } from "../desktopAction";
 import { ipcErrorMessage } from "../ipcError";
 
 type WorkspaceGraphNode = WorkspaceGraphResult["nodes"][number];
@@ -762,19 +761,6 @@ export function GraphView(props: {
   const [includeChatMentions, setIncludeChatMentions] = useState(false);
   const chatMentionsEnabled =
     props.chatMentionsAvailable === true && includeChatMentions;
-  const requestIdentity = useMemo(
-    () => ({
-      workspaceId: props.workspaceId,
-      chatMentionsEnabled,
-      refreshKey: props.refreshKey,
-      reloadNonce,
-    }),
-    [chatMentionsEnabled, props.refreshKey, props.workspaceId, reloadNonce],
-  );
-  const requestIdentityRef = useRef(requestIdentity);
-  useLayoutEffect(() => {
-    requestIdentityRef.current = requestIdentity;
-  }, [requestIdentity]);
   const [state, setState] = useState<GraphState>({
     workspaceId: props.workspaceId,
     chatMentionsEnabled,
@@ -787,52 +773,22 @@ export function GraphView(props: {
     setReloadNonce((nonce) => nonce + 1);
   }, []);
 
-  useAsyncResponseEffect(
-    () => {
-      setState((current) => ({
-        workspaceId: props.workspaceId,
-        chatMentionsEnabled,
-        status: "loading",
-        graph:
-          current.workspaceId === props.workspaceId &&
-          current.chatMentionsEnabled === chatMentionsEnabled
-            ? current.graph
-            : null,
-        error: null,
-      }));
-      return bridge().readWorkspaceGraph({
-        workspaceId: props.workspaceId,
-        includeChatMentions: chatMentionsEnabled,
-      });
-    },
-    {
-      onSuccess: (graph) => {
-        if (requestIdentityRef.current !== requestIdentity) return;
-        setState({
-          workspaceId: props.workspaceId,
-          chatMentionsEnabled,
-          status: "ready",
-          graph,
-          error: null,
-        });
-      },
-      onError: (error: unknown) => {
-        if (requestIdentityRef.current !== requestIdentity) return;
-        setState((current) => ({
-          workspaceId: props.workspaceId,
-          chatMentionsEnabled,
-          status: "error",
-          graph:
-            current.workspaceId === props.workspaceId &&
-            current.chatMentionsEnabled === chatMentionsEnabled
-              ? current.graph
-              : null,
-          error: ipcErrorMessage(error, "Graph failed to load"),
-        }));
-      },
-    },
-    [requestIdentity],
-  );
+  useEffect(() => {
+    setState(current => ({
+      workspaceId: props.workspaceId, chatMentionsEnabled, status: "loading",
+      graph: current.workspaceId === props.workspaceId && current.chatMentionsEnabled === chatMentionsEnabled ? current.graph : null,
+      error: null,
+    }));
+  }, [props.workspaceId, chatMentionsEnabled, props.refreshKey, reloadNonce]);
+  useDesktopLoad([props.workspaceId, chatMentionsEnabled, props.refreshKey, reloadNonce], "readWorkspaceGraph",
+    { workspaceId: props.workspaceId, includeChatMentions: chatMentionsEnabled }, {
+      success: graph => setState({ workspaceId: props.workspaceId, chatMentionsEnabled, status: "ready", graph, error: null }),
+      failure: error => setState(current => ({
+        workspaceId: props.workspaceId, chatMentionsEnabled, status: "error",
+        graph: current.workspaceId === props.workspaceId && current.chatMentionsEnabled === chatMentionsEnabled ? current.graph : null,
+        error: ipcErrorMessage(error, "Graph failed to load"),
+      })),
+    });
 
   const scopedState: GraphState =
     state.workspaceId === props.workspaceId &&

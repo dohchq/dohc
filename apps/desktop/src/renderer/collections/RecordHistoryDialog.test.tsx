@@ -9,6 +9,7 @@ import type {
   RecordHistoryEntry,
 } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
+import { useRecordHistory } from "./useRecordHistory";
 import { RecordHistoryDialog, RUN_NOT_HERE, RUN_NOT_HERE_WHY, recordHistoryGroups } from "./RecordHistoryDialog";
 
 const STAMP = "collection:tasks-id#stamp";
@@ -195,7 +196,7 @@ describe("RecordHistoryDialog", () => {
 
   it("drops a run's answer for the record it showed before", async () => {
     const slow = deferred<LocateRecordHistoryRunResult>();
-    stub(
+    const api = stub(
       async (payload) => ({ entries: [entry(9, automation("Stamp", { claimId: payload.recordId, location: "unchecked" }))], nextBeforeHistoryId: null }),
       (payload) => payload.claimId === "rec_a" ? slow.promise : Promise.resolve({ location: "unavailable" }),
     );
@@ -204,6 +205,7 @@ describe("RecordHistoryDialog", () => {
     await screen.findAllByTestId("record-history-entry");
     rerender(dialog({ recordId: "rec_b", recordName: "Book flights", onRunsChecked }));
     await screen.findByTestId("record-history-run-not-here");
+    expect(api.locateRecordHistoryRun.mock.calls.map(([payload]) => payload.claimId)).toEqual(["rec_a", "rec_b"]);
     await act(async () => slow.resolve({ location: "available" }));
     expect(screen.queryByRole("button", { name: "View run" })).toBeNull();
   });
@@ -360,4 +362,52 @@ describe("RecordHistoryDialog", () => {
     const groups = recordHistoryGroups([entry(5, run), entry(4, run), entry(3, other), entry(2, run), entry(1, automation("Stamp", null)), entry(0, automation("Stamp", null))]);
     expect(groups.map((group) => group.changes.map((change) => change.historyId))).toEqual([[5, 4], [3], [2], [1], [0]]);
   });
+});
+
+it("a Notice retry reopens its recorded record and failed page after the dialog closes", async () => {
+  let noticeRetry: (() => void) | null = null;
+  const clearKind = vi.fn();
+  const shell = {
+    reportShellError: vi.fn((_fallback: string, _error: unknown, retry: (() => void) | null) => { noticeRetry = retry; }),
+    clearKind,
+    openAutomationRun: async () => null,
+  };
+  let fail = true;
+  const api = stub(async payload => {
+    if (payload.beforeHistoryId === undefined) return { entries: [entry(9, null)], nextBeforeHistoryId: 9 };
+    if (fail) throw new Error("offline");
+    return { entries: [entry(4, null, "Owner")], nextBeforeHistoryId: null };
+  });
+  function Host() {
+    const history = useRecordHistory("ws-1", shell);
+    const session = history.session;
+    return <>
+      <button onClick={() => history.open({ collectionPath: "Tasks", recordId: "rec_a", recordName: "Plan the trip" })}>Open A</button>
+      <button onClick={() => noticeRetry?.()}>Retry Notice</button>
+      {session && <RecordHistoryDialog key={session.key} workspaceId={session.workspaceId} {...session.target} until={session.until}
+        onClose={history.close} onOpenRun={history.openRun} onFailed={history.failed} onRead={history.read}
+        onRunsUnchecked={history.runsUnchecked} onRunsChecked={history.runsChecked} />}
+    </>;
+  }
+  render(<Host />);
+  fireEvent.click(screen.getByRole("button", { name: "Open A" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Older changes" }));
+  await waitFor(() => expect(shell.reportShellError).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(screen.queryByTestId("record-history")).toBeNull();
+  fail = false;
+  fireEvent.click(screen.getByRole("button", { name: "Retry Notice" }));
+  await screen.findByText(/Owner:/);
+  expect(api.getCollectionRecordHistory).toHaveBeenLastCalledWith({ workspaceId: "ws-1", collectionPath: "Tasks", recordId: "rec_a", beforeHistoryId: 9 });
+  expect(clearKind).toHaveBeenCalledWith("record-history");
+});
+
+it("drops a failed read after the dialog closes", async () => {
+  const read = deferred<GetCollectionRecordHistoryResult>();
+  const onFailed = vi.fn();
+  stub(() => read.promise);
+  const view = render(dialog({ onFailed }));
+  view.unmount();
+  await act(async () => { read.reject(new Error("offline")); await read.promise.catch(() => {}); });
+  expect(onFailed).not.toHaveBeenCalled();
 });

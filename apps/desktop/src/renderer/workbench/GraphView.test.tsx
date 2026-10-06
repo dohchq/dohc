@@ -946,3 +946,15 @@ describe("GraphView", () => {
     expect(screen.getByText("access revoked")).toBeTruthy();
   });
 });
+
+it("keeps the current graph when a replaced refresh fails late", async () => {
+  const first = deferred<WorkspaceGraphResult>();
+  const readWorkspaceGraph = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(graph("current.md"));
+  vi.stubGlobal("dohcDesktop", { readWorkspaceGraph });
+  const view = render(<GraphView workspaceId="ws" activePath={null} refreshKey="0" onOpenPath={vi.fn()} />);
+  view.rerender(<GraphView workspaceId="ws" activePath={null} refreshKey="1" onOpenPath={vi.fn()} />);
+  await screen.findByRole("button", { name: "Open or focus current.md" });
+  await act(async () => { first.reject(new Error("obsolete failure")); await first.promise.catch(() => {}); });
+  expect(screen.queryByText("obsolete failure")).toBeNull();
+  expect(screen.getByRole("button", { name: "Open or focus current.md" })).toBeTruthy();
+});

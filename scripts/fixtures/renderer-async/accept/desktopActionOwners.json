@@ -1,0 +1,9 @@
+{
+  "shell/useWorkspaceListing.ts": [
+    "listWorkspaceFiles"
+  ],
+  "workbench/reactionStore.tsx": [
+    "listReactions",
+    "addReaction"
+  ]
+}

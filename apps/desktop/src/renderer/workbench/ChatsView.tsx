@@ -85,6 +85,8 @@ import type {
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { useDesktopLoad } from "../desktopAction";
+import { readLaneAgents, type LaneCache } from "../data/laneAgents";
 import {
   ChatMessageList,
   type ChatMessageListHandle,
@@ -2739,13 +2741,10 @@ export function ChatsView(props: {
   // Agents list also reads each joined group's chat lane. One page of the
   // lane per group, on the nav and after activity; a handful of calls.
   const [laneAgents, setLaneAgents] = useState<LaneAgent[]>([]);
-  const laneAgentSeq = useRef(0);
   // What a lane said, by group, keyed on the lane's updated time. Message
   // facts only; the channel and the share are attached when the list is
   // assembled, so a renamed group or a re-issued share shows as it is now.
-  const laneAgentCache = useRef(
-    new Map<string, { updatedAtMs: number; spoke: Array<{ id: string; label: string; atMs: number }> }>(),
-  );
+  const laneAgentCache = useRef<LaneCache>({});
   // The joined chat groups, as one string, so the read runs when that set
   // changes and not on every overview or share refresh.
   const joinedChatGroups = useMemo(() => {
@@ -2757,60 +2756,20 @@ export function ChatsView(props: {
         joinedByWire.get(channel.wireId),
     );
   }, [joinedByWire, overview]);
-  const joinedChatGroupsKey = joinedChatGroups.map((channel) => channel.id).join("\u0000");
-  useEffect(() => {
-    if (nav.level !== "channels") return;
-    const token = liveToken.current;
-    const seq = ++laneAgentSeq.current;
-    const isCurrent = () => token === liveToken.current && seq === laneAgentSeq.current;
-    if (joinedChatGroups.length === 0) {
-      setLaneAgents([]);
-      return;
-    }
-    void Promise.all(
-      joinedChatGroups.map(async (channel): Promise<LaneAgent[]> => {
-        const listed = await bridge().listChannelThreads({ workspaceId, channelId: channel.id, lane: "chat" });
-        // The lane the group shows is its oldest chat thread, as ChatLane reads it.
-        const lane = [...listed.threads].sort(
-          (left, right) => left.createdAtMs - right.createdAtMs || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
-        )[0];
-        if (!lane) return [];
-        const cached = laneAgentCache.current.get(channel.id);
-        let spoke = cached && cached.updatedAtMs === lane.updatedAtMs ? cached.spoke : undefined;
-        if (!spoke) {
-          const page = await bridge().listChatMessages({ workspaceId, threadId: lane.id });
-          spoke = page.messages
-            .filter((message) => message.authorKind === "agent")
-            .map((message) => ({
-              id: message.authorUserId ?? message.authorDisplayName,
-              label: chatAuthorLabel(message),
-              atMs: message.createdAtMs,
-            }));
-          // An obsolete read must not seed the cache for a later hit.
-          if (isCurrent()) laneAgentCache.current.set(channel.id, { updatedAtMs: lane.updatedAtMs, spoke });
-        }
-        const joined = joinedByWire.get(channel.wireId ?? "");
-        const owner = joined?.granterEmail ?? "someone else";
-        return spoke.map((who) => ({
-          key: `${joined?.shareId ?? channel.id}\u0000${who.id}`,
-          label: who.label,
-          owner,
-          channel,
-          atMs: who.atMs,
+  useDesktopLoad([joinedByWire, nav.level, props.threadRevision], readLaneAgents,
+    nav.level === "channels" ? { workspaceId, channelIds: joinedChatGroups.map(channel => channel.id) } : null,
+    {
+      success: result => {
+        Object.assign(laneAgentCache.current, result.updates);
+        setLaneAgents(result.agents.flatMap(who => {
+          const channel = joinedChatGroups.find(group => group.id === who.channelId);
+          if (!channel) return [];
+          const joined = joinedByWire.get(channel.wireId ?? "");
+          return [{ key: `${joined?.shareId ?? channel.id}\u0000${who.id}`, label: who.label, owner: joined?.granterEmail ?? "someone else", channel, atMs: who.atMs }];
         }));
-      }),
-    )
-      .then((found) => {
-        if (!isCurrent()) return;
-        setLaneAgents(found.flat());
-      })
-      .catch(() => {
-        // The lane read is a convenience for the list; Home's items still
-        // name every agent that posts. A failed read leaves the list as is.
-      });
-    // The group list itself is read through its key, so a new overview
-    // object with the same groups does not start another read.
-  }, [joinedChatGroupsKey, joinedByWire, nav.level, props.threadRevision, workspaceId]);
+      },
+      failure: () => {},
+    }, laneAgentCache.current);
 
   const otherAgents = useMemo(() => {
     const seen = new Map<string, { key: string; label: string; owner: string; atMs: number; fromFeed: boolean; open: () => void }>();
