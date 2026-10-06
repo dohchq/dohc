@@ -1,7 +1,9 @@
 import { useFocusReturn, useFocusSurface } from "../ui/focusReturn";
+import { modalReturnTarget } from "../modalFocus";
+import { createPortal } from "react-dom";
 import { automationReachCopy } from "../automationReachCopy";
 import { AlertTriangle, Bell, Bot, Check, CheckCircle2, CloudOff, Download, GitPullRequestArrow, Info, LogIn, MessageSquare, RefreshCw, Sparkles, User, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import {
   ENGINE_STORE_BACKUP_DIR,
   ENGINE_STORE_UPDATE_NEXT_STEP,
@@ -16,7 +18,8 @@ import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
-import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
+import { errorDetails } from "../shell/copyDetails";
+import { CopyButton } from "../ui/CopyButton";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
 import { UPDATE_REQUIRED_LABEL } from "./WorkspaceSyncStatus";
@@ -53,6 +56,7 @@ export type Notice = {
 export interface WorkspaceErrorNotice {
   tone?: "success";
   id: string;
+  title?: string;
   message: string;
   details: string;
   atMs: number;
@@ -234,15 +238,47 @@ const OWNER_LIVE_REFUSALS_TITLE = "Some shares could not start live editing";
 const OWNER_LIVE_REFUSALS_BODY =
   "Open Live documents to see which files are affected and try again.";
 
+// An oversized unclaimed lineage cannot share changes made in dohc.
+type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
+const SHARING_DECLINED_TITLE = "Too large to share your edits";
+function sharingDeclinedBody(declined: SharingDeclined): string {
+  const fileName = declined.path.split("/").pop() ?? declined.path;
+  return `People you share ${fileName} with don't get the edits you make in dohc while it is this large. Make it smaller, then open it again to share your edits.`;
+}
+function sharingDeclinedDetails(workspaceId: string, declined: SharingDeclined): string {
+  return errorDetails([
+    ["Notice", SHARING_DECLINED_TITLE],
+    ["Detail", sharingDeclinedBody(declined)],
+    ["File", declined.path],
+    ["Size", `${declined.observedBytes} bytes`],
+    ["Limit", `${declined.limitBytes} bytes`],
+    ["Constraint", declined.constraint],
+    ["Object id", declined.objectId],
+    ["Version id", declined.versionId],
+    ["Saved file sha256", declined.headBlobSha256],
+    ["Workspace id", workspaceId],
+  ]);
+}
+// One refusal of one saved file: a rename keeps it, and a refusal after a new
+// save is announced again. The head is null only before the first save.
+const sharingDeclinedKey = (workspaceId: string, declined: SharingDeclined): string =>
+  JSON.stringify([workspaceId, declined.objectId, declined.versionId, declined.headBlobSha256]);
+
 // Corner hosts need room above the bell; rail hosts use the bottom-right corner.
 export type NoticeHostPlacement = "rail" | "corner";
 
-// Toasts share the Notices panel's layer, below workbench modals and their
-// scrim, so they cannot cover a review's actions. Their rows stay in Notices.
+function inToastLayer(host: NoticeHostPlacement, stack: ReactElement): ReactNode {
+  return host === "corner" ? createPortal(stack, document.body) : stack;
+}
+
+// Toasts sit above every dialog and its scrim (z-30, warning z-50), so a
+// failure in a dialog is seen where it happens. A dialog keeps its actions
+// clear of them with scroll room (Overlay), and F6 reaches them from the
+// dialog's focus trap (modalFocus). Their rows stay in Notices.
 const TOAST_STACK_CLASS: Record<NoticeHostPlacement, string> = {
-  rail: "fixed bottom-3 right-3 z-20 flex flex-col items-end gap-2",
+  rail: "fixed bottom-3 right-3 z-60 flex flex-col items-end gap-2",
   // The corner toggle is 36px tall on an 8px inset; 56px clears it with a gap.
-  corner: "fixed bottom-14 right-3 z-20 flex flex-col items-end gap-2",
+  corner: "fixed bottom-14 right-3 z-60 flex flex-col items-end gap-2",
 };
 
 const PANEL_POSITION_CLASS: Record<NoticeHostPlacement, string> = {
@@ -274,7 +310,8 @@ export function WorkspaceErrorToast(props: {
     >
       {error.tone === "success" ? <CheckCircle2 size={14} aria-hidden className="mt-0.5 shrink-0 text-success" /> : <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-danger" />}
       <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
-        {error.message}
+        {error.title ? <span className="block font-medium">{error.title}</span> : null}
+        <span className={error.title ? "block mt-0.5 text-muted" : undefined}>{error.message}</span>
       </span>
       {error.actionLabel && props.onAction ? (
         <button
@@ -296,12 +333,13 @@ export function WorkspaceErrorToast(props: {
           Try again
         </button>
       ) : null}
-      <CopyDetailsButton
+      <CopyButton
         key={error.id}
         iconOnly
+        pinName
         label={error.tone === "success" ? "Copy notice details" : "Copy error details"}
-        data-testid="workspace-shell-error-copy"
-        details={() => error.details}
+        testId="workspace-shell-error-copy"
+        getText={() => error.details}
       />
       {props.onHide ? (
         <button
@@ -355,11 +393,12 @@ export function LocalNoticeRow(props: {
             </button>
           ))}
           {notice.copyText !== undefined ? (
-            <CopyDetailsButton
+            <CopyButton
               iconOnly
+              pinName
               label={notice.copyLabel ?? "Copy error details"}
-              data-testid={`notice-${notice.id}-copy`}
-              details={() => notice.copyText ?? ""}
+              testId={`notice-${notice.id}-copy`}
+              getText={() => notice.copyText ?? ""}
             />
           ) : null}
           {notice.onDismiss ? (
@@ -427,6 +466,8 @@ export function NoticeCenter(props: {
   // that repeats itself changes nothing here.
   onRetryLiveDelivery?: () => void;
   onOpenLiveDocuments?: () => void;
+  // Opens the refused document by version and object.
+  onOpenSharingDeclined?: (versionId: string, objectId: string) => void;
   // Changes a share recipient sent to this workspace, awaiting the granter.
   // One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
@@ -480,7 +521,28 @@ export function NoticeCenter(props: {
   const toggleRef = useRef<HTMLButtonElement | null>(null);
   const toastsRef = useRef<HTMLDivElement>(null);
   useFocusReturn(open, centerRef, () => toggleRef.current);
-  useFocusSurface(toastsRef, () => toggleRef.current);
+  // A toast removed under focus hands it back to the open dialog, if there is
+  // one, at the control F6 left from: the toggle sits behind the dialog,
+  // outside its focus trap.
+  useFocusSurface(toastsRef, () => modalReturnTarget() ?? toggleRef.current);
+  // How far the toasts reach up from the window's bottom edge: the room an
+  // open dialog leaves below its content (Overlay). None while none show.
+  useLayoutEffect(() => {
+    const stack = toastsRef.current;
+    if (!stack) return;
+    const root = document.documentElement;
+    const measure = () => {
+      const room = stack.offsetHeight > 0 ? Math.ceil(window.innerHeight - stack.getBoundingClientRect().top) : 0;
+      root.style.setProperty("--dohc-toast-room", `${room}px`);
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(stack);
+    return () => {
+      observer?.disconnect();
+      root.style.removeProperty("--dohc-toast-room");
+    };
+  }, [open]);
   useFocusSurface(centerRef, () => centerRef.current);
   useEffect(() => {
     if (open) centerRef.current?.focus({ preventScroll: true });
@@ -694,6 +756,29 @@ export function NoticeCenter(props: {
     [refusalsKey, props.workspaceId],
   );
 
+  // Closing a toast keeps its row; dismissing the row removes both.
+  const [closedDeclines, setClosedDeclines] = useState<ReadonlySet<string>>(new Set());
+  const [dismissedDeclines, setDismissedDeclines] = useState<ReadonlySet<string>>(new Set());
+  const sharingDeclined = useMemo(
+    () =>
+      (props.syncStatus?.sharingDeclined ?? []).filter(
+        (declined) => !dismissedDeclines.has(sharingDeclinedKey(props.workspaceId, declined)),
+      ),
+    [dismissedDeclines, props.syncStatus?.sharingDeclined, props.workspaceId],
+  );
+  const declineToast =
+    sharingDeclined.find(
+      (declined) => !closedDeclines.has(sharingDeclinedKey(props.workspaceId, declined)),
+    ) ?? null;
+  const closeDecline = useCallback(
+    (declined: SharingDeclined) =>
+      setClosedDeclines((current) =>
+        new Set(current).add(sharingDeclinedKey(props.workspaceId, declined)),
+      ),
+    [props.workspaceId],
+  );
+  const { onOpenSharingDeclined } = props;
+
   const installUpdate = useCallback(async () => {
     if (installPending) return;
     try {
@@ -785,8 +870,8 @@ export function NoticeCenter(props: {
       next.push({
         id: error.id,
         tone: error.tone ?? "danger",
-        title: error.message,
-        body: "",
+        title: error.title ?? error.message,
+        body: error.title ? error.message : "",
         actions: [
           ...(error.actionLabel && props.onWorkspaceErrorAction
             ? [{
@@ -940,12 +1025,28 @@ export function NoticeCenter(props: {
       });
     }
 
-    for (const declined of props.syncStatus?.sharingDeclined ?? []) {
+    for (const declined of sharingDeclined) {
       next.push({
-        id: `sharing-declined-${declined.path}`,
+        id: `sharing-declined-${encodeURIComponent(declined.versionId)}:${encodeURIComponent(declined.objectId)}`,
         tone: "warning",
-        title: "File is too large to sync",
-        body: `Your edit is saved on this machine. "${declined.path}" uses ${declined.observedBytes.toLocaleString("en-US")} bytes after encoding. Sync allows ${declined.limitBytes.toLocaleString("en-US")} bytes. Reduce the file to sync it.`,
+        title: SHARING_DECLINED_TITLE,
+        body: sharingDeclinedBody(declined),
+        ...(onOpenSharingDeclined
+          ? {
+              actions: [{
+                label: "Open document",
+                onClick: () => {
+                  closeDecline(declined);
+                  onOpenSharingDeclined(declined.versionId, declined.objectId);
+                },
+              }],
+            }
+          : {}),
+        onDismiss: () =>
+          setDismissedDeclines((current) =>
+            new Set(current).add(sharingDeclinedKey(props.workspaceId, declined)),
+          ),
+        copyText: sharingDeclinedDetails(props.workspaceId, declined),
         Icon: AlertTriangle,
       });
     }
@@ -1076,6 +1177,10 @@ export function NoticeCenter(props: {
     props.onReviewShareChanges,
     props.shareChangeNotices,
     props.syncStatus,
+    props.workspaceId,
+    sharingDeclined,
+    closeDecline,
+    onOpenSharingDeclined,
     liveDelivery,
     liveDeliveryAction,
     liveDeliveryDetails,
@@ -1180,9 +1285,11 @@ export function NoticeCenter(props: {
       {/* One stack in the window's bottom-right corner: the toasts lay
           themselves out in order instead of counting row heights. Opening
           Notices hides it — every row is in the panel, and a toast must never
-          sit over it. */}
-      {open ? null : (
-        <div ref={toastsRef} data-testid="notice-toasts" className={TOAST_STACK_CLASS[host]}>
+          sit over it. A corner host renders the stack at the body, outside
+          its fixed wrapper's stacking context, so the toasts rise above
+          dialogs there too. */}
+      {open ? null : inToastLayer(host, (
+        <div ref={toastsRef} data-testid="notice-toasts" data-dohc-toasts className={TOAST_STACK_CLASS[host]}>
           {errorToast ? (
             <WorkspaceErrorToast
               error={errorToast}
@@ -1215,12 +1322,13 @@ export function NoticeCenter(props: {
                 </button>
               ) : null}
               {sentToast.notice.kind === "automation-failed" ? (
-                <CopyDetailsButton
+                <CopyButton
                   key={sentToastKey}
                   iconOnly
+                  pinName
                   label="Copy error details"
-                  data-testid="sent-notice-toast-copy"
-                  details={() => failureDetails(sentToast.notice)}
+                  testId="sent-notice-toast-copy"
+                  getText={() => failureDetails(sentToast.notice)}
                 />
               ) : null}
               {sentToast.openable && props.onOpenSentNotice ? (
@@ -1269,12 +1377,13 @@ export function NoticeCenter(props: {
                   {liveDeliveryAction.label}
                 </button>
               ) : null}
-              <CopyDetailsButton
+              <CopyButton
                 key={liveDeliveryKey}
                 iconOnly
+                pinName
                 label="Copy live editing details"
-                data-testid="owner-live-delivery-toast-copy"
-                details={() => liveDeliveryDetails}
+                testId="owner-live-delivery-toast-copy"
+                getText={() => liveDeliveryDetails}
               />
               <button
                 type="button"
@@ -1307,18 +1416,62 @@ export function NoticeCenter(props: {
                   Live documents
                 </button>
               ) : null}
-              <CopyDetailsButton
+              <CopyButton
                 key={refusalsKey}
                 iconOnly
+                pinName
                 label="Copy share details"
-                data-testid="owner-live-refusals-toast-copy"
-                details={() => refusalsDetails}
+                testId="owner-live-refusals-toast-copy"
+                getText={() => refusalsDetails}
               />
               {/* Closing ends the announcement; the row stays in Notices. */}
               <button
                 type="button"
                 aria-label="Dismiss live editing refusals notice"
                 onClick={() => setDismissedRefusalsKey(refusalsKey)}
+                className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
+              >
+                <X size={12} aria-hidden />
+              </button>
+            </div>
+          ) : null}
+          {declineToast ? (
+            <div
+              data-testid="sharing-declined-toast"
+              role="status"
+              aria-live="polite"
+              className="dohc-popover dohc-pop-in relative flex w-[min(420px,calc(100vw-24px))] items-start gap-2 rounded-md border border-line bg-panel px-3 py-2 text-xs text-ink"
+            >
+              <AlertTriangle size={14} aria-hidden className="mt-0.5 shrink-0 text-warning" />
+              <span className="min-w-0 flex-1 select-text cursor-text break-words leading-snug">
+                {SHARING_DECLINED_TITLE}. {sharingDeclinedBody(declineToast)}
+              </span>
+              {onOpenSharingDeclined ? (
+                <button
+                  type="button"
+                  data-testid="sharing-declined-toast-open"
+                  onClick={() => {
+                    closeDecline(declineToast);
+                    onOpenSharingDeclined(declineToast.versionId, declineToast.objectId);
+                  }}
+                  className="h-6 shrink-0 rounded border border-line px-2 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
+                >
+                  Open document
+                </button>
+              ) : null}
+              <CopyButton
+                key={sharingDeclinedKey(props.workspaceId, declineToast)}
+                iconOnly
+                pinName
+                label="Copy error details"
+                testId="sharing-declined-toast-copy"
+                getText={() => sharingDeclinedDetails(props.workspaceId, declineToast)}
+              />
+              {/* Closing ends the announcement; the row stays in Notices. */}
+              <button
+                type="button"
+                aria-label={`Close notice for ${declineToast.path}`}
+                onClick={() => closeDecline(declineToast)}
                 className="grid size-6 shrink-0 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
               >
                 <X size={12} aria-hidden />
@@ -1345,12 +1498,13 @@ export function NoticeCenter(props: {
                   Send report
                 </button>
               ) : null}
-              <CopyDetailsButton
+              <CopyButton
                 key={crashReport.revision}
                 iconOnly
+                pinName
                 label="Copy report"
-                data-testid="crash-report-toast-copy"
-                details={() => crashReport.text}
+                testId="crash-report-toast-copy"
+                getText={() => crashReport.text}
               />
               {/* Closing ends the announcement; the row stays in Notices. */}
               <button
@@ -1407,7 +1561,7 @@ export function NoticeCenter(props: {
             </div>
           ) : null}
         </div>
-      )}
+      ))}
 
       {open ? (
         <div
@@ -1598,11 +1752,12 @@ export function NoticeCenter(props: {
                               ) : null}
                               {copies ? (
                                 <span className={`${openNotice || runNow || retry ? "" : "ml-auto "}flex shrink-0`}>
-                                  <CopyDetailsButton
+                                  <CopyButton
                                     iconOnly
+                                    pinName
                                     label="Copy error details"
-                                    data-testid={`sent-notice-${notice.noticeId}-copy`}
-                                    details={() => failureDetails(notice)}
+                                    testId={`sent-notice-${notice.noticeId}-copy`}
+                                    getText={() => failureDetails(notice)}
                                   />
                                 </span>
                               ) : null}

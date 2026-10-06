@@ -1,12 +1,20 @@
 import {describe, expect, it, vi} from "vitest";
+import type {SharingDeclined} from "@dohc/workspace-contracts/relay";
+import type {OrdinarySyncMethodResultMap} from "@dohc/workspace-engine-client/relay-wire";
 import type {EngineClient} from "@dohc/workspace-engine-client/daemon";
 import {parseServiceOrdinaryReplicationConfig, ServiceOrdinaryReplication} from "./serviceOrdinaryReplication.js";
+
+const decline = {
+  objectId: "object-1", versionId: "main", lineagePruned: true,
+  headBlobSha256: "a".repeat(64), path: "work.md", constraint: "MAX_YDOC_UPDATE_BYTES",
+  limitBytes: 2, observedBytes: 3,
+} satisfies SharingDeclined;
 
 const attachment = () => ({relay: {baseUrl: "https://relay.example", bearerToken: "owner-credential"},
   identity: {kind: "join" as const, replicationEpoch: "actual-epoch", streamIdentity: "actual-stream"}, maxPagesPerPull: 2});
 const page = (nextCursor = 1, hasMore = false) => ({status: "complete", nextCursor, hasMore,
   pendingCursor: {kind: "relay", token: `issued-${nextCursor}`}, fetched: 1, applied: 1, refused: 0, skipped: 0, conflictsOpened: 0,
-  changedPaths: [{versionId: "main", path: "work.md", operation: "write", contentKind: "text"}], refusals: [], sharingDeclined: []});
+  changedPaths: [{versionId: "main", path: "work.md", operation: "write", contentKind: "text"}], refusals: [], sharingDeclined: []} satisfies OrdinarySyncMethodResultMap["sync.pull"]);
 function fixture(config = attachment()) {
   const abort = new AbortController();
   const sendRequest = vi.fn(async (request: Parameters<EngineClient["sendRequest"]>[0]) => {
@@ -129,10 +137,26 @@ it("tells the caller of each committed page before a later page fails", async ()
 it("retains ordinary refusal and sharing-decline evidence", async () => {
   const f = fixture(); const original = f.sendRequest.getMockImplementation()!;
   const refusal = {workspaceId: "workspace", originId: "origin", originSeq: 1, opKind: "ydoc.update", code: "refused", reason: "retained"};
-  const decline = {path: "work.md", constraint: "limit", limitBytes: 2, observedBytes: 3};
   f.sendRequest.mockImplementation(async request => request.method === "sync.pull" ? {result: {...page(), refused: 1, refusals: [refusal], sharingDeclined: [decline]}} as never : original(request));
   const result = await f.driver.pull();
   expect(result.pages[0]).toMatchObject({refused: 1, refusals: [refusal], sharingDeclined: [decline], changedPaths: ["work.md"]});
+});
+
+it("retains complete sharing-decline identity from cursor commit", async () => {
+  const f = fixture(), original = f.sendRequest.getMockImplementation()!;
+  f.sendRequest.mockImplementation(async request => request.method === "sync.commitCursor" ?
+    {result: {committed: true, sharingDeclined: [decline]}} as never : original(request));
+  const onPage = vi.fn();
+  const result = await f.driver.pull(undefined, onPage);
+  expect(result.pages[0]!.sharingDeclined).toEqual([decline]);
+  expect(onPage).toHaveBeenCalledWith(expect.objectContaining({sharingDeclined: [decline]}));
+});
+
+it("retains complete sharing-decline identity from publication", async () => {
+  const f = fixture(), original = f.sendRequest.getMockImplementation()!;
+  f.sendRequest.mockImplementation(async request => request.method === "sync.push" ?
+    {result: {status: "complete", pushed: 0, hasMore: false, sharingDeclined: [decline], ownerAdmissionPending: []}} as never : original(request));
+  expect(await f.driver.push()).toEqual({pushed: 0, hasMore: false, sharingDeclined: [decline]});
 });
 
 it.each([{pendingCursor: {kind: "shareView", token: "foreign"}}, {status: "crashedAfterApply"}, {nextCursor: -1}])(

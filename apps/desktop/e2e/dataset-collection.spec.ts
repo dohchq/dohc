@@ -1,3 +1,4 @@
+import { activityPin, settingsNavPin, editorTabTestId } from "../src/testPins";
 import { expect, test, type Locator } from "@playwright/test";
 import { sendCliRequest } from "@dohc/cli/client";
 import { CLI_PROTOCOL_VERSION } from "@dohc/cli/protocol";
@@ -53,8 +54,8 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     if (listed.kind !== "list" || listed.datasets.length !== 1) throw Error("Expected one Collection.");
     const dataset = listed.datasets[0]!;
     const table = dataset.tables[0]!;
-    const path = `dohc://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
-    await page.getByTestId(`tab-${path}`).click();
+    const path = `tab://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
+    await page.getByTestId(editorTabTestId(path)).click();
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect(collection.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Synthetic participant");
     await collection.getByRole("button", { name: /^Edit Name for record / }).click();
@@ -81,7 +82,7 @@ test("@dataset-collection owner creates a Collection and form, submits, edits, a
     await openWorkspaceFromFirstRun(desktop.page, workspace);
     const restored = await desktop.page.evaluate(async request => window.dohcDesktop!.dataset(request), request);
     expect(restored).toEqual(edited);
-    await desktop.page.getByTestId(`tab-${path}`).click();
+    await desktop.page.getByTestId(editorTabTestId(path)).click();
     const reopened = desktop.page.getByRole("region", { name: "Registrations", exact: true });
     await expect(reopened.getByRole("button", { name: /^Edit Name for record / })).toHaveText("Reviewed before restart");
     await expect(reopened.getByRole("button", { name: "Undo last edit" })).toHaveCount(0);
@@ -159,8 +160,8 @@ test("@dataset-collection owner changes fields, archives, restores, and exports 
     await page.keyboard.press("Escape");
     await page.emulateMedia({ reducedMotion: "reduce" });
     for (const theme of ["light", "dark"] as const) {
-      await page.getByTestId("activity-settings").click();
-      await page.getByTestId("settings-nav-appearance").click();
+      await page.getByTestId(activityPin("settings")).click();
+      await page.getByTestId(settingsNavPin("appearance")).click();
       await page.getByRole("radiogroup", { name: "Theme" }).getByRole("radio", { name: theme === "light" ? "Light" : "Dark" }).click();
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);

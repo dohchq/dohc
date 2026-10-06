@@ -662,6 +662,7 @@ describe("active-version capture routing", () => {
 
     await write(root, "plan.md", "draft text\n");
     engine.observeFileEvents([{ path: "plan.md", operation: "update" }]);
+    await engine.settleAndCloseAllLiveSessions();
     await engine.stop();
 
     // The chain opens the daemon workspace and creates the version over the

@@ -101,7 +101,6 @@ import {
   MenuCommand,
   SearchResultsEvent,
   WorkbenchMenuCommand,
-  WriteClipboardTextPayload,
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
@@ -2482,21 +2481,6 @@ describe("workspace UI state IPC contract", () => {
   });
 });
 
-describe("clipboard IPC contract", () => {
-  it("accepts bounded text and rejects empty or oversized writes", () => {
-    expect(WriteClipboardTextPayload.parse({ text: "copy me" }).text).toBe(
-      "copy me",
-    );
-    expect(WriteClipboardTextPayload.safeParse({ text: "" }).success).toBe(false);
-    expect(
-      WriteClipboardTextPayload.safeParse({ text: "x".repeat(20_001) }).success,
-    ).toBe(false);
-    expect(
-      WriteClipboardTextPayload.safeParse({ text: "copy", secret: "nope" }).success,
-    ).toBe(false);
-  });
-});
-
 // The preload boundary for main→renderer events. These cases are the review
 // attack set: a schema must accept only exact primitive members of its closed
 // set — not String objects, toString tricks, case variants, or lookalikes —
@@ -3417,6 +3401,9 @@ describe("sync status IPC contract", () => {
       sharingDeclined: [
         {
           path: "notes/large.md",
+          objectId: "notes/large.md",
+          versionId: "main",
+          lineagePruned: false, headBlobSha256: null,
           constraint: "MAX_YDOC_UPDATE_BYTES",
           limitBytes: 262_144,
           observedBytes: 280_001,

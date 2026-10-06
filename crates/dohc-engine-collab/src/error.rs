@@ -76,6 +76,10 @@ pub enum CollabError {
     #[error("Y.Doc content kind `{kind}` does not support Markdown replacement")]
     MarkdownRewriteUnsupported { kind: &'static str },
 
+    /// The fold parser kept an over-budget quote as escaped paragraph text.
+    #[error("Markdown quote nesting exceeds the fold's recursion budget")]
+    MarkdownQuoteDepthExceeded,
+
     /// A replicated lineage already has its single base; a second base is
     /// rejected (base-once). The caller must resume the existing lineage.
     #[error("replicated lineage already has a base (base-once)")]
@@ -227,6 +231,7 @@ impl CollabError {
             CollabError::ContentKindMismatch => "content-kind-mismatch",
             CollabError::UnsupportedContentKind { .. } => "unsupported-content-kind",
             CollabError::MarkdownRewriteUnsupported { .. } => "markdown-rewrite-unsupported",
+            CollabError::MarkdownQuoteDepthExceeded => "markdown-quote-depth-exceeded",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::BaseStateDiverged => "base-state-diverged",
             CollabError::BaseRelaySequencePending => "base-relay-sequence-pending",

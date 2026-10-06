@@ -1,5 +1,6 @@
+import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import type { z } from "zod";
-import { documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
+import { DATASET_CAPABILITIES, APP_PUBLICATION_CAPABILITIES, APP_RESPONSE_CAPABILITIES, documentAgentNameSchema, documentEditTextSchema, requestIdSchema, type CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 import { OwnerAppPublicationRequest } from "./appPublication";
 import { OwnerAppResponsesRequest } from "./appResponses";
@@ -98,6 +99,7 @@ interface VerbInput {
 }
 
 export interface CliVerbSpec {
+  capabilityId: CapabilityId;
   summary: string;
   operands: string;
   flags?: readonly CliFlag[];
@@ -226,6 +228,7 @@ function documentWrite(input: VerbInput, verb: "documentEdit" | "documentCreate"
 
 const DOCUMENT_VERBS = {
   read: {
+    capabilityId: "document.read",
     summary: "Read the current Markdown, including edits in an open editor.",
     operands: "<path>",
     notes: ["Read before editing. Without --json, prints the Markdown byte for byte."],
@@ -237,6 +240,7 @@ const DOCUMENT_VERBS = {
     },
   },
   edit: {
+    capabilityId: "document.edit",
     summary: "Replace matching text or append Markdown through the live document.",
     operands: "<path> [-]",
     flags: [...documentTextFlags,
@@ -249,6 +253,7 @@ const DOCUMENT_VERBS = {
     parse: (input) => documentWrite(input, "documentEdit"),
   },
   create: {
+    capabilityId: "document.create",
     summary: "Create a Markdown document without overwriting an existing file.",
     operands: "<path> [-]",
     flags: documentTextFlags,
@@ -268,6 +273,7 @@ function decisionFields(input: VerbInput): { needsDecision: boolean; options?: s
 
 const CHAT_VERBS = {
   groups: {
+    capabilityId: "group.list",
     summary: "List the Groups in this workspace.",
     operands: "",
     parse: ({ operands }) => {
@@ -276,6 +282,7 @@ const CHAT_VERBS = {
     },
   },
   threads: {
+    capabilityId: "chat.threads.list",
     summary: "List the threads in a Group.",
     operands: "<group>",
     parse: ({ operands }) => {
@@ -286,6 +293,7 @@ const CHAT_VERBS = {
     },
   },
   inbox: {
+    capabilityId: "chat.inbox.read",
     summary: "List unread threads. For an agent, also list its unread mentions.",
     operands: "",
     parse: ({ operands }) => {
@@ -294,6 +302,7 @@ const CHAT_VERBS = {
     },
   },
   show: {
+    capabilityId: "chat.show",
     summary: "Show a thread or message and mark the thread read.",
     operands: "<thread-or-message>",
     flags: [
@@ -307,6 +316,7 @@ const CHAT_VERBS = {
     },
   },
   post: {
+    capabilityId: "chat.post",
     summary: "Start a thread in a Group.",
     operands: "<group> <body>",
     flags: [{ name: "--title", value: "title", text: "Set the thread's title." }, attachFlag, ...decisionFlags],
@@ -329,6 +339,7 @@ const CHAT_VERBS = {
     },
   },
   reply: {
+    capabilityId: "chat.reply",
     summary: "Reply in a thread.",
     operands: "<thread> <body>",
     flags: [
@@ -362,6 +373,7 @@ const CHAT_VERBS = {
     },
   },
   react: {
+    capabilityId: "chat.react",
     summary: "Add your reaction to a message, or remove it if it is already there.",
     operands: "<message> <emoji>",
     parse: ({ operands }) => {
@@ -372,6 +384,7 @@ const CHAT_VERBS = {
     },
   },
   grep: {
+    capabilityId: "chat.search",
     summary: "Search message text and thread titles.",
     operands: "<pattern>",
     flags: [
@@ -412,6 +425,7 @@ const CHAT_VERBS = {
     },
   },
   export: {
+    capabilityId: "chat.export",
     summary: "Save threads as Markdown files, one file per thread.",
     operands: "",
     flags: [
@@ -438,6 +452,7 @@ const CHAT_VERBS = {
 
 const HISTORY_VERBS = {
   list: {
+    capabilityId: "history.list",
     summary: "List changes to files, newest first.",
     operands: "[<path>]",
     flags: [
@@ -454,6 +469,7 @@ const HISTORY_VERBS = {
     },
   },
   show: {
+    capabilityId: "history.read",
     summary: "Print a file's text as one change left it.",
     operands: "<change>",
     flags: [{ name: "--before", text: "Print the text from before the change instead." }],
@@ -478,6 +494,7 @@ function automationOperands(input: VerbInput, verb: string, takesRun: boolean): 
 
 const AUTOMATION_VERBS = {
   list: {
+    capabilityId: "automation.list",
     summary: "Read a Collection's automation definitions and on/off file state.", operands: "<collection>",
     parse: input => {
       const [collectionPath, ...extra] = input.operands;
@@ -487,6 +504,7 @@ const AUTOMATION_VERBS = {
     },
   },
   switch: {
+    capabilityId: "automation.switch",
     summary: "Switch one automation on or off in its file.", operands: "<collection> <automation> <on|off>",
     flags: [
       { name: "--base", value: "hash", text: "Use the contentHash returned by automation list." },
@@ -504,6 +522,7 @@ const AUTOMATION_VERBS = {
     },
   },
   buttons: {
+    capabilityId: "automation.buttons.inspect",
     summary: "Inspect Button fields and the actions they require you to confirm.",
     operands: "<collection>",
     flags: [{ name: "--table", value: "table", text: "Inspect the buttons in this dataset table." }],
@@ -516,6 +535,7 @@ const AUTOMATION_VERBS = {
     },
   },
   runs: {
+    capabilityId: "automation.runs.list",
     summary: "List an automation's runs on this computer, newest first.",
     operands: "<collection> <automation>",
     flags: [{ name: "--page", value: "page", text: "List the older runs the last line of an earlier listing names." }],
@@ -530,6 +550,7 @@ const AUTOMATION_VERBS = {
     },
   },
   run: {
+    capabilityId: "automation.run.read",
     summary: "Show one run: what started it, what each step changed, and why it failed.",
     operands: "<collection> <automation> <run>",
     notes: [
@@ -541,6 +562,7 @@ const AUTOMATION_VERBS = {
     },
   },
   retry: {
+    capabilityId: "automation.run.retry",
     summary: "Try a failed run again. It resumes after the last step that finished.",
     operands: "<collection> <automation> <run>",
     flags: [
@@ -556,6 +578,7 @@ const AUTOMATION_VERBS = {
     },
   },
   press: {
+    capabilityId: "automation.button.press",
     summary: "Press a Button field on one record, as a person clicks it in dohc.",
     operands: "<collection> <button> <record>",
     flags: [
@@ -600,6 +623,7 @@ interface JsonVerbHelp {
 }
 
 function jsonVerb(
+  capabilityId: CapabilityId,
   command: string,
   name: string,
   action: string,
@@ -610,6 +634,7 @@ function jsonVerb(
   const label = `${command} ${name}`;
   const invalid = `invalid ${label} arguments; run dohc ${label} --help`;
   return {
+    capabilityId,
     ...help,
     operands: "'<JSON>'",
     fields,
@@ -848,7 +873,7 @@ const DATASET_VERBS: Record<string, CliVerbSpec> = Object.fromEntries(
       const action = option.shape.action.value;
       return [
         action,
-        jsonVerb("dataset", action, action, option.shape, DATASET_HELP[action], (value) => ({
+        jsonVerb(DATASET_CAPABILITIES[action], "dataset", action, action, option.shape, DATASET_HELP[action], (value) => ({
           verb: "dataset",
           request: DatasetRequest.parse(value),
         })),
@@ -862,7 +887,7 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
     const action = option.shape.action.value;
     return [
       action,
-      jsonVerb("app", action, action, option.shape, APP_HELP[action], (value) => ({
+      jsonVerb(APP_PUBLICATION_CAPABILITIES[action], "app", action, action, option.shape, APP_HELP[action], (value) => ({
         verb: "appPublication",
         request: OwnerAppPublicationRequest.parse(value),
       })),
@@ -873,7 +898,7 @@ const APP_VERBS: Record<string, CliVerbSpec> = Object.fromEntries([
     const { name, ...help } = APP_RESPONSE_VERBS[action];
     return [
       name,
-      jsonVerb("app", name, action, option.shape, help, (value) => ({
+      jsonVerb(APP_RESPONSE_CAPABILITIES[action], "app", name, action, option.shape, help, (value) => ({
         verb: "ownerAppResponses",
         request: OwnerAppResponsesRequest.parse(value),
       })),

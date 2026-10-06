@@ -186,8 +186,15 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     if(!Array.isArray(command.input)||!command.input.length||command.input.length>REPLAY_BATCH_EVENTS)reject("invalid_input","Invalid replay batch size.");
     let bytes=0;
     for(const event of command.input)if(!(event.changeset instanceof Uint8Array)||(bytes+=event.changeset.byteLength)>REPLAY_BATCH_BYTES)reject("invalid_input","Invalid replay batch bytes.");
-    // Each event retains the same validation and atomic rows/cursor commit as individual recovery.
-    for(const [index,event] of command.input.entries()){progress(`reapplying saved change ${index+1} of ${command.input.length}`);await handle({kind:"apply",input:event});}
+    if(command.chunkMs!==undefined&&(!Number.isSafeInteger(command.chunkMs)||command.chunkMs<0||command.chunkMs>60_000))reject("invalid_input","Invalid replay chunk duration.");
+    const started=performance.now();
+    // Each event commits its rows and cursor. Return a complete prefix before
+    // costly replay consumes the command cap, so the supervisor can save it.
+    for(const [index,event] of command.input.entries()){
+      progress(`reapplying saved change ${index+1} of ${command.input.length}`);
+      await handle({kind:"apply",input:event});
+      if(command.chunkMs!==undefined&&performance.now()-started>=command.chunkMs)break;
+    }
     // Only the batch's final state is ever served or copied, and a failed batch
     // closes this disposable copy, so one foreign-key check covers every event.
     progress("checking foreign keys after reapplying changes");
@@ -246,7 +253,7 @@ async function handle(command:PersistentCommand):Promise<PersistentResult> {
     } catch (error) {
       rollback();
       if(!constraintConflict || forbidden) throw error;
-      replayThroughShadow(db,{directory:config.directory,tables:config.tables,changeset,databaseBytes:config.limits.databaseBytes},()=>writeMarker(command.input),{progress,datasetCheck});
+      replayThroughShadow(db,{directory:config.directory,tables:config.tables,changeset,databaseBytes:config.limits.databaseBytes,checkForeignKeys:!batching},()=>writeMarker(command.input),{progress,datasetCheck});
       cursor={revision:command.input.revision,digest:command.input.digest};return cursor;
     }
     finally { db.exec("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA ignore_check_constraints=OFF"); }

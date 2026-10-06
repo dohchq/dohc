@@ -135,7 +135,7 @@ async function harness() {
     relayClientForWorkspace: () => ({ pullSharedChannel: pull, push: async () => undefined, claim: async () => undefined }), projectPendingChatBookmarksAfterPull: project,
     normalizeServerUrl: url => url, peekedReceivedGrantKinds: kinds, peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips: () => undefined, notifyRenderer: () => undefined,
-    sharesChanged: () => undefined, reconcileReceivedShares: () => undefined,
+    sharesChanged: () => undefined, reconcileReceivedShares: async () => undefined,
   });
   const chatScope = createChatScopeCapability({
     workspaceAuthorities: authorities,
@@ -295,7 +295,7 @@ describe("registered direct message boundaries", () => {
       onChange: () => undefined,
       operations: {
         claim: async () => undefined,
-        push: async () => ({ pushed: 0, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),
+        push: async () => ({ pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),
         pull: workspacePull,
         recoverOrigin: async () => { throw new Error("unexpected origin recovery"); },
       },

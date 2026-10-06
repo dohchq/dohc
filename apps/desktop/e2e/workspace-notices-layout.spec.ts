@@ -1,3 +1,4 @@
+import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace, openWorkspaceFromFirstRun } from "./helpers/workspace";
@@ -16,16 +17,16 @@ test("@notices-layout workspace fills the window and Notices opens beside the ra
     await page.emulateMedia({ reducedMotion: "reduce" });
 
     for (const theme of ["Light", "Dark"] as const) {
-      await page.getByTestId("activity-settings").click();
-      await page.getByTestId("settings-nav-appearance").click();
+      await page.getByTestId(activityPin("settings")).click();
+      await page.getByTestId(settingsNavPin("appearance")).click();
       await page.getByRole("radio", { name: theme, exact: true }).click();
       await page.getByRole("button", { name: "Close settings" }).click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme.toLowerCase());
 
-      const geometry = await page.evaluate(() => {
+      const geometry = await page.evaluate((pins) => {
         const bounds = (id: string) => document.querySelector(`[data-testid="${id}"]`)!.getBoundingClientRect().toJSON();
-        return { workbench: bounds("workspace-workbench"), bell: bounds("notice-center-toggle"), settings: bounds("activity-settings"), rail: bounds("activity-bar"), height: innerHeight };
-      });
+        return { workbench: bounds("workspace-workbench"), bell: bounds("notice-center-toggle"), settings: bounds(pins.settings), rail: bounds(pins.rail), height: innerHeight };
+      }, { settings: activityPin("settings"), rail: desktopPins.activityBar });
       expect(geometry.workbench.bottom).toBe(geometry.height);
       expect(geometry.bell.bottom).toBeLessThanOrEqual(geometry.settings.top);
       expect(geometry.bell.left).toBeGreaterThanOrEqual(geometry.rail.left);

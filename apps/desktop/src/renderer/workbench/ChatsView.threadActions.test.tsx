@@ -366,9 +366,9 @@ describe("ChatsView work and run links", () => {
       "logs/run-123456789.log",
     );
     await user.click(screen.getByTestId("chats-run-copy-log"));
-    expect(bridgeMock.writeClipboardText).toHaveBeenCalledWith({
-      text: "logs/run-123456789.log",
-    });
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe("logs/run-123456789.log"),
+    );
   });
 });
 

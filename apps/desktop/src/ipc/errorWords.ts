@@ -1,3 +1,4 @@
+import { RESERVED_WORKSPACE_ID_TITLE } from "@dohc/workspace-core";
 import type { DaemonErrorCode } from "@dohc/workspace-engine-client";
 
 // Electron hands a rejected handler's error to the renderer as one string,
@@ -189,6 +190,7 @@ function parse(error: unknown) {
 }
 
 export interface ReadError {
+  title?: string;
   /** What a person reads, or null when only the caller's sentence applies. */
   words: string | null;
   /**
@@ -202,6 +204,9 @@ export interface ReadError {
 
 export function readError(error: unknown): ReadError {
   const { text, name, code, message } = parse(error);
+  if (name === "ReservedWorkspaceIdError") {
+    return { title: RESERVED_WORKSPACE_ID_TITLE, words: message, mapped: false, cause: text };
+  }
   const plain = name === "Error" && code === undefined;
   const entry = ERROR_WORDS[name];
   const lead = message.split(": ")[0];

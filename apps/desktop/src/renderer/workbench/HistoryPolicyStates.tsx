@@ -1,7 +1,8 @@
 import { EyeOff, TriangleAlert } from "lucide-react";
 import type { ReactNode } from "react";
 import type { HistoryPolicyUnreadableResult, WorkspacePolicyPath } from "../../ipc/bridgeContract";
-import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
+import { errorDetails } from "../shell/copyDetails";
+import { CopyButton } from "../ui/CopyButton";
 import { EmptyState, SecondaryButton } from "../ui/controls";
 
 // The two ways History's rules keep a change out of sight. Each is a state of
@@ -52,9 +53,11 @@ export function HistoryHiddenState(props: {
       words={words}
     >
       <SecondaryButton onClick={props.onRetry}>Try again</SecondaryButton>
-      <CopyDetailsButton
+      <CopyButton
         iconOnly
-        details={() =>
+        pinName
+        label="Copy details"
+        getText={() =>
           errorDetails([["Error", words], ...props.result.policyErrors.map((error) => ["Cause", error] as const)])
         }
       />

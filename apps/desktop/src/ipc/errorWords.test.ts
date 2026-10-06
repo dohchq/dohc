@@ -1,3 +1,4 @@
+import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
 import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
@@ -24,6 +25,18 @@ const engineCodes = [
 ].map((match) => match[1]!);
 
 describe("error words", () => {
+  it.each(["link", "shares", "notices"])("keeps the reserved-ID refusal title and body across IPC for %s", (workspaceId) => {
+    const error = new ReservedWorkspaceIdError(workspaceId);
+    const expected = {
+      title: "dohc can't open this folder",
+      words: `Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
+      mapped: false,
+      cause: error.toString(),
+    };
+    expect(readError(error)).toEqual(expected);
+    expect(readError(acrossIpc(error, "desktop:attach-workspace-folder"))).toEqual(expected);
+  });
+
   it("has words, or the caller's words by decision, for every code the engine refuses with", () => {
     expect(engineCodes.length).toBeGreaterThan(30);
     const refusals = ERROR_WORDS.DaemonRefusalError!;

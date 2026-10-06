@@ -425,7 +425,6 @@ function makeBaseBridge(
       settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored" as const,
     })),
-    writeClipboardText: vi.fn(async () => undefined),
     setTitlebarTheme: vi.fn(async () => undefined),
     onUserSettingsChanged: vi.fn(() => () => {}),
     onChatDispatchNotices: vi.fn(() => () => {}),
