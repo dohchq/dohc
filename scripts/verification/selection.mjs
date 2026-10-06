@@ -1,8 +1,6 @@
 import { globSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, posix, relative } from "node:path";
-
-import { selectedGates } from "./verify.mjs";
+import { dirname, join, matchesGlob, posix, relative } from "node:path";
 
 const require = createRequire(new URL("../../apps/desktop/package.json", import.meta.url));
 const dependencyFields = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
@@ -184,31 +182,104 @@ export function uncoveredWorkspaceInputs(files, packages) {
 
 const gateReadCalls = new Set(["include_str!", "include_bytes!", "read_to_string", "fs::read", "File::open",
   "readFileSync", "readFile", "createReadStream", "existsSync"]);
-const gatePathCalls = new Set(["Path::new", "PathBuf::from", "newURL", "join", "resolve"]);
+const gatePathCalls = new Set(["Path::new", "PathBuf::from", "URL", "join", "resolve"]);
+const { typescriptLanguage, tsxLanguage } = require("@codemirror/lang-javascript");
 
-function* literalGateInputs(source, rust) {
-  const stack = [];
-  const tokenPattern = /\s+|\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\\r\n])*'|`(?:\\.|[^`\\])*`|[\w$]+|[^\s]/gu;
-  const regexPattern = /\/(?:\\.|\[(?:\\.|[^\]\\])*\]|[^/\\\r\n\[])+\/[dgimsuvy]*/y;
-  const regexPrefixes = new Set(["(", "[", "{", "=", ",", ":", "!", "?", "|", "&", ";", "return", "=>"]);
+export function workflowFilters(workflow) {
+  const yaml = require("js-yaml");
+  const document = yaml.load(workflow);
+  const filterStep = document.jobs.changes.steps.find(step => step.with?.filters);
+  return yaml.load(filterStep.with.filters);
+}
+
+function gatesFromFilters(files, filters) {
+  return Object.fromEntries(["rust", "js"].map(name =>
+    [name, files.some(file => filters[name].some(pattern => matchesGlob(file, pattern)))]));
+}
+
+export function selectedGates(files, workflow) {
+  return gatesFromFilters(files, workflowFilters(workflow));
+}
+
+export const isGateReader = path => /\.(?:rs|[cm]?[jt]sx?)$/u.test(path);
+
+function* javascriptGateInputs(path, source) {
+  if (!/\b(?:readFileSync|readFile|createReadStream|existsSync|URL|join|resolve)\b/u.test(source)) return;
+  // Lezer treats a CRLF continuation differently from its equivalent LF source.
+  source = source.replaceAll("\r\n", "\n");
+  const language = /\.[jt]sx$/u.test(path) ? tsxLanguage : typescriptLanguage;
+  const cursor = language.parser.parse(source).cursor();
+  do {
+    if (cursor.name !== "String" && cursor.name !== "TemplateString") continue;
+    const node = cursor.node;
+    if (node.parent?.name !== "ArgList" || node.name === "TemplateString" && node.getChild("Interpolation")) continue;
+    const callNode = node.parent.parent;
+    if (callNode.name !== "CallExpression" && callNode.name !== "NewExpression") continue;
+    const callee = callNode.name === "NewExpression" ? callNode.getChild("VariableName") : callNode.firstChild;
+    const nameNode = callee?.name === "MemberExpression" ? callee.lastChild : callee;
+    const call = nameNode ? source.slice(nameNode.from, nameNode.to) : "";
+    if (!gateReadCalls.has(call) && !(gatePathCalls.has(call) && (call !== "URL" || callNode.name === "NewExpression"))) continue;
+    const literal = source.slice(node.from + 1, node.to - 1);
+    if (!literal || /[\\\r\n]/u.test(literal)) continue;
+    let firstArgument = node.parent.firstChild.nextSibling;
+    while (["LineComment", "BlockComment"].includes(firstArgument?.name)) firstArgument = firstArgument.nextSibling;
+    yield { reference: literal, call, directRead: node.from === firstArgument.from && gateReadCalls.has(call) };
+  } while (cursor.next());
+}
+
+function rustTokens(source) {
   const tokens = [];
-  for (let match; (match = tokenPattern.exec(source));) {
-    const token = match[0];
-    if (/^\s/u.test(token) || token.startsWith("//") || token.startsWith("/*")) continue;
-    if (!rust && token === "/" && (!tokens.length || regexPrefixes.has(tokens.at(-1)))) {
-      regexPattern.lastIndex = match.index;
-      const regex = regexPattern.exec(source);
-      if (regex) { tokens.push(regex[0]); tokenPattern.lastIndex = regexPattern.lastIndex; continue; }
+  const pattern = /\s+|\/\/[^\n]*|(?:b|c)?"(?:\\[\s\S]|[^"\\])*"|(?:b)?'(?:\\(?:u\{[\da-fA-F]+\}|x[\da-fA-F]{2}|[\s\S])|[^'\\\r\n])'|[A-Za-z_]\w*|::|[^\s]/y;
+  const rawStart = /(?:br|cr|r)(#*)"/y;
+  for (let offset = 0; offset < source.length;) {
+    if (source.startsWith("/*", offset)) {
+      offset += 2;
+      let depth = 1;
+      while (depth && offset < source.length) {
+        if (source.startsWith("/*", offset)) { depth++; offset += 2; }
+        else if (source.startsWith("*/", offset)) { depth--; offset += 2; }
+        else offset++;
+      }
+      continue;
     }
-    tokens.push(token);
+    rawStart.lastIndex = offset;
+    const raw = rawStart.exec(source);
+    if (raw) {
+      const start = rawStart.lastIndex;
+      const closing = '"' + raw[1];
+      const end = source.indexOf(closing, start);
+      tokens.push({ token: "string", value: end < 0 ? undefined : source.slice(start, end) });
+      offset = end < 0 ? source.length : end + closing.length;
+      continue;
+    }
+    pattern.lastIndex = offset;
+    const match = pattern.exec(source);
+    if (!match) { offset++; continue; }
+    const token = match[0];
+    offset = pattern.lastIndex;
+    if (/^\s/u.test(token) || token.startsWith("//")) continue;
+    const quoted = token.match(/^(?:b|c)?"([\s\S]*)"$/u);
+    const value = quoted?.[1].replace(/\\\r?\n\s*/gu, "");
+    tokens.push({ token, value: value && !value.includes("\\") ? value : undefined });
   }
+  return tokens;
+}
+
+function* rustGateInputs(source) {
+  const tokens = rustTokens(source);
+  const stack = [];
   for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index];
-    const previous = tokens[index - 1];
+    const { token, value } = tokens[index];
     if (token === "(") {
-      const prefix = tokens.slice(Math.max(0, index - 4), index).join("");
-      const call = [...gateReadCalls, ...gatePathCalls].find(name => prefix.endsWith(name)
-        && !/[\w$]/u.test(prefix.at(-name.length - 1) ?? ""));
+      let end = index - 1;
+      let call = tokens[end]?.token ?? "";
+      if (call === "!") call = (tokens[--end]?.token ?? "") + "!";
+      while (tokens[end - 1]?.token === "::" && /^[A-Za-z_]\w*$/u.test(tokens[end - 2]?.token ?? "")) {
+        call = tokens[end - 2].token + "::" + call;
+        end -= 2;
+      }
+      // A fully qualified Rust call can have std:: or another module prefix.
+      call = [...gateReadCalls, ...gatePathCalls].find(name => call === name || call.endsWith("::" + name));
       stack.push({ token, call, first: true });
     } else if (token === "[" || token === "{") {
       stack.push({ token });
@@ -216,32 +287,48 @@ function* literalGateInputs(source, rust) {
       stack.pop();
     } else {
       const argument = stack.at(-1);
-      if (argument?.call && (previous === "(" || previous === ",")) {
-        const literal = token.match(/^(["'`])([^"'`\r\n\\]+)\1$/u);
-        if (literal && !literal[2].includes("${") && [",", ")"].includes(tokens[index + 1])) yield { reference: literal[2], directRead: argument.first && gateReadCalls.has(argument.call) };
+      if (argument?.call && value && ["(", ","].includes(tokens[index - 1]?.token)
+        && [",", ")"].includes(tokens[index + 1]?.token)) {
+        yield { reference: value, call: argument.call, directRead: argument.first && gateReadCalls.has(argument.call) };
       }
       if (token === "," && argument) argument.first = false;
     }
   }
 }
 
+function crateRoot(reader, tracked) {
+  for (let directory = posix.dirname(reader);; directory = posix.dirname(directory)) {
+    if (tracked.has(posix.join(directory, "Cargo.toml"))) return directory;
+    if (directory === ".") return ".";
+  }
+}
+
+export function gateInputMessage({ reader, input, gate, filterLine }) {
+  return `${reader} reads ${input}, but changes to it do not select the ${gate} gate. Add ${filterLine} to the ${gate} filter in .github/workflows/pr-checks.yml.`;
+}
+
 export function uncoveredGateInputs(files, trackedPaths, workflow) {
   const tracked = new Set(trackedPaths);
+  const filters = workflowFilters(workflow);
   const selections = new Map();
   const gatesFor = path => {
-    if (!selections.has(path)) selections.set(path, selectedGates([path], workflow));
+    if (!selections.has(path)) selections.set(path, gatesFromFilters([path], filters));
     return selections.get(path);
   };
   const findings = new Map();
   for (const { path: reader, source } of files) {
-    if (!/\.(?:rs|[cm]?[jt]sx?)$/u.test(reader)) continue;
+    if (!isGateReader(reader)) continue;
+    const rust = reader.endsWith(".rs");
     const gates = Object.entries(gatesFor(reader))
-      .filter(([gate, selected]) => selected && (gate === "rust") === reader.endsWith(".rs")).map(([gate]) => gate);
+      .filter(([gate, selected]) => selected && (gate === "rust") === rust).map(([gate]) => gate);
     if (!gates.length) continue;
-    for (const { reference, directRead } of literalGateInputs(source, reader.endsWith(".rs"))) {
-      const input = /^\.{1,2}\//u.test(reference)
-        ? posix.normalize(posix.join(posix.dirname(reader), reference))
-        : directRead ? posix.normalize(reference) : null;
+    const inputs = rust ? rustGateInputs(source) : javascriptGateInputs(reader, source);
+    const runtimeBase = rust ? crateRoot(reader, tracked) : ".";
+    for (const { reference, directRead, call } of inputs) {
+      const include = rust && (call === "include_str!" || call === "include_bytes!");
+      const input = include || /^\.{1,2}\//u.test(reference)
+        ? posix.normalize(posix.join(include || !rust ? posix.dirname(reader) : runtimeBase, reference))
+        : directRead ? posix.normalize(posix.join(runtimeBase, reference)) : null;
       if (!input || !tracked.has(input)) continue;
       for (const gate of gates) {
         if (!gatesFor(input)[gate]) findings.set(`${gate}|${reader}|${input}`,

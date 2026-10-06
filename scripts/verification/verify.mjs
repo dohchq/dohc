@@ -8,7 +8,7 @@ import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
 import { startTiming, timed } from "./timing.mjs";
 import { testWorkspace } from "./js-tests.mjs";
-import { readWorkspacePackages, selectJavaScript } from "./selection.mjs";
+import { readWorkspacePackages, selectJavaScript, selectedGates, workflowFilters } from "./selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 import { acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
@@ -35,16 +35,7 @@ function passedSpecTitles(suites = []) {
     ...passedSpecTitles(suite.suites),
   ]);
 }
-function workflowFilters(workflow) {
-  const yaml = require("js-yaml");
-  const document = yaml.load(workflow);
-  const filterStep = document.jobs.changes.steps.find((step) => step.with?.filters);
-  return yaml.load(filterStep.with.filters);
-}
-export function selectedGates(files, workflow) {
-  const filters = workflowFilters(workflow);
-  return Object.fromEntries(["rust", "js"].map((name) => [name, files.some((file) => filters[name].some((pattern) => matchesGlob(file, pattern)))]));
-}
+export { selectedGates } from "./selection.mjs";
 
 export function changedFiles(baseCommit, includeUncommitted = false, root = repoRoot) {
   const paths = (args) => readGit(args, root).split("\0").filter(Boolean);
