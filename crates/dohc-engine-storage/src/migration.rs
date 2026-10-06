@@ -4645,8 +4645,9 @@ mod tests {
     fn sharing_decline_migration_clears_head_claim_delete_and_restore() {
         let mut conn = Connection::open_in_memory().unwrap();
         let ctx = MigrationContext::current(1_000);
-        let previous = &BASELINE_MIGRATIONS[..BASELINE_MIGRATIONS.len() - 1];
-        run_migrations(&mut conn, previous, &ctx, &NoFaults).unwrap();
+        let before = migration_index("v2-ydoc-sharing-declined");
+        assert_eq!(BASELINE_MIGRATIONS[before].ordinal, 31);
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..before], &ctx, &NoFaults).unwrap();
         conn.execute_batch("INSERT INTO versioned_workspaces VALUES ('ws','main'); INSERT INTO versions(workspace_id,version_id,kind,name,created_at_ms) VALUES ('ws','main','main','main',0); INSERT INTO file_objects VALUES ('ws','doc',0);").unwrap();
         for value in ['a', 'b'] {
             conn.execute(
@@ -4663,7 +4664,7 @@ mod tests {
         conn.execute("INSERT INTO ydoc_docs (workspace_id,version_id,object_id,content_kind,regime,head_update_seq,head_snapshot_seq,lineage_claim_status,updated_at_ms) VALUES ('ws','main','doc','plaintext','local-only',0,0,'unclaimed',0)", []).unwrap();
         conn.execute("INSERT INTO snapshots (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin) VALUES ('ws','main','doc','notes/a.md',?1,0,'moment','api')", ["a".repeat(64)]).unwrap();
         assert_eq!(
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).unwrap(),
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..=before], &ctx, &NoFaults).unwrap(),
             MigrationOutcome::Applied { newly_applied: 1 }
         );
         let refusal = format!(
