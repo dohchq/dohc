@@ -101,7 +101,6 @@ import {
   MenuCommand,
   SearchResultsEvent,
   WorkbenchMenuCommand,
-  WriteClipboardTextPayload,
   ReadWorkspaceTextResult,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
@@ -2479,21 +2478,6 @@ describe("workspace UI state IPC contract", () => {
       activeEditorGroup: "missing",
     };
     expect(GetWorkspaceUiStateResult.parse(stale)).toEqual(stale);
-  });
-});
-
-describe("clipboard IPC contract", () => {
-  it("accepts bounded text and rejects empty or oversized writes", () => {
-    expect(WriteClipboardTextPayload.parse({ text: "copy me" }).text).toBe(
-      "copy me",
-    );
-    expect(WriteClipboardTextPayload.safeParse({ text: "" }).success).toBe(false);
-    expect(
-      WriteClipboardTextPayload.safeParse({ text: "x".repeat(20_001) }).success,
-    ).toBe(false);
-    expect(
-      WriteClipboardTextPayload.safeParse({ text: "copy", secret: "nope" }).success,
-    ).toBe(false);
   });
 });
 

@@ -1042,8 +1042,7 @@ body {
   background: var(--dohc-agent);
 }
 
-.dohc-code-language-select,
-.dohc-code-copy-btn {
+.dohc-code-language-select {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -1055,15 +1054,10 @@ body {
     border-color 120ms ease-out;
 }
 
-.dohc-code-language-select:hover,
-.dohc-code-copy-btn:hover {
+.dohc-code-language-select:hover {
   border-color: var(--dohc-line);
   @apply bg-hover;
   color: var(--dohc-ink);
-}
-
-.dohc-code-copy-btn {
-  padding: 2px 7px;
 }
 
 /* Shared popover box treatment. `overflow` is deliberately NOT shared: the

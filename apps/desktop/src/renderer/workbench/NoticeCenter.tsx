@@ -18,7 +18,8 @@ import { useAllOrphanedDrafts } from "../orphanedDrafts";
 import { RecoveryList } from "../RecoveryList";
 import { requestGuardedUpdateInstall } from "../RecoveryCloseGuard";
 import { useDesktopUpdateStateFeed } from "../useDesktopUpdateStateFeed";
-import { CopyDetailsButton, errorDetails } from "../shell/copyDetails";
+import { errorDetails } from "../shell/copyDetails";
+import { CopyButton } from "../ui/CopyButton";
 import type { AutomationHoldNotice, AutomationStopNotice } from "../shell/useAutomationHolds";
 import { relativeTime } from "../relativeTime";
 import { UPDATE_REQUIRED_LABEL } from "./WorkspaceSyncStatus";
@@ -306,12 +307,13 @@ export function WorkspaceErrorToast(props: {
           Try again
         </button>
       ) : null}
-      <CopyDetailsButton
+      <CopyButton
         key={error.id}
         iconOnly
+        pinName
         label={error.tone === "success" ? "Copy notice details" : "Copy error details"}
-        data-testid="workspace-shell-error-copy"
-        details={() => error.details}
+        testId="workspace-shell-error-copy"
+        getText={() => error.details}
       />
       {props.onHide ? (
         <button
@@ -365,11 +367,12 @@ export function LocalNoticeRow(props: {
             </button>
           ))}
           {notice.copyText !== undefined ? (
-            <CopyDetailsButton
+            <CopyButton
               iconOnly
+              pinName
               label={notice.copyLabel ?? "Copy error details"}
-              data-testid={`notice-${notice.id}-copy`}
-              details={() => notice.copyText ?? ""}
+              testId={`notice-${notice.id}-copy`}
+              getText={() => notice.copyText ?? ""}
             />
           ) : null}
           {notice.onDismiss ? (
@@ -1248,12 +1251,13 @@ export function NoticeCenter(props: {
                 </button>
               ) : null}
               {sentToast.notice.kind === "automation-failed" ? (
-                <CopyDetailsButton
+                <CopyButton
                   key={sentToastKey}
                   iconOnly
+                  pinName
                   label="Copy error details"
-                  data-testid="sent-notice-toast-copy"
-                  details={() => failureDetails(sentToast.notice)}
+                  testId="sent-notice-toast-copy"
+                  getText={() => failureDetails(sentToast.notice)}
                 />
               ) : null}
               {sentToast.openable && props.onOpenSentNotice ? (
@@ -1302,12 +1306,13 @@ export function NoticeCenter(props: {
                   {liveDeliveryAction.label}
                 </button>
               ) : null}
-              <CopyDetailsButton
+              <CopyButton
                 key={liveDeliveryKey}
                 iconOnly
+                pinName
                 label="Copy live editing details"
-                data-testid="owner-live-delivery-toast-copy"
-                details={() => liveDeliveryDetails}
+                testId="owner-live-delivery-toast-copy"
+                getText={() => liveDeliveryDetails}
               />
               <button
                 type="button"
@@ -1340,12 +1345,13 @@ export function NoticeCenter(props: {
                   Live documents
                 </button>
               ) : null}
-              <CopyDetailsButton
+              <CopyButton
                 key={refusalsKey}
                 iconOnly
+                pinName
                 label="Copy share details"
-                data-testid="owner-live-refusals-toast-copy"
-                details={() => refusalsDetails}
+                testId="owner-live-refusals-toast-copy"
+                getText={() => refusalsDetails}
               />
               {/* Closing ends the announcement; the row stays in Notices. */}
               <button
@@ -1378,12 +1384,13 @@ export function NoticeCenter(props: {
                   Send report
                 </button>
               ) : null}
-              <CopyDetailsButton
+              <CopyButton
                 key={crashReport.revision}
                 iconOnly
+                pinName
                 label="Copy report"
-                data-testid="crash-report-toast-copy"
-                details={() => crashReport.text}
+                testId="crash-report-toast-copy"
+                getText={() => crashReport.text}
               />
               {/* Closing ends the announcement; the row stays in Notices. */}
               <button
@@ -1631,11 +1638,12 @@ export function NoticeCenter(props: {
                               ) : null}
                               {copies ? (
                                 <span className={`${openNotice || runNow || retry ? "" : "ml-auto "}flex shrink-0`}>
-                                  <CopyDetailsButton
+                                  <CopyButton
                                     iconOnly
+                                    pinName
                                     label="Copy error details"
-                                    data-testid={`sent-notice-${notice.noticeId}-copy`}
-                                    details={() => failureDetails(notice)}
+                                    testId={`sent-notice-${notice.noticeId}-copy`}
+                                    getText={() => failureDetails(notice)}
                                   />
                                 </span>
                               ) : null}

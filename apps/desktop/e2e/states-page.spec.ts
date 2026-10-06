@@ -263,18 +263,17 @@ test("@states-page @states-baselines every shared part matches its baseline in b
 
     for (const theme of THEMES) {
       const pane = page.getByTestId(`states-${theme}`);
-      const copied = pane.getByTestId(`states-copy-copied-${theme}`);
-      await press(page, copied);
-      await expect(copied).toHaveText("Copied");
-      const refused = pane.getByTestId(`states-copy-refused-${theme}`);
-      await press(page, refused);
-      await expect(refused).toHaveText("Couldn't copy");
-      const details = pane.getByTestId(`states-copy-details-copied-${theme}`);
-      await press(page, details);
-      await expect(details).toHaveText("Copied");
-      const detailsIcon = pane.getByTestId(`states-copy-details-icon-copied-${theme}`);
-      await press(page, detailsIcon);
-      await expect(detailsIcon).toHaveAttribute("title", "Copied");
+      for (const [answer, words] of [["copied", "Copied"], ["failed", "Couldn't copy"]] as const) {
+        const withWords = pane.getByTestId(`states-copy-words-${answer}-${theme}`);
+        await press(page, withWords);
+        await expect(withWords).toHaveText(words);
+        const icon = pane.getByTestId(`states-copy-icon-${answer}-${theme}`);
+        await press(page, icon);
+        await expect(icon).toHaveAttribute("title", words);
+      }
+      const field = pane.getByTestId(`states-copy-field-copied-${theme}`);
+      await press(page, field);
+      await expect(field).toHaveAttribute("title", "Copied");
     }
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useEffect, useRef, useState } from "react";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -68,6 +68,17 @@ export interface ShellError {
   // The toast was closed; the row in Notices stays until dismissed there.
   seen: boolean;
 }
+
+// The error hook a notice owner hands to a shared part that reports its own
+// failure, such as a copy the clipboard refused: `reportShellFailure`, for a
+// failure the part has already worded. Outside an owner, the part says it in
+// place only.
+export type ReportShellFailure = (failure: {
+  message: string;
+  cause?: unknown;
+  retry?: (() => void) | null;
+}) => void;
+export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
 
 export function useShellError(workspaceId: string) {
   const [shellErrors, setShellErrors] = useState<readonly ShellError[]>([]);
