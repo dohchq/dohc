@@ -45,6 +45,9 @@ allow = [
     # CC0-1.0: public-domain dedication with a permissive fallback. Enters via
     # the notify watcher crate itself.
     "CC0-1.0",
+    # BSL-1.0: permissive, OSI-approved, FSF-libre. Enters via
+    # xxhash-rust for notify's polling content hash.
+    "BSL-1.0",
     # CDLA-Permissive-2.0: permissive data license for the Mozilla CA root
     # dataset bundled by webpki-roots (ureq -> rustls).
     "CDLA-Permissive-2.0",
