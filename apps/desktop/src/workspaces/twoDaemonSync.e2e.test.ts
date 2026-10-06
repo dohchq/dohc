@@ -77,6 +77,16 @@ interface LiveDaemonCapture {
   close(): Promise<void>;
 }
 
+async function pushUntilDrained(relay: EngineRelayWorkspaceClient) {
+  let result = await relay.push();
+  let pushed = result.pushed;
+  while (result.hasMore) {
+    result = await relay.push();
+    pushed += result.pushed;
+  }
+  return { ...result, pushed };
+}
+
 async function openLiveDaemonCapture(input: {
   workspaceId: string;
   rootPath: string;
@@ -277,13 +287,13 @@ async function expectTwoDaemonFileSync(input: {
       // Chat creation always journals, so it can establish that position before
       // the first file initializes the versioned workspace.
       await daemonA.chats.ensureGeneralChannel({ workspaceId: input.workspaceId });
-      const bootstrapPush = await daemonA.relay.push();
+      const bootstrapPush = await pushUntilDrained(daemonA.relay);
       expect(bootstrapPush.pushed).toBeGreaterThan(0);
     }
 
     await writeAndCapture(daemonA, rootA, input.path, input.contents);
 
-    const push = await daemonA.relay.push();
+    const push = await pushUntilDrained(daemonA.relay);
     expect(push.pushed).toBeGreaterThan(0);
 
     daemonB = await openJoinedDaemonCapture({
@@ -312,7 +322,7 @@ async function expectTwoDaemonFileSync(input: {
         input.reverse.path,
         input.reverse.contents,
       );
-      expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
       await pullAndExpect(
         daemonA,
         rootA,
@@ -325,7 +335,7 @@ async function expectTwoDaemonFileSync(input: {
       await daemonB.close();
       daemonB = null;
       await writeAndCapture(daemonA, rootA, input.path, input.restart.contents);
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       daemonB = await openLiveDaemonCapture({
         workspaceId: input.workspaceId,
         rootPath: rootB,
@@ -406,7 +416,7 @@ it.skipIf(engine.missing).each([
     const relay = source.relay.bind({ ...source.workspace, relay: relayConnection });
     await relay.claim();
     await source.chats.ensureGeneralChannel({ workspaceId });
-    await relay.push();
+    await pushUntilDrained(relay);
     const adapter = await source.sessions.run(source.workspace, async ({client, workspace}) => new VersionedLiveAdapter(client, workspace, {workspaceId}));
     await adapter.ensureMainVersion({workspaceId});
     await adapter.writeTextFile({workspaceId, versionId: "main", path, text: hasId ? `---\nid: ${recordId}\n---\n\n${body}` : body,
@@ -424,7 +434,7 @@ it.skipIf(engine.missing).each([
       } finally { scratch.destroy(); }
     }, undefined, { actorOriginId: "local-person", attribution: { actorKind: "human" }, idempotencyKey: "native-baseline" });
     await seeded.settleNow();
-    await relay.push();
+    await pushUntilDrained(relay);
     await seeded.close();
     const share = await fetch(`${proxy.origin}/sync/${workspaceId}/shares`, {method: "POST",
       headers: {authorization: `Bearer ${relayConnection.token}`, "content-type": "application/json"},
@@ -455,7 +465,7 @@ it.skipIf(engine.missing).each([
     await adapter.writeTextFile({workspaceId, versionId: "main", path: "tasks/collection.yaml", text: "fields:\n  Name:\n    type: text\n",
       publish: true, metadata: {origin: "api"}});
     await expect.poll(async () => (await adapter.listPendingCollectionAdoptions()).adoptions.length, {timeout: 60_000}).toBe(1);
-    await relay.push();
+    await pushUntilDrained(relay);
     const pending = (await adapter.listPendingCollectionAdoptions()).adoptions[0]!;
     const bindingDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
     try {
@@ -576,7 +586,7 @@ it.skipIf(engine.missing).each([
         });
       } finally { await formula.close(); }
     }
-    await relay.push();
+    await pushUntilDrained(relay);
     peer = await openJoinedDaemonCapture({workspaceId, rootPath: rootB, relay: relayConnection});
     await pullAndExpect(peer, rootB, path, markdown);
     expect(errors).toEqual([]);
@@ -609,7 +619,7 @@ it.skipIf(engine.missing).each([true, false])(
       const relay = source.relay.bind({ ...source.workspace, relay: relayConnection });
       await relay.claim();
       await source.chats.ensureGeneralChannel({ workspaceId });
-      await relay.push();
+      await pushUntilDrained(relay);
       const adapter = await source.sessions.run(source.workspace, async ({ client, workspace }) =>
         new VersionedLiveAdapter(client, workspace, { workspaceId }));
       await adapter.ensureMainVersion({ workspaceId });
@@ -698,7 +708,7 @@ it.skipIf(engine.missing).each(["new", "legacy", "accepted"] as const)(
       let relay = source.relay.bind({ ...source.workspace, relay: relayConnection });
       await relay.claim();
       await source.chats.ensureGeneralChannel({ workspaceId });
-      await relay.push();
+      await pushUntilDrained(relay);
       await capture.writeAuthoredFile(join(rootA, "tasks/collection.yaml"), "fields: {}\n", { kind: "human", humanId: "local-person" });
       const captureClient = await source.sessions.run(source.workspace, async ({ client }) => client);
       if (!captureClient.onEvent) throw new Error("The real daemon has no capture event source.");
@@ -722,7 +732,7 @@ it.skipIf(engine.missing).each(["new", "legacy", "accepted"] as const)(
       if (queueStyle !== "new") {
         // Restore an older build's wire row with the daemon stopped.
         // Accepted agent rows also exist remotely, with a lost acknowledgement.
-        if (queueStyle === "accepted") expect((await relay.push()).pushed).toBeGreaterThan(0);
+        if (queueStyle === "accepted") expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
         await capture.stop();
         await owner.close();
         capture = undefined;
@@ -767,7 +777,7 @@ it.skipIf(engine.missing).each(["new", "legacy", "accepted"] as const)(
         capture = createWorkspaceEngineCapture({ ...owner.workspace, rustEngineSessions: owner.sessions });
         relay = owner.relay.bind({ ...owner.workspace, relay: relayConnection });
       }
-      expect((await relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
       const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
       const engineDb = new DatabaseSync(join(rootA, SECRET_FILE_STORE_RELATIVE_PATH), { readOnly: true });
       try {
@@ -837,7 +847,7 @@ it.skipIf(engine.missing)(
       expect(await readFile(join(root, "plan.md"), "utf8")).toBe("first\n");
       expect(await restoreMoment(restoredMomentId)).toMatchObject({ metadata: { origin: "restore" }, authors: [person] });
 
-      expect((await relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(relay)).pushed).toBeGreaterThan(0);
       const relayDb = new DatabaseSync(relayServer.dbPath, { readOnly: true });
       try {
         const sent = relayDb.prepare(
@@ -937,8 +947,8 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
         path,
         textB,
       );
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
-      expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
 
       // Both editors remain live. Each pull may persist the foreign base, but
       // it must not arbitrate behind the editor or change either projection.
@@ -977,7 +987,7 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
       await daemonB.capture.resolveConflict(conflict.id, { kind: resolution });
       expect(await readFile(join(rootB, path), "utf8")).toBe(chosen);
       expect(await daemonB.capture.countOpenConflicts()).toBe(0);
-      expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
       await pullAndExpect(daemonA, rootA, path, chosen);
       // Advance B's cursor past its own resolution before reopening editors.
       await daemonB.capture.runRelaySync((materializePage) =>
@@ -999,13 +1009,13 @@ it.skipIf(engine.missing).each(["keep-current", "apply-incoming"] as const)(
           editorA.session.lineageClaimId,
         );
         await typeAtEnd(editorA, "continued on A\n");
-        expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+        expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
         await daemonB.capture.runRelaySync((materializePage) =>
           daemonB!.relay.pull(materializePage),
         );
         await vi.waitFor(() => expect(shown(editorB)).toBe(afterA), arrival);
         await typeAtEnd(editorB, "continued on B\n");
-        expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
+        expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
         await daemonA.capture.runRelaySync((materializePage) =>
           daemonA!.relay.pull(materializePage),
         );
@@ -1081,8 +1091,8 @@ it.skipIf(engine.missing)(
       });
       const seedA = await openIndependentPlaintextLineage(daemonA, rootA, path, textA);
       const seedB = await openIndependentPlaintextLineage(daemonB, rootB, path, textB);
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
-      expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
       await pull(daemonA);
       await pull(daemonB);
       await seedB.close({ settle: false });
@@ -1112,7 +1122,7 @@ it.skipIf(engine.missing)(
       expect(await daemonB.capture.countOpenConflicts()).toBe(1);
 
       await daemonB.capture.resolveConflict(seedConflict.id, { kind: "keep-current" });
-      expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
       const deferredPull = await pull(daemonA);
       expect(deferredPull.fetched).toBeGreaterThan(0);
       expect(deferredPull.sharingDeclined).toEqual([]);
@@ -1143,7 +1153,7 @@ it.skipIf(engine.missing)(
       expect((await daemonA.capture.listOpenConflictsPage()).conflicts).toEqual(reviews);
 
       await daemonA.capture.resolveConflict(reviews[0]!.id, { kind: "keep-current" });
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       await pull(daemonB);
       await pull(daemonA);
       expect(await daemonA.capture.countOpenConflicts(), "A after review resolution").toBe(0);
@@ -1155,7 +1165,7 @@ it.skipIf(engine.missing)(
         incoming: { text: liveA },
       });
       await daemonB.capture.resolveConflict(peerReviews[0]!.id, { kind: "apply-incoming" });
-      expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
       await pull(daemonA);
       await pull(daemonB);
       expect(await daemonB.capture.countOpenConflicts(), "B after review resolution").toBe(0);
@@ -1168,12 +1178,12 @@ it.skipIf(engine.missing)(
       expect(editorA.session.lineageClaimId).toMatch(/^[a-f0-9]{64}$/);
       expect(editorB.session.lineageClaimId).toBe(editorA.session.lineageClaimId);
       await typeAtEnd(editorA, "continued on A\n");
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       await pull(daemonB);
       const arrival = { timeout: REAL_DAEMON_DEADLINE_MS };
       await vi.waitFor(() => expect(shown(editorB)).toBe(`${liveA}continued on A\n`), arrival);
       await typeAtEnd(editorB, "continued on B\n");
-      expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
       await pull(daemonA);
       const finalText = `${liveA}continued on A\ncontinued on B\n`;
       await vi.waitFor(() => expect(shown(editorA)).toBe(finalText), arrival);
@@ -1182,7 +1192,7 @@ it.skipIf(engine.missing)(
 
       // Drain both origins, then demand an empty, stable cursor on each peer.
       // Check durable refusal notices too: refused envelopes can advance cursors.
-      for (const daemon of [daemonA, daemonB]) await daemon.relay.push();
+      for (const daemon of [daemonA, daemonB]) await pushUntilDrained(daemon.relay);
       for (const daemon of [daemonA, daemonB]) await pull(daemon);
       for (const [daemon, root] of [
         [daemonA, rootA],
@@ -1191,7 +1201,7 @@ it.skipIf(engine.missing)(
         expect(await readFile(join(root, path), "utf8")).toBe(finalText);
         expect(await daemon.capture.countOpenConflicts()).toBe(0);
         expect(await daemon.refusalNotices()).toEqual({ notices: [] });
-        expect(await daemon.relay.push()).toMatchObject({
+        expect(await pushUntilDrained(daemon.relay)).toMatchObject({
           pushed: 0,
           ownerAdmissionPending: [],
           sharingDeclined: [],
@@ -1233,9 +1243,9 @@ it.skipIf(engine.missing)(
       });
       await daemonA.relay.claim();
       await daemonA.chats.ensureGeneralChannel({ workspaceId });
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       await writeAndCapture(daemonA, rootA, path, "shared base\n");
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
 
       daemonB = await openJoinedDaemonCapture({
         workspaceId,
@@ -1246,8 +1256,8 @@ it.skipIf(engine.missing)(
 
       await writeAndCapture(daemonA, rootA, path, "edit from A\n");
       await writeAndCapture(daemonB, rootB, path, "edit from B\n");
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
-      expect((await daemonB.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonB.relay)).pushed).toBeGreaterThan(0);
 
       await daemonA.capture.runRelaySync((materializePage) =>
         daemonA!.relay.pull(materializePage),
@@ -1264,7 +1274,7 @@ it.skipIf(engine.missing)(
       });
       expect(await readFile(join(rootA, path), "utf8")).toBe("edit from B\n");
       expect(await daemonA.capture.countOpenConflicts()).toBe(0);
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
 
       await daemonB.capture.runRelaySync((materializePage) =>
         daemonB!.relay.pull(materializePage),
@@ -1337,9 +1347,9 @@ it.skipIf(engine.missing)(
       });
       await daemonA.relay.claim();
       await daemonA.chats.ensureGeneralChannel({ workspaceId });
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       await writeAndCapture(daemonA, rootA, "notes/base.md", "base\n");
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       await daemonA.close();
       daemonA = null;
       await copyFile(engineDb, backupDb);
@@ -1355,7 +1365,7 @@ it.skipIf(engine.missing)(
         "notes/relay-ahead.md",
         "relay is ahead of the backup\n",
       );
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       await daemonA.close();
       daemonA = null;
 
@@ -1433,7 +1443,7 @@ it.skipIf(engine.missing).each([false, true])(
       await daemonA.relay.claim();
       const sourceSession = await openIndependentPlaintextLineage(daemonA, rootA, path, seed);
       const sourceMoment = (await daemonA.capture.listMoments({ limit: 100 })).moments.find((moment) => moment.path === path)!;
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
       daemonB = await openJoinedDaemonCapture({ workspaceId, rootPath: rootB, relay: connection });
       await pullAndExpect(daemonB, rootB, path, seed);
       const peerEditor = await openEditor(daemonB, path);
@@ -1444,7 +1454,7 @@ it.skipIf(engine.missing).each([false, true])(
         const sourceEditor = await openEditor(daemonA, path);
         try {
           await typeAtEnd(sourceEditor, "origin after artifact\n");
-          expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+          expect((await pushUntilDrained(daemonA.relay)).pushed).toBeGreaterThan(0);
           await daemonB.capture.runRelaySync((page) => daemonB!.relay.pull(page));
           await vi.waitFor(() => expect(shown(peerEditor)).toContain("origin after artifact\n"), {
             timeout: REAL_DAEMON_DEADLINE_MS,
@@ -1517,17 +1527,40 @@ it.skipIf(engine.missing)(
         rootPath: rootA,
         relay: relayConnection,
       });
-      await daemonA.relay.claim();
-      await daemonA.chats.ensureGeneralChannel({ workspaceId });
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
 
-      // A starts the document in an editor and shares it.
+      // A opens the document before enrollment. Sync must claim it and send
+      // those bytes on its own continuation timer, without another edit.
+      await daemonA.relay.claim();
       await mkdir(join(rootA, "notes"), { recursive: true });
       await writeFile(join(rootA, path), "");
       const editorA = await openEditor(daemonA, path);
       editors.push(editorA);
       await typeAtEnd(editorA, "Starting together.\n");
-      expect((await daemonA.relay.push()).pushed).toBeGreaterThan(0);
+      const pushes: { pushed: number; hasMore: boolean }[] = [];
+      const ownerRelay = daemonA.relay;
+      const syncA = createRelaySyncEngine({
+        rootDir: rootA,
+        relay: relayConnection,
+        operations: {
+          ...ownerRelay,
+          async push() {
+            const result = await ownerRelay.push();
+            pushes.push(result);
+            return result;
+          },
+        },
+        capture: daemonA.capture,
+        onChange: () => undefined,
+        debounceMs: 0,
+        waitForChange: createRelayLogWait({ workspaceId, relay: relayConnection }),
+      });
+      engines.push(syncA);
+      await syncA.start();
+      expect(pushes[0]).toMatchObject({ pushed: 0, hasMore: true });
+      await vi.waitFor(() => {
+        expect(pushes.some(push => push.pushed > 0)).toBe(true);
+        expect(pushes.at(-1)?.hasMore).toBe(false);
+      }, arrival);
 
       // B joins, receives the document, and opens it too.
       daemonB = await openJoinedDaemonCapture({
@@ -1544,31 +1577,25 @@ it.skipIf(engine.missing)(
 
       // From here the typing device pushes as the desktop does after a local
       // write, and nothing asks the idle device to pull: it waits on the relay.
-      for (const [daemon, rootPath] of [
-        [daemonA, rootA],
-        [daemonB, rootB],
-      ] as const) {
-        const sync = createRelaySyncEngine({
-          rootDir: rootPath,
-          relay: relayConnection,
-          operations: daemon.relay,
-          capture: daemon.capture,
-          onChange: () => undefined,
-          debounceMs: 0,
-          waitForChange: createRelayLogWait({ workspaceId, relay: relayConnection }),
-        });
-        engines.push(sync);
-        await sync.start();
-      }
-      const [syncA, syncB] = engines;
+      const syncB = createRelaySyncEngine({
+        rootDir: rootB,
+        relay: relayConnection,
+        operations: daemonB.relay,
+        capture: daemonB.capture,
+        onChange: () => undefined,
+        debounceMs: 0,
+        waitForChange: createRelayLogWait({ workspaceId, relay: relayConnection }),
+      });
+      engines.push(syncB);
+      await syncB.start();
 
       // Each device types while the other's editor sits idle, and the idle
       // editor shows the edit without being touched.
       await typeAtEnd(editorA, "Typed on A.\n");
-      syncA!.queueSync();
+      syncA.queueSync();
       await vi.waitFor(() => expect(shown(editorB)).toContain("Typed on A."), arrival);
       await typeAtEnd(editorB, "Typed on B.\n");
-      syncB!.queueSync();
+      syncB.queueSync();
       await vi.waitFor(() => expect(shown(editorA)).toContain("Typed on B."), arrival);
 
       // Both editors and both files hold every line exactly once.

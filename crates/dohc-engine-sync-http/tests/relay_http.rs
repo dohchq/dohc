@@ -292,8 +292,11 @@ fn log_page(ops: Vec<Value>, next_cursor: i64, has_more: bool) -> TestResponse {
 #[derive(Default)]
 struct PushBoundaryState {
     have_sizes: Vec<usize>,
+    have_sha256s: Vec<String>,
+    missing_sha256s: Vec<String>,
     log_sizes: Vec<usize>,
-    blob_puts: usize,
+    origin_seqs: Vec<i64>,
+    blob_puts: Vec<String>,
     auth_failures: usize,
 }
 
@@ -355,12 +358,20 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
                 assert_eq!(body["replicationEpoch"], "epoch-1");
                 assert_eq!(body["streamIdentity"], "stream-1");
                 state.have_sizes.push(sha256s.len());
+                state.have_sha256s.extend(
+                    sha256s
+                        .iter()
+                        .map(|sha| sha.as_str().expect("sha").to_owned()),
+                );
+                state
+                    .missing_sha256s
+                    .push(sha256s[0].as_str().expect("missing sha").to_owned());
                 TestResponse::json(200, json!({"ok": true, "missing": [sha256s[0].clone()]}))
             }
             ("PUT", path) if path.starts_with("/sync/ws/blobs/") => {
                 let sha256 = path.rsplit('/').next().expect("sha path");
                 assert_eq!(hex_sha256(&request.body), sha256);
-                state.blob_puts += 1;
+                state.blob_puts.push(sha256.to_owned());
                 TestResponse::json(200, json!({"ok": true}))
             }
             ("POST", "/sync/ws/log") => {
@@ -369,6 +380,10 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
                 assert_eq!(body["streamIdentity"], "stream-1");
                 let ops = body["ops"].as_array().expect("ops array");
                 state.log_sizes.push(ops.len());
+                state.origin_seqs.extend(
+                    ops.iter()
+                        .map(|op| op["originSeq"].as_i64().expect("origin seq")),
+                );
                 let current = ops
                     .last()
                     .and_then(|op| op["originSeq"].as_i64())
@@ -388,28 +403,52 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
         }
     });
 
-    let outcome = RelaySyncClient::new(transport(&server))
-        .push_workspace(
-            &mut engine,
-            "ws",
-            &NoFaults,
-            &dohc_engine_sync::NoLiveLeases,
-            1_000,
-            0,
-        )
-        .expect("push workspace");
-    assert!(matches!(
-        outcome,
-        SyncPassOutcome::Complete { pushed: 501, .. }
-    ));
+    let client = RelaySyncClient::new(transport(&server));
+    let mut total_pushed = 0;
+    let mut passes = Vec::new();
+    loop {
+        let outcome = client
+            .push_workspace(
+                &mut engine,
+                "ws",
+                &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
+                1_000,
+                0,
+            )
+            .expect("push workspace");
+        let SyncPassOutcome::Complete {
+            pushed, has_more, ..
+        } = outcome
+        else {
+            panic!("push must complete: {outcome:?}");
+        };
+        total_pushed += pushed;
+        passes.push((pushed, has_more));
+        if !has_more {
+            break;
+        }
+        assert!(
+            pushed > 0 && total_pushed < 501,
+            "push must make bounded progress"
+        );
+    }
+    assert_eq!(passes, [(500, true), (1, false)]);
+    assert_eq!(total_pushed, 501);
     assert_eq!(
         read_pushed_seq(&engine, "ws", "local").expect("pushed seq"),
         500
     );
-    let state = state.lock().expect("push state");
+    let mut state = state.lock().expect("push state");
     assert_eq!(state.have_sizes, [2_000, 1]);
     assert_eq!(state.log_sizes, [500, 1]);
-    assert_eq!(state.blob_puts, 2);
+    assert_eq!(state.origin_seqs, (0..501).collect::<Vec<_>>());
+    state.have_sha256s.sort();
+    let mut expected_sha256s: Vec<_> = blobs.iter().map(|(sha, _)| sha.clone()).collect();
+    expected_sha256s.sort();
+    assert_eq!(state.have_sha256s, expected_sha256s);
+    assert_eq!(state.blob_puts.len(), 2);
+    assert_eq!(state.blob_puts, state.missing_sha256s);
     assert_eq!(state.auth_failures, 0);
 }
 

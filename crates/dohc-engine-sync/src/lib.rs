@@ -94,14 +94,15 @@ pub use relay::{
     DirectWriteStatus, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
     KeyEnvelopeDownloadResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest,
     LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
-    PullResponse, PushRequest, PushResponse, RecoverResponse, RelaySyncClient, RelayTransport,
-    ShareBlobRequest, ShareBlobUploadRequest, ShareCollectionWriteRequest,
-    ShareCollectionWriteResponse, ShareLogPushRequest, ShareProposalChange,
-    ShareProposalSubmitOutcome, ShareProposalSubmitRequest, ShareProposalSubmitResponse,
-    ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal,
-    ShareViewRequest, ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome,
-    SharedChannelRejection, SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
-    collision_key, read_direct_write_status,
+    PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse,
+    RelaySyncClient, RelayTransport, ShareBlobRequest, ShareBlobUploadRequest,
+    ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
+    ShareProposalChange, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
+    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewChangedPath,
+    ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
+    SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, collision_key,
+    read_direct_write_status,
 };
 pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;

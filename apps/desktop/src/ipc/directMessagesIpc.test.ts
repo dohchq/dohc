@@ -295,7 +295,7 @@ describe("registered direct message boundaries", () => {
       onChange: () => undefined,
       operations: {
         claim: async () => undefined,
-        push: async () => ({ pushed: 0, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),
+        push: async () => ({ pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] }),
         pull: workspacePull,
         recoverOrigin: async () => { throw new Error("unexpected origin recovery"); },
       },
