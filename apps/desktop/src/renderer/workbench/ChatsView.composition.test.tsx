@@ -3,7 +3,7 @@ import "../../testing/legendListMock";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatMessageRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
+import type { ChatMessageRecord, ChatThreadRecord, ListChatReactionsResult } from "../../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../../settings/userSettings";
 import {
   NOW,
@@ -699,4 +699,39 @@ it("one failed channel keeps other channels' agents and cache updates", async ()
   await waitFor(() => expect(bridgeMock.listChatMessages.mock.calls.filter(([payload]) => payload.threadId === "bad")).toHaveLength(2));
   expect(bridgeMock.listChatMessages.mock.calls.filter(([payload]) => payload.threadId === "good")).toHaveLength(1);
   expect(screen.getByText("Available agent")).toBeTruthy();
+});
+
+it("a failed lane refresh retains a displayed agent until a successful empty read", async () => {
+  const group = channel({ id: "c-chat", wireId: "w-chat", type: "chat" });
+  bridgeMock.listChatChannels.mockResolvedValue({ channels: [group], fileThreads: [] });
+  bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ joined: [{
+    shareId: "share-chat", channelWireId: "w-chat", granterEmail: "owner@example.test", access: "read-write", ended: false,
+  }] }));
+  bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [], nextCursor: null });
+  bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ id: "lane", channelId: "c-chat", updatedAtMs: 10 })] });
+  bridgeMock.listChatMessages.mockResolvedValue({ messages: [
+    message({ id: "known", threadId: "lane", authorKind: "agent", authorDisplayName: "Known agent", authorUserId: "known" }),
+  ] });
+  const view = render(navigatorView(0, { threadRevision: 0 }));
+  await screen.findByText("Known agent");
+  expect(bridgeMock.listChatMessages).toHaveBeenCalledOnce();
+  bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread({ id: "lane", channelId: "c-chat", updatedAtMs: 11 })] });
+  const failed = deferred<{ messages: ChatMessageRecord[] }>();
+  bridgeMock.listChatMessages.mockReturnValue(failed.promise);
+  view.rerender(navigatorView(0, { threadRevision: 1 }));
+  await waitFor(() => expect(bridgeMock.listChatMessages.mock.calls.length).toBeGreaterThan(1));
+  await act(async () => { failed.reject(new Error("temporarily offline")); await failed.promise.catch(() => {}); });
+  expect(screen.getByText("Known agent")).toBeTruthy();
+  const readsBeforeEmpty = bridgeMock.listChatMessages.mock.calls.length;
+  bridgeMock.listChatMessages.mockResolvedValue({ messages: [] });
+  view.rerender(navigatorView(0, { threadRevision: 2 }));
+  await waitFor(() => expect(bridgeMock.listChatMessages.mock.calls.length).toBeGreaterThan(readsBeforeEmpty));
+  await waitFor(() => expect(screen.queryByText("Known agent")).toBeNull());
+  const listing = deferred<{ threads: ChatThreadRecord[] }>();
+  const listingsBeforeFailure = bridgeMock.listChannelThreads.mock.calls.length;
+  bridgeMock.listChannelThreads.mockReturnValue(listing.promise);
+  view.rerender(navigatorView(0, { threadRevision: 3 }));
+  await waitFor(() => expect(bridgeMock.listChannelThreads.mock.calls.length).toBeGreaterThan(listingsBeforeFailure));
+  await act(async () => { listing.reject(new Error("still offline")); await listing.promise.catch(() => {}); });
+  expect(screen.queryByText("Known agent")).toBeNull();
 });

@@ -65,9 +65,9 @@ export function Valid(props: { workspaceId: string; includeChatMentions: boolean
 }
 
 export function Invalid(props: { workspaceId: string }) {
-  // GraphView needs its workspace payload.
-  // @ts-expect-error missing workspaceId
-  useDesktopLoad([props.workspaceId], "readWorkspaceGraph", { includeChatMentions: false }, { success: () => {}, failure: () => {} });
+  // GraphView requires an explicit choice about chat mentions.
+  // @ts-expect-error missing includeChatMentions
+  useDesktopLoad([props.workspaceId], "readWorkspaceGraph", { workspaceId: props.workspaceId }, { success: () => {}, failure: () => {} });
   // A mutation cannot go through the replaceable read hook.
   // @ts-expect-error revokeRelayShare is a command
   useDesktopAction([], "revokeRelayShare", { success: () => {}, failure: () => {} });

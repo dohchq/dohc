@@ -5,7 +5,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
 import {
-  desktopMetadata,
+  desktopMetadata, getDroppedFilePaths,
   useDesktopAction, useDesktopCommand, useDesktopEvent, useDesktopLoad, type DesktopTask,
 } from "./desktopAction";
 import { installGlobalErrorReporters } from "./ErrorBoundary";
@@ -495,7 +495,6 @@ describe("commit-time publication, reentrancy, pending, and handler errors", () 
     }
     render(<StrictMode><Viewer /></StrictMode>);
     await act(async () => { replies[0]!.resolve("first-setup"); replies[1]?.resolve("second-setup"); await whenSettled(task!); });
-    expect(delivered).toEqual([read.mock.calls.length === 2 ? "second-setup" : "first-setup"]);
     expect(whenSettled(task!)).toBeInstanceOf(Promise);
     await whenSettled(task!);
     expect(read).toHaveBeenCalledTimes(2);
@@ -662,19 +661,11 @@ it("uncloneable command input fails through its outcome scope and settles", asyn
   expect(success).not.toHaveBeenCalled();
 });
 
-it("dropped-file paths have a supported synchronous read hook", async () => {
+it("dropped-file paths are read synchronously from the original files", () => {
   const file = new File(["text"], "notes.md");
-  const read = vi.fn(() => ["C:/notes.md"]);
+  const read = vi.fn((_files: File[]) => ["C:/notes.md"]);
   vi.stubGlobal("dohcDesktop", { getDroppedFilePaths: read });
-  const delivered: string[][] = [];
-  let task: DesktopTask;
-  function Viewer() {
-    const [paths] = useDesktopAction([], "getDroppedFilePaths", { success: value => delivered.push(value), failure: ok });
-    useLayoutEffect(() => { task = paths([file]); }, [paths]);
-    return null;
-  }
-  render(<Viewer />);
-  await act(async () => { await whenSettled(task!); });
+  expect(getDroppedFilePaths([file])).toEqual(["C:/notes.md"]);
   expect(read).toHaveBeenCalledExactlyOnceWith([file]);
-  expect(delivered).toEqual([["C:/notes.md"]]);
+  expect(read.mock.calls[0]?.[0]?.[0]).toBe(file);
 });

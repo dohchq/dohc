@@ -130,10 +130,11 @@ test("comments between syntax nodes preserve import and hex context", () => {
 
 test("renderer TS and TSX are scanned, including untracked files; tests are exempt", t => {
   const { directory, put } = fixture(t);
-  for (const excluded of [`${renderer}Sample.test.tsx`, `${renderer}Sample.focus.test.ts`, `${renderer}Sample.spec.tsx`, `${renderer}__tests__/Sample.ts`, "apps/site/src/Sample.tsx", `${renderer}DesktopWorkspaceShell.testSupport.tsx`, `${renderer}EditorTestHarness.tsx`, `${renderer}editor/fixture.ts`, `${renderer}FileInspector.draft-fixture.ts`, `${renderer}editor/testDocs.ts`]) {
+  for (const excluded of [`${renderer}Sample.test.tsx`, `${renderer}Sample.focus.test.ts`, `${renderer}Sample.spec.tsx`, `${renderer}__tests__/Sample.ts`, "apps/site/src/Sample.tsx", `${renderer}DesktopWorkspaceShell.testSupport.tsx`, `${renderer}collab/engineDocLeaseTestHarness.ts`, `${renderer}FileInspector.draft-fixture.ts`, `${renderer}editor/testDocs.ts`]) {
     assert.equal(isRendererSource(excluded), false, excluded);
     put(excluded, 'const color = "#fff";');
   }
+  for (const production of [`${renderer}EditorTestHarness.tsx`, `${renderer}editor/fixture.ts`, `${renderer}View.testSupport.tsx`]) assert.equal(isRendererSource(production), true);
   put(`${renderer}tokens.ts`, 'const color = "#fff";');
   assert.deepEqual(checkUiRules(directory, empty()).failures, []);
   put(`${renderer}Sample.ts`, 'const color = "#fff";');

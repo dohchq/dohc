@@ -4,6 +4,8 @@ import { globSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isRendererSource } from "./renderer-source.mjs";
+export { isRendererSource } from "./renderer-source.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const allowlistPath = "scripts/ui-rules-allowlist.json";
@@ -18,13 +20,6 @@ const styleKey = "(?:[\\w-]*color|(?:background|border|outline)[\\w-]*|(?:box|te
 const styleName = new RegExp(`^${styleKey}$`, "iu");
 const cssDeclaration = new RegExp(`(?:(?:^|[\\s;{])(?:${styleKey}|--[\\w-]+)\\s*:|\\b(?:repeating-)?(?:linear|radial|conic)-gradient\\()[^;{}]*$`, "iu");
 
-export function isRendererSource(path) {
-  return path.startsWith(renderer) && /\.tsx?$/u.test(path)
-    && !/\.(?:test(?:-d)?|testSupport|spec)\./u.test(path)
-    && !/(?:^|\/)__tests__\//u.test(path)
-    && !/(?:TestHarness|fixture)/iu.test(path)
-    && path !== `${renderer}editor/testDocs.ts`;
-}
 
 const isComment = node => node?.name === "LineComment" || node?.name === "BlockComment";
 function sibling(node, direction) {

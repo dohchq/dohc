@@ -3,10 +3,12 @@
 // This check covers what types cannot: who may reach transport, and the form of handlers.
 // Usage: node scripts/check-renderer-async.mjs [rendererRoot] [--strict]
 // The default renderer uses the base raw-call inventory until migration completes.
-import { checkRawBridge, children, isRendererTest, rendererRoot as defaultRoot, transportFiles } from "./check-raw-bridge.mjs";
+import { checkRawBridge, rawBridgeReferences, isRendererTest, rendererRoot as defaultRoot, transportFiles } from "./check-raw-bridge.mjs";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
+
+import { children, memberName, resolveModule, unwrap } from "./renderer-source.mjs";
 
 const [rendererRoot = defaultRoot, mode = "--ratchet"] = process.argv.slice(2);
 const { parseSync } = createRequire(import.meta.url)("oxc-parser");
@@ -21,7 +23,7 @@ const files = [];
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
     if (statSync(path).isDirectory()) walk(path);
-    else if (/\.tsx?$/u.test(name)) files.push(path);
+    else if (/\.(?:[cm]?ts|tsx)$/u.test(name)) files.push(path);
   }
 })(root);
 
@@ -33,15 +35,13 @@ function role(path) {
   if (r.startsWith("data/")) return "data";
   return "view";
 }
-const resolveModule = (from, spec) => {
-  const base = resolve(dirname(from), spec);
-  return [base, `${base}.ts`, `${base}.tsx`].find((p) => existsSync(p) && statSync(p).isFile()) ?? `${base}.ts`;
-};
+
 
 const findings = [];
+const referenceCounts = new Map();
 const promiseMethods = new Set(["then", "catch", "finally"]);
 const schedulers = new Set(["setTimeout", "setInterval", "queueMicrotask", "requestAnimationFrame"]);
-const memberName = node => node.computed ? node.property?.value : node.property?.name;
+
 const isString = (n) => n?.type === "Literal" && typeof n.value === "string";
 const isFunction = (n) => ["ArrowFunctionExpression", "FunctionExpression", "FunctionDeclaration"].includes(n?.type);
 const hookArity = { useDesktopAction: { request: 1, handlers: [2] }, useDesktopLoad: { request: 1, handlers: [3] }, useDesktopCommand: { request: 1, handlers: [2, 3] }, useDesktopEvent: { request: 1, handlers: [2] } };
@@ -52,6 +52,7 @@ for (const path of files) {
   const text = readFileSync(path, "utf8");
   const { program, errors } = parseSync(path, text);
   if (errors.length) { findings.push(`PARSE ${rel(path)}: ${errors[0].message}`); continue; }
+  referenceCounts.set(rel(path), rawBridgeReferences(text, path, { program, errors }));
   const line = (node) => text.slice(0, node.start).split("\n").length;
   const report = (node, code, message) => findings.push(`${code} ${rel(path)}:${line(node)}: ${message}`);
   const importRoles = new Map();
@@ -72,7 +73,7 @@ for (const path of files) {
       const runtime = statement.exportKind !== "type" && (statement.type === "ExportAllDeclaration" || statement.specifiers.some(s => s.exportKind !== "type"));
       const targetRel = checkDependency(statement, statement.source.value, runtime);
       if (runtime && transportFiles.includes(targetRel)) {
-        report(statement, "RA7", "do not re-export desktopAction, desktopActionTesting, or bridge. Import the hooks by name where they are used.");
+        report(statement, "RA7", "do not re-export desktopAction, desktopActionTesting, desktopOperations, or bridge. Import the hooks by name where they are used.");
       }
     }
     if (statement.type === "ImportDeclaration") {
@@ -136,20 +137,21 @@ for (const path of files) {
       if (found) return;
       if (node.type === "AwaitExpression") { found = true; return; }
       if (node.type === "CallExpression") {
-        const callee = node.callee;
+        const callee = unwrap(node.callee);
         if (callee.type === "MemberExpression" && (promiseMethods.has(memberName(callee))
-          || ["window", "globalThis"].includes(callee.object.name) && schedulers.has(memberName(callee)))
+          || ["window", "globalThis"].includes(unwrap(callee.object)?.name) && schedulers.has(memberName(callee)))
           || callee.type === "Identifier" && schedulers.has(callee.name)) { found = true; return; }
       }
-      if (node.type === "UnaryExpression" && node.operator === "void" && node.argument.type === "CallExpression") {
-        const callee = node.argument.callee;
+      if (node.type === "UnaryExpression" && node.operator === "void" && unwrap(node.argument).type === "CallExpression") {
+        const callee = unwrap(unwrap(node.argument).callee);
         const resolved = callee.type === "Identifier" && ((setters.has(callee.name) && declarationCount.get(callee.name) === 1) || localFunction(callee.name));
         if (!resolved) { found = true; return; }
       }
-      if (node.type === "CallExpression" && node.callee.type === "Identifier") {
+      if (node.type === "CallExpression" && unwrap(node.callee).type === "Identifier") {
+        const name = unwrap(node.callee).name;
         // A name declared more than once in the file cannot be resolved here; treat it as deferring.
-        if ((declarationCount.get(node.callee.name) ?? 0) > 1) { found = true; return; }
-        const callee = localFunction(node.callee.name);
+        if ((declarationCount.get(name) ?? 0) > 1) { found = true; return; }
+        const callee = localFunction(name);
         if (callee && deferring(callee, seen)) { found = true; return; }
       }
       children(node).forEach(scan);
@@ -207,7 +209,7 @@ for (const path of files) {
         if (isString(request)) {
           if (ownedOperations.has(request.value)) report(request, "RA5", `operation "${request.value}" is owned by ${ownedOperations.get(request.value)}. Use that owner.`);
         } else if (node.callee.name === "useDesktopEvent" || !(request?.type === "Identifier" && importRoles.get(request.name) === "data")) {
-          report(request ?? node, "RA2", "the request must be an operation name or a data executor imported from renderer/data/.");
+          report(request ?? node, "RA2", node.callee.name === "useDesktopEvent" ? "the event must be a literal event name." : "the request must be an operation name or a data executor imported from renderer/data/.");
         }
       }
       for (const index of handlers) {
@@ -232,7 +234,7 @@ const violations = inventory ? unique.filter(finding => {
   return !match || !Object.hasOwn(inventory.counts, match[1]);
 }) : [...unique];
 if (inventory) {
-  const raw = checkRawBridge(root, inventory);
+  const raw = checkRawBridge(root, inventory, referenceCounts);
   for (const line of raw) console.log(line);
   violations.push(...raw);
   console.log(JSON.stringify({ legacyRA1: unique.filter(line => line.startsWith("RA1 ")).length, violations: violations.length }));

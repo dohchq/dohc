@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { test } from "node:test";
-import { checkRawBridge, rawBridgeCalls, isRendererTest, transportFiles } from "./check-raw-bridge.mjs";
+import { checkRawBridge, rawBridgeReferences, isRendererTest, transportFiles } from "./check-raw-bridge.mjs";
 
 const checker = resolve(import.meta.dirname, "check-renderer-async.mjs");
 const fixtures = resolve(import.meta.dirname, "fixtures/renderer-async");
@@ -22,15 +22,15 @@ test("accepted caller and owner shapes have zero findings", () => {
   const output = execFileSync(process.execPath, [checker, join(fixtures, "accept"), "--strict"], { encoding: "utf8" });
   assert.deepEqual(JSON.parse(output.trim()), { files: 12, findings: 0 });
 });
-test("the raw-call ratchet rejects an added call in a legacy file", () => {
+test("the raw-reference ratchet rejects an added call in a legacy file", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-u4-ratchet-"));
   try {
     writeFileSync(join(root, "Legacy.tsx"), 'import { bridge } from "./bridge";\nbridge().read();\n');
     const inventory = { counts: { "Legacy.tsx": 1 } };
     assert.deepEqual(checkRawBridge(root, inventory), []);
     writeFileSync(join(root, "Legacy.tsx"), 'import { bridge } from "./bridge";\nbridge().read(); bridge().read();\n');
-    assert.deepEqual(checkRawBridge(root, inventory), ["RATCHET Legacy.tsx: raw bridge calls 1 -> 2. Use desktopAction or the operation's owner."]);
-    assert.deepEqual(checkRawBridge(root, { counts: {} }), ["RATCHET Legacy.tsx: raw bridge calls 0 -> 2. Use desktopAction or the operation's owner."]);
+    assert.deepEqual(checkRawBridge(root, inventory), ["RATCHET Legacy.tsx: raw bridge references 1 -> 2. Use desktopAction or the operation's owner."]);
+    assert.deepEqual(checkRawBridge(root, { counts: {} }), ["RATCHET Legacy.tsx: raw bridge references 0 -> 2. Use desktopAction or the operation's owner."]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -82,22 +82,22 @@ test("a setter in another component cannot exempt an ambiguous handler", () => {
   assert.equal(result.status, 1, result.stderr);
   assert.match(result.stdout, /RA3 View/);
 });
-test("raw-call counts include aliases, retained handles, and spacing", () => {
-  for (const source of [
-    'import { bridge as desktopBridge } from "./bridge"; desktopBridge().a(); desktopBridge ().b();',
-    'import { bridge } from "./bridge"; const d = bridge(); d.a(); d.b();',
-    'import { bridge } from "./bridge"; const d = useRef(bridge()).current; d.a(); d["b"]();',
-    'import { bridge } from "./bridge"; const { a, b: read } = bridge(); a(); read();',
-    'import { bridge } from "./bridge"; const read = flag ? bridge().a : bridge().b; read(); read();',
-    'window.dohcDesktop.a(); window ["dohcDesktop"].b();',
-    'const { bridge: desktopBridge } = await import("./bridge"); desktopBridge().a(); desktopBridge ().b();',
-    'const module = await import("./bridge"); const d = module.bridge(); d.a(); d.b();',
-  ]) assert.equal(rawBridgeCalls(source), 2, source);
-  assert.equal(rawBridgeCalls('const text = "bridge().read()"; // bridge().read()'), 0);
+test("raw-reference counts include aliases, retained handles, and spacing", () => {
+  for (const [source, expected] of [
+    ['import { bridge as desktopBridge } from "./bridge"; desktopBridge().a(); desktopBridge ().b();', 2],
+    ['import { bridge } from "./bridge"; const d = bridge(); d.a(); d.b();', 3],
+    ['import { bridge } from "./bridge"; const d = useRef(bridge()).current; d.a(); d["b"]();', 3],
+    ['import { bridge } from "./bridge"; const { a, b: read } = bridge(); a(); read();', 3],
+    ['import { bridge } from "./bridge"; const read = flag ? bridge().a : bridge().b; read(); read();', 4],
+    ['window.dohcDesktop.a(); window ["dohcDesktop"].b();', 2],
+    ['const { bridge: desktopBridge } = await import("./bridge"); desktopBridge().a(); desktopBridge ().b();', 2],
+    ['const module = await import("./bridge"); const d = module.bridge(); d.a(); d.b();', 3],
+  ]) assert.equal(rawBridgeReferences(source), expected, source);
+  assert.equal(rawBridgeReferences('const text = "bridge().read()"; // bridge().read()'), 0);
 });
 test("test and transport files share one skip rule", () => {
-  for (const path of ['View.testSupport.tsx', 'View.TestHarness.tsx', 'View.fixture.ts', 'View.test-d.ts']) assert.equal(isRendererTest(path), true);
-  assert.equal(isRendererTest('View.tsx'), false);
+  for (const path of ['DesktopWorkspaceShell.testSupport.tsx', 'collab/engineDocLeaseTestHarness.ts', 'FileInspector.draft-fixture.ts', 'View.test-d.ts']) assert.equal(isRendererTest(path), true);
+  for (const path of ['View.tsx', 'View.TestHarness.tsx', 'View.fixture.ts', 'View.testSupport.tsx', 'fixtures/Production.ts']) assert.equal(isRendererTest(path), false);
   assert.deepEqual(transportFiles, ['bridge.ts', 'desktopAction.ts', 'desktopActionTesting.ts', 'desktopOperations.ts']);
 });
 test("the operation map and resource-owner registry agree", () => {
@@ -116,4 +116,90 @@ test("the operation map and resource-owner registry agree", () => {
   const expected = JSON.parse(readFileSync(join(renderer, "desktopActionOwners.json"), "utf8"));
   const sorted = entries => Object.fromEntries(Object.entries(entries).map(([file, names]) => [file, names.sort()]));
   assert.deepEqual(sorted(found), sorted(expected));
+});
+
+test("bridge references cover escape forms and transitive copies", () => {
+  for (const [body, expected] of [
+    ["helper(bridge()); helper2(bridge());", 2],
+    ["const deps = { api: bridge() }; deps.api.a();", 2],
+    ["(bridge() as Api).a();", 1],
+    ["bridge().a.call(null, 1); p.then(bridge().a);", 2],
+    ["let d; d = bridge(); d.a(); d.b();", 4],
+    ["function f(api = bridge()) { api.a(); }", 2],
+    ["const b = bridge; const copy = b; copy().a(); copy().b();", 4],
+    ["const read = bridge().a; const refresh = read; refresh(); refresh();", 4],
+    ["const { a: read } = bridge(); const { b } = { b: read }; b();", 3],
+  ]) assert.equal(rawBridgeReferences('import { bridge } from "./bridge"; ' + body), expected, body);
+  assert.equal(rawBridgeReferences("const { dohcDesktop: api } = window; api.a(); api.b();"), 3);
+  assert.equal(rawBridgeReferences("window.dohcDesktop!.a(); (window.dohcDesktop as Api).b(); dohcDesktop.c();"), 3);
+});
+test("bridge bindings respect lexical shadowing, keys, types, and hoisting", () => {
+  const source = 'import { bridge } from "./bridge"; const d = bridge(); d.a();';
+  for (const body of [
+    "function update(d: { read(): void }) { d.read(); }",
+    "{ const d = ordinary; d.read(); }",
+    "try {} catch (d) { d.read(); }",
+    "for (const d of items) { d.read(); }",
+    "function update({ d }: { d: Api }) { d.read(); }",
+    "function update() { d.read(); var d = ordinary; }",
+    "const object = { d: 1 }; type T = typeof d;",
+    "function update(bridge: Api) { bridge.read(); }",
+  ]) assert.equal(rawBridgeReferences(source + body), 2, body);
+  assert.equal(rawBridgeReferences(source + "{ const copy = d; copy.a(); }"), 4);
+  assert.equal(rawBridgeReferences('import { bridge } from "./bridge"; const {read = fallback} = bridge(); read();'), 2);
+  assert.equal(rawBridgeReferences('import { bridge } from "./bridge"; export { bridge };'), 1);
+  assert.equal(rawBridgeReferences('import { bridge } from "./bridge"; const f = () => bridge(); f();'), 1);
+  assert.equal(rawBridgeReferences('import type { bridge } from "./bridge"; type T = typeof bridge;'), 0);
+});
+test("transparent callees and constant-template promise members cannot defer delivery", () => {
+  for (const call of ["(later.then)(paint)", "(later.then as Function)(paint)", "(later.then satisfies Function)(paint)", "later.then!(paint)", "later[`then`](paint)", "(window[`queueMicrotask`])(paint)", "(window as Window).setTimeout(paint, 0)"]) {
+    const result = probe({ "View.tsx": hooks + 'useDesktopAction([], "read", { success: () => { ' + call + '; }, failure: () => {} });' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /RA3 View/);
+  }
+});
+test("supported JavaScript specifiers retain every renderer boundary", () => {
+  for (const [source, rule] of [
+    ['import { bridge } from "./bridge.js"; bridge().read();', "RA1"],
+    ['export { bridge } from "./bridge.js";', "RA7"],
+    ['export { ReadName } from "./desktopOperations.js";', "RA7"],
+    ['async function read() { await import("./desktopActionTesting.js"); }', "RA6"],
+    ['import { useDesktopEvent as subscribe } from "./desktopAction.js"; subscribe([], "event", async () => {});', "RA7"],
+  ]) {
+    const result = probe({ "View.tsx": source });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, new RegExp(rule + " View"));
+  }
+  assert.equal(rawBridgeReferences('import { bridge as api } from "./bridge.js"; api().read(); api().read();'), 2);
+  assert.equal(rawBridgeReferences('const { bridge: api } = await import("./bridge.js"); api().read();'), 1);
+  for (const [specifier, file] of [["helpers.mjs", "helpers.mts"], ["helpers.jsx", "helpers.tsx"]]) {
+    const result = probe({ "data/read.ts": 'export { read } from "../' + specifier + '";', [file]: 'export function read() {}' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /RA4 data/);
+  }
+});
+test("production fixture and harness names do not bypass enforcement", () => {
+  for (const name of ["View.fixture.ts", "ViewTestHarness.tsx", "View.testSupport.tsx"]) {
+    const result = probe({ [name]: 'import { bridge } from "./bridge"; bridge().read();' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /RA1/);
+  }
+});
+
+test("transparent calls retain same-file and void-call handler checks", () => {
+  for (const body of ['async function defer() { await Promise.resolve(); }', 'function defer() { (props.report)(); }']) {
+    const call = body.startsWith("async") ? "(defer)()" : "void ((props.report)())";
+    const result = probe({ "View.tsx": hooks + body + 'useDesktopAction([], "read", { success: () => { ' + call + '; }, failure: () => {} });' });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /RA3 View/);
+  }
+});
+test("runtime TypeScript expressions remain references while type syntax does not", () => {
+  const prefix = 'import { bridge } from "./bridge"; ';
+  assert.equal(rawBridgeReferences(prefix + 'enum E { value = Number(Boolean(bridge())) }'), 1);
+  assert.equal(rawBridgeReferences(prefix + 'enum E { bridge = 1, value = bridge }'), 0);
+  assert.equal(rawBridgeReferences(prefix + 'namespace N { const b = bridge; b().a(); }'), 2);
+  assert.equal(rawBridgeReferences(prefix + 'namespace N { var bridge = ordinary; bridge.read(); } bridge().read();'), 1);
+  assert.equal(rawBridgeReferences(prefix + 'class C { constructor(private bridge: Api) { bridge.read(); } }'), 0);
+  assert.equal(rawBridgeReferences(prefix + 'class C { static { const bridge = ordinary; bridge.read(); } }'), 0);
 });

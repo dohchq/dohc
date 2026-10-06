@@ -1,7 +1,7 @@
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 
 // Reads have no side effects and may be superseded; commands have effects whose outcomes must survive the view.
-export type MemberKind = { readonly kind: "read" | "command" | "event" | "metadata"; readonly owner?: string };
+export type MemberKind = { readonly kind: "read" | "command" | "event" | "metadata"; readonly owner?: string; readonly requiredInput?: readonly string[] };
 
 export const desktopMembers = {
   listOwnerLiveDocuments: { kind: "read" },
@@ -40,14 +40,14 @@ export const desktopMembers = {
   exportDocumentFile: { kind: "command" },
   showExplorerMenu: { kind: "command" },
   showWorkbenchMenu: { kind: "command" },
-  getDroppedFilePaths: { kind: "read" },
+  getDroppedFilePaths: { kind: "metadata" },
   importWorkspaceFiles: { kind: "command" },
   readWorkspaceText: { kind: "read" },
   writeWorkspaceText: { kind: "command" },
   writeWorkspaceAsset: { kind: "command" },
   pickImageFiles: { kind: "command" },
   openFileExternally: { kind: "command" },
-  readWorkspaceGraph: { kind: "read" },
+  readWorkspaceGraph: { kind: "read", requiredInput: ["includeChatMentions"] },
   getBacklinks: { kind: "read" },
   listWorkspaceHeadings: { kind: "read" },
   listChatFileMentions: { kind: "read" },
@@ -280,7 +280,9 @@ export type ReadName = { [K in keyof typeof desktopMembers]: typeof desktopMembe
 export type CommandName = { [K in keyof typeof desktopMembers]: typeof desktopMembers[K]["kind"] extends "command" ? Unowned<K> : never }[keyof typeof desktopMembers];
 export type EventName = { [K in keyof typeof desktopMembers]: typeof desktopMembers[K]["kind"] extends "event" ? Unowned<K> : never }[keyof typeof desktopMembers];
 type Method<K extends keyof DohcDesktopBridge> = Extract<DohcDesktopBridge[K], (...args: never[]) => unknown>;
-export type InputOf<K extends keyof DohcDesktopBridge> = Parameters<Method<K>> extends [] ? undefined : Parameters<Method<K>>[0];
+type ExplicitInput<K extends keyof DohcDesktopBridge, I> = typeof desktopMembers[K] extends { readonly requiredInput: readonly (infer Field)[] }
+  ? I & Required<Pick<I, Extract<Field, keyof I>>> : I;
+export type InputOf<K extends keyof DohcDesktopBridge> = Parameters<Method<K>> extends [] ? undefined : ExplicitInput<K, Parameters<Method<K>>[0]>;
 export type ResultOf<K extends keyof DohcDesktopBridge> = Awaited<ReturnType<Method<K>>>;
 export type EventValue<E extends EventName> = Parameters<Extract<InputOf<E>, (...args: never[]) => unknown>> extends [] ? undefined : Parameters<Extract<InputOf<E>, (...args: never[]) => unknown>>[0];
 export type ReadDesktop = Pick<DohcDesktopBridge, ReadName>;

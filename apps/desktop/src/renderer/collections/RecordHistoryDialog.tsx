@@ -159,7 +159,7 @@ export function RecordHistoryDialog(props: {
   onRunsChecked: (runs: readonly string[]) => void;
 }) {
   const { workspaceId, collectionPath, recordId } = props;
-  const recordScope = useCallback(() => {}, [workspaceId, collectionPath, recordId]);
+  const recordScope = JSON.stringify([workspaceId, collectionPath, recordId]);
   const [page, setPage] = useState<{ entries: RecordHistoryEntry[]; next: number | null } | null>(null);
   // The page being read: the first, or the one after the last shown.
   const [loadingKind, setLoadingKind] = useState<"first" | "older" | null>(null);

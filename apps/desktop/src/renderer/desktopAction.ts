@@ -19,6 +19,10 @@ export function desktopMetadata() {
   return { platform, devTools, windowRole } as const;
 }
 
+export function getDroppedFilePaths(files: File[]): string[] {
+  return bridge().getDroppedFilePaths(files);
+}
+
 function issue(work: (settle: () => void) => void): DesktopTask {
   const task = {} as DesktopTask;
   settledTasks.set(task, new Promise<void>((resolve) => work(resolve)));
@@ -35,10 +39,7 @@ function guarded(run: () => void): void {
 function send(request: AnyRequest, input: unknown, context?: unknown): PromiseLike<unknown> {
   try {
     const api = bridge();
-    if (typeof request === "string") {
-      const result = (api as unknown as Transport)[request]!(input);
-      return result && typeof result.then === "function" ? result : Promise.resolve(result);
-    }
+    if (typeof request === "string") return (api as unknown as Transport)[request]!(input);
     const reads = Object.fromEntries(readNames.map(name => [name, (api as unknown as Transport)[name]])) as unknown as ReadDesktop;
     return (request as (desktop: ReadDesktop, input: unknown, context: unknown) => PromiseLike<unknown>)(reads, structuredClone(input), structuredClone(context));
   } catch (error) { return Promise.reject(error); }
