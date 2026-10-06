@@ -1,5 +1,5 @@
 import { Check, Copy, TriangleAlert } from "lucide-react";
-import { useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useContext, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { withErrorWords } from "../../ipc/errorWords";
 import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 
@@ -183,6 +183,7 @@ export function CopyButton(props: {
   sensitive?: CopySecret | undefined;
   testId?: string | undefined;
   disabled?: boolean;
+  ref?: Ref<HTMLButtonElement> | undefined;
 }) {
   const report = useContext(ShellErrorReporter);
   const label = props.label ?? "Copy";
@@ -233,6 +234,7 @@ export function CopyButton(props: {
   return (
     <>
       <button
+        ref={props.ref}
         type="button"
         data-testid={props.testId}
         disabled={props.disabled}

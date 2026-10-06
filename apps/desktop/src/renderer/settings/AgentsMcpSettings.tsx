@@ -1,6 +1,6 @@
 import { configuredRunnerCommand } from "../../agents/agentToolCatalog";
 import { useRequestSequence } from "../useRequestSequence";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Bot } from "lucide-react";
 import type {
   AgentRunStatusResult,
@@ -164,6 +164,17 @@ export function AgentsMcpSettings(props: {
     }
   }, [workspaceId, refresh, isCurrentRequest, status?.activeRun?.id, onAgentActiveChange]);
 
+  // The guide's Enable MCP hands focus to the config's Copy once the server
+  // runs. The guide button disables for the toggle, which drops focus in
+  // Chromium, and is gone once the server runs, so focus moves explicitly.
+  const configCopyRef = useRef<HTMLButtonElement>(null);
+  const focusCopyWhenRunning = useRef(false);
+  useEffect(() => {
+    if (busy || !focusCopyWhenRunning.current) return;
+    focusCopyWhenRunning.current = false;
+    if (enabled) configCopyRef.current?.focus();
+  }, [busy, enabled]);
+
   return (
     <div className="flex flex-col">
       <section
@@ -213,7 +224,7 @@ export function AgentsMcpSettings(props: {
           <div className="px-4 py-3">
             <p className="m-0 text-[11px] font-medium text-ink">Connect an existing agent</p>
             <p className="m-0 mt-1 text-[10px] leading-relaxed text-subtle">
-              Enable the workspace-scoped MCP server, then copy its configuration into your
+              Enable the workspace-scoped MCP server, then copy the MCP config below into your
               existing agent. Sign-in status stays with that provider.
             </p>
             {status ? (
@@ -225,16 +236,21 @@ export function AgentsMcpSettings(props: {
                 {enabled ? "Server running" : "Server stopped"}
               </span>
             ) : null}
-            {/* Disable stays on the server row below. One button keeps focus when its next step changes. */}
-            <button
-              type="button"
-              data-testid="agent-setup-mcp-action"
-              disabled={busy || (enabled && (!config || "unavailable" in config))}
-              onClick={() => void (enabled ? copyConfig() : toggle())}
-              className="mt-2 rounded-md border border-line bg-bg px-2.5 py-1 text-[10px] font-medium text-muted hover:text-ink disabled:opacity-50"
-            >
-              {enabled ? (copied ? "Copied" : "Copy config") : "Enable MCP"}
-            </button>
+            {/* Disable stays on the server row below, and Copy stays beside the MCP config. */}
+            {enabled ? null : (
+              <button
+                type="button"
+                data-testid="agent-setup-mcp-action"
+                disabled={busy}
+                onClick={() => {
+                  focusCopyWhenRunning.current = true;
+                  void toggle();
+                }}
+                className="mt-2 rounded-md border border-line bg-bg px-2.5 py-1 text-[10px] font-medium text-muted hover:text-ink disabled:opacity-50"
+              >
+                Enable MCP
+              </button>
+            )}
           </div>
         </div>
       </section>
@@ -310,6 +326,7 @@ export function AgentsMcpSettings(props: {
           <h3 className="m-0 text-[13px] font-medium text-ink">MCP config</h3>
           <CopyButton
             key={workspaceId}
+            ref={configCopyRef}
             disabled={!config || "unavailable" in config}
             getText={() => (config && !("unavailable" in config) ? configSnippet(config) : null)}
           />
