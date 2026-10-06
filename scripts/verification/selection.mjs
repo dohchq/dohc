@@ -1,6 +1,7 @@
 import { globSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, matchesGlob, posix, relative } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(new URL("../../apps/desktop/package.json", import.meta.url));
 const dependencyFields = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
@@ -204,7 +205,7 @@ export const isGateReader = path => /\.(?:rs|[cm]?[jt]sx?)$/u.test(path);
 
 function* javascriptGateInputs(path, source, couldFind) {
   // Overlapping quotes retain candidates inside templates, comments, and regexes.
-  // Treat every value as a direct read here; the parser decides its actual role.
+  // Check possible direct paths and URLs here; the parser decides each value's role.
   let candidate = false;
   for (const match of source.matchAll(/(?=(["'\x60])([^\\\r\n]*?)\1)/gu)) {
     if (couldFind(match[2])) { candidate = true; break; }
@@ -233,7 +234,10 @@ function* javascriptGateInputs(path, source, couldFind) {
     while (["LineComment", "BlockComment", ","].includes(secondArgument?.name)) secondArgument = secondArgument.nextSibling;
     const fileRelativeURL = call === "URL" && node.from === firstArgument.from
       && secondArgument && source.slice(secondArgument.from, secondArgument.to) === "import.meta.url";
-    yield { reference: literal, call, fileRelativeURL, directRead: node.from === firstArgument.from && gateReadCalls.has(call) };
+    const fileRelativeDirectory = (call === "join" || call === "resolve")
+      && ["import.meta.dirname", "__dirname"].includes(source.slice(firstArgument.from, firstArgument.to));
+    yield { reference: literal, call, fileRelativeURL, fileRelativeDirectory,
+      directRead: node.from === firstArgument.from && gateReadCalls.has(call) };
   } while (cursor.next());
 }
 
@@ -335,16 +339,25 @@ export function uncoveredGateInputs(files, trackedPaths, workflow) {
     const readerDirectory = posix.dirname(reader);
     const runtimeBase = manifestRoot(reader, tracked, rust ? "Cargo.toml" : "package.json");
     const runtimeBases = rust ? [runtimeBase] : [...new Set([readerDirectory, runtimeBase, "."])];
-    const resolveReferences = ({ reference, directRead, call, fileRelativeURL }) => {
+    const resolveReferences = ({ reference, directRead, call, fileRelativeURL, fileRelativeDirectory }) => {
       if (rust && (call === "include_str!" || call === "include_bytes!")) return [posix.join(readerDirectory, reference)];
       // A direct read uses cwd, which is not known from its source file.
       if (directRead) return runtimeBases.map(base => posix.join(base, reference));
-      if (fileRelativeURL) return [posix.join(readerDirectory, reference)];
+      if (fileRelativeURL) {
+        try {
+          // A fixed POSIX root keeps URL decoding independent of the host.
+          const base = pathToFileURL(posix.join("/workspace", reader), { windows: false });
+          const input = fileURLToPath(new URL(reference, base), { windows: false });
+          return [posix.relative("/workspace", input)];
+        } catch { return []; }
+      }
+      if (fileRelativeDirectory) return [posix.join(readerDirectory, reference)];
       if (/^\.{1,2}\//u.test(reference)) return [posix.join(rust ? runtimeBase : readerDirectory, reference)];
       return [];
     };
-    const couldFind = reference => resolveReferences({ reference, directRead: true })
-      .some(input => tracked.has(input) && gates.some(gate => !gatesFor(input)[gate]));
+    const isUncovered = input => tracked.has(input) && gates.some(gate => !gatesFor(input)[gate]);
+    const couldFind = reference => resolveReferences({ reference, directRead: true }).some(isUncovered)
+      || /[%?#]/u.test(reference) && resolveReferences({ reference, fileRelativeURL: true }).some(isUncovered);
     const inputs = rust ? rustGateInputs(source) : javascriptGateInputs(reader, source, couldFind);
     for (const reference of inputs) {
       for (const input of resolveReferences(reference)) {

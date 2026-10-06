@@ -357,6 +357,49 @@ test("gate input guard resolves bare URL inputs from the reader directory", () =
     [reader, input], workflow), []);
 });
 
+test("gate input guard decodes file-relative URL inputs", () => {
+  const reader = "scripts/read.mjs";
+  const workflow = gateWorkflow.replace("scripts/**", reader);
+  for (const [reference, input] of [["my%20file.json", "scripts/my file.json"],
+    ["./my%20file.json", "scripts/my file.json"], ["../my%20file.json", "my file.json"],
+    ["caf%C3%A9.json", "scripts/café.json"], ["100%25.json", "scripts/100%.json"],
+    ["my%20file.json?version=1#part", "scripts/my file.json"]]) {
+    for (const quote of ['"', "'", "`"]) {
+      const source = 'readFileSync(new URL(' + quote + reference + quote + ', import.meta.url));';
+      assert.deepEqual(uncoveredGateInputs([{path: reader, source}], [reader, input], workflow),
+        [gateFinding(reader, input, "js")], source);
+    }
+  }
+  for (const reference of ["bad%ZZ.json", "bad%FF.json", "nested%2Ffile.json", "https://example.com/my%20file.json"]) {
+    const source = 'new URL("' + reference + '", import.meta.url);';
+    assert.deepEqual(uncoveredGateInputs([{path: reader, source}],
+      [reader, "scripts/" + reference, "scripts/nested/file.json"], workflow), [], source);
+  }
+  assert.deepEqual(uncoveredGateInputs([{path: reader, source: 'readFileSync("my%20file.json");'}],
+    [reader, "scripts/my file.json"], workflow), []);
+});
+
+test("gate input guard resolves bare names under known directory bases", () => {
+  const reader = "apps/tool/src/read.mjs";
+  const input = "apps/tool/src/fixture.json";
+  const workflow = gateWorkflow.replace("scripts/**", reader);
+  const tracked = [reader, input, "apps/tool/package.json", "apps/tool/fixture.json", "fixture.json"];
+  for (const call of ["join", "resolve"]) {
+    for (const base of ["import.meta.dirname", "__dirname"]) {
+      const source = call + '(' + base + ', "fixture.json");';
+      assert.deepEqual(uncoveredGateInputs([{path: reader, source}], tracked, workflow),
+        [gateFinding(reader, input, "js")], source);
+      const commented = call + '(/* base */ ' + base + ' /* note */, /* input */ "fixture.json");';
+      assert.deepEqual(uncoveredGateInputs([{path: reader, source: commented}], tracked, workflow),
+        [gateFinding(reader, input, "js")], commented);
+    }
+    for (const base of ["temp", "other.dirname"]) {
+      const source = call + '(' + base + ', "fixture.json");';
+      assert.deepEqual(uncoveredGateInputs([{path: reader, source}], tracked, workflow), [], source);
+    }
+  }
+});
+
 test("gate input guard checks direct reads against each possible working directory", () => {
   const reader = "apps/tool/src/read.mjs";
   const inputs = ["apps/tool/src/fixture.json", "apps/tool/fixture.json", "fixture.json"];
