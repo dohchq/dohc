@@ -1,5 +1,6 @@
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
+import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type {OwnerRestoreRequest, OwnerRestoreAction, OwnerRestoreResult} from "./ownerRestoreContract";
 import { PublicationAgent } from "@dohc/cli/app-publication";
 import type {OwnerAppPublicationRequest, OwnerAppPublicationResult} from "./ownerAppPublicationContract";
@@ -1579,8 +1580,16 @@ const ListEngineMomentsUpdatingResult = z.object({
 type ListEngineMomentsUpdatingResult = z.infer<
   typeof ListEngineMomentsUpdatingResult
 >;
+// The workspace's rules for which files History tracks and who sees them,
+// and the folder that holds them.
+export const WorkspacePolicyPath = z.enum(WORKSPACE_POLICY_PATHS);
+export type WorkspacePolicyPath = z.infer<typeof WorkspacePolicyPath>;
+
+// History hides everything while those rules cannot be read. `unreadable`
+// names what to fix; `policyErrors` say why, for Copy details only.
 export const HistoryPolicyUnreadableResult = z.object({
   status: z.literal("policy-unreadable"),
+  unreadable: z.array(WorkspacePolicyPath).min(1),
   policyErrors: z.array(z.string()).min(1),
 });
 export type HistoryPolicyUnreadableResult = z.infer<typeof HistoryPolicyUnreadableResult>;
@@ -1625,8 +1634,11 @@ export const EngineMomentDetailRecord = EngineMomentRecord.omit({
 });
 export type EngineMomentDetailRecord = z.infer<typeof EngineMomentDetailRecord>;
 
+// `untracked`: the change is in History, but the current rules no longer
+// track a file it touched, so its contents stay hidden.
 export const ReadEngineMomentResult = z.union([
   HistoryPolicyUnreadableResult.extend({ moment: z.null() }),
+  z.object({ status: z.literal("untracked"), moment: z.null() }),
   z.object({ moment: EngineMomentDetailRecord.nullable() }),
 ]);
 export type ReadEngineMomentResult = z.infer<typeof ReadEngineMomentResult>;
@@ -4885,6 +4897,8 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
       z.object({ path: PATH_STRING, reason: z.literal("changed-since") }).strict(),
       z.object({ path: PATH_STRING, reason: z.literal("folder-in-use") }).strict(),
       z.object({ path: PATH_STRING, reason: z.literal("restore-refused"), detail: z.string().max(2_000) }).strict(),
+      // History's rules could not be read, so restoring the file was refused.
+      z.object({ path: PATH_STRING, reason: z.literal("rules-unreadable"), unreadable: z.array(WorkspacePolicyPath).min(1) }).strict(),
     ])),
     // Runs of the person's automations undone, and those Undo could not undo.
     runsUndone: z.number().int().nonnegative(),
@@ -4922,6 +4936,7 @@ export const UndoStopAndRestoreResult = z.object({
       receipt: z.object({ path: PATH_STRING, restoredMomentId: OPAQUE_ID }).strict(),
     }).strict(),
     z.object({ momentId: OPAQUE_ID, kind: z.literal("refused"), detail: z.string().max(2_000) }).strict(),
+    z.object({ momentId: OPAQUE_ID, kind: z.literal("rules-unreadable"), unreadable: z.array(WorkspacePolicyPath).min(1) }).strict(),
   ])),
 }).strict();
 export type UndoStopAndRestoreResult = z.infer<typeof UndoStopAndRestoreResult>;

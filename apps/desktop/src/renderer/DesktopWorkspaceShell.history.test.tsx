@@ -277,6 +277,159 @@ describe("history page", () => {
     expect(bridge.listEngineMoments).toHaveBeenLastCalledWith(expect.objectContaining({ beforeMomentOrder: 80 }));
   });
 
+  it("says History is hidden while its rules can't be read, and shows it again once they can", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listEngineMoments = vi.fn()
+      .mockResolvedValueOnce({
+        status: "policy-unreadable",
+        unreadable: [".dohc/visibility.toml"],
+        policyErrors: ["visibility.toml: TOML parse error at line 3, column 9"],
+      } satisfies ListEngineMomentsResponse)
+      .mockResolvedValue(historyPage([historyMoment("m-1", "Wrote the plan")]));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+
+    const hidden = await screen.findByTestId("history-policy-hidden");
+    expect(hidden.textContent).toContain(
+      "dohc can't read .dohc/visibility.toml, so History is hidden. Fix the file, then try again.",
+    );
+    expect(hidden.textContent).not.toContain("TOML parse error");
+    expect(screen.queryByTestId("history-load-failed")).toBeNull();
+    expect(screen.queryByText("No changes yet")).toBeNull();
+
+    await user.click(within(hidden).getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Wrote the plan")).toBeTruthy();
+    expect(screen.queryByTestId("history-policy-hidden")).toBeNull();
+  });
+
+  it("reports a refused restore in dohc's words, and Try again asks before it restores", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const moment = historyMoment("m-1", "Wrote the plan");
+    bridge.listEngineMoments = vi.fn(async () => historyPage([moment]));
+    bridge.readEngineMoment = vi.fn(async () => ({ moment: { ...moment, beforeText: "one\n", afterText: "two\n" } }));
+    const restoreEngineMomentFile = vi.fn()
+      .mockRejectedValueOnce(new Error(
+        "Error invoking remote method 'desktop:restore-engine-moment-file': RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: visibility.toml: TOML parse error at line 3, column 9",
+      ))
+      .mockResolvedValue({ restored: "text", restoredMomentId: "restore-1" });
+    Object.assign(bridge, { restoreEngineMomentFile });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await user.click(await screen.findByTestId("engine-diff-restore-file"));
+    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain(
+      "dohc could not restore notes/plan.md. It can't read .dohc/visibility.toml. Fix the file, then try again.",
+    );
+    expect(toast.textContent).not.toContain("TOML parse error");
+    expect(screen.queryByTestId("engine-diff-restore-status")).toBeNull();
+
+    // Try again reads the change again, then opens its confirm dialog
+    // instead of restoring.
+    const readsBefore = bridge.readEngineMoment.mock.calls.length;
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+    expect(await screen.findByTestId("engine-diff-restore-confirm")).toBeTruthy();
+    expect(bridge.readEngineMoment.mock.calls.length).toBeGreaterThan(readsBefore);
+    await user.click(screen.getByTestId("engine-diff-confirm-restore"));
+    await waitFor(() => expect(restoreEngineMomentFile).toHaveBeenCalledTimes(2));
+    expect((await screen.findByTestId("engine-diff-restore-status")).textContent).toBe(
+      "Restored the earlier state. Undo restore is available here.",
+    );
+    expect(screen.getByTestId("engine-diff-undo-restore")).toBeTruthy();
+    expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
+  });
+
+  it("keeps a hidden change's tab nameless and asks nothing when Try again finds it hidden", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const moment = historyMoment("m-1", "Wrote the plan");
+    const blocked = {
+      status: "policy-unreadable" as const,
+      unreadable: [".dohc/visibility.toml" as const],
+      policyErrors: ["visibility.toml: TOML parse error at line 3, column 9"],
+    };
+    let broken = false;
+    bridge.listEngineMoments = vi.fn(async (): Promise<ListEngineMomentsResponse> => broken ? blocked : historyPage([moment]));
+    bridge.readEngineMoment = vi.fn(async (): Promise<ReadEngineMomentResult> => broken
+      ? { ...blocked, moment: null }
+      : { moment: { ...moment, beforeText: "one\n", afterText: "two\n" } });
+    const restoreEngineMomentFile = vi.fn(async (): Promise<never> => {
+      throw new Error(
+        "Error invoking remote method 'desktop:restore-engine-moment-file': RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: visibility.toml: TOML parse error at line 3, column 9",
+      );
+    });
+    Object.assign(bridge, { restoreEngineMomentFile });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await user.click(await screen.findByTestId("engine-diff-restore-file"));
+    await user.click(await screen.findByTestId("engine-diff-confirm-restore"));
+    const toast = await screen.findByTestId("workspace-shell-error");
+    const tab = screen.getByTestId("tab-dohc://moment-diff/m-1");
+    expect(tab.textContent).toContain("Diff: plan.md");
+
+    // A committed refresh hides the change while its tab is open.
+    broken = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    expect(await screen.findByTestId("engine-diff-hidden")).toBeTruthy();
+    await waitFor(() => expect(tab.textContent).toContain("History change"));
+
+    // Try again reopens the tab, which reads the change again and finds it hidden.
+    const readsBefore = bridge.readEngineMoment.mock.calls.length;
+    await user.click(within(toast).getByTestId("workspace-shell-error-retry"));
+    await waitFor(() => expect(bridge.readEngineMoment.mock.calls.length).toBeGreaterThan(readsBefore));
+    await act(async () => {});
+    expect(screen.getByTestId("engine-diff-hidden")).toBeTruthy();
+    expect(screen.queryByTestId("engine-diff-restore-confirm")).toBeNull();
+    expect(tab.textContent).toContain("History change");
+    expect(tab.textContent).not.toContain("plan.md");
+    expect(restoreEngineMomentFile).toHaveBeenCalledOnce();
+  });
+
+  it("hides an open diff when a History refresh finds the rules unreadable", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const moment = historyMoment("m-1", "Wrote the plan");
+    const blocked = {
+      status: "policy-unreadable" as const,
+      unreadable: [".dohc/visibility.toml" as const],
+      policyErrors: ["visibility.toml: TOML parse error at line 3, column 9"],
+    };
+    let broken = false;
+    bridge.listEngineMoments = vi.fn(async (): Promise<ListEngineMomentsResponse> => broken ? blocked : historyPage([moment]));
+    bridge.readEngineMoment = vi.fn(async (): Promise<ReadEngineMomentResult> => broken
+      ? { ...blocked, moment: null }
+      : { moment: { ...moment, beforeText: "one\n", afterText: "two\n" } });
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await screen.findByTestId("titlebar-chats-sidebar");
+    await user.click(screen.getByTestId("activity-history"));
+    await user.click(await screen.findByTestId("engine-moment-open"));
+    await screen.findByTestId("engine-diff-lines");
+    const tab = screen.getByTestId("tab-dohc://moment-diff/m-1");
+    expect(tab.textContent).toContain("Diff: plan.md");
+
+    broken = true;
+    act(() => {
+      bridge.emitWorkspaceActivity();
+    });
+    expect(await screen.findByTestId("history-policy-hidden")).toBeTruthy();
+    expect(await screen.findByTestId("engine-diff-hidden")).toBeTruthy();
+    expect(screen.queryByTestId("engine-diff-lines")).toBeNull();
+    expect(screen.queryByTestId("engine-diff-restore-file")).toBeNull();
+    // The tab shows that a change is open, not which file it changed.
+    await waitFor(() => expect(tab.textContent).not.toContain("plan.md"));
+    expect(tab.textContent).toContain("History change");
+  });
+
   it("persists a moment diff opened for a valid multibyte file path", async () => {
     const filePath = `目录/${"界".repeat(500)}.md`;
     const bridge = makeBridge(Promise.resolve(null));

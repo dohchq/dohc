@@ -175,6 +175,7 @@ import { useWorkspaceSearch } from "./workbench/useWorkspaceSearch";
 import {
   EngineHistoryView,
 } from "./workbench/EngineHistory";
+import { HistoryHiddenState } from "./workbench/HistoryPolicyStates";
 import {
   ConflictReviewDialog,
   VersionComparePage,
@@ -206,6 +207,7 @@ import {
   versionCompareTabPath,
   isMomentDiffTabPath,
   momentDiffTabPath,
+  parseMomentDiffTabPath,
   collectionTabPath,
   transactionalCollectionTabPath,
   parseTransactionalCollectionTabPath,
@@ -956,6 +958,7 @@ export function DesktopWorkspaceShell(props: {
   const {
     tabLabels: knownTabLabels,
     rememberMomentDiffPath,
+    resolveMomentDiffPath,
   } = useTabTitles(workspaceId);
   const anyTabDirty = dirtyPaths.size > 0;
   const activeDocumentPath = isVirtualTabPath(focusedTabPath)
@@ -1470,6 +1473,7 @@ export function DesktopWorkspaceShell(props: {
     page: engineHistory,
     loadingMore: engineHistoryLoadingMore,
     readState: engineHistoryReadState,
+    policyError: engineHistoryPolicyError,
     refresh: refreshHistoryPage,
     supersede: supersedeHistoryPage,
     loadMore: loadMoreEngineHistory,
@@ -2453,6 +2457,23 @@ export function DesktopWorkspaceShell(props: {
     },
     [refreshFiles, refreshHistory, reportShellError, workspaceId],
   );
+  // One row per file in Notices: a newer failure for the file replaces it.
+  const reportRestoreError = useCallback(
+    (fallback: string, error: unknown, retry: () => void, identity: string) =>
+      reportShellError(fallback, error, retry, undefined, identity),
+    [reportShellError],
+  );
+  // Try again on a failed restore opens the change's tab, and that page asks
+  // before it restores, with its Undo restore after.
+  const [restoreRequest, setRestoreRequest] = useState<{ workspaceId: string; momentId: string } | null>(null);
+  const reopenRestore = useCallback(
+    (momentId: string, path: string) => {
+      setRestoreRequest({ workspaceId, momentId });
+      openMomentDiffTab(momentId, path);
+    },
+    [openMomentDiffTab, workspaceId],
+  );
+  const takeRestoreRequest = useCallback(() => setRestoreRequest(null), []);
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
       const current = wbRef.current;
@@ -4142,6 +4163,16 @@ export function DesktopWorkspaceShell(props: {
         }
         onOpenMoment={openMomentDiffTab}
       />
+    ) : engineHistoryReadState === "failed" && engineHistoryPolicyError ? (
+      <HistoryHiddenState
+        testId="history-policy-hidden"
+        result={engineHistoryPolicyError}
+        onRetry={() =>
+          void refreshHistory().catch((error) =>
+            reportShellError("Could not refresh history.", error),
+          )
+        }
+      />
     ) : engineHistoryReadState === "failed" ||
       engineHistoryReadState === "updating" ? (
       // The same state its two siblings render — ChatsView and LinkedChats
@@ -5036,10 +5067,19 @@ export function DesktopWorkspaceShell(props: {
                   readOnly={!!shareView}
                   onBeforeRestore={beginLineageOperation}
                   onOpenFile={openFile}
-                  onPathResolved={rememberMomentDiffPath}
+                  onPathResolved={resolveMomentDiffPath}
                   registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
                   onRestored={refreshAfterHistoryRestore}
                   onStopAndRestore={stopAndRestore.open}
+                  onError={reportRestoreError}
+                  onSettled={clearIdentity}
+                  historyAnswer={engineHistory ?? engineHistoryPolicyError}
+                  onReopenRestore={reopenRestore}
+                  restoreRequested={
+                    restoreRequest?.workspaceId === workspaceId &&
+                    restoreRequest.momentId === parseMomentDiffTabPath(tabPath ?? "")
+                  }
+                  onRestoreRequestTaken={takeRestoreRequest}
                 />
               )
             ) : isVersionCompareTabPath(tabPath) ? (

@@ -8,6 +8,7 @@ import {
   type FilesPolicyRule,
   type PolicyParseResult,
   type VisibilityPolicyRule,
+  type WorkspacePolicyPath,
 } from "@dohc/security-contract/effective-policy";
 import {
   type SearchVisibility,
@@ -23,6 +24,8 @@ export interface WorkspaceEnginePolicySnapshot {
   filesPolicy: FilesPolicyRule[] | null;
   visibilityPolicy: VisibilityPolicyRule[] | null;
   errors: string[];
+  // Where `errors` came from, so a person can be told which file to fix.
+  unreadable: WorkspacePolicyPath[];
 }
 
 type PolicyReadResult<T> = { rules: T[] | null; errors: string[] };
@@ -175,6 +178,7 @@ export async function readWorkspaceEnginePolicy(
       errors: [
         `workspace policy directory could not be resolved: ${errorMessage(error)}`,
       ],
+      unreadable: [".dohc"],
     };
   }
   const [files, visibility] = await Promise.all([
@@ -185,5 +189,9 @@ export async function readWorkspaceEnginePolicy(
     filesPolicy: files.rules,
     visibilityPolicy: visibility.rules,
     errors: [...files.errors, ...visibility.errors],
+    unreadable: [
+      ...(files.errors.length ? [".dohc/files.toml" as const] : []),
+      ...(visibility.errors.length ? [".dohc/visibility.toml" as const] : []),
+    ],
   };
 }

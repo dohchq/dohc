@@ -22,7 +22,7 @@ import type { createReceivedShareEngineAccess } from "../workspaces/receivedShar
 import type { createEngineYDocSessionIpc, EngineYDocIpcSender } from "../workspaces/engineYDocSessionIpc";
 import type { LocalPersonAuthor } from "../workspaces/desktopRecordEdits";
 import { sharedViewHistory } from "../workspaces/sharedViewHistory";
-import { historyPathAdmission, historyMomentPathsAdmitted, type readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";
+import { historyPathAdmission, historyMomentPathsAdmitted, type readWorkspaceEnginePolicy, type WorkspaceEnginePolicySnapshot } from "../workspaces/workspaceEnginePolicyFile";
 import { shareViewIsPresent } from "../workspaces/shareViewMarker";
 import { collectionListSources, collectionReadSource, mountedCollectionSchema, receivedCollectionQuery } from "../workspaces/receivedShareCollections";
 
@@ -272,12 +272,16 @@ export function createWorkspaceEngineIpc<
         });
     }
 
+    const policyUnreadable = (policy: WorkspaceEnginePolicySnapshot) => HistoryPolicyUnreadableResult.parse({
+      status: "policy-unreadable", unreadable: policy.unreadable, policyErrors: policy.errors,
+    });
+
     registerHandler(CHANNELS.listEngineMoments, async (event, payload) => {
       assertTrustedSender(event);
       const input = ListEngineMomentsPayload.parse(payload);
       return readHistory(event, input.workspaceId, async (history, rootPath) => {
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
-        if (policy?.errors.length) return HistoryPolicyUnreadableResult.parse({ status: "policy-unreadable", policyErrors: policy.errors });
+        if (policy?.errors.length) return policyUnreadable(policy);
         const admitted = policy ? historyPathAdmission(policy) : null;
         return listEngineMomentsForIpc(
           async () => {
@@ -309,12 +313,13 @@ export function createWorkspaceEngineIpc<
       const input = ReadEngineMomentPayload.parse(payload);
       return readHistory(event, input.workspaceId, async (history, rootPath) => {
         const policy = rootPath === null ? null : await readWorkspaceEnginePolicy(rootPath);
-        if (policy?.errors.length) return ReadEngineMomentResult.parse({ moment: null, status: "policy-unreadable", policyErrors: policy.errors });
+        if (policy?.errors.length) return ReadEngineMomentResult.parse({ ...policyUnreadable(policy), moment: null });
         const moment = await history.readMoment(input.momentId);
+        if (moment && !moment.protected && policy && !historyMomentPathsAdmitted(historyPathAdmission(policy), moment.moment)) {
+          return ReadEngineMomentResult.parse({ status: "untracked", moment: null });
+        }
         return ReadEngineMomentResult.parse({
-          moment: moment && (moment.protected || !policy || historyMomentPathsAdmitted(historyPathAdmission(policy), moment.moment))
-            ? engineMomentDetailForIpc(moment, authorNames(input.workspaceId))
-            : null,
+          moment: moment ? engineMomentDetailForIpc(moment, authorNames(input.workspaceId)) : null,
         });
       });
     });

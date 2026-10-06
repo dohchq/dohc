@@ -124,6 +124,8 @@ function renderExport(result: ExportResult): string {
 }
 
 function renderMoments(result: CliResultByVerb["moments"]): string {
+  // A refusal exits with its reason before anything renders.
+  if (!("changes" in result)) return "";
   const lines = result.changes.map((change) => {
     const agents = (change.authors ?? [])
       .map((author) => (author.kind === "agent" ? ` · agent ${author.agentId}` : ""))
