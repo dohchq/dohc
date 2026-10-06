@@ -934,13 +934,12 @@ impl EngineService {
         // small — resuming positionally over the loaded ordered vector is
         // exact (the id either exists at one position or the cursor is
         // stale and reads from the start).
-        if let Some(after) = params.after_version_id.as_deref() {
-            if let Some(position) = versions
+        if let Some(after) = params.after_version_id.as_deref()
+            && let Some(position) = versions
                 .iter()
                 .position(|version| version.version_id == after)
-            {
-                versions.drain(..=position);
-            }
+        {
+            versions.drain(..=position);
         }
         // Versions are few in practice, but the frame limit does not care
         // about practice: same measured budget + honest truncated flag as

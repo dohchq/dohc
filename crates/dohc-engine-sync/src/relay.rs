@@ -1291,12 +1291,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             .ok_or(RelayError::InvalidResponse)?;
         let (queued, mut durable_origins) = crate::deferred::read(store, workspace_id, &identity)?;
         let current = crate::read_relay_cursor(store, workspace_id).map_err(local)?;
-        if let Some(cursor) = &current {
-            if cursor.replication_epoch != identity.replication_epoch
-                || cursor.stream_identity != identity.stream_identity
-            {
-                return Err(RelayError::InvalidResponse);
-            }
+        if let Some(cursor) = &current
+            && (cursor.replication_epoch != identity.replication_epoch
+                || cursor.stream_identity != identity.stream_identity)
+        {
+            return Err(RelayError::InvalidResponse);
         }
         let bootstrap_complete = store
             .read_with(|conn| {
@@ -4379,8 +4378,8 @@ fn replay_share_view_op<T: RelayTransport>(
             Some("write") => {
                 let after = string_field(&envelope.payload, "payloadAfterPath").or(path);
                 let sha = string_field(&envelope.payload, "payloadAfterBlobSha256");
-                if let (Some(after), Some(sha)) = (after, sha) {
-                    if let Err(error) = replay_share_write(
+                if let (Some(after), Some(sha)) = (after, sha)
+                    && let Err(error) = replay_share_write(
                         context.transport,
                         &mut *context.store,
                         context.workspace_id,
@@ -4394,9 +4393,9 @@ fn replay_share_view_op<T: RelayTransport>(
                         &mut *context.applied,
                         &mut *context.changed,
                         &mut *context.blob_refusals,
-                    ) {
-                        refuse_replay_unit(context, &mut refused, after, error)?;
-                    }
+                    )
+                {
+                    refuse_replay_unit(context, &mut refused, after, error)?;
                 }
             }
             _ => {}

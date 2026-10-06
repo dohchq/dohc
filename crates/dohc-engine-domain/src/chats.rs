@@ -4056,13 +4056,13 @@ impl<'a> LinkedChatStore<'a> {
             .as_deref()
             .map(|owner| normalize_feed_identity(owner, "Replication feed owner"))
             .transpose()?;
-        if let Some(replication_owner_user_id) = &replication_owner_user_id {
-            if replication_owner_user_id != &owner_user_id {
-                return Err(DomainError::chat(
-                    "invalid-follow-target",
-                    "Replication feed owner must match the local feed owner.",
-                ));
-            }
+        if let Some(replication_owner_user_id) = &replication_owner_user_id
+            && replication_owner_user_id != &owner_user_id
+        {
+            return Err(DomainError::chat(
+                "invalid-follow-target",
+                "Replication feed owner must match the local feed owner.",
+            ));
         }
         let target_id = normalize_feed_identity(&input.target_id, "Follow target")?;
         let mut input = input.clone();
@@ -4152,13 +4152,14 @@ impl<'a> LinkedChatStore<'a> {
         // Oracle `listFollows`: an omitted state returns all rows — unfollow
         // tombstones included, which reseeding flows inspect — and a present
         // state must be one of the two follow states.
-        if let Some(state) = state {
-            if state != "following" && state != "unfollowed" {
-                return Err(DomainError::chat(
-                    "invalid-follow-target",
-                    "Follow state is invalid.",
-                ));
-            }
+        if let Some(state) = state
+            && state != "following"
+            && state != "unfollowed"
+        {
+            return Err(DomainError::chat(
+                "invalid-follow-target",
+                "Follow state is invalid.",
+            ));
         }
         self.store.read_with(|conn| {
             let mut stmt = conn
@@ -4326,13 +4327,13 @@ impl<'a> LinkedChatStore<'a> {
         let replication_owner_user_id = replication_owner_user_id
             .map(|owner| normalize_feed_identity(owner, "Replication feed owner"))
             .transpose()?;
-        if let Some(replication_owner_user_id) = &replication_owner_user_id {
-            if replication_owner_user_id != &owner_user_id {
-                return Err(DomainError::chat(
-                    "invalid-follow-target",
-                    "Replication feed owner must match the local feed owner.",
-                ));
-            }
+        if let Some(replication_owner_user_id) = &replication_owner_user_id
+            && replication_owner_user_id != &owner_user_id
+        {
+            return Err(DomainError::chat(
+                "invalid-follow-target",
+                "Replication feed owner must match the local feed owner.",
+            ));
         }
         let cursor = decode_feed_cursor(head_cursor)?;
         let ws = workspace_id.to_owned();
@@ -4788,13 +4789,14 @@ impl<'a> LinkedChatStore<'a> {
         state: Option<&str>,
     ) -> Result<Vec<ChatBookmark>, DomainError> {
         let owner_user_id = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
-        if let Some(state) = state {
-            if state != "active" && state != "archived" {
-                return Err(DomainError::chat(
-                    "invalid-bookmark-target",
-                    "Bookmark state is invalid.",
-                ));
-            }
+        if let Some(state) = state
+            && state != "active"
+            && state != "archived"
+        {
+            return Err(DomainError::chat(
+                "invalid-bookmark-target",
+                "Bookmark state is invalid.",
+            ));
         }
         self.store.read_with(|conn| {
             let mut stmt = conn

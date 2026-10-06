@@ -111,15 +111,14 @@ impl<'a> VersionedTextStore<'a> {
 
             let before_state = moment_before_state(conn, ws, &input.mutation_moment_id)?;
             let before = resolve_rollback_before(conn, input, &moment, before_state)?;
-            if let Some(before) = &before {
-                if before.version_id != input.version_id
+            if let Some(before) = &before
+                && (before.version_id != input.version_id
                     || before.object_id != moment.object_id
-                    || (before.path != input.path && moment.operation != MomentOp::Rename)
-                {
-                    return Err(DomainError::InvalidInput {
-                        reason: "rollback snapshot does not match the target file",
-                    });
-                }
+                    || (before.path != input.path && moment.operation != MomentOp::Rename))
+            {
+                return Err(DomainError::InvalidInput {
+                    reason: "rollback snapshot does not match the target file",
+                });
             }
             if later_materialized_object_moment_exists(conn, ws, &moment)? {
                 return Err(DomainError::InvalidInput {

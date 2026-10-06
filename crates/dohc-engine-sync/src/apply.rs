@@ -1528,15 +1528,14 @@ fn apply_message(
         .parent_message_id
         .as_deref()
         .filter(|_| !parent_exists)
+        && parent != payload.message_id
     {
-        if parent != payload.message_id {
-            tx.execute(
-                "INSERT OR IGNORE INTO chat_pending_message_parents \
-                 (workspace_id, child_message_id, thread_id, parent_message_id) VALUES (?1, ?2, ?3, ?4)",
-                params![op.workspace_id, payload.message_id, payload.thread_id, parent],
-            )
-            .map_err(SyncError::persist)?;
-        }
+        tx.execute(
+            "INSERT OR IGNORE INTO chat_pending_message_parents \
+             (workspace_id, child_message_id, thread_id, parent_message_id) VALUES (?1, ?2, ?3, ?4)",
+            params![op.workspace_id, payload.message_id, payload.thread_id, parent],
+        )
+        .map_err(SyncError::persist)?;
     }
     tx.execute(
         "UPDATE chat_messages SET parent_message_id = ?3 WHERE workspace_id = ?1 AND thread_id = ?2 \
