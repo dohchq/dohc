@@ -506,29 +506,74 @@ pub(crate) fn backfill_file_versions_in_tx(
     Ok(())
 }
 
-pub(crate) const LAST_FILE_EXPORT_SQL: &str = "SELECT r.payload_json FROM replication_log r
+pub(crate) const LAST_FILE_EXPORT_SQL: &str = "SELECT r.payload_json,m.moment_order,r.rowid FROM replication_log r
          JOIN moments m ON m.workspace_id=r.workspace_id
            AND m.moment_id=json_extract(r.payload_json,'$.momentId')
          WHERE r.workspace_id=?1 AND r.op_kind='moment.append'
            AND json_extract(r.payload_json,'$.versionId')=+?2
            AND json_extract(r.payload_json,'$.objectId')=+?3
-           AND (r.imported=0 OR NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
-             WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq))
+           AND (r.imported=0 OR (COALESCE(m.sync_record_only,0)=0 AND NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
+             WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq)))
          ORDER BY m.moment_order DESC,r.rowid DESC LIMIT 1";
 
 pub(crate) fn last_file_export_in_tx(
     tx: &Transaction<'_>,
     key: &DocKey,
 ) -> Result<Option<serde_json::Value>, SyncError> {
-    let last: Option<String> = tx
+    let mut last: Option<(String, (i64, bool, i64))> = tx
         .query_row(
             LAST_FILE_EXPORT_SQL,
             params![key.workspace_id, key.version_id, key.object_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, (row.get(1)?, true, row.get(2)?))),
         )
         .optional()
         .map_err(SyncError::corrupt)?;
-    last.map(|json| serde_json::from_str(&json).map_err(SyncError::corrupt))
+    // Rollback replaces its target moment but leaves the published operation.
+    // Its compensating moment orders that export immediately before the replacement.
+    let mut missing = tx.prepare(
+        "SELECT r.payload_json,r.rowid,json_extract(r.payload_json,'$.momentId')
+         FROM replication_log r LEFT JOIN moments m ON m.workspace_id=r.workspace_id
+           AND m.moment_id=json_extract(r.payload_json,'$.momentId')
+         WHERE r.workspace_id=?1 AND r.op_kind='moment.append'
+           AND json_extract(r.payload_json,'$.versionId')=+?2 AND json_extract(r.payload_json,'$.objectId')=+?3
+           AND m.moment_id IS NULL AND (r.imported=0 OR NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
+             WHERE p.workspace_id=r.workspace_id AND p.origin_id=r.origin_id AND p.origin_seq=r.origin_seq))"
+    ).map_err(SyncError::corrupt)?;
+    let rows = missing
+        .query_map(
+            params![key.workspace_id, key.version_id, key.object_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(SyncError::corrupt)?;
+    for row in rows {
+        let (json, rowid, id) = row.map_err(SyncError::corrupt)?;
+        let replacement = dohc_engine_domain::rollback_compensating_moment_id(
+            &key.workspace_id,
+            &key.version_id,
+            &id,
+        );
+        let order: Option<i64> = tx
+            .query_row(
+                "SELECT moment_order FROM moments WHERE workspace_id=?1 AND moment_id=?2",
+                params![key.workspace_id, replacement],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        if let Some(order) = order {
+            let rank = (order, false, rowid);
+            if last.as_ref().is_none_or(|(_, previous)| rank > *previous) {
+                last = Some((json, rank));
+            }
+        }
+    }
+    last.map(|(json, _)| serde_json::from_str(&json).map_err(SyncError::corrupt))
         .transpose()
 }
 

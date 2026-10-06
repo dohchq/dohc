@@ -494,6 +494,7 @@ mod tests {
                 moment_id: "moment-result".to_owned(),
                 payload_sha256: String::new(),
             }],
+            exported_before: None,
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id: "e".repeat(64),
                 predecessor_state_vector_sha256: "f".repeat(64),

@@ -2,7 +2,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use dohc_engine_domain::{SecretMomentRecord, VersionRecord};
 use dohc_engine_storage::{StorageError, hex_sha256};
-use rusqlite::{Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx};
 
@@ -131,6 +131,15 @@ pub(crate) struct PortableBefore {
 }
 
 impl PortableBefore {
+    pub(crate) fn apply_to(&self, payload: &mut serde_json::Value) {
+        let object = payload
+            .as_object_mut()
+            .expect("moment payload is an object");
+        for (field, value) in &self.fields {
+            object.insert(field.clone(), value.clone());
+        }
+    }
+
     pub(crate) fn bootstrap(payload: &serde_json::Value) -> Self {
         let fields = payload
             .as_object()
@@ -193,30 +202,75 @@ pub fn journal_moment_append_in_tx(
     workspace_id: &str,
     moment_id: &str,
 ) -> Result<(), SyncError> {
-    let (payload, recorded_at_ms) = moment_payload_in_tx(tx, workspace_id, moment_id, None)?;
+    let (payload, recorded_at_ms) =
+        published_moment_append_payload_in_tx(tx, workspace_id, moment_id)?;
+    journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
+}
+
+pub(crate) fn lane_before_in_tx(
+    tx: &Transaction<'_>,
+    key: &dohc_engine_collab::DocKey,
+) -> Result<Option<PortableBefore>, SyncError> {
     let uses_file_preimage: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3
-           AND (file_export_lane IN (1,2) OR (file_export_lane=3 AND ?4='delete')))",
-        params![workspace_id,payload["versionId"].as_str(),payload["objectId"].as_str(),payload["operation"].as_str()],
+           AND file_export_lane IN (1,2,3))",
+        params![key.workspace_id,key.version_id,key.object_id],
         |row| row.get(0),
     ).map_err(SyncError::corrupt)?;
-    if uses_file_preimage {
-        let key = dohc_engine_collab::DocKey {
-            workspace_id: workspace_id.to_owned(),
-            version_id: payload["versionId"]
-                .as_str()
-                .expect("moment names its version")
-                .to_owned(),
-            object_id: payload["objectId"]
-                .as_str()
-                .expect("moment names its object")
-                .to_owned(),
-        };
-        let last = crate::enrolment::last_file_export_in_tx(tx, &key)?;
-        let before = crate::enrolment::file_version_before_in_tx(tx, &key, last.as_ref())?;
-        return journal_moment_append_from_in_tx(tx, workspace_id, moment_id, &before);
+    if !uses_file_preimage {
+        return Ok(None);
     }
-    journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
+    let last = crate::enrolment::last_file_export_in_tx(tx, key)?;
+    crate::enrolment::file_version_before_in_tx(tx, key, last.as_ref()).map(Some)
+}
+
+pub(crate) fn published_moment_append_payload_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+) -> Result<(serde_json::Value, i64), SyncError> {
+    let (mut payload, recorded_at_ms) = moment_append_payload_in_tx(tx, workspace_id, moment_id)?;
+    let key = dohc_engine_collab::DocKey {
+        workspace_id: workspace_id.to_owned(),
+        version_id: payload["versionId"]
+            .as_str()
+            .expect("moment names its version")
+            .to_owned(),
+        object_id: payload["objectId"]
+            .as_str()
+            .expect("moment names its object")
+            .to_owned(),
+    };
+    // A published moment keeps its original preimage after promotion and later exports.
+    let published: Option<String> = tx.query_row(
+            "SELECT payload_json FROM replication_log WHERE workspace_id=?1 AND op_kind='moment.append'
+               AND json_extract(payload_json,'$.versionId')=+?2 AND json_extract(payload_json,'$.objectId')=+?3
+               AND json_extract(payload_json,'$.momentId')=?4
+               AND (imported=0 OR NOT EXISTS(SELECT 1 FROM replication_pending_refusals p
+                 WHERE p.workspace_id=replication_log.workspace_id AND p.origin_id=replication_log.origin_id AND p.origin_seq=replication_log.origin_seq))
+               ORDER BY rowid DESC LIMIT 1",
+            params![workspace_id,key.version_id,key.object_id,moment_id], |row| row.get(0),
+        ).optional().map_err(SyncError::corrupt)?;
+    let published = match published {
+        Some(published) => Some(published),
+        None => tx
+            .query_row(
+                "SELECT o.payload_json FROM replication_pending_conflict_moments m
+                   JOIN replication_pending_conflict_ops o USING(bundle_order,op_index)
+                 WHERE m.workspace_id=?1 AND m.moment_id=?2",
+                params![workspace_id, moment_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?,
+    };
+    if let Some(published) = published {
+        let published = serde_json::from_str(&published).map_err(SyncError::corrupt)?;
+        PortableBefore::bootstrap(&published).apply_to(&mut payload);
+    } else if let Some(before) = lane_before_in_tx(tx, &key)? {
+        before.apply_to(&mut payload);
+    }
+    Ok((payload, recorded_at_ms))
 }
 
 /// [`journal_moment_append_in_tx`] with `before` as the whole public before group.
@@ -367,12 +421,7 @@ fn moment_payload_in_tx(
         "beforeMetadata": before_metadata,
     });
     if let Some(before) = portable_before {
-        let object = payload
-            .as_object_mut()
-            .expect("moment payload is an object");
-        for (field, value) in &before.fields {
-            object.insert(field.clone(), value.clone());
-        }
+        before.apply_to(&mut payload);
     }
     omit_local_person_authors(&mut payload);
     if let Some(authors) = payload

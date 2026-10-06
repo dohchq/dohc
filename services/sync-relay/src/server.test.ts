@@ -1530,6 +1530,90 @@ describe("sync relay handler", () => {
     ]);
   });
 
+  it.each([
+    [false, "text"], [true, "text"], [false, "binary"], [true, "binary"],
+  ] as const)("binds an exported preimage to lane resolution shadows (moved=%s, kind=%s)", (moved, contentKind) => {
+    const fixture = compactConflictResolveFixture();
+    const payload = fixture.payload;
+    const transition = payload.transition as Record<string, Record<string, unknown>>;
+    const paths = payload.paths as string[];
+    const effects = payload.effects as Array<{ payloadSha256: string }>;
+    payload.lineageTransition = null;
+    if (moved) {
+      paths.push("docs/exported.md");
+    } else {
+      paths.splice(1);
+      transition.incoming.pathRef = 0;
+      transition.result.pathRef = 0;
+      effects.splice(0, 1);
+      fixture.shadows.splice(0, 1);
+      Object.assign(fixture.shadows[0], {
+        conflictEffectIndex: 0, path: paths[0], payloadAfterPath: paths[0],
+      });
+    }
+    const exported = {
+      ...transition.current, pathRef: moved ? 2 : 0, latestMomentId: "moment-exported",
+      blobSha256: sha256("last exported text"), contentKind, byteLength: 18, updatedAtMs: 5,
+    };
+    payload.exportedBefore = exported;
+    Object.assign(fixture.shadows[0], {
+      payloadBeforeBlobSha256: exported.blobSha256, payloadBeforePath: paths[exported.pathRef],
+      payloadBeforeContentKind: contentKind, payloadBeforeByteLength: exported.byteLength,
+      beforePresent: "present", beforeObjectId: "object-a", beforeVersionId: "main",
+      beforePath: paths[exported.pathRef], beforeBlobSha256: exported.blobSha256,
+      beforeContentKind: contentKind, beforeByteLength: exported.byteLength,
+      beforeUpdatedAtMs: exported.updatedAtMs, beforeLatestMomentId: exported.latestMomentId, beforeMetadata: null,
+    });
+    fixture.shadows.forEach((shadow, index) => {
+      effects[index].payloadSha256 = sha256(stableJsonStringify(shadow));
+    });
+    const readRoots = () => referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
+      workspaceId: "workspace-a", recordedAtMs: 21,
+    });
+    expect(new Set(readRoots())).toEqual(new Set([
+      transition.current.blobSha256, transition.result.blobSha256, exported.blobSha256,
+    ]));
+    exported.updatedAtMs += 1;
+    expect(readRoots).toThrow(/payloadSha256/u);
+    if (moved) {
+      paths.push("docs/fourth.md");
+      expect(readRoots).toThrow(/one to three/u);
+    }
+  });
+
+  it("accepts a lane's absent exported preimage and keeps the following write absent", () => {
+    const fixture = compactConflictResolveFixture();
+    fixture.payload.lineageTransition = null;
+    fixture.payload.exportedBefore = { present: false, pathRef: 0 };
+    const shadow = fixture.shadows[0];
+    for (const key of Object.keys(shadow)) {
+      if (key.startsWith("before") || key.startsWith("payloadBefore")) shadow[key] = null;
+    }
+    shadow.beforePresent = "null";
+    const effects = fixture.payload.effects as Array<{ payloadSha256: string }>;
+    effects[0].payloadSha256 = sha256(stableJsonStringify(shadow));
+    const roots = referencedBlobShas("conflict.resolve", JSON.stringify(fixture.payload), {
+      workspaceId: "workspace-a", recordedAtMs: 21,
+    });
+    const transition = fixture.payload.transition as Record<string, Record<string, unknown>>;
+    expect(new Set(roots)).toEqual(new Set([
+      transition.current.blobSha256, transition.result.blobSha256,
+    ]));
+  });
+
+  it("rejects exported preimages for claimed lineages or another object", () => {
+    const fixture = compactConflictResolveFixture();
+    const transition = fixture.payload.transition as Record<string, Record<string, unknown>>;
+    fixture.payload.exportedBefore = { ...transition.current };
+    const readRoots = () => referencedBlobShas("conflict.resolve", JSON.stringify(fixture.payload), {
+      workspaceId: "workspace-a", recordedAtMs: 21,
+    });
+    expect(readRoots).toThrow(/unclaimed object/u);
+    fixture.payload.lineageTransition = null;
+    fixture.payload.exportedBefore = { ...transition.current, objectId: "another-object" };
+    expect(readRoots).toThrow(/unclaimed object/u);
+  });
+
   it("proves that two worst-valid canonical moment effects cannot fit the relay payload cap", () => {
     const first = worstValidCanonicalMoment('"'.repeat(512));
     const second = worstValidCanonicalMoment(`\\${'"'.repeat(511)}`);

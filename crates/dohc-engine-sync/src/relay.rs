@@ -5262,6 +5262,7 @@ mod conflict_resolve_blob_ref_tests {
                 result_object_created_at_ms: Some(1),
             },
             effects: Vec::new(),
+            exported_before: None,
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id: dohc_engine_storage::hex_sha256(b"predecessor"),
                 predecessor_state_vector_sha256: dohc_engine_storage::hex_sha256(

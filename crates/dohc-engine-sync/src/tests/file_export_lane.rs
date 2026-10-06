@@ -106,7 +106,11 @@ fn apply(store: &mut EngineStore, op: &ReplicationEnvelope) {
     let ApplyDisposition::Applied(result) = result.primary else {
         panic!("{result:?}")
     };
-    assert_eq!(result, 0);
+    assert_eq!(
+        result, 0,
+        "moment {} opened a conflict",
+        op.payload["momentId"]
+    );
 }
 
 fn unsynced_settle_then_ordinary_publication(operation: &str) {
@@ -130,6 +134,25 @@ fn unsynced_settle_then_ordinary_publication(operation: &str) {
                         workspace_id: "ws".into(),
                         version_id: "main".into(),
                         path: "doc.md".into(),
+                        moment_id: "outside".into(),
+                        request_id: None,
+                        metadata_origin: "api".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 30,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+        } else if operation == "rename" {
+            VersionedTextStore::new(&mut source)
+                .rename_text_file(
+                    &RenameTextFile {
+                        workspace_id: "ws".into(),
+                        version_id: "main".into(),
+                        from_path: "doc.md".into(),
+                        to_path: "renamed.md".into(),
                         moment_id: "outside".into(),
                         request_id: None,
                         metadata_origin: "api".into(),
@@ -198,6 +221,385 @@ fn lane_outside_write_after_unsynced_settle_uses_the_exported_preimage() {
 #[test]
 fn lane_delete_after_unsynced_settle_uses_the_exported_preimage() {
     unsynced_settle_then_ordinary_publication("delete");
+}
+
+#[test]
+fn lane_rename_after_unsynced_settle_uses_the_exported_preimage() {
+    unsynced_settle_then_ordinary_publication("rename");
+}
+
+#[test]
+fn retired_lane_restore_blocked_reopen_settle_then_write_uses_the_exported_preimage() {
+    let (_scratch, _, mut source) = owner();
+    write(&mut source, "doc", "v1", "doc.md", "exported", "ydoc", 10);
+    lane(&mut source, "doc");
+    drain(&mut source);
+    VersionedTextStore::new(&mut source)
+        .delete_text_file(
+            &DeleteTextFile {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                path: "doc.md".into(),
+                moment_id: "deleted".into(),
+                request_id: None,
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 20,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    source
+        .write_with(&NoFaults, |tx| {
+            journal_moment_append_in_tx(tx, "ws", "deleted")
+        })
+        .unwrap();
+    VersionedTextStore::new(&mut source)
+        .rollback_text_file_mutation(
+            &dohc_engine_domain::RollbackTextFileMutation {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                path: "doc.md".into(),
+                mutation_moment_id: "deleted".into(),
+                metadata_origin: "restore".into(),
+                author_json: None,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    let restored = dohc_engine_domain::rollback_compensating_moment_id("ws", "main", "deleted");
+    source
+        .write_with(&NoFaults, |tx| {
+            journal_moment_append_in_tx(tx, "ws", &restored)
+        })
+        .unwrap();
+    let key = DocKey::new("ws", "main", "doc").unwrap();
+    fresh_seed(&mut source, &key, "exported");
+    source.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO ydoc_deferred_updates(workspace_id,version_id,object_id,origin_id,origin_seq,recorded_at_ms) VALUES ('ws','main','doc','peer',0,30)", []).map_err(SyncError::persist)?;
+        assert_eq!(originate_ydoc_base_in_tx(tx, &key, "doc.md", None, None, 30)?, BaseOrigination::NothingToDo);
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    assert_eq!(
+        dohc_engine_collab::read_marker(&source, &key)
+            .unwrap()
+            .unwrap()
+            .file_export_lane,
+        dohc_engine_collab::FileExportLane::Retired
+    );
+    write(
+        &mut source,
+        "doc",
+        "unexported",
+        "doc.md",
+        "owner-only",
+        "ydoc",
+        40,
+    );
+    write(
+        &mut source,
+        "doc",
+        "outside",
+        "doc.md",
+        "outside edit",
+        "api",
+        50,
+    );
+    source
+        .write_with(&NoFaults, |tx| {
+            journal_moment_append_in_tx(tx, "ws", "outside")
+        })
+        .unwrap();
+    let all = exports(&source);
+    assert_eq!(all.len(), 4, "the intermediate settle stays owner-only");
+    assert_eq!(
+        all.last().unwrap().payload["beforeLatestMomentId"],
+        restored
+    );
+    let (_peer_scratch, _, mut peer) = open_store();
+    seed_replication_version(&mut peer, "main", "main");
+    adopt_join_identity(
+        &mut peer,
+        "ws",
+        "recipient",
+        "epoch-1",
+        "stream-1",
+        1,
+        &NoFaults,
+    )
+    .unwrap();
+    hydrate(&source, &mut peer);
+    for op in &all {
+        apply(&mut peer, op);
+    }
+    assert_eq!(count(&peer, "conflicts"), 0);
+    assert_eq!(
+        all.last().unwrap().payload["beforeLatestMomentId"],
+        restored
+    );
+    let real_before: String = source
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT before_latest_moment_id FROM moments WHERE moment_id='outside'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(real_before, "unexported");
+}
+
+#[test]
+fn lane_conflict_resolution_after_unsynced_settle_uses_the_exported_preimage() {
+    let (_scratch, _, mut source) = owner();
+    write(&mut source, "doc", "v1", "doc.md", "exported", "ydoc", 10);
+    lane(&mut source, "doc");
+    drain(&mut source);
+    write(&mut source, "doc", "v2", "doc.md", "owner-only", "ydoc", 20);
+    let (_peer_scratch, _, mut peer) = open_store();
+    seed_replication_version(&mut peer, "main", "main");
+    adopt_join_identity(
+        &mut peer,
+        "ws",
+        "recipient",
+        "epoch-1",
+        "stream-1",
+        1,
+        &NoFaults,
+    )
+    .unwrap();
+    hydrate(&source, &mut peer);
+    apply(&mut peer, &exports(&source)[0]);
+    write(
+        &mut peer,
+        "doc",
+        "peer-edit",
+        "doc.md",
+        "peer version",
+        "api",
+        30,
+    );
+    peer.write_with(&NoFaults, |tx| {
+        journal_moment_append_in_tx(tx, "ws", "peer-edit")
+    })
+    .unwrap();
+    hydrate(&peer, &mut source);
+    let imported =
+        apply_moment_envelope(&mut source, &exports(&peer)[0], &NoFaults, &NoLiveLeases).unwrap();
+    assert_eq!(imported.primary, ApplyDisposition::Applied(1));
+    let conflicts = VersionedTextStore::new(&mut source)
+        .list_text_conflicts_page("ws", Some("open"), None)
+        .unwrap();
+    assert_eq!(conflicts.len(), 1);
+    let input = dohc_engine_domain::ResolveTextConflict {
+        workspace_id: "ws".into(),
+        conflict_id: conflicts[0].conflict_id.clone(),
+        resolution: dohc_engine_domain::ResolveConflictKind::ApplyIncoming,
+        object_id: "doc".into(),
+        write_moment_id: "resolved".into(),
+        delete_moment_id: "unused-delete".into(),
+        metadata_origin: "api".into(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms: 40,
+        request_id: None,
+        conflict_answer_budget_bytes: usize::MAX,
+    };
+    VersionedTextStore::new(&mut source)
+        .resolve_text_conflict_with(
+            &input,
+            &NoFaults,
+            |tx, conflict, _| {
+                Ok(
+                    crate::conflict_resolve_v1::prepare_local_conflict_resolve_v1_in_tx(
+                        tx, &input, conflict,
+                    )
+                    .unwrap(),
+                )
+            },
+            |tx, result, prepared| {
+                crate::conflict_resolve_v1::commit_local_conflict_resolve_v1_in_tx(
+                    tx, &prepared, result,
+                )
+                .unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+    let ops = list_replication_ops(&source, "ws", "local", -1, 20).unwrap();
+    let shadow = ops
+        .iter()
+        .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == "resolved")
+        .unwrap();
+    assert_eq!(shadow.payload["beforeLatestMomentId"], "v1");
+    let real_before: String = source
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT before_latest_moment_id FROM moments WHERE moment_id='resolved'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(real_before, "v2", "owner rollback keeps the real preimage");
+    hydrate(&source, &mut peer);
+    for op in ops
+        .iter()
+        .filter(|op| op.op_kind == "conflict.resolve" || op.payload["momentId"] == "resolved")
+    {
+        let result = apply_replication_envelope(
+            &mut peer,
+            &mut WriterDocCache::new(),
+            op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Applied(_)),
+            "{result:?}"
+        );
+    }
+    assert_eq!(count(&peer, "conflicts"), 0);
+    for diverged in [false, true] {
+        let (_recipient_scratch, _, mut recipient) = open_store();
+        seed_replication_version(&mut recipient, "main", "main");
+        adopt_join_identity(
+            &mut recipient,
+            "ws",
+            "another-recipient",
+            "epoch-1",
+            "stream-1",
+            1,
+            &NoFaults,
+        )
+        .unwrap();
+        hydrate(&source, &mut recipient);
+        apply(&mut recipient, &exports(&source)[0]);
+        if diverged {
+            write(
+                &mut recipient,
+                "doc",
+                "private-recipient",
+                "doc.md",
+                "unreviewed local edit",
+                "api",
+                35,
+            );
+        }
+        for op in ops
+            .iter()
+            .filter(|op| op.op_kind == "conflict.resolve" || op.payload["momentId"] == "resolved")
+        {
+            let result = apply_replication_envelope(
+                &mut recipient,
+                &mut WriterDocCache::new(),
+                op,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .unwrap();
+            assert!(
+                matches!(result.primary, ApplyDisposition::Applied(_)),
+                "{result:?}"
+            );
+        }
+        assert_eq!(count(&recipient, "conflicts"), i64::from(diverged));
+        let current = VersionedTextStore::new(&mut recipient)
+            .read_text("ws", "main", "doc.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            current.text,
+            if diverged {
+                "unreviewed local edit"
+            } else {
+                "peer version"
+            }
+        );
+    }
+    write(
+        &mut peer,
+        "doc",
+        "continued-peer-edit",
+        "doc.md",
+        "peer continued",
+        "api",
+        50,
+    );
+    peer.write_with(&NoFaults, |tx| {
+        journal_moment_append_in_tx(tx, "ws", "continued-peer-edit")
+    })
+    .unwrap();
+    hydrate(&peer, &mut source);
+    let continued = apply_moment_envelope(
+        &mut source,
+        exports(&peer).last().unwrap(),
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .unwrap();
+    assert_eq!(continued.primary, ApplyDisposition::Applied(0));
+    write(
+        &mut source,
+        "doc",
+        "later-publication",
+        "doc.md",
+        "later owner version",
+        "api",
+        60,
+    );
+    source
+        .write_with(&NoFaults, |tx| {
+            journal_moment_append_in_tx(tx, "ws", "later-publication")?;
+            let duplicate = crate::conflict_resolve_v1::durable_effect_shadow_in_tx(
+                tx,
+                "ws",
+                "resolved",
+                &input.conflict_id,
+                0,
+            )?;
+            assert_eq!(
+                duplicate, shadow.payload,
+                "a later export must not change the original shadow"
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let key = DocKey::new("ws", "main", "doc").unwrap();
+    fresh_seed(&mut source, &key, "later owner version");
+    source
+        .write_with(&NoFaults, |tx| {
+            assert!(matches!(
+                originate_ydoc_base_in_tx(tx, &key, "doc.md", None, None, 70)?,
+                BaseOrigination::Originated { .. }
+            ));
+            let flag: i64 = tx
+                .query_row(
+                    "SELECT file_export_lane FROM ydoc_docs WHERE object_id='doc'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(SyncError::corrupt)?;
+            assert_eq!(flag, 0);
+            let duplicate = crate::conflict_resolve_v1::durable_effect_shadow_in_tx(
+                tx,
+                "ws",
+                "resolved",
+                &input.conflict_id,
+                0,
+            )?;
+            assert_eq!(
+                duplicate, shadow.payload,
+                "promotion must retain the signed shadow's preimage"
+            );
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
 }
 
 #[test]

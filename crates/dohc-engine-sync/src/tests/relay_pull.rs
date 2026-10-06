@@ -3835,6 +3835,7 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
             payload_sha256: String::new(),
         }],
         lineage_transition: None,
+        exported_before: None,
     })
     .expect("retryable parent carrier");
     let mut parent = envelope("bundle-peer", 0, "conflict.resolve", built.value);
@@ -5313,6 +5314,7 @@ fn assert_held_conflict_replays_after_restart(joining: bool) {
             payload_sha256: String::new(),
         }],
         lineage_transition: None,
+        exported_before: None,
     })
     .expect("retryable parent carrier");
     let mut parent = envelope("bundle-peer", 0, "conflict.resolve", built.value);
@@ -5712,6 +5714,7 @@ fn fetched_suffix_does_not_starve_a_released_deferred_origin() {
                 payload_sha256: String::new(),
             }],
             lineage_transition: None,
+            exported_before: None,
         })
         .expect("retryable parent carrier");
         let mut parent = envelope(origin, 0, "conflict.resolve", built.value);

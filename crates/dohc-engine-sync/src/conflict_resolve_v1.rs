@@ -172,6 +172,7 @@ pub(crate) struct ConflictResolveV1 {
     pub effect_context: EffectContextV1,
     pub effects: Vec<EffectV1>,
     pub lineage_transition: Option<LineageTransitionV1>,
+    pub exported_before: Option<HeadV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,14 +242,7 @@ pub(crate) fn build_conflict_resolve_v1(
 ) -> Result<BuiltConflictResolveV1, SyncError> {
     validate_bindings(&payload)?;
     for effect_index in 0..payload.effects.len() {
-        let shadow = match payload.effects[effect_index].kind {
-            EffectKindV1::Delete => {
-                delete_shadow(&payload, &payload.effects[effect_index], effect_index)?
-            }
-            EffectKindV1::Write => {
-                write_shadow(&payload, &payload.effects[effect_index], effect_index)?
-            }
-        };
+        let shadow = effect_shadow(&payload, &payload.effects[effect_index], effect_index)?;
         let canonical = crate::relay::canonical_json_bytes(&shadow)?;
         ensure_limit(
             "MAX_PAYLOAD_JSON_BYTES",
@@ -280,25 +274,33 @@ pub(crate) fn validate_conflict_resolve_v1(
         MAX_PAYLOAD_JSON_BYTES,
         encoded_payload_bytes,
     )?;
-    let record = exact_object(
-        value,
-        &[
-            "formatVersion",
-            "workspaceId",
-            "conflictId",
-            "status",
-            "chosenFrom",
-            "resolution",
-            "targetVersionId",
-            "sourceVersionId",
-            "paths",
-            "transition",
-            "effectContext",
-            "effects",
-            "lineageTransition",
-        ],
-        "conflict.resolve v1 payload has unknown or missing fields",
-    )?;
+    let required = [
+        "formatVersion",
+        "workspaceId",
+        "conflictId",
+        "status",
+        "chosenFrom",
+        "resolution",
+        "targetVersionId",
+        "sourceVersionId",
+        "paths",
+        "transition",
+        "effectContext",
+        "effects",
+        "lineageTransition",
+    ];
+    let record = value
+        .as_object()
+        .ok_or_else(|| invalid("conflict.resolve v1 payload is not an object"))?;
+    if required.iter().any(|key| !record.contains_key(*key))
+        || record
+            .keys()
+            .any(|key| !required.contains(&key.as_str()) && key != "exportedBefore")
+    {
+        return Err(invalid(
+            "conflict.resolve v1 payload has unknown or missing fields",
+        ));
+    }
     if wire_integer(field(record, "formatVersion")?)? != FORMAT_VERSION {
         return Err(invalid("conflict.resolve formatVersion must be 1"));
     }
@@ -325,6 +327,10 @@ pub(crate) fn validate_conflict_resolve_v1(
     let current = parse_head(field(transition, "current")?, paths.len())?;
     let incoming = parse_head(field(transition, "incoming")?, paths.len())?;
     let result = parse_head(field(transition, "result")?, paths.len())?;
+    let exported_before = record
+        .get("exportedBefore")
+        .map(|head| parse_head(head, paths.len()))
+        .transpose()?;
     let effect_context = parse_effect_context(field(record, "effectContext")?)?;
     if effect_context.recorded_at_ms != envelope.recorded_at_ms {
         return Err(invalid(
@@ -347,16 +353,14 @@ pub(crate) fn validate_conflict_resolve_v1(
         effect_context,
         effects,
         lineage_transition,
+        exported_before,
     };
     validate_bindings(&payload)?;
 
     let mut shadows = Vec::with_capacity(payload.effects.len());
     let mut shadow_sha256s = Vec::with_capacity(payload.effects.len());
     for (effect_index, effect) in payload.effects.iter().enumerate() {
-        let shadow = match effect.kind {
-            EffectKindV1::Delete => delete_shadow(&payload, effect, effect_index)?,
-            EffectKindV1::Write => write_shadow(&payload, effect, effect_index)?,
-        };
+        let shadow = effect_shadow(&payload, effect, effect_index)?;
         let canonical = crate::relay::canonical_json_bytes(&shadow)?;
         ensure_limit(
             "MAX_PAYLOAD_JSON_BYTES",
@@ -507,9 +511,9 @@ fn parse_paths(value: &Value) -> Result<Vec<String>, SyncError> {
     let Some(values) = value.as_array() else {
         return Err(invalid("conflict.resolve paths must be an array"));
     };
-    if !(1..=2).contains(&values.len()) {
+    if !(1..=3).contains(&values.len()) {
         return Err(invalid(
-            "conflict.resolve paths must contain one or two entries",
+            "conflict.resolve paths must contain one to three entries",
         ));
     }
     let mut paths = Vec::with_capacity(values.len());
@@ -857,9 +861,22 @@ fn validate_bindings(payload: &ConflictResolveV1) -> Result<(), SyncError> {
         payload.result.path_ref(),
     ]
     .into_iter()
+    .chain(payload.exported_before.iter().map(HeadV1::path_ref))
     .collect::<BTreeSet<_>>();
     if used_paths.len() != payload.paths.len() {
         return Err(invalid("conflict.resolve path table has an unused entry"));
+    }
+    if let Some(exported) = &payload.exported_before {
+        if payload.lineage_transition.is_some()
+            || payload.current.present().is_none()
+            || exported.present().is_some_and(|head| {
+                Some(&head.object_id) != payload.current.present().map(|head| &head.object_id)
+            })
+        {
+            return Err(invalid(
+                "conflict.resolve exported preimage must name its unclaimed object",
+            ));
+        }
     }
     if payload.current.present().is_some()
         != payload
@@ -1104,6 +1121,57 @@ fn delete_shadow(
     }))
 }
 
+fn effect_shadow(
+    payload: &ConflictResolveV1,
+    effect: &EffectV1,
+    effect_index: usize,
+) -> Result<Value, SyncError> {
+    let mut shadow = match effect.kind {
+        EffectKindV1::Delete => delete_shadow(payload, effect, effect_index)?,
+        EffectKindV1::Write => write_shadow(payload, effect, effect_index)?,
+    };
+    if let Some(exported) = &payload.exported_before
+        && shadow["objectId"].as_str()
+            == payload
+                .current
+                .present()
+                .map(|head| head.object_id.as_str())
+    {
+        let absent = HeadV1::Absent {
+            path_ref: payload.result.path_ref(),
+        };
+        let before = if effect.kind == EffectKindV1::Write
+            && payload.effects[..effect_index]
+                .iter()
+                .any(|effect| effect.kind == EffectKindV1::Delete)
+        {
+            &absent
+        } else {
+            exported
+        };
+        portable_head_before(payload, before).apply_to(&mut shadow);
+        shadow["beforeMetadata"] = Value::Null;
+    }
+    Ok(shadow)
+}
+
+fn portable_head_before(
+    payload: &ConflictResolveV1,
+    head: &HeadV1,
+) -> crate::outbound::PortableBefore {
+    let published = match head {
+        HeadV1::Absent { .. } => json!({"operation":"delete"}),
+        HeadV1::Present(head) => json!({
+            "operation":"write", "versionId":payload.target_version_id, "objectId":head.object_id,
+            "momentId":head.latest_moment_id, "recordedAtMs":head.updated_at_ms,
+            "payloadAfterPath":payload.paths[head.path_ref], "payloadAfterContentKind":head.content_kind.as_str(),
+            "payloadAfterBlobSha256":head.blob_sha256, "payloadAfterByteLength":head.byte_length,
+            "metadata":Value::Null,
+        }),
+    };
+    crate::outbound::PortableBefore::published(&published)
+}
+
 fn write_shadow(
     payload: &ConflictResolveV1,
     effect: &EffectV1,
@@ -1161,6 +1229,7 @@ fn blob_roots(payload: &ConflictResolveV1) -> (Vec<String>, Vec<String>, Vec<Str
     let mut ydoc = BTreeSet::new();
     for head in [&payload.current, &payload.incoming, &payload.result]
         .into_iter()
+        .chain(payload.exported_before.iter())
         .filter_map(HeadV1::present)
     {
         match head.content_kind {
@@ -1261,7 +1330,7 @@ fn payload_value(payload: &ConflictResolveV1) -> Value {
             })
         })
         .collect::<Vec<_>>();
-    json!({
+    let mut value = json!({
         "formatVersion": FORMAT_VERSION,
         "workspaceId": payload.workspace_id,
         "conflictId": payload.conflict_id,
@@ -1285,7 +1354,11 @@ fn payload_value(payload: &ConflictResolveV1) -> Value {
         },
         "effects": effects,
         "lineageTransition": lineage_transition_value(payload.lineage_transition.as_ref()),
-    })
+    });
+    if let Some(exported) = &payload.exported_before {
+        value["exportedBefore"] = head_value(exported);
+    }
+    value
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1475,10 +1548,15 @@ pub(crate) fn apply_imported_conflict_resolve_v1_in_tx(
                     shadow,
                 )?;
             }
-            if payload
+            if (payload
                 .lineage_transition
                 .as_ref()
                 .is_some_and(|transition| transition.successor.is_some())
+                || (payload.exported_before.is_some()
+                    && payload
+                        .effects
+                        .last()
+                        .is_some_and(|effect| effect.kind == EffectKindV1::Write)))
                 && let Some(result) = payload.result.present()
                 && let Some(current) = live.present()
                 && current.latest_moment_id != result.latest_moment_id
@@ -1828,6 +1906,12 @@ fn classify_imported_head(
 ) -> Result<(ImportedHeadDisposition, HeadV1), SyncError> {
     let current_path_ref = payload.current.path_ref();
     let current_live = imported_live_head(tx, payload, current_path_ref)?;
+    if let Some(exported) = &payload.exported_before {
+        let exported_live = imported_live_head(tx, payload, exported.path_ref())?;
+        if exported_live == *exported {
+            return Ok((ImportedHeadDisposition::ExactCurrent, exported_live));
+        }
+    }
     if current_live == payload.current {
         return Ok((ImportedHeadDisposition::ExactCurrent, current_live));
     }
@@ -2866,9 +2950,38 @@ pub fn prepare_local_conflict_resolve_v1_in_tx(
         },
         effects,
         lineage_transition: None,
+        exported_before: None,
     };
     let lineage = prepare_local_lineage_in_tx(tx, conflict, &payload, result_text.as_deref())?;
     payload.lineage_transition = lineage_transition(&lineage)?;
+    if payload.lineage_transition.is_none()
+        && let Some(current) = payload.current.present()
+    {
+        let key = DocKey::new(
+            &payload.workspace_id,
+            &payload.target_version_id,
+            &current.object_id,
+        )
+        .map_err(|_| corrupt_local("conflict.resolve current coordinates are invalid"))?;
+        if let Some(before) = crate::outbound::lane_before_in_tx(tx, &key)? {
+            let mut fields = json!({});
+            before.apply_to(&mut fields);
+            let path = fields["beforePath"]
+                .as_str()
+                .unwrap_or(&payload.paths[0])
+                .to_owned();
+            let path_ref = intern_path(&mut payload.paths, &path);
+            let head = if fields["beforePresent"] == "present" {
+                json!({"present":true,"pathRef":path_ref,"objectId":fields["beforeObjectId"],
+                    "latestMomentId":fields["beforeLatestMomentId"],"contentKind":fields["beforeContentKind"],
+                    "blobSha256":fields["beforeBlobSha256"],"byteLength":fields["beforeByteLength"],
+                    "updatedAtMs":fields["beforeUpdatedAtMs"]})
+            } else {
+                json!({"present":false,"pathRef":path_ref})
+            };
+            payload.exported_before = Some(parse_head(&head, payload.paths.len())?);
+        }
+    }
     let built = build_conflict_resolve_v1(payload)?;
     Ok(PreparedLocalConflictResolveV1 {
         built,
@@ -2887,7 +3000,9 @@ pub fn commit_local_conflict_resolve_v1_in_tx(
     prepared: &PreparedLocalConflictResolveV1,
     result: &ResolveTextConflictResult,
 ) -> Result<(), SyncError> {
-    verify_local_result_in_tx(tx, &prepared.built.validated.payload, result)?;
+    let mut local_expected = prepared.built.validated.payload.clone();
+    local_expected.exported_before = None;
+    verify_local_result_in_tx(tx, &local_expected, result)?;
     crate::refusal_notices::clear_conflict_in_tx(
         tx,
         &prepared.built.validated.payload.workspace_id,
@@ -3439,13 +3554,12 @@ fn verify_local_result_in_tx(
         ));
     }
     for (effect_index, effect) in expected.effects.iter().enumerate() {
-        let actual = durable_effect_shadow_in_tx(
+        let (actual, _) = crate::outbound::moment_append_payload_in_tx(
             tx,
             &expected.workspace_id,
             &effect.moment_id,
-            &expected.conflict_id,
-            effect_index,
         )?;
+        let actual = tag_effect_shadow(actual, &expected.conflict_id, effect_index)?;
         let shadow = match effect.kind {
             EffectKindV1::Delete => delete_shadow(expected, effect, effect_index)?,
             EffectKindV1::Write => write_shadow(expected, effect, effect_index)?,
@@ -3511,8 +3625,16 @@ pub(crate) fn durable_effect_shadow_in_tx(
     conflict_id: &str,
     effect_index: usize,
 ) -> Result<Value, SyncError> {
-    let (mut shadow, _) =
-        crate::outbound::moment_append_payload_in_tx(tx, workspace_id, moment_id)?;
+    let (shadow, _) =
+        crate::outbound::published_moment_append_payload_in_tx(tx, workspace_id, moment_id)?;
+    tag_effect_shadow(shadow, conflict_id, effect_index)
+}
+
+fn tag_effect_shadow(
+    mut shadow: Value,
+    conflict_id: &str,
+    effect_index: usize,
+) -> Result<Value, SyncError> {
     shadow["beforeMetadata"] = Value::Null;
     let record = shadow
         .as_object_mut()
@@ -4161,6 +4283,57 @@ mod tests {
         })
     }
 
+    #[test]
+    fn lane_exported_preimage_has_its_own_path_and_binds_the_ordered_shadows() {
+        let context = ConflictResolveEnvelopeContext {
+            workspace_id: "workspace-a",
+            recorded_at_ms: 21,
+        };
+        for content_kind in [HeadContentKindV1::Text, HeadContentKindV1::Binary] {
+            let mut payload = validate_conflict_resolve_v1(&compact_path_change(), context)
+                .unwrap()
+                .payload;
+            payload.lineage_transition = None;
+            payload.paths.push("docs/exported.md".to_owned());
+            let mut exported = payload.current.present().unwrap().clone();
+            exported.path_ref = 2;
+            exported.latest_moment_id = "moment-exported".to_owned();
+            exported.blob_sha256 = dohc_engine_storage::hex_sha256(b"last exported text");
+            exported.content_kind = content_kind;
+            exported.byte_length = 18;
+            exported.updated_at_ms = 5;
+            payload.exported_before = Some(HeadV1::Present(exported));
+            let built = build_conflict_resolve_v1(payload).unwrap();
+            let validated = validate_conflict_resolve_v1(&built.value, context).unwrap();
+            assert_eq!(validated.shadows[0]["beforePath"], "docs/exported.md");
+            let expected_kind = match content_kind {
+                HeadContentKindV1::Text => "text",
+                HeadContentKindV1::Binary => "binary",
+            };
+            assert_eq!(validated.shadows[0]["beforeContentKind"], expected_kind);
+            let exported_sha = dohc_engine_storage::hex_sha256(b"last exported text");
+            assert_eq!(
+                validated.text_blob_sha256s.contains(&exported_sha),
+                content_kind == HeadContentKindV1::Text
+            );
+            assert_eq!(
+                validated.binary_blob_sha256s.contains(&exported_sha),
+                content_kind == HeadContentKindV1::Binary
+            );
+            assert_eq!(
+                validated.shadows[0]["beforeLatestMomentId"],
+                "moment-exported"
+            );
+            assert_eq!(validated.shadows[1]["beforePresent"], "null");
+            let mut too_many_paths = built.value;
+            too_many_paths["paths"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("docs/fourth.md"));
+            assert!(validate_conflict_resolve_v1(&too_many_paths, context).is_err());
+        }
+    }
+
     fn receiver_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
         let scratch = ScratchDir::new().expect("scratch");
         let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
@@ -4279,6 +4452,7 @@ mod tests {
                 moment_id: "moment-result".to_owned(),
                 payload_sha256: String::new(),
             }],
+            exported_before: None,
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id,
                 predecessor_state_vector_sha256,
@@ -4495,6 +4669,7 @@ mod tests {
             },
             effects: Vec::new(),
             lineage_transition: None,
+            exported_before: None,
         }
     }
 
@@ -7110,6 +7285,7 @@ mod tests {
                     payload_sha256: String::new(),
                 },
             ],
+            exported_before: None,
             lineage_transition: Some(LineageTransitionV1 {
                 predecessor_claim_id: "e".repeat(64),
                 predecessor_state_vector_sha256: "f".repeat(64),

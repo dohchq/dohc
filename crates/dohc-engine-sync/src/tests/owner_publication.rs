@@ -509,6 +509,7 @@ fn kept_current_resolution_checks_each_heads_own_content() {
         },
         effects: vec![],
         lineage_transition: None,
+        exported_before: None,
     };
     let built = build_conflict_resolve_v1(payload.clone()).unwrap();
     let mut op = envelope("local", 1, "conflict.resolve", built.value);
