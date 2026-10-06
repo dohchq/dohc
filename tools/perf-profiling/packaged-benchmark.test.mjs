@@ -10,10 +10,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { parseOptions, createEvidenceDirectory, benchmarkEnvironment, packagedLaunchArgs } from './packaged-benchmark-options.mjs';
 import { startWindowController, waitForVisibleWindow } from './window-controller.mjs';
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
-import { summarize } from './summarize-packaged-benchmark.mjs';
+import { summarize, HARNESS_HASH_KEYS, harnessHashKeys } from './summarize-packaged-benchmark.mjs';
+import { memorySample, recordSwitches, summarizeSwitchMemory } from './packaged-memory.mjs';
+import { accountIdle } from './packaged-idle.mjs';
 import { compareSummaries, DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
 import { createRequire } from 'node:module';
-import { observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
+import { activateTab, observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, recordId, classifyProcess, aggregateByKind } from './packaged-surfaces.mjs';
 import { automationCases, automationFixtureDigest, automationOf, busyShare, classifyOutcome, cpuByKind, DATASET_NAME, datasetAutomationDefinition, datasetListRequest, datasetRowValues, datasetSetupRequest, DEFAULT_LIMITS,
   dismissToasts, documentAutomationFiles, documentValues, journalBytes, noticeForPress, observeAutomationRun, outcomeTexts, peakByKind, readAutomationNotices, readDocumentCase, readRunJournal, runForPress, TRIGGER,
@@ -86,14 +88,14 @@ test('startup observer installed before the body exists waits for the editable d
   body.remove();
   assert.equal(p.document.body, null);
   const result = p.observe();
-  assert.equal(p.frames.size, 0);
+  assert.equal(p.frames.size, 1);
   p.document.documentElement.append(body);
-  p.step(); p.frame(); p.frame();
+  await mutations(); p.frame(); p.frame();
   const observed = await result;
   assert.equal(observed.alreadyReady, false);
   assert.equal(observed.observerInstalledMs, 10);
-  assert.equal(observed.predicateMatchedMs, 60);
-  assert.equal(observed.secondAnimationFrameMs, 92);
+  assert.equal(observed.predicateMatchedMs, 10);
+  assert.equal(observed.secondAnimationFrameMs, 42);
   assert.equal(p.frames.size + p.timers.size, 0);
 });
 
@@ -114,13 +116,13 @@ for (const [name, prepare] of Object.entries(notReadyCases)) test(`startup obser
   const p = readinessPage(t);
   const restore = prepare(p.document);
   const result = p.observe();
-  assert.equal(p.frames.size, 0);
-  restore(); p.step(); p.frame(); p.frame();
+  assert.equal(p.frames.size, 1);
+  restore(); await mutations(); p.frame(); p.frame(); p.frame();
   const observed = await result;
   assert.equal(observed.alreadyReady, false);
   assert.equal(observed.observerInstalledMs, 10);
-  assert.equal(observed.predicateMatchedMs, 60);
-  assert.equal(observed.secondAnimationFrameMs, 92);
+  assert.equal(observed.predicateMatchedMs, name === 'zero-sized editor' ? 26 : 10);
+  assert.equal(observed.secondAnimationFrameMs, name === 'zero-sized editor' ? 58 : 42);
 });
 
 test('startup observer restarts its frame check when the bound editor is replaced', async t => {
@@ -176,9 +178,9 @@ test('startup observer cannot combine the active selection with content in anoth
   const activeEditor = group.querySelector('.tiptap');
   activeEditor.textContent = 'Workspace 1 small';
   const result = p.observe();
-  assert.equal(p.frames.size, 0);
+  assert.equal(p.frames.size, 1);
   activeEditor.textContent = 'Workspace 0 small';
-  p.step(); p.frame(); p.frame();
+  await mutations(); p.frame(); p.frame();
   assert.equal((await result).alreadyReady, false);
 });
 
@@ -204,8 +206,35 @@ test('startup observer times out and clears scheduled work when no editable docu
 
 test('startup observer propagates the editing refusal', async t => {
   const p = readinessPage(t);
-  p.document.body.innerText = 'dohc could not open this document for editing.';
+  p.document.body.insertAdjacentHTML('beforeend', '<div hidden data-testid="engine-may-hold-document-notice">dohc could not open this document for editing.</div><div data-testid="engine-may-hold-document-notice">dohc could not open this document for editing.</div>');
+  Object.defineProperty(p.document.body, 'innerText', { get() { throw Error('innerText forces layout'); } });
   await assert.rejects(p.observe(), /Actual packaged app refused document editing/);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+
+test('startup observer ignores hidden refusal notices without reading body innerText', async t => {
+  const p = readinessPage(t);
+  p.document.body.insertAdjacentHTML('beforeend', '<div hidden data-testid="engine-may-hold-document-notice">dohc could not open this document for editing.</div>');
+  Object.defineProperty(p.document.body, 'innerText', { get() { throw Error('innerText forces layout'); } });
+  const result = p.observe(); p.frame(); p.frame();
+  assert.equal((await result).alreadyReady, true);
+});
+
+test('tab observer waits for its trigger before checking editing refusal', async t => {
+  const p = readinessPage(t);
+  p.document.body.insertAdjacentHTML('beforeend', '<div data-testid="engine-may-hold-document-notice">dohc could not open this document for editing.</div>');
+  const notice = p.document.querySelector('[data-testid="engine-may-hold-document-notice"]');
+  let reads = 0, listener;
+  Object.defineProperty(notice, 'textContent', { get() { reads++; return 'dohc could not open this document for editing.'; } });
+  const add = p.document.addEventListener.bind(p.document);
+  p.document.addEventListener = (type, callback, options) => { if (type === 'pointerdown') listener = callback; else add(type, callback, options); };
+  const result = p.run(observeStartupReadiness, { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small', trigger: 'pointerdown', timeoutMs: 1000 });
+  notice.dataset.mutated = 'true'; await mutations();
+  assert.equal(reads, 0);
+  const rejected = assert.rejects(result, /Actual packaged app refused document editing/);
+  listener({ target: p.document.querySelector('[role="tab"]'), isTrusted: true, timeStamp: 10 });
+  await rejected;
+  assert.equal(reads, 1);
   assert.equal(p.frames.size + p.timers.size, 0);
 });
 
@@ -393,7 +422,7 @@ test('release environment excludes inherited dohc integration and Node controls'
 });
 test('strict release CLI rejects typos, duplicates, missing provenance and ambiguous modes', () => {
   assert.equal(parseOptions(required).scenario, 'full');
-  assert.equal(parseOptions(required).runCount, 3);
+  assert.equal(parseOptions(required).runCount, 5);
   assert.deepEqual(parseOptions(['--help']), { help: true });
   for (const extra of [
     ['--runs'], ['--typo', '3'], ['--runs', 'NaN'], ['--runs', '0'], ['--runs', '1.5'], ['--runs', '1e2'],
@@ -401,6 +430,7 @@ test('strict release CLI rejects typos, duplicates, missing provenance and ambig
     ['--label', 'candidate'], ['--profile-main', 'yes'], ['--profile-renderer', '1'], ['--scenario', 'typo'],
     ['--package-dir', 'other'], ['--engine-commit', 'HEAD'], ['--profile-main', 'true'],
     ['--profile-renderer', 'true', '--scenario', 'startup'], ['--profile-renderer', 'true', '--scenario', 'go-to'],
+    ['--profile-renderer', 'true', '--scenario', 'small-tab'],
     ['--soak-minutes', '5'], ['--chat-messages', '5'], ['--records', '5'], ['--scenario', 'soak', '--soak-minutes', '0'],
     ['--scenario', 'chat-history', '--chat-messages', '1'], ['--scenario', 'soak', '--records', '5'],
     ['--scenario', 'go-to'], ['--scenario', 'search', '--files', '4242'],
@@ -1241,10 +1271,13 @@ export async function executeCli() {
 });
 
 const receipt = ({ status = 'complete', open = [100, 105, 110, 115, 120], typed = [20, 21, 22, 23, 24], settled = [800, 850, 900, 950, 1000], fixture = 'f1', failures = 0, findCap = 50, contention = false } = {}) => ({
+  measurementVersion: 2, host: { hostname: 'fixture', arch: 'x64', release: 'fixture-os', cpuModel: 'fixture-cpu', logicalProcessors: 8, totalMemoryBytes: 16e9 }, platform: 'win32', node: 'v24',
+  ...Object.fromEntries(harnessHashKeys('collection').map(key => [key, 'a'.repeat(64)])),
   label: 'baseline', status, settings: { scenario: 'collection', runCount: open.length, keystrokes: 30, fixtureFiles: 2, records: 500, findCap, writeCap: 200 }, limits: [],
   runs: open.map((openMs, index) => ({ index: index + 1,
+    fixtureHashes: [0, 1].map(workspace => ({ workspaceId: `ws-${workspace}`, digest: 'b'.repeat(64) })),
     collection: { records: 500, indexedWaitObservedMs: 10, clickToRowsPaintedMs: openMs, rowsRendered: 20, loadedRecords: 100 },
-    typing: [{ name: 'small.md', supported: true, longTasks: [], samples: [{ dispatchToTwoRafMs: typed[index], inputToNextPaintMs: null }] }],
+    typing: [{ name: 'small.md', supported: true, longTasks: [], samples: Array.from({ length: 30 }, () => ({ dispatchToTwoRafMs: typed[index], inputToNextPaintMs: null })) }],
     collectionAutomations: { findCap, writeCap: 200, fixtureSha256: 'all', dataset: { cases: [] }, document: { cases: [
       { name: contention ? 'baseline-typing' : 'baseline', fixtureSha256: fixture, expected: 'done', outcome: 'done', pass: index >= failures, verification: { ok: true }, triggerToSettledPaintedMs: settled[index], longTasks: [],
         typing: contention ? { samplesDuringRun: 1, samples: [{ dispatchToTwoRafMs: typed[index] }] } : null },
@@ -1318,10 +1351,11 @@ test('comparison CLI records and applies the automation margin independently', a
   await writeFile(join(candidate, 'result.json'), JSON.stringify(receipt({ settled: [800, 900, 1126, 1200, 5000] })));
   const run = flags => spawnSync(process.execPath, ['tools/perf-profiling/compare-packaged-benchmark.mjs', baseline, candidate, ...flags], { encoding: 'utf8', timeout: 20_000 });
   assert.equal(run([]).status, 1);
-  const passed = run(['--automation-margin-percent', '30', '--margin-percent', '11', '--floor-ms', '18']);
+  const passed = run(['--automation-margin-percent', '30', '--margin-percent', '11', '--floor-ms', '18', '--cpu-percentage-point-floor', '0.5', '--memory-byte-floor', '4096']);
   assert.equal(passed.status, 0, passed.stderr);
   const comparison = JSON.parse(await readFile(join(candidate, 'comparison.json'), 'utf8'));
   assert.deepEqual(comparison.margin, { percent: 11, automationPercent: 30, floorMs: 18 });
+  assert.deepEqual(comparison.resources, { cpuPercentagePoints: .5, memoryBytes: 4096, idleCpuMax: null, memoryGrowthMaxBytes: null });
   assert.equal(comparison.pass, true);
   for (const value of ['-1', 'NaN', 'Infinity']) {
     const invalid = run(['--automation-margin-percent', value]);
@@ -1342,7 +1376,7 @@ test('comparison checks a case whose fixture changed only within the candidate, 
   candidate.settings = { ...candidate.settings, keystrokes: 10 };
   delete candidate.collectionAutomations.document.baseline;
   candidate.typing['small.md'].dispatchToTwoRafObservedMs = { count: 0, p50: null, p95: null, max: null };
-  assert.deepEqual(compareSummaries(baseline, candidate).problems, ['The receipts differ in keystrokes.', 'typing small.md dispatch to two frames: missing', 'document baseline: missing']);
+  assert.deepEqual(compareSummaries(baseline, candidate).problems, ['The receipts differ in keystrokes.', 'The candidate typing small.md has 0 samples; expected 50.', 'typing small.md dispatch to two frames: missing', 'document baseline: missing']);
   // A receipt from before per-case digests cannot pass as comparable.
   const old = receipt({ settled: [5000, 6000, 7000, 8000, 9000] });
   for (const run of old.runs) delete run.collectionAutomations.document.cases[0].fixtureSha256;
@@ -1492,11 +1526,14 @@ test('heap snapshots setup failure detaches its owned CDP session', async () => 
 
 test('heap snapshots mark summaries diagnostic and retain capture receipts', async () => {
   const captures = [{ minute: 10, status: 'complete', file: 'renderer-heap-10m.heapsnapshot' }];
-  const summary = await summarize({ settings: { heapSnapshotMinutes: [10] }, runs: [{ soak: { minutes: 10, cycles: [], elapsedMs: 600000, samples: [], heapSnapshots: captures, heapSnapshotPauseMs: 2500 } }] });
+  const data = metricsReceipt('soak');
+  data.settings.heapSnapshotMinutes = [10];
+  data.runs[0].soak = { minutes: 10, cycles: [], elapsedMs: 600000, samples: [], heapSnapshots: captures, heapSnapshotPauseMs: 2500 };
+  const summary = await summarize(data);
   assert.equal(summary.diagnostic, true);
   const comparison = compareSummaries({ ...summary, status: 'complete' }, { ...summary, status: 'complete' });
   assert.equal(comparison.pass, false);
-  assert.deepEqual(comparison.problems, ['A profiled receipt cannot serve as a performance comparison.']);
+  assert.deepEqual(comparison.problems, ['Scenario soak is not comparable: no gated metrics are implemented.', 'A profiled receipt cannot serve as a performance comparison.']);
   assert.deepEqual(summary.soak[0].heapSnapshots, captures);
   assert.equal(summary.soak[0].heapSnapshotPauseMs, 2500);
   assert.equal((await summarize({ settings: { heapSnapshotMinutes: [] }, runs: [] })).diagnostic, false);
@@ -1626,4 +1663,397 @@ test('heap snapshots soak captures a later due minute crossed during the first p
   f.chunk('{"second":true}'); f.captures[1].resolve(); await soak;
   assert.deepEqual(f.controller.records.map(r => r.cycle), [1, 1]);
   assert.equal(f.controller.records[0].pauseMs, 3000000);
+});
+
+const processes = (index, growth = 0) => [
+  { pid: 1, createdAt: 'main-start', name: 'dohc.exe', commandLine: 'dohc.exe', cpuMs: 0, privateBytes: 1e9, workingSetBytes: 2e9 },
+  { pid: 2, createdAt: 'engine-start', name: 'dohc-workspace-engine.exe', commandLine: '', cpuMs: 0, privateBytes: 1e8, workingSetBytes: 2e8 },
+  { pid: 3, createdAt: 'renderer-start', name: 'dohc.exe', commandLine: '--type=renderer', cpuMs: 0, privateBytes: 1e9 + growth * index, workingSetBytes: 2e9 + growth * index },
+];
+const memory = (count = 100, growth = 0) => ({ samples: Array.from({ length: count + 1 }, (_, index) =>
+  memorySample({ completedAtMs: 1000 * (index + 1), processes: processes(index, growth) }, 1, index)) });
+const quiet = () => ({ kinds: null, share: .05, intervals: 3, intervalMs: 1000,
+  evidence: Array.from({ length: 3 }, () => ({ elapsedMs: 1000, busyShare: .01 })) });
+const typed = name => ({ name, samples: Array.from({ length: 30 }, () => ({ dispatchToTwoRafMs: 20, inputToNextPaintMs: null })), longTasks: [], supported: true });
+function metricsReceipt(scenario = 'switches', count = 100, runCount = 1) {
+  const startup = { editablePaintObservedMs: 100, renderer: { paints: [] } };
+  const run = { index: 1, fixtureHashes: [0, 1].map(index => ({ workspaceId: `ws-${index}`, digest: 'b'.repeat(64) })), freshStartup: startup };
+  if (['startup', 'full'].includes(scenario)) run.restartStartup = startup;
+  if (['switches', 'full', 'small-switch'].includes(scenario)) run.switches = Array.from({ length: scenario === 'small-switch' ? 2 : count }, () => ({ editablePaintObservedMs: 50 }));
+  if (scenario === 'switches') run.switchMemory = memory(count);
+  if (scenario === 'small-tab') run.tabs = Array.from({ length: count }, (_, index) => ({ path: index % 2 ? 'small.md' : 'large.md', pointerdownToEditableTwoRafObservedMs: 40 }));
+  if (['small-tab', 'small-switch', 'full'].includes(scenario)) run.typing = (scenario === 'full' ? ['small.md', 'large.md'] : ['small.md']).map(typed);
+  if (scenario === 'full') run.idle = ['visible', 'minimized'].map(state => idleRow(idleSamples(), state));
+  return { measurementVersion: 2, status: 'complete', host: { hostname: 'fixture', arch: 'x64', release: 'fixture-os', cpuModel: 'fixture-cpu', logicalProcessors: 8, totalMemoryBytes: 16e9 }, platform: 'win32', node: 'v24',
+    ...Object.fromEntries(HARNESS_HASH_KEYS.map(key => [key, 'a'.repeat(64)])),
+    settings: { scenario, runCount, switches: count, keystrokes: 30, idleSeconds: 60 }, runs: Array.from({ length: runCount }, (_, index) => {
+      const current = { ...structuredClone(run), index: index + 1 };
+      if (index > 0) delete current.idle;
+      return current;
+    }) };
+}
+const comparison = async (before, after, resources) => compareSummaries(await summarize(before), await summarize(after), undefined, resources);
+
+const idleSamples = (cpuMs = 120) => [0, 60000].map((elapsed, index) => ({ completedAtMs: 1000 + elapsed,
+  processes: processes(0).map(process => ({ ...process, cpuMs: process.pid === 3 && index ? cpuMs : 0,
+    readBytes: 0, writeBytes: 0, otherBytes: 0, readOperations: 0, writeOperations: 0, otherOperations: 0 })) }));
+const idleRow = (samples, state = 'visible') => ({ state, quiet: quiet(), ...accountIdle(samples), samples,
+  totals: samples.map(sample => ({ privateBytes: sample.processes.reduce((total, process) => total + process.privateBytes, 0), processCount: sample.processes.length })) });
+
+test('idle CPU budget rejects a newly observed process despite valid pre-idle quiet evidence', async () => {
+  const baseline = metricsReceipt('full', 100, 5);
+  baseline.runs[0].idle = ['visible', 'minimized'].map(state => idleRow(idleSamples(0), state));
+  const candidate = structuredClone(baseline), samples = idleSamples(0);
+  samples[1].processes.push({ ...samples[1].processes[2], pid: 4, createdAt: 'born-during-idle', cpuMs: 600 });
+  candidate.runs[0].idle[0] = idleRow(samples);
+  const result = await comparison(baseline, candidate, { idleCpuMax: .5 });
+  assert.equal(result.pass, false, '600ms on a new identity must not pass the 0.5% CPU budget as zero');
+  assert.equal(result.absoluteChecks[0].verdict, 'missing');
+  assert.equal(candidate.runs[0].idle[0].cpuPercentOneLogicalCore, null);
+});
+
+test('idle CPU accounting measures stable counters and retains partial counts during churn', async () => {
+  const samples = idleSamples(600), stable = accountIdle(samples);
+  assert.equal(stable.elapsedMs, 60000);
+  assert.equal(stable.deltas.cpuMs, 600);
+  assert.equal(stable.cpuPercentOneLogicalCore, 1);
+  assert.equal(stable.cpuCoverage.complete, true);
+  const baseline = metricsReceipt('full', 100, 5), candidate = structuredClone(baseline);
+  candidate.runs[0].idle[0] = idleRow(samples);
+  assert.equal((await comparison(baseline, candidate, { idleCpuMax: .5 })).absoluteChecks[0].verdict, 'over-budget');
+  samples[1].processes.push({ ...samples[1].processes[2], pid: 4, cpuMs: 1200 });
+  const partial = accountIdle(samples);
+  assert.equal(partial.deltas.cpuMs, 600);
+  assert.equal(partial.cpuPercentOneLogicalCore, null);
+  assert.deepEqual(partial.intervals[0].added, ['4:renderer-start']);
+  assert.deepEqual(partial.intervals[0].counters.at(-1), { identity: '4:renderer-start', beforeCpuMs: null, afterCpuMs: 1200, cpuMs: null });
+  const summarized = await summarize({ settings: {}, runs: [{ idle: [idleRow(samples)] }] });
+  assert.deepEqual(summarized.idle[0].intervals, partial.intervals);
+  assert.deepEqual(summarized.idle[0].cpuCoverage, partial.cpuCoverage);
+});
+
+for (const [name, mutate] of [
+  ['process exit', samples => samples[1].processes.pop()],
+  ['replacement PID', samples => { samples[1].processes[2].pid = 4; }],
+  ['PID reuse', samples => { samples[1].processes[2].createdAt = 'replacement-start'; }],
+  ['missing CPU counter', samples => { delete samples[1].processes[2].cpuMs; }],
+  ['missing initial CPU counter', samples => { delete samples[0].processes[2].cpuMs; }],
+  ['null CPU counter', samples => { samples[1].processes[2].cpuMs = null; }],
+  ['nonfinite CPU counter', samples => { samples[1].processes[2].cpuMs = Infinity; }],
+  ['NaN CPU counter', samples => { samples[1].processes[2].cpuMs = NaN; }],
+  ['negative CPU counter', samples => { samples[1].processes[2].cpuMs = -1; }],
+  ['decreasing CPU counter', samples => { samples[0].processes[2].cpuMs = 601; }],
+  ['nonpositive elapsed interval', samples => { samples[1].completedAtMs = samples[0].completedAtMs; }],
+  ['reversed elapsed interval', samples => { samples[1].completedAtMs = samples[0].completedAtMs - 1; }],
+  ['nonfinite timestamp', samples => { samples[1].completedAtMs = Infinity; }],
+  ['empty identities', samples => { samples[1].processes = []; }],
+  ['missing creation time', samples => { delete samples[1].processes[2].createdAt; }],
+  ['invalid PID', samples => { samples[1].processes[2].pid = 0; }],
+  ['duplicate identity', samples => { samples[1].processes.push({ ...samples[1].processes[2] }); }],
+]) test(`idle CPU accounting rejects ${name} in both measured states`, async () => {
+  const baseline = metricsReceipt('full', 100, 5);
+  for (const state of ['visible', 'minimized']) {
+    const samples = idleSamples(600); mutate(samples);
+    const accounting = accountIdle(samples);
+    assert.equal(accounting.cpuCoverage.complete, false);
+    assert.equal(accounting.cpuPercentOneLogicalCore, null);
+    const candidate = structuredClone(baseline), index = state === 'visible' ? 0 : 1;
+    candidate.runs[0].idle[index] = { ...candidate.runs[0].idle[index], ...accounting, samples };
+    for (const resources of [{ idleCpuMax: .5 }, { cpuPercentagePoints: .1 }]) {
+      const result = await comparison(baseline, candidate, resources);
+      assert.equal(result.pass, false);
+      assert.equal(result.checks.find(row => row.metric === `${state} idle CPU`).verdict, 'missing');
+    }
+  }
+});
+
+test('idle CPU summary recomputes coverage and cannot trust a finite scalar without valid samples', async () => {
+  const baseline = metricsReceipt('full', 100, 5);
+  for (const samples of [undefined, [], idleSamples().slice(0, 1), [{ completedAtMs: 1000 }, { completedAtMs: 61000 }]]) {
+    const candidate = structuredClone(baseline);
+    candidate.runs[0].idle[0].samples = samples;
+    candidate.runs[0].idle[0].cpuPercentOneLogicalCore = 0;
+    candidate.runs[0].idle[0].cpuCoverage = { complete: true, intervalCount: 1 };
+    assert.equal((await comparison(baseline, candidate, { idleCpuMax: .5 })).pass, false);
+  }
+  const summary = await summarize(baseline);
+  for (const mutate of [
+    row => { delete row.cpuCoverage; }, row => { row.cpuCoverage.complete = false; },
+    row => { delete row.intervals; }, row => { row.intervals[0].complete = false; },
+  ]) {
+    const candidate = structuredClone(summary); mutate(candidate.idle[0]);
+    assert.equal(compareSummaries(summary, candidate, undefined, { idleCpuMax: .5 }).pass, false);
+  }
+  const forged = structuredClone(baseline), samples = idleSamples(600);
+  samples[1].processes[2].createdAt = 'new-renderer';
+  forged.runs[0].idle[0].samples = samples;
+  forged.runs[0].idle[0].cpuPercentOneLogicalCore = 0;
+  assert.equal((await comparison(baseline, forged, { idleCpuMax: .5 })).pass, false);
+});
+
+test('tab activation arms before clicking and separates renderer timing from automation brackets', async () => {
+  const calls = [], target = { workspaceName: 'workspace-0', path: 'large.md', content: 'Workspace 0 large' };
+  let now = 10;
+  const rendererReadiness = { triggerMs: 100, secondAnimationFrameMs: 132, triggerTrusted: true };
+  const page = {
+    locator(selector) { calls.push(selector); return { getByTestId(id) { calls.push(id); return { async click() { calls.push('click'); now += 50; } }; } }; },
+    async evaluate(observer) {
+      if (typeof observer === 'string') { assert.match(observer, /pointerdown/); calls.push('arm'); now += 5; return; }
+      calls.push('readiness'); now += 32; return rendererReadiness;
+    },
+  };
+  assert.deepEqual(await activateTab(page, target, () => now), { ...target,
+    pointerdownToEditableTwoRafObservedMs: 32, automationClickToReadinessReturnedMs: 82,
+    observation: { armStartedMs: 10, armCompletedMs: 15, clickStartedMs: 15, clickCompletedMs: 65, readinessReturnedMs: 97 }, rendererReadiness });
+  assert.deepEqual(calls, ['arm', '[data-editor-group-id][data-active="true"]', 'tab-large.md', 'click', 'readiness']);
+  page.evaluate = async () => { throw Error('wrong selected document'); };
+  await assert.rejects(activateTab(page, target), /wrong selected document/);
+});
+
+for (const trusted of [true, false]) test(`tab observer requires its bound trusted pointerdown (${trusted})`, async t => {
+  const p = readinessPage(t);
+  let listener;
+  const add = p.document.addEventListener.bind(p.document);
+  p.document.addEventListener = (type, callback, options) => { if (type === 'pointerdown') listener = callback; else add(type, callback, options); };
+  const result = p.run(observeStartupReadiness, { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small', trigger: 'pointerdown', timeoutMs: 1000 });
+  assert.equal(p.frames.size, 0);
+  listener({ target: p.document.body, isTrusted: trusted });
+  assert.equal(p.frames.size, 0);
+  const rejected = !trusted && assert.rejects(result, /Untrusted tab pointerdown/);
+  listener({ target: p.document.querySelector('[role="tab"]'), isTrusted: trusted, timeStamp: 9 });
+  if (!trusted) { await rejected; return; }
+  p.frame(); p.frame();
+  const observed = await result;
+  assert.equal(observed.triggerMs, 10);
+  assert.equal(observed.triggerEventTimestampMs, 9);
+  assert.equal(observed.secondAnimationFrameMs, 42);
+});
+
+test('100 completed switches produce ordered samples; failed and cancelled loops remain incomplete', async () => {
+  const result = {}, calls = [];
+  await recordSwitches({ count: 100, result, activate: async destination => { calls.push(destination); return { to: destination }; },
+    sample: async index => ({ switchIndex: index }), checkpoint: async () => {} });
+  assert.deepEqual(calls, Array.from({ length: 100 }, (_, index) => (index + 1) % 2));
+  assert.equal(result.switches.length, 100);
+  assert.deepEqual(result.switchMemory.samples.map(sample => sample.switchIndex), Array.from({ length: 101 }, (_, index) => index));
+  const partial = {};
+  await assert.rejects(recordSwitches({ count: 100, result: partial, activate: async () => { throw Error('switch refused'); }, sample: async index => ({ switchIndex: index }), checkpoint: async () => {} }), /switch refused/);
+  assert.equal(partial.switches.length, 0); assert.equal(partial.switchMemory.samples.length, 1);
+  const controller = new AbortController(); controller.abort(Error('cancelled'));
+  await assert.rejects(recordSwitches({ count: 100, result: {}, activate: async () => assert.fail(), sample: async index => ({ switchIndex: index }), checkpoint: async () => {}, signal: controller.signal }), /cancelled/);
+});
+
+test('memory windows distinguish a plateau, allocator step, growth, replacement, and missing samples', () => {
+  const flat = summarizeSwitchMemory(memory(), 100);
+  assert.equal(flat.complete, true); assert.equal(flat.plateauMeasured, true);
+  assert.equal(flat.kinds.renderer.privateBytes.lateGrowthBytes, 0);
+  assert.equal(flat.kinds.renderer.privateBytes.tailSlopeBytesPerSwitch, 0);
+  const stepped = memory();
+  for (const sample of stepped.samples.slice(20)) sample.processes[2].privateBytes += 10000;
+  assert.equal(summarizeSwitchMemory(stepped, 100).kinds.renderer.privateBytes.lateGrowthBytes, 0);
+  const growth = summarizeSwitchMemory(memory(100, 100), 100).kinds.renderer.privateBytes;
+  assert.equal(growth.lateGrowthBytes, 2000); assert.equal(growth.tailSlopeBytesPerSwitch, 100);
+  const replaced = memory(); replaced.samples.at(-1).processes[2].createdAt = 'replacement';
+  assert.equal(summarizeSwitchMemory(replaced, 100).kinds.renderer.churn, true);
+  assert.equal(summarizeSwitchMemory(replaced, 100).kinds.renderer.privateBytes.lastMedian, null);
+  const missing = memory(); missing.samples.splice(80, 1);
+  assert.equal(summarizeSwitchMemory(missing, 100).complete, false);
+  const transient = memory();
+  transient.samples[0].processes.push({ pid: 8, createdAt: 'warmup', kind: 'utility', privateBytes: 100, workingSetBytes: 100 });
+  const utility = summarizeSwitchMemory(transient, 100).kinds.utility;
+  assert.equal(utility.churn, false); assert.equal(utility.identityChanges, 1);
+  assert.equal(utility.privateBytes.lastMedian, 0);
+  assert.equal(summarizeSwitchMemory(memory(10), 10).plateauMeasured, false);
+});
+
+test('tab observer sees readiness mutations between frames and stays bound to the clicked group', async t => {
+  const p = readinessPage(t);
+  const group = p.document.querySelector('[data-editor-group-id]');
+  const other = group.cloneNode(true); other.dataset.editorGroupId = 'other'; other.dataset.active = 'false'; group.after(other);
+  const editor = group.querySelector('.tiptap'); editor.textContent = 'Waiting';
+  let listener;
+  const add = p.document.addEventListener.bind(p.document);
+  p.document.addEventListener = (type, callback, options) => { if (type === 'pointerdown') listener = callback; else add(type, callback, options); };
+  const result = p.run(observeStartupReadiness, { workspaceName: 'workspace-0', path: 'small.md', content: 'Workspace 0 small', trigger: 'pointerdown', timeoutMs: 1000 });
+  listener({ target: group.querySelector('[role="tab"]'), isTrusted: true, timeStamp: 10 });
+  group.dataset.active = 'false'; other.dataset.active = 'true';
+  await mutations(); p.frame();
+  assert.equal(p.frames.size, 1);
+  group.dataset.active = 'true'; other.dataset.active = 'false'; editor.textContent = 'Workspace 0 small';
+  await mutations(); p.frame(); p.frame();
+  const observed = await result;
+  assert.equal(observed.predicateMatchedMs, 26);
+  assert.equal(observed.secondAnimationFrameMs - observed.triggerMs, 48);
+  assert.equal(p.frames.size + p.timers.size, 0);
+});
+
+test('early persistent process replacement invalidates whole-run memory budgets', async () => {
+  for (const kind of ['main', 'engine', 'renderer', 'gpu']) {
+    const before = metricsReceipt(), after = structuredClone(before);
+    if (kind === 'gpu') for (const receipt of [before, after]) for (const sample of receipt.runs[0].switchMemory.samples) {
+      sample.processes.push({ pid: 4, createdAt: 'gpu-start', kind: 'gpu', privateBytes: 1000, workingSetBytes: 1000 });
+    }
+    for (const sample of after.runs[0].switchMemory.samples.slice(30)) sample.processes.find(process => process.kind === kind).createdAt = 'early-restart';
+    const reading = summarizeSwitchMemory(after.runs[0].switchMemory, 100).kinds[kind];
+    assert.equal(reading.churn, true, kind); assert.equal(reading.identityChanges, 1, kind);
+    assert.equal(reading.privateBytes.lastMedian, null, kind);
+    const result = await comparison(before, after, { memoryGrowthMaxBytes: 0 });
+    assert.equal(result.pass, false, kind);
+    assert.ok(result.problems.some(problem => problem.includes(`cannot evaluate ${kind}`)), kind);
+  }
+});
+
+test('collection requires all open and typing samples even when both receipts omit them', async () => {
+  const good = receipt({});
+  for (const missing of ['collection', 'typing']) {
+    const empty = structuredClone(good);
+    for (const run of empty.runs) delete run[missing];
+    const result = await comparison(empty, structuredClone(empty));
+    assert.equal(result.pass, false, missing);
+    assert.ok(result.problems.some(problem => problem.includes('samples; expected')), missing);
+  }
+  const partial = structuredClone(good); partial.runs[0].typing[0].samples.pop();
+  assert.equal((await comparison(good, partial)).pass, false);
+});
+
+test('comparison rejects scenarios without gated metrics and incompatible absolute budgets', async () => {
+  for (const scenario of ['go-to', 'command-palette', 'search', 'chat-history', 'soak']) {
+    const receipt = metricsReceipt(scenario), result = await comparison(receipt, structuredClone(receipt));
+    assert.equal(result.pass, false, scenario);
+    assert.ok(result.problems.some(problem => problem.includes('not comparable')), scenario);
+  }
+  for (const [scenario, resources] of [['startup', { idleCpuMax: 1 }], ['full', { memoryGrowthMaxBytes: 0 }], ['switches', { idleCpuMax: 1 }]]) {
+    const receipt = metricsReceipt(scenario), result = await comparison(receipt, structuredClone(receipt), resources);
+    assert.equal(result.pass, false); assert.equal(result.absoluteBudgetsConfigured, true);
+    assert.ok(result.problems.some(problem => problem.includes('budget requires')));
+  }
+});
+
+test('startup p95 needs five samples to gate and preserves insufficient-run statistics', async () => {
+  for (const count of [1, 3, 5]) {
+    const before = metricsReceipt('startup');
+    before.runs = Array.from({ length: count }, (_, index) => ({ ...structuredClone(before.runs[0]), index: index + 1 })); before.settings.runCount = count;
+    const after = structuredClone(before); after.runs[0].freshStartup.editablePaintObservedMs = 200;
+    const result = await comparison(before, after);
+    const check = result.checks.find(check => check.metric === 'fresh startup');
+    assert.equal(check.candidateP95, 200);
+    assert.equal(check.verdict, count < 5 ? 'insufficient-runs' : 'regressed');
+    assert.equal(result.pass, false);
+    assert.equal(result.problems.some(problem => problem.includes('startup-only comparison needs at least 5')), count < 5);
+    if (count === 5) {
+      const passing = await comparison(before, structuredClone(before));
+      assert.equal(passing.pass, true);
+    }
+  }
+  for (const scenario of ['full', 'startup']) assert.equal(parseOptions([...required, '--scenario', scenario]).runCount, 5);
+});
+
+test('a short full run reports startup but still gates its measured typing', async () => {
+  const before = metricsReceipt('full'), after = structuredClone(before);
+  after.runs[0].freshStartup.editablePaintObservedMs = 200;
+  const reported = await comparison(before, after);
+  assert.equal(reported.pass, true);
+  assert.equal(reported.checks.find(check => check.metric === 'fresh startup').verdict, 'insufficient-runs');
+  for (const sample of after.runs[0].typing[0].samples) sample.dispatchToTwoRafMs = 60;
+  const regressed = await comparison(before, after);
+  assert.equal(regressed.pass, false);
+  assert.ok(regressed.problems.includes('typing small.md dispatch to two frames: regressed'));
+});
+
+test('five-run full receipts require idle once per package and retain independent CPU checks', async () => {
+  const before = metricsReceipt('full', 100, 5);
+  const after = structuredClone(before);
+  assert.equal((await comparison(before, after, { idleCpuMax: .4 })).pass, true);
+  const summarized = await summarize(after);
+  assert.equal(summarized.idle.length, 2);
+  assert.ok(after.runs.slice(1).every(run => !Object.hasOwn(run, 'idle')));
+  for (const mutate of [run => run.idle.shift(), run => run.idle.pop(), run => { delete run.idle[0].quiet; }, run => { run.idle[1].samples.at(-1).completedAtMs = run.idle[1].samples[0].completedAtMs; }, run => { run.idle.push(structuredClone(run.idle[0])); }]) {
+    const missing = structuredClone(after); mutate(missing.runs[0]);
+    const result = await comparison(before, missing);
+    assert.equal(result.pass, false);
+    assert.ok(result.problems.some(problem => problem.includes('no complete settled window')));
+  }
+  after.runs[0].idle[0].samples[1].processes[2].cpuMs = 300;
+  const overBudget = await comparison(before, after, { idleCpuMax: .4 });
+  assert.equal(overBudget.pass, false);
+  assert.equal(overBudget.absoluteChecks[0].candidate, .5);
+  assert.equal(overBudget.absoluteChecks[0].verdict, 'over-budget');
+  const relative = await comparison(before, after, { cpuPercentagePoints: .1 });
+  assert.ok(relative.problems.includes('visible idle CPU: regressed'));
+  for (const value of [null, NaN, -1]) {
+    after.runs[0].idle[0].samples[1].processes[2].cpuMs = value;
+    const unmeasured = await comparison(before, after, { idleCpuMax: .4 });
+    assert.equal(unmeasured.absoluteChecks[0].verdict, 'missing');
+    assert.equal(unmeasured.pass, false);
+  }
+});
+
+test('settled idle includes a busy renderer while automation quiet waits retain their original scope', async () => {
+  const before = { completedAtMs: 1000, processes: processes(0) }, after = { completedAtMs: 2000, processes: processes(0) };
+  after.processes[2].cpuMs = 500;
+  assert.equal(busyShare(before, after, 1), 0);
+  assert.equal(busyShare(before, after, 1, null), .5);
+  let index = 0;
+  const cpu = [0, 500, 500, 500, 500];
+  const settled = await waitForQuiet({ appPid: 1, kinds: null, sample: async () => {
+    const rows = processes(0); rows[2].cpuMs = cpu[index]; return { completedAtMs: 1000 * (++index), processes: rows };
+  } });
+  assert.equal(index, 5); assert.equal(settled.evidence[0].busyShare, .5);
+  assert.deepEqual(settled.evidence.slice(-3).map(interval => interval.busyShare), [0, 0, 0]);
+});
+
+test('required startup, warm workspace, tab, and typing samples cannot be absent on both sides', async () => {
+  for (const scenario of ['startup', 'full', 'switches', 'small-tab', 'small-switch']) {
+    const good = metricsReceipt(scenario);
+    if (scenario === 'startup') {
+      good.runs = Array.from({ length: 5 }, (_, index) => ({ ...structuredClone(good.runs[0]), index: index + 1 })); good.settings.runCount = 5;
+    }
+    assert.equal((await comparison(good, structuredClone(good))).pass, true, scenario);
+    const empty = structuredClone(good);
+    for (const key of ['freshStartup', 'restartStartup', 'switches', 'tabs', 'typing', 'idle', 'switchMemory']) delete empty.runs[0][key];
+    const failed = await comparison(empty, structuredClone(empty));
+    assert.equal(failed.pass, false, scenario);
+    assert.ok(failed.problems.some(problem => problem.includes('samples; expected')), scenario);
+  }
+  const tabs = await summarize(metricsReceipt('small-tab', 20));
+  assert.equal(tabs.warmTabsByPath['small.md'].count, 10);
+  assert.equal(tabs.warmTabsByPath['large.md'].count, 10);
+});
+
+test('comparison validates measured counts, provenance, fixture settings, and process churn', async () => {
+  for (const mutate of [
+    data => data.runs[0].switches.pop(), data => data.runs[0].switchMemory.samples.pop(),
+    data => { data.runs[0].switchMemory.samples.at(-1).processes[2].createdAt = 'restart'; },
+    data => { delete data.memorySha256; }, data => { delete data.idleSha256; }, data => { data.host.hostname = 'different'; },
+    data => { data.runs[0].fixtureHashes[0].digest = 'c'.repeat(64); },
+    data => { data.settings.chatMessages = 300; }, data => { data.settings.soakMinutes = 4; },
+  ]) { const before = metricsReceipt(), after = structuredClone(before); mutate(after); assert.equal((await comparison(before, after)).pass, false); }
+  const old = metricsReceipt(); delete old.measurementVersion;
+  assert.equal((await comparison(old, structuredClone(old))).pass, false);
+  assert.ok(harnessHashKeys('collection').includes('datasetCliSha256'));
+  assert.ok(harnessHashKeys('chat-history').includes('seedScriptSha256'));
+  assert.ok(harnessHashKeys('full').includes('idleSha256'));
+});
+
+test('timing regressions and CPU or memory budgets use separate units and retain quantized samples as diagnostic', async () => {
+  const startup = metricsReceipt('startup');
+  startup.runs = Array.from({ length: 5 }, (_, index) => ({ ...structuredClone(startup.runs[0]), index: index + 1 })); startup.settings.runCount = 5;
+  const slower = structuredClone(startup); slower.runs[0].freshStartup.editablePaintObservedMs = 118;
+  assert.ok((await comparison(startup, slower)).problems.includes('fresh startup: regressed'));
+  const idle = metricsReceipt('full'), busy = structuredClone(idle); busy.runs[0].idle[0].samples[1].processes[2].cpuMs = 300;
+  assert.equal((await comparison(idle, busy)).pass, true);
+  assert.equal((await comparison(idle, busy)).checks.find(row => row.metric === 'visible idle CPU').verdict, 'reported');
+  assert.equal((await comparison(idle, busy, { cpuPercentagePoints: 0 })).pass, false);
+  const relative = await comparison(idle, busy, { cpuPercentagePoints: .3 });
+  assert.equal(relative.pass, true); assert.equal(relative.absoluteBudgetsConfigured, false);
+  const budget = await comparison(idle, busy, { cpuPercentagePoints: .3, idleCpuMax: .4 });
+  assert.equal(budget.pass, false); assert.equal(budget.absoluteChecks[0].unit, 'percent of one logical core');
+  const before = metricsReceipt(), after = metricsReceipt(); after.runs[0].switchMemory = memory(100, 100);
+  assert.equal((await comparison(before, after, { memoryGrowthMaxBytes: 2000 })).pass, true);
+  assert.equal((await comparison(before, after, { memoryGrowthMaxBytes: 1999 })).pass, false);
+  assert.equal((await comparison(metricsReceipt('switches', 10), metricsReceipt('switches', 10), { memoryGrowthMaxBytes: 100 })).pass, false);
+  busy.runs[0].typing[0].samples[0].inputToNextPaintMs = 800;
+  assert.equal((await comparison(idle, busy, { cpuPercentagePoints: .3 })).pass, true);
+  delete busy.runs[0].idle[0].quiet;
+  assert.equal((await comparison(idle, busy, { cpuPercentagePoints: .3 })).pass, false);
 });

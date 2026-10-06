@@ -3,9 +3,9 @@ import { mkdir } from 'node:fs/promises';
 import { DEFAULT_LIMITS } from './packaged-collection-automations.mjs';
 
 export const SCENARIOS = ['full', 'startup', 'switches', 'small-switch', 'small-tab', 'go-to', 'command-palette', 'search', 'chat-history', 'collection', 'soak'];
-export const SWITCHING_SCENARIOS = ['full', 'switches', 'small-switch', 'small-tab', 'soak'];
+export const SWITCHING_SCENARIOS = ['full', 'switches', 'small-switch', 'soak'];
 export const usage = `node tools/perf-profiling/packaged-benchmark.mjs --binary <dohc.exe> --package-commit <40-digit SHA> --output <new directory> --label <baseline|candidate> [--runs <count>] [--idle-seconds 60] [--keystrokes 30] [--switches 10] [--files 2] [--scenario ${SCENARIOS.join('|')}] [--soak-minutes 10] [--heap-snapshot-minutes 10,60] [--chat-messages 200] [--records 500] [--find-cap 50] [--write-cap 200] [--profile-renderer true|false] [--profile-main true|false] [--engine-commit <40-digit SHA>]
-Runs default to 5 for collection and 3 for other scenarios.
+Runs default to 5 for collection, startup and full; other scenarios default to 3.
 Heap snapshot minutes are distinct positive integers within the soak duration. Capture is opt-in and diagnostic.`;
 
 export function parseOptions(argv) {
@@ -39,7 +39,7 @@ export function parseOptions(argv) {
     binary: resolve(args.get('binary') ?? join(args.get('package-dir'), 'dohc.exe')),
     output: resolve(args.get('output')), label: choice('label', ['baseline', 'candidate']),
     packageCommit: args.get('package-commit'), engineCommit: args.get('engine-commit') ?? args.get('package-commit'),
-    runCount: integer('runs', scenario === 'collection' ? 5 : 3), idleSeconds: integer('idle-seconds', 60), keystrokes: integer('keystrokes', 30),
+    runCount: integer('runs', ['collection', 'startup', 'full'].includes(scenario) ? 5 : 3), idleSeconds: integer('idle-seconds', 60), keystrokes: integer('keystrokes', 30),
     switches: integer('switches', 10), fixtureFiles: integer('files', 2, 2),
     scenario, heapSnapshotMinutes: [],
     soakMinutes: integer('soak-minutes', 10), chatMessages: integer('chat-messages', 200, 2), records: integer('records', 500),
