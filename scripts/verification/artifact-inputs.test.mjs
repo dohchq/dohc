@@ -39,6 +39,40 @@ test("production receipts ignore unconsumed tests while verification still check
   assert.notEqual(sourceFingerprint("desktop", root), provenance);
 });
 
+test("receipts track the actual Git reader and Windows build relay", t => {
+  const {root, put} = fixture(t);
+  const gitReader = "tools/rust-engine-program/git-read.mjs";
+  const relay = "scripts/verification/windows-command.mjs";
+  const gitSource = readFileSync(new URL("../../tools/rust-engine-program/git-read.mjs", import.meta.url), "utf8");
+  const relaySource = readFileSync(new URL("./windows-command.mjs", import.meta.url), "utf8");
+  put(gitReader, gitSource);
+  put(relay, relaySource);
+  const readGit = () => execFileSync(process.execPath, ["--input-type=module", "-e",
+    `import {readGit} from ${JSON.stringify(pathToFileURL(join(root, gitReader)).href)};console.log(readGit(['rev-parse','--show-toplevel'],${JSON.stringify(root)}));`], {encoding: "utf8"});
+  const runRelay = () => execFileSync(process.execPath, [join(root, relay)], {
+    encoding: "utf8", input: JSON.stringify({nodeOptions: null, payload: Buffer.from(JSON.stringify({
+      command: process.execPath, args: ["--input-type=module", "-e", "console.log(process.env.DOHC_TEST_RELAY_VALUE ?? 'original');"],
+    })).toString("base64")}),
+  });
+  const exec = childProcess.execFileSync;
+  childProcess.execFileSync = (command, ...args) => command === "rustc" ? Buffer.from("fixture compiler") : exec(command, ...args);
+  syncBuiltinESMExports();
+  try {
+    const fingerprints = () => Object.fromEntries(["engine", "desktop", "runtime"].map(kind => [kind, artifactSourceFingerprint(kind, root)]));
+    const beforeGit = fingerprints();
+    assert.doesNotMatch(readGit(), /changed-reader/);
+    put(gitReader, gitSource.replace("return result.stdout;", "return 'changed-reader:' + result.stdout;"));
+    assert.match(readGit(), /changed-reader/);
+    const beforeRelay = fingerprints();
+    for (const kind of Object.keys(beforeGit)) assert.notEqual(beforeRelay[kind], beforeGit[kind], `${kind} Git reader`);
+    assert.equal(runRelay().trim(), "original");
+    put(relay, relaySource.replace("const env = { ...process.env };", "const env = { ...process.env, DOHC_TEST_RELAY_VALUE: 'changed-relay' };"));
+    assert.equal(runRelay().trim(), "changed-relay");
+    const afterRelay = fingerprints();
+    for (const kind of Object.keys(beforeRelay)) assert.notEqual(afterRelay[kind], beforeRelay[kind], `${kind} build relay`);
+  } finally { childProcess.execFileSync = exec; syncBuiltinESMExports(); }
+});
+
 test("production receipts follow a real transitive security consumer", async t => {
   const {root, put} = fixture(t);
   const before = artifactSourceFingerprint("desktop", root);

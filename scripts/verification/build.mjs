@@ -105,6 +105,12 @@ export function sourceFingerprint(kind, root = repoRoot, selectedPaths, contents
 }
 
 const testInput = path => /(?:^|\/)(?:tests|__tests__|testing|e2e)\/|\.(?:test|spec|testSupport|fixture|integration-helper)\.[^/]+$|[Tt]estFixture\.[^/]+$/u.test(path);
+const preparationInputs = [
+  "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/cancellation.mjs",
+  "scripts/verification/windows-command.mjs", "scripts/verification/windows-job.ps1",
+  "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/build-slot.mjs",
+  "apps/desktop/scripts/require-e2e-engine.mjs",
+];
 
 export function artifactSourceFingerprint(kind, root = repoRoot) {
   const files = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], root).split("\0").filter(Boolean);
@@ -146,9 +152,11 @@ export function artifactSourceFingerprint(kind, root = repoRoot) {
   const shared = path => !path.includes("/") && !/\.md$/iu.test(path)
     || /^(?:patches|\.cargo)\//u.test(path)
     || /^scripts\/(?!verification\/)/u.test(path) && !testInput(path)
-    || path === "scripts/verification/build.mjs";
+    || preparationInputs.includes(path);
   const inOwner = path => [...owners].some(owner => path.startsWith(owner + "/"));
   const selected = new Set(files.filter(path => shared(path) || inOwner(path) && !testInput(path)));
+  // Receipts depend on the helpers that discover inputs and launch each build.
+  for (const path of preparationInputs) selected.add(path);
   // A test-named file can still be a production import or build resource.
   // Retain references from source, including build-script globs, before excluding it.
   const references = new Map();
