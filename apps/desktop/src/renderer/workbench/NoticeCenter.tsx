@@ -1459,12 +1459,13 @@ export function NoticeCenter(props: {
                   Open document
                 </button>
               ) : null}
-              <CopyDetailsButton
+              <CopyButton
                 key={sharingDeclinedKey(props.workspaceId, declineToast)}
                 iconOnly
+                pinName
                 label="Copy error details"
-                data-testid="sharing-declined-toast-copy"
-                details={() => sharingDeclinedDetails(props.workspaceId, declineToast)}
+                testId="sharing-declined-toast-copy"
+                getText={() => sharingDeclinedDetails(props.workspaceId, declineToast)}
               />
               {/* Closing ends the announcement; the row stays in Notices. */}
               <button

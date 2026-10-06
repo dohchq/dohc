@@ -608,7 +608,7 @@ describe("relaySyncEngine", () => {
   it("merges push and pull declines by object after a rename", async () => {
     const decline = { objectId: "same-object", versionId: "main", lineagePruned: true, headBlobSha256: null,
       path: "before.md", constraint: "MAX_YDOC_UPDATE_BYTES", limitBytes: 20, observedBytes: 21 };
-    pushMock.mockResolvedValueOnce({ pushed: 0, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [decline] });
+    pushMock.mockResolvedValueOnce({ pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [decline] });
     const result = pullResult();
     result.sharingDeclined = [{ ...decline, path: "after.md" }];
     pullMock.mockResolvedValueOnce(result);
@@ -622,7 +622,7 @@ describe("relaySyncEngine", () => {
     const main = { objectId: "same-object", versionId: "main", lineagePruned: true, headBlobSha256: null,
       path: "large.md", constraint: "MAX_YDOC_UPDATE_BYTES", limitBytes: 20, observedBytes: 21 };
     const draft = { ...main, versionId: "draft" };
-    pushMock.mockResolvedValueOnce({ pushed: 0, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [main, draft] });
+    pushMock.mockResolvedValueOnce({ pushed: 0, hasMore: false, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [main, draft] });
     const result = pullResult();
     result.sharingDeclined = [{ ...draft, path: "renamed.md" }];
     pullMock.mockResolvedValueOnce(result);
