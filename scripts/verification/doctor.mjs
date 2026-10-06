@@ -21,9 +21,12 @@ export function doctor({ ready = false, engine = true, desktop = true, browser =
     } catch { add("PowerShell", false, "Install PowerShell 7 and put pwsh.exe on PATH."); }
   }
   const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
-  for (const dependency of ["pnpm", ...(desktop ? ["electron"] : []), ...(browser ? ["playwright"] : [])]) {
+  const dependencies = [["pnpm", () => require("pnpm")],
+    ...(desktop ? [["electron", () => require("electron/package.json")]] : []),
+    ...(browser ? [["playwright", () => require("playwright/package.json")]] : [])];
+  for (const [dependency, load] of dependencies) {
     try {
-      const installed = require(dependency === "pnpm" ? "pnpm" : `${dependency}/package.json`).version;
+      const installed = load().version;
       add(dependency, dependency !== "pnpm" || installed === pkg.engines.pnpm, installed);
     } catch { add(dependency, false, "Run pnpm setup:worktree."); }
   }

@@ -24,6 +24,7 @@ function moduleReferences(path, source, parse) {
   const references = [];
   let ambiguous = false;
   let failed = false;
+  let opaqueLoader = false;
   const add = (value, {module = false, type = false, escaped = false} = {}) => {
     if (typeof value !== "string") { if (module) ambiguous = true; return; }
     references.push({value, module, type, escaped});
@@ -39,7 +40,11 @@ function moduleReferences(path, source, parse) {
     escaped: node?.extra?.raw?.includes("\\") || node?.quasis?.some(quasi => quasi.value.raw.includes("\\"))});
   const requireNames = new Set(["require"]);
   const requireFactories = new Set(["createRequire"]);
+  const resolvedModules = new Set();
   const nameOf = node => node?.name ?? node?.property?.name ?? node?.property?.value;
+  const modulePath = node => node?.type === "Identifier" && resolvedModules.has(node.name)
+    || node?.type === "CallExpression" && ["dirname", "join", "resolve"].includes(nameOf(node.callee))
+      && node.arguments.some(modulePath) && node.arguments.every(argument => literal(argument) !== undefined || modulePath(argument));
   function walk(node, action) {
     if (!node || typeof node !== "object") return;
     action(node);
@@ -51,6 +56,11 @@ function moduleReferences(path, source, parse) {
   }
   function visit(node) {
     if (!node || typeof node !== "object") return;
+    if (node.type === "MemberExpression" && node.object.type === "MetaProperty" && nameOf(node) === "glob"
+      || node.type === "VariableDeclarator" && node.init?.type === "MetaProperty" && node.id.type === "ObjectPattern"
+        && node.id.properties.some(property => (property.key?.name ?? property.key?.value) === "glob")) {
+      ambiguous = true; opaqueLoader = true;
+    }
     if (["ImportDeclaration", "ExportAllDeclaration", "ExportNamedDeclaration"].includes(node.type) && node.source) {
       const type = node.importKind === "type" || node.exportKind === "type" || node.specifiers?.length > 0
         && node.specifiers.every(specifier => specifier.importKind === "type" || specifier.exportKind === "type");
@@ -69,8 +79,8 @@ function moduleReferences(path, source, parse) {
         && (node.arguments.length || !["importOriginal", "importActual"].includes(name))) {
         addModule(node.arguments[0]);
       }
-      if (node.callee?.type === "MemberExpression" && node.callee.object?.type === "MetaProperty"
-        && node.callee.property?.name === "glob") ambiguous = true;
+      if ((directRequire || node.callee.type === "Identifier" && requireNames.has(name))
+        && literal(node.arguments[0]) === undefined && !modulePath(node.arguments[0])) opaqueLoader = true;
     }
     if (node.type === "StringLiteral") add(node.value);
     if (node.type === "TemplateLiteral" && !node.expressions.length) add(literal(node));
@@ -84,6 +94,9 @@ function moduleReferences(path, source, parse) {
     const tree = parse(source, {sourceType: "unambiguous", createImportExpressions: true,
       plugins: [...(/\.[cm]?tsx?$/u.test(path) ? ["typescript"] : []), ...(/\.[jt]sx$/u.test(path) ? ["jsx"] : [])]});
     walk(tree, node => {
+      if (node.type === "FunctionDeclaration" && node.id?.name === "require") requireNames.delete("require");
+      if (node.type === "ImportDeclaration" && !["node:module", "module"].includes(node.source.value)
+        && node.specifiers.some(specifier => specifier.local.name === "require")) requireNames.delete("require");
       if (node.type === "ImportDeclaration" && ["node:module", "module"].includes(node.source.value)) {
         for (const specifier of node.specifiers) if (specifier.imported?.name === "createRequire") requireFactories.add(specifier.local.name);
       }
@@ -98,9 +111,24 @@ function moduleReferences(path, source, parse) {
         if (node.init?.type === "Identifier" && requireFactories.has(node.init.name)) requireFactories.add(node.id.name);
       });
     } while (size !== requireNames.size + requireFactories.size);
+    const unresolvedModules = new Set();
+    walk(tree, node => {
+      if (node.params) for (const parameter of node.params) walk(parameter, binding => {
+        if (binding.type === "Identifier") unresolvedModules.add(binding.name);
+      });
+      const name = node.type === "VariableDeclarator" ? node.id : node.type === "AssignmentExpression" ? node.left : null;
+      const value = node.type === "VariableDeclarator" ? node.init : node.right;
+      if (name?.type !== "Identifier" || !value) return;
+      if (value.type === "CallExpression" && value.callee.type === "MemberExpression"
+        && value.callee.object.type === "Identifier" && requireNames.has(value.callee.object.name)
+        && nameOf(value.callee) === "resolve" && literal(value.arguments[0]) !== undefined
+        && !/^(?:\.{1,2}\/|@dohc\/)/u.test(literal(value.arguments[0]))) resolvedModules.add(name.name);
+      else unresolvedModules.add(name.name);
+    });
+    for (const name of unresolvedModules) resolvedModules.delete(name);
     visit(tree);
   } catch { ambiguous = true; failed = true; }
-  return {references, ambiguous, failed};
+  return {references, ambiguous, failed, opaqueLoader};
 }
 
 function literalReferences(source) {
@@ -133,7 +161,7 @@ export function rendererInputGraph(files, {runtime = false, seeds, parse} = {}) 
     return [manifest.name, {path: posix.dirname(file.path), manifest}];
   }));
   const sources = new Map(files.map(file => [file.path, file.source]));
-  const inputs = new Map(), consumers = new Map(), uncertain = new Set(), native = new Set(), escaped = new Set();
+  const inputs = new Map(), consumers = new Map(), uncertain = new Set(), native = new Set(), escaped = new Set(), opaque = new Set();
   const pending = new Set(seeds ?? paths);
   if (runtime) parse ??= require("@babel/parser").parse;
   for (const path of pending) {
@@ -149,6 +177,12 @@ export function rendererInputGraph(files, {runtime = false, seeds, parse} = {}) 
       try { parsed = moduleReferences(path, source, parse ?? require("@babel/parser").parse); }
       catch { parsed = {failed: true}; }
       if (parsed.failed || parsed.references.some(reference => reference.module && reference.escaped)) escaped.add(path);
+    }
+    if (!runtime && /\b(?:createRequire|require)\b|\bimport\s*\.\s*meta\b/u.test(source)) {
+      let parsed;
+      try { parsed = moduleReferences(path, source, parse ?? require("@babel/parser").parse); }
+      catch { parsed = {failed: true}; }
+      if (parsed.failed || parsed.opaqueLoader) opaque.add(path);
     }
     for (const {value, module: moduleInput, type: typeOnly, directory} of references) {
       if (runtime && typeOnly) continue;
@@ -181,7 +215,7 @@ export function rendererInputGraph(files, {runtime = false, seeds, parse} = {}) 
         const sourceReader = outsideRenderer && (/\.(?:test|spec)\.[cm]?[jt]sx?$/u.test(path)
           || /^(?:scripts|tools)\//u.test(path) || path.includes("/e2e/"));
         const prefix = directory ? target : target.replace(/\/$/u, "") + "/";
-        if (!runtime && (directory && moduleInput || !directory && sourceReader && prefix.startsWith(renderer))) {
+        if (!runtime && (directory && (moduleInput || sourceReader) || !directory && sourceReader && prefix.startsWith(renderer))) {
           for (const candidate of paths) if (candidate.startsWith(renderer) && candidate.startsWith(prefix)) depend(candidate);
         }
         // Missing module inputs must not silently produce an incomplete graph.
@@ -193,7 +227,7 @@ export function rendererInputGraph(files, {runtime = false, seeds, parse} = {}) 
       consumers.get(dependency).add(path);
     }
   }
-  return {inputs, consumers, uncertain, native, escaped};
+  return {inputs, consumers, uncertain, native, escaped, opaque};
 }
 
 function closure(seeds, graph) {
@@ -208,8 +242,8 @@ export function focusedRendererSelection(changed, files, {baseFiles, graph, load
   if (!changed.length || changed.some(path => !path.startsWith(renderer) || !/\.(?:tsx?|css)$/u.test(path))) return null;
   const sources = new Map(files.map(file => [file.path, file.source]));
   if (!sources.has(tokensTest) || changed.some(path => !sources.has(path) || baseFiles && !baseFiles.has(path))) return null;
-  const {consumers, uncertain, escaped} = graph ?? rendererInputGraph(files);
-  if (escaped?.size) return null;
+  const {consumers, uncertain, escaped, opaque} = graph ?? rendererInputGraph(files);
+  if (escaped?.size || opaque?.size) return null;
   const affected = closure(changed, consumers);
   if ([...affected].some(path => !path.startsWith(renderer) && !path.startsWith(site))) return null;
   // A computed module load in the renderer or site could hide a reverse edge.

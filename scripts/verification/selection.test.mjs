@@ -758,6 +758,33 @@ test("renderer directory reads and computed literal prefixes outside the rendere
   }
 });
 
+test("external aliased module loads and computed source reads cannot hide renderer consumers", () => {
+  for (const source of [
+    'const load = createRequire(import.meta.url); load(`../renderer/Wid${name}.js`);',
+    'const load = createRequire(import.meta.url); load(computedRendererPath);',
+    'const load = require; load(computedRendererPath);',
+    'const load = createRequire(import.meta.url); let path = load.resolve("yjs"); path = computedRendererPath; load(path);',
+    'const load = createRequire(import.meta.url); const path = load.resolve("yjs"); function consume(path) { load(path); }',
+    'const load = createRequire(import.meta.url); const path = load.resolve("../renderer/Other.js"); load(join(dirname(path), "Widget.js"));',
+    'const pattern = `../renderer/${name}.tsx`; import.meta.glob(pattern);',
+    'import.meta.glob(computedRendererPattern);',
+    'import.meta["glob"](computedRendererPattern);',
+    'const glob = import.meta.glob; glob(computedRendererPattern);',
+    'const {glob} = import.meta; glob(computedRendererPattern);',
+    'readFileSync(`../renderer/Wid${name}.tsx`, "utf8");',
+    'const sourcePath = `../renderer/${name}.tsx`; readFileSync(sourcePath, "utf8");',
+  ]) {
+    const files = rendererFixture([{path: "apps/desktop/src/testing/consumer.test.ts", source}]);
+    assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], files), null, source);
+  }
+});
+
+test("external package resolution stays bounded without treating runtime data reads as renderer imports", () => {
+  const source = 'const load = createRequire(import.meta.url); let path; path = load.resolve("yjs"); load(path); load(join(dirname(path), "../package.json"));';
+  const files = rendererFixture([{path: "scripts/consumer.mjs", source}]);
+  assert.ok(focusedRendererSelection([`${rendererPath}Widget.tsx`], files));
+});
+
 test("tracked JSON and raw HTML inputs resolve without disabling renderer focus", () => {
   const files = rendererFixture([
     {path: `${rendererPath}data.json`, source: ""},
