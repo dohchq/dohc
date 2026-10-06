@@ -3,8 +3,10 @@ import {
   DesktopUserSettingsResult, DesktopMarksResult, ExitRoundAnswerPayload, LaunchMarksResult,
   OpenExternalUrlPayload, ReloadRendererRequestPayload, SetTitlebarThemePayload,
   StepWindowZoomPayload, WriteClipboardTextPayload,
+  WorkspaceIdPayload, NativeWorkStatsResult,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
+import { profileCounters } from "../performance/profileCounters";
 import { isSafeExternalUrl } from "../security/electronSecurity";
 import type { DesktopUserSettingsResult as UserSettingsResult, ZoomStep } from "../settings/userSettings";
 import type { createExitRounds, createQuitGuard } from "../quitGuard";
@@ -32,6 +34,7 @@ export function createWindowIpc<
   desktopMarks: Pick<typeof import("../performance/desktopMarks").desktopMarks, "markOnce" | "snapshot">;
   logLaunchMarksOnce(): void;
   app: { readonly isPackaged: boolean };
+  readNativeWorkStats(event: Event, workspaceId: string): Promise<NativeWorkStatsResult>;
 }) {
   const {
     registerHandler, registerEvent, assertTrustedSender, prepareForRendererReload,
@@ -141,7 +144,14 @@ export function createWindowIpc<
       });
       registerHandler(CHANNELS.getDesktopMarks, (event) => {
         assertTrustedSender(event);
-        return DesktopMarksResult.parse(desktopMarks.snapshot());
+        return DesktopMarksResult.parse({ ...desktopMarks.snapshot(), counters: profileCounters.snapshot() });
+      });
+      registerHandler(CHANNELS.getNativeWorkStats, async (event, payload) => {
+        assertTrustedSender(event);
+        const { workspaceId } = WorkspaceIdPayload.parse(payload);
+        const result = NativeWorkStatsResult.parse(await dependencies.readNativeWorkStats(event, workspaceId));
+        if (result.workspaceId !== workspaceId) throw new Error("Native work snapshot targeted a different workspace.");
+        return result;
       });
     }
   }

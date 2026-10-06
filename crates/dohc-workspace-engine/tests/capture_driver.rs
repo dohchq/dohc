@@ -343,6 +343,39 @@ async fn the_startup_baseline_stamps_reconcile_provenance_and_emits_one_event() 
         wait_for_moment_event(&mut events, "offline-b.md").await;
     }
 
+    wait_for_initial_settled_event(&mut events).await;
+    let work = call(&transport, &handle, 9_099, "files.workStats", json!({})).await;
+    assert!(
+        work["generation"]
+            .as_str()
+            .is_some_and(|generation| !generation.is_empty())
+    );
+    assert!(work["capture"]["started"].as_u64().expect("scan count") >= 1);
+    assert!(
+        work["capture"]["completed"]
+            .as_u64()
+            .expect("completed scan count")
+            >= 1
+    );
+    assert!(
+        work["capture"]["filesEnumerated"]
+            .as_u64()
+            .expect("enumerated files")
+            >= 2
+    );
+    assert!(
+        work["capture"]["hashAttemptsCompleted"]
+            .as_u64()
+            .expect("hash attempts")
+            >= 2
+    );
+    assert!(
+        work["capture"]["bytesReadForHashing"]
+            .as_u64()
+            .expect("hash read bytes")
+            >= 42
+    );
+
     transport
         .call(
             RequestContext::unbounded(),

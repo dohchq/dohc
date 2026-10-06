@@ -277,6 +277,7 @@ impl EngineService {
             }
             "engine.ping" => engine_ping(),
             "workspace.open" => Box::pin(self.workspace_open(&ctx, request.params)).await?,
+            "files.workStats" => self.files_work_stats(request.workspace, request.params)?,
             "files.changesSince" => {
                 Box::pin(self.files_changes_since(&ctx, request.workspace, request.params, false))
                     .await?
@@ -1005,6 +1006,7 @@ impl EngineService {
             && !matches!(
                 method,
                 "workspace.close"
+                    | "files.workStats"
                     | "files.changesSince"
                     | "files.drain"
                     | "search.queryChatMessagesGranular"
@@ -1350,6 +1352,9 @@ mod tests {
             "conflicts.open",
             "conflicts.resolve",
             "engine.ping",
+            "files.changesSince",
+            "files.drain",
+            "files.workStats",
             "history.page",
             "keptCopies.list",
             "keptCopies.save",

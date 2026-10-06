@@ -21,25 +21,30 @@ const SCENARIOS = [
   { artifact: "excalidraw-profile", spec: "excalidraw-profile.spec.ts" },
   { artifact: "bigdoc-profile", spec: "bigdoc-profile.spec.ts" },
   { artifact: "bigdoc-read-profile", spec: "bigdoc-read-profile.spec.ts" },
+  { artifact: "save-amplification-profile", spec: "save-amplification-profile.spec.ts" },
 ];
 
 function usage() {
   return [
-    "Usage: node tools/perf-profiling/run-profiles.mjs --output <directory> [--seed <uint32>] [--tiny] [--headed]",
+    "Usage: node tools/perf-profiling/run-profiles.mjs --output <directory> [--seed <uint32>] [--tiny] [--headed] [--scenario <artifact-name>]",
     "",
     "--tiny seeds a 200-file large-flat fixture and shortens timed interactions for one plumbing smoke run.",
   ].join("\n");
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   let output = null;
   let seed = null;
   let tiny = false;
   let headed = false;
+  let scenario = null;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--output") {
       output = argv[++index] ?? null;
+    } else if (arg === "--scenario") {
+      scenario = argv[++index] ?? null;
+      if (!SCENARIOS.some(entry => entry.artifact === scenario)) throw new Error(`Unknown scenario: ${scenario}`);
     } else if (arg === "--seed") {
       const raw = argv[++index];
       const parsed = Number(raw);
@@ -59,7 +64,7 @@ function parseArgs(argv) {
     }
   }
   if (!output) throw new Error(`--output is required.\n\n${usage()}`);
-  return { output: resolve(output), seed, tiny, headed };
+  return { output: resolve(output), seed, tiny, headed, scenarios: scenario ? SCENARIOS.filter(entry => entry.artifact === scenario) : SCENARIOS };
 }
 
 async function run(command, args, options = {}) {
@@ -235,6 +240,39 @@ function commonSummary(measurements) {
   };
 }
 
+function summarizeSaveAmplification(cases) {
+  if (!Array.isArray(cases)) return null;
+  return cases.map(entry => ({
+    fixture: entry.fixture ? Object.fromEntries(["name", "seed", "files", "path", "bytes", "paragraphs", "tableRows", "contentDigest"]
+      .map(field => [field, entry.fixture[field] ?? null])) : null,
+    opening: entry.opening ? {
+      elapsedMs: entry.opening.elapsedMs ?? null, surface: entry.opening.surface ?? null,
+      sourceViewWasShown: entry.opening.sourceViewWasShown ?? null, native: entry.opening.native ?? null,
+    } : null,
+    phases: (entry.phases ?? []).map(phase => ({
+      ...commonSummary({ ...phase, reactCommitCount: phase.react?.commitCount }),
+      name: phase.name, complete: phase.complete ?? null,
+      measurementStage: phase.measurementStage ?? null, plannedCharacters: phase.plannedCharacters ?? null,
+      elapsedMs: phase.elapsedMs ?? null, workloadObservedMs: phase.workloadObservedMs ?? null,
+      keystrokeDelayMs: phase.keystrokeDelayMs ?? null, typedCharacters: phase.typedCharacters ?? null,
+      externalWritesCompleted: phase.externalWritesCompleted ?? null, inputsDuringWrites: phase.inputsDuringWrites ?? null,
+      uniqueSavedNotifications: phase.uniqueSavedNotifications ?? null, persistedContentVerified: phase.persistedContentVerified ?? null,
+      delta: phase.delta ?? null, native: phase.native ?? null,
+      countersPerSavedNotification: phase.countersPerSavedNotification ?? null,
+      performanceDelta: phase.performance?.delta ?? null,
+      error: phase.error ?? null, evidenceErrors: phase.evidenceErrors ?? null,
+      collectionError: phase.collectionError ?? null, artifactError: phase.artifactError ?? null,
+      eventCounts: {
+        inputs: phase.raw?.inputs?.length ?? null,
+        trustedInputs: phase.raw?.inputs?.filter(input => input.trusted).length ?? null,
+        saveNotifications: phase.raw?.saves?.length ?? null,
+        savedNotifications: phase.raw?.saves?.filter(save => save.event.state === "saved").length ?? null,
+        activityNotifications: phase.raw?.activities?.length ?? null,
+      },
+    })),
+  }));
+}
+
 function summarizeArtifacts(artifacts) {
   const switchMeasurements = artifacts["switch-profile"]?.measurements;
   const explorer = artifacts["explorer-profile"]?.measurements;
@@ -264,6 +302,7 @@ function summarizeArtifacts(artifacts) {
     : null;
 
   return {
+    saveAmplification: summarizeSaveAmplification(artifacts["save-amplification-profile"]?.measurements?.cases),
     switch: switchMeasurements
       ? {
           ...commonSummary(switchMeasurements),
@@ -339,8 +378,9 @@ export function createSummary(runEnvelope, failures, artifacts, scenarios = SCEN
     ...runEnvelope,
     complete:
       failures.length === 0 &&
-      scenarios.every(({ artifact }) => Object.hasOwn(artifacts, artifact)),
+      scenarios.every(({ artifact }) => Object.hasOwn(artifacts, artifact) && artifacts[artifact].complete !== false),
     failures,
+    selectedScenarios: scenarios.map(entry => entry.artifact),
     scenarios: summarizeArtifacts(artifacts),
   };
 }
@@ -382,6 +422,8 @@ async function main() {
       rendererTreeSha256: await sha256Tree(join(desktopRoot, "dist", "renderer")),
       engineSha256: await sha256File(stagedEngine),
       fixtureManifestSha256: await sha256File(join(fixtures, "seed-manifest.json")),
+      profilingToolsSha256: await sha256Tree(scriptDir),
+      profilingSpecsSha256: await sha256Tree(join(desktopRoot, "e2e", "profiling")),
     },
     machine: {
       hostname: hostname(),
@@ -409,14 +451,15 @@ async function main() {
     output: options.output,
     headed: options.headed,
     env,
+    scenarios: options.scenarios,
   });
 
   const artifacts = {};
-  for (const { artifact } of SCENARIOS) {
+  for (const { artifact } of options.scenarios) {
     const path = join(options.output, `${artifact}.json`);
     if (existsSync(path)) artifacts[artifact] = JSON.parse(await readFile(path, "utf8"));
   }
-  const summary = createSummary(runEnvelope, failures, artifacts);
+  const summary = createSummary(runEnvelope, failures, artifacts, options.scenarios);
   await writeFile(join(options.output, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
   console.log(`[perf-profiling] wrote ${join(options.output, "summary.json")}`);
   if (failures.length > 0) {

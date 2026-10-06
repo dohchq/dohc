@@ -376,4 +376,5 @@ export const CHANNELS = {
   devRevealPath: "desktop:dev:reveal-path",
   getLaunchMarks: "desktop:test:get-launch-marks",
   getDesktopMarks: "desktop:test:get-desktop-marks",
+  getNativeWorkStats: "desktop:test:get-native-work-stats",
 } as const;

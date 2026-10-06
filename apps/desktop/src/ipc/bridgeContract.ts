@@ -6125,8 +6125,10 @@ export type EngineYDocSaveStateEvent = z.infer<typeof EngineYDocSaveStateEvent>;
 export const DesktopMarksResult = z.object({
   marks: z.record(z.string(), z.number()),
   measures: z.record(z.string(), z.number()),
+  counters: z.record(z.string(), z.number()).nullable(),
 });
 export type DesktopMarksResult = z.infer<typeof DesktopMarksResult>;
+export { NativeWorkStatsResult } from "../performance/nativeWorkStats";
 
 export const DevRevealPathPayload = z.object({
   target: z.enum(["workspace", "state-dir"]),

@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { broadcastWorkspaceActivity, coalesceWorkspaceActivity } from "./workspaceActivityBroadcast";
 import { CHANNELS } from "./channels";
+import { profileCounters } from "../performance/profileCounters";
+afterEach(() => profileCounters.resetForTests());
 
 function fakeWindow(id: number) {
   return { webContents: { id, send: vi.fn() } };
@@ -38,6 +40,8 @@ describe("broadcastWorkspaceActivity", () => {
     } finally { vi.useRealTimers(); }
   });
   it("delivers a scoped event only to windows with that workspace active", () => {
+    profileCounters.enable();
+    const before = profileCounters.snapshot()!;
     const onA = fakeWindow(1);
     const onB = fakeWindow(2);
     const onNone = fakeWindow(3);
@@ -60,6 +64,7 @@ describe("broadcastWorkspaceActivity", () => {
     // about workspace A, and neither does a window with no workspace open.
     expect(onB.webContents.send).not.toHaveBeenCalled();
     expect(onNone.webContents.send).not.toHaveBeenCalled();
+    expect(profileCounters.snapshot()!.activityWindowDeliveries - before.activityWindowDeliveries).toBe(1);
   });
 
   it("delivers a global event to every window, workspace or not", () => {

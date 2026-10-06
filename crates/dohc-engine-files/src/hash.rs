@@ -17,6 +17,7 @@
 //! no durable step to tear).
 
 use crate::error::FilesError;
+use crate::work_stats::{HashAttempt, NativeWorkCounters};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::PathBuf;
@@ -164,6 +165,20 @@ impl HashPool {
         read_buffer_bytes: usize,
         max_file_bytes: u64,
     ) -> Result<Self, FilesError> {
+        Self::with_stats(
+            workers,
+            read_buffer_bytes,
+            max_file_bytes,
+            NativeWorkCounters::default(),
+        )
+    }
+
+    pub(crate) fn with_stats(
+        workers: usize,
+        read_buffer_bytes: usize,
+        max_file_bytes: u64,
+        work: NativeWorkCounters,
+    ) -> Result<Self, FilesError> {
         if workers == 0 || read_buffer_bytes == 0 {
             return Err(FilesError::PoolUnavailable {
                 reason: "hash pool needs a non-zero worker count and buffer size",
@@ -186,9 +201,10 @@ impl HashPool {
             let job_rx = Arc::clone(&job_rx);
             let result_tx = result_tx.clone();
             let gauge = Arc::clone(&gauge);
+            let work = work.clone();
             let handle = std::thread::Builder::new()
                 .name(format!("dohc-hash-{n}"))
-                .spawn(move || worker_main(&job_rx, &result_tx, &gauge, config))
+                .spawn(move || worker_main(&job_rx, &result_tx, &gauge, config, &work))
                 .map_err(|_| FilesError::PoolUnavailable {
                     reason: "could not spawn hash worker thread",
                 })?;
@@ -343,6 +359,7 @@ fn worker_main(
     result_tx: &SyncSender<Indexed>,
     gauge: &PoolGauge,
     config: WorkerConfig,
+    work: &NativeWorkCounters,
 ) {
     // One reusable buffer per worker — the bounded read buffer.
     let mut buffer = vec![0u8; config.read_buffer_bytes];
@@ -361,10 +378,12 @@ fn worker_main(
         // result drain (`recv` would otherwise block forever waiting on a
         // result the dead worker can't produce). The worker survives and the
         // run surfaces a typed, fail-closed outcome.
+        let mut attempt = work.hash_attempt();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            hash_one(&job, &mut buffer, config.max_file_bytes)
+            hash_one(&job, &mut buffer, config.max_file_bytes, &mut attempt)
         }))
         .unwrap_or(HashOutcome::Panicked);
+        drop(attempt);
         gauge.leave();
         // If the result channel is gone the pool is being torn down; stop.
         if result_tx
@@ -385,7 +404,12 @@ fn worker_main(
 #[cfg(test)]
 pub(crate) static TEST_PANIC_ON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-fn hash_one(job: &Job, buffer: &mut [u8], max_file_bytes: u64) -> HashOutcome {
+fn hash_one(
+    job: &Job,
+    buffer: &mut [u8],
+    max_file_bytes: u64,
+    attempt: &mut HashAttempt,
+) -> HashOutcome {
     #[cfg(test)]
     {
         let marker = TEST_PANIC_ON
@@ -403,30 +427,11 @@ fn hash_one(job: &Job, buffer: &mut [u8], max_file_bytes: u64) -> HashOutcome {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HashOutcome::Vanished,
         Err(err) => return HashOutcome::Io { kind: err.kind() },
     };
-    let mut hasher = Sha256::new();
-    let mut bytes: u64 = 0;
-    loop {
-        // Cooperative cancellation between buffer reads of a single large file.
-        if job.token.is_cancelled() {
-            return HashOutcome::Cancelled;
-        }
-        let read = match file.read(buffer) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HashOutcome::Vanished,
-            Err(err) => return HashOutcome::Io { kind: err.kind() },
-        };
-        bytes = bytes.saturating_add(read as u64);
-        // Enforce the size cap while streaming: a file that grew past the cap
-        // after enumeration is abandoned at the boundary, never read unbounded.
-        if bytes > max_file_bytes {
-            return HashOutcome::OverCap;
-        }
-        if let Some(chunk) = buffer.get(..read) {
-            hasher.update(chunk);
-        }
-    }
+    let (hasher, bytes) = match hash_reader(&mut file, &job.token, buffer, max_file_bytes, attempt)
+    {
+        Ok(result) => result,
+        Err(outcome) => return outcome,
+    };
     let stable_mtime_ms = match &job.post_hash {
         None => 0,
         Some(expectation) => {
@@ -450,6 +455,43 @@ fn hash_one(job: &Job, buffer: &mut [u8], max_file_bytes: u64) -> HashOutcome {
         bytes,
         stable_mtime_ms,
     }
+}
+
+fn hash_reader(
+    reader: &mut impl Read,
+    token: &CancellationToken,
+    buffer: &mut [u8],
+    max_file_bytes: u64,
+    attempt: &mut HashAttempt,
+) -> Result<(Sha256, u64), HashOutcome> {
+    let mut hasher = Sha256::new();
+    let mut bytes: u64 = 0;
+    loop {
+        // Cooperative cancellation between buffer reads of a single large file.
+        if token.is_cancelled() {
+            return Err(HashOutcome::Cancelled);
+        }
+        let read = match reader.read(buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(HashOutcome::Vanished);
+            }
+            Err(err) => return Err(HashOutcome::Io { kind: err.kind() }),
+        };
+        bytes = bytes.saturating_add(read as u64);
+        attempt.bytes = attempt.bytes.saturating_add(read as u64);
+        // Enforce the size cap while streaming: a file that grew past the cap
+        // after enumeration is abandoned at the boundary, never read unbounded.
+        if bytes > max_file_bytes {
+            return Err(HashOutcome::OverCap);
+        }
+        if let Some(chunk) = buffer.get(..read) {
+            hasher.update(chunk);
+        }
+    }
+    Ok((hasher, bytes))
 }
 
 fn metadata_matches(metadata: &std::fs::Metadata, expectation: &PostHashExpectation) -> bool {
@@ -516,7 +558,9 @@ mod tests {
         // The job whose path contains "f3.txt" panics the worker mid-hash.
         *TEST_PANIC_ON.lock().unwrap_or_else(|p| p.into_inner()) = Some("f3.txt".to_owned());
 
-        let pool = HashPool::new(2, 4096, u64::MAX).expect("pool");
+        let work = NativeWorkCounters::default();
+        let pool = HashPool::with_stats(2, 4096, u64::MAX, work.clone()).expect("pool");
+        let gauge = Arc::clone(pool.gauge());
         let inputs: Vec<HashInput> = (0..6)
             .map(|i| HashInput {
                 index: i,
@@ -536,11 +580,66 @@ mod tests {
         *TEST_PANIC_ON.lock().unwrap_or_else(|p| p.into_inner()) = None;
         let _ = worker.join();
 
+        let snapshot = work.snapshot();
+        assert_eq!(snapshot.hash_attempts_completed, gauge.hashed() as u64);
+        assert!(snapshot.hash_attempts_completed >= 4);
+        assert_eq!(
+            snapshot.bytes_read_for_hashing,
+            (snapshot.hash_attempts_completed - 1) * 4
+        );
         assert_eq!(
             got,
             Ok(true),
             "a panicking hash worker must fail closed (PoolUnavailable) in bounded time, not hang"
         );
+    }
+
+    #[test]
+    fn abandoned_hash_reads_remain_counted() {
+        struct PartialReader {
+            token: CancellationToken,
+            cancel: bool,
+            read_once: bool,
+        }
+        impl Read for PartialReader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.read_once {
+                    return Err(std::io::ErrorKind::PermissionDenied.into());
+                }
+                self.read_once = true;
+                buffer[..4].copy_from_slice(b"read");
+                if self.cancel {
+                    self.token.cancel();
+                }
+                Ok(4)
+            }
+        }
+        for cancel in [false, true] {
+            let work = NativeWorkCounters::default();
+            let token = CancellationToken::new();
+            let mut reader = PartialReader {
+                token: token.clone(),
+                cancel,
+                read_once: false,
+            };
+            let mut attempt = work.hash_attempt();
+            let outcome = hash_reader(&mut reader, &token, &mut [0; 8], 100, &mut attempt)
+                .err()
+                .unwrap();
+            assert_eq!(
+                outcome,
+                if cancel {
+                    HashOutcome::Cancelled
+                } else {
+                    HashOutcome::Io {
+                        kind: std::io::ErrorKind::PermissionDenied,
+                    }
+                }
+            );
+            drop(attempt);
+            assert_eq!(work.snapshot().hash_attempts_completed, 1);
+            assert_eq!(work.snapshot().bytes_read_for_hashing, 4);
+        }
     }
 
     #[test]
@@ -553,7 +652,8 @@ mod tests {
         std::fs::write(dir.join("small.bin"), b"tiny").expect("write");
 
         // 64-byte cap, 16-byte buffer → the cap trips after a couple of reads.
-        let pool = HashPool::new(1, 16, 64).expect("pool");
+        let work = NativeWorkCounters::default();
+        let pool = HashPool::with_stats(1, 16, 64, work.clone()).expect("pool");
         let inputs = vec![
             HashInput {
                 index: 0,
@@ -575,6 +675,8 @@ mod tests {
             matches!(outcomes[1], HashOutcome::Hashed { bytes: 4, .. }),
             "under-cap file still hashed"
         );
+        assert_eq!(work.snapshot().hash_attempts_completed, 2);
+        assert_eq!(work.snapshot().bytes_read_for_hashing, 84);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

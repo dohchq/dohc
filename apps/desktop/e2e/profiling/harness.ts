@@ -2,6 +2,8 @@ import type { Page } from "@playwright/test";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { MarksSnapshot, SwitchTimelineEntry } from "../../src/performance/desktopMarks";
+import { profileCountersDelta, type ProfileCountersSnapshot } from "../../src/performance/profileCounters";
+import { nativeWorkStatsDelta, type NativeWorkStatsResult } from "../../src/performance/nativeWorkStats";
 import { launchDesktopApp, type LaunchedDesktopApp } from "../helpers/desktopApp";
 import {
   cleanupDesktopWorkspace,
@@ -12,7 +14,7 @@ import {
   type WorkspaceSummary,
 } from "../helpers/workspace";
 
-export type FixtureName = "large-flat" | "large-deep" | "big-docs" | "drawings";
+export type FixtureName = "large-flat" | "large-deep" | "big-docs" | "drawings" | "rich-edit-ordinary" | "rich-edit-stress";
 
 export interface SeedManifest {
   schemaVersion: number;
@@ -23,6 +25,116 @@ export interface SeedManifest {
     "large-deep": { files: number; markdownFiles: number; levels: number };
     "big-docs": { files: Array<{ path: string; bytes: number }> };
     drawings: { files: Array<{ path: string; elementCount: number }> };
+    "rich-edit-ordinary": RichEditFixture;
+    "rich-edit-stress": RichEditFixture;
+  };
+}
+
+export interface RichEditFixture {
+  files: number;
+  path: string;
+  bytes: number;
+  paragraphs: number;
+  tableRows: number;
+  contentDigest: string;
+  externalWritePaths: string[];
+}
+
+export interface ProfileCounterPair {
+  main: { marks: MarksSnapshot; counters: ProfileCountersSnapshot | null };
+  renderer: { marks: MarksSnapshot; counters: ProfileCountersSnapshot | null };
+  native: NativeWorkStatsResult;
+  observedAtMs: { started: number; finished: number };
+  readBracketsMs: Record<"main" | "native" | "renderer", { started: number; finished: number }>;
+}
+
+export type ProfileCounterRead = Omit<Partial<ProfileCounterPair>, "readBracketsMs"> & {
+  readBracketsMs: Partial<ProfileCounterPair["readBracketsMs"]>;
+  errors: Array<{ lane: "main" | "native" | "renderer"; error: ReturnType<typeof profileError> }>;
+};
+
+export function profileError(error: unknown) {
+  return error instanceof Error ? { name: error.name, message: error.message, stack: error.stack ?? null }
+    : { name: "Error", message: String(error), stack: null };
+}
+
+// Keep the first failure while collecting evidence and saving the partial phase.
+export async function recordProfilePhase(phases: Array<Record<string, unknown>>, phase: Record<string, unknown>, steps: {
+  run(): Promise<void>; collect(): Promise<void>; verify(): Promise<void>; persist(): Promise<void>;
+}): Promise<void> {
+  phase.complete = false;
+  phases.push(phase);
+  let failed = false, failure: unknown;
+  const fail = (field: string, error: unknown) => {
+    if (!failed) { failed = true; failure = error; }
+    phase[field] = profileError(error);
+  };
+  try { await steps.persist(); await steps.run(); }
+  catch (error) { fail("error", error); }
+  try { await steps.collect(); }
+  catch (error) { fail("collectionError", error); }
+  if (!failed) {
+    try { await steps.verify(); }
+    catch (error) { fail("error", error); }
+  }
+  phase.complete = !failed;
+  try { await steps.persist(); }
+  catch (error) { fail("artifactError", error); phase.complete = false; }
+  if (failed) throw failure;
+}
+
+// Sequential reads are a bracket, not an atomic cross-process snapshot.
+export async function readProfileCounters(page: Page, workspaceId: string, observe?: (read: ProfileCounterRead) => void): Promise<ProfileCounterPair> {
+  const started = performance.now();
+  const partial: ProfileCounterRead = { observedAtMs: { started, finished: started }, readBracketsMs: {}, errors: [] };
+  const report = () => observe?.({ ...partial, readBracketsMs: { ...partial.readBracketsMs }, errors: [...partial.errors] });
+  let lane: "main" | "native" | "renderer" = "main", laneStarted = started;
+  report();
+  try {
+    const main = await page.evaluate(async () => {
+      const api = window.dohcDesktopTest as { getDesktopMarks(): Promise<MarksSnapshot & { counters: ProfileCountersSnapshot | null }> };
+      const { counters, ...marks } = await api.getDesktopMarks();
+      return { marks, counters };
+    });
+    const mainFinished = performance.now();
+    partial.main = main; partial.readBracketsMs.main = { started, finished: mainFinished };
+    partial.observedAtMs = { started, finished: mainFinished }; report();
+    lane = "native"; laneStarted = mainFinished;
+    const native = await page.evaluate(async workspaceId => {
+      const api = window.dohcDesktopTest as { getNativeWorkStats(workspaceId: string): Promise<NativeWorkStatsResult> };
+      return api.getNativeWorkStats(workspaceId);
+    }, workspaceId);
+    const nativeFinished = performance.now();
+    partial.native = native; partial.readBracketsMs.native = { started: mainFinished, finished: nativeFinished };
+    partial.observedAtMs = { started, finished: nativeFinished }; report();
+    lane = "renderer"; laneStarted = nativeFinished;
+    const renderer = await page.evaluate(() => {
+      const recorder = window.dohcDesktopMarks;
+      if (!recorder) throw new Error("Renderer profile counters are unavailable.");
+      return { marks: recorder.snapshot(), counters: recorder.counters() };
+    });
+    const finished = performance.now();
+    partial.renderer = renderer; partial.readBracketsMs.renderer = { started: nativeFinished, finished };
+    partial.observedAtMs = { started, finished }; report();
+    if (!main.counters || !renderer.counters) throw new Error("Test profile counters are disabled.");
+    return { main, native, renderer, observedAtMs: { started, finished }, readBracketsMs: {
+      main: { started, finished: mainFinished }, native: { started: mainFinished, finished: nativeFinished },
+      renderer: { started: nativeFinished, finished },
+    } };
+  } catch (error) {
+    const finished = performance.now();
+    partial.observedAtMs = { started, finished };
+    partial.readBracketsMs[lane] = { started: laneStarted, finished };
+    partial.errors.push({ lane, error: profileError(error) }); report();
+    throw error;
+  }
+}
+
+export function counterPairDelta(before: ProfileCounterPair, after: ProfileCounterPair) {
+  return {
+    main: profileCountersDelta(before.main.counters, after.main.counters),
+    renderer: profileCountersDelta(before.renderer.counters, after.renderer.counters),
+    native: nativeWorkStatsDelta(before.native, after.native),
   };
 }
 

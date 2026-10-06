@@ -1,3 +1,4 @@
+import { profileCounters } from "../performance/profileCounters";
 import {
   deriveSyncStatus,
   type WatcherEvent,
@@ -353,12 +354,15 @@ export function createWorkspaceActivity(
           // Deletion suppression happens before any queued work or close.
           entry.capture?.observeFileEvents(events);
           if (state.entry !== entry) return;
+          profileCounters.add("observationFactBatches");
+          profileCounters.add("observationFactPaths", facts.length);
           options.onWatcherBatch?.(workspace, events);
           notify({ workspaceId: workspace.workspaceId, paths: facts.map(fact => fact.path),
             pathSetChanged: facts.some(fact => fact.kind !== "changed") });
         },
         async resync() {
           if (state.entry !== entry && state.entry !== null) return;
+          profileCounters.add("observationResyncCallbacks");
           await entry.capture?.resyncFileObservation();
           if (state.entry !== entry) return;
           void options.onObservationResync?.(workspace).catch(error =>
@@ -367,6 +371,9 @@ export function createWorkspaceActivity(
         },
         captured(paths) {
           if (state.entry !== entry) return;
+          profileCounters.add("captureCallbacks");
+          if (!paths) profileCounters.add("captureCallbacksWithoutPaths");
+          profileCounters.add("capturedPaths", paths?.length ?? 0);
           entry.inFlight = false;
           entry.lastSyncedAtMs = Date.now();
           entry.engine?.queueSync();

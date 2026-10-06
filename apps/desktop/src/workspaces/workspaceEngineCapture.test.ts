@@ -7,6 +7,7 @@ import type {
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { denyRead, restoreRead } from "@dohc/workspace-fs/testing";
 import { createHash } from "node:crypto";
+import { profileCounters } from "../performance/profileCounters";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -58,6 +59,7 @@ import { createTestScratch } from "./testTemp";
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
 
 afterEach(async () => {
+  profileCounters.resetForTests();
   vi.restoreAllMocks();
 });
 
@@ -2161,15 +2163,22 @@ describe("workspaceEngineCapture batch capture", () => {
   // The narrowness guard: the refusal above must fire only on a drifted file.
   it("still reports a plain saved settle when nothing changed the file", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
-    await write(root, "note.md", EDITOR_TEXT);
+    const text = `${EDITOR_TEXT} café`;
+    await write(root, "note.md", text);
+    profileCounters.enable();
+    const before = profileCounters.snapshot()!;
 
     const states = await settleOnClose(root, {
-      sha256: sha256Utf8(EDITOR_TEXT),
-      content: EDITOR_TEXT,
+      sha256: sha256Utf8(text),
+      content: text,
     });
 
-    expect(await readFile(join(root, "note.md"), "utf8")).toBe(EDITOR_TEXT);
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe(text);
     expect(states).toEqual(["saved"]);
+    const after = profileCounters.snapshot()!;
+    expect(after.settledFileReadCalls - before.settledFileReadCalls).toBe(1);
+    expect(after.settledFileReadBytes - before.settledFileReadBytes).toBe(Buffer.byteLength(text));
+    expect(after.settledFileReadElapsedMs - before.settledFileReadElapsedMs).toBeGreaterThanOrEqual(0);
   });
 
   it("mutation proof: polls daemon watcher degradation after startup", async () => {

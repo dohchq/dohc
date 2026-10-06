@@ -62,6 +62,9 @@ async function harness(isPackaged = false) {
   let clock = 10;
   const desktopMarks = createMarkRecorder(() => clock++);
   const logLaunchMarksOnce = vi.fn();
+  const readNativeWorkStats = vi.fn(async (_event: Event, workspaceId: string) => ({
+    workspaceId, status: "unavailable" as const, reason: "No current open engine binding.",
+  }));
   const isTrustedFrame = (url: string) => decideNavigation(url, { httpOrigins: ["http://localhost:5173"], fileUrlPrefix: null }).action === "allow";
   const handlers = new Map<string, (event: Event, payload: unknown) => unknown>();
   const events = new Map<string, (event: Event) => void>();
@@ -75,7 +78,7 @@ async function harness(isPackaged = false) {
     assertTrustedSender: event => { if (!isTrustedFrame(event.senderFrame?.url ?? "")) throw new Error("untrusted"); },
     prepareForRendererReload, shell, clipboard, BrowserWindow, rememberChromeTheme,
     titleBarOverlayOptions, stepWindowZoom, exitRounds, quitGuard, isTrustedFrame,
-    launchMarks, desktopMarks, logLaunchMarksOnce, app: { isPackaged },
+    launchMarks, desktopMarks, logLaunchMarksOnce, app: { isPackaged }, readNativeWorkStats,
   });
   return {
     ...capability, first, second, handlers, events, order, sessions, retiring,
@@ -83,7 +86,7 @@ async function harness(isPackaged = false) {
     quit, forceQuit, ask, quitGuard, exitRounds, requestIds, confirmProceed,
     stepWindowZoom, clipboard, shell, overlay, windows,
     BrowserWindow, rememberChromeTheme, titleBarOverlayOptions, launchMarks, desktopMarks,
-    logLaunchMarksOnce,
+    logLaunchMarksOnce, readNativeWorkStats,
     registerAll() { capability.registerReload(); capability.registerExternalUrl(); capability.registerWindowControls(); capability.registerQuitAndMarks(); },
     invoke: async (channel: string, payload?: unknown, value = first, senderFrame: Event["senderFrame"] = frame) => {
       const handler = handlers.get(channel);
@@ -108,7 +111,7 @@ describe("registered window IPC", () => {
       CHANNELS.reloadRenderer, "registry", CHANNELS.openExternalUrl, "handoff",
       CHANNELS.writeClipboardText, CHANNELS.setTitlebarTheme, CHANNELS.stepWindowZoom,
       "ui-state", "updates", CHANNELS.exitRoundAnswer, CHANNELS.holdQuit,
-      CHANNELS.resumeQuit, CHANNELS.firstPaint, CHANNELS.getLaunchMarks, CHANNELS.getDesktopMarks,
+      CHANNELS.resumeQuit, CHANNELS.firstPaint, CHANNELS.getLaunchMarks, CHANNELS.getDesktopMarks, CHANNELS.getNativeWorkStats,
     ]);
   });
 
@@ -125,6 +128,7 @@ describe("registered window IPC", () => {
     expect(h.stepWindowZoom).not.toHaveBeenCalled();
     expect(h.quit).not.toHaveBeenCalled();
     expect(h.launchMarks.snapshot).not.toHaveBeenCalled();
+    expect(h.readNativeWorkStats).not.toHaveBeenCalled();
   });
 
   it("validates payloads before admitting reload, clipboard, theme, zoom or URL work", async () => {
@@ -285,6 +289,7 @@ describe("registered window IPC", () => {
     const h = await harness(packaged); h.registerQuitAndMarks();
     expect(h.handlers.has(CHANNELS.getLaunchMarks)).toBe(flag === "1" && !packaged);
     expect(h.handlers.has(CHANNELS.getDesktopMarks)).toBe(flag === "1" && !packaged);
+    expect(h.handlers.has(CHANNELS.getNativeWorkStats)).toBe(flag === "1" && !packaged);
     expect(h.events.has(CHANNELS.firstPaint)).toBe(true);
   });
 
@@ -297,7 +302,7 @@ describe("registered window IPC", () => {
     h.paint(frame); h.paint(frame);
     expect(h.launchMarks.firstPaint).toHaveBeenCalledTimes(2);
     expect(h.logLaunchMarksOnce).toHaveBeenCalledTimes(2);
-    await expect(h.invoke(CHANNELS.getDesktopMarks)).resolves.toEqual({ marks: { "first-renderer-paint": 10 }, measures: {} });
+    await expect(h.invoke(CHANNELS.getDesktopMarks)).resolves.toEqual({ marks: { "first-renderer-paint": 10 }, measures: {}, counters: null });
     await expect(h.invoke(CHANNELS.getLaunchMarks)).resolves.toEqual({ appReadyMs: 1, firstWindowMs: 2, firstPaintMs: 3 });
     h.launchMarks.snapshot.mockReturnValueOnce({ appReadyMs: -1, firstWindowMs: 2, firstPaintMs: 3 });
     await expect(h.invoke(CHANNELS.getLaunchMarks)).rejects.toThrow();
@@ -310,5 +315,20 @@ describe("registered window IPC", () => {
     h.registerQuitAndMarks();
     expect(h.handlers.has(CHANNELS.getLaunchMarks)).toBe(true);
     expect(h.handlers.has(CHANNELS.getDesktopMarks)).toBe(true);
+  });
+
+  it("requires a workspace for native snapshots and preserves explicit unavailability", async () => {
+    vi.stubEnv("DOHC_DESKTOP_TEST", "1");
+    const h = await harness(); h.registerQuitAndMarks();
+    for (const payload of [undefined, {}, { workspaceId: "" }, { workspaceId: "../a" }]) {
+      await expect(h.invoke(CHANNELS.getNativeWorkStats, payload)).rejects.toThrow();
+    }
+    expect(h.readNativeWorkStats).not.toHaveBeenCalled();
+    await expect(h.invoke(CHANNELS.getNativeWorkStats, { workspaceId: "a" })).resolves.toEqual({
+      workspaceId: "a", status: "unavailable", reason: "No current open engine binding.",
+    });
+    expect(h.readNativeWorkStats).toHaveBeenCalledExactlyOnceWith({ sender: h.first, senderFrame: frame }, "a");
+    h.readNativeWorkStats.mockResolvedValueOnce({ workspaceId: "b", status: "unavailable", reason: "Wrong response." });
+    await expect(h.invoke(CHANNELS.getNativeWorkStats, { workspaceId: "a" })).rejects.toThrow(/different workspace/);
   });
 });

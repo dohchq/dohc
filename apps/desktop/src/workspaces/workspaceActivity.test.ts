@@ -15,6 +15,7 @@ import type { CloudSyncFailure } from "./relaySyncEngine";
 import { captureForWorkspace } from "./engineCaptureGate";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
+import { profileCounters } from "../performance/profileCounters";
 
 // The shared-view pin drives the real gate, which never reaches the engine
 // for a shared view — these sessions prove it by throwing on any use.
@@ -38,6 +39,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  profileCounters.resetForTests();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -64,10 +66,18 @@ describe("workspaceActivity capture hooks", () => {
     });
     const status = await activity.open(workspace());
     expect(status.historyRecordingUnavailable).toBe(true);
+    profileCounters.enable();
+    const before = profileCounters.snapshot()!;
     observation.facts([{ path: "note.md", kind: "changed" }]);
     expect(queueSync).not.toHaveBeenCalled();
     observation.captured();
     expect(queueSync).toHaveBeenCalledOnce();
+    const after = profileCounters.snapshot()!;
+    expect(after.observationFactBatches - before.observationFactBatches).toBe(1);
+    expect(after.observationFactPaths - before.observationFactPaths).toBe(1);
+    expect(after.captureCallbacks - before.captureCallbacks).toBe(1);
+    expect(after.captureCallbacksWithoutPaths - before.captureCallbacksWithoutPaths).toBe(1);
+    expect(after.capturedPaths - before.capturedPaths).toBe(0);
     await activity.stopAll();
   });
 
