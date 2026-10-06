@@ -621,6 +621,7 @@ function rendererFixture(extra = []) {
     {path: `${rendererPath}Widget.tsx`, source: "export const Widget = () => null;"},
     {path: `${rendererPath}Widget.test.tsx`, source: 'import {Widget} from "./Widget.js";'},
     {path: `${rendererPath}tokens.test.ts`, source: "// reads the renderer source tree"},
+    {path: "apps/desktop/e2e/self-host-onboarding.spec.ts", source: 'page.getByTestId("onboarding-control");'},
     ...extra,
   ];
 }
@@ -697,6 +698,54 @@ test("renderer test dependency closure retains native and database resources", (
   assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], files), null);
 });
 
+test("onboarding selectors retain their live proof and Postgres while keeping focused unit tests", () => {
+  for (const source of ['export const Widget = () => <button data-testid="onboarding-control" />;',
+    'export const Widget = () => <Button testId="onboarding-control" />;']) {
+    const files = rendererFixture();
+    files.find(file => file.path.endsWith("Widget.tsx")).source = source;
+    const plan = focusedRendererSelection([`${rendererPath}Widget.tsx`], files);
+    assert.equal(plan.proofs.desktop, true);
+    assert.equal(plan.proofs.smoke, true);
+    assert.equal(plan.proofs.statesPage, true);
+    assert.equal(plan.needs.postgres, true);
+    assert.equal(plan.proofs.selfHostNative, false);
+    assert.deepEqual(plan.testFiles["@dohc/desktop"], ["src/renderer/Widget.test.tsx", "src/renderer/tokens.test.ts"]);
+    assert.equal(plan.desktopScripts, false);
+  }
+});
+
+test("onboarding selector coverage follows helper imports and shared component consumers", () => {
+  const files = rendererFixture([
+    {path: `${rendererPath}Surface.tsx`, source: 'import {Widget} from "./Widget"; export const Surface = () => <div data-testid="onboarding-control"><Widget /></div>;'},
+    {path: "apps/desktop/e2e/helpers/onboarding.ts", source: 'page.getByTestId("onboarding-control");'},
+  ]);
+  files.find(file => file.path.endsWith("self-host-onboarding.spec.ts")).source = 'import "./helpers/onboarding";';
+  const plan = focusedRendererSelection([`${rendererPath}Widget.tsx`], files);
+  assert.equal(plan.proofs.desktop, true);
+  assert.equal(plan.needs.postgres, true);
+});
+
+test("removed onboarding IDs remain proof inputs and uncertain selectors retain package selection", () => {
+  const files = rendererFixture();
+  const plan = focusedRendererSelection([`${rendererPath}Widget.tsx`], files, {
+    baseSources: new Map([[`${rendererPath}Widget.tsx`, 'export const Widget = () => <button data-testid="onboarding-control" />;']]),
+  });
+  assert.equal(plan.proofs.desktop, true);
+  assert.equal(plan.needs.postgres, true);
+  for (const source of ['page.getByTestId(id);', 'page.getByTestId(/onboarding/);',
+    'const select = page.getByTestId; select("onboarding-control");', 'const {getByTestId} = page;',
+    'import "./helpers/missing"; page.getByTestId("unrelated");']) {
+    const uncertain = rendererFixture();
+    uncertain.find(file => file.path.endsWith("self-host-onboarding.spec.ts")).source = source;
+    assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], uncertain), null, source);
+  }
+  files.find(file => file.path.endsWith("Widget.tsx")).source = 'export const Widget = () => <div data-testid={id} />;';
+  assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], files), null);
+  files.find(file => file.path.endsWith("Widget.tsx")).source = 'export const Widget = () => <div {...attributes} />;';
+  assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], files), null);
+  assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], files.filter(file => !file.path.endsWith("self-host-onboarding.spec.ts"))), null);
+});
+
 test("escaped module paths retain broad selection when reverse impact cannot be read literally", () => {
   const escape = String.fromCharCode(92);
   for (const path of [`${rendererPath}consumer.test.tsx`, "scripts/consumer.test.mjs"]) {
@@ -743,6 +792,16 @@ test("real renderer selection activates for pure changes and rejects native edge
   assert.ok(plan, "The focused renderer path must remain reachable in this repository.");
   assert.ok(plan.testFiles["@dohc/desktop"].includes("src/renderer/workbench/quick-open-rank.test.ts"));
   assert.equal(plan.proofs.smoke, true);
+  assert.equal(plan.proofs.desktop, true, "Affected workspace shell consumers retain onboarding.");
+  assert.equal(plan.needs.postgres, true);
+  for (const component of ["CloudLogin.tsx", "JoinSyncedWorkspace.tsx", "WorkspaceManager.tsx"]) {
+    const componentPlan = focusedRendererSelection([`${rendererPath}${component}`], files, {graph});
+    assert.ok(componentPlan, component);
+    assert.equal(componentPlan.proofs.desktop, true, component);
+    assert.equal(componentPlan.needs.postgres, true, component);
+    assert.ok(componentPlan.testFiles["@dohc/desktop"].length < 622, component);
+    assert.equal(componentPlan.desktopScripts, false, component);
+  }
   for (const path of ["collab/engineYDocProvider.ts", "tokens.ts", "workbench/workbenchState.ts", "collab/presenceChannel.ts",
     "workbench/EngineHistory.tsx", "shareSkipNotice.ts", "workbench/chatFileMentions.ts"]) {
     assert.equal(focusedRendererSelection([`${rendererPath}${path}`], files, {graph}), null, path);

@@ -6,6 +6,7 @@ import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 const renderer = "apps/desktop/src/renderer/";
 const site = "apps/site/";
 const tokensTest = `${renderer}tokens.test.ts`;
+const onboardingSpec = "apps/desktop/e2e/self-host-onboarding.spec.ts";
 const sourceFile = /\.(?:[cm]?[jt]sx?|css)$/u;
 const unitTest = /\.test\.tsx?$/u;
 const require = createRequire(import.meta.url);
@@ -236,13 +237,69 @@ function closure(seeds, graph) {
   return reached;
 }
 
+function onboardingImpact(affected, sources, inputs, parse, baseSources, uncertain) {
+  if (!sources.has(onboardingSpec)) return "unknown";
+  const selectors = new Set(), ids = new Set();
+  let uncertainProof = false, uncertainRenderer = false;
+  const scan = (path, source, proof) => {
+    if (!/getByTestId|data-testid|\btestId\b/u.test(source) && (proof || !path.endsWith(".tsx"))) return;
+    try {
+      const tree = parse(source, {sourceType: "unambiguous", createImportExpressions: true,
+        plugins: [...(/\.[cm]?tsx?$/u.test(path) ? ["typescript"] : []), ...(/\.[jt]sx$/u.test(path) ? ["jsx"] : [])]});
+      const literal = node => node?.type === "StringLiteral" ? node.value
+        : node?.type === "TemplateLiteral" && !node.expressions.length ? node.quasis[0].value.cooked : undefined;
+      const name = node => node?.name ?? node?.property?.name ?? node?.property?.value;
+      const walk = (node, parent) => {
+        if (!node || typeof node !== "object") return;
+        if (proof && ["MemberExpression", "OptionalMemberExpression"].includes(node.type) && name(node) === "getByTestId") {
+          const value = parent?.callee === node && literal(parent.arguments?.[0]);
+          if (typeof value === "string") selectors.add(value);
+          else uncertainProof = true;
+        }
+        if (proof && node.type === "ObjectProperty" && name(node.key) === "getByTestId") uncertainProof = true;
+        if (!proof && node.type === "JSXAttribute" && ["data-testid", "testId"].includes(node.name.name)) {
+          const value = literal(node.value?.type === "JSXExpressionContainer" ? node.value.expression : node.value);
+          if (typeof value === "string") ids.add(value);
+          else uncertainRenderer = true;
+        }
+        if (!proof && node.type === "JSXSpreadAttribute") uncertainRenderer = true;
+        for (const [key, child] of Object.entries(node)) {
+          if (["loc", "comments", "leadingComments", "trailingComments", "innerComments", "extra"].includes(key)) continue;
+          if (Array.isArray(child)) child.forEach(value => walk(value, node));
+          else if (child && typeof child === "object") walk(child, node);
+        }
+      };
+      walk(tree);
+    } catch { if (proof) uncertainProof = true; else uncertainRenderer = true; }
+  };
+  for (const path of closure([onboardingSpec], inputs)) {
+    const source = sources.get(path);
+    if (source === undefined) return "unknown";
+    if (path.startsWith("apps/desktop/e2e/") && uncertain.has(path)) {
+      // The literal graph also sees bootstrap strings. Confirm actual helper
+      // imports before treating those strings as missing UI proof inputs.
+      const parsed = moduleReferences(path, source, parse);
+      if (parsed.ambiguous || parsed.failed || parsed.references.some(reference => reference.module && !reference.type
+        && reference.value.startsWith(".") && !candidates(posix.join(posix.dirname(path), reference.value)).some(candidate => sources.has(candidate)))) return "unknown";
+    }
+    scan(path, source, true);
+  }
+  if (!selectors.size || uncertainProof) return "unknown";
+  for (const path of affected) if (path.startsWith(renderer) && !unitTest.test(path)) {
+    scan(path, sources.get(path) ?? "", false);
+    if (baseSources?.has(path)) scan(path, baseSources.get(path), false);
+  }
+  if ([...ids].some(id => selectors.has(id))) return "affected";
+  return uncertainRenderer ? "unknown" : "unaffected";
+}
+
 // This scope excludes main-process, storage, IPC, and sharing inputs. The old
 // package selection remains the fallback whenever a renderer consumer escapes.
-export function focusedRendererSelection(changed, files, {baseFiles, graph, loadParser = () => require("@babel/parser").parse} = {}) {
+export function focusedRendererSelection(changed, files, {baseFiles, baseSources, graph, loadParser = () => require("@babel/parser").parse} = {}) {
   if (!changed.length || changed.some(path => !path.startsWith(renderer) || !/\.(?:tsx?|css)$/u.test(path))) return null;
   const sources = new Map(files.map(file => [file.path, file.source]));
   if (!sources.has(tokensTest) || changed.some(path => !sources.has(path) || baseFiles && !baseFiles.has(path))) return null;
-  const {consumers, uncertain, escaped, opaque} = graph ?? rendererInputGraph(files);
+  const {inputs, consumers, uncertain, escaped, opaque} = graph ?? rendererInputGraph(files);
   if (escaped?.size || opaque?.size) return null;
   const affected = closure(changed, consumers);
   if ([...affected].some(path => !path.startsWith(renderer) && !path.startsWith(site))) return null;
@@ -262,6 +319,8 @@ export function focusedRendererSelection(changed, files, {baseFiles, graph, load
   let parse;
   try { parse = loadParser(); }
   catch (error) { if (error.code === "MODULE_NOT_FOUND") return null; throw error; }
+  const onboarding = onboardingImpact(affected, sources, inputs, parse, baseSources, uncertain);
+  if (onboarding === "unknown") return null;
   const runtimeGraph = rendererInputGraph(files, {runtime: true, seeds: tests, parse});
   const testInputs = closure(tests, runtimeGraph.inputs);
   for (const path of testInputs) {
@@ -279,8 +338,8 @@ export function focusedRendererSelection(changed, files, {baseFiles, graph, load
     reason: "Renderer inputs and test consumers stay within the renderer and site.",
     testFiles: {"@dohc/desktop": testFiles},
     desktopScripts: false, repository: "source",
-    proofs: {accounts: false, selfHostNative: false, desktop: false, smoke: true, statesPage: true},
-    needs: {postgres: false, engine: true, desktop: true},
+    proofs: {accounts: false, selfHostNative: false, desktop: onboarding === "affected", smoke: true, statesPage: true},
+    needs: {postgres: onboarding === "affected", engine: true, desktop: true},
   };
 }
 
@@ -297,5 +356,7 @@ export function readFocusedRendererSelection(root, changed, baseCommit) {
   const trackedPaths = new Set(tracked);
   if (changed.some(path => !trackedPaths.has(path) || !existsSync(join(root, path)))) return null;
   const baseFiles = baseCommit ? new Set(readGit(["ls-tree", "-r", "--name-only", "-z", baseCommit], root).split("\0")) : undefined;
-  return focusedRendererSelection(changed, files, {baseFiles});
+  if (baseFiles && changed.some(path => !baseFiles.has(path))) return null;
+  const baseSources = baseCommit ? new Map(changed.map(path => [path, readGit(["show", `${baseCommit}:${path}`], root)])) : undefined;
+  return focusedRendererSelection(changed, files, {baseFiles, baseSources});
 }
