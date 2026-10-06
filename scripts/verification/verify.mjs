@@ -385,31 +385,31 @@ export async function verify(args) {
   }
   finally {
     try {
-    lane?.update?.({phase: "cleanup"});
-    checkoutOwner?.update?.({phase: "cleanup"});
-    try { await database?.stop(); }
-    catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
-    const interrupted = await cancellation.dispose();
-    lane?.release();
-    if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
-    finishTiming(); Object.assign(report, total);
-    if (originalRustIdentity && !interrupted && !report.rustError && !report.cleanupError) {
-      try {
-        recordTree("rust-receipt:finish");
-        report.provenance = classifyTreeProvenance(report.treeReadings);
-        const finalIdentity = rustIdentity({root: repoRoot, engine: sourceFingerprint("engine"), tools: rustTools});
-        report.rustEvidence = finishRustEvidence(report, originalRustIdentity, finalIdentity);
-      } catch (error) {
-        report.rustEvidence = {kind: "unavailable", reason: error.message};
-        report.verdict = "FAIL"; report.error ??= error.message; process.exitCode = 1;
+      lane?.update?.({phase: "cleanup"});
+      checkoutOwner?.update?.({phase: "cleanup"});
+      try { await database?.stop(); }
+      catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
+      const interrupted = await cancellation.dispose();
+      lane?.release();
+      if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
+      finishTiming(); Object.assign(report, total);
+      if (originalRustIdentity && !interrupted && !report.rustError && !report.cleanupError) {
+        try {
+          recordTree("rust-receipt:finish");
+          report.provenance = classifyTreeProvenance(report.treeReadings);
+          const finalIdentity = rustIdentity({root: repoRoot, engine: sourceFingerprint("engine"), tools: rustTools});
+          report.rustEvidence = finishRustEvidence(report, originalRustIdentity, finalIdentity);
+        } catch (error) {
+          report.rustEvidence = {kind: "unavailable", reason: error.message};
+          report.verdict = "FAIL"; report.error ??= error.message; process.exitCode = 1;
+        }
       }
-    }
-    if (mode === "pr") {
-      if (previousIncremental === undefined) delete process.env.CARGO_INCREMENTAL;
-      else process.env.CARGO_INCREMENTAL = previousIncremental;
-    }
-    finishTiming(); Object.assign(report, total);
-    save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
+      if (mode === "pr") {
+        if (previousIncremental === undefined) delete process.env.CARGO_INCREMENTAL;
+        else process.env.CARGO_INCREMENTAL = previousIncremental;
+      }
+      finishTiming(); Object.assign(report, total);
+      save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
     } finally { checkoutOwner?.release(); }
   }
 }
