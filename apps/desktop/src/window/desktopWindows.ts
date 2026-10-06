@@ -18,7 +18,7 @@ interface DesktopWindowsDependencies {
   BrowserWindow: Pick<typeof BrowserWindow, "getAllWindows">;
   Menu: Pick<typeof Menu, "setApplicationMenu" | "buildFromTemplate">;
   dialog: Pick<Dialog, "showErrorBox" | "showMessageBox">;
-  process: Pick<NodeJS.Process, "platform" | "execPath">;
+  process: Pick<NodeJS.Process, "platform" | "execPath" | "argv">;
   workspaceSummaries(): WorkspaceSummary[];
   currentUpdateState(): { canInstall?: boolean };
   stateDir(): string;
@@ -281,6 +281,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
 
   function refreshNativeWorkspaceSurfaces(): void {
     if (!app.isReady()) return;
+    if (process.argv.includes("--dohc-isolated-test")) {
+      refreshApplicationMenu();
+      return;
+    }
     const roots = nativeWorkspaceSummaries().map((workspace) => workspace.rootPath);
     try {
       if (

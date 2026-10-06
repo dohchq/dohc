@@ -81,7 +81,7 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
       showErrorBox: vi.fn(),
       showMessageBox: vi.fn(async () => ({ response: 0, checkboxChecked: false })),
     },
-    process: { platform, execPath: "C:\\dohc\\dohc.exe" },
+    process: { platform, execPath: "C:\\dohc\\dohc.exe", argv: [] },
     workspaceSummaries: workspaceSummaries ?? vi.fn(() => rows),
     currentUpdateState: vi.fn(() => ({ canInstall })),
     stateDir: () => "state",
@@ -598,6 +598,18 @@ describe("desktop native menus", () => {
     first.destroy(); f.windows.trackWorkspaceWindow(second.native); click(command);
     expect(first.webContents.send).not.toHaveBeenCalled();
     expect(second.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
+  });
+
+  it("keeps isolated test workspaces out of native recents while refreshing its own menu", () => {
+    const f = fixture();
+    f.dependencies.process.argv.push("--dohc-isolated-test");
+    f.windows.refreshNativeWorkspaceSurfaces();
+    f.setRows([workspace("c")]);
+    f.windows.refreshNativeWorkspaceSurfaces();
+    expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
+    expect(f.dependencies.app.addRecentDocument).not.toHaveBeenCalled();
+    expect(f.dependencies.app.setUserTasks).not.toHaveBeenCalled();
+    expect(submenu(item(f, "File", "Open Recent"))).toHaveLength(1);
   });
 
   it("reuses native recents for cloned roots while rebuilding current menus", () => {
