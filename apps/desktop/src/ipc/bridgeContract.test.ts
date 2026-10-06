@@ -4468,20 +4468,19 @@ it("uses the engine slug byte bound in feed, mentions, and graph results", () =>
 });
 
 describe("launch path failure event", () => {
-  it.each([null, { workspaceId: "selected", rendererDocumentId: "document", generation: 1 }])("retains the attempted path and cause with context %j", (context) => {
-    const event = { path: "C:\\work\\attempted", cause: "ReservedWorkspaceIdError [reserved-id]: refused",
-      workspaceId: null, rendererDocumentId: null, generation: null, ...context };
+  it.each([null, "selected"])("retains the attempt, path, and cause for workspace %j", (workspaceId) => {
+    const event = { attemptId: "attempt-1", path: "C:\\work\\attempted",
+      cause: "ReservedWorkspaceIdError: refused", workspaceId };
     expect(WorkspacePathOpenFailedEvent.parse({ ...event, authority: "ignored" })).toEqual(event);
   });
 
   it.each([
-    { workspaceId: "other" },
-    { rendererDocumentId: "other" },
-    { generation: 2 },
+    { attemptId: "" },
+    { workspaceId: "" },
     { cause: null },
-    { path: null },
+    { path: "" },
   ])("rejects malformed failure packets %j", (change) => {
-    expect(WorkspacePathOpenFailedEvent.safeParse({ path: "attempted", cause: "refused",
-      workspaceId: null, rendererDocumentId: null, generation: null, ...change }).success).toBe(false);
+    expect(WorkspacePathOpenFailedEvent.safeParse({ attemptId: "attempt-1", path: "attempted", cause: "refused",
+      workspaceId: null, ...change }).success).toBe(false);
   });
 });

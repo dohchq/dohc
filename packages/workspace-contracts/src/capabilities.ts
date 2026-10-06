@@ -58,6 +58,7 @@ export const CAPABILITIES = {
   "notice.mark": capability("Mark Notices.", {ipc: ["markNotices"]}),
   "automation.schedule.run": capability("Run a skipped schedule.", {ipc: ["runSkippedScheduleNow"]}),
   "automation.notice.retry": capability("Retry an automation from a Notice.", {ipc: ["retryAutomationNotice"]}),
+  "workspace.open.retry": capability("Open a folder again after a launch could not open it.", {ipc: ["retryWorkspacePathOpen"]}),
   "group.list": capability("List the Groups in this workspace.", {socket: ["groups", "groupsFull"], public: ["chat groups"], mcp: {owner: ["dohc_list_groups"], view: ["dohc_list_groups"], comment: ["dohc_list_groups"], edit: ["dohc_list_groups"]}}),
   "chat.threads.list": capability("List the threads in a Group.", {socket: ["threads"], public: ["chat threads"]}),
   "chat.inbox.read": capability("List unread threads. For an agent, also list its unread mentions.", {socket: ["inbox"], public: ["chat inbox"]}),

@@ -90,12 +90,13 @@ vi.mock("./DesktopWorkspaceShell", async () => {
   } };
 });
 
-// The notice list DesktopRoot keeps for the window. Empty unless a test
-// says otherwise.
+// The notices DesktopRoot keeps for the window: the notice list, and folders
+// a launch could not open. Empty unless a test says otherwise.
 function noticeBridge() {
   return {
     listNotices: vi.fn(async () => ({ account: null, notices: [] })),
     onNoticesChanged: vi.fn(() => () => undefined),
+    onWorkspacePathOpenFailed: vi.fn(() => () => undefined),
   };
 }
 

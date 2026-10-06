@@ -5960,6 +5960,15 @@ export const noticeOperations = {
     channel: "desktop:retry-automation-notice",
     payload: RetryAutomationNoticePayload, result: RetryAutomationNoticeResult, guard: "trusted-sender",
   },
+  // Opens the folder a launch failure names again. The renderer names the
+  // attempt, never a path, and main honors it once, for the window it told.
+  // A failure arrives as a new WorkspacePathOpenFailedEvent.
+  retryWorkspacePathOpen: {
+    capabilityId: "workspace.open.retry",
+    scope: "device",
+    channel: "desktop:retry-workspace-path-open",
+    payload: z.object({ attemptId: OPAQUE_ID }), guard: "trusted-sender",
+  },
 } satisfies OperationTable;
 
 // WS-G2-C-2 engine Y.Doc binding IPC. The renderer mints a bounded sessionId
@@ -6208,16 +6217,17 @@ export const LaunchMarksResult = z.object({
 });
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
-// A launch/OS attempt failed. Raw errors stay in main's diagnostic log;
-// the shell receives the attempted path, cause, and delivery context.
+// A folder the command line or the OS asked dohc to open did not open. Main
+// keeps the error itself in its log; `cause` is its one-line form for Copy.
+// `workspaceId` is the workspace the window showed when main sent this, or
+// null for none: the renderer drops a failure meant for another workspace.
+// `attemptId` lets that window ask once for the same folder again.
 export const WorkspacePathOpenFailedEvent = z.object({
-  path: z.string(),
+  attemptId: OPAQUE_ID,
+  path: z.string().min(1),
   cause: z.string(),
-  workspaceId: z.string().nullable(),
-  rendererDocumentId: z.string().nullable(),
-  generation: z.number().int().nonnegative().nullable(),
-}).refine((event) => (event.workspaceId === null) === (event.rendererDocumentId === null)
-  && (event.workspaceId === null) === (event.generation === null));
+  workspaceId: z.string().min(1).nullable(),
+});
 export type WorkspacePathOpenFailedEvent = z.infer<typeof WorkspacePathOpenFailedEvent>;
 
 export interface DohcDesktopBridge

@@ -1,0 +1,5 @@
+{
+  "sourceCommit": "4e236cf84f0b7861e57040ecf1b137f6846cb789",
+  "nameAdditions": ["desktop:retry-workspace-path-open", "desktop:workspace-path-open-failed"],
+  "channelKeyAdditions": ["workspacePathOpenFailed"]
+}

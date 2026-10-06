@@ -204,7 +204,8 @@ export function useShellError(workspaceId: string) {
   // cause, go into Copy details only; so does `cause`, the error that caused
   // the words. Text that arrives raw is read into words the same way. A kind
   // makes a newer message replace the row of an older one, such as one
-  // import's result replacing the last.
+  // import's result replacing the last; an identity does the same for one
+  // thing, such as one folder.
   const reportShellFailure = useCallback(
     (failure: {
       message: string;
@@ -213,6 +214,7 @@ export function useShellError(workspaceId: string) {
       retry?: (() => void) | null;
       onDismiss?: () => void;
       kind?: ShellErrorKind;
+      identity?: string;
     }) => {
       const shown = readError(failure.message);
       const cause = failure.cause === undefined ? shown.cause : readError(failure.cause).cause;
@@ -226,6 +228,7 @@ export function useShellError(workspaceId: string) {
         ...(details.length ? { details } : {}),
         ...(failure.onDismiss ? { onDismiss: failure.onDismiss } : {}),
         ...(failure.kind ? { kind: failure.kind } : {}),
+        ...(failure.identity !== undefined ? { identity: failure.identity } : {}),
       });
     },
     [push],

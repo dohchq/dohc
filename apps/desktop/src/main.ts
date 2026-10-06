@@ -80,6 +80,7 @@ import {
 } from "./ipc/workspaceRegistryIpc";
 import { createAppLifecycle } from "./appLifecycle";
 import { captureOpenPathFailureTarget } from "./window/openPathFailureTarget";
+import { createOpenPathAttempts } from "./window/openPathAttempts";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
@@ -122,6 +123,7 @@ import {
   RebuildEngineStoreResult,
   type PushShareDirectWritesResult,
   WorkspaceSummary,
+  type WorkspacePathOpenFailedEvent,
   UpdateStateEvent,
   ShareHandoffStatus,
   crashReportOperations,
@@ -5034,20 +5036,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
   },
   workspaces: {
     openPath: openWorkspacePath,
-    recordOpenFailure: (path, error) => {
-      console.error(`[desktop] could not open launch path ${path}:`, error);
-    },
-    reportOpenFailure: (path, error, window) => {
-      const session = rendererWorkspaceSessions.current(window.webContents);
-      const cause = ipcWireError(error);
-      window.webContents.send(CHANNELS.workspacePathOpenFailed, {
-        path,
-        cause: String(cause),
-        workspaceId: session?.workspaceId ?? null,
-        rendererDocumentId: session?.rendererDocumentId ?? null,
-        generation: session?.generation ?? null,
-      });
-    },
+    recordOpenFailure: recordOpenPathFailure,
+    reportOpenFailure: reportOpenPathFailure,
     refreshNativeSurfaces: refreshNativeWorkspaceSurfaces,
   },
   bootstrap: {
@@ -5225,6 +5215,42 @@ async function openWorkspacePath(
   await sendWorkspaceActivated(window, workspace);
   refreshNativeWorkspaceSurfaces();
   return workspace;
+}
+
+const openPathAttempts = createOpenPathAttempts();
+
+function recordOpenPathFailure(path: string, error: unknown): void {
+  console.error(`[desktop] could not open launch path ${path}:`, error);
+}
+
+// The window's renderer turns this into a toast and a Notices row. Its Try
+// again sends back the attempt id, which names this path for this window.
+function reportOpenPathFailure(path: string, error: unknown, window: BrowserWindow): void {
+  const contents = window.webContents;
+  contents.send(CHANNELS.workspacePathOpenFailed, {
+    attemptId: openPathAttempts.issue(path, contents.id),
+    path,
+    cause: String(ipcWireError(error)),
+    workspaceId: rendererWorkspaceSessions.current(contents)?.workspaceId ?? null,
+  } satisfies WorkspacePathOpenFailedEvent);
+}
+
+// A Try again from that row. Once the attempt is found, every way the open
+// fails, including a folder gone since, comes back as a new report with a
+// new attempt.
+async function retryOpenPath(attemptId: string, contents: WebContents): Promise<void> {
+  const path = openPathAttempts.take(attemptId, contents.id);
+  if (path === null) throw new Error("Open the folder again.");
+  const window = BrowserWindow.fromWebContents(contents) ?? undefined;
+  try {
+    if (await openWorkspacePath(path, window)) return;
+    // Nothing opens there now. Stat's own error says why, such as ENOENT.
+    statSync(path);
+    throw new Error("dohc can open only a file or a folder.");
+  } catch (error) {
+    recordOpenPathFailure(path, error);
+    if (window && !window.isDestroyed()) reportOpenPathFailure(path, error, window);
+  }
 }
 
 // The navigation policy is constant for the process lifetime (env var and
@@ -6265,6 +6291,7 @@ function registerIpcHandlers(): void {
     markNotices: (input) => noticeStore().mark(input.notices, input.mark, input.account),
     runSkippedScheduleNow: async (input) => ({ note: await runSkippedScheduleNow(input.notice, input.account) }),
     retryAutomationNotice: (input) => retryFromFailureNotice({ notices: noticeStore(), retry: retryAutomationFromNotice }, input),
+    retryWorkspacePathOpen: (input, { event }) => retryOpenPath(input.attemptId, event.sender),
   });
 
   workspaceEngineIpc.registerYDoc();
