@@ -326,6 +326,154 @@ async fn a_held_recorded_file_changed_on_disk_keeps_capture_unsettled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_released_lease_retries_quarantined_capture_without_disk_changes() {
+    let harness = Harness::new();
+    let object_id = derive_capture_object_id(WORKSPACE_ID, "main", NEW_FILE);
+    let lease = harness
+        .leases
+        .acquire(&harness.key(&object_id))
+        .expect("the editor holds a headless session");
+    let mut releases_seen = harness.leases.release_generation(WORKSPACE_ID);
+    std::fs::write(harness.root.join(NEW_FILE), "Written outside the editor.\n")
+        .expect("outside write");
+    let files = FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+        .await
+        .expect("files actor");
+    let files = FilesActorCloseGuard::new(files);
+
+    for _ in 0..dohc_engine_files::DEGRADED_RESCAN_BACKOFF {
+        assert!(!harness.capture(&files.handle()).await);
+    }
+    let stats = files.handle().stats().await.expect("stats");
+    assert_eq!(
+        (stats.deferred, stats.quarantined, stats.dirty),
+        (0, 1, false)
+    );
+    assert_eq!(head_count(&harness.db, NEW_FILE), 0);
+    offer_deferred_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(
+        !files.handle().stats().await.expect("stats").dirty,
+        "the held lease does not restart parked capture"
+    );
+
+    drop(lease);
+    offer_deferred_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(
+        files.handle().stats().await.expect("stats").dirty,
+        "release reoffers the quarantined write without a filesystem event"
+    );
+    assert!(harness.capture(&files.handle()).await);
+    assert_eq!(head_count(&harness.db, NEW_FILE), 1);
+    assert_eq!(head_origin(&harness.db, NEW_FILE), "capture");
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join(NEW_FILE)).expect("intact file"),
+        "Written outside the editor.\n"
+    );
+
+    drop(
+        harness
+            .leases
+            .acquire(&harness.key("another-object"))
+            .expect("lease"),
+    );
+    offer_deferred_after_release(
+        &harness.leases,
+        WORKSPACE_ID,
+        &mut releases_seen,
+        &files.handle(),
+    )
+    .await;
+    assert!(
+        !files.handle().stats().await.expect("stats").dirty,
+        "a release with no capture backlog does not request a scan"
+    );
+    files.close().await;
+    harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restored_secret_key_retries_quarantined_capture_without_content_changes() {
+    let harness = Harness::new();
+    let secret = harness.root.join(".env");
+    std::fs::write(&secret, "TOKEN=original").expect("secret artifact");
+    let files = FilesActorCloseGuard::new(
+        FilesActor::spawn_async(harness.root.clone(), ScanBounds::default())
+            .await
+            .expect("files actor"),
+    );
+    assert!(harness.capture(&files.handle()).await);
+    let key = harness
+        .root
+        .join(dohc_engine_crypto::SECRET_KEY_FILE_RELATIVE);
+    let staged_key = key.with_file_name("restored-key.tmp");
+    std::fs::rename(&key, &staged_key).expect("park original key outside its known location");
+    std::fs::write(&secret, "TOKEN=changed").expect("external secret edit");
+    files.handle().request_rescan();
+    for _ in 0..3 {
+        assert!(!harness.capture(&files.handle()).await);
+    }
+    let parked = files.handle().stats().await.expect("parked stats");
+    assert_eq!(
+        (parked.quarantined, parked.deferred, parked.dirty),
+        (1, 0, false)
+    );
+    assert!(
+        !key.exists(),
+        "capture must not mint over encrypted history"
+    );
+
+    // Deliver only the restored key through the callback queue and debounce.
+    // OS backends can also emit ancestor-directory events for the rename,
+    // which would hide a dropped key event. No lease or content event fires.
+    std::fs::rename(&staged_key, &key).expect("atomic key restore");
+    dohc_engine_files::watch::notify_settled_change_for_harness(
+        harness.root.clone(),
+        key,
+        &files.handle(),
+    );
+    let noticed = files.handle().stats().await.expect("callback stats").dirty;
+    if !noticed {
+        files.close().await;
+        harness.close();
+        panic!("key restore never reached callback/debounce rescan");
+    }
+    assert!(harness.capture(&files.handle()).await);
+    let recovered = files.handle().stats().await.expect("recovered stats");
+    assert_eq!(
+        (recovered.quarantined, recovered.deferred, recovered.dirty),
+        (0, 0, false)
+    );
+    let mut store = dohc_engine_storage::EngineStore::open(&harness.db, 1).expect("store observer");
+    let loaded_key = dohc_engine_crypto::load_key_file(&harness.root)
+        .expect("load restored key")
+        .expect("original key restored");
+    let captured = dohc_engine_domain::SecretFileStore::new(&mut store, &loaded_key)
+        .materialize_secret_file(WORKSPACE_ID, "main", ".env")
+        .expect("decrypt captured secret")
+        .expect("secret tip");
+    assert_eq!(captured, "TOKEN=changed".into());
+    assert_eq!(
+        std::fs::read(&secret).expect("intact secret"),
+        captured.as_bytes()
+    );
+    drop(store);
+    files.close().await;
+    harness.close();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unrepresentable_replicated_record_never_enters_the_deferred_count() {
     use dohc_engine_collab::{
         ContentKind, LocalAppend, MarkerCreation, Regime, WriterDocCache, Ydoc,
