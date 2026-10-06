@@ -3,7 +3,7 @@ import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, rea
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { basename, dirname, join, matchesGlob, relative, resolve } from "node:path";
-import { acquireBuildSlot, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
+import { acquireBuildSlot, capBuildParallelism, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 import { git, pnpm, readJson, repoRoot, run } from "./process.mjs";
 import { cancellationScope } from "./cancellation.mjs";
@@ -259,15 +259,11 @@ export function assertIndependentStagedEngine() {
 }
 
 export function buildEnvironment(maxJobs, source = process.env) {
-  const env = { ...source };
+  const env = maxJobs ? capBuildParallelism(source, maxJobs) : { ...source };
   for (const name of Object.keys(env)) {
     if (["CARGO_BUILD_TARGET", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"].includes(name.toUpperCase())) delete env[name];
   }
   for (const name of ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"]) env[name] = join(repoRoot, "target");
-  if (maxJobs) {
-    const requested = Number(env.CARGO_BUILD_JOBS);
-    env.CARGO_BUILD_JOBS = String(Number.isInteger(requested) && requested > 0 ? Math.min(requested, maxJobs) : maxJobs);
-  }
   return env;
 }
 
