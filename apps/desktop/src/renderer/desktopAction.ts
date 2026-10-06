@@ -12,6 +12,8 @@ export const settledTasks = new WeakMap<DesktopTask, Promise<void>>();
 const notIssued = {} as DesktopTask;
 settledTasks.set(notIssued, Promise.resolve());
 
+const readNames = Object.entries(desktopMembers).filter(([, member]) => member.kind === "read" && !("owner" in member)).map(([name]) => name);
+
 export function desktopMetadata() {
   const { platform, devTools, windowRole } = bridge();
   return { platform, devTools, windowRole } as const;
@@ -33,10 +35,11 @@ function guarded(run: () => void): void {
 function send(request: AnyRequest, input: unknown, context?: unknown): PromiseLike<unknown> {
   try {
     const api = bridge();
-    if (typeof request === "string") return (api as unknown as Transport)[request]!(input);
-    const reads = Object.fromEntries(Object.entries(desktopMembers)
-      .filter(([, member]) => member.kind === "read" && !("owner" in member))
-      .map(([name]) => [name, (api as unknown as Transport)[name]])) as ReadDesktop;
+    if (typeof request === "string") {
+      const result = (api as unknown as Transport)[request]!(input);
+      return result && typeof result.then === "function" ? result : Promise.resolve(result);
+    }
+    const reads = Object.fromEntries(readNames.map(name => [name, (api as unknown as Transport)[name]])) as unknown as ReadDesktop;
     return (request as (desktop: ReadDesktop, input: unknown, context: unknown) => PromiseLike<unknown>)(reads, structuredClone(input), structuredClone(context));
   } catch (error) { return Promise.reject(error); }
 }
@@ -100,6 +103,7 @@ function useIssueRead(current: () => Binding<ReadPublication> | null, changed: (
   }, [current, changed]);
 }
 
+// Only the newest call per binding delivers. Independent concurrent reads need one binding each.
 export function useDesktopAction<K extends ReadName>(identity: DependencyList, request: K, delivery: Delivery<ResultOf<K>>): readonly [(input: InputOf<K>) => DesktopTask, boolean];
 export function useDesktopAction<I, R>(identity: DependencyList, request: DataExecutor<I, R>, delivery: Delivery<R>): readonly [(input: DataInput<I>) => DesktopTask, boolean];
 export function useDesktopAction(identity: DependencyList, request: AnyRequest, delivery: Delivery<unknown>): readonly [(input: unknown) => DesktopTask, boolean] {
@@ -107,6 +111,7 @@ export function useDesktopAction(identity: DependencyList, request: AnyRequest, 
   return [useIssueRead(current, changed), pending];
 }
 
+// Loads share the newest-call rule; concurrent independent reads need separate bindings.
 export function useDesktopLoad<K extends ReadName>(identity: DependencyList, request: K, input: InputOf<K> | null, delivery: Delivery<ResultOf<K>>): { readonly pending: boolean };
 export function useDesktopLoad<I, R, C = undefined>(identity: DependencyList, request: DataExecutor<I, R, C>, input: DataInput<I> | null, delivery: Delivery<R>, ...context: C extends undefined ? [] : [DataInput<C>]): { readonly pending: boolean };
 export function useDesktopLoad(identity: DependencyList, request: AnyRequest, input: unknown, delivery: Delivery<unknown>, context?: unknown): { readonly pending: boolean } {
@@ -129,8 +134,8 @@ export function useDesktopCommand<K extends CommandName, C = undefined>(identity
 export function useDesktopCommand(identity: DependencyList, request: string, outcome: CommandOutcome<unknown, unknown, unknown>, view: ViewFollowUp<unknown, unknown> = {}): readonly [(input: unknown, context?: unknown) => DesktopTask, boolean] {
   const { current, changed, pending } = useBinding<CommandPublication>(identity, { request, outcome, view });
   const issueCall = useCallback((binding: Binding<CommandPublication>, input: unknown, context: unknown, request: string, callOutcome: CommandOutcome<unknown, unknown, unknown>): DesktopTask => {
-    const snapshot = structuredClone(input);
-    const labels = structuredClone(context);
+    let snapshot = input;
+    let labels = context;
     binding.inFlight++;
     changed();
     return issue((settle) => {
@@ -142,6 +147,13 @@ export function useDesktopCommand(identity: DependencyList, request: string, out
         settle();
       };
       const retry = () => { if (callOutcome.scope.live()) issueCall(binding, snapshot, labels, request, callOutcome); };
+      try {
+        snapshot = structuredClone(input);
+        labels = structuredClone(context);
+      } catch (error) {
+        done(() => callOutcome.failure(error, input, retry, context), v => v.failure?.(error, input));
+        return;
+      }
       send(request, snapshot).then(
         value => done(() => callOutcome.success(value, snapshot, labels), v => v.success?.(value, snapshot)),
         (error: unknown) => done(() => callOutcome.failure(error, snapshot, retry, labels), v => v.failure?.(error, snapshot)),
@@ -162,6 +174,6 @@ export function useDesktopEvent<E extends EventName>(identity: DependencyList, e
     const binding = current()!;
     const subscribe = bridge()[event] as (listener: (value: EventValue<E>) => void) => () => void;
     const unsubscribe = subscribe(value => { if (binding.live) guarded(() => binding.published.handler(value)); });
-    return () => { binding.live = false; unsubscribe(); };
-  }, [current, event]);
+    return unsubscribe;
+  }, [current]);
 }

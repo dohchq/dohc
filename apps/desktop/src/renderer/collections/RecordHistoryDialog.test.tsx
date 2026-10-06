@@ -405,9 +405,27 @@ it("a Notice retry reopens its recorded record and failed page after the dialog 
 it("drops a failed read after the dialog closes", async () => {
   const read = deferred<GetCollectionRecordHistoryResult>();
   const onFailed = vi.fn();
-  stub(() => read.promise);
+  const api = stub(() => read.promise);
   const view = render(dialog({ onFailed }));
+  expect(api.getCollectionRecordHistory).toHaveBeenCalledExactlyOnceWith({ workspaceId: "ws-1", collectionPath: "Tasks", recordId: "rec_a" });
   view.unmount();
   await act(async () => { read.reject(new Error("offline")); await read.promise.catch(() => {}); });
   expect(onFailed).not.toHaveBeenCalled();
+});
+
+it("a record change cannot report the previous record's unchecked runs", async () => {
+  const offline = new Error("offline");
+  const next = deferred<GetCollectionRecordHistoryResult>();
+  const api = stub(payload => payload.recordId === "rec_a"
+    ? Promise.resolve({ entries: [entry(9, automation("Stamp", { claimId: "old-run", location: "unchecked" }))], nextBeforeHistoryId: null })
+    : next.promise, async () => { throw offline; });
+  const oldUnchecked = vi.fn();
+  const newUnchecked = vi.fn();
+  const view = render(dialog({ onRunsUnchecked: oldUnchecked }));
+  await waitFor(() => expect(oldUnchecked).toHaveBeenCalledExactlyOnceWith(null, offline, [STAMP + "\nold-run"]));
+  view.rerender(dialog({ recordId: "rec_b", onRunsUnchecked: newUnchecked }));
+  expect(api.getCollectionRecordHistory).toHaveBeenCalledTimes(2);
+  expect(newUnchecked).not.toHaveBeenCalled();
+  await act(async () => { next.resolve({ entries: [], nextBeforeHistoryId: null }); });
+  expect(newUnchecked).not.toHaveBeenCalled();
 });

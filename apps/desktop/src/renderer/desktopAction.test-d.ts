@@ -9,8 +9,7 @@ declare function postUndo(receipt: unknown, subject: string): void;
 declare function postFailure(error: unknown, subject: string, retry: () => void): void;
 type ShareLabels = { selector: string; recipient: string };
 
-// The real lane read (ChatsView.tsx:2759-2800), as a data executor. It reads a plain snapshot of the
-// cache and returns cache updates as data; only guarded delivery writes the cache.
+// Reduced lane executor for the data-input and cache-context type contract.
 type Spoke = readonly { readonly id: string; readonly atMs: number }[];
 type LaneCache = { readonly [channelId: string]: { readonly updatedAtMs: number; readonly spoke: Spoke } };
 async function readLaneAgents(desktop: ReadDesktop, input: { workspaceId: string; channelIds: readonly string[] }, cached: LaneCache) {
@@ -66,9 +65,9 @@ export function Valid(props: { workspaceId: string; includeChatMentions: boolean
 }
 
 export function Invalid(props: { workspaceId: string }) {
-  // GraphView's real payload is required.
-  // @ts-expect-error missing includeChatMentions
-  useDesktopLoad([props.workspaceId], "readWorkspaceGraph", { workspaceId: props.workspaceId }, { success: () => {}, failure: () => {} });
+  // GraphView needs its workspace payload.
+  // @ts-expect-error missing workspaceId
+  useDesktopLoad([props.workspaceId], "readWorkspaceGraph", { includeChatMentions: false }, { success: () => {}, failure: () => {} });
   // A mutation cannot go through the replaceable read hook.
   // @ts-expect-error revokeRelayShare is a command
   useDesktopAction([], "revokeRelayShare", { success: () => {}, failure: () => {} });

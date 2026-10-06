@@ -9,7 +9,7 @@ import {
   useDesktopAction, useDesktopCommand, useDesktopEvent, useDesktopLoad, type DesktopTask,
 } from "./desktopAction";
 import { installGlobalErrorReporters } from "./ErrorBoundary";
-import type { ReadDesktop } from "./desktopOperations";
+import { desktopMembers, type ReadDesktop } from "./desktopOperations";
 import type { JSX } from "react";
 import { whenSettled } from "./desktopActionTesting";
 
@@ -107,12 +107,16 @@ describe("#933 refresh generation: reply lands after commit, before passive clea
   it("a null input skips the load", () => {
     const read = vi.fn(() => new Promise(() => {}));
     desktop({ readWorkspaceGraph: read });
-    function Graph() {
-      useDesktopLoad([], "readWorkspaceGraph", null, { success: ok, failure: ok });
+    function Graph(props: { active: boolean }) {
+      useDesktopLoad([], "readWorkspaceGraph", props.active ? { workspaceId: "w", includeChatMentions: false } : null, { success: ok, failure: ok });
       return null;
     }
-    render(<Graph />);
+    const view = render(<Graph active={false} />);
     expect(read).not.toHaveBeenCalled();
+    view.rerender(<Graph active />);
+    expect(read).toHaveBeenCalledExactlyOnceWith({ workspaceId: "w", includeChatMentions: false });
+    view.rerender(<Graph active={false} />);
+    expect(read).toHaveBeenCalledOnce();
     expect(reported).toEqual([]);
   });
 });
@@ -120,7 +124,7 @@ describe("#933 refresh generation: reply lands after commit, before passive clea
 describe("#602 reused cursor: Show more from a replaced window", () => {
   type Props = { refreshNonce: number; expose: (more: () => void) => void };
   async function run(Versions: (props: Props) => JSX.Element | null, readPage: (cursor: string) => PromiseLike<string[]>, page: { resolve: (rows: string[]) => void; promise: Promise<string[]> }) {
-    desktop({ compareWorkspaceVersions: readPage as never });
+    desktop({ compareWorkspaceVersions: (input: { afterPath: string }) => Promise.resolve(readPage(input.afterPath)).then(rows => ({ files: rows.map(path => ({ path })), nextAfterPath: null })) });
     let more = () => {};
     const view = render(<Versions refreshNonce={0} expose={(f) => { more = f; }} />);
     act(() => more());
@@ -151,11 +155,13 @@ describe("#602 reused cursor: Show more from a replaced window", () => {
     function Versions(props: Props) {
       const [rows, setRows] = useState<string[]>([]);
       useLayoutEffect(() => { setRows([`window-${props.refreshNonce}`]); }, [props.refreshNonce]);
-      const [showMore] = useDesktopAction([props.refreshNonce], "compareWorkspaceVersions" as never, { success: (rowsPage: string[]) => setRows((r) => [...r, ...rowsPage]), failure: ok });
-      props.expose(() => { showMore("c1" as never); });
+      const [showMore] = useDesktopAction([props.refreshNonce], "compareWorkspaceVersions", { success: rowsPage => setRows(r => [...r, ...rowsPage.files.map(file => file.path)]), failure: ok });
+      props.expose(() => { showMore({ workspaceId: "w", versionId: "v", afterPath: "c1" }); });
       return <ul>{rows.map((row) => <li key={row}>{row}</li>)}</ul>;
     }
+    expect(desktopMembers.compareWorkspaceVersions.kind).toBe("read");
     await run(Versions, readPage, page);
+    expect(readPage).toHaveBeenCalledExactlyOnceWith("c1");
     expect(screen.queryByText("old-page-row")).toBeNull();
     expect(screen.getByText("window-1")).toBeTruthy();
   });
@@ -176,6 +182,8 @@ describe("#1484 retained retry for a record that is no longer shown", () => {
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     view.rerender(<Dialog recordId="r2" />);
     const before = read.mock.calls.length;
+    expect(before).toBe(1);
+    expect(notices).toHaveLength(1);
     await act(async () => { notices[0]!(); await Promise.resolve(); });
     expect(read.mock.calls.length).toBe(before + 1);
     expect(read).toHaveBeenLastCalledWith("r1");
@@ -196,6 +204,8 @@ describe("#1484 retained retry for a record that is no longer shown", () => {
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     view.rerender(<Dialog recordId="r2" />);
     const before = read.mock.calls.length;
+    expect(before).toBe(1);
+    expect(notices).toHaveLength(1);
     await act(async () => { notices[0]!(); await Promise.resolve(); });
     expect(read.mock.calls.length).toBe(before);
   });
@@ -245,9 +255,8 @@ describe("#1147 overlapping lane reads in one lifetime seed the cache", () => {
   });
 });
 
-describe("#1147 with the real lane executor: inputs are detached and the cache-hit path works", () => {
-  // An adaptation of the lane read in ChatsView.tsx:2759-2800 as a data executor: same cache-hit and fetch structure,
-  // simplified identity (display name) and no label or join construction.
+describe("#1147 with a reduced lane executor: inputs are detached and the cache-hit path works", () => {
+  // Reduced lane executor for the input-clone and cache-delivery contract.
   async function readLaneAgents(desktop: ReadDesktop, input: { workspaceId: string; channelIds: readonly string[] }, cached: Record<string, { updatedAtMs: number; spoke: readonly { id: string; atMs: number }[] }>) {
     const updates: Record<string, { updatedAtMs: number; spoke: readonly { id: string; atMs: number }[] }> = {};
     const agents = await Promise.all(input.channelIds.map(async (channelId) => {
@@ -266,7 +275,8 @@ describe("#1147 with the real lane executor: inputs are detached and the cache-h
 
   it("an executor that writes its input cannot touch the caller's live cache (review r3 F1)", async () => {
     const reply = deferred<{ messages: { authorDisplayName: string }[] }>();
-    desktop({ listChatMessages: () => reply.promise });
+    const listChatMessages = vi.fn(() => reply.promise);
+    desktop({ listChatMessages });
     async function readCached(d: ReadDesktop, input: { threadId: string; cache: Record<string, string> }) {
       const page = await d.listChatMessages({ workspaceId: "w", threadId: input.threadId });
       input.cache[input.threadId] = page.messages.map((m: { authorDisplayName: string }) => m.authorDisplayName).join(",");
@@ -281,6 +291,7 @@ describe("#1147 with the real lane executor: inputs are detached and the cache-h
     const view = render(<Lane threadId="t1" />);
     view.rerender(<Lane threadId="t2" />);
     await act(async () => { reply.resolve({ messages: [{ authorDisplayName: "agent" }] }); await reply.promise; });
+    expect(listChatMessages.mock.calls).toEqual([[{ workspaceId: "w", threadId: "t1" }], [{ workspaceId: "w", threadId: "t2" }]]);
     expect(live).toEqual({});
   });
 
@@ -332,13 +343,15 @@ describe("#1166 shape: a failure reaches a parent callback after its workspace s
   });
   it("the action retires with the shell and reports nothing", async () => {
     const reply = deferred<string>();
-    desktop({ readWorkspaceGraph: () => reply.promise });
+    const read = vi.fn(() => reply.promise);
+    desktop({ readWorkspaceGraph: read });
     function Shell(props: ShellProps) {
       const [readWorkspaceGraph] = useDesktopAction([props.workspaceId], "readWorkspaceGraph" as never, { success: ok, failure: (e) => props.report(props.workspaceId, (e as Error).message) });
       props.expose(() => { readWorkspaceGraph(undefined as never); });
       return null;
     }
     expect(await run(Shell, reply)).toEqual([]);
+    expect(read).toHaveBeenCalledOnce();
   });
 });
 
@@ -453,7 +466,8 @@ describe("commit-time publication, reentrancy, pending, and handler errors", () 
     refView.unmount();
 
     const firstA2 = deferred<string>();
-    desktop({ readWorkspaceGraph: vi.fn().mockReturnValueOnce(firstA2.promise).mockReturnValue(new Promise<string>(() => {})) });
+    const actionRead = vi.fn().mockReturnValueOnce(firstA2.promise).mockReturnValue(new Promise<string>(() => {}));
+    desktop({ readWorkspaceGraph: actionRead });
     function Action(props: { workspaceId: string }) {
       const [text, setText] = useState("idle");
       useDesktopLoad([props.workspaceId], "readWorkspaceGraph", { workspaceId: props.workspaceId, includeChatMentions: false }, { success: setText as never, failure: ok });
@@ -463,6 +477,7 @@ describe("commit-time publication, reentrancy, pending, and handler errors", () 
     actionView.rerender(<Action workspaceId="B" />);
     actionView.rerender(<Action workspaceId="A" />);
     await act(async () => { firstA2.resolve("first-A"); await firstA2.promise; });
+    expect(actionRead.mock.calls).toEqual([[{ workspaceId: "A", includeChatMentions: false }], [{ workspaceId: "B", includeChatMentions: false }], [{ workspaceId: "A", includeChatMentions: false }]]);
     expect(screen.getByTestId("action").textContent).toBe("idle");
   });
 
@@ -481,7 +496,10 @@ describe("commit-time publication, reentrancy, pending, and handler errors", () 
     render(<StrictMode><Viewer /></StrictMode>);
     await act(async () => { replies[0]!.resolve("first-setup"); replies[1]?.resolve("second-setup"); await whenSettled(task!); });
     expect(delivered).toEqual([read.mock.calls.length === 2 ? "second-setup" : "first-setup"]);
-    expect(await whenSettled(task!)).toBeUndefined();
+    expect(whenSettled(task!)).toBeInstanceOf(Promise);
+    await whenSettled(task!);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(delivered).toEqual(["second-setup"]);
   });
 });
 
@@ -543,7 +561,8 @@ describe("mutations, events, and metadata", () => {
 
   it("a command outcome is dropped once its outcome scope (the workspace) closed", async () => {
     const reply = deferred<{ undo?: { undoId: string; expiresAtMs: number } }>();
-    desktop({ revokeRelayShare: () => reply.promise });
+    const revokeRelayShare = vi.fn(() => reply.promise);
+    desktop({ revokeRelayShare });
     const notices: string[] = [];
     const workspace = { open: true, live: () => workspace.open };
     let revoke = () => {};
@@ -554,6 +573,7 @@ describe("mutations, events, and metadata", () => {
     }
     render(<SharedByMe />);
     act(() => revoke());
+    expect(revokeRelayShare).toHaveBeenCalledExactlyOnceWith({ shareId: "A" });
     workspace.open = false;
     await act(async () => { reply.resolve({}); await reply.promise; });
     expect(notices).toEqual([]);
@@ -612,7 +632,49 @@ it("reports a handler exception through the renderer's installed error owner", a
   }
   try {
     render(<Viewer />);
-    await act(async () => { expect(await whenSettled(task!)).toBeUndefined(); });
+    expect(whenSettled(task!)).toBeInstanceOf(Promise);
+    await act(async () => { await whenSettled(task!); });
     expect(log.mock.calls).toEqual([["[desktop] uncaught renderer error:", error]]);
   } finally { log.mockRestore(); }
+});
+
+it("uncloneable command input fails through its outcome scope and settles", async () => {
+  const send = vi.fn().mockResolvedValue({});
+  desktop({ revokeRelayShare: send });
+  const failure = vi.fn();
+  const success = vi.fn();
+  let task: DesktopTask;
+  let run = (_input: { shareId: string }) => {};
+  function Viewer() {
+    const [revoke] = useDesktopCommand([], "revokeRelayShare", { scope: { live: () => true }, success, failure });
+    run = input => { task = revoke(input); };
+    return null;
+  }
+  render(<Viewer />);
+  const input = { shareId: "A", uncloneable: () => {} };
+  act(() => run(input));
+  expect(whenSettled(task!)).toBeInstanceOf(Promise);
+  await act(async () => { await whenSettled(task!); });
+  expect(failure).toHaveBeenCalledOnce();
+  expect(failure.mock.calls[0]?.[0]).toMatchObject({ name: "DataCloneError" });
+  expect(failure.mock.calls[0]?.slice(1)).toEqual([input, expect.any(Function), undefined]);
+  expect(send).not.toHaveBeenCalled();
+  expect(success).not.toHaveBeenCalled();
+});
+
+it("dropped-file paths have a supported synchronous read hook", async () => {
+  const file = new File(["text"], "notes.md");
+  const read = vi.fn(() => ["C:/notes.md"]);
+  vi.stubGlobal("dohcDesktop", { getDroppedFilePaths: read });
+  const delivered: string[][] = [];
+  let task: DesktopTask;
+  function Viewer() {
+    const [paths] = useDesktopAction([], "getDroppedFilePaths", { success: value => delivered.push(value), failure: ok });
+    useLayoutEffect(() => { task = paths([file]); }, [paths]);
+    return null;
+  }
+  render(<Viewer />);
+  await act(async () => { await whenSettled(task!); });
+  expect(read).toHaveBeenCalledExactlyOnceWith([file]);
+  expect(delivered).toEqual([["C:/notes.md"]]);
 });

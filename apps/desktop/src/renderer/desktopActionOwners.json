@@ -15,7 +15,6 @@
   "shell/useHistoryPage.ts": [
     "listEngineMoments"
   ],
-  "collections/useRecordHistory.ts": [],
   "collections/AutomationsPanel.tsx": [
     "writeCollectionAutomations"
   ],

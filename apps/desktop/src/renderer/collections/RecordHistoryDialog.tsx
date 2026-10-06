@@ -23,10 +23,10 @@ type RunState = "available" | "unavailable" | "unknown" | "pending";
 
 // Asked at once, so a page of runs does not flood the relay.
 const LOOKUPS_AT_ONCE = 4;
-type RunLookup = { key: string; automationId: string; claimId: string; scope: string };
+type RunLookup = { key: string; automationId: string; claimId: string };
 
-function HistoryRunLookup(props: { workspaceId: string; recordId: string; run: RunLookup; onLocated: (run: RunLookup, state: RunState, error: unknown) => void }) {
-  useDesktopLoad([props.recordId, props.run.key], "locateRecordHistoryRun",
+function HistoryRunLookup(props: { workspaceId: string; run: RunLookup; onLocated: (run: RunLookup, state: RunState, error: unknown) => void }) {
+  useDesktopLoad([], "locateRecordHistoryRun",
     { workspaceId: props.workspaceId, automationId: props.run.automationId, claimId: props.run.claimId }, {
       success: result => props.onLocated(props.run, result.location, null),
       failure: error => props.onLocated(props.run, "unknown", error),
@@ -159,7 +159,7 @@ export function RecordHistoryDialog(props: {
   onRunsChecked: (runs: readonly string[]) => void;
 }) {
   const { workspaceId, collectionPath, recordId } = props;
-  const recordScope = JSON.stringify([workspaceId, collectionPath, recordId]);
+  const recordScope = useCallback(() => {}, [workspaceId, collectionPath, recordId]);
   const [page, setPage] = useState<{ entries: RecordHistoryEntry[]; next: number | null } | null>(null);
   // The page being read: the first, or the one after the last shown.
   const [loadingKind, setLoadingKind] = useState<"first" | "older" | null>(null);
@@ -181,7 +181,7 @@ export function RecordHistoryDialog(props: {
   const asked = useRef(new Set<string>());
   const queue = useRef<RunLookup[]>([]);
   const asking = useRef(0);
-  const [activeRuns, setActiveRuns] = useState<RunLookup[]>([]);
+  const [activeRuns, setActiveRuns] = useState<{ record: typeof recordScope; runs: RunLookup[] }>({ record: recordScope, runs: [] });
   const lookupError = useRef<unknown>(null);
   // The runs Notices already says dohc could not place.
   const reportedUnchecked = useRef(new Set<string>());
@@ -194,13 +194,13 @@ export function RecordHistoryDialog(props: {
       started.push(queue.current.shift()!);
       asking.current++;
     }
-    if (started.length) setActiveRuns(current => [...current, ...started]);
-  }, []);
+    if (started.length) setActiveRuns(current => ({ record: recordScope, runs: [...current.runs, ...started] }));
+  }, [recordScope]);
   const locatedRun = useCallback((run: RunLookup, state: RunState, error: unknown) => {
     asking.current--;
     if (state === "unknown") lookupError.current ??= error;
     setLocated(current => new Map(current).set(run.key, state));
-    setActiveRuns(current => current.filter(active => active.key !== run.key));
+    setActiveRuns(current => ({ ...current, runs: current.runs.filter(active => active.key !== run.key) }));
     lookUp();
   }, [lookUp]);
 
@@ -216,7 +216,7 @@ export function RecordHistoryDialog(props: {
         const key = runOf(author)!;
         if (asked.current.has(key)) continue;
         asked.current.add(key);
-        queue.current.push({ key, automationId: author.automationId, claimId: author.run.claimId, scope: recordScope });
+        queue.current.push({ key, automationId: author.automationId, claimId: author.run.claimId });
       }
       lookUp();
       setPage(current => {
@@ -241,21 +241,23 @@ export function RecordHistoryDialog(props: {
     setLoadingKind(before === null ? "first" : "older");
     issueHistory({ workspaceId, collectionPath, recordId, ...(before === null ? {} : { beforeHistoryId: before }) });
   }, [issueHistory, workspaceId, collectionPath, recordId]);
-  const loading = pending ? loadingKind : null;
+  const loadedRecord = useRef<typeof recordScope | null>(null);
+  const loading = loadedRecord.current !== recordScope ? "first" : pending ? loadingKind : null;
 
   useEffect(() => {
+    loadedRecord.current = recordScope;
     setPage(null);
     setFailed(null);
     setLocated(new Map());
     asked.current = new Set();
     queue.current = [];
     asking.current = 0;
-    setActiveRuns([]);
+    setActiveRuns({ record: recordScope, runs: [] });
     lookupError.current = null;
     reportedUnchecked.current = new Set();
     oldest.current = null;
     load(null);
-  }, [load]);
+  }, [load, recordScope]);
 
   // Said once the reads and lookups settle, so Try again reads back to every
   // page shown, and said again only for a run newly left unplaced.
@@ -301,7 +303,7 @@ export function RecordHistoryDialog(props: {
         className: "dohc-elevated dohc-pop-in flex max-h-[85vh] w-[min(560px,92vw)] flex-col gap-3 rounded-xl border border-line bg-panel p-5 text-ink",
       }}
     >
-      {activeRuns.filter(run => run.scope === recordScope).map(run => <HistoryRunLookup key={`${workspaceId}\n${collectionPath}\n${recordId}\n${run.key}`} workspaceId={workspaceId} recordId={recordId} run={run} onLocated={locatedRun} />)}
+      {(activeRuns.record === recordScope ? activeRuns.runs : []).map(run => <HistoryRunLookup key={run.key} workspaceId={workspaceId} run={run} onLocated={locatedRun} />)}
       <div className="flex items-center justify-between gap-3">
         <h2 className="m-0 flex min-w-0 items-center gap-2 text-sm font-semibold">
           <HistoryIcon size={16} strokeWidth={1.9} aria-hidden className="shrink-0" />

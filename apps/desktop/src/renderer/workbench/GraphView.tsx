@@ -773,14 +773,7 @@ export function GraphView(props: {
     setReloadNonce((nonce) => nonce + 1);
   }, []);
 
-  useEffect(() => {
-    setState(current => ({
-      workspaceId: props.workspaceId, chatMentionsEnabled, status: "loading",
-      graph: current.workspaceId === props.workspaceId && current.chatMentionsEnabled === chatMentionsEnabled ? current.graph : null,
-      error: null,
-    }));
-  }, [props.workspaceId, chatMentionsEnabled, props.refreshKey, reloadNonce]);
-  useDesktopLoad([props.workspaceId, chatMentionsEnabled, props.refreshKey, reloadNonce], "readWorkspaceGraph",
+  const { pending } = useDesktopLoad([props.refreshKey, reloadNonce], "readWorkspaceGraph",
     { workspaceId: props.workspaceId, includeChatMentions: chatMentionsEnabled }, {
       success: graph => setState({ workspaceId: props.workspaceId, chatMentionsEnabled, status: "ready", graph, error: null }),
       failure: error => setState(current => ({
@@ -793,7 +786,7 @@ export function GraphView(props: {
   const scopedState: GraphState =
     state.workspaceId === props.workspaceId &&
     state.chatMentionsEnabled === chatMentionsEnabled
-      ? state
+      ? pending ? { ...state, status: "loading", error: null } : state
       : {
           workspaceId: props.workspaceId,
           chatMentionsEnabled,

@@ -2765,9 +2765,10 @@ export function ChatsView(props: {
           const channel = joinedChatGroups.find(group => group.id === who.channelId);
           if (!channel) return [];
           const joined = joinedByWire.get(channel.wireId ?? "");
-          return [{ key: `${joined?.shareId ?? channel.id}\u0000${who.id}`, label: who.label, owner: joined?.granterEmail ?? "someone else", channel, atMs: who.atMs }];
+          return [{ key: `${joined?.shareId ?? channel.id}\u0000${who.id}`, label: chatAuthorLabel(who), owner: joined?.granterEmail ?? "someone else", channel, atMs: who.atMs }];
         }));
       },
+      // Home still names every agent if a lane read fails.
       failure: () => {},
     }, laneAgentCache.current);
 

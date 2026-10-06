@@ -3,12 +3,12 @@
 // This check covers what types cannot: who may reach transport, and the form of handlers.
 // Usage: node scripts/check-renderer-async.mjs [rendererRoot] [--strict]
 // The default renderer uses the base raw-call inventory until migration completes.
-import { checkRawBridge } from "./check-raw-bridge.mjs";
+import { checkRawBridge, children, isRendererTest, rendererRoot as defaultRoot, transportFiles } from "./check-raw-bridge.mjs";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
-const [rendererRoot = "apps/desktop/src/renderer", mode = "--ratchet"] = process.argv.slice(2);
+const [rendererRoot = defaultRoot, mode = "--ratchet"] = process.argv.slice(2);
 const { parseSync } = createRequire(import.meta.url)("oxc-parser");
 const root = resolve(rendererRoot);
 const rel = (p) => relative(root, p).split(sep).join("/");
@@ -27,8 +27,8 @@ const files = [];
 
 function role(path) {
   const r = rel(path);
-  if (/\.test(?:-d)?\.tsx?$/u.test(r) || ["DesktopWorkspaceShell.testHarness.tsx", "DesktopWorkspaceShell.testSupport.tsx", "FileInspector.draft-fixture.ts", "FileInspector.editor-fixture.ts", "FileInspector.environment-fixture.ts", "FileInspector.text-fixture.ts", "workbench/ChatsView.testHarness.tsx"].includes(r)) return "test";
-  if (["bridge.ts", "desktopAction.ts", "desktopActionTesting.ts", "desktopOperations.ts"].includes(r)) return "transport";
+  if (isRendererTest(r)) return "test";
+  if (transportFiles.includes(r)) return "transport";
   if (Object.hasOwn(owners, r)) return "owner";
   if (r.startsWith("data/")) return "data";
   return "view";
@@ -39,39 +39,39 @@ const resolveModule = (from, spec) => {
 };
 
 const findings = [];
-const deferredWork = /\bawait\b|\.then\(|\.catch\(|\.finally\(|setTimeout\(|setInterval\(|queueMicrotask\(|requestAnimationFrame\(/u;
+const promiseMethods = new Set(["then", "catch", "finally"]);
+const schedulers = new Set(["setTimeout", "setInterval", "queueMicrotask", "requestAnimationFrame"]);
+const memberName = node => node.computed ? node.property?.value : node.property?.name;
 const isString = (n) => n?.type === "Literal" && typeof n.value === "string";
 const isFunction = (n) => ["ArrowFunctionExpression", "FunctionExpression", "FunctionDeclaration"].includes(n?.type);
-const hookArity = { useDesktopAction: { request: 1, handlers: [2] }, useDesktopLoad: { request: 1, handlers: [3] }, useDesktopCommand: { request: 1, handlers: [2, 3] }, useDesktopEvent: { request: null, handlers: [2] } };
-
-function children(node) {
-  const out = [];
-  for (const [key, value] of Object.entries(node)) {
-    if (key === "parent") continue;
-    if (Array.isArray(value)) { for (const v of value) if (v && typeof v.type === "string") out.push(v); }
-    else if (value && typeof value.type === "string") out.push(value);
-  }
-  return out;
-}
+const hookArity = { useDesktopAction: { request: 1, handlers: [2] }, useDesktopLoad: { request: 1, handlers: [3] }, useDesktopCommand: { request: 1, handlers: [2, 3] }, useDesktopEvent: { request: 1, handlers: [2] } };
 
 for (const path of files) {
+  const kind = role(path);
+  if (kind === "test" || kind === "transport") continue;
   const text = readFileSync(path, "utf8");
   const { program, errors } = parseSync(path, text);
   if (errors.length) { findings.push(`PARSE ${rel(path)}: ${errors[0].message}`); continue; }
   const line = (node) => text.slice(0, node.start).split("\n").length;
   const report = (node, code, message) => findings.push(`${code} ${rel(path)}:${line(node)}: ${message}`);
-  const kind = role(path);
-  if (kind === "test" || kind === "transport") continue;
-
   const importRoles = new Map();
   const declarations = new Map(); // same-file name -> initializer or function
   const declarationCount = new Map();
   const setters = new Set();
 
+  const checkDependency = (node, spec, runtime) => {
+    const target = spec.startsWith(".") ? resolveModule(path, spec) : null;
+    const targetRel = target ? rel(target) : "";
+    if (runtime && kind !== "owner" && targetRel === "bridge.ts") report(node, "RA1", "only registered resource owners may import the desktop bridge. Use the desktopAction hooks.");
+    if (runtime && targetRel === "desktopActionTesting.ts") report(node, "RA6", "task completion is for tests. Production code cannot wait on a task; put follow-up work in delivery or in the resource owner.");
+    if (kind === "data" && runtime && (spec === "react" || (target && role(target) !== "data"))) report(node, "RA4", "data executors may import only packages, types, and other data executors.");
+    return targetRel;
+  };
   for (const statement of program.body) {
     if ((statement.type === "ExportNamedDeclaration" || statement.type === "ExportAllDeclaration") && statement.source) {
-      const target = statement.source.value.startsWith(".") ? resolveModule(path, statement.source.value) : null;
-      if (target && ["desktopAction.ts", "desktopActionTesting.ts", "bridge.ts"].includes(rel(target))) {
+      const runtime = statement.exportKind !== "type" && (statement.type === "ExportAllDeclaration" || statement.specifiers.some(s => s.exportKind !== "type"));
+      const targetRel = checkDependency(statement, statement.source.value, runtime);
+      if (runtime && transportFiles.includes(targetRel)) {
         report(statement, "RA7", "do not re-export desktopAction, desktopActionTesting, or bridge. Import the hooks by name where they are used.");
       }
     }
@@ -80,22 +80,18 @@ for (const path of files) {
       const target = spec.startsWith(".") ? resolveModule(path, spec) : null;
       const targetRole = target ? role(target) : "package";
       for (const s of statement.specifiers) importRoles.set(s.local.name, targetRole);
-      const targetRel = target ? rel(target) : "";
-      if (kind !== "owner" && targetRel === "bridge.ts") report(statement, "RA1", "only registered resource owners may import the desktop bridge. Use the desktopAction hooks.");
-      if (targetRel === "desktopActionTesting.ts" || statement.specifiers.some((s) => s.imported?.name === "settledTasks")) {
+      const runtimeImport = statement.importKind !== "type" && (statement.specifiers.length === 0 || statement.specifiers.some(s => s.importKind !== "type"));
+      const targetRel = checkDependency(statement, spec, runtimeImport);
+      if (targetRel !== "desktopActionTesting.ts" && statement.specifiers.some((s) => s.imported?.name === "settledTasks")) {
         report(statement, "RA6", "task completion is for tests. Production code cannot wait on a task; put follow-up work in delivery or in the resource owner.");
       }
       if (targetRel === "desktopAction.ts" && statement.specifiers.some((s) => s.type !== "ImportSpecifier" || s.imported.name !== s.local.name)) {
         report(statement, "RA7", "import the desktopAction hooks by name, without an alias or namespace, so the check can see each call.");
       }
-      const runtimeImport = statement.importKind !== "type" && (statement.specifiers.length === 0 || statement.specifiers.some(s => s.importKind !== "type"));
-      if (kind === "data" && runtimeImport && (spec === "react" || (target && targetRole !== "data"))) {
-        report(statement, "RA4", "data executors may import only packages, types, and other data executors.");
-      }
     }
     if (kind === "data") {
       const decl = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
-      const allowed = statement.type === "ImportDeclaration" || (statement.type === "ExportNamedDeclaration" && !statement.declaration)
+      const allowed = statement.type === "ImportDeclaration" || (["ExportNamedDeclaration", "ExportAllDeclaration"].includes(statement.type) && !statement.declaration)
         || ["FunctionDeclaration", "TSTypeAliasDeclaration", "TSInterfaceDeclaration"].includes(decl?.type);
       if (!allowed) report(statement, "RA4", "data executors hold no module state: only functions and types at top level. Keep caches in their resource owner or pass them as context.");
     }
@@ -134,13 +130,20 @@ for (const path of files) {
   const deferring = (fn, seen = new Set()) => {
     if (seen.has(fn)) return false;
     seen.add(fn);
-    if (fn.async || deferredWork.test(text.slice(fn.start, fn.end))) return true;
+    if (fn.async) return true;
     let found = false;
     const scan = (node) => {
       if (found) return;
+      if (node.type === "AwaitExpression") { found = true; return; }
+      if (node.type === "CallExpression") {
+        const callee = node.callee;
+        if (callee.type === "MemberExpression" && (promiseMethods.has(memberName(callee))
+          || ["window", "globalThis"].includes(callee.object.name) && schedulers.has(memberName(callee)))
+          || callee.type === "Identifier" && schedulers.has(callee.name)) { found = true; return; }
+      }
       if (node.type === "UnaryExpression" && node.operator === "void" && node.argument.type === "CallExpression") {
         const callee = node.argument.callee;
-        const resolved = callee.type === "Identifier" && (setters.has(callee.name) || localFunction(callee.name));
+        const resolved = callee.type === "Identifier" && ((setters.has(callee.name) && declarationCount.get(callee.name) === 1) || localFunction(callee.name));
         if (!resolved) { found = true; return; }
       }
       if (node.type === "CallExpression" && node.callee.type === "Identifier") {
@@ -160,7 +163,7 @@ for (const path of files) {
       return;
     }
     if (node.type === "Identifier") {
-      if (setters.has(node.name)) return;
+      if (setters.has(node.name) && declarationCount.get(node.name) === 1) return;
       if ((declarationCount.get(node.name) ?? 0) > 1) return report(where, "RA3", `handler "${node.name}" is declared more than once in this file. Give each handler its own name.`);
       const target = localFunction(node.name);
       if (target) return checkHandler(target, where);
@@ -190,13 +193,20 @@ for (const path of files) {
     if (kind !== "owner" && ((node.type === "Identifier" && node.name === "dohcDesktop") || (isString(node) && node.value === "dohcDesktop"))) {
       report(node, "RA1", "views cannot reach window.dohcDesktop. Use the desktopAction hooks, or desktopMetadata() for platform, devTools, and window role.");
     }
+    if (node.type === "ImportExpression") {
+      if (!isString(node.source)) report(node, "RA7", "dynamic imports must name a literal module so its renderer boundary can be checked.");
+      else {
+        const targetRel = checkDependency(node, node.source.value, true);
+        if (targetRel === "desktopAction.ts") report(node, "RA7", "import the desktopAction hooks by name, without a dynamic import.");
+      }
+    }
     if (node.type === "CallExpression" && node.callee.type === "Identifier" && Object.hasOwn(hookArity, node.callee.name)) {
       const { request: requestIndex, handlers } = hookArity[node.callee.name];
       if (requestIndex !== null) {
         const request = node.arguments[requestIndex];
         if (isString(request)) {
           if (ownedOperations.has(request.value)) report(request, "RA5", `operation "${request.value}" is owned by ${ownedOperations.get(request.value)}. Use that owner.`);
-        } else if (!(request?.type === "Identifier" && importRoles.get(request.name) === "data")) {
+        } else if (node.callee.name === "useDesktopEvent" || !(request?.type === "Identifier" && importRoles.get(request.name) === "data")) {
           report(request ?? node, "RA2", "the request must be an operation name or a data executor imported from renderer/data/.");
         }
       }
@@ -215,11 +225,11 @@ for (const path of files) {
 const unique = [...new Set(findings)];
 for (const f of unique) console.log(f);
 console.log(JSON.stringify({ files: files.length, findings: unique.length }));
-const inventory = mode === "--ratchet" && root === resolve("apps/desktop/src/renderer")
+const inventory = mode === "--ratchet" && root === defaultRoot
   ? JSON.parse(readFileSync(new URL("./renderer-raw-bridge-inventory.json", import.meta.url), "utf8")) : null;
 const violations = inventory ? unique.filter(finding => {
   const match = /^RA1 (.+?):\d+:/.exec(finding);
-  return !match || !Object.hasOwn(inventory.counts, match[1]) || inventory.migrated.includes(match[1]);
+  return !match || !Object.hasOwn(inventory.counts, match[1]);
 }) : [...unique];
 if (inventory) {
   const raw = checkRawBridge(root, inventory);

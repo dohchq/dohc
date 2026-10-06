@@ -1,5 +1,6 @@
 import type { DohcDesktopBridge } from "../ipc/bridgeContract";
 
+// Reads have no side effects and may be superseded; commands have effects whose outcomes must survive the view.
 export type MemberKind = { readonly kind: "read" | "command" | "event" | "metadata"; readonly owner?: string };
 
 export const desktopMembers = {
@@ -39,7 +40,7 @@ export const desktopMembers = {
   exportDocumentFile: { kind: "command" },
   showExplorerMenu: { kind: "command" },
   showWorkbenchMenu: { kind: "command" },
-  getDroppedFilePaths: { kind: "metadata" },
+  getDroppedFilePaths: { kind: "read" },
   importWorkspaceFiles: { kind: "command" },
   readWorkspaceText: { kind: "read" },
   writeWorkspaceText: { kind: "command" },
@@ -55,7 +56,7 @@ export const desktopMembers = {
   archiveChatBookmark: { kind: "command" },
   listCollections: { kind: "read" },
   getCollection: { kind: "read", owner: "CollectionPage.tsx" },
-  queryCollectionRecords: { kind: "command", owner: "CollectionPage.tsx" },
+  queryCollectionRecords: { kind: "read", owner: "CollectionPage.tsx" },
   getCollectionRecordHistory: { kind: "read" },
   locateRecordHistoryRun: { kind: "read" },
   readWorkspaceDatabase: { kind: "read" },
@@ -249,7 +250,7 @@ export const desktopMembers = {
   listWorkspaceVersions: { kind: "read" },
   createWorkspaceVersion: { kind: "command" },
   switchWorkspaceVersion: { kind: "command" },
-  compareWorkspaceVersions: { kind: "command" },
+  compareWorkspaceVersions: { kind: "read" },
   mergeWorkspaceVersion: { kind: "command" },
   listWorkspaceVersionConflicts: { kind: "read" },
   resolveWorkspaceVersionConflict: { kind: "command" },
@@ -279,7 +280,7 @@ export type ReadName = { [K in keyof typeof desktopMembers]: typeof desktopMembe
 export type CommandName = { [K in keyof typeof desktopMembers]: typeof desktopMembers[K]["kind"] extends "command" ? Unowned<K> : never }[keyof typeof desktopMembers];
 export type EventName = { [K in keyof typeof desktopMembers]: typeof desktopMembers[K]["kind"] extends "event" ? Unowned<K> : never }[keyof typeof desktopMembers];
 type Method<K extends keyof DohcDesktopBridge> = Extract<DohcDesktopBridge[K], (...args: never[]) => unknown>;
-export type InputOf<K extends keyof DohcDesktopBridge> = Parameters<Method<K>> extends [] ? undefined : K extends "readWorkspaceGraph" ? Required<Parameters<Method<K>>[0]> : Parameters<Method<K>>[0];
+export type InputOf<K extends keyof DohcDesktopBridge> = Parameters<Method<K>> extends [] ? undefined : Parameters<Method<K>>[0];
 export type ResultOf<K extends keyof DohcDesktopBridge> = Awaited<ReturnType<Method<K>>>;
 export type EventValue<E extends EventName> = Parameters<Extract<InputOf<E>, (...args: never[]) => unknown>> extends [] ? undefined : Parameters<Extract<InputOf<E>, (...args: never[]) => unknown>>[0];
 export type ReadDesktop = Pick<DohcDesktopBridge, ReadName>;

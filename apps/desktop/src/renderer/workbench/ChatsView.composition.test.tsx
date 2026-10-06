@@ -677,3 +677,26 @@ it("an obsolete lane answer cannot replace agents or seed the next cache hit", a
   expect(screen.getByText("Current agent")).toBeTruthy();
   expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(2);
 });
+
+it("one failed channel keeps other channels' agents and cache updates", async () => {
+  const groups = [channel({ id: "good", wireId: "w-good", type: "chat" }), channel({ id: "bad", wireId: "w-bad", type: "chat" })];
+  bridgeMock.listChatChannels.mockResolvedValue({ channels: groups, fileThreads: [] });
+  bridgeMock.listChatChannelShares.mockResolvedValue(shareListing({ joined: groups.map(group => ({
+    shareId: group.id, channelWireId: group.wireId, granterEmail: "owner@example.test", access: "read-write", ended: false,
+  })) }));
+  bridgeMock.listChannelThreads.mockImplementation(async (payload: { channelId: string }) => ({ threads: [thread({ id: payload.channelId, channelId: payload.channelId, updatedAtMs: 10 })] }));
+  bridgeMock.listChatMessages.mockImplementation(async (payload: { threadId: string }) => {
+    if (payload.threadId === "bad") throw new Error("offline");
+    return { messages: [message({ id: "fresh", threadId: "good", authorKind: "agent", authorDisplayName: "Available agent", authorUserId: "current" })] };
+  });
+  const view = render(navigatorView(0, { threadRevision: 0 }));
+  await screen.findByText("Available agent");
+  expect(bridgeMock.listChatMessages.mock.calls.filter(([payload]) => payload.threadId === "good")).toHaveLength(1);
+  expect(bridgeMock.listChatMessages.mock.calls.some(([payload]) => payload.threadId === "bad")).toBe(true);
+  const before = bridgeMock.listChannelThreads.mock.calls.length;
+  view.rerender(navigatorView(0, { threadRevision: 1 }));
+  await waitFor(() => expect(bridgeMock.listChannelThreads.mock.calls.length).toBeGreaterThan(before));
+  await waitFor(() => expect(bridgeMock.listChatMessages.mock.calls.filter(([payload]) => payload.threadId === "bad")).toHaveLength(2));
+  expect(bridgeMock.listChatMessages.mock.calls.filter(([payload]) => payload.threadId === "good")).toHaveLength(1);
+  expect(screen.getByText("Available agent")).toBeTruthy();
+});
