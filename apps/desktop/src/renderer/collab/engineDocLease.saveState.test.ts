@@ -9,6 +9,8 @@ import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
 import { parseExcalidrawDocument } from "../excalidrawDocument";
+import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
+import { authorCapacityMessage } from "./authorCapacityMessage";
 
 const projectionGate = vi.hoisted(() => ({
   pending: null as Promise<void> | null,
@@ -668,6 +670,122 @@ it("stays Saving while a rejected transport head retries ahead of later edits", 
   expect(retained.snapshot.saveState).toBe("saving");
   harness.emit("saved", 2);
   expect(retained.snapshot.saveState).toBe("saved");
+});
+
+// Each lease notification as the save fields it carried.
+function observeSaveNotices() {
+  const notices: Array<[string, string | null, boolean]> = [];
+  retained.lease.subscribe(() => {
+    const { saveState, saveError, authorCapacity } = retained.lease.getSnapshot();
+    notices.push([saveState, saveError, authorCapacity]);
+  });
+  return notices;
+}
+
+// The harness has no edit-refusal report. Capture main's save-state channel
+// to send one.
+function captureSaveStateChannel() {
+  const listeners: Array<(event: EngineYDocSaveStateEvent) => void> = [];
+  vi.stubGlobal("dohcDesktop", {
+    ...harness.api,
+    onEngineYDocSaveState(listener: (event: EngineYDocSaveStateEvent) => void) {
+      listeners.push(listener);
+      return harness.api.onEngineYDocSaveState(listener);
+    },
+  });
+  return (event: Omit<EngineYDocSaveStateEvent, "sessionId">) =>
+    act(() => {
+      for (const listener of listeners) {
+        listener({ ...event, sessionId: harness.sessionId()! });
+      }
+    });
+}
+
+it("publishes one Saving notice for a typing burst while every edit reaches main", async () => {
+  await retainBound();
+  const notices = observeSaveNotices();
+
+  for (let edit = 0; edit < 5; edit += 1) {
+    act(() => editDocument());
+    await flushLocalBatch();
+  }
+
+  expect(notices).toEqual([["saving", null, false]]);
+  expect(harness.mainText()).toBe("seed!!!!!");
+  expect(retained.snapshot.saveState).toBe("saving");
+});
+
+it("publishes Saving again for an edit after Saved", async () => {
+  await retainBound();
+  const notices = observeSaveNotices();
+  act(() => editDocument());
+  await flushLocalBatch();
+
+  harness.emit("saved", harness.applied.at(-1)!.seq);
+  act(() => editDocument());
+  await flushLocalBatch();
+
+  expect(notices).toEqual([
+    ["saving", null, false],
+    ["saved", null, false],
+    ["saving", null, false],
+  ]);
+  expect(harness.mainText()).toBe("seed!!");
+});
+
+it("skips a settling report that repeats the shown Saving state", async () => {
+  await retainBound();
+  act(() => editDocument());
+  await flushLocalBatch();
+  const seq = harness.applied.at(-1)!.seq;
+  harness.emit("saved", seq);
+  const notices = observeSaveNotices();
+
+  harness.emit("settling", seq);
+  harness.emit("settling", seq);
+  act(() => editDocument());
+  await flushLocalBatch();
+
+  expect(notices).toEqual([["saving", null, false]]);
+  expect(harness.mainText()).toBe("seed!!");
+});
+
+it("publishes a changed refusal message while the state stays Error", async () => {
+  const sendSaveState = captureSaveStateChannel();
+  await retainBound();
+  const notices = observeSaveNotices();
+  const refusal = (message: string) => ({
+    state: "error" as const,
+    seq: 0,
+    editRefusal: { workspaceId: "ws-1", path: "notes/big.md", requestId: "r1", message },
+  });
+
+  sendSaveState(refusal("first refusal"));
+  sendSaveState(refusal("first refusal"));
+  sendSaveState(refusal("second refusal"));
+
+  expect(notices).toEqual([
+    ["error", "first refusal", false],
+    ["error", "second refusal", false],
+  ]);
+});
+
+it("publishes each author capacity change and skips its repeats", async () => {
+  await retainBound();
+  const notices = observeSaveNotices();
+  const capacity = authorCapacityMessage("notes/big.md");
+
+  harness.emit("error", 0, undefined, false);
+  harness.emit("error", 0, undefined, true);
+  harness.emit("error", 0, undefined, true);
+  harness.emit("error", 0, undefined, false);
+  harness.emit("error", 0, undefined, false);
+
+  expect(notices).toEqual([
+    ["error", null, false],
+    ["error", capacity, true],
+    ["error", null, false],
+  ]);
 });
 
 it("ignores a save-state report addressed to a different session", async () => {

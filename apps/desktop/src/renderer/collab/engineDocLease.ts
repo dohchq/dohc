@@ -506,6 +506,15 @@ function createEngineDocSession(
     authorCapacity = false,
   ): void => {
     saveStateRef.current = state;
+    // Every keystroke reports "saving". Repeating the shown state would only
+    // wake every subscriber to read the same snapshot.
+    if (
+      snapshot.saveState === state &&
+      snapshot.saveError === error &&
+      snapshot.authorCapacity === authorCapacity
+    ) {
+      return;
+    }
     publish((current) => ({ ...current, saveState: state, saveError: error, authorCapacity }));
   };
 
