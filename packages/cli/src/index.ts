@@ -48,6 +48,11 @@ async function bodyForCommand(
     if (!documentEditTextSchema.safeParse(text).success) throw new DohcCliError("document text is at most 256 KiB as UTF-8");
     return text;
   }
+  if (command.verb === "fileChatStart") {
+    const body = command.stdin ? await readStdin() : command.body;
+    if (!body.trim()) throw new DohcCliError("comment body must contain text that is not all whitespace");
+    return body;
+  }
   if (command.verb !== "post" && command.verb !== "reply") return undefined;
   if (command.body !== "-") return command.body;
   const body = await readStdin();
@@ -83,6 +88,14 @@ function buildCliRequest(
             ...(command.requestId === undefined ? {} : { requestId: command.requestId }),
           } };
     }
+    case "fileChatStart":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: {
+        cwd: common.cwd, actor: common.actor, path: command.path, title: command.title,
+        body: stdinBody ?? command.body,
+        ...(command.agent === undefined ? {} : { agent: command.agent }),
+        ...(command.requestId === undefined ? {} : { requestId: command.requestId }),
+        ...((command.runId ?? runId) ? { runId: command.runId ?? runId } : {}),
+      } };
     case "dataset":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "appPublication":
@@ -277,7 +290,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["moments", "moment", "documentRead", "documentEdit", "documentCreate", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);

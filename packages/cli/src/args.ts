@@ -18,6 +18,7 @@ type ExportScope =
 
 type CliCommandBody =
   | { verb: "documentRead"; path: string }
+  | { verb: "fileChatStart"; path: string; title: string; body: string; stdin: boolean; agent?: string; requestId?: string; runId?: string }
   | { verb: "documentEdit" | "documentCreate"; path: string; text: string; stdin: boolean; find?: string; agent?: string; requestId?: string }
   | { verb: "dataset"; request: DatasetRequest }
   | { verb: "appPublication"; request: OwnerAppPublicationRequest }
@@ -260,6 +261,40 @@ const DOCUMENT_VERBS = {
     notes: [stdinNote, "Use --text instead to supply Markdown. With neither, create an empty document.",
       "The path must end in .md or .markdown. Frontmatter is refused."],
     parse: (input) => documentWrite(input, "documentCreate"),
+  },
+  comment: {
+    capabilityId: "file.chat.start",
+    summary: "Start a chat linked to a file with its first message.",
+    operands: "<path> [-]",
+    flags: [
+      { name: "--title", value: "title", text: "Set the chat title. Use 1 to 200 characters that are not all whitespace." },
+      { name: "--text", value: "markdown", text: "Set the first message as Markdown. The message must contain text that is not all whitespace." },
+      { name: "--agent", value: "name", text: "Record this agent name with the change." },
+      { name: "--request-id", value: "key", text: "Set a key for safe retries. Use 1 to 64 printable ASCII characters. A retry with the same key and the same payload returns the existing result. A retry with the same key and a changed payload is refused." },
+      { name: "--run-id", value: "id", text: "Set the run ID. The value must not be empty. This flag overrides DOHC_RUN_ID." },
+    ],
+    notes: [stdinNote, "The default output shows the result as JSON.", "Add --json to include schemaVersion in the output."],
+    parse: (input) => {
+      const [path, body, ...extra] = input.operands;
+      if (!path) fail("document requires a path");
+      noExtraArgs(extra, "document comment");
+      const title = lastValue(input, "--title");
+      if (title === undefined) fail("comment requires --title");
+      if (!title.trim() || title.length > 200) fail("invalid --title; use 1 to 200 characters that are not all whitespace");
+      const text = lastValue(input, "--text");
+      if (body !== undefined && (body !== "-" || text !== undefined)) fail("use either - for stdin or --text <markdown>");
+      if (body === undefined && text === undefined) fail("use either - for stdin or --text <markdown>");
+      if (text !== undefined && !text.trim()) fail("comment body must contain text that is not all whitespace");
+      const agent = lastValue(input, "--agent");
+      const requestId = lastValue(input, "--request-id");
+      const runId = lastValue(input, "--run-id");
+      if (agent !== undefined && !documentAgentNameSchema.safeParse(agent).success) fail("invalid --agent name; use 1 to 64 letters, numbers, spaces, dots, underscores, or hyphens, starting with a letter or number");
+      if (requestId !== undefined && !requestIdSchema.safeParse(requestId).success) fail("--request-id requires 1 to 64 printable ASCII characters");
+      if (runId !== undefined && !runId) fail("--run-id requires a value that is not empty");
+      return { verb: "fileChatStart", path, title, body: text ?? "", stdin: body === "-",
+        ...(agent === undefined ? {} : { agent }), ...(requestId === undefined ? {} : { requestId }),
+        ...(runId === undefined ? {} : { runId }) };
+    },
   },
 } satisfies Record<string, CliVerbSpec>;
 

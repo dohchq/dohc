@@ -535,6 +535,24 @@ Use - as the body to read it from stdin. Use --text instead to supply Markdown. 
 
 With `--json`, prints `{ schemaVersion, ok: true, path }`.
 
+#### `dohc document comment`
+
+```sh
+dohc document comment <path> [-] [options]
+```
+
+Start a chat linked to a file with its first message.
+
+Use - as the body to read it from stdin. The default output shows the result as JSON. Add --json to include schemaVersion in the output.
+
+- `--title <title>`: Set the chat title. Use 1 to 200 characters that are not all whitespace.
+- `--text <markdown>`: Set the first message as Markdown. The message must contain text that is not all whitespace.
+- `--agent <name>`: Record this agent name with the change.
+- `--request-id <key>`: Set a key for safe retries. Use 1 to 64 printable ASCII characters. A retry with the same key and the same payload returns the existing result. A retry with the same key and a changed payload is refused.
+- `--run-id <id>`: Set the run ID. The value must not be empty. This flag overrides DOHC_RUN_ID.
+
+With `--json`, prints `{ schemaVersion, ok: true, path, threadId, messageId, warning? }`.
+
 ### `dohc chat`
 
 Read and post in Groups and threads.

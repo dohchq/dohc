@@ -110,7 +110,7 @@ export const HISTORY_RESULTS: Record<string, CliSocketVerb> = {
 };
 
 const DOCUMENT_RESULTS: Record<string, CliSocketVerb> = {
-  read: "documentRead", edit: "documentEdit", create: "documentCreate",
+  read: "documentRead", edit: "documentEdit", create: "documentCreate", comment: "fileChatStart",
 };
 
 // The socket verb whose result each `dohc automation` verb prints.
