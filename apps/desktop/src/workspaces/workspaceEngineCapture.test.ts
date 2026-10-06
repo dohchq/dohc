@@ -53,6 +53,7 @@ import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/li
 import { deferred } from "../testing/deferred";
 
 import { createTestScratch } from "./testTemp";
+import { createRelaySyncEngine } from "./relaySyncEngine";
 
 // The person a restore names, as desktop main reads them.
 const RESTORER = { kind: "human", humanId: "local-person" } as const;
@@ -3407,6 +3408,70 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
       } as never;
     };
   }
+
+  it("opens a document and publishes an authored file between bounded relay passes", async () => {
+    const root = await createTestScratch("dohc-drain-interleave-");
+    const loopback = new VersionedLoopbackEngine();
+    const path = "note.md";
+    await write(root, path, "existing document");
+    loopback.seedTextFile({ workspace: WORKSPACE_ID, versionId: "main", path, text: "existing document" });
+    const events: string[] = [];
+    const engine = liveCapture(root, loopback, {
+      openRustYDocProviderSession: async options => {
+        events.push("document opened");
+        return recordingProvider([])(options);
+      },
+    });
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    const continued = deferred<void>();
+    const releaseContinuation = deferred<void>();
+    let pushes = 0;
+    const sync = createRelaySyncEngine({
+      rootDir: root, relay: { baseUrl: "http://relay.test", token: "test" }, capture: engine,
+      onChange: () => undefined,
+      operations: {
+        claim: async () => undefined,
+        recoverOrigin: async () => { throw new Error("unexpected origin recovery"); },
+        push: async () => {
+          pushes += 1;
+          events.push(`push ${pushes}`);
+          if (pushes === 1) { entered.resolve(); await release.promise; }
+          else { continued.resolve(); await releaseContinuation.promise; }
+          return { pushed: 1, hasMore: pushes === 1, originsPushed: [], ownerAdmissionPending: [], sharingDeclined: [] };
+        },
+        pull: async () => {
+          events.push("pull");
+          return { fetched: 0, applied: 0, skipped: 0, conflictsOpened: 0,
+            fastForwardedPaths: [], nextCursor: pushes, sharingDeclined: [] };
+        },
+      },
+    });
+    try {
+      const pass = sync.start();
+      await entered.promise;
+      const opened = engine.openYDocSession({ path, onRemoteUpdate: () => undefined });
+      const written = engine.writeAuthoredFile(join(root, "agent.txt"), "authored content",
+        { kind: "agent", agentId: "agent", onBehalfOf: "local" }).then(result => {
+        events.push("authored write");
+        return result;
+      });
+      release.resolve();
+      const [, session] = await Promise.all([pass, opened, written]);
+      await continued.promise;
+      expect(events).toEqual(["push 1", "pull", "document opened", "authored write", "push 2"]);
+      expect(await readFile(join(root, "agent.txt"), "utf8")).toBe("authored content");
+      releaseContinuation.resolve();
+      await sync.stop();
+      expect(events.at(-1)).toBe("pull");
+      await session.close({ settle: false });
+    } finally {
+      release.resolve();
+      releaseContinuation.resolve();
+      await sync.stop();
+      await engine.stop();
+    }
+  });
 
   it("hydrates a live artifact asset by its workspace-scoped blob after its head is retired", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
