@@ -144,6 +144,24 @@ async function typeAfter(page: Page, anchor: string, text: string): Promise<void
   await page.keyboard.type(text);
 }
 
+/**
+ * A recipient's ended share: the banner says so without a Refresh, and the
+ * document stays readable with Edit disabled and nothing editable. `text`
+ * must show, so a missing or empty document cannot pass.
+ */
+async function expectEndedShare(page: Page, text: string[]) {
+  const banner = page.getByTestId("shared-view-banner");
+  await expect(banner).toHaveAttribute("data-ended", "true", { timeout: 60_000 });
+  await expect(banner).toContainText(/This share was ended/);
+  await expect(page.getByTestId("shared-view-refresh")).toHaveCount(0);
+  await expect(page.getByTestId("markdown-edit-toggle")).toBeDisabled();
+  const document = page.getByTestId("view-markdown");
+  await expect(document).toBeVisible();
+  for (const line of text) await expect(document).toContainText(line);
+  await expect(page.getByTestId("file-inspector").locator('[contenteditable="true"]')).toHaveCount(0);
+  return document;
+}
+
 async function openSharedRestore(page: Page) {
   await openHistoryView(page);
   const moment = page.locator(`[data-testid="engine-moment-open"][data-moment-path="${PATH}"]`).first();
@@ -720,15 +738,15 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(editor(owner!.page)).toContainText(HA);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA], [R1]), { timeout: 60_000 }).toBe(true);
       const page = recipient!.page;
-      // The relay, the editor and the owner's access list prove the stop. The
-      // save chip does not: the read-only view may show none.
+      // The relay, the read-only document and the owner's access list prove
+      // the stop. The save chip does not: the read-only view may show none.
       await expect.poll(() => page.evaluate(shareId =>
         (window as unknown as { dohcDesktop: Api }).dohcDesktop.getRelayReceivedShare({ shareId }), share.shareId), { timeout: 60_000 })
         .toMatchObject({ found: false });
-      await expect(editor(page)).toHaveAttribute("contenteditable", "false", { timeout: 60_000 });
-      await editor(page).getByText(H1).click();
+      const document = await expectEndedShare(page, [H1, A1, HA]);
+      await document.getByText(H1).click();
       await page.keyboard.type(" Typed after access stopped.");
-      await expect(editor(page)).not.toContainText("Typed after access stopped.");
+      await expect(document).not.toContainText("Typed after access stopped.");
       await expectActiveAccess(owner!.page, []);
       // The recipient's edit saved before the stop, so nothing is set aside.
       await expect(page.getByTestId("orphaned-draft-notice")).toHaveCount(0);
@@ -799,15 +817,12 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       const page = recipient!.page;
       expect(await page.evaluate(shareId =>
         (window as unknown as { dohcDesktop: Api }).dohcDesktop.getRelayReceivedShare({ shareId }), share.shareId)).toMatchObject({ found: false });
-      await expect(editor(page)).toHaveAttribute("contenteditable", "false");
-      await expect(editor(page)).not.toContainText(R2);
       // The window says the share ended without the person asking: the
       // document turning read-only made it ask the relay, and the relay said so.
-      await expect(page.getByTestId("shared-view-banner")).toContainText(/This share was ended/, { timeout: 60_000 });
-      await expect(page.getByTestId("shared-view-refresh")).toHaveCount(0);
+      const document = await expectEndedShare(page, [H1, A1, HA]);
+      await expect(document).not.toContainText(R2);
       // The saved edit stays in the owner's History, not in a set-aside draft.
       await expect(page.getByTestId("orphaned-draft-notice")).toHaveCount(0);
-      await expect(editor(page)).toHaveAttribute("contenteditable", "false");
       await expectNoCollectionNotice(page);
       await attachScreen(testInfo, page, "stopped recipient");
       await expectActiveAccess(owner!.page, [newRecipientAccount.email]);
@@ -834,13 +849,12 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
         await expect.poll(async () => (await page.evaluate(shareId =>
           (window as unknown as { dohcDesktop: Api }).dohcDesktop.getRelayReceivedShare({ shareId }), newShare.shareId)).found, { timeout: 60_000 })
           .toBe(false);
-        await expect(editor(page)).toHaveAttribute("contenteditable", "false", { timeout: 60_000 });
+        const document = await expectEndedShare(page, [H1, A1, HA]);
         // Access ended while main still held the typing.
         expect(await heldEditorUpdates(desktop)).toMatchObject({ settled: 0, released: false });
-        await editor(page).getByText(H1).click();
+        await document.getByText(H1).click();
         await page.keyboard.type(" Typed after the share ended.");
-        await expect(editor(page)).not.toContainText("Typed after the share ended.");
-        await expect(page.getByTestId("shared-view-banner")).toContainText(/This share was ended/, { timeout: 60_000 });
+        await expect(document).not.toContainText("Typed after the share ended.");
         const notice = page.getByTestId("orphaned-draft-notice");
         await expect(notice).toHaveCount(1);
         await expect(notice).toContainText("This document became read-only. Copy your text to keep it.");
@@ -870,8 +884,13 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
           copied,
           shareFound: await read(page.evaluate(shareId =>
             (window as unknown as { dohcDesktop: Api }).dohcDesktop.getRelayReceivedShare({ shareId }).then(share => share.found), newShare.shareId)),
+          // An ended share has no live editor, so these two can be empty while
+          // the read-only document below still shows.
           editable: await read(editor(page).evaluateAll(nodes => nodes.map(node => node.getAttribute("contenteditable")))),
           saveState: await read(saveState(page).evaluateAll(nodes => nodes.map(node => node.getAttribute("data-state")))),
+          ended: await read(page.getByTestId("shared-view-banner").evaluateAll(nodes => nodes.map(node => node.getAttribute("data-ended")))),
+          editDisabled: await read(page.getByTestId("markdown-edit-toggle").evaluateAll(nodes => nodes.map(node => (node as HTMLButtonElement).disabled))),
+          documents: await read(page.getByTestId("view-markdown").count()),
           notices: await read(page.getByTestId("orphaned-draft-notice").allInnerTexts()),
           copyLabels: await read(page.getByTestId("orphaned-draft-copy").allInnerTexts()),
         }, null, 2) }).catch(() => undefined);
