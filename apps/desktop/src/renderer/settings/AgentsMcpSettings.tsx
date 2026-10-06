@@ -132,11 +132,17 @@ export function AgentsMcpSettings(props: {
 
   const enabled = status?.mcpEnabled ?? false;
   const runnerConfigured = configuredRunnerCommand(runner).length > 0;
-  // An enabled MCP server only means it is available to connect to. We do not
-  // have a trusted session signal proving that an external client copied the
-  // configuration and connected, so only the in-app runner can make this
-  // guide ready.
-  const setupReady = Boolean(props.agentName) && runner.enabled;
+  // Each way of connecting reports its own state; neither one is required. The
+  // runner dispatches only with an agent name to post as. An enabled MCP server
+  // is only available to connect to: no trusted signal proves that an external
+  // client copied the configuration, so this never claims one is connected.
+  const runnerState = runner.enabled
+    ? props.agentName
+      ? { state: "ready", label: "Dispatch ready" }
+      : { state: "unnamed", label: "Agent name needed" }
+    : runnerConfigured
+      ? { state: "configured", label: "Configured · dispatch off" }
+      : { state: "missing", label: "No runner command" };
 
   const toggle = useCallback(async () => {
     const version = requestVersionRef.current();
@@ -202,7 +208,6 @@ export function AgentsMcpSettings(props: {
     <div className="flex flex-col">
       <section
         data-testid="agent-setup-guide"
-        data-state={setupReady ? "ready" : "needs-setup"}
         className="my-4 overflow-hidden rounded-lg border border-line bg-panel-2"
         aria-labelledby="agent-setup-title"
       >
@@ -211,18 +216,9 @@ export function AgentsMcpSettings(props: {
             <Bot size={14} aria-hidden />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 id="agent-setup-title" className="m-0 text-[13px] font-medium text-ink">
-                Set up your agent
-              </h3>
-              <span
-                data-testid="agent-setup-status"
-                data-state={setupReady ? "ready" : "needs-setup"}
-                className="rounded-full border border-line bg-bg px-2 py-0.5 text-[10px] uppercase tracking-wide text-subtle"
-              >
-                {setupReady ? "Ready" : "Needs setup"}
-              </span>
-            </div>
+            <h3 id="agent-setup-title" className="m-0 text-[13px] font-medium text-ink">
+              Set up your agent
+            </h3>
             <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted">
               Choose how a local agent connects to this workspace. Provider names describe
               the connection; messages are always attributed to you.
@@ -248,10 +244,10 @@ export function AgentsMcpSettings(props: {
             </p>
             <span
               data-testid="agent-setup-runner-state"
-              data-state={runner.enabled ? "ready" : runnerConfigured ? "configured" : "missing"}
+              data-state={runnerState.state}
               className="mt-2 inline-block text-[10px] font-medium text-muted"
             >
-              {runner.enabled ? "Dispatch ready" : runnerConfigured ? "Configured · dispatch off" : "Runner command needed"}
+              {runnerState.label}
             </span>
           </div>
           <div className="px-4 py-3">
@@ -260,14 +256,24 @@ export function AgentsMcpSettings(props: {
               Enable the workspace-scoped MCP server, then copy its configuration into your
               existing agent. Sign-in status stays with that provider.
             </p>
+            {status ? (
+              <span
+                data-testid="agent-setup-mcp-state"
+                data-state={enabled ? "running" : "stopped"}
+                className="mt-2 block text-[10px] font-medium text-muted"
+              >
+                {enabled ? "Server running" : "Server stopped"}
+              </span>
+            ) : null}
+            {/* Disable stays on the server row below. One button keeps focus when its next step changes. */}
             <button
               type="button"
               data-testid="agent-setup-mcp-action"
-              disabled={busy}
-              onClick={() => void toggle()}
+              disabled={busy || (enabled && (!config || "unavailable" in config))}
+              onClick={() => void (enabled ? copyConfig() : toggle())}
               className="mt-2 rounded-md border border-line bg-bg px-2.5 py-1 text-[10px] font-medium text-muted hover:text-ink disabled:opacity-50"
             >
-              {enabled ? "MCP enabled · copy config below" : "Enable MCP"}
+              {enabled ? (copied ? "Copied" : "Copy config") : "Enable MCP"}
             </button>
           </div>
         </div>
