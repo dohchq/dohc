@@ -611,3 +611,47 @@ it.each(["revoke", "downgrade", "rename"])(
     );
   },
 );
+
+it.each([1, 2])("recomputes at most once after %i concurrent read revisions", async (writes) => {
+  const f = await fixture();
+  const b = await f.share("bob");
+  await f.pub("bob", b, "notes/a.md", { yc: 7, update: awareness(7, {}) });
+  const grant = f.storage.listActiveShareGrantsForRecipient(b, "bob")[0]!;
+  const db = inspectDatabase(storagePath(f.storage));
+  const originalCapture = f.storage.captureReadRevisionMatches.bind(f.storage);
+  let preparing = false;
+  const capture = vi.spyOn(f.storage, "captureReadRevisionMatches").mockImplementation(() => {
+    preparing = true;
+    return originalCapture();
+  });
+  const originalOwnerCheck = f.storage.workspaceIsOwnedBy.bind(f.storage);
+  let performed = 0;
+  const ownerCheck = vi.spyOn(f.storage, "workspaceIsOwnedBy").mockImplementation((workspaceId, userId) => {
+    const result = originalOwnerCheck(workspaceId, userId);
+    if (preparing && userId === "bob" && performed < writes) {
+      performed++;
+      db.prepare("UPDATE sync_relay_share_grants SET access = ? WHERE grant_id = ?")
+        .run(performed === 1 ? "view" : "edit", grant.grantId);
+    }
+    return result;
+  });
+  try {
+    const h = testHandler(f.storage, {
+      presence: f.presence,
+      lookupUserDisplayName: (id) => f.names[id] ?? null,
+    });
+    const response = await h(request("owner", "/sync/w/presence?topic=notes/a.md&hold=0"));
+    expect(response.status).toBe(writes === 1 ? 200 : 404);
+    expect(capture).toHaveBeenCalledTimes(2);
+    expect(performed).toBe(writes);
+    if (writes === 1) {
+      expect((await json(response)).peers).toEqual([
+        expect.objectContaining({ displayName: "Bob label", state: {} }),
+      ]);
+    }
+  } finally {
+    capture.mockRestore();
+    ownerCheck.mockRestore();
+    f.presence.dispose();
+  }
+});

@@ -1,8 +1,15 @@
 import { presenceColorHash } from "./presenceColorHash";
 import { presencePalette } from "./presencePalette";
-import type { Collaborator, ExcalidrawImperativeAPI, SocketId } from "@excalidraw/excalidraw/types";
+import type {
+  Collaborator,
+  ExcalidrawImperativeAPI,
+  SocketId,
+} from "@excalidraw/excalidraw/types";
 import type * as Y from "yjs";
-import { PRESENCE_STATE_MAX_BYTES, type PresenceScopeInput } from "../../ipc/bridgeContract";
+import {
+  PRESENCE_STATE_MAX_BYTES,
+  type PresenceScopeInput,
+} from "../../ipc/bridgeContract";
 import { bindDocPresence, type DocPresenceBinding } from "./docPresence";
 import type { PresenceTransport } from "./presenceChannel";
 
@@ -21,10 +28,12 @@ const SELECTION_HEADROOM_BYTES = 4096;
 const MAX_SELECTION_ID_BYTES_TOTAL = Math.floor(
   ((PRESENCE_STATE_MAX_BYTES - SELECTION_HEADROOM_BYTES) * 3) / 4,
 );
-const utf8ByteLength = (value: string): number => new TextEncoder().encode(value).length;
+const utf8ByteLength = (value: string): number =>
+  new TextEncoder().encode(value).length;
 // The id's exact serialized bytes inside the awareness JSON: `"` and `\`
 // escape to two bytes, which a raw UTF-8 count under-bills.
-const serializedIdBytes = (id: string): number => utf8ByteLength(JSON.stringify(id)) - 2;
+const serializedIdBytes = (id: string): number =>
+  utf8ByteLength(JSON.stringify(id)) - 2;
 // JSON overhead per selection entry: quotes, colon, `true`, and a comma.
 const SELECTION_ENTRY_OVERHEAD_BYTES = 8;
 const UNSAFE_ELEMENT_ID = /[\u0000-\u001f\u007f-\u009f]/;
@@ -65,7 +74,8 @@ type PresenceScheduler = {
 const defaultScheduler: PresenceScheduler = {
   now: () => Date.now(),
   schedule: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
-  cancel: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+  cancel: (handle) =>
+    globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
 export function excalidrawPresenceTopic(input: {
@@ -73,7 +83,11 @@ export function excalidrawPresenceTopic(input: {
   versionId: string;
   objectId: string;
 }): string {
-  return `scene:${JSON.stringify([input.workspaceId, input.versionId, input.objectId])}`;
+  return `scene:${JSON.stringify([
+    input.workspaceId,
+    input.versionId,
+    input.objectId,
+  ])}`;
 }
 
 function colorFor(value: string | number) {
@@ -98,7 +112,10 @@ function cleanName(value: unknown): string {
 
 function finiteCoordinate(value: unknown): number | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  return Math.max(-MAX_POINTER_COORDINATE, Math.min(MAX_POINTER_COORDINATE, value));
+  return Math.max(
+    -MAX_POINTER_COORDINATE,
+    Math.min(MAX_POINTER_COORDINATE, value),
+  );
 }
 
 function cleanPointer(value: unknown): Collaborator["pointer"] | undefined {
@@ -138,31 +155,38 @@ function cleanSelection(value: unknown): CleanSelection | undefined {
   return selected;
 }
 
-function sameSelection(left: CleanSelection, right: CleanSelection): boolean {
+function sameSelection(
+  left: CleanSelection,
+  right: CleanSelection,
+): boolean {
   const leftIds = Object.keys(left).sort();
   const rightIds = Object.keys(right).sort();
-  return leftIds.length === rightIds.length && leftIds.every((id, index) => id === rightIds[index]);
+  return (
+    leftIds.length === rightIds.length &&
+    leftIds.every((id, index) => id === rightIds[index])
+  );
 }
 
-function collaboratorsFromAwareness(binding: DocPresenceBinding): Map<SocketId, Collaborator> {
+function collaboratorsFromAwareness(
+  binding: DocPresenceBinding,
+): Map<SocketId, Collaborator> {
   const collaborators = new Map<SocketId, Collaborator>();
   for (const [awarenessClientId, rawState] of binding.awareness.getStates()) {
     if (awarenessClientId === binding.awareness.clientID) continue;
     if (!rawState || typeof rawState !== "object") continue;
     const state = rawState as Record<string, unknown>;
     const rawUser =
-      state.user && typeof state.user === "object" ? (state.user as Record<string, unknown>) : {};
-    const socketId = (
-      typeof rawUser.sessionToken === "string"
-        ? rawUser.sessionToken
-        : `awareness-${awarenessClientId}`
-    ) as SocketId;
+      state.user && typeof state.user === "object"
+        ? (state.user as Record<string, unknown>)
+        : {};
+    const socketId = (typeof rawUser.sessionToken === "string" ? rawUser.sessionToken : `awareness-${awarenessClientId}`) as SocketId;
     const pointer = cleanPointer(state.pointer);
-    const button = state.button === "down" || state.button === "up" ? state.button : undefined;
+    const button =
+      state.button === "down" || state.button === "up"
+        ? state.button
+        : undefined;
     const selectedElementIds = cleanSelection(state.selectedElementIds);
-    const color = presencePalette(
-      typeof rawUser.paletteSlot === "number" ? rawUser.paletteSlot : 3,
-    );
+    const color = presencePalette(typeof rawUser.paletteSlot === "number" ? rawUser.paletteSlot : 3);
     collaborators.set(socketId, {
       socketId,
       id: socketId,
@@ -247,13 +271,17 @@ export function bindExcalidrawPresence(options: {
         return;
       }
       if (pointerTimer === null) {
-        pointerTimer = scheduler.schedule(publishPointer, CURSOR_PUBLISH_MS - elapsed);
+        pointerTimer = scheduler.schedule(
+          publishPointer,
+          CURSOR_PUBLISH_MS - elapsed,
+        );
       }
     },
     updateSelection(selectedElementIds) {
       if (destroyed) return;
       const selection =
-        cleanSelection(selectedElementIds) ?? (Object.create(null) as CleanSelection);
+        cleanSelection(selectedElementIds) ??
+        (Object.create(null) as CleanSelection);
       if (sameSelection(lastSelection, selection)) return;
       lastSelection = selection;
       try {

@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MENU_SEPARATOR, Menu, type MenuEntry, type MenuItem } from "./Menu";
+import { MENU_SEPARATOR, Menu, deleteShortcut, menuEnterFrom, moveInMenu, revealMenuRow, type MenuEntry, type MenuItem } from "./Menu";
 import { Overlay } from "../Overlay";
 
 function Harness(props: { items: readonly MenuEntry[]; closeOnPick?: boolean; children?: ReactNode }) {
@@ -470,5 +470,86 @@ describe("Menu", () => {
       fireEvent.keyDown(input, { key: "Enter" });
       expect(submit).toHaveBeenCalledOnce();
     });
+  });
+});
+
+// The keys every menu shares, the Menu part and the editor menus alike.
+describe("moveInMenu", () => {
+  const labels = ["Text", "Heading 1", "Heading 2", "Duplicate", "Delete"];
+  it("wraps the arrows, jumps with Home and End, and finds the next row by its first letter", () => {
+    expect(moveInMenu("ArrowDown", 4, labels)).toBe(0);
+    expect(moveInMenu("ArrowUp", 0, labels)).toBe(4);
+    expect(moveInMenu("Home", 3, labels)).toBe(0);
+    expect(moveInMenu("End", 0, labels)).toBe(4);
+    expect(moveInMenu("h", 0, labels)).toBe(1);
+    expect(moveInMenu("h", 1, labels)).toBe(2);
+    expect(moveInMenu("D", 2, labels)).toBe(3);
+    expect(moveInMenu("d", 3, labels)).toBe(4);
+  });
+
+  it("answers null for other keys, a letter no row starts with, and an empty list", () => {
+    expect(moveInMenu("Enter", 0, labels)).toBeNull();
+    expect(moveInMenu(" ", 0, labels)).toBeNull();
+    expect(moveInMenu("z", 0, labels)).toBeNull();
+    expect(moveInMenu("ArrowDown", 0, [])).toBeNull();
+  });
+});
+
+describe("menuEnterFrom", () => {
+  it("starts the list 4px toward its trigger", () => {
+    expect(menuEnterFrom("below")).toEqual({ "--dohc-menu-from": "-4px" });
+    expect(menuEnterFrom("above")).toEqual({ "--dohc-menu-from": "4px" });
+    expect(menuEnterFrom("right")).toEqual({ "--dohc-menu-from": "0px", "--dohc-menu-from-x": "-4px" });
+    expect(menuEnterFrom("left")).toEqual({ "--dohc-menu-from": "0px", "--dohc-menu-from-x": "4px" });
+  });
+});
+
+describe("deleteShortcut", () => {
+  it("labels the key as the keyboard does: ⌫ on macOS, Del elsewhere", () => {
+    expect(deleteShortcut("darwin")).toEqual({ label: "⌫", keys: "Backspace" });
+    expect(deleteShortcut("win32")).toEqual({ label: "Del", keys: "Delete" });
+    expect(deleteShortcut("linux")).toEqual({ label: "Del", keys: "Delete" });
+  });
+});
+
+// jsdom has no layout: a 100px list with 4px padding over 28px rows.
+describe("revealMenuRow", () => {
+  function list() {
+    const element = document.createElement("div");
+    element.style.paddingTop = "4px";
+    element.style.paddingBottom = "4px";
+    Object.defineProperty(element, "clientHeight", { value: 100 });
+    document.body.append(element);
+    const rows = Array.from({ length: 8 }, (_, index) => {
+      const row = document.createElement("div");
+      Object.defineProperty(row, "offsetTop", { value: 4 + index * 28 });
+      Object.defineProperty(row, "offsetHeight", { value: 28 });
+      element.append(row);
+      return row;
+    });
+    return { element, rows };
+  }
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  it("scrolls just enough to show a row below or above the view, with the padding around it", () => {
+    const { element, rows } = list();
+    revealMenuRow(element, rows[7]);
+    // The last row ends at 228, plus 4px of padding: 232 - 100.
+    expect(element.scrollTop).toBe(132);
+    revealMenuRow(element, rows[6]);
+    expect(element.scrollTop).toBe(132);
+    revealMenuRow(element, rows[1]);
+    expect(element.scrollTop).toBe(28);
+    revealMenuRow(element, rows[0]);
+    expect(element.scrollTop).toBe(0);
+  });
+
+  it("shows a start element above the row too, such as its section label", () => {
+    const { element, rows } = list();
+    element.scrollTop = 132;
+    revealMenuRow(element, rows[4], rows[2]);
+    expect(element.scrollTop).toBe(56);
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useEffect, useRef, useState } from "react";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
@@ -46,6 +46,7 @@ export const SHELL_ERROR_MAX_CHARS = 500;
 export interface ShellError {
   tone?: "success";
   id: string;
+  title?: string;
   message: string;
   // Facts for a report, one "label: value" line each, such as the error as
   // it arrived. They go into Copy details, not the text a person reads.
@@ -67,6 +68,17 @@ export interface ShellError {
   // The toast was closed; the row in Notices stays until dismissed there.
   seen: boolean;
 }
+
+// The error hook a notice owner hands to a shared part that reports its own
+// failure, such as a copy the clipboard refused: `reportShellFailure`, for a
+// failure the part has already worded. Outside an owner, the part says it in
+// place only.
+export type ReportShellFailure = (failure: {
+  message: string;
+  cause?: unknown;
+  retry?: (() => void) | null;
+}) => void;
+export const ShellErrorReporter = createContext<ReportShellFailure | null>(null);
 
 export function useShellError(workspaceId: string) {
   const [shellErrors, setShellErrors] = useState<readonly ShellError[]>([]);
@@ -166,7 +178,7 @@ export function useShellError(workspaceId: string) {
       kind?: ShellErrorKind,
       identity?: string,
     ) => {
-      const { cause } = readError(error);
+      const { cause, title, words } = readError(error);
       const partial = error instanceof CreationPartialError ? error.partial : undefined;
       const details: ReadonlyArray<ErrorDetailField> = partial ? [
         ...partial.created.map((path): ErrorDetailField => ["Created", path, path.length]),
@@ -176,7 +188,8 @@ export function useShellError(workspaceId: string) {
         ["Next", partial.retry.instruction, partial.retry.instruction.length],
       ] : cause ? [["Cause", cause]] : [];
       push({
-        message: partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
+        ...(title ? { title } : {}),
+        message: title && words ? words : partial ? creationPartialNotice(partial) : withErrorWords(fallback, error),
         ...(partial ? { identity: partial.retry.recordId
           ? `record:${partial.retry.recordId}`
           : `form:${partial.created[0]!.split("/").slice(0, -1).join("/")}` } : identity !== undefined ? { identity } : {}),

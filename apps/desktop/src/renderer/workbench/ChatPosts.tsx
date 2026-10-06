@@ -1,6 +1,6 @@
 import { AgentBadge, useIsOwnAuthor } from "./AgentBadge";
 import { AutomationBadge } from "./AutomationBadge";
-import { Bookmark, CircleCheck, CircleHelp, Copy, FileText, TriangleAlert, Zap } from "lucide-react";
+import { Bookmark, CircleCheck, CircleHelp, FileText, TriangleAlert, Zap } from "lucide-react";
 import { memo, type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   ChannelThreadRecord,
@@ -14,8 +14,8 @@ import type {
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 import { basenameOf } from "../path";
 import { SkeletonRows } from "../ui/SkeletonRows";
-import { bridge } from "../bridge";
 import { formatChatTime } from "../time";
+import { CopyButton } from "../ui/CopyButton";
 import { ChatAvatar } from "./ChatAvatar";
 import {
   ChatFileIcon,
@@ -347,20 +347,13 @@ function RunChip(props: { run: ChatRunRecord }) {
                 {props.run.logPath ?? "No log path"}
               </code>
               {props.run.logPath ? (
-                <button
-                  type="button"
-                  data-testid="chats-run-copy-log"
-                  aria-label="Copy log path"
-                  title="Copy log path"
-                  onClick={() => {
-                    void bridge()
-                      .writeClipboardText({ text: props.run.logPath ?? "" })
-                      .catch(() => undefined);
-                  }}
-                  className="grid size-6 shrink-0 place-items-center rounded border border-line text-subtle hover:text-ink dohc-focus-visible"
-                >
-                  <Copy size={11} aria-hidden />
-                </button>
+                <CopyButton
+                  iconOnly
+                  testId="chats-run-copy-log"
+                  label="Copy log path"
+                  pinName
+                  getText={() => props.run.logPath ?? null}
+                />
               ) : null}
             </span>
           </span>

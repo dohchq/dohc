@@ -1,3 +1,4 @@
+import { activityPin } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { seedThroughDaemon } from "./helpers/daemonSeed";
@@ -161,7 +162,7 @@ test("switching A->B while panels load never shows A's history or chats in B", a
     expect(ipcTiming.ms).toBeLessThan(500);
 
     // --- Perf evidence: chats panel with 200 messages ---
-    await page.getByTestId("activity-explorer").click();
+    await page.getByTestId(activityPin("explorer")).click();
     await revealExplorerPath(page, "files/doc-000.md");
     await explorerRow(page, "files/doc-000.md").click();
     const chatStart = Date.now();
@@ -207,7 +208,7 @@ test("switching A->B while panels load never shows A's history or chats in B", a
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path^="files/doc-"]'),
     ).toHaveCount(0);
-    await page.getByTestId("activity-explorer").click();
+    await page.getByTestId(activityPin("explorer")).click();
     await revealExplorerPath(page, "b-note.md");
     await explorerRow(page, "b-note.md").click();
     await openFileChatsPanel(page);

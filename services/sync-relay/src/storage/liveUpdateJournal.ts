@@ -734,7 +734,8 @@ function readJournalCut(storage: StorageContext, document: LiveDocumentKey, expe
         ? { ...prior.binding, selectorPaths: [...prior.binding.selectorPaths] } : journalBindingFromRow(raw);
       previousBinding = { raw, binding };
       const row = journalRowWithBinding(storage.db, raw, binding, provenance.get(authorityInteger(raw.journal_cursor, 1)) ?? [], snapshots), receipt = row.admitted.metadata.accepted.receipt;
-      journalIntegrity(receipt.journalCursor > last && receipt.journalCursor <= (highWater ?? 0) && row.checkpoint === null);
+      journalIntegrity(receipt.journalCursor > last && receipt.journalCursor <= (highWater ?? 0) && row.checkpoint === null &&
+        row.admitted.metadata.checkpointCoverage === undefined);
       last = receipt.journalCursor; suffixBytes += row.admitted.updateBytes.byteLength;
       return { cursor: receipt.journalCursor, digest: receipt.updateDigest, bytes: row.admitted.updateBytes, metadata: row.admitted.metadata };
     });

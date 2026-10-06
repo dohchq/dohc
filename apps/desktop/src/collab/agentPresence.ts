@@ -20,7 +20,6 @@ export function agentPresenceClientId(workspaceId: string): string {
 export function resolveAgentPresenceActivity(
   peers: readonly AgentPresencePeer[],
 ): AgentPresenceActivity | null {
-  // The relay retained this marker only for the reserved client. Merge the owner-binding fix first.
   for (const peer of peers) {
     if (typeof peer.state !== "object" || peer.state === null) continue;
     const state = peer.state as { agent?: unknown; activity?: unknown };

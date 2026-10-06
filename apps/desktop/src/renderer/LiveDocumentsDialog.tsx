@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Overlay } from "./Overlay";
-import { CopyDetailsButton, errorDetails } from "./shell/copyDetails";
+import { errorDetails } from "./shell/copyDetails";
+import { CopyButton } from "./ui/CopyButton";
 import { EmptyState, SecondaryButton } from "./ui/controls";
 import { SkeletonLines } from "./ui/SkeletonRows";
 import { useRequestSequence } from "./useRequestSequence";
@@ -617,11 +618,12 @@ export function LiveDocumentsDialog({
                   >
                     Try again
                   </SecondaryButton>
-                  <CopyDetailsButton
+                  <CopyButton
                     iconOnly
+                    pinName
                     label={`Copy details for ${refusalLabel(row)}`}
-                    data-testid={`live-refusal-copy-${row.shareId}`}
-                    details={() => refusalDetails(row, workspaceId)}
+                    testId={`live-refusal-copy-${row.shareId}`}
+                    getText={() => refusalDetails(row, workspaceId)}
                   />
                 </li>
               ))}

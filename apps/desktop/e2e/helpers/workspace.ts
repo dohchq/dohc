@@ -1,3 +1,4 @@
+import { desktopPins, activityPin, chatsPanelTabPin } from "../../src/testPins";
 import { expect, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
@@ -368,7 +369,7 @@ export async function revealExplorerPath(
 // view back already open). aria-current="page" is exactly "history view
 // showing" — active view and visible panel.
 export async function openHistoryView(page: Page): Promise<void> {
-  const button = page.getByTestId("activity-history");
+  const button = page.getByTestId(activityPin("history"));
   if ((await button.getAttribute("aria-current")) !== "page") {
     await button.click();
   }
@@ -379,12 +380,12 @@ export async function openHistoryView(page: Page): Promise<void> {
 // persists in ui-state, so a relaunch may restore it already open) and lands
 // on the "This file" tab — the active file's linked chats.
 export async function openFileChatsPanel(page: Page): Promise<void> {
-  const panel = page.getByTestId("chats-panel");
+  const panel = page.getByTestId(desktopPins.chatsPanel);
   if (!(await panel.isVisible())) {
-    await page.getByTestId("titlebar-chats-sidebar").click();
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     await expect(panel).toBeVisible();
   }
-  await page.getByTestId("chats-panel-tab-file").click();
+  await page.getByTestId(chatsPanelTabPin("file")).click();
 }
 
 export async function expectVisibleContent(

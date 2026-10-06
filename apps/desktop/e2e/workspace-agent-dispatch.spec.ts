@@ -1,3 +1,4 @@
+import { desktopPins, activityPin, settingsNavPin } from "../src/testPins";
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -26,7 +27,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
     await openMyAgent(page);
-    await page.getByTestId("chats-panel").getByTestId("chats-add-agent-open").click();
+    await page.getByTestId(desktopPins.chatsPanel).getByTestId("chats-add-agent-open").click();
     await page.getByTestId("chats-add-agent-agent-name").fill("Nova");
     for (const name of ["Claude Code", "Codex"]) {
       await page.getByRole("button", { name, exact: true }).click();
@@ -35,7 +36,7 @@ test("installed tool cards save profiles, Check replies through PATH, and a grou
     }
     await page.getByTestId("chats-add-agent-submit").click();
     await expect(page.getByTestId("chats-add-agent")).toHaveCount(0);
-    await page.getByTestId("chats-panel").getByTestId("chats-channel").filter({ hasText: "general" }).click();
+    await page.getByTestId(desktopPins.chatsPanel).getByTestId("chats-channel").filter({ hasText: "general" }).click();
     await page.getByTestId("chats-new-thread-composer").fill("@agent check the exports");
     await page.getByTestId("chats-new-thread-composer").press("Enter");
     await expect(page.getByTestId("chats-message").filter({ hasText: REPORT })).toHaveCount(1);
@@ -95,7 +96,7 @@ async function openMyAgent(page: Page): Promise<void> {
     )
     .toBe(true);
 
-  await page.getByTestId("titlebar-chats-sidebar").click();
+  await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
   await expect(page.getByTestId("chats-view")).toBeVisible();
   await page.getByTestId("chats-my-agent").click();
   await expect(page.getByTestId("chats-channel-title")).toHaveText("My agent");
@@ -240,8 +241,8 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
-    await page.getByTestId("activity-settings").click();
-    await page.getByTestId("settings-nav-agents").click();
+    await page.getByTestId(activityPin("settings")).click();
+    await page.getByTestId(settingsNavPin("agents")).click();
     await page.getByTestId("runner-self-test-button").click();
     await expect(page.getByTestId("runner-self-test-result")).toHaveAttribute("data-state", "error");
     await expect(page.getByTestId("runner-self-test-result")).toHaveText("Test failed.");
@@ -261,10 +262,10 @@ test("failed runner tests stay readable above Settings and remain in Notices", a
     }
     await page.getByTestId("workspace-shell-error-copy").click();
     await expect.poll(() => desktop!.app.evaluate(({ clipboard }) => clipboard.readText())).toContain(reason);
-    await expect(page.getByTestId("settings-dialog")).toBeVisible();
+    await expect(page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
     await page.getByRole("button", { name: "Dismiss workspace error" }).click();
     await expect(toast).toHaveCount(0);
-    await expect(page.getByTestId("settings-dialog")).toBeVisible();
+    await expect(page.getByTestId(desktopPins.settingsDialog)).toBeVisible();
     await page.getByRole("button", { name: "Close settings" }).click();
     await page.getByTestId("notice-center-toggle").click();
     await expect(page.getByTestId("notice-center")).toContainText(reason);

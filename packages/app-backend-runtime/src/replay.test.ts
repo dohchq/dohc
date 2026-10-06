@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { replayThroughShadow } from "./replay.ts";
 
 it("rolls back canonical rows and cursor when the recovery commit fails",()=>{
@@ -73,5 +73,26 @@ it("reports its step while it copies and rebuilds rows, so the host sees progres
     // 2,500 rows report each phase again after rows 1,000 and 2,000.
     expect(steps.filter(step=>step==="copying the dataset for the replay")).toHaveLength(3);
     expect(steps.filter(step=>step==="rebuilding the dataset from the replay copy")).toHaveLength(3);
+  }finally{source.close();target.close();rmSync(directory,{recursive:true,force:true});}
+});
+
+
+it("defers a shadow event's foreign-key scan to its replay chunk",()=>{
+  const directory=mkdtempSync(join(tmpdir(),'dohc-replay-chunk-'));
+  const source=new DatabaseSync(':memory:'),target=new DatabaseSync(':memory:');
+  try{
+    const schema="CREATE TABLE parents(id INTEGER PRIMARY KEY); CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT UNIQUE,parent INTEGER REFERENCES parents(id)); INSERT INTO parents VALUES(1); INSERT INTO items VALUES(1,'a',1),(2,'b',1);";
+    source.exec(schema);target.exec(schema);
+    const session=source.createSession();
+    try{
+      source.exec("UPDATE items SET value='temp' WHERE id=1; UPDATE items SET value='a' WHERE id=2; UPDATE items SET value='b' WHERE id=1;");
+      const prepare=vi.spyOn(target,'prepare');
+      replayThroughShadow(target,{directory,tables:['parents','items'],changeset:session.changeset(),databaseBytes:16*1024*1024,checkForeignKeys:false},()=>{});
+      expect(prepare.mock.calls.filter(([sql])=>sql==='PRAGMA foreign_key_check')).toHaveLength(0);
+      expect(target.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+      prepare.mockRestore();
+    }finally{session.close();}
+    expect(target.prepare('SELECT id,value FROM items ORDER BY id').all()).toEqual([{id:1,value:'b'},{id:2,value:'a'}]);
+    expect(readdirSync(directory)).toEqual([]);
   }finally{source.close();target.close();rmSync(directory,{recursive:true,force:true});}
 });

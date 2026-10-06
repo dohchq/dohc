@@ -328,6 +328,16 @@ describe("executeCli", () => {
       stdout: "",
       stderr: "dohc: change not found: moment-9\n",
     });
+    // Unreadable History rules: the list refuses instead of saying there is no History.
+    const hidden = { ok: false, status: "policy-unreadable", unreadable: [".dohc/visibility.toml"],
+      reason: "History is hidden because dohc can't read .dohc/visibility.toml" };
+    for (const argv of [["history", "list"], ["history", "list", "--json"]]) {
+      expect(await executeCli({ argv, env: {}, request: async () => hidden })).toEqual({
+        exitCode: 1,
+        stdout: "",
+        stderr: "dohc: History is hidden because dohc can't read .dohc/visibility.toml\n",
+      });
+    }
   });
 
   it("lists an automation's runs and shows what one run's steps changed", async () => {

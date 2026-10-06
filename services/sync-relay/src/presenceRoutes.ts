@@ -131,37 +131,41 @@ export function createPresenceRoutes(
   const prepareSnapshot = (snapshot: PresenceSnapshot, workspaceId: string, topic: string) => {
     const cached = preparedSnapshots.get(snapshot);
     if (cached?.current()) return cached.value;
-    const current = storage.captureReadRevisionMatches();
-    const resolver = chatResolverFor(workspaceId);
-    const thread = parseChatThreadTopic(topic);
-    const chatAttribution =
-      parsePresenceObjectTopic(topic) === null &&
-      (thread !== null
-        ? resolver.threadChannelWireId(thread) != null || resolver.threadFileBinding(thread) != null
-        : resolver.channelKind(topic) != null);
-    const peers: PreparedPresenceSnapshot["peers"] = [];
-    for (const peer of snapshot.peers) {
-      try {
-        const isOwner = storage.workspaceIsOwnedBy(workspaceId, peer.userId);
-        let canEdit = isOwner;
-        if (peer.shareId) {
-          const auth = authorizeShare(peer.shareId, peer.userId, topic);
-          if (auth.share.workspaceId !== workspaceId) continue;
-          canEdit = fileSideOf(auth.effectiveSelector)?.access === "edit";
-        } else if (!isOwner) continue;
-        peers.push({
-          peer,
-          isOwner,
-          state: presenceStateForAccess(peer.state, canEdit),
-        });
-      } catch {
-        // A peer whose grant or selected path no longer admits it is absent.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const current = storage.captureReadRevisionMatches();
+      const resolver = chatResolverFor(workspaceId);
+      const thread = parseChatThreadTopic(topic);
+      const chatAttribution =
+        parsePresenceObjectTopic(topic) === null &&
+        (thread !== null
+          ? resolver.threadChannelWireId(thread) != null || resolver.threadFileBinding(thread) != null
+          : resolver.channelKind(topic) != null);
+      const peers: PreparedPresenceSnapshot["peers"] = [];
+      for (const peer of snapshot.peers) {
+        try {
+          const isOwner = storage.workspaceIsOwnedBy(workspaceId, peer.userId);
+          let canEdit = isOwner;
+          if (peer.shareId) {
+            const auth = authorizeShare(peer.shareId, peer.userId, topic);
+            if (auth.share.workspaceId !== workspaceId) continue;
+            canEdit = fileSideOf(auth.effectiveSelector)?.access === "edit";
+          } else if (!isOwner) continue;
+          peers.push({
+            peer,
+            isOwner,
+            state: presenceStateForAccess(peer.state, canEdit),
+          });
+        } catch {
+          // A peer whose grant or selected path no longer admits it is absent.
+        }
+      }
+      const value = { peers, chatAttribution };
+      if (current()) {
+        preparedSnapshots.set(snapshot, { value, current });
+        return value;
       }
     }
-    const value = { peers, chatAttribution };
-    if (!current()) throw notFound();
-    preparedSnapshots.set(snapshot, { value, current });
-    return value;
+    throw notFound();
   };
 
   const respondPresence = async (
@@ -189,6 +193,13 @@ export function createPresenceRoutes(
         const input = await readJsonObject(request);
         viewerClientId = parseString(input.clientId, "clientId", MAX_CLIENT_ID_CHARS);
         canEdit = authorize();
+        // Reserved agent identities belong to the authenticated workspace owner.
+        if (
+          viewerClientId.startsWith("agent:") &&
+          (viewerClientId !== `agent:${workspaceId}` || !storage.workspaceIsOwnedBy(workspaceId, userId))
+        ) {
+          throw notFound();
+        }
         if (input.leave === true)
           snapshot = presence.leave(scopeKey, userId, viewerClientId, nowMs());
         else {

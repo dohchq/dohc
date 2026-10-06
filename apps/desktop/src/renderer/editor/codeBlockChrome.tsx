@@ -3,6 +3,37 @@ import { stopEditorMouseEvent, isCodeBlockNode } from "./pmHelpers";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, TextSelection, type EditorState } from "@tiptap/pm/state";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
+import type { ReportShellFailure } from "../shell/useShellError";
+import {
+  COPY_TILE_CLASS,
+  COPY_TILE_STATE_CLASS,
+  COPY_WORDS,
+  createCopy,
+  type CopyFeedback,
+} from "../ui/CopyButton";
+
+type ErrorReporter = () => ReportShellFailure | null;
+
+// The copy tile's three icons as lucide draws them (Copy, Check,
+// TriangleAlert), for a toolbar ProseMirror owns and React does not render.
+const COPY_ICON_MARKUP: Record<CopyFeedback | "rest", string> = {
+  rest: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  copied: '<path d="M20 6 9 17l-5-5"/>',
+  failed: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+};
+
+function copyIcon(feedback: CopyFeedback | null): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  for (const [name, value] of Object.entries({
+    width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor",
+    "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true",
+  })) svg.setAttribute(name, value);
+  svg.innerHTML = COPY_ICON_MARKUP[feedback ?? "rest"];
+  return svg;
+}
+
+// What each toolbar's copy needs when ProseMirror destroys the toolbar.
+const disposeToolbar = new WeakMap<Node, () => void>();
 
 const CODE_LANGUAGE_OPTIONS = [
   { value: "", label: "Plain text" },
@@ -164,6 +195,7 @@ function buildCodeLanguageDecorations(
   doc: ProseMirrorNode,
   owners: Map<number, string>,
   nextOwnerKey: () => string,
+  report: ErrorReporter,
 ): DecorationSet {
   const decorations: Decoration[] = [];
   doc.descendants((node, pos) => {
@@ -246,37 +278,54 @@ function buildCodeLanguageDecorations(
           });
           select.addEventListener("change", commit);
 
+          // The shared copy tile, drawn here because React does not render
+          // this toolbar. Its name stays "copy code".
           const copy = document.createElement("button");
           copy.type = "button";
-          copy.className = "dohc-code-copy-btn";
           copy.setAttribute("aria-label", "copy code");
-          copy.textContent = "copy";
+          const status = document.createElement("span");
+          status.setAttribute("role", "status");
+          status.setAttribute("aria-live", "polite");
+          status.className = "sr-only";
+          let announce: ReturnType<typeof setTimeout> | null = null;
+          const draw = (feedback: CopyFeedback | null) => {
+            copy.className = `dohc-code-copy-btn ${COPY_TILE_CLASS} ${COPY_TILE_STATE_CLASS[feedback ?? "rest"]}`;
+            copy.title = feedback ? COPY_WORDS[feedback] : "Copy code";
+            copy.replaceChildren(copyIcon(feedback));
+            status.textContent = "";
+            if (announce !== null) clearTimeout(announce);
+            announce = feedback
+              ? setTimeout(() => {
+                  status.textContent = COPY_WORDS[feedback];
+                }, 0)
+              : null;
+          };
+          const action = createCopy({
+            // The widget key uses block ownership and language, not code
+            // text, so ProseMirror reuses this DOM (and its captured `node`)
+            // across pure text edits. Read the live node at click time so
+            // the copy never writes pre-edit content.
+            getText: () => {
+              const blockPos = getPos();
+              const current = blockPos === undefined ? null : view.state.doc.nodeAt(blockPos);
+              return current && isCodeBlockNode(current) ? current.textContent : node.textContent;
+            },
+            report,
+            show: draw,
+          });
+          draw(null);
           copy.addEventListener("mousedown", stopEditorMouseEvent);
           copy.addEventListener("click", (event) => {
             stopEditorMouseEvent(event);
-            // The widget key uses block ownership and language, not code text, so
-            // ProseMirror reuses this DOM (and its captured `node`) across
-            // pure text edits. Read the live node at click time so "copy"
-            // never writes pre-edit content.
-            const blockPos = getPos();
-            const current =
-              blockPos === undefined ? null : view.state.doc.nodeAt(blockPos);
-            const text =
-              current && isCodeBlockNode(current)
-                ? current.textContent
-                : node.textContent;
-            const write = navigator.clipboard?.writeText(text);
-            if (!write) return;
-            void write.then(() => {
-              copy.textContent = "copied";
-              window.setTimeout(() => {
-                copy.textContent = "copy";
-              }, 1200);
-            });
+            void action.copy();
           });
 
           left.append(dot, select);
-          toolbar.append(left, copy);
+          toolbar.append(left, copy, status);
+          disposeToolbar.set(toolbar, () => {
+            action.dispose();
+            if (announce !== null) clearTimeout(announce);
+          });
           return toolbar;
         },
         {
@@ -286,6 +335,7 @@ function buildCodeLanguageDecorations(
           ownerKey,
           ignoreSelection: true,
           stopEvent: () => true,
+          destroy: (toolbar) => disposeToolbar.get(toolbar)?.(),
         },
       ),
     );
@@ -294,20 +344,21 @@ function buildCodeLanguageDecorations(
   return DecorationSet.create(doc, decorations);
 }
 
-export function makeCodeBlockChromePlugin() {
+// `report` reaches the shell's error hook, for a copy the clipboard refused.
+export function makeCodeBlockChromePlugin(report: ErrorReporter = () => null) {
   let nextId = 0;
   const nextOwnerKey = () => String(nextId++);
   return new Plugin({
     key: codeLanguageKey,
     state: {
       init(_, instance) {
-        return buildCodeLanguageDecorations(instance.doc, new Map(), nextOwnerKey);
+        return buildCodeLanguageDecorations(instance.doc, new Map(), nextOwnerKey, report);
       },
       apply(tr, old) {
         if (!tr.docChanged && !tr.getMeta(codeLanguageKey)) {
           return old.map(tr.mapping, tr.doc);
         }
-        return buildCodeLanguageDecorations(tr.doc, mapWidgetOwners(old, tr.mapping), nextOwnerKey);
+        return buildCodeLanguageDecorations(tr.doc, mapWidgetOwners(old, tr.mapping), nextOwnerKey, report);
       },
     },
     view(view) {

@@ -1,3 +1,4 @@
+import { activityPin, editorTabTestId } from "../src/testPins";
 import type { LiveAuthorSnapshot } from "@dohc/live-session-contract/live-authorship";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -116,7 +117,7 @@ function settlementState(temp: TempWorkspace) {
 }
 
 async function openDocument(page: Page): Promise<void> {
-  const explorer = page.getByTestId("activity-explorer");
+  const explorer = page.getByTestId(activityPin("explorer"));
   if ((await explorer.getAttribute("aria-current")) !== "page") await explorer.click();
   await revealExplorerPath(page, PATH);
   await explorerRow(page, PATH).click();
@@ -382,7 +383,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await writeWorkspaceFiles(ownerTemp, [{ path: PATH, contents: SEED }, { path: HIDDEN, contents: `${HIDDEN_TEXT}\n` }]);
       owner = await launch(ownerTemp);
       const opened = await openWorkspaceFromFirstRun(owner.page, ownerTemp);
-      await owner.page.getByTestId("activity-cloud").click();
+      await owner.page.getByTestId(activityPin("cloud")).click();
       await expect(owner.page.getByTestId("cloud-sync-panel")).toBeVisible();
       const ownerPage = await ownerBrowser!.newPage();
       const approval = await openDesktopApproval(owner, ownerPage, origin);
@@ -460,7 +461,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       // the close has something to fold.
       expect(before).toMatchObject({ regime: "replicated" });
       expect(before!.head).toBeGreaterThan(before!.snapshot);
-      const tab = page.getByTestId(`tab-${PATH}`);
+      const tab = page.getByTestId(editorTabTestId(PATH));
       await tab.hover();
       await tab.getByRole("button", { name: /^Close / }).click();
       await expect(tab).toHaveCount(0);

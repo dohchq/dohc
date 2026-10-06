@@ -113,7 +113,7 @@ export function sanitizePresenceState(
   const state: Record<string, unknown> = {};
   if (typeof r.typing === "boolean") state.typing = r.typing;
   if (r.state === "viewing" || r.state === "typing") state.state = r.state;
-  // The reserved-client spoof is owned by fix/agent-presence-owner.
+  // The routes admit reserved-client markers only for workspace owners.
   if (reservedAgent && r.agent === true && (r.activity === "working" || r.activity === "idle")) {
     state.agent = true;
     state.activity = r.activity;

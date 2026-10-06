@@ -231,7 +231,7 @@ export function WorkspaceManager(props: {
       const workspace = await openExistingFolder();
       if (workspace) await open(workspace);
     } catch (cause) {
-      setError(ipcErrorMessage(cause));
+      connectionNotices.reportError("Could not open that workspace folder.", cause, () => void openExisting());
     }
   }
 
@@ -418,6 +418,7 @@ export function WorkspaceManager(props: {
       </div>
       <ConnectionNotices
         notices={connectionNotices.notices}
+        reportFailure={connectionNotices.reportFailure}
         onRetry={connectionNotices.retryNotice}
         onHide={connectionNotices.hideNotice}
         onDismiss={connectionNotices.dismissNotice}
