@@ -80,6 +80,8 @@ Combined site changes retain both renderer compatibility files and those proofs.
 Desktop process, storage, shared, and unclassified inputs retain the complete desktop suite, packaging tests, and proofs.
 Isolated renderer changes run their tracked test consumers and the site suite when every dependency stays within that boundary.
 The runner keeps persistence smoke and the Windows pixel gallery for those changes.
+Affected onboarding surfaces also retain the onboarding proof and its Postgres setup.
+The runner checks literal test IDs in the onboarding spec and its helpers against affected renderer consumers.
 Unknown imports, native resources, uncovered sources, and consumers outside that boundary retain broader selection.
 Desktop renderer changes, and changes to the states page itself, also run the `@states-page` pixel gallery on Windows, where its baselines were taken.
 Desktop-only changes run the Y.Doc compatibility files that import desktop code.
@@ -100,6 +102,8 @@ Selected integration suites must run; unavailable prerequisites cause failure ra
 The native self-host editing proof checks the prepared engine and its complete delivery evidence when selected.
 The Rust gate uses the repository build budget and checks its summary verdict.
 On the shared Windows host, one full PR verification runs at a time. Full runs wait in FIFO order.
+Each PR run owns its checkout until cleanup and receipt writing finish.
+Another PR run in that checkout fails before installation or queue admission and reports the owner.
 Warm, narrow JavaScript plans can use one separate light lane beside the full lane.
 Light admission requires at most two audited Vitest suites, no Rust, native preparation, services, browser proofs, or desktop scripts.
 The site suite and its selected desktop renderer compatibility files qualify. Complete desktop suites do not.
@@ -124,6 +128,10 @@ A cold history has no estimate. Estimates do not reject or reorder work.
 Full runs wait up to six hours. A live holder keeps its slot even if its heartbeat stops; investigate its recorded PID before changing its resources.
 Use verification queues for PR checks. A verification slot does not provide an idle host for benchmarks.
 Performance measurements must record concurrent host work and use the shared build budget when running Cargo.
+The live-authorship profiling command uses a separate single owner and creates no PR queue ticket.
+It defers when registered gates or builds hold or wait for slots.
+If registered work arrives during measurement, it stops its own child and records the run as failed.
+Its host context covers registered lanes and does not prove that the host was otherwise idle.
 
 The full lane count defaults to one. To compare one and two lanes, use an isolated root and explicit trial flags in PowerShell:
 
@@ -177,6 +185,8 @@ Do not add step durations to estimate elapsed time.
 
 `pnpm test` builds the app runtime before testing packages.
 Repository checks run beside at most two package commands.
+The complete repository suite runs at most two independent fixture files at once.
+Repository source guards retain their sequential schedule.
 Isolated desktop script tests then use the repository lane.
 PR verification then reuses that lane for selected integration proofs after every selected database package finishes.
 When proofs are selected, desktop and database package tests start first so proofs can overlap the remaining package tests.
