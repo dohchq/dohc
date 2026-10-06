@@ -82,6 +82,11 @@ opt-level = 1
 debug-assertions = true
 overflow-checks = true
 
+[profile.test.package.dohc-engine-files]
+opt-level = 1
+debug-assertions = true
+overflow-checks = true
+
 [profile.test.package.serde_json]
 opt-level = 2
 debug-assertions = true

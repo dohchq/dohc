@@ -18,8 +18,15 @@ if (separator !== 1 || !/^[a-z0-9-]+$/.test(label ?? "") || args.length < 3) {
   throw new Error("Use run-rust-profile.mjs <label> -- <nextest selection arguments>.");
 }
 const selection = args.slice(separator + 1);
-if (selection.some(arg => /^(--target(?:-dir)?|--manifest-path|--profile|--cargo-profile|--test-threads|--no-capture|--config)(=|$)/.test(arg))) {
-  throw new Error("Keep the checkout target, profile, capture, and parallelism under the profiling runner's control.");
+const valuedFlags = new Set(["-p", "--package", "--test", "--filter-expr"]);
+for (let index = 0; index < selection.length; index += 1) {
+  const flag = selection[index];
+  if (flag === "--lib") continue;
+  if (!valuedFlags.has(flag)) {
+    throw new Error(`Unsupported profiling selection flag: ${flag}. Use -p, --package, --lib, --test, or --filter-expr.`);
+  }
+  const value = selection[++index];
+  if (!value || value.startsWith("-")) throw new Error(`Missing value for ${flag}.`);
 }
 const output = join(repoRoot, ".agent-artifacts/rust-profile", `${new Date().toISOString().replaceAll(":", "-")}-${label}`);
 mkdirSync(output, { recursive: true });
@@ -40,15 +47,19 @@ try {
   await withBuildBudget(async env => {
     await cancellation.checkpoint();
     env.CARGO_INCREMENTAL = "0";
-    env.CARGO_BUILD_JOBS = String(Math.min(8, Number(env.CARGO_BUILD_JOBS) || 8));
-    env.RUST_TEST_THREADS = "8";
-    env.NEXTEST_TEST_THREADS = "8";
+    for (const key of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) {
+      const cap = Number(env[key]);
+      env[key] = String(Number.isInteger(cap) && cap > 0 ? Math.min(8, cap) : 8);
+    }
     env.DOHC_TEST_SCRATCH_ROOT = scratch;
     env.DOHC_RUST_PROFILE = "1";
     report.environment = Object.fromEntries(Object.entries(env).filter(([key]) => /^(CARGO_(INCREMENTAL|BUILD_JOBS|TARGET_DIR|PROFILE_)|RUST_TEST_THREADS|NEXTEST_TEST_THREADS|DOHC_RUST_PROFILE)/.test(key)));
     mkdirSync(scratch, { recursive: true });
     writeFileSync(join(scratch, SCRATCH_SENTINEL), label);
-    const probe = await run("cargo", ["rustc", "--locked", "-p", "dohc-engine-protocol", "--lib", "--profile", "check", "--", "--print", "cfg"], { env, log: join(output, "native.log") });
+    const nativeStarted = Date.now();
+    report.nativeProbe = { log: join(output, "native.log") };
+    const probe = await run("cargo", ["rustc", "--locked", "-p", "dohc-engine-protocol", "--lib", "--profile", "check", "--", "--print", "cfg"], { env, log: report.nativeProbe.log, onSpawn: child => { report.nativeProbe.pid = child.pid; save(); } });
+    report.nativeProbe.seconds = (Date.now() - nativeStarted) / 1000;
     report.native = verifyNativeTarget({ runProbe: () => ({ status: probe.code, stdout: probe.stdout, stderr: probe.stderr }) });
     if (!report.native.ok) throw new Error(report.native.reason);
     report.readings.push({ step: "native", state: tree() });

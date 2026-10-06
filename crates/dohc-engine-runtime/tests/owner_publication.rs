@@ -511,11 +511,11 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
             deliver_declared(&handle, &f.binding, cursor, &remote_bytes, large_agent(999)).await;
         assert!(matches!(result, ApplicationResult::Applied(..)));
         if cursor % 100 == 0 {
-            mark("rival-refusal");
+            mark("periodic-settlement-start");
             let settled = f.settle(&handle, Some(receipt)).await;
             assert!(!f.file().contains(LOCAL));
             assert!(f.file().contains(REMOTE));
-            mark("fill-capacity");
+            mark("periodic-settlement-complete");
             let moments = f.store.table_row_count("moments").unwrap();
             if let Some((moment, count)) = &accepted_head {
                 assert_eq!(
@@ -568,6 +568,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         }
     };
     assert!(admitted > 1);
+    mark("fill-capacity");
 
     // The private edit's native sequence has no application. Settling the
     // accepted prefix leaves it out of the file and the moment.
@@ -610,6 +611,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
             .content
             .contains(LOCAL)
     );
+    mark("rival-refusal");
     std::fs::write(f.root.path().join(&f.binding.current_path), preimage).unwrap();
     let settled = f.settle(&handle, terminal.clone()).await;
     assert!(settled.materialized);
