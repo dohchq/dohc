@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { checkIpcSites, extractIpcSites } from "./check-ipc-sites.mjs";
 
@@ -9,12 +10,10 @@ const preload = "apps/desktop/src/preload.ts";
 const main = "apps/desktop/src/main.ts";
 const registrar = "apps/desktop/src/ipc/exampleIpc.ts";
 const root = resolve(import.meta.dirname, "..");
-const oldSite = preload + " | preload | CHANNELS.old";
+const oldSite = preload + " | CHANNELS.old";
 
 function fixture(t, sources = {}) {
-  const artifacts = join(root, ".agent-artifacts");
-  mkdirSync(artifacts, { recursive: true });
-  const dir = mkdtempSync(join(artifacts, "u3a-ipc-sites-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "dohc-ipc-sites-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const write = (path, source) => {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
@@ -69,7 +68,7 @@ for (const [path, expression] of [
     const { dir } = fixture(t, { [path]: expression });
     const { failures } = checkIpcSites(dir, { sites: [oldSite] });
     assert.equal(failures.length, 1);
-    assert.match(failures[0], /main.*new hand-written IPC site/u);
+    assert.match(failures[0], /new hand-written IPC site/u);
   });
 }
 
@@ -84,7 +83,7 @@ test("rejects an added invokeParsed helper call", t => {
   const helper = 'async function invokeParsed(channel: string, schema: Schema) { return schema.parse(await ipcRenderer.invoke(channel)); }';
   const { dir, write } = fixture(t, { [preload]: helper + ' invokeParsed(CHANNELS.old, Schema);' });
   const inventory = { sites: extractIpcSites(preload, helper + ' invokeParsed(CHANNELS.old, Schema);').map(site => site.fingerprint) };
-  assert.deepEqual(inventory.sites, [preload + " | preload | ipcRenderer.invoke(channel)@invokeParsed", oldSite]);
+  assert.deepEqual(inventory.sites, [preload + " | invokeParsed forwards channel to ipcRenderer.invoke", oldSite]);
   write(preload, helper + ' invokeParsed(CHANNELS.new, Schema);');
   const { failures } = checkIpcSites(dir, inventory);
   assert.equal(failures.length, 2);
@@ -109,7 +108,7 @@ test("expands loop channels and rejects an added channel", t => {
   const loop = channels => 'for (const [channel, stop] of [' + channels + '] as const) { registerHandler(channel, handler); }';
   const before = loop('[CHANNELS.stop, true], [CHANNELS.resume, false]');
   const fingerprints = extractIpcSites(registrar, before).map(site => site.fingerprint);
-  assert.deepEqual(fingerprints, [registrar + " | main | CHANNELS.stop", registrar + " | main | CHANNELS.resume"]);
+  assert.deepEqual(fingerprints, [registrar + " | CHANNELS.stop", registrar + " | CHANNELS.resume"]);
   const { dir } = fixture(t, { [registrar]: loop('[CHANNELS.stop, true], [CHANNELS.new, false]') });
   const { failures } = checkIpcSites(dir, { sites: [oldSite, ...fingerprints] });
   assert.equal(failures.length, 2);
@@ -125,7 +124,7 @@ test("rejects an additional call to an already inventoried channel", t => {
 
 test("limits extraction to the declared production IPC files", () => {
   assert.deepEqual(extractIpcSites("apps/desktop/src/ipc/exampleIpc.test.ts", "registerHandler(CHANNELS.new, handler);"), []);
-  assert.deepEqual(extractIpcSites("apps/desktop/src/ipc/operationTable.ts", "ipcMain.handle(channel, handler);"), []);
+  assert.deepEqual(extractIpcSites("apps/desktop/src/renderer/bridge.ts", "ipcRenderer.invoke(CHANNELS.new);"), []);
 });
 
 test("rejects malformed and duplicate inventories", t => {
@@ -138,14 +137,14 @@ test("rejects malformed and duplicate inventories", t => {
 test("recognizes bracket access and explicit type arguments", () => {
   const source = 'function invokeParsed(channel: string) { return ipcRenderer["invoke"](channel); } invokeParsed<Schema>(CHANNELS.new);';
   assert.deepEqual(extractIpcSites(preload, source).map(site => site.fingerprint), [
-    preload + " | preload | ipcRenderer.invoke(channel)@invokeParsed", preload + " | preload | CHANNELS.new",
+    preload + " | invokeParsed forwards channel to ipcRenderer.invoke", preload + " | CHANNELS.new",
   ]);
-  assert.deepEqual(extractIpcSites(main, 'ipcMain["handle"](CHANNELS.new, handler);').map(site => site.fingerprint), [main + " | main | CHANNELS.new"]);
+  assert.deepEqual(extractIpcSites(main, 'ipcMain["handle"](CHANNELS.new, handler);').map(site => site.fingerprint), [main + " | CHANNELS.new"]);
 });
 
 test("expands a direct channel array", () => {
   assert.deepEqual(extractIpcSites(registrar, 'for (const channel of [CHANNELS.a, CHANNELS.b]) registerHandler(channel, handler);').map(site => site.fingerprint), [
-    registrar + " | main | CHANNELS.a", registrar + " | main | CHANNELS.b",
+    registrar + " | CHANNELS.a", registrar + " | CHANNELS.b",
   ]);
 });
 
@@ -167,4 +166,112 @@ test("source and full repository verification include the check and fixtures", (
   assert.ok(scripts["test:repo:source"].includes("node scripts/check-ipc-sites.mjs &&"));
   assert.ok(scripts["test:repo:source"].includes("scripts/check-ipc-sites.test.mjs"));
   assert.ok(scripts["test:repo"].startsWith("pnpm test:repo:source &&"));
+});
+
+test("regression: tuple wrappers, constants, spreads, and unresolved rows retain sites", () => {
+  const rows = [
+    '[CHANNELS.new, true] as const',
+    '[CHANNELS.new, true] satisfies Row',
+    '([CHANNELS.new, true])',
+    'row',
+    '[...channelTuple]',
+    '...rows',
+    '...unknownRows',
+  ];
+  const results = rows.map(row => extractIpcSites(registrar,
+    'const channelTuple = [CHANNELS.new, true] as const; const row = channelTuple; const rows = [row]; for (const [channel, stop] of ['
+    + row + '] as const) registerHandler(channel, handler);').map(site => site.fingerprint.split(' | ').at(-1)));
+  assert.deepEqual(results.slice(0, -1), rows.slice(0, -1).map(() => ['CHANNELS.new']));
+  assert.match(results.at(-1)[0], /^collection/u);
+  assert.equal(results.at(-1).length, 1);
+  assert.deepEqual(extractIpcSites(registrar, 'const rows = [[CHANNELS.new, true]] as const; for (const [channel, stop] of (rows satisfies Rows)) registerHandler(channel, handler);').map(site => site.fingerprint), [registrar + ' | CHANNELS.new']);
+  const unknown = value => extractIpcSites(registrar,
+    'const rows = makeRows(' + value + '); for (const [channel, stop] of rows) registerHandler(channel, handler);');
+  assert.equal(unknown('CHANNELS.a').length, 1);
+  assert.notDeepEqual(unknown('CHANNELS.a'), unknown('CHANNELS.b'));
+  const mixed = value => extractIpcSites(registrar,
+    'for (const [channel, stop] of [[CHANNELS.old, true], makeRow(' + value + ')]) registerHandler(channel, handler);');
+  assert.equal(mixed('CHANNELS.a').length, 2);
+  assert.notDeepEqual(mixed('CHANNELS.a'), mixed('CHANNELS.b'));
+  const tupleSpread = value => extractIpcSites(registrar,
+    'for (const [channel, stop] of [[...makeTuple(' + value + ')]]) registerHandler(channel, handler);');
+  assert.equal(tupleSpread('CHANNELS.a').length, 1);
+  assert.notDeepEqual(tupleSpread('CHANNELS.a'), tupleSpread('CHANNELS.b'));
+  const indirect = value => extractIpcSites(registrar,
+    'const inputs = [' + value + ']; const rows = inputs.map(makeRow); for (const [channel] of rows) registerHandler(channel, handler);');
+  assert.equal(indirect('CHANNELS.a').length, 1);
+  assert.notDeepEqual(indirect('CHANNELS.a'), indirect('CHANNELS.b'));
+});
+
+test("regression: boundary and one-shot registrations are hand sites", () => {
+  const results = ['operationBoundary.handle', 'ipcMain.handleOnce'].map(callee =>
+    extractIpcSites(main, 'const operationBoundary = { handle: handleIpc }; ' + callee + '(CHANNELS.new, handler);').map(site => site.fingerprint.split(' | ').at(-1)));
+  assert.deepEqual(results, [['CHANNELS.new'], ['CHANNELS.new']]);
+});
+
+test("regression: invoke normalization follows transparent expressions and local aliases", () => {
+  const sources = [
+    '(ipcRenderer.invoke)(CHANNELS.new);',
+    '(ipcRenderer).invoke(CHANNELS.new);',
+    'ipcRenderer?.invoke(CHANNELS.new);',
+    '(ipcRenderer as X).invoke(CHANNELS.new);',
+    '(<X>ipcRenderer).invoke(CHANNELS.new);',
+    'ipcRenderer!.invoke?.(CHANNELS.new);',
+    'const renderer = ipcRenderer; const r = renderer; r["invoke"](CHANNELS.new);',
+    'const r = ipcRenderer; r.invoke(CHANNELS.new);',
+    'const { invoke } = ipcRenderer; invoke(CHANNELS.new);',
+    'const { invoke: request } = ipcRenderer; request(CHANNELS.new);',
+    'const request = ipcRenderer.invoke.bind(ipcRenderer); request(CHANNELS.new);',
+    '(ipcRenderer.invoke.bind(ipcRenderer))(CHANNELS.new);',
+  ];
+  assert.deepEqual(sources.map(source => extractIpcSites(preload, source)
+    .map(site => site.fingerprint.split(' | ').at(-1))), sources.map(() => ['CHANNELS.new']));
+});
+
+test("regression: inline and constant table transports are exempt only when forwarding", () => {
+  for (const transport of [
+    '(channel, payload) => ipcRenderer.invoke(channel, payload)',
+    'function(channel, payload) { return ipcRenderer.invoke(channel, payload); }',
+  ]) {
+    assert.deepEqual(extractIpcSites(preload, 'operationBridge(ops, ' + transport + ');'), []);
+    assert.deepEqual(extractIpcSites(preload, 'const transport = ' + transport + '; operationBridge(ops, transport);'), []);
+    assert.deepEqual(extractIpcSites(preload, 'operationBridge(ops, '
+      + transport.replace('invoke(channel', 'invoke(CHANNELS.new') + ');').map(site => site.fingerprint), [preload + ' | CHANNELS.new']);
+    assert.equal(extractIpcSites(preload, 'const transport = ' + transport
+      + '; operationBridge(ops, transport); transport(CHANNELS.new);').length, 1);
+  }
+});
+
+test("regression: moved preload and registrar modules remain in the scanned set", t => {
+  const paths = ['apps/desktop/src/bridge/transport.ts', 'apps/desktop/src/ipc/settings/handlers.ts'];
+  const { dir } = fixture(t, {
+    [paths[0]]: 'ipcRenderer.invoke(CHANNELS.new);',
+    [paths[1]]: 'registerHandler(CHANNELS.new, handler);',
+  });
+  const inventory = { sites: extractIpcSites(preload, 'ipcRenderer.invoke(CHANNELS.old);').map(site => site.fingerprint) };
+  const { failures, sites } = checkIpcSites(dir, inventory);
+  assert.equal(failures.length, 2);
+  assert.equal(sites.length, 3);
+  for (const path of paths) assert.ok(failures.some(failure => failure.startsWith(path)));
+});
+
+test("regression: mixed new and stale sites explain fingerprint replacement", t => {
+  const { dir } = fixture(t, { [preload]: 'ipcRenderer.invoke(CHANNELS.new);' });
+  const stale = extractIpcSites(preload, 'ipcRenderer.invoke(CHANNELS.old);')[0].fingerprint;
+  const { failures } = checkIpcSites(dir, { sites: [stale] });
+  assert.match(failures.join('\n'), /if this change only moves existing hand sites, replace the stale fingerprints with these/u);
+  assert.match(failures.join('\n'), /CHANNELS.old/u);
+  assert.match(failures.join('\n'), /CHANNELS.new/u);
+});
+
+test("local aliases respect function and block bindings", () => {
+  const source = 'const r = ipcRenderer; function unrelated(r: Other) { r.invoke(CHANNELS.fake); } '
+    + '{ const r = other; r.invoke(CHANNELS.fake); } r.invoke(CHANNELS.new);';
+  assert.deepEqual(extractIpcSites(preload, source).map(site => site.fingerprint), [preload + ' | CHANNELS.new']);
+});
+
+test("forwarding fingerprints name the registrar and channel parameter", () => {
+  assert.deepEqual(extractIpcSites(main,
+    'registerExampleIpc({ registerHandler: (channel, handler) => ipcMain.handle(channel, handler) });')
+    .map(site => site.fingerprint), [main + ' | registerExampleIpc.registerHandler forwards channel to ipcMain.handle']);
 });
