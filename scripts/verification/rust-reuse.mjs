@@ -37,16 +37,20 @@ function completeOriginal(report) {
   if (report.mode !== "pr" || report.gates?.rust !== true || !["PASS", "FAIL"].includes(report.verdict) || !report.finishedAt || report.dirty !== false
     || !/^[a-f0-9]{40}$/u.test(report.commit) || report.rustError || report.cleanupError
     || /interrupted|cancelled/iu.test(report.error ?? "")) throw new Error("Rust reuse requires a completed, clean, uninterrupted canonical PR report.");
+  cleanFinalTree(report);
+  for (const name of executedSteps) {
+    const steps = report.steps.filter(step => step.name === name);
+    if (steps.length !== 1 || steps[0].verdict !== "PASS" || !steps[0].finishedAt || !Number.isFinite(steps[0].seconds)
+      || steps[0].reused) throw new Error(`Rust reuse requires an executed, complete PASS for ${name}.`);
+  }
+}
+
+function cleanFinalTree(report) {
   const readings = report.treeReadings;
   if (!Array.isArray(readings) || readings.length < 2 || readings.at(-1).step !== "rust-receipt:finish"
     || readings.some(row => row.state?.head !== report.commit || row.state?.dirty?.length !== 0)
     || classifyTreeProvenance(readings).status !== "PASS" || report.provenance?.status !== "PASS") {
     throw new Error("Rust reuse requires final clean tree provenance on the original commit.");
-  }
-  for (const name of executedSteps) {
-    const steps = report.steps.filter(step => step.name === name);
-    if (steps.length !== 1 || steps[0].verdict !== "PASS" || !steps[0].finishedAt || !Number.isFinite(steps[0].seconds)
-      || steps[0].reused) throw new Error(`Rust reuse requires an executed, complete PASS for ${name}.`);
   }
 }
 
@@ -118,4 +122,11 @@ export async function refreshRustReuse(path, {root, identity, step}) {
   await step("cargo-deny-refresh", "cargo", ["deny", "check"]);
   await step("cargo-audit-refresh", "cargo", ["audit"]);
   return {...evidence, security: "cargo-deny and cargo-audit passed in this run"};
+}
+
+export function finishRustEvidence(report, initialIdentity, finalIdentity) {
+  if (JSON.stringify(finalIdentity) !== JSON.stringify(initialIdentity)) throw new Error("Rust inputs changed before the receipt finished.");
+  cleanFinalTree(report);
+  if (report.rustEvidence?.kind === "reused") return report.rustEvidence;
+  return sealRustEvidence(report, initialIdentity);
 }

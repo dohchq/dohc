@@ -13,7 +13,7 @@ export function runOwnerCancellationFixture(root, sourceRoot, kind, signal, clea
     if (existsSync(join(sourceRoot, path))) copy(path);
   }
   put("apps/desktop/package.json", "{}");
-  put("scripts/verification/rust-reuse.mjs", "export const rustIdentity=()=>({});export const sealRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
+  put("scripts/verification/rust-reuse.mjs", "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
   put("pnpm-workspace.yaml", "fixture workspace");
   put("packages/workspace-auth/package.json", '{"name":"@dohc/workspace-auth","scripts":{"test":"vitest run"}}');
   put(".github/workflows/pr-checks.yml", "fixture workflow");

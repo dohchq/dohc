@@ -8,7 +8,7 @@ import test, { mock } from "node:test";
 import { sourceFingerprint } from "./build.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
 import { readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
-import { readRustReuse, refreshRustReuse, rustIdentity, sealRustEvidence } from "./rust-reuse.mjs";
+import { finishRustEvidence, readRustReuse, refreshRustReuse, rustIdentity, sealRustEvidence } from "./rust-reuse.mjs";
 
 const steps = ["tree provenance", "native target", "fixture drift", "fmt --check", "clippy -D warnings", "test --workspace",
   "doctests", "build daemon", "cargo-deny", "cargo-audit", "scratch leak"];
@@ -160,5 +160,24 @@ test("reuse refreshes both security tools and rejects either fresh failure", asy
       assert.deepEqual(calls, [["cargo-deny-refresh", "cargo", ["deny", "check"]],
         ...(fail === "cargo-deny-refresh" ? [] : [["cargo-audit-refresh", "cargo", ["audit"]]])]);
     }
+  } finally { f.close(); }
+});
+
+test("finishing reused evidence rejects ignored configuration and environment drift after fresh audits", async () => {
+  const f = fixture();
+  try {
+    const initial = f.identity();
+    const evidence = await refreshRustReuse(f.file, {root: f.root, identity: initial, step: async () => {}});
+    const report = {...f.report, rustEvidence: evidence};
+    assert.equal(finishRustEvidence(report, initial, f.identity()).kind, "reused");
+    for (const path of [".config/nextest.toml", ".cargo/audit.toml", "deny.toml"]) {
+      f.put(path, "changed during the JavaScript job");
+      assert.throws(() => finishRustEvidence(report, initial, f.identity()), /changed before the receipt finished/, path);
+      rmSync(join(f.root, path));
+    }
+    assert.throws(() => finishRustEvidence(report, initial, f.identity({...process.env, NEXTEST_TEST_THREADS: "changed"})), /changed before the receipt finished/);
+    const dirty = {...report, treeReadings: structuredClone(report.treeReadings)};
+    dirty.treeReadings.at(-1).state.dirty = [" M Cargo.toml"];
+    assert.throws(() => finishRustEvidence(dirty, initial, f.identity()), /final clean tree provenance/);
   } finally { f.close(); }
 });

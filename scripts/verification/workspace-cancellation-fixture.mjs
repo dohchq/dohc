@@ -12,7 +12,7 @@ export async function runCanonicalCancellationFixture(root, sourceRoot) {
     put(`scripts/verification/${file}`,readFileSync(join(sourceRoot,'scripts/verification',file)));
   put('tools/rust-engine-program/git-read.mjs',readFileSync(join(sourceRoot,'tools/rust-engine-program/git-read.mjs')));
   put('apps/desktop/package.json','{}');
-  put('scripts/verification/rust-reuse.mjs', "export const rustIdentity=()=>({});export const sealRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
+  put('scripts/verification/rust-reuse.mjs', "export const rustIdentity=()=>({});export const finishRustEvidence=()=>({kind:'fixture'});export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
   put('pnpm-workspace.yaml','fixture workspace');
   put('.github/workflows/pr-checks.yml','fixture workflow');
   put('node_modules/js-yaml/index.js',"exports.load=s=>s==='fixture workspace'?{packages:['packages/*']}:s==='fixture workflow'?{jobs:{changes:{steps:[{with:{filters:'fixture filters'}}]}}}:{rust:[],js:['**']};");

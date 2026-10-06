@@ -14,7 +14,7 @@ import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-p
 import { acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
 import { admissionPreflight, installedDependenciesMatch, verificationAdmission } from "./admission.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
-import { refreshRustReuse, rustIdentity, sealRustEvidence } from "./rust-reuse.mjs";
+import { finishRustEvidence, refreshRustReuse, rustIdentity } from "./rust-reuse.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 export function desktopProofCommand(args, { platform = process.platform, env = process.env } = {}) {
@@ -285,6 +285,7 @@ export async function verify(args) {
           rustTools[tool] = result.stdout.trim();
         }
         const identity = rustIdentity({root: repoRoot, engine: sourceFingerprint("engine"), tools: rustTools});
+        originalRustIdentity = identity;
         if (reuseRust) {
           report.rustEvidence = await checkedStep({name: "rust-reuse", reused: true, report: resolve(reuseRust)},
             () => refreshRustReuse(reuseRust, {root: repoRoot, identity,
@@ -292,7 +293,6 @@ export async function verify(args) {
           save();
           return;
         }
-        originalRustIdentity = identity;
         await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
         await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
       } catch (error) {
@@ -389,8 +389,7 @@ export async function verify(args) {
         recordTree("rust-receipt:finish");
         report.provenance = classifyTreeProvenance(report.treeReadings);
         const finalIdentity = rustIdentity({root: repoRoot, engine: sourceFingerprint("engine"), tools: rustTools});
-        if (JSON.stringify(finalIdentity) !== JSON.stringify(originalRustIdentity)) throw new Error("Rust inputs changed before the receipt finished.");
-        report.rustEvidence = sealRustEvidence(report, originalRustIdentity);
+        report.rustEvidence = finishRustEvidence(report, originalRustIdentity, finalIdentity);
       } catch (error) {
         report.rustEvidence = {kind: "unavailable", reason: error.message};
         report.verdict = "FAIL"; report.error ??= error.message; process.exitCode = 1;
