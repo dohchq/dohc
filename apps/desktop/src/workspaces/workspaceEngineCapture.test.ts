@@ -396,7 +396,9 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it.each(["ownerPending", "declined", "mismatch"] as const)(
+  it.each([
+    "ownerPending", "declined", "mismatch", "engine-store-busy", "live-settlement-capacity",
+  ] as const)(
     "defers an open adoption (%s) while another record proceeds", async (status) => {
     const root = await createTestScratch("dohc-engine-capture-");
     const path = "tasks/pending.md";
@@ -407,6 +409,8 @@ describe("workspaceEngineCapture batch capture", () => {
     const liveStore = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root,
       attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
     let pending = true;
+    const transient = status === "engine-store-busy" || status === "live-settlement-capacity";
+    let blocked = true;
     let healthyPending = true;
     const reconcile = vi.fn(async () => {
       healthyPending = false;
@@ -440,6 +444,14 @@ describe("workspaceEngineCapture batch capture", () => {
       unsettled: false, close, evict,
       applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); },
       adoptCollectionRecord: async () => {
+        if (transient && blocked) {
+          throw new DaemonRefusalError({ code: "OVERLOADED", message: status, retry: "afterBackoff" }, undefined);
+        }
+        if (transient) {
+          pending = false;
+          doc.getMap("frontmatter").set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
+          return "settled" as const;
+        }
         if (status === "ownerPending") doc.getMap("frontmatter").set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
         return status === "declined" ? "declined" as const : "ownerPending" as const;
       },
@@ -469,9 +481,13 @@ describe("workspaceEngineCapture batch capture", () => {
     }, undefined));
     await expect(engine.flush()).rejects.toThrow("collection-reconciliation-lease-held");
     healthyPending = false;
-    // The configured owner host completes adoption with its audited settlement.
-    pending = false;
+    // Retry after capacity clears, or observe adoption completed by the owner host.
+    if (transient) blocked = false;
+    else pending = false;
     await engine.flush();
+    expect(pending).toBe(false);
+    if (transient) expect(session.doc.getMap("frontmatter").get("id")).toBe("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(errors).toEqual([]);
     await session.close({ settle: false });
     await engine.stop();
     expect(close).toHaveBeenCalledTimes(1);
