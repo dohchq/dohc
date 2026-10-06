@@ -6,6 +6,7 @@ import { observeExit, closeOwnedPackage, benchmarkCancellation, verifyRestartInp
 import { run as runOwnedCommand } from '../../scripts/verification/process.mjs';
 import { activateTab, observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
 import { memorySample, recordSwitches } from './packaged-memory.mjs';
+import { accountIdle } from './packaged-idle.mjs';
 import { observeSurface, observeSearchSubmit, seededPostThreadId, collectionFixtureFiles, aggregateByKind } from './packaged-surfaces.mjs';
 import { automationCases, automationFixtureDigest, automationOf, automationsYaml, CASE_TIMEOUT_MS, classifyOutcome, cpuByKind, DATASET_FOLDER, DATASET_NAME, dismissToasts,
   datasetListRequest, datasetRowValues, datasetSetupRequest, DOCUMENT_FOLDER, documentAutomationFiles, journalBytes, observeAutomationRun,
@@ -84,6 +85,7 @@ Object.assign(receipt, {
   optionsSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-benchmark-options.mjs')),
   surfacesSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-surfaces.mjs')),
   memorySha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-memory.mjs')),
+  idleSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'packaged-idle.mjs')),
   automationsModuleSha256: await sha256(automationsModule),
   closeImplementationSha256: await sha256(fileURLToPath(new URL('../../scripts/verification/close-electron.mjs', import.meta.url))),
   summarizerSha256: await sha256(join(dirname(fileURLToPath(import.meta.url)), 'summarize-packaged-benchmark.mjs')),
@@ -123,6 +125,7 @@ Object.assign(receipt, {
     'small-tab arms before clicking an already-open tab. Its primary renderer timing starts at trusted pointerdown and ends after the bound visible editable document check plus two animation frames. Playwright wall time and raw observation brackets are separate.',
     'The switches scenario samples memory after each completed switch, outside its latency endpoint. Late private-byte windows and slopes describe bounded-run growth, including allocator and garbage-collector timing; they are not a leak proof. Main, engine, renderer and GPU replacement anywhere in the run invalidates their late windows. Transient process kinds use the final 40-switch identity window.',
     'Idle starts after all app process kinds use under 5% of one logical core for three consecutive intervals of at least one second. Quiet-wait evidence and sampling overhead remain recorded.',
+    'Idle CPU requires continuous observed process identities and valid counters throughout the measured window. Observed additions, exits, replacements, or invalid counters leave CPU unknown; partial counter deltas remain diagnostic. A process born and exited entirely between snapshots is not covered by this sampled metric.',
     'soak samples working set and private bytes per process kind after each mixed cycle. Growth includes allocator and garbage-collector timing; it is not a leak proof.',
   ],
 });
@@ -415,24 +418,12 @@ async function idle(instance, state) {
     await delay(Math.min(5000, Math.max(1, idleSeconds * 1000 - (performance.now() - started))), undefined, { signal: cancellation.signal });
     samples.push(await snapshot(instance.child.pid));
   }
-  const deltas = { cpuMs: 0, readBytes: 0, writeBytes: 0, otherBytes: 0, readOperations: 0, writeOperations: 0, otherOperations: 0 };
-  const intervals = [];
-  for (let i = 1; i < samples.length; i++) {
-    const before = new Map(samples[i - 1].processes.map(p => [`${p.pid}:${p.createdAt}`, p]));
-    const delta = Object.fromEntries(Object.keys(deltas).map(key => [key, 0]));
-    for (const p of samples[i].processes) {
-      const previous = before.get(`${p.pid}:${p.createdAt}`);
-      if (previous) for (const key of Object.keys(delta)) delta[key] += p[key] - previous[key];
-    }
-    for (const key of Object.keys(deltas)) deltas[key] += delta[key];
-    intervals.push(delta);
-  }
-  const elapsedMs = samples.at(-1).completedAtMs - samples[0].completedAtMs;
+  const accounting = accountIdle(samples);
   const totals = samples.map(s => ({ privateBytes: s.processes.reduce((n, p) => n + p.privateBytes, 0), workingSetBytes: s.processes.reduce((n, p) => n + p.workingSetBytes, 0), processCount: s.processes.length }));
   await setWindowState(instance, 'visible');
   await instance.page.bringToFront();
   const quietEvidence = Object.fromEntries(Object.entries(quiet).filter(([key]) => key !== 'snapshot'));
-  return { state, windowState, domVisibility, quiet: quietEvidence, elapsedMs, deltas, cpuPercentOneLogicalCore: 100 * deltas.cpuMs / elapsedMs, contextSwitches: null, hardwareWakeups: null, totals, samples, intervals };
+  return { state, windowState, domVisibility, quiet: quietEvidence, ...accounting, contextSwitches: null, hardwareWakeups: null, totals, samples };
 }
 
 // Installs a self-contained renderer observer before the harness sends the input that it

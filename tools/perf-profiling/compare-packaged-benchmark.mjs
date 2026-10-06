@@ -126,7 +126,9 @@ export function compareSummaries(baseline, candidate, margin = DEFAULT_MARGIN, r
           problems.push(`The ${label} ${state} idle measurement has no complete settled window.`);
         }
       }
-      const readings = rows.map(windows => windows.length === 1 && Number.isFinite(windows[0].cpuPercentOneLogicalCore) && windows[0].cpuPercentOneLogicalCore >= 0
+      const readings = rows.map(windows => windows.length === 1 && windows[0].cpuCoverage?.complete === true &&
+        windows[0].cpuCoverage.intervalCount > 0 && windows[0].intervals?.length === windows[0].cpuCoverage.intervalCount &&
+        windows[0].intervals.every(interval => interval.complete) && Number.isFinite(windows[0].cpuPercentOneLogicalCore) && windows[0].cpuPercentOneLogicalCore >= 0
         ? windows[0].cpuPercentOneLogicalCore : null);
       const cpu = resourceCheck(`${state} idle CPU`, 'percent of one logical core', readings[0], readings[1], margin.percent, resources.cpuPercentagePoints ?? 0);
       if (resources.cpuPercentagePoints === null && cpu.verdict !== 'missing') { cpu.verdict = 'reported'; delete cpu.limit; }

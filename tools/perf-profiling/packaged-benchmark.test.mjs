@@ -12,6 +12,7 @@ import { startWindowController, waitForVisibleWindow } from './window-controller
 import { closeOwnedPackage, observeExit, benchmarkCancellation, verifyRestartInput } from './packaged-process.mjs';
 import { summarize, HARNESS_HASH_KEYS, harnessHashKeys } from './summarize-packaged-benchmark.mjs';
 import { memorySample, recordSwitches, summarizeSwitchMemory } from './packaged-memory.mjs';
+import { accountIdle } from './packaged-idle.mjs';
 import { compareSummaries, DEFAULT_MARGIN } from './compare-packaged-benchmark.mjs';
 import { createRequire } from 'node:module';
 import { activateTab, observeStartupReadiness, startupTargetFromRegistry } from './startup-readiness.mjs';
@@ -1682,8 +1683,7 @@ function metricsReceipt(scenario = 'switches', count = 100, runCount = 1) {
   if (scenario === 'switches') run.switchMemory = memory(count);
   if (scenario === 'small-tab') run.tabs = Array.from({ length: count }, (_, index) => ({ path: index % 2 ? 'small.md' : 'large.md', pointerdownToEditableTwoRafObservedMs: 40 }));
   if (['small-tab', 'small-switch', 'full'].includes(scenario)) run.typing = (scenario === 'full' ? ['small.md', 'large.md'] : ['small.md']).map(typed);
-  if (scenario === 'full') run.idle = ['visible', 'minimized'].map(state => ({ state, quiet: quiet(), elapsedMs: 60000, cpuPercentOneLogicalCore: .2,
-    totals: [], deltas: { readBytes: 0, writeBytes: 0, otherBytes: 0 } }));
+  if (scenario === 'full') run.idle = ['visible', 'minimized'].map(state => idleRow(idleSamples(), state));
   return { measurementVersion: 2, status: 'complete', host: { hostname: 'fixture', arch: 'x64', release: 'fixture-os', cpuModel: 'fixture-cpu', logicalProcessors: 8, totalMemoryBytes: 16e9 }, platform: 'win32', node: 'v24',
     ...Object.fromEntries(HARNESS_HASH_KEYS.map(key => [key, 'a'.repeat(64)])),
     settings: { scenario, runCount, switches: count, keystrokes: 30, idleSeconds: 60 }, runs: Array.from({ length: runCount }, (_, index) => {
@@ -1693,6 +1693,103 @@ function metricsReceipt(scenario = 'switches', count = 100, runCount = 1) {
     }) };
 }
 const comparison = async (before, after, resources) => compareSummaries(await summarize(before), await summarize(after), undefined, resources);
+
+const idleSamples = (cpuMs = 120) => [0, 60000].map((elapsed, index) => ({ completedAtMs: 1000 + elapsed,
+  processes: processes(0).map(process => ({ ...process, cpuMs: process.pid === 3 && index ? cpuMs : 0,
+    readBytes: 0, writeBytes: 0, otherBytes: 0, readOperations: 0, writeOperations: 0, otherOperations: 0 })) }));
+const idleRow = (samples, state = 'visible') => ({ state, quiet: quiet(), ...accountIdle(samples), samples,
+  totals: samples.map(sample => ({ privateBytes: sample.processes.reduce((total, process) => total + process.privateBytes, 0), processCount: sample.processes.length })) });
+
+test('idle CPU budget rejects a newly observed process despite valid pre-idle quiet evidence', async () => {
+  const baseline = metricsReceipt('full', 100, 5);
+  baseline.runs[0].idle = ['visible', 'minimized'].map(state => idleRow(idleSamples(0), state));
+  const candidate = structuredClone(baseline), samples = idleSamples(0);
+  samples[1].processes.push({ ...samples[1].processes[2], pid: 4, createdAt: 'born-during-idle', cpuMs: 600 });
+  candidate.runs[0].idle[0] = idleRow(samples);
+  const result = await comparison(baseline, candidate, { idleCpuMax: .5 });
+  assert.equal(result.pass, false, '600ms on a new identity must not pass the 0.5% CPU budget as zero');
+  assert.equal(result.absoluteChecks[0].verdict, 'missing');
+  assert.equal(candidate.runs[0].idle[0].cpuPercentOneLogicalCore, null);
+});
+
+test('idle CPU accounting measures stable counters and retains partial counts during churn', async () => {
+  const samples = idleSamples(600), stable = accountIdle(samples);
+  assert.equal(stable.elapsedMs, 60000);
+  assert.equal(stable.deltas.cpuMs, 600);
+  assert.equal(stable.cpuPercentOneLogicalCore, 1);
+  assert.equal(stable.cpuCoverage.complete, true);
+  const baseline = metricsReceipt('full', 100, 5), candidate = structuredClone(baseline);
+  candidate.runs[0].idle[0] = idleRow(samples);
+  assert.equal((await comparison(baseline, candidate, { idleCpuMax: .5 })).absoluteChecks[0].verdict, 'over-budget');
+  samples[1].processes.push({ ...samples[1].processes[2], pid: 4, cpuMs: 1200 });
+  const partial = accountIdle(samples);
+  assert.equal(partial.deltas.cpuMs, 600);
+  assert.equal(partial.cpuPercentOneLogicalCore, null);
+  assert.deepEqual(partial.intervals[0].added, ['4:renderer-start']);
+  assert.deepEqual(partial.intervals[0].counters.at(-1), { identity: '4:renderer-start', beforeCpuMs: null, afterCpuMs: 1200, cpuMs: null });
+  const summarized = await summarize({ settings: {}, runs: [{ idle: [idleRow(samples)] }] });
+  assert.deepEqual(summarized.idle[0].intervals, partial.intervals);
+  assert.deepEqual(summarized.idle[0].cpuCoverage, partial.cpuCoverage);
+});
+
+for (const [name, mutate] of [
+  ['process exit', samples => samples[1].processes.pop()],
+  ['replacement PID', samples => { samples[1].processes[2].pid = 4; }],
+  ['PID reuse', samples => { samples[1].processes[2].createdAt = 'replacement-start'; }],
+  ['missing CPU counter', samples => { delete samples[1].processes[2].cpuMs; }],
+  ['missing initial CPU counter', samples => { delete samples[0].processes[2].cpuMs; }],
+  ['null CPU counter', samples => { samples[1].processes[2].cpuMs = null; }],
+  ['nonfinite CPU counter', samples => { samples[1].processes[2].cpuMs = Infinity; }],
+  ['NaN CPU counter', samples => { samples[1].processes[2].cpuMs = NaN; }],
+  ['negative CPU counter', samples => { samples[1].processes[2].cpuMs = -1; }],
+  ['decreasing CPU counter', samples => { samples[0].processes[2].cpuMs = 601; }],
+  ['nonpositive elapsed interval', samples => { samples[1].completedAtMs = samples[0].completedAtMs; }],
+  ['reversed elapsed interval', samples => { samples[1].completedAtMs = samples[0].completedAtMs - 1; }],
+  ['nonfinite timestamp', samples => { samples[1].completedAtMs = Infinity; }],
+  ['empty identities', samples => { samples[1].processes = []; }],
+  ['missing creation time', samples => { delete samples[1].processes[2].createdAt; }],
+  ['invalid PID', samples => { samples[1].processes[2].pid = 0; }],
+  ['duplicate identity', samples => { samples[1].processes.push({ ...samples[1].processes[2] }); }],
+]) test(`idle CPU accounting rejects ${name} in both measured states`, async () => {
+  const baseline = metricsReceipt('full', 100, 5);
+  for (const state of ['visible', 'minimized']) {
+    const samples = idleSamples(600); mutate(samples);
+    const accounting = accountIdle(samples);
+    assert.equal(accounting.cpuCoverage.complete, false);
+    assert.equal(accounting.cpuPercentOneLogicalCore, null);
+    const candidate = structuredClone(baseline), index = state === 'visible' ? 0 : 1;
+    candidate.runs[0].idle[index] = { ...candidate.runs[0].idle[index], ...accounting, samples };
+    for (const resources of [{ idleCpuMax: .5 }, { cpuPercentagePoints: .1 }]) {
+      const result = await comparison(baseline, candidate, resources);
+      assert.equal(result.pass, false);
+      assert.equal(result.checks.find(row => row.metric === `${state} idle CPU`).verdict, 'missing');
+    }
+  }
+});
+
+test('idle CPU summary recomputes coverage and cannot trust a finite scalar without valid samples', async () => {
+  const baseline = metricsReceipt('full', 100, 5);
+  for (const samples of [undefined, [], idleSamples().slice(0, 1), [{ completedAtMs: 1000 }, { completedAtMs: 61000 }]]) {
+    const candidate = structuredClone(baseline);
+    candidate.runs[0].idle[0].samples = samples;
+    candidate.runs[0].idle[0].cpuPercentOneLogicalCore = 0;
+    candidate.runs[0].idle[0].cpuCoverage = { complete: true, intervalCount: 1 };
+    assert.equal((await comparison(baseline, candidate, { idleCpuMax: .5 })).pass, false);
+  }
+  const summary = await summarize(baseline);
+  for (const mutate of [
+    row => { delete row.cpuCoverage; }, row => { row.cpuCoverage.complete = false; },
+    row => { delete row.intervals; }, row => { row.intervals[0].complete = false; },
+  ]) {
+    const candidate = structuredClone(summary); mutate(candidate.idle[0]);
+    assert.equal(compareSummaries(summary, candidate, undefined, { idleCpuMax: .5 }).pass, false);
+  }
+  const forged = structuredClone(baseline), samples = idleSamples(600);
+  samples[1].processes[2].createdAt = 'new-renderer';
+  forged.runs[0].idle[0].samples = samples;
+  forged.runs[0].idle[0].cpuPercentOneLogicalCore = 0;
+  assert.equal((await comparison(baseline, forged, { idleCpuMax: .5 })).pass, false);
+});
 
 test('tab activation arms before clicking and separates renderer timing from automation brackets', async () => {
   const calls = [], target = { workspaceName: 'workspace-0', path: 'large.md', content: 'Workspace 0 large' };
@@ -1870,13 +1967,13 @@ test('five-run full receipts require idle once per package and retain independen
   const summarized = await summarize(after);
   assert.equal(summarized.idle.length, 2);
   assert.ok(after.runs.slice(1).every(run => !Object.hasOwn(run, 'idle')));
-  for (const mutate of [run => run.idle.shift(), run => run.idle.pop(), run => { delete run.idle[0].quiet; }, run => { run.idle[1].elapsedMs = 0; }, run => { run.idle.push(structuredClone(run.idle[0])); }]) {
+  for (const mutate of [run => run.idle.shift(), run => run.idle.pop(), run => { delete run.idle[0].quiet; }, run => { run.idle[1].samples.at(-1).completedAtMs = run.idle[1].samples[0].completedAtMs; }, run => { run.idle.push(structuredClone(run.idle[0])); }]) {
     const missing = structuredClone(after); mutate(missing.runs[0]);
     const result = await comparison(before, missing);
     assert.equal(result.pass, false);
     assert.ok(result.problems.some(problem => problem.includes('no complete settled window')));
   }
-  after.runs[0].idle[0].cpuPercentOneLogicalCore = .5;
+  after.runs[0].idle[0].samples[1].processes[2].cpuMs = 300;
   const overBudget = await comparison(before, after, { idleCpuMax: .4 });
   assert.equal(overBudget.pass, false);
   assert.equal(overBudget.absoluteChecks[0].candidate, .5);
@@ -1884,7 +1981,7 @@ test('five-run full receipts require idle once per package and retain independen
   const relative = await comparison(before, after, { cpuPercentagePoints: .1 });
   assert.ok(relative.problems.includes('visible idle CPU: regressed'));
   for (const value of [null, NaN, -1]) {
-    after.runs[0].idle[0].cpuPercentOneLogicalCore = value;
+    after.runs[0].idle[0].samples[1].processes[2].cpuMs = value;
     const unmeasured = await comparison(before, after, { idleCpuMax: .4 });
     assert.equal(unmeasured.absoluteChecks[0].verdict, 'missing');
     assert.equal(unmeasured.pass, false);
@@ -1927,7 +2024,7 @@ test('comparison validates measured counts, provenance, fixture settings, and pr
   for (const mutate of [
     data => data.runs[0].switches.pop(), data => data.runs[0].switchMemory.samples.pop(),
     data => { data.runs[0].switchMemory.samples.at(-1).processes[2].createdAt = 'restart'; },
-    data => { delete data.memorySha256; }, data => { data.host.hostname = 'different'; },
+    data => { delete data.memorySha256; }, data => { delete data.idleSha256; }, data => { data.host.hostname = 'different'; },
     data => { data.runs[0].fixtureHashes[0].digest = 'c'.repeat(64); },
     data => { data.settings.chatMessages = 300; }, data => { data.settings.soakMinutes = 4; },
   ]) { const before = metricsReceipt(), after = structuredClone(before); mutate(after); assert.equal((await comparison(before, after)).pass, false); }
@@ -1935,6 +2032,7 @@ test('comparison validates measured counts, provenance, fixture settings, and pr
   assert.equal((await comparison(old, structuredClone(old))).pass, false);
   assert.ok(harnessHashKeys('collection').includes('datasetCliSha256'));
   assert.ok(harnessHashKeys('chat-history').includes('seedScriptSha256'));
+  assert.ok(harnessHashKeys('full').includes('idleSha256'));
 });
 
 test('timing regressions and CPU or memory budgets use separate units and retain quantized samples as diagnostic', async () => {
@@ -1942,7 +2040,7 @@ test('timing regressions and CPU or memory budgets use separate units and retain
   startup.runs = Array.from({ length: 5 }, (_, index) => ({ ...structuredClone(startup.runs[0]), index: index + 1 })); startup.settings.runCount = 5;
   const slower = structuredClone(startup); slower.runs[0].freshStartup.editablePaintObservedMs = 118;
   assert.ok((await comparison(startup, slower)).problems.includes('fresh startup: regressed'));
-  const idle = metricsReceipt('full'), busy = structuredClone(idle); busy.runs[0].idle[0].cpuPercentOneLogicalCore = .5;
+  const idle = metricsReceipt('full'), busy = structuredClone(idle); busy.runs[0].idle[0].samples[1].processes[2].cpuMs = 300;
   assert.equal((await comparison(idle, busy)).pass, true);
   assert.equal((await comparison(idle, busy)).checks.find(row => row.metric === 'visible idle CPU').verdict, 'reported');
   assert.equal((await comparison(idle, busy, { cpuPercentagePoints: 0 })).pass, false);

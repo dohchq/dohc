@@ -2,8 +2,9 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { summarizeSwitchMemory } from './packaged-memory.mjs';
+import { accountIdle } from './packaged-idle.mjs';
 export const HARNESS_HASH_KEYS = ['harnessSha256', 'samplerSha256', 'windowControllerSha256', 'windowClientSha256',
-  'lifecycleSha256', 'startupReadinessSha256', 'optionsSha256', 'surfacesSha256', 'memorySha256',
+  'lifecycleSha256', 'startupReadinessSha256', 'optionsSha256', 'surfacesSha256', 'memorySha256', 'idleSha256',
   'automationsModuleSha256', 'closeImplementationSha256', 'summarizerSha256'];
 export function harnessHashKeys(scenario) {
   return [...HARNESS_HASH_KEYS,
@@ -80,11 +81,12 @@ export async function summarize(data, readLog = async () => '') {
     };
   }
   for (const idle of data.runs.flatMap(r => r.idle ?? [])) {
+    const accounting = accountIdle(idle.samples);
     summary.idle.push({ state: idle.state, windowState: idle.windowState, domVisibility: idle.domVisibility, quiet: idle.quiet,
-      elapsedMs: idle.elapsedMs, cpuPercentOneLogicalCore: idle.cpuPercentOneLogicalCore,
-      transferBytesPerSecond: Object.fromEntries(['readBytes', 'writeBytes', 'otherBytes'].map(key => [key, idle.elapsedMs > 0 && Number.isFinite(idle.deltas?.[key]) ? idle.deltas[key] * 1000 / idle.elapsedMs : null])),
+      ...accounting,
+      transferBytesPerSecond: Object.fromEntries(['readBytes', 'writeBytes', 'otherBytes'].map(key => [key, accounting.elapsedMs > 0 ? accounting.deltas[key] * 1000 / accounting.elapsedMs : null])),
       privateBytes: stats(idle.totals.map(t => t.privateBytes)), processCounts: [...new Set(idle.totals.map(t => t.processCount))],
-      deltas: idle.deltas, contextSwitches: idle.contextSwitches, hardwareWakeups: idle.hardwareWakeups });
+      contextSwitches: idle.contextSwitches, hardwareWakeups: idle.hardwareWakeups });
   }
   Object.assign(summary, surfaceSummaries(data.runs), { collectionAutomations: automationSummary(data.runs) });
   return summary;

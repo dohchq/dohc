@@ -44,6 +44,10 @@ Go to, palette, search, chat-history, and soak receipts are not comparable becau
 CPU comparisons use percent of one logical core. Memory comparisons use bytes.
 Idle CPU is reported unless `--cpu-percentage-point-floor` supplies a calibrated relative allowance.
 The full scenario measures idle once per package, in its first run. The comparator requires exactly one settled window per state and checks that window's CPU reading. Summaries retain both raw idle rows.
+The collector and summarizer derive CPU from the same measured snapshots. Each interval retains process identities and CPU counters.
+Observed process additions, exits, replacements, missing or invalid counters, and nonpositive intervals leave the CPU reading unknown.
+Partial counter deltas remain diagnostic. Incomplete measured coverage fails an idle CPU comparison or absolute budget, even after a valid quiet wait.
+A process born and exited entirely between snapshots is outside this sampled metric's coverage.
 Set the relative memory tolerance floor with `--memory-byte-floor`, default zero. `--margin-percent` supplies the percentage allowance.
 Set optional absolute resource budgets with `--idle-cpu-max` and `--memory-growth-max-bytes`.
 The CPU budget requires `full`. The memory budget requires `switches`, at least 100 complete switches per run, and valid process identities.
