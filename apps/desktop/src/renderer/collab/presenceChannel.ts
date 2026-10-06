@@ -14,10 +14,13 @@
 // dormant for solo.
 
 export interface PresencePeer {
-  // Server-derived attribution (the relay echoes the authenticated actor).
-  userId: string;
-  clientId: string;
-  // Opaque display payload the publisher sent, e.g. { displayName, typing }.
+  // Opaque per-viewer tokens. Account and transport identifiers stay on the relay.
+  faceToken: string;
+  sessionToken: string;
+  isSelf: boolean;
+  displayName: string | null;
+  paletteSlot: number;
+  // Validated cursor/drawing or typing state, without identity.
   state: unknown;
   updatedAtMs: number;
 }
@@ -41,7 +44,7 @@ export interface PresenceTransport {
     clientId: string;
     incarnationId: string;
   }): Promise<void>;
-  poll(input: { topic: string; since: number; signal: AbortSignal }): Promise<PresenceSnapshot>;
+  poll(input: { topic: string; clientId: string; since: number; signal: AbortSignal }): Promise<PresenceSnapshot>;
 }
 
 interface RelayPresenceTransport {
@@ -53,18 +56,17 @@ interface RelayPresenceTransport {
   leave(input: { topic: string; clientId: string }): Promise<void>;
   poll(input: {
     topic: string;
+    clientId: string;
     since: number;
     signal: AbortSignal;
   }): Promise<PresenceSnapshot>;
 }
 
-// The one guard between a peer's untrusted display payload and every UI
-// surface: only a real, non-empty string may become a display name. Keep any
-// future sanitization/length caps here so all callers stay in sync.
+// Render only the permitted relay account label. Anonymous peers use the
+// existing fallback; display fields in peer state cannot supply a name.
 export function resolvePeerDisplayName(peer: PresencePeer): string {
-  const state = (peer.state ?? {}) as { displayName?: unknown };
-  const name = typeof state.displayName === "string" ? state.displayName.trim() : "";
-  return name ? name.slice(0, 64) : "Someone";
+  const name = typeof peer.displayName === "string" ? peer.displayName.trim() : "";
+  return name ? [...name].slice(0, 64).join("") : "Someone";
 }
 
 export type PresenceScope =
@@ -120,8 +122,8 @@ export function createRelayPresenceTransport(
       });
       if (!response.ok) throw new Error(`presence leave failed: ${response.status}`);
     },
-    async poll({ topic, since, signal }) {
-      const response = await doFetch(presenceUrl(config, topic, { since: String(since) }), {
+    async poll({ topic, clientId, since, signal }) {
+      const response = await doFetch(presenceUrl(config, topic, { since: String(since), clientId }), {
         method: "GET",
         headers: authHeaders,
         signal,
@@ -257,6 +259,7 @@ export function createPresenceChannel(options: PresenceChannelOptions): Presence
         const snapshot = await options.transport.poll({
           topic: options.topic,
           since: version,
+          clientId: options.clientId,
           signal: pollController.signal,
         });
         emit(snapshot);

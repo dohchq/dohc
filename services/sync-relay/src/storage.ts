@@ -1293,6 +1293,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return currentFilesStorage.listLinkRevisionLogRows(this, input);
   }
 
+  currentObjectPath(input: { workspaceId: string; versionId: string; objectId: string }): string | null {
+    return currentFilesStorage.currentObjectPath(this, input);
+  }
+
   currentObjectBlobByteLength(input: {
     workspaceId: string;
     versionId: string;

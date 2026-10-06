@@ -1,4 +1,3 @@
-import { presenceColorHash } from "./presenceColorHash";
 import { useMemo } from "react";
 import { resolvePeerDisplayName, type PresencePeer } from "./presenceChannel";
 
@@ -25,7 +24,7 @@ export function PresenceFaces(props: {
   const unique = useMemo(() => {
     const byUser = new Map<string, PresencePeer>();
     for (const peer of props.others) {
-      if (!byUser.has(peer.userId)) byUser.set(peer.userId, peer);
+      if (!byUser.has(peer.faceToken)) byUser.set(peer.faceToken, peer);
     }
     return [...byUser.values()];
   }, [props.others]);
@@ -48,10 +47,10 @@ export function PresenceFaces(props: {
     >
       {shown.map((peer) => {
         const name = resolvePeerDisplayName(peer);
-        const hue = presenceColorHash(peer.userId) % 360;
+        const hue = [15, 42, 175, 210, 240, 280, 340][peer.paletteSlot] ?? 0;
         return (
           <span
-            key={peer.userId}
+            key={peer.faceToken}
             className="-ml-1 flex h-5 w-5 items-center justify-center rounded-full border border-bg text-[10px] font-semibold first:ml-0"
             style={{
               backgroundColor: `hsl(${hue} 45% 88%)`,

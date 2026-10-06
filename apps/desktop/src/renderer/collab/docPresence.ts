@@ -1,5 +1,6 @@
 import { bytesToBase64, base64ToBytes } from "../base64";
 import type * as Y from "yjs";
+
 import {
   Awareness,
   applyAwarenessUpdate,
@@ -11,7 +12,12 @@ import {
   type PresenceChannel,
   type PresencePeer,
   type PresenceTransport,
+  resolvePeerDisplayName,
 } from "./presenceChannel";
+
+export function presencePaletteColor(slot: number): string {
+  return ["#905d47", "#806d42", "#446a50", "#52697a", "#545c78", "#725478", "#965567"][slot] ?? "#52697a";
+}
 
 // MU-C1 — DOC co-presence: bind a Yjs Awareness to the engine mirror doc and
 // bridge it over the same ephemeral relay transport as chat presence, keyed by
@@ -33,7 +39,6 @@ export interface DocPresenceUser {
 // clientID (`yc`), so the receiver can apply the update and reconcile removals
 // (drop the awareness state of a peer that is no longer in the snapshot).
 interface DocPresenceState {
-  user: DocPresenceUser;
   yc: number;
   update: string; // base64 of encodeAwarenessUpdate for this client
 }
@@ -101,17 +106,24 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
   const awareness = new Awareness(options.doc);
   awareness.setLocalStateField("user", options.user);
 
+  // Encode only cursor/drawing fields. Local presentation stays on this device.
+  const encodedLocalState = (): string => {
+    const full = awareness.getLocalState();
+    const clean = Object.fromEntries(Object.entries(full ?? {}).filter(([key]) => ["cursor", "pointer", "button", "selectedElementIds"].includes(key)));
+    awareness.getStates().set(awareness.clientID, clean);
+    try { return bytesToBase64(encodeAwarenessUpdate(awareness, [awareness.clientID])); }
+    finally { if (full) awareness.getStates().set(awareness.clientID, full); }
+  };
   const localState = (): DocPresenceState => ({
-    user: options.user,
     yc: awareness.clientID,
-    update: bytesToBase64(encodeAwarenessUpdate(awareness, [awareness.clientID])),
+    update: encodedLocalState(),
   });
 
   // Yjs clientIDs of remote peers we've applied, so we can prune the ones that
   // leave (their presence entry disappears from the snapshot).
   const remoteClients = new Set<number>();
-  // Bind each Yjs clientID to the server-authenticated presence entry
-  // (userId + clientId) that first claimed it. Awareness itself never
+  // Bind each Yjs clientID to the relay-issued session token that first
+  // claimed it. Awareness itself never
   // validates clientID ownership, so without this one authenticated peer
   // could publish updates that spoof/overwrite another peer's slot.
   const ycOwners = new Map<number, string>();
@@ -119,7 +131,7 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
   const onPeers = (peers: PresencePeer[]): void => {
     const present = new Set<number>();
     for (const peer of peers) {
-      if (peer.clientId === options.clientId) continue;
+      if (peer.isSelf) continue;
       const state = peer.state as DocPresenceState | null;
       if (!state || typeof state.yc !== "number" || typeof state.update !== "string") continue;
       // No remote peer may ever claim our Yjs clientID: applying such an
@@ -127,7 +139,7 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
       if (state.yc === awareness.clientID) continue;
       // First authenticated claimant wins the slot; a different peer relaying
       // updates for someone else's clientID is dropped.
-      const ownerKey = `${peer.userId}\u0000${peer.clientId}`;
+      const ownerKey = peer.sessionToken;
       const owner = ycOwners.get(state.yc);
       if (owner !== undefined && owner !== ownerKey) continue;
       try {
@@ -137,6 +149,11 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
         const embedded = awarenessUpdateClientIds(update);
         if (!embedded || embedded.some((id) => id !== state.yc)) continue;
         applyAwarenessUpdate(awareness, update, "presence-remote");
+        const remote = awareness.getStates().get(state.yc);
+        if (remote) {
+          remote.user = { name: resolvePeerDisplayName(peer), color: presencePaletteColor(peer.paletteSlot), paletteSlot: peer.paletteSlot, sessionToken: peer.sessionToken };
+          awareness.emit("change", [{ added: [], updated: [state.yc], removed: [] }, "presence-remote"]);
+        }
       } catch {
         // A malformed peer update never breaks local editing.
         continue;
@@ -154,15 +171,8 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
         ycOwners.delete(id);
       }
     }
-    // Report other editors' names (unique).
-    const names = new Set<string>();
-    for (const [clientId, remoteState] of awareness.getStates()) {
-      if (clientId === awareness.clientID) continue;
-      // Remote awareness state is attacker/bug-controllable network payload;
-      // only a real string may enter the `string[]` contract of onPeers.
-      const user = (remoteState as { user?: Partial<DocPresenceUser> }).user;
-      if (typeof user?.name === "string" && user.name.trim()) names.add(user.name);
-    }
+    // Faces include every admitted peer, even when their grant has no caret authority.
+    const names = new Set(peers.filter(peer => !peer.isSelf).map(resolvePeerDisplayName));
     options.onPeers([...names]);
   };
 

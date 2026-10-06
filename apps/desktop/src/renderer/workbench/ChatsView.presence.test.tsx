@@ -283,8 +283,8 @@ describe("ChatsView presence (MU-C1)", () => {
     await waitFor(() => expect(t.publishes.length).toBeGreaterThan(0));
     act(() => {
       t.set([
-        { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
-        { userId: "bob", clientId: "cb", state: { displayName: "Bob", typing: true }, updatedAtMs: 0 },
+        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
+        { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob", typing: true }, updatedAtMs: 0 },
       ]);
     });
     expect(await screen.findByLabelText("Bob is here")).toBeTruthy();
@@ -360,10 +360,10 @@ describe("ChatsView presence (MU-C1)", () => {
 
     act(() => {
       t.set("chat:agent", [
-        { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
+        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
         {
-          userId: "me",
-          clientId: "agent:workspace-a",
+          faceToken: "me",
+          sessionToken: "agent:workspace-a", isSelf: false, displayName: "Me", paletteSlot: 0,
           state: { displayName: "Me", agent: true, activity: "busy" },
           updatedAtMs: 0,
         },
@@ -376,10 +376,10 @@ describe("ChatsView presence (MU-C1)", () => {
 
     act(() => {
       t.set("chat:agent", [
-        { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
+        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
         {
-          userId: "me",
-          clientId: "agent:workspace-a",
+          faceToken: "me",
+          sessionToken: "agent:workspace-a", isSelf: false, displayName: "Me", paletteSlot: 0,
           state: { displayName: "Me", agent: true, activity: "working" },
           updatedAtMs: 0,
         },
@@ -390,10 +390,10 @@ describe("ChatsView presence (MU-C1)", () => {
 
     act(() => {
       t.set("chat:agent", [
-        { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
+        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
         {
-          userId: "me",
-          clientId: "agent:workspace-a",
+          faceToken: "me",
+          sessionToken: "agent:workspace-a", isSelf: false, displayName: "Me", paletteSlot: 0,
           state: { displayName: "Me", agent: true, activity: "idle" },
           updatedAtMs: 0,
         },
@@ -417,10 +417,10 @@ describe("ChatsView presence (MU-C1)", () => {
 
     act(() => {
       t.set("chat:thread:thread-agent", [
-        { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
+        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
         {
-          userId: "me",
-          clientId: "agent:workspace-a",
+          faceToken: "me",
+          sessionToken: "agent:workspace-a", isSelf: false, displayName: "Me", paletteSlot: 0,
           state: { displayName: "Me", agent: true, activity: "working" },
           updatedAtMs: 0,
         },
@@ -430,14 +430,14 @@ describe("ChatsView presence (MU-C1)", () => {
       expect(screen.getByTestId("chats-thread-agent-presence").textContent).toBe("working"),
     );
 
-    // A lookalike payload without the reserved client id is not agent status.
+    // The relay strips agent markers from a client outside this workspace.
     act(() => {
       t.set("chat:thread:thread-agent", [
-        { userId: "me", clientId: "me", state: { displayName: "Me" }, updatedAtMs: 0 },
+        { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "Me", paletteSlot: 0, state: { displayName: "Me" }, updatedAtMs: 0 },
         {
-          userId: "me",
-          clientId: "agent:another-workspace",
-          state: { displayName: "Other agent", agent: true, activity: "working" },
+          faceToken: "me",
+          sessionToken: "other-agent-session", isSelf: false, displayName: "Other agent", paletteSlot: 0,
+          state: {},
           updatedAtMs: 0,
         },
       ]);

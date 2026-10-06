@@ -19,7 +19,7 @@ import {
 afterEach(closeTestStorages);
 
 function makeHandler(storage: SyncRelayStorage, presence: PresenceHub): SyncRelayHandler {
-  return testHandler(storage, { presence, nowMs: () => Date.now() });
+  return testHandler(storage, { presence, nowMs: () => Date.now(), lookupUserDisplayName: id => id === "owner" ? "Owner" : "Guest" });
 }
 
 function post(userId: string, path: string, body: unknown): Request {
@@ -70,7 +70,9 @@ describe("presence transport (workspace-owned)", () => {
     expect(body.ok).toBe(true);
     const peers = body.peers as Array<Record<string, unknown>>;
     expect(peers).toHaveLength(1);
-    expect(peers[0]).toMatchObject({ userId: "owner", clientId: "laptop" });
+    expect(peers[0]).toMatchObject({ displayName: "Owner", isSelf: true });
+    expect(peers[0]).not.toHaveProperty("userId");
+    expect(peers[0]).not.toHaveProperty("clientId");
   });
 
   it("two devices of one user see each other; leave clears one", async () => {
@@ -107,7 +109,8 @@ describe("presence transport (workspace-owned)", () => {
     );
     const peers = body.peers as Array<Record<string, unknown>>;
     // Attribution is the authenticated actor, never the payload.
-    expect(peers[0]?.userId).toBe("owner");
+    expect(peers[0]?.displayName).toBe("Owner");
+    expect(peers[0]?.state).toEqual({});
   });
 
   it("requires a topic", async () => {
@@ -241,8 +244,8 @@ describe("presence over a share (cross-user, gated)", () => {
         }),
       ),
     );
-    const ids = (guestView.peers as Array<Record<string, unknown>>).map((p) => p.userId).sort();
-    expect(ids).toEqual(["guest", "owner"]);
+    const names = (guestView.peers as Array<Record<string, unknown>>).map((p) => p.displayName).sort();
+    expect(names).toEqual(["Guest", "Owner"]);
   });
 
   it("refuses a recipient a topic the grant does not expose (isolation)", async () => {

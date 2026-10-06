@@ -7,7 +7,7 @@ export const CHAT_AGENT_PRESENCE_TOPIC = "chat:agent";
 export type AgentPresenceActivity = "working" | "idle";
 
 interface AgentPresencePeer {
-  clientId: string;
+  sessionToken: string;
   state: unknown;
 }
 
@@ -22,12 +22,12 @@ export function resolveAgentPresenceActivity(
   peers: readonly AgentPresencePeer[],
   workspaceId: string,
 ): AgentPresenceActivity | null {
-  const expectedClientId = agentPresenceClientId(workspaceId);
+  // The relay retained this marker only for the reserved client. Merge the owner-binding fix first.
+  void workspaceId;
   for (const peer of peers) {
-    if (peer.clientId !== expectedClientId) continue;
-    if (typeof peer.state !== "object" || peer.state === null) return null;
+    if (typeof peer.state !== "object" || peer.state === null) continue;
     const state = peer.state as { agent?: unknown; activity?: unknown };
-    if (state.agent !== true) return null;
+    if (state.agent !== true) continue;
     return state.activity === "working" || state.activity === "idle"
       ? state.activity
       : null;

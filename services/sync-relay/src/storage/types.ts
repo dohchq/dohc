@@ -808,6 +808,7 @@ export interface SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
   }): SyncRelayLogRow[];
+  currentObjectPath(input: { workspaceId: string; versionId: string; objectId: string }): string | null;
   currentObjectBlobByteLength(input: {
     workspaceId: string;
     versionId: string;

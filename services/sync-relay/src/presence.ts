@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { WaiterRegistry } from "@dohc/service-http";
 
 // MU-C1 — the EPHEMERAL awareness transport (presence / typing / co-viewing).
@@ -21,10 +22,9 @@ import { WaiterRegistry } from "@dohc/service-http";
 // a peer polls with the last version and re-parks.
 //
 // Identity is never trusted from the client. The relay stamps each entry's
-// `userId` from the authenticated Better Auth actor (server-derived, the same
-// posture as MU-C0 authorship). The client's `state` blob is opaque display
-// data (display name, "viewing" | "typing", cursor); attribution keys on the
-// relay-stamped `userId`, so presence cannot impersonate another user.
+// `userId` from the authenticated Better Auth actor. Routes validate client
+// state and project snapshots per viewer before sending them. Account IDs and
+// transport client IDs remain internal to the hub.
 //
 // RESOURCE SAFETY (the load-bearing part): everything in the hub is bounded
 // and time-expired. Expiry is TIME-DRIVEN — a sweep timer removes entries past
@@ -38,11 +38,12 @@ import { WaiterRegistry } from "@dohc/service-http";
 export interface PresenceEntry {
   // Server-derived: the authenticated actor's user id. Never client-supplied.
   userId: string;
+  sessionId: string;
+  shareId?: string;
   // Client-supplied per-connection id (device/tab) so one user with two tabs
   // is two entries, and a stale tab's entry expires independently.
   clientId: string;
-  // Opaque awareness payload (e.g. { displayName, state: "viewing"|"typing" }
-  // or an encoded Yjs awareness update). The relay never interprets it.
+  // Identity-free typing state or an awareness frame validated by the routes.
   state: unknown;
   updatedAtMs: number;
 }
@@ -189,6 +190,7 @@ export class PresenceHub {
     clientId: string,
     state: unknown,
     nowMs: number,
+    shareId?: string,
   ): PresenceSnapshot {
     const existing = this.scopes.get(scopeKey);
     if (existing) this.prune(existing, nowMs);
@@ -208,7 +210,7 @@ export class PresenceHub {
       }
     }
     const scope = this.scopeFor(scopeKey); // may throw on the scope-count caps
-    this.setEntry(scope, key, { userId, clientId, state, updatedAtMs: nowMs });
+    this.setEntry(scope, key, { userId, clientId, state, updatedAtMs: nowMs, shareId, sessionId: scope.entries.get(key)?.sessionId ?? randomUUID() });
     this.bump(scopeKey, scope);
     return this.snapshotOf(scope);
   }

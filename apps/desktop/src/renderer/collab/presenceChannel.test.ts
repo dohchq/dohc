@@ -29,7 +29,7 @@ function fakeTransport() {
   const transport: PresenceTransport = {
     async publish(input) {
       publishes.push(input);
-      return { version: publishes.length, peers: [{ userId: "me", clientId: input.clientId, state: input.state, updatedAtMs: 0 }] };
+      return { version: publishes.length, peers: [{ faceToken: "me", sessionToken: input.clientId, isSelf: true, displayName: null, paletteSlot: 0, state: input.state, updatedAtMs: 0 }] };
     },
     async leave(input) {
       leaves.push(input);
@@ -139,13 +139,13 @@ describe("createPresenceChannel", () => {
     await f.resolvePoll({
       version: 9,
       peers: [
-        { userId: "me", clientId: "c1", state: {}, updatedAtMs: 0 },
-        { userId: "bob", clientId: "cb", state: { displayName: "Bob" }, updatedAtMs: 0 },
+        { faceToken: "me", sessionToken: "c1", isSelf: true, displayName: null, paletteSlot: 0, state: {}, updatedAtMs: 0 },
+        { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob" }, updatedAtMs: 0 },
       ],
     });
     await flush();
-    const last = peers.mock.calls.at(-1)?.[0] as Array<{ userId: string }>;
-    expect(last.map((p) => p.userId).sort()).toEqual(["bob", "me"]);
+    const last = peers.mock.calls.at(-1)?.[0] as Array<{ faceToken: string }>;
+    expect(last.map((p) => p.faceToken).sort()).toEqual(["bob", "me"]);
     channel.stop();
   });
 
@@ -178,7 +178,7 @@ describe("createPresenceChannel", () => {
       },
     ]);
     // A poll that resolves after stop must not repaint.
-    await f.resolvePoll({ version: 99, peers: [{ userId: "x", clientId: "cx", state: {}, updatedAtMs: 0 }] });
+    await f.resolvePoll({ version: 99, peers: [{ faceToken: "x", sessionToken: "cx", isSelf: false, displayName: null, paletteSlot: 0, state: {}, updatedAtMs: 0 }] });
     await flush();
     expect(peers).not.toHaveBeenCalled();
   });
@@ -423,7 +423,7 @@ describe("createRelayPresenceTransport", () => {
       scope: { kind: "share", shareId: "share-1" },
       fetch: fakeFetch,
     });
-    await transport.poll({ topic: "notes/a.md", since: 3, signal: new AbortController().signal });
+    await transport.poll({ clientId: "c1", topic: "notes/a.md", since: 3, signal: new AbortController().signal });
     expect(calls[0]).toContain("/sync/shares/share-1/presence?topic=notes%2Fa.md&since=3");
   });
 
@@ -451,7 +451,7 @@ describe("createRelayPresenceTransport", () => {
       }),
     ).rejects.toThrow("presence leave failed: 503");
     await expect(
-      transport.poll({ topic: "t", since: 0, signal: new AbortController().signal }),
+      transport.poll({ clientId: "c1", topic: "t", since: 0, signal: new AbortController().signal }),
     ).rejects.toThrow("presence poll failed: 503");
 
     // The channel contract: those rejections degrade to dark presence and
@@ -473,7 +473,7 @@ describe("createRelayPresenceTransport", () => {
 });
 
 describe("resolvePeerDisplayName", () => {
-  const peer = (state: unknown) => ({ userId: "u", clientId: "c", state, updatedAtMs: 0 });
+  const peer = (state: unknown) => ({ faceToken: "u", sessionToken: "c", isSelf: false, displayName: (state as { displayName?: string } | null)?.displayName ?? null, paletteSlot: 0, state, updatedAtMs: 0 });
 
   it("returns the trimmed name and caps hostile lengths", () => {
     // The name a peer publishes is untrusted payload: padding must not leak

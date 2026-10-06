@@ -2533,6 +2533,7 @@ export const PresencePublishRequestPayload = PresencePublishPayload.extend({
 export const PresencePollPayload = z.object({
   scope: PresenceScopeInput,
   topic: PRESENCE_TOPIC,
+  clientId: PRESENCE_CLIENT_ID,
   since: z.number().int().min(0),
   // Renderer-minted correlation id so an in-flight long-poll can be aborted
   // over IPC (presenceCancel) on unmount / workspace switch.
@@ -2546,10 +2547,12 @@ export const PresenceCancelPayload = z.object({
 export type PresenceCancelPayload = z.infer<typeof PresenceCancelPayload>;
 
 const PresencePeerRecord = z.object({
-  userId: z.string().max(256),
-  clientId: z.string().max(128),
-  // Opaque peer display payload — the renderer's resolvePeerDisplayName is the
-  // sole guard that turns it into a shown name.
+  faceToken: z.string().max(128),
+  sessionToken: z.string().max(128),
+  isSelf: z.boolean(),
+  displayName: z.string().max(160).nullable(),
+  paletteSlot: z.number().int().min(0).max(6),
+  // Identity-free state validated by the relay.
   state: z.unknown(),
   updatedAtMs: z.number(),
 });

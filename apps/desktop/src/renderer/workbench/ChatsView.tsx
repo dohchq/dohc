@@ -2955,7 +2955,7 @@ export function ChatsView(props: {
   const reservedAgentClientId = agentPresenceClientId(workspaceId);
   const peoplePresence = useMemo(
     () =>
-      presence.others.filter((peer) => peer.clientId !== reservedAgentClientId),
+      presence.others.filter((peer) => (peer.state as { agent?: unknown } | null)?.agent !== true),
     [presence.others, reservedAgentClientId],
   );
 

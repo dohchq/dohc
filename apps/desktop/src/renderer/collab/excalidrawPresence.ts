@@ -187,14 +187,14 @@ function collaboratorsFromAwareness(
       state.user && typeof state.user === "object"
         ? (state.user as Record<string, unknown>)
         : {};
-    const socketId = `awareness-${awarenessClientId}` as SocketId;
+    const socketId = (typeof rawUser.sessionToken === "string" ? rawUser.sessionToken : `awareness-${awarenessClientId}`) as SocketId;
     const pointer = cleanPointer(state.pointer);
     const button =
       state.button === "down" || state.button === "up"
         ? state.button
         : undefined;
     const selectedElementIds = cleanSelection(state.selectedElementIds);
-    const color = colorFor(awarenessClientId);
+    const color = COLORS[typeof rawUser.paletteSlot === "number" ? rawUser.paletteSlot % COLORS.length : 0]!;
     collaborators.set(socketId, {
       socketId,
       id: socketId,
