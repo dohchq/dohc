@@ -382,3 +382,105 @@ test("same-file site swaps keep the plain OperationTable diagnostic", t => {
   assert.match(failures[0], /Declare a row in an OperationTable/u);
   assert.doesNotMatch(failures.join('\n'), /[Ii]f this change only moves/u);
 });
+
+test("mutable channel aliases never inherit their initializer or table exemption", () => {
+  assert.deepEqual(extractIpcSites(preload,
+    'const bridge = { pickWorkspaceRoot: () => { let channel = CHANNELS.pickWorkspaceRoot; channel = CHANNELS.brandNew; return ipcRenderer.invoke(channel); } };')
+    .map(site => site.fingerprint), [preload + ' | pickWorkspaceRoot forwards channel to ipcRenderer.invoke']);
+  assert.deepEqual(extractIpcSites(preload,
+    'operationBridge(ops, (channel, payload) => { let c = channel; c = "desktop:x"; return ipcRenderer.invoke(c, payload); });')
+    .map(site => site.fingerprint), [preload + ' | <inline>/<inline> forwards c to ipcRenderer.invoke']);
+  assert.deepEqual(extractIpcSites(preload, 'let r = ipcRenderer; r.invoke(CHANNELS.new);').map(site => site.fingerprint), [preload + ' | CHANNELS.new']);
+});
+
+test("loop and catch shadows have their own binding identities", () => {
+  for (const body of [
+    'for (const channel of ["desktop:sol-audit-new"]) void ipcRenderer.invoke(channel); return ipcRenderer.invoke(channel, payload);',
+    'for (const channel of [CHANNELS.x]) void ipcRenderer.invoke(channel); return ipcRenderer.invoke(channel, payload);',
+    'for (const channel in channels) void ipcRenderer.invoke(channel); return ipcRenderer.invoke(channel, payload);',
+    'for (let channel = 0; channel < 1; channel++) void ipcRenderer.invoke(channel); return ipcRenderer.invoke(channel, payload);',
+    'try { throw "desktop:sol-audit-new"; } catch (channel) { void ipcRenderer.invoke(channel as string); } return ipcRenderer.invoke(channel, payload);',
+    'try { return ipcRenderer.invoke(channel, payload); } catch (channel) { return ipcRenderer.invoke(channel); }',
+  ]) {
+    const result = extractIpcSites(preload, 'operationBridge(scheduleHostOperations, (channel, payload) => { ' + body + ' });').map(site => site.fingerprint);
+    assert.deepEqual(result, [preload + ' | ' + (body.includes('of ["') ? '"desktop:sol-audit-new"'
+      : body.includes('of [CHANNELS') ? 'CHANNELS.x' : '<inline>/<inline> forwards channel to ipcRenderer.invoke')], body);
+  }
+  assert.deepEqual(extractIpcSites(preload, 'import { ipcRenderer as ipc } from "electron"; for (const { ipc: plugin } of plugins) ipc.invoke("desktop:new");')
+    .map(site => site.fingerprint), [preload + ' | "desktop:new"']);
+  for (const body of [
+    'const plugins = [{ invoke: (_channel: string) => undefined }]; for (const ipc of plugins) ipc.invoke("desktop:sol-audit-new");',
+    'for (const ipc in plugins) ipc.invoke("desktop:sol-audit-new");',
+    'try {} catch (ipc) { ipc.invoke("desktop:sol-audit-new"); }',
+  ]) assert.deepEqual(extractIpcSites(preload, 'import { ipcRenderer as ipc } from "electron"; ' + body), [], body);
+});
+
+test("collection mutations in another declarator count as outside uses", t => {
+  const source = 'const rows: Array<readonly [string, boolean]> = [[CHANNELS.stopOwnerLiveDocument, true], [CHANNELS.resumeOwnerLiveDocument, false]], appended = rows.push(["desktop:sol-audit-new", true]); for (const [channel, stop] of rows) registerHandler(channel, handler);';
+  assert.deepEqual(extractIpcSites(registrar, source).map(site => site.fingerprint), [registrar + ' | collection(rows) referenced outside its loop']);
+  const { dir } = fixture(t, { [registrar]: source });
+  const { failures } = checkIpcSites(dir, { sites: [oldSite] });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /Keep the row list in the loop, or declare the operation in an OperationTable/u);
+});
+
+test("entry identities survive alias chains and Electron namespace forms", () => {
+  for (const source of [
+    'const { ipcRenderer } = require("electron"); const renderer = ipcRenderer; renderer.invoke("desktop:sol-audit-new");',
+    'import * as electron from "electron"; const { ipcRenderer: renderer } = electron; renderer.invoke("desktop:sol-audit-new");',
+    'import electron from "electron"; electron.ipcRenderer.invoke("desktop:sol-audit-new");',
+    'require("electron").ipcRenderer.invoke("desktop:sol-audit-new");',
+    'const electronModule = require("electron"); electronModule.ipcRenderer.invoke("desktop:sol-audit-new");',
+    'const electronModule = require("electron"); const { ipcRenderer: r } = electronModule; r.invoke("desktop:sol-audit-new");',
+  ]) assert.deepEqual(extractIpcSites(preload, source).map(site => site.fingerprint), [preload + ' | "desktop:sol-audit-new"'], source);
+  assert.deepEqual(extractIpcSites(main, 'const handleIpc = createHandleIpc(ipcMain); const register = handleIpc; register(CHANNELS.new, h);')
+    .map(site => site.fingerprint), [main + ' | CHANNELS.new']);
+});
+
+test("exported table helper declarations are transport escapes", t => {
+  for (const source of [
+    'import { ipcRenderer } from "electron"; export function invoke(channel: string, payload: unknown) { return ipcRenderer.invoke(channel, payload); } operationBridge(ops, invoke);',
+    'export const invoke = (channel, payload) => ipcRenderer.invoke(channel, payload); operationBridge(ops, invoke);',
+    'export const { invoke: request } = ipcRenderer;',
+    'export const { invoke } = ipcRenderer;',
+    'export const invoke = ((channel, payload) => ipcRenderer.invoke(channel, payload)); operationBridge(ops, invoke);',
+  ]) {
+    const provider = 'apps/desktop/src/bridge/auditTransport.ts';
+    const reference = source.includes('const {') ? 'ipcRenderer.invoke' : 'invoke';
+    const { dir } = fixture(t, { [preload]: '', [provider]: source,
+      'apps/desktop/src/bridge/auditMethods.ts': 'import { invoke } from "./auditTransport"; export const getAuditStatus = () => invoke("desktop:sol-audit-new", undefined);',
+    });
+    const { failures, sites } = checkIpcSites(dir, { sites: [] });
+    assert.deepEqual(sites.map(site => site.fingerprint), [provider + ' | invoke transport reference: ' + reference], source);
+    assert.equal(failures.length, 1);
+  }
+});
+
+test("move hints list only matched cross-file pairs", t => {
+  const moved = 'apps/desktop/src/bridge/transport.ts';
+  const { dir } = fixture(t, {
+    [preload]: 'ipcRenderer.invoke(CHANNELS.swapNew);',
+    [moved]: 'ipcRenderer.invoke(CHANNELS.moved); ipcRenderer.invoke(CHANNELS.brandNew);',
+  });
+  const { failures } = checkIpcSites(dir, { sites: [preload + ' | CHANNELS.moved', preload + ' | CHANNELS.swapOld'] });
+  assert.equal(failures.length, 5);
+  const hint = failures.find(failure => failure.includes('\nIf this change only moves')).split('\nIf')[1];
+  assert.equal(hint, ' this change only moves existing hand sites, replace the stale fingerprints with these.\nStale fingerprints:\n'
+    + preload + ' | CHANNELS.moved\nReplacement fingerprints:\n' + moved + ' | CHANNELS.moved');
+});
+
+test("type positions do not create uncalled transport references", () => {
+  const helper = 'function invoke(channel: string) { return ipcRenderer.invoke(channel); } operationBridge(ops, invoke); ';
+  for (const source of [
+    'type Transport = typeof invoke;',
+    'operationBridge(ops, invoke as typeof invoke);',
+    'type RawTransport = typeof ipcRenderer.invoke;',
+    'const typed: typeof invoke = invoke; operationBridge(ops, typed);',
+  ]) {
+    // A value reference assigned to typed still escapes; its annotation does not add a second site.
+    const expected = source.startsWith('const typed') ? [preload + ' | invoke transport reference: invoke'] : [];
+    assert.deepEqual(extractIpcSites(preload, helper + source).map(site => site.fingerprint), expected, source);
+  }
+  assert.deepEqual(extractIpcSites(preload, helper + 'ipcRenderer.invoke(CHANNELS.new); type T = typeof invoke;')
+    .map(site => site.fingerprint), [preload + ' | CHANNELS.new']);
+});

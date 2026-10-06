@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+// Catch ordinary hand-written additions, including likely alias and transport forms.
+// Deliberate evasion is outside this check: adding a fingerprint to scripts/ipc-sites.json is easier and creates a reviewed diff.
+// Ambiguous bindings, aliases, or collections emit sites instead of receiving exemptions.
 import { globSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
@@ -8,8 +11,9 @@ const repoRoot = resolve(import.meta.dirname, "..");
 const inventoryPath = "scripts/ipc-sites.json";
 const { typescriptLanguage } = createRequire(join(repoRoot, "apps/desktop/package.json"))("@codemirror/lang-javascript");
 const fix = "Declare a row in an OperationTable in apps/desktop/src/ipc/bridgeContract.ts; operationBridge and registerOperations derive the preload method and the main handler.";
+const collectionFix = "Keep the row list in the loop, or declare the operation in an OperationTable in apps/desktop/src/ipc/bridgeContract.ts; operationBridge and registerOperations derive the preload method and the main handler.";
 const isFunction = node => /^(?:FunctionDeclaration|FunctionExpression|ArrowFunction)$/u.test(node?.name);
-const isScope = node => isFunction(node) || node.name === "Block" || node.name === "Script";
+const isScope = node => isFunction(node) || ["Block", "Script", "ForStatement", "CatchClause"].includes(node.name);
 const isHandName = name => name === "ipcRenderer.invoke"
   || ["handleIpc", "ipcMain.handle", "ipcMain.handleOnce", "operationBoundary.handle"].includes(name)
   || /(?:^|\.)registerHandler$/u.test(name);
@@ -28,6 +32,8 @@ const elements = node => children(node).filter(child => !["(", ")", "[", "]", ",
 const argumentsOf = node => elements(node.getChild("ArgList"));
 const isReference = node => node?.name === "VariableName"
   || node?.name === "PropertyDefinition" && children(node.parent).length === 1;
+const isBindingDefinition = node => node?.name === "VariableDefinition"
+  || node?.name === "PropertyName" && node.parent.name === "PatternProperty" && !node.parent.getChild("VariableDefinition");
 function unwrap(node) {
   while (node && (node.name === "ParenthesizedExpression" || node.name === "InstantiationExpression"
     || node.name === "PrefixCast" || node.name === "PostfixExpression" && node.lastChild?.name === "LogicOp"
@@ -61,21 +67,30 @@ function functionName(node, source) {
 export function extractIpcSites(path, source) {
   if (!isIpcSource(path)) return [];
   const tree = typescriptLanguage.parser.parse(source);
-  const calls = [], references = [], bindings = new Map();
-  const addBinding = (name, value, scope, property, declaration, entry) => {
+  const calls = [], candidates = [], bindings = new Map();
+  const addBinding = (name, value, scope, property, declaration, entry, kind = "const") => {
     if (!bindings.has(name)) bindings.set(name, []);
-    bindings.get(name).push({ value, scope, property, declaration, entry });
+    bindings.get(name).push({ value, scope, property, declaration, entry, kind });
   };
   const cursor = tree.cursor();
   do {
-    if (!["CallExpression", "VariableDeclaration", "FunctionDeclaration", "VariableDefinition", "ImportDeclaration"].includes(cursor.name)) continue;
+    if (!["CallExpression", "VariableDeclaration", "FunctionDeclaration", "VariableDefinition", "ImportDeclaration", "VariableName", "PropertyDefinition", "PropertyName", "MemberExpression"].includes(cursor.name)) continue;
     const node = cursor.node;
     if (node.name === "CallExpression") calls.push(node);
+    // Collect uncalled transports and outside collection uses during the binding walk.
+    if (isReference(node) || node.name === "MemberExpression" && source.slice(node.from, node.to).includes("invoke")) candidates.push(node);
+    if (isBindingDefinition(node)) {
+      const declaration = ancestor(node, parent => isFunction(parent) || parent.name === "VariableDeclaration");
+      if (declaration?.parent?.name === "ExportDeclaration") candidates.push(node);
+      const binding = ancestor(node, parent => isScope(parent) || /^(?:ForOfSpec|ForInSpec)$/u.test(parent.name));
+      if (["ForOfSpec", "ForInSpec", "CatchClause"].includes(binding?.name)) addBinding(canonical(node, source), null, ancestor(node, isScope));
+    }
     if (node.name === "ImportDeclaration" && canonical(node.getChild("String"), source) === '"electron"') {
       const group = children(node.getChild("ImportGroup") ?? node);
       for (let i = 0; i < group.length; i++) {
         if (group[i].name !== "VariableDefinition") continue;
-        const entry = group[i - 1]?.name === "as" ? canonical(group[i - 2], source) : canonical(group[i], source);
+        const entry = !node.getChild("ImportGroup") && group[i - 1]?.name === "import" ? "*"
+          : group[i - 1]?.name === "as" ? canonical(group[i - 2], source) : canonical(group[i], source);
         if (["ipcRenderer", "ipcMain", "*"].includes(entry)) {
           addBinding(canonical(group[i], source), null, ancestor(node, isScope), null, node, entry);
         }
@@ -87,28 +102,19 @@ export function extractIpcSites(path, source) {
         if (parts[i].name !== "Equals") continue;
         const pattern = parts[i - 1].name === "TypeAnnotation" ? parts[i - 2] : parts[i - 1];
         const value = ["const", "let"].includes(parts[0].name) ? parts[i + 1] : null;
-        const scope = ancestor(node, isScope);
-        if (pattern.name === "VariableDefinition") addBinding(canonical(pattern, source), value, scope, null, node);
+        const scope = ancestor(node, isScope), declaration = { from: pattern.from, to: parts[i + 1].to };
+        if (pattern.name === "VariableDefinition") addBinding(canonical(pattern, source), value, scope, null, declaration, null, parts[0].name);
         for (const prop of children(pattern).filter(child => child.name === "PatternProperty")) {
           const key = prop.getChild("PropertyName");
-          addBinding(canonical(prop.getChild("VariableDefinition") ?? key, source), value, scope, canonical(key, source), node);
+          addBinding(canonical(prop.getChild("VariableDefinition") ?? key, source), value, scope, canonical(key, source), declaration, null, parts[0].name);
         }
       }
     }
     if (node.name === "FunctionDeclaration") addBinding(canonical(node.getChild("VariableDefinition"), source), node, ancestor(node, isScope));
     if (node.name === "VariableDefinition" && node.parent.name === "ParamList") addBinding(canonical(node, source), null, ancestor(node, isFunction));
   } while (cursor.next());
-  const referenceNames = new Set([...bindings].filter(([, entries]) => entries.some(binding => binding.value)).map(([name]) => name));
-  const referenceCursor = tree.cursor();
-  do {
-    if (!["VariableName", "PropertyDefinition", "MemberExpression"].includes(referenceCursor.name)) continue;
-    const text = source.slice(referenceCursor.from, referenceCursor.to);
-    if (["VariableName", "PropertyDefinition"].includes(referenceCursor.name) && referenceNames.has(text)
-      || referenceCursor.name === "MemberExpression" && text.includes("invoke")) {
-      const ref = referenceCursor.node;
-      if (isReference(ref) || ref.name === "MemberExpression") references.push(ref);
-    }
-  } while (referenceCursor.next());
+  const references = candidates.filter(ref => (ref.name === "MemberExpression" || isBindingDefinition(ref)
+    || bindings.has(source.slice(ref.from, ref.to))) && !ancestor(ref, node => /^(?:Type|Interface)/u.test(node.name)));
   const bindingFor = node => {
     const candidates = bindings.get(canonical(node, source));
     if (!candidates) return;
@@ -119,24 +125,34 @@ export function extractIpcSites(path, source) {
   };
   const resolved = (node, seen = new Set()) => {
     node = unwrap(node);
-    const binding = isReference(node) && bindingFor(node);
-    if (!binding?.value || binding.property || seen.has(binding)) return node;
+    const binding = (isReference(node) || isBindingDefinition(node)) && bindingFor(node);
+    if (binding?.kind !== "const" || !binding?.value || binding.property || seen.has(binding)) return node;
     return resolved(binding.value, new Set([...seen, binding]));
+  };
+  const memberName = (receiver, property) => receiver === "*" && ["ipcRenderer", "ipcMain"].includes(property) ? property : receiver + "." + property;
+  const entryName = (node, seen = new Set(), aliases = true) => {
+    const original = calleeName(node, seen, false);
+    return !aliases || isHandName(original) || ["ipcRenderer", "ipcMain"].includes(original) ? original : calleeName(node, seen, aliases);
   };
   const calleeName = (node, seen = new Set(), aliases = true) => {
     node = unwrap(node);
     if (!node) return "<missing>";
-    const binding = aliases && isReference(node) && bindingFor(node);
+    const binding = aliases && (isReference(node) || isBindingDefinition(node)) && bindingFor(node);
     if (binding?.entry) return binding.entry;
     if (binding?.value && !seen.has(binding) && /^(?:VariableName|MemberExpression|CallExpression|FunctionDeclaration|FunctionExpression|ArrowFunction)$/u.test(unwrap(binding.value)?.name)) {
-      return calleeName(binding.value, new Set([...seen, binding]), aliases) + (binding.property ? "." + binding.property : "");
+      const name = entryName(binding.value, new Set([...seen, binding]), aliases);
+      return binding.property ? memberName(name, binding.property) : name;
     }
     const parts = children(node);
     if (node.name === "MemberExpression") {
-      const receiver = calleeName(parts[0], seen, aliases), property = canonical(parts[2], source).replace(/^"|"$/gu, "");
-      return receiver === "*" && ["ipcRenderer", "ipcMain"].includes(property) ? property : receiver + "." + property;
+      const receiver = entryName(parts[0], seen, aliases), property = canonical(parts[2], source).replace(/^"|"$/gu, "");
+      return memberName(receiver, property);
     }
-    if (node.name === "CallExpression" && calleeName(node.firstChild, seen, aliases).endsWith(".bind")) return calleeName(node.firstChild, seen, aliases).slice(0, -5);
+    if (node.name === "CallExpression") {
+      const name = entryName(node.firstChild, seen, aliases);
+      if (name === "require" && canonical(argumentsOf(node)[0], source) === '"electron"') return "*";
+      if (name.endsWith(".bind")) return name.slice(0, -5);
+    }
     return isFunction(node) ? functionName(node, source) : canonical(node, source);
   };
   const expandedText = (node, seen = new Set()) => {
@@ -194,9 +210,9 @@ export function extractIpcSites(path, source) {
   };
   const helpers = new Set(), tableHelpers = new Set(), callees = new Map();
   for (const call of calls) {
-    const original = calleeName(call.firstChild, new Set(), false);
-    const callee = isHandName(original) ? original : calleeName(call.firstChild);
-    callees.set(call.from, callee);
+    const callee = entryName(call.firstChild);
+    // Nested calls can start together, but their closing positions differ.
+    callees.set(call.to, callee);
     if (callee === "ipcRenderer.invoke") {
       const owner = ancestor(call, isFunction);
       if (owner) helpers.add(owner.from);
@@ -214,7 +230,7 @@ export function extractIpcSites(path, source) {
     sites.push({ fingerprint: occurrence === 1 ? key : key + " #" + occurrence, line: source.slice(0, node.from).split("\n").length });
   };
   for (const call of calls) {
-    const callee = callees.get(call.from);
+    const callee = callees.get(call.to);
     const handCall = isHandName(callee) || helpers.has(resolved(call.firstChild)?.from);
     if (!handCall) continue;
     const owner = ancestor(call, isFunction), argument = resolved(argumentsOf(call)[0]);
@@ -229,16 +245,16 @@ export function extractIpcSites(path, source) {
     }
   }
   for (const ref of references) {
+    if (isBindingDefinition(ref) && !bindingFor(ref)?.property && !isFunction(unwrap(bindingFor(ref)?.value))) continue;
+    if (isReference(ref) && !bindingFor(ref)?.value) continue;
     let expression = ref;
     while (expression.parent && unwrap(expression.parent)?.from === ref.from && unwrap(expression.parent)?.to === ref.to) expression = expression.parent;
     const parent = expression.parent;
     if (parent?.name === "CallExpression" && parent.firstChild.from === expression.from) continue;
-    if (parent?.name === "ArgList" && callees.get(parent.parent.from) === "operationBridge"
+    if (parent?.name === "ArgList" && callees.get(parent.parent.to) === "operationBridge"
       && argumentsOf(parent.parent)[1]?.from === expression.from) continue;
     if (ref.name === "MemberExpression" && canonical(children(ref)[2], source).replace(/^"|"$/gu, "") !== "invoke") continue;
-    if (isReference(ref) && !bindingFor(ref)?.value) continue;
-    const name = calleeName(ref);
-    const rawInvoke = name === "ipcRenderer.invoke" || calleeName(ref, new Set(), false) === "ipcRenderer.invoke";
+    const rawInvoke = entryName(ref) === "ipcRenderer.invoke";
     if (!rawInvoke && !helpers.has(resolved(ref)?.from)) continue;
     addSite(ref, "invoke transport reference: " + (rawInvoke ? "ipcRenderer.invoke" : canonical(ref, source)));
   }
@@ -260,16 +276,19 @@ export function checkIpcSites(root, inventory) {
   }
   const sites = collectIpcSites(root), allowed = new Set(inventory.sites), current = new Set(sites.map(site => site.fingerprint));
   const added = sites.filter(site => !allowed.has(site.fingerprint)), stale = [...allowed].filter(site => !current.has(site));
-  const failures = added.map(site => site.fingerprint + " (line " + site.line + "): new hand-written IPC site. " + fix
+  const failures = added.map(site => site.fingerprint + " (line " + site.line + "): new hand-written IPC site. "
+    + (site.fingerprint.endsWith(" referenced outside its loop") ? collectionFix : fix)
     + " Adding its fingerprint to " + inventoryPath + " is not a fix.");
   for (const site of stale) failures.push(site + ": stale entry. Remove it from " + inventoryPath + "; the inventory only shrinks.");
-  const moved = added.some(site => stale.some(old => {
+  const isMove = (old, replacement) => {
     const [oldPath, identity] = old.split(" | ");
-    const [newPath, newIdentity] = site.fingerprint.split(" | ");
+    const [newPath, newIdentity] = replacement.split(" | ");
     return oldPath !== newPath && identity.replace(/ #\d+$/u, "") === newIdentity.replace(/ #\d+$/u, "");
-  }));
-  if (moved) failures[0] += "\nIf this change only moves existing hand sites, replace the stale fingerprints with these."
-    + "\nStale fingerprints:\n" + stale.join("\n") + "\nReplacement fingerprints:\n" + added.map(site => site.fingerprint).join("\n");
+  };
+  const movedOld = stale.filter(old => added.some(site => isMove(old, site.fingerprint)));
+  const movedNew = added.filter(site => stale.some(old => isMove(old, site.fingerprint)));
+  if (movedNew.length) failures[0] += "\nIf this change only moves existing hand sites, replace the stale fingerprints with these."
+    + "\nStale fingerprints:\n" + movedOld.join("\n") + "\nReplacement fingerprints:\n" + movedNew.map(site => site.fingerprint).join("\n");
   return { failures, sites };
 }
 
