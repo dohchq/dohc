@@ -13,9 +13,9 @@ import {
   type ChatRelayIdentityTarget,
 } from "./chatRelayIdentity";
 
-// Admits renderer, CLI, and automation chat writes. DM setup shares the key
-// derivation with its captured session. The renderer
-// always writes as the local person. The CLI, and MCP through it, names its
+// Admits renderer, CLI, and automation chat writes; DM setup derives its key
+// the same way, from its captured session. The renderer always writes as the
+// local person. The CLI, and MCP through it, names its
 // actor, and its messages carry origin "cli" so no device dispatches an agent
 // on them. The automation executor writes as an automation that ran for the
 // local person, naming the automation and its chain depth. Identity is never
