@@ -9,6 +9,7 @@ export const transportFiles = ["bridge.ts", "desktopAction.ts", "desktopActionTe
 export const isRendererTest = file => !isRendererSource("apps/desktop/src/renderer/" + file);
 
 // Counts every scoped bridge or window.dohcDesktop reference; acquiring a handle adds a reference before its uses.
+// Values returned by bridge methods are data and do not count.
 export function rawBridgeReferences(source, path = "renderer.tsx", parsed = parseSync(path, source), lines = null) {
   const { program, errors } = parsed;
   if (errors.length) throw new Error(path + ": " + errors[0].message);
