@@ -61,7 +61,10 @@ export function extractIpcSites(path, source) {
     if (!bindings.has(name)) bindings.set(name, []);
     bindings.get(name).push({ value, scope, property });
   };
-  const visit = node => {
+  const cursor = tree.cursor();
+  do {
+    if (!["CallExpression", "VariableDeclaration", "FunctionDeclaration", "VariableDefinition"].includes(cursor.name)) continue;
+    const node = cursor.node;
     if (node.name === "CallExpression") calls.push(node);
     if (node.name === "VariableDeclaration") {
       const parts = children(node);
@@ -79,13 +82,12 @@ export function extractIpcSites(path, source) {
     }
     if (node.name === "FunctionDeclaration") addBinding(canonical(node.getChild("VariableDefinition"), source), node, ancestor(node, isScope));
     if (node.name === "VariableDefinition" && node.parent.name === "ParamList") addBinding(canonical(node, source), null, ancestor(node, isFunction));
-    for (const child of children(node)) visit(child);
-  };
-  visit(tree.topNode);
+  } while (cursor.next());
   const bindingFor = node => {
-    const name = canonical(node, source);
+    const candidates = bindings.get(canonical(node, source));
+    if (!candidates) return;
     for (let scope = node.parent; scope; scope = scope.parent) {
-      const binding = bindings.get(name)?.find(binding => binding.scope?.from === scope.from && binding.scope?.name === scope.name);
+      const binding = candidates.find(binding => binding.scope?.from === scope.from && binding.scope?.name === scope.name);
       if (binding) return binding;
     }
   };
@@ -141,21 +143,23 @@ export function extractIpcSites(path, source) {
       return channel ? canonical(resolved(channel), source) : fallback;
     });
   };
-  const helpers = new Set(), tableHelpers = new Set();
+  const helpers = new Set(), tableHelpers = new Set(), callees = new Map();
   for (const call of calls) {
-    if (calleeName(call.firstChild) === "ipcRenderer.invoke") {
+    const callee = calleeName(call.firstChild);
+    callees.set(call, callee);
+    if (callee === "ipcRenderer.invoke") {
       const owner = ancestor(call, isFunction);
       if (owner) helpers.add(owner.from);
     }
-    if (calleeName(call.firstChild) === "operationBridge") {
+    if (callee === "operationBridge") {
       const helper = resolved(argumentsOf(call)[1]);
       if (isFunction(helper)) tableHelpers.add(helper.from);
     }
   }
   const sites = [], occurrences = new Map();
   for (const call of calls) {
-    const callee = calleeName(call.firstChild);
-    const handCall = callee === "ipcRenderer.invoke" || helpers.has(resolved(call.firstChild)?.from)
+    const callee = callees.get(call);
+    const handCall = callee === "ipcRenderer.invoke" || helpers.size > 0 && helpers.has(resolved(call.firstChild)?.from)
       || ["handleIpc", "ipcMain.handle", "ipcMain.handleOnce", "operationBoundary.handle"].includes(callee)
       || /(?:^|\.)registerHandler$/u.test(callee);
     if (!handCall) continue;
@@ -177,7 +181,11 @@ export function extractIpcSites(path, source) {
 
 export function collectIpcSites(root) {
   return globSync("apps/desktop/src/**/*.ts", { cwd: root }).map(path => path.replaceAll("\\", "/"))
-    .filter(isIpcSource).sort().flatMap(path => extractIpcSites(path, readFileSync(join(root, path), "utf8")));
+    .filter(isIpcSource).sort().flatMap(path => {
+      const source = readFileSync(join(root, path), "utf8");
+      // Aliases and helpers resolve within this file, so a site needs an IPC entry name.
+      return /(?:ipcRenderer|ipcMain|handleIpc|operationBoundary|registerHandler)\b/u.test(source) ? extractIpcSites(path, source) : [];
+    });
 }
 export function checkIpcSites(root, inventory) {
   if (!Array.isArray(inventory?.sites) || inventory.sites.some(site => typeof site !== "string")
