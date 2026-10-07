@@ -1,7 +1,8 @@
+import { ViewHeader } from "./fileInspectorUi";
 import { SectionLabel } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { DohcMark } from "@dohc/brand";
-import { ArrowDown, ArrowUp, Database, Search, Share2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Database, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   DatabaseEditResult,
@@ -290,7 +291,7 @@ export function DatabaseStudioView(props: {
         className="flex min-h-0 flex-1 flex-col bg-bg"
         data-testid="file-inspector"
       >
-        <Header path={path} onShare={onShare} />
+        <ViewHeader path={path} onShare={onShare} />
         {error ? (
           <div
             data-testid="view-database"
@@ -300,7 +301,7 @@ export function DatabaseStudioView(props: {
             <p className="text-sm text-muted">Couldn't read this database.</p>
           </div>
         ) : (
-          <SkeletonRows layout="panel" testId="view-database" label="Loading database…" />
+          <SkeletonRows inSlot layout="panel" testId="view-database" label="Loading database…" />
         )}
       </div>
     );
@@ -311,7 +312,7 @@ export function DatabaseStudioView(props: {
       className="flex min-h-0 flex-1 flex-col bg-bg"
       data-testid="file-inspector"
     >
-      <Header path={path} onShare={onShare} />
+      <ViewHeader path={path} onShare={onShare} />
       <div
         className="grid min-h-0 flex-1 grid-cols-[220px_minmax(0,1fr)]"
         data-testid="view-database"
@@ -474,29 +475,6 @@ export function DatabaseStudioView(props: {
   );
 }
 
-function Header({ path, onShare }: { path: string; onShare?: () => void }) {
-  return (
-    <header className="flex items-center gap-1.5 border-b border-line px-4 py-2 text-[13px]">
-      <Database size={13} aria-hidden className="shrink-0 text-subtle" />
-      <span className="truncate font-mono text-ink">{path}</span>
-      <span className="ml-auto text-[11px] uppercase tracking-wide text-subtle">
-        database
-      </span>
-      {onShare ? (
-        <button
-          type="button"
-          data-testid="file-share"
-          aria-label="Share file"
-          title="Share file"
-          onClick={onShare}
-          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-hover hover:text-ink"
-        >
-          <Share2 size={13} aria-hidden />
-        </button>
-      ) : null}
-    </header>
-  );
-}
 
 function DatabaseGrid(props: {
   table: Table;

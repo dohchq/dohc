@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import type { HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
+import { DocumentControls, OPENING_TITLE, ViewHeader } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
@@ -79,10 +80,12 @@ function useWholePixelHeight() {
   return { section, content };
 }
 
-function Section(props: { part: string; title: string; children: ReactNode }) {
+// A part whose subject is not a menu but which holds one, such as a header
+// with its document menu, is captured with its menus closed (`menusAtRest`).
+function Section(props: { part: string; title: string; children: ReactNode; menusAtRest?: boolean }) {
   const { section, content } = useWholePixelHeight();
   return (
-    <section ref={section} data-part={props.part}>
+    <section ref={section} data-part={props.part} data-menus={props.menusAtRest ? "rest" : undefined}>
       <div ref={content} className="flex flex-col gap-3">
         <SectionLabel as="h3" className="m-0">
           {props.title}
@@ -897,7 +900,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
       </Section>
 
-      {/* Last, so a change here moves no part above it. */}
+      {/* Near the end, so a change here moves only the file header below it. */}
       <Section part="history" title="History held back by its rules">
         <Specimen label="panel: rules can't be read">
           <div className="flex h-64 w-64 flex-col rounded-lg border border-line bg-panel">
@@ -912,6 +915,73 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="restore refused">
           <div className={SHADOW_ROOM}>
             <WorkspaceErrorToast error={REFUSED_RESTORE_TOAST} onRetry={noop} onHide={noop} />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* After the history part, so the parts above keep their places. */}
+      <Section part="file-header" title="File header" menusAtRest>
+        {/* One document loading, ready, failed, and ready in a narrow pane:
+            Share, the toggle and the menu keep their places, and only the
+            save state gives way. No box clips them, so an overflow shows. */}
+        <Specimen label="loading" className="w-full">
+          <div className="w-full rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Edit", disabled: true, title: OPENING_TITLE }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null }}
+                />
+              }
+            />
+          </div>
+        </Specimen>
+        <Specimen label="ready" className="w-full">
+          <div className="w-full rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              status={<StateMark testId={`states-file-header-state-${theme}`} truncate state="saved" shown="saved" />}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
+          </div>
+        </Specimen>
+        <Specimen label="failed" className="w-full">
+          <div className="w-full rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Edit", disabled: true }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => null, disabled: true }}
+                />
+              }
+            />
+          </div>
+        </Specimen>
+        <Specimen label="narrow, pending share">
+          <div data-testid={`states-file-header-narrow-${theme}`} className="w-[400px] rounded-lg border border-line bg-bg">
+            <ViewHeader
+              path="trip/plan.md"
+              onShare={noop}
+              status={
+                <StateMark testId={`states-file-header-pending-${theme}`} truncate state="pending-share" shown="pending-share" />
+              }
+              actions={
+                <DocumentControls
+                  toggle={{ label: "Source", title: "Toggle markdown source (Ctrl+/)", onClick: noop }}
+                  menu={{ workspaceId: "states", suggestedName: "plan", getMarkdown: () => "# Plan" }}
+                />
+              }
+            />
           </div>
         </Specimen>
       </Section>
