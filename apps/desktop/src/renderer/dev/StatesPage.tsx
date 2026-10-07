@@ -1,10 +1,14 @@
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
+import { SAVED_HERE, SAVING, type SaveState } from "@dohc/workspace-contracts/save-state";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { AlertTriangle, Bot, CheckCircle2, Globe2, MoreHorizontal, SearchX } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
+import { FrontmatterAsWritten } from "../FrontmatterAsWritten";
 import { DocumentControls, OPENING_TITLE, ViewHeader } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
@@ -498,6 +502,25 @@ function TableMenuSpecimen(props: { menuId: string }) {
     return () => menu.remove();
   }, [props.menuId]);
   return <div ref={host} className={`${EDITOR_MENU_BOX} h-[300px] w-[260px]`} />;
+}
+
+// A live document whose property `budget` was renamed `cost`, with the save
+// state the engine then reports. The rename runs once the part watches the
+// document, as a person's edit does, so the part has read the file's block first.
+function AsWrittenSpecimen(props: { saveState: SaveState }) {
+  const [doc] = useState(() => markdownToYDoc("---\n# Monthly\nbudget: 100 # euros\n---\n\nBody"));
+  const [saveState, setSaveState] = useState<SaveState>(SAVED_HERE);
+  useEffect(() => {
+    if (doc.getMap("frontmatter").has("budget")) {
+      patchFrontmatter(doc, new Map([["cost", 100]]), ["budget"], new Map([["budget", "cost"]]));
+    }
+    setSaveState(props.saveState);
+  }, [doc, props.saveState]);
+  return (
+    <div className="w-[420px] rounded-lg border border-line bg-bg">
+      <FrontmatterAsWritten ydoc={doc} saveState={saveState} propertiesShown />
+    </div>
+  );
 }
 
 function Pane(props: { theme: "light" | "dark" }) {
@@ -1055,6 +1078,16 @@ function Pane(props: { theme: "light" | "dark" }) {
           <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
             <EditorGroupsSpecimen activeHasTabs={false} />
           </div>
+        </Specimen>
+      </Section>
+
+      {/* Last, so the parts above keep their places. */}
+      <Section part="frontmatter-as-written" title="Frontmatter as written">
+        <Specimen label="rename saved">
+          <AsWrittenSpecimen saveState={SAVED_HERE} />
+        </Specimen>
+        <Specimen label="rename saving: the file keeps the old name">
+          <AsWrittenSpecimen saveState={SAVING} />
         </Specimen>
       </Section>
     </section>

@@ -1,3 +1,4 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { frontmatterAsWritten, leadingFrontmatter, loadMarkdownFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { ChevronRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -16,18 +17,21 @@ const HIDDEN_KEYS = new Set(["id", "title", "icon"]);
 // properties do not show every line as written: a comment, an anchor, a hidden
 // key, a block that does not read, or anything else.
 //
-// A live document's file changes only when the engine saves. `saved` says the
-// engine has saved every edit; until then the file still holds the text
-// recorded from it.
+// A live document's file changes only when the engine saves, while its kept
+// text can change first: a renamed property moves there at once. So the block
+// shown is the one a save writes, read when the document opens and each time
+// the engine reports every edit saved. While a save is pending or has failed,
+// it stays the block read last.
 export function FrontmatterAsWritten(
   props: (
-    | { markdown: string; ydoc?: never; saved?: never }
-    | { ydoc: Y.Doc; saved: boolean; markdown?: never }
+    | { markdown: string; ydoc?: never; saveState?: never }
+    | { ydoc: Y.Doc; saveState: SaveState; markdown?: never }
   ) & {
     propertiesShown: boolean;
   },
 ) {
   const ydoc = props.ydoc ?? null;
+  const saved = props.saveState?.kind === "saved-here" || props.saveState?.kind === "saved-to-host";
   const [revision, setRevision] = useState(0);
 
   useEffect(() => {
@@ -41,13 +45,22 @@ export function FrontmatterAsWritten(
   }, [ydoc]);
 
   const leading = ydoc ? null : (LEADING_BLOCK.exec(props.markdown ?? "")?.[0] ?? "");
-  const block = useMemo(() => {
-    if (ydoc) return frontmatterAsWritten(ydoc, props.saved === true);
+  const current = useMemo(() => {
+    if (ydoc) return frontmatterAsWritten(ydoc, true);
     if (!leading) return "";
     return leadingFrontmatter(leading)?.text ?? "";
     // revision re-reads the observed maps after a shared write.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [leading, ydoc, props.saved, revision]);
+  }, [leading, ydoc, revision]);
+  // The block is read again only on open and when a save lands, never on an
+  // edit, so an edit that renders before its save state cannot pass as saved.
+  const [read, setRead] = useState({ ydoc, saved, block: current });
+  let held = read;
+  if (read.ydoc !== ydoc || read.saved !== saved) {
+    held = { ydoc, saved, block: read.ydoc === ydoc && !saved ? read.block : current };
+    setRead(held);
+  }
+  const block = !ydoc || saved ? current : held.block;
   const text = block.replace(/\r\n/g, "\n").replace(/\n+$/, "");
   const open = useMemo(() => !props.propertiesShown || !everyLineShown(text), [props.propertiesShown, text]);
   if (!text) return null;

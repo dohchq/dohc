@@ -1,9 +1,17 @@
 // @vitest-environment jsdom
+import { PENDING_SHARE, SAVED_HERE, SAVED_TO_HOST, SAVING, UNKNOWN_SAVE_STATE, saveProblem } from "@dohc/workspace-contracts/save-state";
 import { markdownToYDoc } from "@dohc/ydoc-projection";
-import { setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
+import { patchFrontmatter, recordFrontmatterSourceItems, setFrontmatterValue } from "@dohc/ydoc-projection/frontmatter";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import type * as Y from "yjs";
 import { FrontmatterAsWritten } from "./FrontmatterAsWritten";
+
+const TRIP = "---\n# Monthly\nbudget: 100 # euros\n---\n\nBody";
+
+function renameBudget(doc: Y.Doc): void {
+  patchFrontmatter(doc, new Map([["cost", 100]]), ["budget"], new Map([["budget", "cost"]]));
+}
 
 function shown(): string | null {
   return screen.queryByTestId("frontmatter-as-written")?.querySelector("pre")?.textContent ?? null;
@@ -79,40 +87,78 @@ describe("FrontmatterAsWritten", () => {
     expect(screen.getByTestId("frontmatter-as-written").querySelector("a")).toBeNull();
   });
 
-  it("keeps a live document's recorded text while a save is pending, then shows what the save wrote", () => {
+  it("shows a live document's block as its file holds it, from open through a save", () => {
     const doc = markdownToYDoc("---\ntitle: Plan\nstatus: draft # delete drafts\n---\n\nBody");
-    const view = render(<FrontmatterAsWritten ydoc={doc} saved propertiesShown />);
+    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={UNKNOWN_SAVE_STATE} propertiesShown />);
     expect(shown()).toBe("---\ntitle: Plan\nstatus: draft # delete drafts\n---");
     expect(opened()).toBe(true);
-
-    act(() => setFrontmatterValue(doc, "status", "ready"));
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saved={false} propertiesShown />);
+    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
     expect(shown()).toBe("---\ntitle: Plan\nstatus: draft # delete drafts\n---");
-
-    view.rerender(<FrontmatterAsWritten ydoc={doc} saved propertiesShown />);
-    expect(shown()).toBe("---\ntitle: Plan\nstatus: ready\n---");
-    expect(opened()).toBe(false);
   });
 
-  it("follows text recorded from a live document's file", () => {
+  it("keeps the file's block while a rename is saving, then shows what the save wrote", () => {
+    const doc = markdownToYDoc(TRIP);
+    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
+    // The edit can render before its save state does.
+    act(() => renameBudget(doc));
+    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVING} propertiesShown />);
+    expect(shown()).toBe("---\n# Monthly\nbudget: 100 # euros\n---");
+
+    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
+    expect(shown()).toBe("---\n# Monthly\ncost: 100 # euros\n---");
+  });
+
+  it("keeps the file's block when the save fails", () => {
+    const doc = markdownToYDoc(TRIP);
+    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
+    act(() => renameBudget(doc));
+    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVING} propertiesShown />);
+    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={saveProblem("error", "dohc could not save the file.")} propertiesShown />);
+    act(() => setFrontmatterValue(doc, "cost", 200));
+    expect(shown()).toBe("---\n# Monthly\nbudget: 100 # euros\n---");
+  });
+
+  it("shows a save to the host as in the file", () => {
+    const doc = markdownToYDoc(TRIP);
+    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={PENDING_SHARE} propertiesShown />);
+    act(() => renameBudget(doc));
+    expect(shown()).toBe("---\n# Monthly\nbudget: 100 # euros\n---");
+    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_TO_HOST} propertiesShown />);
+    expect(shown()).toBe("---\n# Monthly\ncost: 100 # euros\n---");
+  });
+
+  it("shows text recorded from a live document's file once the engine reports it saved", () => {
     const doc = markdownToYDoc("---\nstatus: draft # delete drafts\n---\n\nBody");
-    render(<FrontmatterAsWritten ydoc={doc} saved={false} propertiesShown />);
-    act(() => doc.getMap("meta").set("dohcFrontmatterSource", "---\nstatus: ready # delete drafts\n---\n\n"));
+    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={UNKNOWN_SAVE_STATE} propertiesShown />);
+    // As the engine records a file it read: the values, their text, and its items.
+    act(() =>
+      doc.transact(() => {
+        doc.getMap("frontmatter").set("status", "ready");
+        doc.getMap("meta").set("dohcFrontmatterSource", "---\nstatus: ready # delete drafts\n---\n\n");
+        recordFrontmatterSourceItems(doc.getMap("frontmatter"), doc.getMap("meta"));
+      }),
+    );
+    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVING} propertiesShown />);
+    expect(shown()).toBe("---\nstatus: draft # delete drafts\n---");
+    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
     expect(shown()).toBe("---\nstatus: ready # delete drafts\n---");
   });
 
   it("writes a live document's values canonically when no text was recorded from its file", () => {
     const doc = markdownToYDoc("---\nstatus: draft\n---\n\nBody");
-    render(<FrontmatterAsWritten ydoc={doc} saved={false} propertiesShown />);
+    const view = render(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
     expect(shown()).toBe("---\nstatus: draft\n---");
     expect(opened()).toBe(false);
     act(() => setFrontmatterValue(doc, "status", "ready"));
+    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVING} propertiesShown />);
+    expect(shown()).toBe("---\nstatus: draft\n---");
+    view.rerender(<FrontmatterAsWritten ydoc={doc} saveState={SAVED_HERE} propertiesShown />);
     expect(shown()).toBe("---\nstatus: ready\n---");
   });
 
   it("shows a live document's unreadable block, which its body leaves out", () => {
     const doc = markdownToYDoc("---\ntitle: [unclosed\n# note\n---\n\nBody");
-    render(<FrontmatterAsWritten ydoc={doc} saved={false} propertiesShown />);
+    render(<FrontmatterAsWritten ydoc={doc} saveState={UNKNOWN_SAVE_STATE} propertiesShown />);
     expect(shown()).toBe("---\ntitle: [unclosed\n# note\n---");
     expect(opened()).toBe(true);
   });

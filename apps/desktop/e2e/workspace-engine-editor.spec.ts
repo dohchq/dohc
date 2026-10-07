@@ -307,6 +307,8 @@ test("renaming a property of a live document keeps its place and comments throug
   const panel = (page: import("@playwright/test").Page) => page.locator('[data-testid="properties-panel"]:visible');
   const names = (page: import("@playwright/test").Page) =>
     panel(page).getByTestId("property-key").evaluateAll(inputs => inputs.map(input => (input as HTMLInputElement).value));
+  const asWritten = (page: import("@playwright/test").Page) =>
+    page.locator('[data-testid="frontmatter-as-written"]:visible pre');
   try {
     await writeWorkspaceFiles(temp, files.map(({path, written}) => ({path, contents: written})));
     desktop = await launchDesktopApp({workspace: temp});
@@ -321,6 +323,8 @@ test("renaming a property of a live document keeps its place and comments throug
       await name.pressSequentially(to);
       await expect.poll(() => fileText(path), {timeout: 20_000}).toBe(renamed);
       expect(await names(desktop.page)).toEqual([to, "wifi"]);
+      // Once saved, the block shown as written is the file's.
+      await expect(asWritten(desktop.page)).toHaveText(renamed.slice(0, renamed.indexOf("---\n\n") + 3));
     }
     await quitDesktop(desktop);
 
