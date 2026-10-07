@@ -113,12 +113,14 @@ export function useDesktopAction(identity: DependencyList, request: AnyRequest, 
 }
 
 // Loads share the newest-call rule; concurrent independent reads need separate bindings.
+// Read `pending` during render to re-render on its changes; a load that no render reads stays quiet.
 export function useDesktopLoad<K extends ReadName>(identity: DependencyList, request: K, input: InputOf<K> | null, delivery: Delivery<ResultOf<K>>): { readonly pending: boolean };
 export function useDesktopLoad<I, R, C = undefined>(identity: DependencyList, request: DataExecutor<I, R, C>, input: DataInput<I> | null, delivery: Delivery<R>, ...context: C extends undefined ? [] : [DataInput<C>]): { readonly pending: boolean };
 export function useDesktopLoad(identity: DependencyList, request: AnyRequest, input: unknown, delivery: Delivery<unknown>, context?: unknown): { readonly pending: boolean } {
   const { current, changed, pending } = useBinding<ReadPublication>([...identity, stableKey(input)], { request, delivery, input, context });
   const observesPending = useRef(false);
   // Each render owns its observation; only a commit can change notifications for the live binding.
+  // A pending change between this render and its commit sent no notification, so re-render here.
   let pendingRead = false;
   useLayoutEffect(() => {
     observesPending.current = pendingRead;
