@@ -318,7 +318,7 @@ fn moment_payload_in_tx(
 ) -> Result<(serde_json::Value, i64), SyncError> {
     let row = tx
         .query_row(
-            "SELECT m.moment_id, m.version_id, m.object_id, o.created_at_ms, m.path, \
+            concat!("SELECT m.moment_id, m.version_id, m.object_id, o.created_at_ms, m.path, \
                     m.recorded_at_ms, m.operation, m.payload_before_blob_sha256, \
                     m.payload_before_path, m.payload_after_blob_sha256, m.payload_after_path, \
                     m.payload_before_content_kind, \
@@ -344,7 +344,7 @@ fn moment_payload_in_tx(
              LEFT JOIN moments p ON p.workspace_id=m.workspace_id AND p.moment_id=m.before_latest_moment_id \
              LEFT JOIN fork_base_snapshots f ON f.workspace_id=m.workspace_id AND f.version_id=m.version_id \
                AND f.object_id=m.object_id AND f.latest_moment_id=m.before_latest_moment_id \
-             WHERE m.workspace_id=?1 AND m.moment_id=?2",
+             WHERE ", dohc_engine_domain::exclude_capture_recovery_sql!("m"), " AND m.workspace_id=?1 AND m.moment_id=?2"),
             params![workspace_id, moment_id],
             |row| {
                 Ok(MomentPayloadRow {
