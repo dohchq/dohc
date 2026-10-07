@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { beginSearch } from "./search-model";
 import { SearchView } from "./SearchView";
@@ -10,7 +11,7 @@ afterEach(() => cleanup());
 describe("SearchView", () => {
   it("keeps the live region mounted before search status changes", () => {
     const idleSearch: WorkspaceSearchApi = {
-      model: { ...beginSearch("search-1"), status: "idle" },
+      model: { ...beginSearch("search-1", "needle"), status: "idle" },
       criteria: {
         query: "needle",
         caseSensitive: false,
@@ -45,7 +46,7 @@ describe("SearchView", () => {
 
   it("shows workspace progress instead of an empty result while capture updates", () => {
     const search: WorkspaceSearchApi = {
-      model: { ...beginSearch("search-1"), status: "updating" },
+      model: { ...beginSearch("search-1", "needle"), status: "updating" },
       criteria: {
         query: "needle",
         caseSensitive: false,
@@ -71,5 +72,57 @@ describe("SearchView", () => {
       "Updating workspace…",
     );
     expect(screen.queryByTestId("search-empty-state")).toBeNull();
+  });
+
+  // A finished search that found nothing, under whatever the input holds now.
+  function emptySearch(criteria: Partial<WorkspaceSearchApi["criteria"]>): WorkspaceSearchApi {
+    return {
+      model: { ...beginSearch("search-1", "agnet"), status: "complete" },
+      criteria: {
+        query: "agnet",
+        caseSensitive: false,
+        wholeWord: false,
+        regex: false,
+        includeGlob: "",
+        excludeGlob: "",
+        ...criteria,
+      },
+      setCriteria: vi.fn(),
+      run: vi.fn(),
+      clear: vi.fn(),
+    };
+  }
+
+  it("names the query that found nothing, not the next one the input holds", () => {
+    render(<SearchView search={emptySearch({ query: "agent" })} onOpenResult={vi.fn()} />);
+
+    expect(screen.getByTestId("search-empty-state").textContent).toContain(
+      'No files or chats match "agnet".',
+    );
+    expect(screen.queryByRole("button", { name: "Clear filters" })).toBeNull();
+  });
+
+  it("clears every toggle and filter that narrowed an empty search, and searches again", async () => {
+    const search = emptySearch({ regex: true, includeGlob: "*.md" });
+    render(<SearchView search={search} onOpenResult={vi.fn()} />);
+
+    const clear = screen.getByRole("button", { name: "Clear filters" });
+    clear.focus();
+    await userEvent.setup().keyboard("{Enter}");
+
+    const widened = {
+      query: "agnet",
+      caseSensitive: false,
+      wholeWord: false,
+      regex: false,
+      includeGlob: "",
+      excludeGlob: "",
+    };
+    expect(search.setCriteria).toHaveBeenCalledExactlyOnceWith(widened);
+    expect(search.run).toHaveBeenCalledExactlyOnceWith({
+      ...widened,
+      includeGlob: undefined,
+      excludeGlob: undefined,
+    });
   });
 });

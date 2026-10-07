@@ -1,5 +1,5 @@
 import { FILE_KIND_RECORDS, type FileDisplayKind } from "@dohc/workspace-contracts/kinds";
-import { AlertTriangle, Bot, CheckCircle2, MoreHorizontal } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Globe2, MoreHorizontal, SearchX } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { HistoryPolicyUnreadableResult } from "../../ipc/bridgeContract";
@@ -103,6 +103,11 @@ function Specimen(props: { label: string; children: ReactNode; className?: strin
       <div className="flex items-center gap-2">{props.children}</div>
     </div>
   );
+}
+
+// A side panel's width, as Search, Apps and Chats give their empty states.
+function EmptyPanel(props: { children: ReactNode }) {
+  return <div className="flex h-44 w-64 flex-col rounded-lg border border-line bg-panel">{props.children}</div>;
 }
 
 function Swatch(props: { label: string; className: string }) {
@@ -750,11 +755,40 @@ function Pane(props: { theme: "light" | "dark" }) {
       </Section>
 
       <Section part="empty" title="Empty">
-        <div className="flex h-40 w-64 flex-col rounded-lg border border-line bg-panel">
-          <EmptyState title='No files match "budget".' hint="Try a shorter search.">
-            <button type="button" className={KBD}>Clear search</button>
-          </EmptyState>
-        </div>
+        <Specimen label="glyph, line, action in focus">
+          <EmptyPanel>
+            <EmptyState icon={SearchX} title='No files or chats match "budget".'>
+              <SecondaryButton data-force-state="focus-visible">Clear filters</SecondaryButton>
+            </EmptyState>
+          </EmptyPanel>
+        </Specimen>
+        <Specimen label="create">
+          <EmptyPanel>
+            <EmptyState icon={Globe2} title="No apps in this workspace yet.">
+              <PrimaryButton>Create app</PrimaryButton>
+            </EmptyState>
+          </EmptyPanel>
+        </Specimen>
+        <Specimen label="mark, line, hint">
+          <EmptyPanel>
+            <EmptyState
+              title="No live documents in this workspace."
+              hint="Reload after a document starts live editing."
+            />
+          </EmptyPanel>
+        </Specimen>
+        <Specimen label="failed">
+          <EmptyPanel>
+            <EmptyState icon={AlertTriangle} tone="danger" title="Workspace is still updating. Try again.">
+              <SecondaryButton>Try again</SecondaryButton>
+            </EmptyState>
+          </EmptyPanel>
+        </Specimen>
+        <Specimen label="a long query wraps">
+          <EmptyPanel>
+            <EmptyState icon={SearchX} title='No files or chats match "quarterly-revenue-forecast-final-v3".' />
+          </EmptyPanel>
+        </Specimen>
       </Section>
 
       <Section part="loading" title="Loading">

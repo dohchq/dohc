@@ -13,7 +13,7 @@ import {
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { SearchResultsEventEntry } from "../../ipc/bridgeContract";
 import { rendererMarks } from "../../performance/rendererMarks";
-import { SectionLabel } from "../ui/controls";
+import { EmptyState, SecondaryButton, SectionLabel } from "../ui/controls";
 import {
   GROUP_WINDOW_STEP,
   groupVisibleEntries,
@@ -359,6 +359,9 @@ export function SearchView(props: {
   }
 
   const fileCount = model.groups.length;
+  // Anything beyond the query that can hide a match: a toggle or a glob.
+  const narrowed =
+    caseSensitive || wholeWord || regex || includeGlob !== "" || excludeGlob !== "";
 
   return (
     <div
@@ -490,29 +493,29 @@ export function SearchView(props: {
       ) : null}
 
       {model.status === "idle" ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-          <Search size={20} aria-hidden strokeWidth={1.9} className="text-line" />
-          <div className="flex flex-col gap-1">
-            <span className="text-sm text-muted">Search this workspace</span>
-            <span className="text-[11px] leading-relaxed text-subtle">
-              Full-text results stream in as you type. Toggle case, whole word,
-              regex, and file filters above.
-            </span>
-          </div>
-        </div>
+        <EmptyState icon={Search} title="Search files and chats" />
       ) : model.status === "complete" && model.totalMatches === 0 ? (
-        <div
+        <EmptyState
           data-testid="search-empty-state"
-          className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+          icon={SearchX}
+          title={`No files or chats match "${model.query}".`}
         >
-          <SearchX size={20} aria-hidden strokeWidth={1.9} className="text-line" />
-          <div className="flex flex-col gap-1">
-            <span className="text-sm text-muted">No results found</span>
-            <span className="text-[11px] leading-relaxed text-subtle">
-              Check the spelling, loosen a filter, or try a regex.
-            </span>
-          </div>
-        </div>
+          {narrowed ? (
+            <SecondaryButton
+              onClick={() =>
+                changeCriteria({
+                  caseSensitive: false,
+                  wholeWord: false,
+                  regex: false,
+                  includeGlob: "",
+                  excludeGlob: "",
+                })
+              }
+            >
+              Clear filters
+            </SecondaryButton>
+          ) : null}
+        </EmptyState>
       ) : (
         <ul
           ref={listRef}

@@ -1,6 +1,7 @@
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
-import { ChevronDown, ChevronRight, FileArchive, FileText, Lock, RotateCcw, Search, X, Zap } from "lucide-react";
+import { ChevronDown, ChevronRight, FileArchive, FileText, History, Lock, RotateCcw, Search, X, Zap } from "lucide-react";
+import { EmptyState } from "../ui/controls";
 import { useId, useMemo, useState } from "react";
 import { LegendList } from "@legendapp/list/react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
@@ -406,15 +407,7 @@ export function EngineHistoryView(props: {
   // has a page: "No changes yet" states something about the workspace,
   // and a read still in flight or a read that failed may not state it.
   if (props.moments.length === 0 && !props.hasMore) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-        <span className="text-sm text-muted">No changes yet</span>
-        <span className="max-w-xs text-[11px] leading-5 text-subtle">
-          Edits — yours or your agent's — show up here as a timeline you can
-          review.
-        </span>
-      </div>
-    );
+    return <EmptyState icon={History} title="No changes yet" />;
   }
 
   return (
