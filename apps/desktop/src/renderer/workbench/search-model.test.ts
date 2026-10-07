@@ -23,7 +23,7 @@ function batch(overrides: Partial<SearchResultsEvent>): SearchResultsEvent {
 
 describe("applyBatch", () => {
   it("groups streamed entries by file in arrival order", () => {
-    let model = beginSearch("s1");
+    let model = beginSearch("s1", "needle");
     model = applyBatch(model, batch({ entries: [entry("a.md", 1), entry("b.md", 2)] }));
     model = applyBatch(model, batch({ entries: [entry("a.md", 9)], done: true }));
     expect(model.groups.map((g) => g.path)).toEqual(["a.md", "b.md"]);
@@ -33,7 +33,7 @@ describe("applyBatch", () => {
   });
 
   it("Drops stale batches: a superseded search's stragglers never corrupt results", () => {
-    let model = beginSearch("s2");
+    let model = beginSearch("s2", "needle");
     const stale = applyBatch(model, batch({ searchId: "s1", entries: [entry("old.md")] }));
     expect(stale).toBe(model); // same reference — identity says "ignored"
     model = applyBatch(model, batch({ searchId: "s2", entries: [entry("new.md")] }));
@@ -45,13 +45,13 @@ describe("applyBatch", () => {
   it("ignores batches while idle and after completion", () => {
     const idle = idleSearchModel();
     expect(applyBatch(idle, batch({ entries: [entry("a.md")] }))).toBe(idle);
-    let model = beginSearch("s1");
+    let model = beginSearch("s1", "needle");
     model = applyBatch(model, batch({ done: true }));
     expect(applyBatch(model, batch({ entries: [entry("late.md")] }))).toBe(model);
   });
 
   it("keeps untouched group references stable across batches (memo contract)", () => {
-    let model = beginSearch("s1");
+    let model = beginSearch("s1", "needle");
     model = applyBatch(model, batch({ entries: [entry("a.md"), entry("b.md")] }));
     const [a1, b1] = model.groups;
     model = applyBatch(model, batch({ entries: [entry("b.md", 7)] }));
@@ -61,14 +61,14 @@ describe("applyBatch", () => {
   });
 
   it("latches limitHit once any batch flags it", () => {
-    let model = beginSearch("s1");
+    let model = beginSearch("s1", "needle");
     model = applyBatch(model, batch({ entries: [entry("a.md")], limitHit: true }));
     model = applyBatch(model, batch({ done: true }));
     expect(model.limitHit).toBe(true);
   });
 
   it("carries a fail-closed notice and keeps it once set", () => {
-    let model = beginSearch("s1");
+    let model = beginSearch("s1", "needle");
     expect(model.notice).toBeNull();
     model = applyBatch(
       model,
@@ -76,16 +76,24 @@ describe("applyBatch", () => {
     );
     expect(model.notice).toBe("Search paused: policy error");
     // beginSearch clears it for the next run.
-    expect(beginSearch("s2").notice).toBeNull();
+    expect(beginSearch("s2", "needle").notice).toBeNull();
   });
 
   it("beginSearch resets prior results", () => {
-    let model = beginSearch("s1");
+    let model = beginSearch("s1", "needle");
     model = applyBatch(model, batch({ entries: [entry("a.md")] }));
-    const fresh = beginSearch("s2");
+    const fresh = beginSearch("s2", "needle");
     expect(fresh.groups).toEqual([]);
     expect(fresh.totalMatches).toBe(0);
     expect(fresh.status).toBe("searching");
+  });
+
+  it("keeps the query each search answers through its last batch", () => {
+    let model = beginSearch("s1", "agnet");
+    model = applyBatch(model, batch({ entries: [entry("a.md")] }));
+    model = applyBatch(model, batch({ done: true }));
+    expect(model.query).toBe("agnet");
+    expect(idleSearchModel().query).toBe("");
   });
 });
 

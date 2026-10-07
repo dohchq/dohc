@@ -1,7 +1,7 @@
 import { formatChatTime } from "../time";
 import { basenameOf } from "../path";
 import { ipcErrorMessage } from "../ipcError";
-import { ArrowLeft, MessageSquare } from "lucide-react";
+import { AlertTriangle, ArrowLeft, MessageSquare } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatMessageRecord,
@@ -9,6 +9,7 @@ import type {
   ListFileChatsResponse,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
+import { EmptyState, SecondaryButton } from "../ui/controls";
 import { SkeletonRows } from "../ui/SkeletonRows";
 import {
   ChatComposer,
@@ -390,15 +391,11 @@ export function LinkedChatsPanel(props: {
 
   if (!filePath) {
     return (
-      <div
+      <EmptyState
         data-testid="linked-chats-empty"
-        className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
-      >
-        <span className="text-xs text-muted">No file open</span>
-        <span className="text-[11px] text-subtle">
-          Open a file to see its Chats.
-        </span>
-      </div>
+        icon={MessageSquare}
+        title="Open a file to see its chats."
+      />
     );
   }
 
@@ -408,37 +405,23 @@ export function LinkedChatsPanel(props: {
 
   if (threadsState.status === "unavailable") {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
-        <span className="text-xs text-danger">{threadsState.message}</span>
-        <button
-          type="button"
-          onClick={() => void refreshThreads()}
-          className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-hover hover:text-ink"
-        >
-          Try again
-        </button>
-      </div>
+      <EmptyState icon={AlertTriangle} tone="danger" title={threadsState.message}>
+        <SecondaryButton onClick={() => void refreshThreads()}>Try again</SecondaryButton>
+      </EmptyState>
     );
   }
 
   return (
     <div data-testid="linked-chats-panel" className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
         {threadsState.threads.length === 0 ? (
-          <div
+          // The next step is the New chat control below, where this file
+          // offers one.
+          <EmptyState
             data-testid="linked-chats-empty"
-            className="flex h-full flex-col items-center justify-center gap-1 px-4 text-center"
-          >
-            <MessageSquare size={16} aria-hidden className="text-subtle" />
-            <span className="text-xs text-muted">
-              No chats about this file yet.
-            </span>
-            {/* "Start one." is a next step this surface does not offer at
-                `view`, where the New chat control is gone. */}
-            {readOnly ? null : (
-              <span className="text-[11px] text-subtle">Start one.</span>
-            )}
-          </div>
+            icon={MessageSquare}
+            title="No chats about this file yet."
+          />
         ) : (
           <ul className="m-0 list-none p-0">
             {threadsState.threads.map((thread) => (

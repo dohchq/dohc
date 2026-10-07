@@ -236,7 +236,7 @@ describe("SitePreviewPage", () => {
     it("opens the app instead when the page moved to another app", async () => {
       const shared = await shareReplaced();
       shared.view.rerender(shared.page("other"));
-      await screen.findByText("App not detected");
+      await screen.findByText("dohc no longer detects an app in this folder.");
       const starts = bridgeMock.startSitePreview.mock.calls.length;
       await act(async () => { shared.retry(); });
       expect(shared.onOpenApp).toHaveBeenCalledExactlyOnceWith("report");
