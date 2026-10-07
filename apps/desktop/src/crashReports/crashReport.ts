@@ -2,7 +2,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EngineDaemonUnavailableError } from "@dohc/workspace-engine-client/daemon";
 import type { CrashReportSource } from "../ipc/bridgeContract";
-import { ERROR_CODES, ERROR_NAMES, SIGNALS, SYSCALLS, WIRE_CODES } from "./crashReportValues";
+import { ENGINE_METHODS, ERROR_CODES, ERROR_NAMES, SIGNALS, SYSCALLS, WIRE_CODES } from "./crashReportValues";
 
 // One problem the desktop saw. A report keeps only what dohc itself wrote:
 // fixed facts, error classes and codes, messages that match a known
@@ -61,8 +61,9 @@ export const VALUE_WITHHELD = "<withheld>";
 
 // Only real supervisor errors reach these templates. desktopEngine.ts uses
 // engineDaemonLifecycle.ts's default counters and timeouts, so keep those
-// exact values. Other configurations are withheld. Exit codes can be signed
-// or unsigned 32-bit values on Windows; signal names come from a fixed list.
+// exact values. Request caps can shrink to the remaining read budget, up to
+// the default 120,000ms smoke cap. Exit codes can be signed or unsigned
+// 32-bit values on Windows; signal names come from a fixed list.
 const ENGINE_MESSAGES: ReadonlyArray<readonly [RegExp, (match: RegExpExecArray) => string | null]> = [
   [/^Rust engine daemon exited unexpectedly with (?:code (-?\d+)|code unknown|signal (\w+))\.$/, (m) => {
     const code = Number(m[1]);
@@ -71,8 +72,17 @@ const ENGINE_MESSAGES: ReadonlyArray<readonly [RegExp, (match: RegExpExecArray) 
       m[1] !== undefined ? `code ${code}` : m[2] !== undefined ? `signal ${SIGNALS.has(m[2]) ? m[2] : VALUE_WITHHELD}` : "code unknown"
     }.`;
   }],
-  [/^Rust engine \S+ returned an invalid result\.$/, () => "Rust engine request returned an invalid result."],
-  [/^Rust engine \S+ timed out after 5000ms\.$/, () => "Rust engine request timed out after 5000ms."],
+  [/^Rust engine (\S+) returned an invalid result\.$/, (m) => rpcMessage(m[1]!, "returned an invalid result.")],
+  [/^Rust engine (\S+) timed out after ([1-9]\d{0,5})ms\.$/, (m) => {
+    const capMs = Number(m[2]);
+    return capMs <= 120_000 ? rpcMessage(m[1]!, `timed out after ${capMs}ms.`) : null;
+  }],
+  [/^Rust engine (\S+) did not start within its 10000ms budget\.$/, (m) =>
+    rpcMessage(m[1]!, "did not start within its 10000ms budget.")],
+  [/^Rust engine (\S+) ran out of its 10000ms budget before the read\.$/, (m) =>
+    rpcMessage(m[1]!, "ran out of its 10000ms budget before the read.")],
+  [/^Rust engine (\S+) got no answer: a probe expired after 45000ms with no frame of any kind from the engine\.$/, (m) =>
+    rpcMessage(m[1]!, "got no answer: a probe expired after 45000ms with no frame of any kind from the engine.")],
   ...[
     "Rust engine restart limit exceeded after 3 attempts.",
     "The Rust engine crashed again after 10 restarts in the last 10 minutes. The limit is 10 restarts per 10 minutes. dohc stopped restarting it.",
@@ -89,10 +99,14 @@ const ENGINE_MESSAGES: ReadonlyArray<readonly [RegExp, (match: RegExpExecArray) 
   ].map((sentence) => [new RegExp(`^${sentence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), () => sentence] as const),
 ];
 
+function rpcMessage(method: string, diagnostic: string): string | null {
+  return ENGINE_METHODS.has(method) ? `Rust engine ${method} ${diagnostic}` : null;
+}
+
 function engineMessage(message: string): string | null {
   for (const [pattern, render] of ENGINE_MESSAGES) {
     const match = pattern.exec(message);
-    if (match) return render(match);
+    if (match && match[0] === message) return render(match);
   }
   return null;
 }
