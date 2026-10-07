@@ -99,14 +99,14 @@ const ENGINE_MESSAGES: ReadonlyArray<readonly [RegExp, (match: RegExpExecArray) 
   ].map((sentence) => [new RegExp(`^${sentence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), () => sentence] as const),
 ];
 
-function rpcMessage(method: string, diagnostic: string): string | null {
-  return ENGINE_METHODS.has(method) ? `Rust engine ${method} ${diagnostic}` : null;
+function rpcMessage(method: string, diagnostic: string): string {
+  return `Rust engine ${ENGINE_METHODS.has(method) ? method : VALUE_WITHHELD} ${diagnostic}`;
 }
 
 function engineMessage(message: string): string | null {
   for (const [pattern, render] of ENGINE_MESSAGES) {
     const match = pattern.exec(message);
-    if (match && match[0] === message) return render(match);
+    if (match) return render(match);
   }
   return null;
 }

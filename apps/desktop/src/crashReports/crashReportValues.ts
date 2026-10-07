@@ -15,14 +15,6 @@ export const ENGINE_METHODS: ReadonlySet<string> = new Set([
   ...Object.values(YDOC_METHOD),
   ...Object.values(CHATS_METHOD),
   ...Object.values(KEY_ENVELOPE_METHOD),
-  // Requests issued directly by the daemon client, lifecycle, and adapters.
-  "engine.ping", "files.changesSince", "files.drain", "liveApplication.ack",
-  "ydoc.ownerDelivery.listDrafts", "ydoc.ownerDelivery.openDraft", "ydoc.ownerDelivery.appendDraft",
-  "ydoc.ownerDelivery.prepareEnrollment", "ydoc.ownerDelivery.enroll", "ydoc.ownerDelivery.readState",
-  "ydoc.ownerDelivery.applyInitialSync", "ydoc.ownerDelivery.applyAcceptedFrame", "ydoc.ownerDelivery.isReceiptApplied",
-  "liveApplication.captureOwnerActivation", "liveApplication.syncOpen", "liveApplication.appliedRead",
-  "liveApplication.apply", "liveApplication.bootstrap", "liveApplication.adoptOwner",
-  "liveApplication.prepareRestore", "liveApplication.applyRestore", "liveApplication.settleRestore", "liveApplication.resumeRestore",
 ]);
 
 export const ERROR_NAMES: ReadonlySet<string> = new Set([
