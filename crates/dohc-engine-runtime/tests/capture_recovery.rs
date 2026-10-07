@@ -4,7 +4,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_runtime::{ActorHandle, CancellationToken, WorkspaceSupervisor, YdocOpenState};
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, StorageError};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path, try_make_dir_alias};
 use std::{path::Path, sync::Arc};
 
 const WS: &str = "capture-recovery";
@@ -410,6 +410,109 @@ async fn recovery_after_pruning_and_reenrollment_never_exports_private_typing() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn directory_blocked_or_cancelled_settlement_needs_recovery_only_for_later_typing() {
+    for cancelled in [false, true] {
+        for later_typing in [false, true] {
+            let scratch = ScratchDir::new().unwrap();
+            let elsewhere = ScratchDir::new().unwrap();
+            let db = engine_db_path(&scratch).unwrap();
+            let supervisor = WorkspaceSupervisor::new();
+            let actor = supervisor.open(&db, 1).unwrap().actor;
+            let (state, doc) = dirty(&actor).await;
+            let typing = doc.plaintext_string();
+            let file = scratch.path().join(FILE);
+            std::fs::write(&file, "base\n").unwrap();
+            assert!(
+                actor
+                    .ydoc_settle(
+                        scratch.path().into(),
+                        state.key.clone(),
+                        FILE.into(),
+                        ContentKind::Plaintext,
+                        state.lineage_claim_id.clone(),
+                        state.head_blob_sha256.clone(),
+                        "blocked".into(),
+                        Arc::new(()),
+                        3,
+                        ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
+                        CancellationToken::new(),
+                        None,
+                    )
+                    .await
+                    .is_err()
+            );
+            std::fs::remove_file(&file).unwrap();
+            assert!(try_make_dir_alias(elsewhere.path(), &file).unwrap());
+            actor
+                .materialize_replay_pending(scratch.path().into(), WS.into(), 4)
+                .await
+                .unwrap();
+            let moment = inspect(&db, |store| {
+                let row: (String, String, Option<i64>) = store.read_with(|conn| conn.query_row(
+                    "SELECT m.moment_id,j.status,d.settle_prior_update_seq FROM ydoc_docs d
+                     JOIN snapshots s USING (workspace_id,version_id,object_id)
+                     JOIN moments m ON m.workspace_id=s.workspace_id AND m.moment_id=s.latest_moment_id
+                     JOIN materialization_jobs j ON j.job_id='ydoc-mat_'||m.moment_id
+                     WHERE d.workspace_id=?1 AND d.object_id=?2",
+                    rusqlite::params![WS,state.key.object_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+                )).unwrap();
+                assert_eq!(row.1, "pending");
+                assert!(row.2.is_some());
+                if cancelled {
+                    store.write_with(&NoFaults, |tx| tx.execute(
+                        "UPDATE materialization_jobs SET status='cancelled',completed_at_ms=5 WHERE job_id='ydoc-mat_'||?1",
+                        [&row.0],
+                    ).map_err(StorageError::persist_public)).unwrap();
+                }
+                row.0
+            });
+            #[cfg(windows)]
+            std::fs::remove_dir(&file).unwrap();
+            #[cfg(not(windows))]
+            std::fs::remove_file(&file).unwrap();
+            if later_typing {
+                append(&actor, &state.key, doc.plaintext_insert(0, "later\n")).await;
+            }
+            std::fs::write(&file, "outside\n").unwrap();
+            capture(&actor, "outside\n").await;
+            let recoveries = actor.capture_recoveries(WS.into()).await.unwrap();
+            assert_eq!(recoveries.len(), usize::from(later_typing));
+            let committed = actor
+                .get_moment(WS.into(), moment.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(committed.after_text.as_deref(), Some(typing.as_str()));
+            if let Some(recovery) = recoveries.first() {
+                let recovered = actor
+                    .get_moment(WS.into(), recovery.moment_id.clone())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    recovered.before_text.as_deref(),
+                    Some(doc.plaintext_string().as_str())
+                );
+            }
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "outside\n");
+            inspect(&db, |store| {
+                let status: String = store
+                    .read_with(|conn| {
+                        conn.query_row(
+                            "SELECT status FROM materialization_jobs WHERE job_id='ydoc-mat_'||?1",
+                            [&moment],
+                            |row| row.get(0),
+                        )
+                    })
+                    .unwrap();
+                assert_eq!(status, "cancelled");
+            });
+            supervisor.close(&db).unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_live_settlement_generation_skips_redundant_recovery() {
     for pending in [false, true] {
         let scratch = ScratchDir::new().unwrap();
@@ -494,9 +597,12 @@ async fn committed_live_settlement_generation_skips_redundant_recovery() {
         });
         let actor = supervisor.open(&db, 5).unwrap().actor;
         capture(&actor, "outside\n").await;
-        assert_eq!(
-            actor.capture_recoveries(WS.into()).await.unwrap().len(),
-            usize::from(pending)
+        assert!(
+            actor
+                .capture_recoveries(WS.into())
+                .await
+                .unwrap()
+                .is_empty()
         );
         supervisor.close(&db).unwrap();
     }

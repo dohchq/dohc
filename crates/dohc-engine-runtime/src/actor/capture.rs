@@ -478,11 +478,11 @@ fn prepare_capture_recovery_in(
         return Ok(prepared);
     }
     let sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
-    // The committed head's identity and digest cover the native boundary;
-    // settle_seq can be a per-document generation, not a moment order. Accepted-prefix
-    // audits cover their exact vector, independently of that boundary.
+    // Committed moments cover typing even when their file write is pending or
+    // cancelled. Capture supersedes that write in this transaction. Only a
+    // pristine seed needs the absence of a pending job to prove coverage.
     let covered: bool = tx.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') AND target_path=?4 AND status='pending') AND (
+        "SELECT (
           EXISTS(SELECT 1 FROM ydoc_docs d JOIN snapshots s ON s.workspace_id=d.workspace_id
             AND s.version_id=d.version_id AND s.object_id=d.object_id
             JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id
@@ -496,12 +496,13 @@ fn prepare_capture_recovery_in(
             WHERE a.workspace_id=?1 AND a.main_version_id=?2 AND a.object_id=?3
             AND a.lineage_claim_id=d.lineage_claim_id AND a.source_state_vector_digest=?6
             AND a.markdown_digest=?5 AND m.after_blob_sha256=?5) OR
+          (NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') AND target_path=?4 AND status='pending') AND
           EXISTS(SELECT 1 FROM ydoc_docs d WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3
             AND d.last_settled_sha IS NULL AND d.head_update_seq=1 AND d.head_snapshot_seq IN (0,1)
             AND (SELECT COUNT(*) FROM ydoc_updates u WHERE u.workspace_id=?1 AND u.version_id=?2 AND u.object_id=?3)=1-d.head_snapshot_seq
             AND EXISTS(SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.up_to_seq=d.head_snapshot_seq)
             AND NOT EXISTS(SELECT 1 FROM ydoc_snapshots s WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3 AND s.up_to_seq NOT IN (0,1))
-            AND EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.after_blob_sha256=d.seed_source_sha256)))",
+            AND EXISTS(SELECT 1 FROM moments m WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.after_blob_sha256=d.seed_source_sha256))))",
         params![input.workspace_id,input.version_id,object_id,input.path,sha,projection.source_state_vector_sha256], |row| row.get(0),
     ).map_err(StorageError::corrupt_public)?;
     if covered {
