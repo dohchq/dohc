@@ -985,6 +985,17 @@ function Pane(props: { theme: "light" | "dark" }) {
           </div>
         </Specimen>
       </Section>
+
+      {/* After the file header, so the parts above keep their places. The
+          group a keyboard close leaves empty takes focus, and its ring shows
+          on all four edges above its tab strip. */}
+      <Section part="editor-group-focus" title="Editor group, focused" menusAtRest>
+        <Specimen label="split: the focused active group, empty, then one with tabs">
+          <div data-force-state="focus focus-visible" data-force-target='[data-editor-group-id="first"]'>
+            <EditorGroupsSpecimen activeHasTabs={false} />
+          </div>
+        </Specimen>
+      </Section>
     </section>
   );
 }
