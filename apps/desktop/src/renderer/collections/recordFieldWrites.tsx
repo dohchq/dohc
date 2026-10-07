@@ -8,6 +8,8 @@ import type { CollectionCellChange } from "@dohc/collection-views";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import { useEngineDoc } from "../collab/useEngineDoc";
 import { SecondaryButton } from "../ui/controls";
+import { CopyButton } from "../ui/CopyButton";
+import { ShellErrorReporter } from "../shell/useShellError";
 import { addSelectOption } from "./schemaAuthoring";
 import { rewriteCollectionSchema } from "./schemaWrite";
 
@@ -826,10 +828,13 @@ function CollectionWriteFailureRow({
   failure: CollectionWriteFailure;
 }) {
   const paused = useCollectionWritesPaused(failure.workspaceId);
+  // This host sits outside every notice owner, and the row's other way out
+  // is a Discard that cannot be undone. A refused copy keeps its instruction
+  // until the next copy starts.
+  const [copyRefused, setCopyRefused] = useState(false);
   const lineage = useCollectionWriteLineage(failure.workspaceId);
   const stale = failure.lineage !== lineage;
   const recoverOnly = stale || failure.superseded || failure.recoveryOnly;
-  const [copyState, setCopyState] = useState<string | null>(null);
   const value = failure.change.value;
   const recoveryText = typeof value === "string"
     ? value
@@ -857,7 +862,7 @@ function CollectionWriteFailureRow({
       <span className="text-[12px] text-muted">
         Discard removes the input kept here. You cannot undo this.
       </span>
-      <div className="flex gap-1.5">
+      <div className="flex items-center gap-1.5">
         <SecondaryButton
           data-testid="collection-write-retry"
           className="disabled:opacity-50"
@@ -866,17 +871,11 @@ function CollectionWriteFailureRow({
         >
           Retry
         </SecondaryButton>
-        <SecondaryButton
-          data-testid="collection-write-copy"
-          onClick={() => {
-            void Promise.resolve()
-              .then(() => navigator.clipboard.writeText(recoveryText))
-              .then(() => setCopyState("Copied"))
-              .catch(() => setCopyState("Could not copy. Select the value above to copy it."));
-          }}
-        >
-          Copy value
-        </SecondaryButton>
+        <span className="contents" onClickCapture={() => setCopyRefused(false)}>
+          <ShellErrorReporter.Provider value={() => setCopyRefused(true)}>
+            <CopyButton testId="collection-write-copy" label="Copy value" pinName getText={() => recoveryText} />
+          </ShellErrorReporter.Provider>
+        </span>
         <SecondaryButton
           data-testid="collection-write-discard"
           onClick={() => discardCollectionFieldWrite(failure.id)}
@@ -884,7 +883,11 @@ function CollectionWriteFailureRow({
           Discard unsaved change
         </SecondaryButton>
       </div>
-      {copyState ? <span className="text-[12px] text-muted">{copyState}</span> : null}
+      {copyRefused ? (
+        <span data-testid="collection-write-copy-refused" className="text-[12px] text-muted">
+          Could not copy. Select the value above to copy it.
+        </span>
+      ) : null}
     </div>
   );
 }

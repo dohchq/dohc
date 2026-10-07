@@ -1,6 +1,7 @@
 import {
   forwardRef,
   useCallback,
+  useContext,
   useEffect,
   useImperativeHandle,
   useMemo,
@@ -10,6 +11,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
+import { ShellErrorReporter } from "../shell/useShellError";
 import { Extension, resolveFocusPosition, type Editor } from "@tiptap/core";
 import { DohcMarkdownTable, serializeRichdocBody } from "@dohc/ydoc-projection";
 import { EditorContent, useEditor, useEditorState } from "@tiptap/react";
@@ -505,7 +507,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     const blockMenuStateRef = useRef<BlockMenuState>(blockMenuState);
     const slashCommandRunnerRef = useRef<(id: SlashCommandId) => void>(() => {});
     const blockInsertRef = useRef<(pos: number) => void>(() => {});
-    const blockMenuOpenRef = useRef<(pos: number, rect: DOMRect) => void>(() => {});
+    const blockMenuOpenRef = useRef<(pos: number, handle: HTMLElement) => void>(() => {});
     const knownFilesRef = useRef<ReadonlyMap<string, WikilinkFile>>(new Map());
     const applyingPendingUndoRef = useRef(false);
     const appliedPendingUndoToken = useRef<number | null>(null);
@@ -520,6 +522,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     >(onOpenWorkspaceLink ?? null);
     const onFocusRef = useRef(onFocus);
     onFocusRef.current = onFocus;
+    // The shell's error hook, for a code block's copy the clipboard refused.
+    const reportError = useContext(ShellErrorReporter);
+    const reportErrorRef = useRef(reportError);
+    reportErrorRef.current = reportError;
 
     // ProseMirror invokes menu handlers outside React's render cycle. Keep the
     // imperative ref current in the same tick as the visual state so rapid
@@ -668,7 +674,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 openWorkspaceLink: (target) =>
                   onOpenWorkspaceLinkRef.current?.(target),
               }),
-              makeCodeBlockChromePlugin(),
+              makeCodeBlockChromePlugin(() => reportErrorRef.current),
               // After the slash-command plugin (menu keeps ArrowDown while
               // open), before code-block continuation (nested code escapes
               // past its callout) and StarterKit keymaps (Mod-Enter beats
@@ -931,8 +937,14 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       [editor, openSlashMenuAtPosition],
     );
 
-    const openBlockMenu = useCallback((pos: number, rect: DOMRect) => {
-      setBlockMenuState(resolveBlockMenuState(pos, rect));
+    // The handle of the block whose menu is open closes it, like any trigger.
+    const openBlockMenu = useCallback((pos: number, handle: HTMLElement) => {
+      const current = blockMenuStateRef.current;
+      setBlockMenuState(
+        current.open && current.pos === pos
+          ? CLOSED_BLOCK_MENU_STATE
+          : resolveBlockMenuState(pos, handle),
+      );
     }, []);
 
     const closeBlockMenu = useCallback(() => {

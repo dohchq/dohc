@@ -3,7 +3,9 @@ import { RecordButtonsRow } from "./collections/RecordButtonsRow";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import {
+  DocumentControls,
   EngineMayHoldDocumentNotice,
+  OPENING_TITLE,
   ViewHeader,
   type FileSaveState,
   OrphanedDraftNotices,
@@ -25,7 +27,6 @@ import {
 import { resolveWikilinkNavigation, resolveWorkspaceLinkNavigation } from "./wikilinkNavigation";
 import { CopyButton } from "./ui/CopyButton";
 import { SkeletonRows } from "./ui/SkeletonRows";
-import { FileText } from "lucide-react";
 import {
   Suspense,
   lazy,
@@ -66,7 +67,6 @@ import { FrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
-import { DocumentMenu } from "./DocumentMenu";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
 import { extractWorkspaceHeadings, resolveWorkspaceHeadingAnchorTarget } from "../workspaces/workspaceHeadings";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
@@ -85,7 +85,7 @@ const ENGINE_FRONTMATTER_FIELD = "frontmatter";
 
 // The filename without its directory or extension — the Notion-style empty
 // title placeholder ("2026-plan.md" -> "2026-plan").
-function filenameStem(path: string): string {
+export function filenameStem(path: string): string {
   const slash = path.lastIndexOf("/");
   const leaf = slash >= 0 ? path.slice(slash + 1) : path;
   const dot = leaf.lastIndexOf(".");
@@ -1907,46 +1907,44 @@ export function MarkdownView(props: {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <ViewHeader
-          icon={<FileText size={13} aria-hidden />}
           path={props.path}
-          label={showSource ? "markdown source" : "document"}
           onShare={onShareCurrentPath}
+          status={
+            <StateMark
+              testId="markdown-save-state"
+              truncate
+              state={engineChipState}
+              shown={engine.readOnlyWhileEditing ? "read-only-transition" : engineChipState}
+              title={
+                (engineChipState === "deleted" ||
+                  engineChipState === "object-changed") &&
+                hasSetAsideEdit
+                  ? goneNotice(engine.goneCause, true)
+                  : engineChipState === "error" && engine.saveError
+                    ? engine.saveError
+                    : undefined
+              }
+            />
+          }
           actions={
-            <>
-              <StateMark
-                testId="markdown-save-state"
-                state={engineChipState}
-                shown={engine.readOnlyWhileEditing ? "read-only-transition" : engineChipState}
-                title={
-                  (engineChipState === "deleted" ||
-                    engineChipState === "object-changed") &&
-                  hasSetAsideEdit
-                    ? goneNotice(engine.goneCause, true)
-                    : engineChipState === "error" && engine.saveError
-                      ? engine.saveError
-                      : undefined
-                }
-              />
-              <button
-                type="button"
-                data-testid="markdown-source-toggle"
-                aria-pressed={showSource}
-                title="Toggle markdown source (Ctrl+/)"
-                onClick={toggleSourceView}
-                className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink"
-              >
-                {showSource ? "Editor" : "Source"}
-              </button>
-              <DocumentMenu
-                workspaceId={props.workspaceId}
-                reportError={props.onButtonError}
-                suggestedName={filenameStem(props.path)}
+            <DocumentControls
+              toggle={{
+                label: showSource ? "Editor" : "Source",
+                testId: "markdown-source-toggle",
+                pressed: showSource,
+                title: "Toggle markdown source (Ctrl+/)",
+                onClick: toggleSourceView,
+              }}
+              menu={{
+                workspaceId: props.workspaceId,
+                reportError: props.onButtonError,
+                suggestedName: filenameStem(props.path),
                 // Always live, even in source view: the WYSIWYG editor stays
                 // MOUNTED (hidden) while source is shown, so its ref keeps
                 // serializing the current Y.Doc state at click time.
-                getMarkdown={() => serializeEngineDraft()}
-              />
-            </>
+                getMarkdown: () => serializeEngineDraft(),
+              }}
+            />
           }
         />
         {props.truncatedNotice}
@@ -2055,11 +2053,9 @@ export function MarkdownView(props: {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <ViewHeader
-        icon={<FileText size={13} aria-hidden />}
         path={props.path}
-        label="document"
         onShare={onShareCurrentPath}
-        actions={
+        status={
           <>
             {/* The wait has its own word: an opening document is not a
                 saved one, and dohc has not decided about it yet. Read mode
@@ -2076,9 +2072,9 @@ export function MarkdownView(props: {
                 // browser does not reliably draw a tooltip over a disabled
                 // control. This span is not disabled, so hovering the state
                 // always explains it.
-                title="You can edit this document when it finishes opening."
+                title={OPENING_TITLE}
                 // Shown only if opening is slow, like the loading lines.
-                className="dohc-reveal-if-slow font-mono text-[11px] text-subtle"
+                className="dohc-reveal-if-slow min-w-0 truncate font-mono text-[11px] text-subtle"
               >
                 Opening…
               </span>
@@ -2088,60 +2084,58 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" state={chipState} shown={chipState} />
+              <StateMark testId="markdown-save-state" truncate state={chipState} shown={chipState} />
             ) : null}
-            <button
-              type="button"
-              data-testid="markdown-edit-toggle"
-              disabled={readOnly || opening}
-              title={
-                opening
-                  ? "You can edit this document when it finishes opening."
-                  : undefined
-              }
-              onClick={() => {
+          </>
+        }
+        actions={
+          <DocumentControls
+            toggle={{
+              label: surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG",
+              testId: "markdown-edit-toggle",
+              disabled: readOnly || opening,
+              title: opening ? OPENING_TITLE : undefined,
+              onClick: () => {
                 if (readOnly || opening) return;
                 if (mode === "source" && saveTimer.current) {
                   clearTimeout(saveTimer.current);
                   void saveNow();
                 }
                 toggleEditorMode();
-              }}
-              className="rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {surfaceMode === "read" ? "Edit" : surfaceMode === "wysiwyg" ? "Source" : "WYSIWYG"}
-            </button>
-            {/* A truncated doc only loaded a bounded prefix into
-                serializeDraftRef — copying/exporting it would silently emit a
-                partial document. Hide the menu until the full file is loaded
-                (same gate as the inline properties below). */}
-            {!props.truncated ? (
-              <DocumentMenu
-                workspaceId={props.workspaceId}
-                reportError={props.onButtonError}
-                suggestedName={filenameStem(props.path)}
-                // The same rule the engine branch answers to: emit the
-                // document, or refuse. This branch shows the disk, and until
-                // the engine open answers there is no telling whether the
-                // disk is the document — a session that binds a moment later
-                // may hold replicated updates the file has never seen (#564,
-                // codex r19/r21). Refuse for the whole unresolved window,
-                // which the editor beside this menu already spends read-only
-                // or opening. The refusal reads "Document not open", and the
-                // notice below offers the retry that resolves it.
-                //
-                // `opening` is the wait and `engineMayHoldDocument` is the
-                // wait giving up; both mean the same thing to an export. Once
-                // the open answers "not engine-backed", the file IS the
-                // document and this lifts.
-                getMarkdown={() =>
-                  engine.opening || engine.engineMayHoldDocument
-                    ? null
-                    : serializeDraftRef.current()
-                }
-              />
-            ) : null}
-          </>
+              },
+            }}
+            // A truncated doc only loaded a bounded prefix into
+            // serializeDraftRef — copying/exporting it would silently emit a
+            // partial document. No menu until the full file is loaded (same
+            // gate as the inline properties below).
+            menu={
+              props.truncated
+                ? null
+                : {
+                    workspaceId: props.workspaceId,
+                    reportError: props.onButtonError,
+                    suggestedName: filenameStem(props.path),
+                    // The same rule the engine branch answers to: emit the
+                    // document, or refuse. This branch shows the disk, and until
+                    // the engine open answers there is no telling whether the
+                    // disk is the document — a session that binds a moment later
+                    // may hold replicated updates the file has never seen (#564,
+                    // codex r19/r21). Refuse for the whole unresolved window,
+                    // which the editor beside this menu already spends read-only
+                    // or opening. The refusal reads "Document not open", and the
+                    // notice below offers the retry that resolves it.
+                    //
+                    // `opening` is the wait and `engineMayHoldDocument` is the
+                    // wait giving up; both mean the same thing to an export. Once
+                    // the open answers "not engine-backed", the file IS the
+                    // document and this lifts.
+                    getMarkdown: () =>
+                      engine.opening || engine.engineMayHoldDocument
+                        ? null
+                        : serializeDraftRef.current(),
+                  }
+            }
+          />
         }
       />
       {props.truncatedNotice}

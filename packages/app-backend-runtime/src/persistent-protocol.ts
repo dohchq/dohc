@@ -72,7 +72,7 @@ export type PersistentCommand = {kind:"open";input:OpenRequest}
   | {kind:"finalize";input:FinalizeOperation}
   | {kind:"discard";proposalId:string}
   | {kind:"apply";input:CommittedChangeset}
-  | {kind:"applyBatch";input:CommittedChangeset[]}
+  | {kind:"applyBatch";input:CommittedChangeset[]; chunkMs?:number}
   | {kind:"snapshot";path:string}
   | {kind:"migrateCheckpoint";input:MigrateCheckpointInput}
   | {kind:"close"};

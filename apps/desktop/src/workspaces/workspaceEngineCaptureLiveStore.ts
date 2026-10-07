@@ -155,6 +155,7 @@ export type CaptureVersionedTextStore = VersionedTextStore & {
   }): Promise<CaptureTextFileMetadata[]>;
   listHistoryPage(input: {
     workspaceId: string;
+    objectId?: string;
     limit?: number;
     beforeMomentOrder?: number;
   }): Promise<{
@@ -607,6 +608,7 @@ function captureAuthor(author: MomentWriteAuthor): AgentAuthor {
 export function createCaptureLiveStores(
   workspace: AttachedEngineWorkspace | ShareMountEngineWorkspace,
   sessions: EngineWorkspaceSessions,
+  captureWaitSignal?: AbortSignal,
 ): CaptureLiveStores {
   const adapters = new WeakMap<object, Map<string, VersionedLiveAdapter>>();
   if (workspace.shareMount !== true) {
@@ -643,6 +645,21 @@ export function createCaptureLiveStores(
       async (binding) => await operation(adapterFor(binding)),
       { ...options, retryTransportErrors: true },
     );
+  }
+
+  async function waitForCapture<T>(operation: () => Promise<T>): Promise<T> {
+    const signal = captureWaitSignal;
+    signal?.throwIfAborted();
+    if (!signal) return await operation();
+    let rejectAbort!: (reason: unknown) => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {rejectAbort = reject;});
+    const abort = () => rejectAbort(signal.reason);
+    signal.addEventListener("abort", abort, {once: true});
+    try {
+      return await Promise.race([operation(), cancelled]);
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
   }
 
   async function runRawMutation<T>(
@@ -1131,6 +1148,7 @@ export function createCaptureLiveStores(
 
     async listHistoryPage(input: {
       workspaceId: string;
+      objectId?: string;
       limit?: number;
       beforeMomentOrder?: number;
     }) {
@@ -1361,6 +1379,7 @@ export function createCaptureLiveStores(
     },
 
     async flushCapture() {
+      captureWaitSignal?.throwIfAborted();
       // `settled: false` is not an error. The daemon documents it as "state
       // not comparable" — a layer down, a teardown race, or a workspace under
       // continuous mutation — and expects the caller to poll. Every Rust-side
@@ -1374,9 +1393,9 @@ export function createCaptureLiveStores(
       // deliberate unsettled pass, `running: false` with `degraded: false`.
       // A second switch straight after the first therefore threw
       // "did not settle" at whoever asked for it.
-      let outcome = await runRead(async (adapter) => await adapter.flushCapture());
+      let outcome = await waitForCapture(() => runRead(async adapter => await adapter.flushCapture()));
       if (!outcome.settled) {
-        const status = await runRead(async (adapter) => await adapter.watcherStatus());
+        const status = await waitForCapture(() => runRead(async adapter => await adapter.watcherStatus()));
         if (status.phase === "starting" || status.phase === "importing") {
           throw new DaemonRefusalError(
             {
@@ -1393,8 +1412,13 @@ export function createCaptureLiveStores(
         !outcome.settled && attempt < FLUSH_SETTLE_ATTEMPTS;
         attempt += 1
       ) {
-        await delay(FLUSH_SETTLE_POLL_MS);
-        outcome = await runRead(async (adapter) => await adapter.flushCapture());
+        captureWaitSignal?.throwIfAborted();
+        await delay(FLUSH_SETTLE_POLL_MS, undefined, { signal: captureWaitSignal }).catch(error => {
+          captureWaitSignal?.throwIfAborted();
+          throw error;
+        });
+        captureWaitSignal?.throwIfAborted();
+        outcome = await waitForCapture(() => runRead(async adapter => await adapter.flushCapture()));
       }
       if (!outcome.settled) {
         throw new Error(

@@ -277,7 +277,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["moment", "documentRead", "documentEdit", "documentCreate", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["moments", "moment", "documentRead", "documentEdit", "documentCreate", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);

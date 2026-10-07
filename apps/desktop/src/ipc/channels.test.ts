@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import * as contract from "./bridgeContract";
 import { CHANNELS, MENU_COMMANDS, WORKBENCH_MENU_COMMANDS } from "./channels";
 
@@ -31,6 +32,10 @@ function operationChannels(value: unknown): string[] {
 }
 
 describe("IPC channel names", () => {
+  it("adds no keys to CHANNELS; migrations remove keys into operation tables", () => {
+    const mainKeys = JSON.parse(readFileSync(new URL("./channelKeys.main.json", import.meta.url), "utf8")) as string[];
+    expect(Object.keys(CHANNELS).filter(key => !mainKeys.includes(key))).toEqual([]);
+  });
   // ipcMain.handle throws on a second handler for one channel, which would stop
   // main at startup. Every operation table the contract exports is included.
   it("names each channel once across CHANNELS and every operation table", () => {

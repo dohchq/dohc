@@ -647,7 +647,7 @@ describe("history page readiness and lifetime", () => {
 
 describe("History policy read failure", () => {
   beforeEach(() => vi.useFakeTimers());
-  const blocked = { status: "policy-unreadable" as const, policyErrors: ["files.toml could not be read"] };
+  const blocked = { status: "policy-unreadable" as const, unreadable: [".dohc/files.toml" as const], policyErrors: ["files.toml could not be read and was ignored."] };
   it("hides the previous page without retrying, keeps the typed cause, and recovers", async () => {
     const it0 = mount();
     await committed(it0, page("old"));
@@ -712,7 +712,7 @@ it("keeps a newer committed pagination when an older refresh reports unreadable 
   const olderPage = it0.loadMore();
   await settle(reads[2]!, page("older"));
   await olderPage;
-  await settle(reads[1]!, { status: "policy-unreadable", policyErrors: ["files.toml"] });
+  await settle(reads[1]!, { status: "policy-unreadable", unreadable: [".dohc/files.toml"], policyErrors: ["files.toml"] });
   expect(it0.ids()).toEqual(["newest", "older"]);
   expect(it0.hook().policyError).toBeNull();
   await refresh;
@@ -724,7 +724,7 @@ it("never appends an old pagination after a policy refusal hides the page", asyn
   await committed(it0, page("newest", { nextBeforeMomentOrder: 10 }));
   const olderPage = it0.loadMore();
   const refresh = it0.refresh();
-  await settle(reads[2]!, { status: "policy-unreadable", policyErrors: ["files.toml"] });
+  await settle(reads[2]!, { status: "policy-unreadable", unreadable: [".dohc/files.toml"], policyErrors: ["files.toml"] });
   expect(it0.hook().page).toBeNull();
   await refresh;
   await settle(reads[1]!, page("older"));

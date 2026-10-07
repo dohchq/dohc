@@ -336,7 +336,6 @@ export const CHANNELS = {
   getWorkspaceSettings: "desktop:get-workspace-settings",
   setWorkspaceSettings: "desktop:set-workspace-settings",
   resetWorkspaceSettings: "desktop:reset-workspace-settings",
-  writeClipboardText: "desktop:write-clipboard-text",
   setTitlebarTheme: "desktop:set-titlebar-theme",
   stepWindowZoom: "desktop:step-window-zoom",
   userSettingsChanged: "desktop:user-settings-changed",

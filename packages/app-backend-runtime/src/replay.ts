@@ -47,7 +47,7 @@ function copyRows(source:DatabaseSync, target:DatabaseSync, table:string, column
 /** Called only after the fast replay transaction rolls back a secondary-constraint conflict. */
 // `steps` reports each phase to the host. Copying and rebuilding every row runs
 // the app's indexes and generated columns, so each runs as a dataset check.
-export function replayThroughShadow(database:DatabaseSync, input:{directory:string;tables:string[];changeset:Uint8Array;databaseBytes:number}, commit:()=>void,
+export function replayThroughShadow(database:DatabaseSync, input:{directory:string;tables:string[];changeset:Uint8Array;databaseBytes:number;checkForeignKeys?:boolean}, commit:()=>void,
   steps:{progress(step:string):void;datasetCheck:CpuBudgets["datasetCheck"]}={progress(){},datasetCheck:unbudgeted.datasetCheck}):void {
   const path=join(input.directory,`replay-${randomUUID()}.sqlite`);
   closeSync(openSync(path,"wx",0o600));
@@ -81,7 +81,7 @@ export function replayThroughShadow(database:DatabaseSync, input:{directory:stri
       const intact=steps.datasetCheck(bytes,()=>{
         for(const table of tables) database.exec(`DELETE FROM ${quote(table.name)}`);
         for(const table of tables) copyRows(shadow!,database,table.name,table.columns,()=>steps.progress(rebuilding));
-        return database.prepare("PRAGMA foreign_key_check").iterate().next().done;
+        return input.checkForeignKeys===false || database.prepare("PRAGMA foreign_key_check").iterate().next().done;
       });
       if(!intact) reject("invalid_changeset","The saved change breaks a foreign key between records.");
       for(const trigger of triggers) database.exec(String(trigger.sql));

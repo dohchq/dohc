@@ -4,6 +4,7 @@ import { bridge } from "./bridge";
 import { Overlay } from "./Overlay";
 import { DangerButton, PrimaryButton, SecondaryButton } from "./ui/controls";
 import { useRequestSequence } from "./useRequestSequence";
+import { restoreRulesUnreadableWords } from "./workbench/HistoryPolicyStates";
 
 // Stop and restore (ADR 0013): the owner picks a person they shared this
 // workspace with, or an Edit share link, and confirms once. dohc stops that
@@ -290,7 +291,9 @@ export function StopAndRestoreDialog({
       const original = originals.get(file.momentId);
       if (!original) continue;
       if (file.kind === "restored") review.delete(original.path);
-      else review.set(original.path, { path: original.path, reason: "restore-refused", detail: file.detail });
+      else if (file.kind === "rules-unreadable") {
+        review.set(original.path, { path: original.path, reason: "rules-unreadable", unreadable: file.unreadable });
+      } else review.set(original.path, { path: original.path, reason: "restore-refused", detail: file.detail });
     }
     const reviewed = [...review.values()].sort((left, right) => left.path.localeCompare(right.path));
     const outcome = {
@@ -528,5 +531,6 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
 function reviewReason(file: Restored["review"][number], after: string): string {
   if (file.reason === "changed-since") return `Someone changed it after ${after}.`;
   if (file.reason === "folder-in-use") return "This Collection holds files someone else added.";
+  if (file.reason === "rules-unreadable") return restoreRulesUnreadableWords(file.unreadable);
   return `dohc could not restore it. ${file.detail}`;
 }

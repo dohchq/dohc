@@ -56,6 +56,9 @@ export function DocumentMenu(props: {
   // The shell's error hook. A copy that fails after the menu has closed has
   // no row left to say so, and reaches the person through this instead.
   reportError?: ReportButtonError;
+  // The document will not open here, such as after a failed read: the
+  // trigger keeps its place and does nothing.
+  disabled?: boolean;
 }) {
   const customize = useContext(CustomizeContext)?.customize;
   const items = customize ? [...ITEMS, CUSTOMIZE_ITEM] : ITEMS;
@@ -291,6 +294,7 @@ export function DocumentMenu(props: {
     <Menu
       label="Document actions"
       testId="document-menu-trigger"
+      disabled={props.disabled}
       open={open}
       onOpenChange={setOpen}
       closeOnPick={false}

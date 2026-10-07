@@ -642,6 +642,43 @@ pub struct RelaySyncClient<T> {
     automation_claims: std::sync::Mutex<Vec<dohc_engine_domain::AutomationClaim>>,
 }
 
+const MAX_PUSH_OPS_PER_PASS: usize = crate::MAX_PUSH_OPS_PER_BATCH;
+// Soft limit on preparation and blob uploads, reserving 10 seconds of the
+// desktop's 30-second RPC deadline for append and durable acknowledgement.
+// An individual transport request can still run past this limit.
+const PUSH_PRE_APPEND_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// One push request's preparation, retained while its transport yields for I/O.
+/// A new request starts from the durable cursor, never from this cache.
+pub struct PushWorkspaceProgress {
+    started: std::time::Instant,
+    acknowledged: usize,
+    page: Option<PreparedPushPage>,
+}
+
+impl Default for PushWorkspaceProgress {
+    fn default() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            acknowledged: 0,
+            page: None,
+        }
+    }
+}
+
+struct PreparedPushPage {
+    identity: crate::SyncIdentity,
+    origin_id: String,
+    cursor: i64,
+    revision: u64,
+    ops: Vec<ReplicationEnvelope>,
+    prefix: crate::OwnerPublicationPrefix,
+    blob_refs: BTreeMap<String, BTreeSet<BlobKind>>,
+    missing: Option<BTreeSet<String>>,
+    uploaded_ops: usize,
+    sending: Option<usize>,
+}
+
 struct PendingBaseRelayRepair {
     key: dohc_engine_collab::DocKey,
     lineage_claim_id: String,
@@ -1028,6 +1065,29 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         now_ms: i64,
         max_read_bytes: usize,
     ) -> Result<SyncPassOutcome, RelayError> {
+        self.resume_push_workspace(
+            store,
+            workspace_id,
+            faults,
+            leases,
+            now_ms,
+            max_read_bytes,
+            &mut PushWorkspaceProgress::default(),
+        )
+    }
+
+    /// Resume the same request after a deferred transport completion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume_push_workspace(
+        &self,
+        store: &mut EngineStore,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
+        now_ms: i64,
+        max_read_bytes: usize,
+        progress: &mut PushWorkspaceProgress,
+    ) -> Result<SyncPassOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
             .ok_or(RelayError::IdentityRequired)?;
@@ -1111,44 +1171,96 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
 
         let mut seen_origins: BTreeSet<_> = origins.iter().cloned().collect();
+        // Consume an in-flight append before considering newly queued origins.
+        if let Some(page) = &progress.page
+            && let Some(index) = origins.iter().position(|origin| origin == &page.origin_id)
+        {
+            origins.swap(0, index);
+        }
         let mut origins: VecDeque<_> = origins.into();
-        while let Some(origin_id) = origins.pop_front() {
+        'origins: while let Some(origin_id) = origins.pop_front() {
             let mut local_max =
                 local_max_origin_seq(store, workspace_id, &origin_id).map_err(local)?;
             let mut cursor = read_pushed_seq(store, workspace_id, &origin_id).map_err(local)?;
             let mut attempt = 0_u8;
 
             loop {
-                let mut ops = list_replication_ops(
-                    store,
-                    workspace_id,
-                    &origin_id,
-                    cursor,
-                    crate::MAX_PULL_OPS,
-                )
-                .map_err(local)?;
-                if ops.is_empty() {
-                    break;
-                }
-                match crate::outbound::repair_queued_moment_authors(store, &mut ops, faults)
-                    .map_err(local)?
+                if progress.acknowledged >= MAX_PUSH_OPS_PER_PASS
+                    || (progress.acknowledged > 0
+                        && progress.started.elapsed() >= PUSH_PRE_APPEND_BUDGET)
                 {
-                    TxnOutcome::Committed(()) => {}
-                    TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+                    resume_needed |= cursor < local_max || !origins.is_empty();
+                    break 'origins;
                 }
-                let prefix =
-                    crate::owner_publication_prefix(store, workspace_id, &ops, max_read_bytes)
+                let revision = store
+                    .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
+                    .map_err(local)?;
+                // An in-flight append can consume its original response after
+                // local edits, but never under a different workspace identity.
+                let cached = progress.page.as_ref().is_some_and(|page| {
+                    page.identity == identity
+                        && page.origin_id == origin_id
+                        && page.cursor == cursor
+                        && (page.sending.is_some() || page.revision == revision)
+                });
+                if !cached {
+                    let mut ops = list_replication_ops(
+                        store,
+                        workspace_id,
+                        &origin_id,
+                        cursor,
+                        MAX_PUSH_OPS_PER_PASS - progress.acknowledged,
+                    )
+                    .map_err(local)?;
+                    if ops.is_empty() {
+                        break;
+                    }
+                    match crate::outbound::repair_queued_moment_authors(store, &mut ops, faults)
+                        .map_err(local)?
+                    {
+                        TxnOutcome::Committed(()) => {}
+                        TxnOutcome::Crashed { .. } => return Err(local(SyncError::FaultCrash)),
+                    }
+                    let prefix =
+                        crate::owner_publication_prefix(store, workspace_id, &ops, max_read_bytes)
+                            .map_err(local)?;
+                    let revision = store
+                        .read_with(|conn| Ok::<_, SyncError>(conn.total_changes()))
                         .map_err(local)?;
+                    progress.page = Some(PreparedPushPage {
+                        identity: identity.clone(),
+                        origin_id: origin_id.clone(),
+                        cursor,
+                        revision,
+                        blob_refs: collect_blob_refs(&ops[..prefix.allowed_ops])?,
+                        ops,
+                        prefix,
+                        missing: None,
+                        uploaded_ops: 0,
+                        sending: None,
+                    });
+                }
+                let page = progress.page.as_mut().ok_or(RelayError::InvalidResponse)?;
+                let count = match page.sending {
+                    Some(count) => count,
+                    None => self.upload_push_prefix(
+                        store,
+                        workspace_id,
+                        &identity,
+                        page,
+                        progress.started,
+                    )?,
+                };
+                page.sending = Some(count);
+                let prefix = &page.prefix;
                 let blocked = prefix.pending.is_some() || prefix.budget_exhausted;
-                let ops = &ops[..prefix.allowed_ops];
-                if let Some(pending) = prefix.pending {
-                    owner_admission_pending.push(pending);
+                let ops = &page.ops[..count];
+                if let Some(pending) = &prefix.pending {
+                    owner_admission_pending.push(pending.clone());
                 }
                 if ops.is_empty() {
                     break;
                 }
-                self.upload_missing_blobs(store, workspace_id, &identity, ops)?;
-
                 let mut conflict = false;
                 for batch in ops.chunks(crate::MAX_PUSH_OPS_PER_BATCH) {
                     let response = match self.transport.push(PushRequest {
@@ -1213,10 +1325,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         .checked_add(response.inserted)
                         .ok_or(RelayError::InvalidResponse)?;
                     cursor = response.current_max_origin_seq;
+                    progress.acknowledged += batch.len();
                 }
                 if !conflict {
+                    resume_needed |= count < prefix.allowed_ops || prefix.budget_exhausted;
+                    progress.page = None;
                     if blocked {
-                        resume_needed |= prefix.budget_exhausted;
                         break;
                     }
                     continue;
@@ -1249,6 +1363,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     }
                 }
                 cursor = probe.current_max_origin_seq;
+                progress.page = None;
                 attempt = attempt.saturating_add(1);
             }
         }
@@ -2530,47 +2645,68 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         crate::commit_share_cursor(store, workspace_id, cursor, faults).map_err(local)
     }
 
-    fn upload_missing_blobs(
+    fn upload_push_prefix(
         &self,
         store: &EngineStore,
         workspace_id: &str,
         identity: &crate::SyncIdentity,
-        ops: &[ReplicationEnvelope],
-    ) -> Result<(), RelayError> {
-        let refs = collect_blob_refs(ops)?;
-        let all = refs.keys().cloned().collect::<Vec<_>>();
-        for sha_chunk in all.chunks(crate::MAX_BLOB_HAVE_BATCH) {
-            let response = self.transport.blobs_have(BlobHaveRequest {
-                workspace_id: workspace_id.to_owned(),
-                replication_epoch: identity.replication_epoch.clone(),
-                stream_identity: identity.stream_identity.clone(),
-                sha256s: sha_chunk.to_vec(),
-            })?;
-            let requested = sha_chunk.iter().collect::<BTreeSet<_>>();
-            let mut seen = BTreeSet::new();
-            for sha256 in response.missing {
-                if !requested.contains(&sha256) || !seen.insert(sha256.clone()) {
-                    return Err(RelayError::InvalidResponse);
+        page: &mut PreparedPushPage,
+        started: std::time::Instant,
+    ) -> Result<usize, RelayError> {
+        let ops = &page.ops[..page.prefix.allowed_ops];
+        if page.missing.is_none() {
+            let all = page.blob_refs.keys().cloned().collect::<Vec<_>>();
+            let mut missing = BTreeSet::new();
+            for chunk in all.chunks(crate::MAX_BLOB_HAVE_BATCH) {
+                let response = self.transport.blobs_have(BlobHaveRequest {
+                    workspace_id: workspace_id.to_owned(),
+                    replication_epoch: identity.replication_epoch.clone(),
+                    stream_identity: identity.stream_identity.clone(),
+                    sha256s: chunk.to_vec(),
+                })?;
+                let requested = chunk.iter().collect::<BTreeSet<_>>();
+                for sha in response.missing {
+                    if !requested.contains(&sha) || !missing.insert(sha) {
+                        return Err(RelayError::InvalidResponse);
+                    }
                 }
-                let kinds = refs.get(&sha256).ok_or(RelayError::InvalidResponse)?;
+            }
+            page.missing = Some(missing);
+        }
+        let missing = page.missing.as_mut().ok_or(RelayError::InvalidResponse)?;
+        while page.uploaded_ops < ops.len() {
+            // Finish at least one operation, then reserve time for append and
+            // durable acknowledgement before the caller's 30-second deadline.
+            if page.uploaded_ops > 0 && started.elapsed() >= PUSH_PRE_APPEND_BUDGET {
+                break;
+            }
+            for sha256 in collect_blob_refs(&ops[page.uploaded_ops..=page.uploaded_ops])?.keys() {
+                if !missing.contains(sha256) {
+                    continue;
+                }
                 let mut bytes = None;
+                let kinds = page
+                    .blob_refs
+                    .get(sha256)
+                    .ok_or(RelayError::InvalidResponse)?;
                 for kind in kinds {
-                    if let Some(local) = local_blob_bytes(store, &sha256, *kind)? {
+                    if let Some(local) = local_blob_bytes(store, sha256, *kind)? {
                         bytes = Some(local);
                         break;
                     }
                 }
-                let bytes = bytes.ok_or(RelayError::BlobInvalid)?;
                 self.transport.upload_blob(BlobUploadRequest {
                     workspace_id: workspace_id.to_owned(),
                     replication_epoch: identity.replication_epoch.clone(),
                     stream_identity: identity.stream_identity.clone(),
-                    sha256,
-                    bytes,
+                    sha256: sha256.clone(),
+                    bytes: bytes.ok_or(RelayError::BlobInvalid)?,
                 })?;
+                missing.remove(sha256);
             }
+            page.uploaded_ops += 1;
         }
-        Ok(())
+        Ok(page.uploaded_ops)
     }
 
     fn hydrate_missing_blobs(
@@ -4881,7 +5017,12 @@ fn push_sharing_declined_once(
     declines: &mut Vec<crate::SharingDeclined>,
     declined: crate::SharingDeclined,
 ) {
-    if !declines.contains(&declined) {
+    if let Some(existing) = declines
+        .iter_mut()
+        .find(|item| item.version_id == declined.version_id && item.object_id == declined.object_id)
+    {
+        *existing = declined;
+    } else {
         declines.push(declined);
     }
 }
@@ -4917,6 +5058,140 @@ fn local(error: SyncError) -> RelayError {
         return RelayError::StoreBusy;
     }
     RelayError::Local(error.code().to_owned())
+}
+
+#[cfg(test)]
+mod push_budget_tests {
+    use super::*;
+
+    #[test]
+    fn upload_uses_page_wide_kinds_for_a_digest_shared_by_binary_and_text_ops() {
+        for stored_as_text in [true, false] {
+            let (_scratch, _path, mut store) = dohc_engine_testkit::open_store();
+            let bytes = b"shared content";
+            let sha = hex_sha256(bytes);
+            store
+                .write_with(&dohc_engine_storage::NoFaults, |tx| {
+                    if stored_as_text {
+                        tx.execute(
+                            "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                            rusqlite::params![sha, bytes.len() as i64, "shared content"],
+                        )
+                        .map_err(SyncError::persist)?;
+                    } else {
+                        tx.execute(
+                            "INSERT INTO binary_blobs(sha256,byte_length,bytes) VALUES (?1,?2,?3)",
+                            rusqlite::params![sha, bytes.len() as i64, bytes.as_slice()],
+                        )
+                        .map_err(SyncError::persist)?;
+                    }
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+            let identity = crate::SyncIdentity {
+                workspace_id: "ws".into(),
+                origin_id: "local".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+            };
+            let kinds = if stored_as_text {
+                ["binary", "text"]
+            } else {
+                ["text", "binary"]
+            };
+            let ops: Vec<_> = kinds
+                .into_iter()
+                .enumerate()
+                .map(|(index, kind)| ReplicationEnvelope {
+                    workspace_id: "ws".into(),
+                    origin_id: "local".into(),
+                    origin_seq: index as i64,
+                    relay_seq: None,
+                    op_kind: "moment.append".into(),
+                    recorded_at_ms: 1,
+                    payload: serde_json::json!({ "payloadAfterBlobSha256": sha,
+                    "payloadAfterContentKind": kind }),
+                })
+                .collect();
+            let mut page = PreparedPushPage {
+                identity: identity.clone(),
+                origin_id: "local".into(),
+                cursor: -1,
+                revision: 0,
+                blob_refs: collect_blob_refs(&ops).unwrap(),
+                ops,
+                prefix: crate::OwnerPublicationPrefix {
+                    allowed_ops: 2,
+                    pending: None,
+                    budget_exhausted: false,
+                },
+                missing: Some(BTreeSet::from([sha])),
+                uploaded_ops: 0,
+                sending: None,
+            };
+            let client = RelaySyncClient::new(crate::tests::FakeRelay::default());
+            assert_eq!(
+                client
+                    .upload_push_prefix(
+                        &store,
+                        "ws",
+                        &identity,
+                        &mut page,
+                        std::time::Instant::now()
+                    )
+                    .unwrap(),
+                2
+            );
+            assert!(page.missing.unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn elapsed_upload_budget_finishes_one_operation_and_leaves_a_prefix() {
+        let (_scratch, _path, store) = dohc_engine_testkit::open_store();
+        let identity = crate::SyncIdentity {
+            workspace_id: "ws".into(),
+            origin_id: "local".into(),
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+        };
+        let mut page = PreparedPushPage {
+            identity: identity.clone(),
+            origin_id: "local".into(),
+            cursor: -1,
+            revision: 0,
+            ops: (0..2)
+                .map(|origin_seq| ReplicationEnvelope {
+                    workspace_id: "ws".into(),
+                    origin_id: "local".into(),
+                    origin_seq,
+                    relay_seq: None,
+                    op_kind: "probe.safe".into(),
+                    payload: serde_json::json!({}),
+                    recorded_at_ms: 1,
+                })
+                .collect(),
+            prefix: crate::OwnerPublicationPrefix {
+                allowed_ops: 2,
+                pending: None,
+                budget_exhausted: false,
+            },
+            blob_refs: BTreeMap::new(),
+            missing: None,
+            uploaded_ops: 0,
+            sending: None,
+        };
+        let client = RelaySyncClient::new(crate::tests::FakeRelay::default());
+        let started = std::time::Instant::now() - PUSH_PRE_APPEND_BUDGET;
+        assert_eq!(
+            client
+                .upload_push_prefix(&store, "ws", &identity, &mut page, started)
+                .unwrap(),
+            1
+        );
+        assert_eq!(page.uploaded_ops, 1);
+        assert_eq!(page.ops.len(), 2);
+    }
 }
 
 #[cfg(test)]
@@ -4990,6 +5265,10 @@ mod sharing_decline_tests {
 
     fn decline(path: &str) -> crate::SharingDeclined {
         crate::SharingDeclined {
+            object_id: path.to_owned(),
+            version_id: "main".to_owned(),
+            lineage_pruned: false,
+            head_blob_sha256: None,
             path: path.to_owned(),
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limit_bytes: 20,
@@ -4998,7 +5277,39 @@ mod sharing_decline_tests {
     }
 
     #[test]
-    fn equal_sized_declines_for_distinct_paths_do_not_collapse() {
+    fn merged_declines_follow_an_object_across_a_rename() {
+        let original = decline("notes/original.md");
+        let renamed = crate::SharingDeclined {
+            path: "notes/renamed.md".to_owned(),
+            lineage_pruned: true,
+            ..original.clone()
+        };
+        let mut declines = Vec::new();
+        push_sharing_declined_once(&mut declines, original);
+        push_sharing_declined_once(&mut declines, renamed.clone());
+        assert_eq!(declines, [renamed]);
+    }
+
+    #[test]
+    fn sharing_declines_keep_the_same_object_in_distinct_versions() {
+        let main = decline("notes/large.md");
+        let draft = crate::SharingDeclined {
+            version_id: "draft".to_owned(),
+            ..main.clone()
+        };
+        let renamed_draft = crate::SharingDeclined {
+            path: "notes/renamed.md".to_owned(),
+            ..draft.clone()
+        };
+        let mut declines = Vec::new();
+        push_sharing_declined_once(&mut declines, main.clone());
+        push_sharing_declined_once(&mut declines, draft);
+        push_sharing_declined_once(&mut declines, renamed_draft.clone());
+        assert_eq!(declines, [main, renamed_draft]);
+    }
+
+    #[test]
+    fn equal_sized_declines_for_distinct_objects_do_not_collapse() {
         let mut declines = Vec::new();
 
         push_sharing_declined_once(&mut declines, decline("notes/first.md"));

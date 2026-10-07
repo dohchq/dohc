@@ -162,6 +162,27 @@ it("lists Undo refusals and retries only the files not put back", async () => {
   expect(screen.queryByText("dohc could not restore it. This history moment is no longer available.")).toBeNull();
 });
 
+it("names the rules file it can't read on the file's row, from a restore and from Undo", async () => {
+  const f = fixture([{
+    status: "restored", restored: [{ path: "docs/new.md", restoredMomentId: "new" }],
+    review: [{ path: "docs/old.md", reason: "rules-unreadable", unreadable: [".dohc/visibility.toml"] }],
+    runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
+    wroteAutomations: false, sendsMessages: false, unfinished: null,
+  }]);
+  f.undoStopAndRestore.mockResolvedValueOnce({ files: [
+    { momentId: "new", kind: "rules-unreadable", unreadable: [".dohc/files.toml", ".dohc/visibility.toml"] },
+  ], errorMessage: null });
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText(
+    "dohc could not restore this file because it can't read .dohc/visibility.toml. Fix the file, then try again.",
+  )).toBeTruthy();
+  fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
+  expect(await screen.findByText(
+    "dohc could not restore this file because it can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.",
+  )).toBeTruthy();
+  expect(f.shell().receipts.get(WORKSPACE, ANA.target)).toEqual([{ path: "docs/new.md", restoredMomentId: "new" }]);
+});
+
 it("keeps partial Undo outcomes on an unexpected error and retries only remaining receipts", async () => {
   const f = fixture([{
     status: "restored", restored: [{ path: "docs/old.md", restoredMomentId: "old" },

@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, type ReactNode } from "react";
 import { bridge } from "../bridge";
 import {
   NoticeCenter,
@@ -6,7 +6,7 @@ import {
   type WorkspaceErrorNotice,
 } from "../workbench/NoticeCenter";
 import { errorDetails } from "./copyDetails";
-import { useShellError } from "./useShellError";
+import { ShellErrorReporter, useShellError, type ReportShellFailure } from "./useShellError";
 
 // What a connection attempt hands the surface that owns its notices. The
 // owner raises the toast and the Notices row; the panel shows nothing inline.
@@ -77,8 +77,10 @@ export function useConnectionNotices() {
         ...(error.tone ? { tone: error.tone } : {}),
         id: error.id,
         message: error.message,
+        ...(error.title ? { title: error.title } : {}),
         details: errorDetails([
           ["Error", error.message],
+          ...(error.title ? [["Title", error.title] as const] : []),
           ...(error.details ?? []),
           ["Platform", bridge().platform],
           ["Time", new Date(error.atMs).toISOString()],
@@ -93,6 +95,7 @@ export function useConnectionNotices() {
   return {
     reporter,
     reportError: reportShellError,
+    reportFailure: reportShellFailure,
     showSuccess: showSuccessNotice,
     notices,
     retryNotice: retryShellError,
@@ -104,12 +107,35 @@ export function useConnectionNotices() {
 const NOOP = () => undefined;
 
 /**
+ * A notice owner for a screen with none above it, such as the one dohc shows
+ * when it cannot read its workspace list. A copy that fails there still
+ * reaches a toast and a Notices row, with Try again.
+ */
+export function StandaloneNotices(props: { children: ReactNode }) {
+  const own = useConnectionNotices();
+  return (
+    <ShellErrorReporter.Provider value={own.reportFailure}>
+      {props.children}
+      <ConnectionNotices
+        notices={own.notices}
+        reportFailure={own.reportFailure}
+        onRetry={own.retryNotice}
+        onHide={own.hideNotice}
+        onDismiss={own.dismissNotice}
+      />
+    </ShellErrorReporter.Provider>
+  );
+}
+
+/**
  * The shell's notice center, docked bottom-right of a surface that has no
  * status bar to hold it. Nothing renders until a notice exists, so the
  * first-run screen keeps its own chrome.
  */
 export function ConnectionNotices(props: {
   notices: readonly WorkspaceErrorNotice[];
+  // Where a copy from one of these notices reports its own failure.
+  reportFailure: ReportShellFailure;
   onRetry: (id: string) => void;
   onHide: (id: string) => void;
   onDismiss: (id: string) => void;
@@ -123,6 +149,7 @@ export function ConnectionNotices(props: {
       data-testid="connection-notices"
       className="fixed bottom-2 right-3 z-30"
     >
+      <ShellErrorReporter.Provider value={props.reportFailure}>
       <NoticeCenter
         workspaceId={NO_WORKSPACE}
         host="corner"
@@ -142,6 +169,7 @@ export function ConnectionNotices(props: {
         {...(props.onSendCrashReport ? { onSendCrashReport: props.onSendCrashReport } : {})}
         {...(props.onDismissCrashReport ? { onDismissCrashReport: props.onDismissCrashReport } : {})}
       />
+      </ShellErrorReporter.Provider>
     </div>
   );
 }

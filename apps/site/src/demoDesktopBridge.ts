@@ -281,7 +281,6 @@ type DemoDesktopBridge = Pick<
   | "resolveChatDecision"
   | "stopAgentRun"
   | "resumeThreadDispatch"
-  | "writeClipboardText"
   | "openExternalUrl"
   | "shareChatChannel"
   | "joinSharedChannel"
@@ -723,7 +722,6 @@ const demoBridge = {
   },
   async stopAgentRun() {},
   async resumeThreadDispatch() {},
-  async writeClipboardText() {},
   async openExternalUrl(payload: { url: string }) {
     window.open(payload.url, "_blank", "noopener,noreferrer");
   },

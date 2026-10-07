@@ -140,6 +140,7 @@ const readablePolicy = {
   filesPolicy: null,
   visibilityPolicy: null,
   errors: [],
+  unreadable: [],
 };
 
 function expectStopped(search: Promise<unknown>): Promise<void> {
