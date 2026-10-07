@@ -358,6 +358,56 @@ describe("useFileText", () => {
     expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3);
   });
 
+  it("never settles or restarts one document's read for another", async () => {
+    const docA = markdownToYDoc(BUDGET_FILE);
+    let answerA: (text: string) => void = () => undefined;
+    bridgeMock.readWorkspaceText.mockImplementation(({ relativePath }: { relativePath: string }) =>
+      relativePath === "a.md"
+        ? new Promise((resolve) => {
+            answerA = (text) => resolve(fileRead(text));
+          })
+        : Promise.resolve(fileRead(COST_FILE)),
+    );
+    const view = render(<Live path="a.md" body={BUDGET_FILE} ydoc={docA} saveState={SAVED_HERE} />);
+    await settle();
+    // A's read is out, and A owes another.
+    activity(["a.md"]);
+    view.rerender(<Live path="b.md" body={BUDGET_FILE} ydoc={markdownToYDoc(BUDGET_FILE)} saveState={SAVED_HERE} />);
+    await settle();
+    answerA(BUDGET_FILE);
+    await settle();
+    await settle();
+    const reads = bridgeMock.readWorkspaceText.mock.calls.map(([payload]) => (payload as { relativePath: string }).relativePath);
+    expect(reads.filter((path) => path === "a.md")).toHaveLength(1);
+    expect(reads).toContain("b.md");
+    expect(shown()).toBe(COST);
+  });
+
+  it("shows no text read before the section opened until a fresh read lands, and none if it fails", async () => {
+    const canonical = "---\nstatus: draft\n---\n\nBody";
+    const view = render(<Live body={canonical} ydoc={markdownToYDoc(canonical)} saveState={UNKNOWN_SAVE_STATE} />);
+    expect(opened()).toBe(false);
+    let answer: (text: string) => void = () => undefined;
+    bridgeMock.readWorkspaceText.mockReturnValueOnce(new Promise((resolve) => {
+      answer = (text) => resolve(fileRead(text));
+    }));
+    expand();
+    await settle();
+    expect(opened()).toBe(true);
+    expect(shown()).toBeNull();
+    answer("---\nstatus: ready\n---\n\nBody");
+    await settle();
+    expect(shown()).toBe("---\nstatus: ready\n---");
+    view.unmount();
+
+    render(<Live body={canonical} ydoc={markdownToYDoc(canonical)} saveState={UNKNOWN_SAVE_STATE} />);
+    bridgeMock.readWorkspaceText.mockRejectedValueOnce(new Error("busy"));
+    expand();
+    await settle();
+    expect(opened()).toBe(true);
+    expect(shown()).toBeNull();
+  });
+
   it("never shows a slow read on another document, or an older read over a newer one", async () => {
     const doc = markdownToYDoc(BUDGET_FILE);
     let answerTrip: (text: string) => void = () => undefined;

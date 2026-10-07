@@ -41,13 +41,13 @@ function useFileText(input: {
   ydoc: Y.Doc;
   saveState: SaveState;
   open: boolean;
-}): string {
+}): { text: string; stale: boolean } {
   const { workspaceId, path, body, ydoc, open } = input;
-  const key = `${workspaceId}\n${path}`;
-  const [read, setRead] = useState({ key, body, text: body });
+  // `stale` holds back text read before the section opened.
+  const [read, setRead] = useState({ body, text: body, stale: false });
   let current = read;
-  if (read.key !== key || read.body !== body) {
-    current = { key, body, text: body };
+  if (read.body !== body) {
+    current = { body, text: body, stale: false };
     setRead(current);
   }
 
@@ -67,13 +67,13 @@ function useFileText(input: {
     };
   }, [ydoc]);
 
-  // One order for both readers: a newer inspector read, or another document,
-  // drops every read still pending, and only the newest read lands.
+  // One order for both readers: a newer inspector read, or another document
+  // session, drops every read still pending, and only the newest read lands.
   const latest = useRef(0);
   const live = useRef({ open, mounted: true });
   useLayoutEffect(() => {
     latest.current += 1;
-  }, [key, body, ydoc]);
+  }, [body, ydoc]);
   useLayoutEffect(() => {
     live.current.open = open;
   }, [open]);
@@ -104,9 +104,10 @@ function useFileText(input: {
         ({ result, covers }) => {
           if (latest.current !== id) return;
           edits.current.read = Math.max(edits.current.read, covers);
-          setRead((last) => (last.key === key ? { ...last, text: result.text } : last));
+          setRead((last) => ({ ...last, text: result.text, stale: false }));
         },
-        // The text read last stays. The inspector reports a file it cannot read.
+        // The text read last stays, or stays hidden while stale. The
+        // inspector reports a file it cannot read.
         () => undefined,
       )
       .finally(() => {
@@ -115,19 +116,25 @@ function useFileText(input: {
         owed.current = false;
         if (live.current.mounted && live.current.open) start();
       });
-  }, [key, workspaceId, path]);
+  }, [workspaceId, path]);
   const readFile = useCallback(() => {
     if (!live.current.open || flight.current === "queued") return;
     if (flight.current === "reading") owed.current = true;
     else start();
   }, [start]);
 
-  // Opening shows the file as it is now.
+  // Opening shows only the file as it is now: text read earlier is held
+  // back, and a read already out is dropped for a fresh one.
   const wasOpen = useRef(open);
   useEffect(() => {
-    if (open && !wasOpen.current) readFile();
+    if (open && !wasOpen.current) {
+      latest.current += 1;
+      setRead((last) => ({ ...last, stale: true }));
+      if (flight.current === "idle") start();
+      else owed.current = true;
+    }
     wasOpen.current = open;
-  }, [open, readFile]);
+  }, [open, start]);
 
   const kind = input.saveState.kind;
   useEffect(() => {
@@ -143,15 +150,27 @@ function useFileText(input: {
       }),
     [readFile, workspaceId, path],
   );
-  return current.text;
+  return current;
 }
 
 /**
  * The section for a live document, whose file changes only when the engine
  * saves. `body` is the inspector's read of the file. It also decides whether
- * the section starts open, so a closed section costs no read.
+ * the section starts open, so a closed section costs no read. Each document
+ * gets its own reads, so nothing read for one settles or clears another.
  */
 export function LiveFrontmatterAsWritten(props: {
+  workspaceId: string;
+  path: string;
+  body: string;
+  ydoc: Y.Doc;
+  saveState: SaveState;
+  propertiesShown: boolean;
+}) {
+  return <LiveSection key={`${props.workspaceId}\n${props.path}`} {...props} />;
+}
+
+function LiveSection(props: {
   workspaceId: string;
   path: string;
   body: string;
@@ -163,15 +182,16 @@ export function LiveFrontmatterAsWritten(props: {
     () => opensByDefault(blockOf(props.body), props.propertiesShown),
     [props.body, props.propertiesShown],
   );
-  const [toggled, setToggled] = useState<{ ydoc: Y.Doc; open: boolean } | null>(null);
-  const open = toggled?.ydoc === props.ydoc ? toggled.open : opens;
-  const markdown = useFileText({ ...props, open });
+  const [toggled, setToggled] = useState<boolean | null>(null);
+  const open = toggled ?? opens;
+  const file = useFileText({ ...props, open });
   return (
     <FrontmatterAsWritten
-      markdown={markdown}
+      markdown={file.text}
       propertiesShown={props.propertiesShown}
       open={open}
-      onToggle={(next) => setToggled({ ydoc: props.ydoc, open: next })}
+      stale={file.stale}
+      onToggle={setToggled}
     />
   );
 }
@@ -181,11 +201,13 @@ export function LiveFrontmatterAsWritten(props: {
 // receives all of it, so a person sees all of it here. It opens when the
 // properties do not show every line as written: a comment, an anchor, a hidden
 // key, a block that does not read, or anything else. `markdown` is file text.
-// A live document passes `open` and `onToggle` from LiveFrontmatterAsWritten.
+// A live document passes `open`, `stale` and `onToggle` from
+// LiveFrontmatterAsWritten. Stale text is not shown.
 export function FrontmatterAsWritten(props: {
   markdown: string;
   propertiesShown: boolean;
   open?: boolean;
+  stale?: boolean;
   onToggle?: (open: boolean) => void;
 }) {
   const text = useMemo(() => blockOf(props.markdown), [props.markdown]);
@@ -212,15 +234,16 @@ export function FrontmatterAsWritten(props: {
             <ChevronRight size={13} aria-hidden className="transition-transform duration-150 group-open:rotate-90" />
             As written in the file
           </summary>
-          <pre className="m-0 mb-1 overflow-x-auto rounded-md border border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[12px] leading-5 text-ink">
-            {text}
-          </pre>
+          {props.stale ? null : (
+            <pre className="m-0 mb-1 overflow-x-auto rounded-md border border-line bg-panel-2 px-2.5 py-1.5 font-mono text-[12px] leading-5 text-ink">
+              {text}
+            </pre>
+          )}
         </details>
       </div>
     </section>
   );
 }
-
 
 /** Whether the properties and page title show every line of the block as written. */
 function everyLineShown(text: string): boolean {
