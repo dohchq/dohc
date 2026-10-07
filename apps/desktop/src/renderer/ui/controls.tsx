@@ -175,7 +175,7 @@ export function EmptyState({
       ) : (
         <DohcMark size={30} className={toneClass.mark} />
       )}
-      <div className="flex max-w-sm flex-col gap-1 wrap-anywhere">
+      <div className="flex max-w-sm flex-col gap-1 text-balance wrap-anywhere">
         <span className="text-sm text-muted">{title}</span>
         {hint ? <span className="text-[11px] text-subtle">{hint}</span> : null}
       </div>

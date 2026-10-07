@@ -499,18 +499,22 @@ export function SearchView(props: {
           data-testid="search-empty-state"
           icon={SearchX}
           title={`No files or chats match "${model.query}".`}
+          hint={narrowed ? undefined : "Try a shorter search."}
         >
           {narrowed ? (
             <SecondaryButton
-              onClick={() =>
+              onClick={() => {
+                // The search runs again at once and this state unmounts with
+                // the button, so focus goes where the person keeps searching.
+                inputRef.current?.focus();
                 changeCriteria({
                   caseSensitive: false,
                   wholeWord: false,
                   regex: false,
                   includeGlob: "",
                   excludeGlob: "",
-                })
-              }
+                });
+              }}
             >
               Clear filters
             </SecondaryButton>

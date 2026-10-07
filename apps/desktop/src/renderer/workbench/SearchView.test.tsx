@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { beginSearch } from "./search-model";
+import { beginSearch, idleSearchModel, type SearchModel } from "./search-model";
 import { SearchView } from "./SearchView";
-import type { WorkspaceSearchApi } from "./useWorkspaceSearch";
+import type { SearchCriteria, WorkspaceSearchApi } from "./useWorkspaceSearch";
 
 afterEach(() => cleanup());
 
@@ -99,6 +100,7 @@ describe("SearchView", () => {
     expect(screen.getByTestId("search-empty-state").textContent).toContain(
       'No files or chats match "agnet".',
     );
+    expect(screen.getByTestId("search-empty-state").textContent).toContain("Try a shorter search.");
     expect(screen.queryByRole("button", { name: "Clear filters" })).toBeNull();
   });
 
@@ -106,6 +108,7 @@ describe("SearchView", () => {
     const search = emptySearch({ regex: true, includeGlob: "*.md" });
     render(<SearchView search={search} onOpenResult={vi.fn()} />);
 
+    expect(screen.getByTestId("search-empty-state").textContent).not.toContain("Try a shorter search.");
     const clear = screen.getByRole("button", { name: "Clear filters" });
     clear.focus();
     await userEvent.setup().keyboard("{Enter}");
@@ -124,5 +127,39 @@ describe("SearchView", () => {
       includeGlob: undefined,
       excludeGlob: undefined,
     });
+  });
+
+  // The shell's search state, held for real: run() moves the model to a new
+  // search, which replaces the empty state and the button in it.
+  function LiveSearch(props: { criteria: SearchCriteria }) {
+    const [model, setModel] = useState<SearchModel>({ ...beginSearch("search-1", "agnet"), status: "complete" });
+    const [criteria, setCriteria] = useState(props.criteria);
+    return (
+      <SearchView
+        search={{
+          model,
+          criteria,
+          setCriteria,
+          run: (options) => setModel(beginSearch("search-2", options.query)),
+          clear: () => setModel(idleSearchModel()),
+        }}
+        onOpenResult={vi.fn()}
+      />
+    );
+  }
+
+  it("keeps keyboard focus in Search when Clear filters searches again", async () => {
+    render(
+      <LiveSearch
+        criteria={{ query: "agnet", caseSensitive: true, wholeWord: false, regex: false, includeGlob: "", excludeGlob: "" }}
+      />,
+    );
+
+    screen.getByRole("button", { name: "Clear filters" }).focus();
+    await userEvent.setup().keyboard("{Enter}");
+
+    expect(screen.queryByTestId("search-empty-state")).toBeNull();
+    expect(screen.getByTestId("search-view").getAttribute("data-state")).toBe("searching");
+    expect(document.activeElement).toBe(screen.getByTestId("search-input"));
   });
 });

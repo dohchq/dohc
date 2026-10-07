@@ -407,7 +407,13 @@ export function EngineHistoryView(props: {
   // has a page: "No changes yet" states something about the workspace,
   // and a read still in flight or a read that failed may not state it.
   if (props.moments.length === 0 && !props.hasMore) {
-    return <EmptyState icon={History} title="No changes yet" />;
+    return (
+      <EmptyState
+        icon={History}
+        title="No changes yet"
+        hint="Edits by you or your agent appear here as a timeline you can review."
+      />
+    );
   }
 
   return (
