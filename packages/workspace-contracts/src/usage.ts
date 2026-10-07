@@ -29,15 +29,15 @@ export const USAGE_ACTION_IDS = [
   "app.responses.undo", "folder.create", "app.create", "app.test", "data.import",
 ] as const satisfies readonly CapabilityId[];
 
-export const UsageCapabilityId = z.enum(Object.keys(CAPABILITIES) as [CapabilityId, ...CapabilityId[]]);
-export const UsageActionId = z.enum(USAGE_ACTION_IDS);
-export const UsageDoor = z.enum(USAGE_DOORS);
-export const UsageDay = z.iso.date();
+const UsageCapabilityId = z.enum(Object.keys(CAPABILITIES) as [CapabilityId, ...CapabilityId[]]);
+const UsageActionId = z.enum(USAGE_ACTION_IDS);
+const UsageDoor = z.enum(USAGE_DOORS);
+const UsageDay = z.iso.date();
 export const UsageAppVersion = z.string().max(64).regex(/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?$/);
 export const UsagePair = z.strictObject({ capabilityId: UsageCapabilityId, door: UsageDoor });
 export type UsagePair = z.infer<typeof UsagePair>;
 export const UsageInvocation = z.strictObject({ capabilityId: UsageActionId, door: UsageDoor });
-export const UsageCoverageStatus = z.enum(["covered", "uncovered", "unavailable"]);
+const UsageCoverageStatus = z.enum(["covered", "uncovered", "unavailable"]);
 export const UsageBuildPair = UsagePair.extend({ status: UsageCoverageStatus });
 export type UsageBuildPair = z.infer<typeof UsageBuildPair>;
 export const UsageVersionCoverage = z.strictObject({
@@ -67,7 +67,7 @@ export const UsageDayRecord = z.strictObject({
 });
 export type UsageDayRecord = z.infer<typeof UsageDayRecord>;
 
-export function usagePairKey(pair: UsagePair): string {
+function usagePairKey(pair: UsagePair): string {
   return `${pair.capabilityId}:${pair.door}`;
 }
 export function usageRowKey(row: UsagePair & { day: string }): string {
