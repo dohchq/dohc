@@ -1147,6 +1147,35 @@ it("resets the uncached replay wait after a successful cache save",async()=>{
   expect((await f.read()).revision).toBe(3);
 });
 
+it("backs off when a final replay cache failure stops its worker before capture",async()=>{
+  const f=await fixture();
+  await f.invoke({id:'one',value:'saved'});
+  await f.supervisor.close();
+  let broken=true,clock=0;
+  const applied:number[]=[],pids:number[]=[],closedPids:number[]=[];
+  cleanups.push(async()=>{expect(closedPids.sort()).toEqual(pids.sort());});
+  const launch=launcher((request,controls)=>{
+    if(request.command.kind==='applyBatch')applied.push(...request.command.input.map((event:{revision:number})=>event.revision));
+    if(request.command.kind==='snapshot'&&broken){controls.stop();return;}
+    controls.deliver();
+  },undefined,pids,closedPids);
+  const onMaintenanceError=vi.fn();
+  const supervisor=await createDatasetSupervisor({journal:f.journal,directory:join(f.directory,'workers'),runtime:{launch},
+    replayCacheMs:0,nowMs:()=>clock,maintenanceStorage:{authorize(){},account(){}},onMaintenanceError});
+  cleanups.push(()=>supervisor.close());
+  const read={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({code:'replay_not_saved',retryAfterMs:5000});
+  expect(onMaintenanceError).toHaveBeenCalledTimes(1);
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toEqual([]);
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({code:'dataset_reopen_wait',retryAfterMs:5000});
+  expect(applied).toEqual([1]);
+  broken=false;clock=5000;
+  expect(await supervisor.invoke(read)).toMatchObject({revision:1,result:[{id:'one',value:'saved'}]});
+  expect(applied).toEqual([1,1]);
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor.revision).toBe(1);
+});
+
 it.each(['quota','seal'] as const)("returns a completed replay when its final cache fails at %s and waits before replaying again",async(stage)=>{
   const f=await fixture();
   await f.invoke({id:'1',value:'saved'});

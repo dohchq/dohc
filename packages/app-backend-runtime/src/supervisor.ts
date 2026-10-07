@@ -528,6 +528,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     // Cache a completed replay when capacity allows; its journal remains authoritative.
     if (replayedSinceCheckpoint && performance.now() - replayStarted >= replayCacheMs) {
       reopen.uncachedTail = !await maintainMaterialization(lane, "replay-tail");
+      if (!lane.worker) throw new PersistentRuntimeError("replay_not_saved", "dohc could not save this Collection's records. Try again.");
     }
     return worker;
   }
