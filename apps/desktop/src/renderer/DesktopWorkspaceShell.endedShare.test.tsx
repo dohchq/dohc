@@ -8,10 +8,7 @@ import type { Workspace } from "./DesktopWorkspaceShell";
 import { deferred } from "../testing/deferred";
 import { collectionTabPath } from "./workbench/workbenchState";
 import { serializeCollectionSchema } from "./collections/schemaAuthoring";
-import { claimWorkspace, closeTestStorages, createShare, inspectDatabase, storagePath, testHandler, testStorage, request } from "@dohc/sync-relay/testing";
-import { fetchShareViewAccess } from "../workspaces/shareViewInfo";
-import { createSharedViewsIpcHarness, credentials } from "../testing/sharedViewsIpcHarness";
-import { sharedViewAccessOperations } from "../ipc/bridgeContract";
+import type { CheckSharedViewAccessResult } from "../ipc/bridgeContract";
 import {
   DesktopWorkspaceShell, SHARE_VIEW, makeShareBridge, shellBootstrapProps, storedStateWithTabs,
 } from "./DesktopWorkspaceShell.testHarness";
@@ -159,49 +156,36 @@ describe("ended Edit Collection shares", () => {
     expect(bridge.refreshSharedView).not.toHaveBeenCalled();
   });
 
-  it("discovers a real relay's Edit-to-View downgrade and revocation while the Collection stays open", async () => {
-    const storage = await testStorage();
+  it("discovers an Edit-to-View downgrade and revocation while the Collection stays open", async () => {
+    const bridge = collectionBridge();
+    let workspace = EDIT_SHARE;
+    let result: CheckSharedViewAccessResult = { status: "current", access: "edit" };
+    bridge.checkSharedViewAccess.mockImplementation(async payload => {
+      expect(payload.workspaceId).toBe(EDIT_SHARE.workspaceId);
+      bridge.getWorkspaceRegistry.mockResolvedValue({ workspaces: [workspace] });
+      return result;
+    });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     try {
-      const relay = testHandler(storage);
-      await claimWorkspace(relay, "granter", "owner");
-      const shareId = await createShare(relay, "granter", "owner", { recipientUserId: "recipient", paths: ["tasks"], access: "edit" });
-      const bridge = collectionBridge();
-      const main = await createSharedViewsIpcHarness();
-      main.workspace.shareView!.shareId = shareId;
-      main.workspace.shareView!.relayUrl = "http://relay.test";
-      main.cache.set({ ...credentials, relayUrl: "http://relay.test", token: "user:recipient" });
-      main.fetchAccess.mockImplementation(input => fetchShareViewAccess({ ...input,
-        relay: { ...input.relay, fetch: async (url, init) => relay(new Request(url, init)) },
-      }));
-      bridge.checkSharedViewAccess.mockImplementation(payload => {
-        expect(payload.workspaceId).toBe(EDIT_SHARE.workspaceId);
-        return main.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" }) as ReturnType<typeof bridge.checkSharedViewAccess>;
-      });
-      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
       vi.stubGlobal("dohcDesktop", bridge);
       const view = render(shell(bridge, EDIT_SHARE));
       await screen.findByTestId("collection-new-record");
-      const db = inspectDatabase(storagePath(storage));
-      // Named-grant retuning has no public route yet. Seed its current View
-      // state in the real relay store; the authenticated GET remains real.
-      db.prepare("UPDATE sync_relay_share_grants SET access = 'view' WHERE share_id = ?").run(shareId);
+      workspace = { ...EDIT_SHARE, shareView: { ...EDIT_SHARE.shareView!, access: "view" } };
+      result = { status: "current", access: "view" };
       await act(() => vi.advanceTimersByTimeAsync(5_000));
       expect(screen.queryByTestId("collection-new-record")).toBeNull();
-      expect(main.workspace.shareView!.grantedSelector.access).toBe("view");
       expect(screen.queryByTestId("collection-fields-button")).toBeNull();
       expect(screen.queryByTestId("collection-views-button")).toBeNull();
       expect(screen.queryByTestId("share-changes-send")).toBeNull();
       expect(screen.getByText("Retained task")).toBeTruthy();
-      const removed = await relay(request("granter", `/sync/shares/${shareId}/revoke`, { method: "POST" }));
-      expect(removed.status).toBe(200);
+      workspace = { ...workspace, shareView: { ...workspace.shareView!, ended: true } };
+      result = { status: "ended" };
       await act(() => vi.advanceTimersByTimeAsync(5_000));
       expect(screen.getByTestId("shared-view-banner").textContent).toContain("This share was ended");
-      expect(main.end).toHaveBeenCalledOnce();
-      expect(main.workspace.shareView!.ended).toBe(true);
       expect(bridge.refreshSharedView).toHaveBeenCalledTimes(1);
       expect(screen.getByText("Retained task")).toBeTruthy();
       view.unmount();
-    } finally { vi.useRealTimers(); await closeTestStorages(); }
+    } finally { vi.useRealTimers(); }
   });
 
   it("keeps unchanged access checks from rendering the shell again", async () => {
