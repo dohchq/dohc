@@ -138,6 +138,18 @@ describe("folders a launch could not open", () => {
     expect(details).toContain(`Cause: ${cause}`);
   });
 
+  it("shows folders main combined as one row, with each listed folder in Copy and no Try again", async () => {
+    render(<Root owner={null} />);
+    held.push({ attemptId: "more-1", paths: ["C:\\work\\Notes", "C:\\work\\Plans"], count: 3, workspaceId: null });
+    await act(async () => ping());
+
+    const toast = await screen.findByTestId("workspace-shell-error");
+    expect(toast.textContent).toContain("dohc could not open 3 more folders. Copy the details to list them.");
+    expect(within(toast).queryByRole("button", { name: "Try again" })).toBeNull();
+    const details = await copied(toast);
+    expect(details).toContain("Folder: C:\\work\\Notes\nFolder: C:\\work\\Plans\nNot listed: 1 more, named in dohc's log");
+  });
+
   it("keeps the row in Notices, with Try again and Copy, after the toast closes", async () => {
     const user = userEvent.setup();
     render(<Root owner={null} />);

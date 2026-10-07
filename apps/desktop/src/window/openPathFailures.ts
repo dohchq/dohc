@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { WORKSPACE_PATH_OPEN_FAILURES_MAX, type WorkspacePathOpenFailure } from "../ipc/bridgeContract";
+import {
+  WORKSPACE_PATH_OPEN_FAILURES_MAX,
+  WORKSPACE_PATH_OPEN_MORE_PATHS_MAX,
+  type WorkspacePathOpenFailure,
+} from "../ipc/bridgeContract";
 import { ipcWireError } from "../ipc/errorWords";
 
 // One window's renderer, as this store needs it.
@@ -26,6 +30,9 @@ export function createOpenPathFailures<Renderer extends OpenPathFailureRenderer>
   record(path: string, error: unknown): void;
   limit?: number;
 }) {
+  // A window keeps up to `limit` failures apart until it takes them; past
+  // that they combine into one. Main keeps `limit` taken ones for Try again,
+  // oldest dropped first. It never drops one a window has not taken.
   const limit = dependencies.limit ?? WORKSPACE_PATH_OPEN_FAILURES_MAX;
   const held = new Map<string, { failure: WorkspacePathOpenFailure; rendererId: number; taken: boolean }>();
   const watched = new WeakSet<Renderer>();
@@ -44,11 +51,19 @@ export function createOpenPathFailures<Renderer extends OpenPathFailureRenderer>
         for (const [attemptId, entry] of held) if (entry.rendererId === renderer.id) held.delete(attemptId);
       });
     }
-    const failure = { attemptId: randomUUID(), path, cause: String(ipcWireError(error)), workspaceId };
-    held.set(failure.attemptId, { failure, rendererId: renderer.id, taken: false });
-    for (const oldest of held.keys()) {
-      if (held.size <= limit) break;
-      held.delete(oldest);
+    const waiting = [...held.values()].filter((entry) => entry.rendererId === renderer.id && !entry.taken);
+    const attemptId = randomUUID();
+    if (waiting.length < limit) {
+      const failure = { attemptId, path, cause: String(ipcWireError(error)), workspaceId };
+      held.set(attemptId, { failure, rendererId: renderer.id, taken: false });
+    } else {
+      const more = waiting.find(({ failure }) => "paths" in failure && failure.workspaceId === workspaceId)?.failure;
+      if (more && "paths" in more) {
+        more.count += 1;
+        if (more.paths.length < WORKSPACE_PATH_OPEN_MORE_PATHS_MAX) more.paths.push(path);
+      } else {
+        held.set(attemptId, { failure: { attemptId, paths: [path], count: 1, workspaceId }, rendererId: renderer.id, taken: false });
+      }
     }
     dependencies.notify(renderer);
   }
@@ -58,16 +73,20 @@ export function createOpenPathFailures<Renderer extends OpenPathFailureRenderer>
     // Each failure goes to the first take from its window, and only that one.
     take(renderer: Renderer): WorkspacePathOpenFailure[] {
       const taken: WorkspacePathOpenFailure[] = [];
-      for (const entry of held.values()) {
+      for (const [attemptId, entry] of held) {
         if (entry.rendererId !== renderer.id || entry.taken) continue;
-        entry.taken = true;
         taken.push(entry.failure);
+        // Folders combined into one have no Try again to keep.
+        if ("paths" in entry.failure) held.delete(attemptId);
+        else entry.taken = true;
       }
+      const spent = [...held].filter(([, entry]) => entry.taken);
+      for (const [attemptId] of spent.slice(0, Math.max(0, spent.length - limit))) held.delete(attemptId);
       return taken;
     },
     async retry(attemptId: string, renderer: Renderer): Promise<void> {
       const entry = held.get(attemptId);
-      if (entry?.rendererId !== renderer.id) throw new Error("Open the folder again.");
+      if (entry?.rendererId !== renderer.id || !("path" in entry.failure)) throw new Error("Open the folder again.");
       held.delete(attemptId);
       const { path } = entry.failure;
       const workspaceId = dependencies.workspaceIdOf(renderer);

@@ -112,10 +112,64 @@ describe("open path failures", () => {
     expect(f.notify).toHaveBeenCalledTimes(3);
   });
 
-  it("drops the oldest failure once it holds its limit", () => {
+  it("gives every failure a window has not taken, combining those past its limit", () => {
+    const f = fixture(2);
+    const window = renderer(7, "a");
+    // One launch reports every folder before the window can take any.
+    for (const path of ["first", "second", "third", "fourth", "fifth"]) f.failures.report(path, refused, window);
+
+    expect(f.failures.take(window)).toEqual([
+      expect.objectContaining({ path: "first", workspaceId: "a" }),
+      expect.objectContaining({ path: "second", workspaceId: "a" }),
+      { attemptId: expect.any(String), paths: ["third", "fourth", "fifth"], count: 3, workspaceId: "a" },
+    ]);
+    expect(f.failures.take(window)).toEqual([]);
+    // The window took them, so the next ones are kept apart again.
+    f.failures.report("sixth", refused, window);
+    expect(f.failures.take(window)).toEqual([expect.objectContaining({ path: "sixth" })]);
+  });
+
+  it("keeps folders past the limit for another workspace apart", () => {
+    const f = fixture(1);
+    const window = renderer(7, "a");
+    for (const path of ["first", "second"]) f.failures.report(path, refused, window);
+    window.workspaceId = "b";
+    f.failures.report("third", refused, window);
+    expect(f.failures.take(window)).toEqual([
+      expect.objectContaining({ path: "first", workspaceId: "a" }),
+      expect.objectContaining({ paths: ["second"], workspaceId: "a" }),
+      expect.objectContaining({ paths: ["third"], workspaceId: "b" }),
+    ]);
+  });
+
+  it("lists a bounded number of combined folders and counts every one", () => {
+    const f = fixture(1);
+    const window = renderer(7);
+    for (let index = 0; index < 301; index += 1) f.failures.report(`folder-${index}`, refused, window);
+    const [, more] = f.failures.take(window);
+    expect(more).toMatchObject({ count: 300 });
+    expect(more && "paths" in more ? more.paths : []).toHaveLength(256);
+  });
+
+  it("makes room by dropping only Try again attempts a window already took", async () => {
     const f = fixture(2);
     const window = renderer(7);
-    for (const path of ["first", "second", "third"]) f.failures.report(path, refused, window);
-    expect(f.failures.take(window).map((failure) => failure.path)).toEqual(["second", "third"]);
+    for (const path of ["first", "second"]) f.failures.report(path, refused, window);
+    const [first, second] = f.failures.take(window);
+    for (const path of ["third", "fourth"]) f.failures.report(path, refused, window);
+    // Untaken failures stay whatever main holds.
+    expect(f.failures.take(window).map((failure) => "path" in failure && failure.path)).toEqual(["third", "fourth"]);
+
+    await expect(f.failures.retry(first!.attemptId, window)).rejects.toThrow("Open the folder again.");
+    await expect(f.failures.retry(second!.attemptId, window)).rejects.toThrow("Open the folder again.");
+    expect(f.reopen).not.toHaveBeenCalled();
+  });
+
+  it("offers no Try again for folders combined into one", async () => {
+    const f = fixture(1);
+    const window = renderer(7);
+    for (const path of ["first", "second"]) f.failures.report(path, refused, window);
+    const [, more] = f.failures.take(window);
+    await expect(f.failures.retry(more!.attemptId, window)).rejects.toThrow("Open the folder again.");
   });
 });

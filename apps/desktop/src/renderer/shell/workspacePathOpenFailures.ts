@@ -76,7 +76,8 @@ export function useWorkspacePathOpenFailures(workspaceId: string | null, report:
 
   useEffect(() => {
     if (failures.length === 0) return;
-    const reportFailure = (failure: WorkspacePathOpenFailure, cause: unknown, canRetry: boolean) => {
+    type OneFailure = Extract<WorkspacePathOpenFailure, { path: string }>;
+    const reportFailure = (failure: OneFailure, cause: unknown, canRetry: boolean) => {
       const notice = workspacePathOpenNotice(failure.path, cause);
       report({
         message: notice.message,
@@ -95,9 +96,23 @@ export function useWorkspacePathOpenFailures(workspaceId: string | null, report:
     for (const failure of failures) {
       // Main names the workspace the window showed when it sent this. A
       // workspace that has gone since takes its failure with it.
-      if (failure.workspaceId === null || failure.workspaceId === workspaceId) {
+      if (failure.workspaceId !== null && failure.workspaceId !== workspaceId) continue;
+      if ("path" in failure) {
         reportFailure(failure, failure.cause, true);
+        continue;
       }
+      // Folders past the ones main keeps apart: one row, every listed
+      // folder in Copy. Main's log names any it could not list.
+      const unlisted = failure.count - failure.paths.length;
+      report({
+        message: `dohc could not open ${failure.count} more ${failure.count === 1 ? "folder" : "folders"}. Copy the details to list them.`,
+        details: [
+          ...failure.paths.map((path): ErrorDetailField => ["Folder", path, path.length]),
+          ...(unlisted > 0 ? [["Not listed", `${unlisted} more, named in dohc's log`] as const] : []),
+        ],
+        retry: null,
+        identity: `workspace-path-open-more:${failure.attemptId}`,
+      });
     }
     take(failures);
   }, [failures, report, take, workspaceId]);
