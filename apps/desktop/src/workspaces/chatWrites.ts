@@ -2,6 +2,7 @@ import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import type { ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
+import { normalizeChatMessageBody } from "./chatMessageBody";
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";
@@ -204,6 +205,7 @@ export function createChatWrites(dependencies: {
 
   // Admits the message and does its async work. The caller commits the row.
   async function prepareMessage(place: ChatWritePlace, target: ChatRelayIdentityTarget, input: ChatMessageInput) {
+    const body = normalizeChatMessageBody(input.body);
     // Before admission, whose identity checks refuse a signed-out write to
     // a joined Group: an automation waits for a session there instead.
     if (input.writer.via === "automation" && !input.writer.local) {
@@ -228,7 +230,7 @@ export function createChatWrites(dependencies: {
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       ...(authorUserId ? { authorUserId } : {}),
       ...(input.writer.via === "cli" ? { origin: "cli" as const } : {}),
-      body: input.body,
+      body,
       ...(input.needsDecision ? { needsDecision: true } : {}),
       ...(input.options && input.options.length > 0 ? { options: input.options } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),

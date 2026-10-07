@@ -97,6 +97,7 @@ import { z } from "zod";
 import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
+import { normalizeChatMessageBody } from "../workspaces/chatMessageBody";
 import type { AutomationRunRetry } from "../automations/automationNotices";
 import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import {
@@ -1861,7 +1862,9 @@ async function startFileChat(
   options: CliServerOptions,
 ): Promise<{ created: boolean; result: unknown }> {
   let thread: ChatThread;
+  let body: string;
   try {
+    body = normalizeChatMessageBody(input.body);
     thread = await options.chatWrites.createFileThread(context, {
       title: input.title,
       linkedFile: async () => {
@@ -1882,7 +1885,7 @@ async function startFileChat(
     message = await options.chatWrites.sendMessage(context, {
       writer: { via: "cli", actor: "agent", ...(input.agent ? { agentName: input.agent } : {}) },
       threadId: thread.id,
-      body: input.body,
+      body,
       resolveAttachments: async () => [],
     });
   } catch (error) {

@@ -23,5 +23,12 @@ it.each(["owner", "view", "comment", "edit"] as const)("preserves main tools/lis
     expected.push(...publicationTools.ownerToolAdditions);
     expected.sort((a, b) => a.name.localeCompare(b.name));
   }
+  // Body admission now uses normalized UTF-8 bytes in the desktop.
+  for (const tool of expected) {
+    if (!["dohc_start_file_chat", "dohc_start_group_chat", "dohc_reply_to_chat"].includes(tool.name)) continue;
+    const schema = tool.inputSchema as { properties: { body: { maxLength?: number } } };
+    expect(schema.properties.body.maxLength).toBe(65_536);
+    delete schema.properties.body.maxLength;
+  }
   expect(await advertisedCapabilityTools(level === "owner" ? undefined : level)).toEqual(expected);
 });

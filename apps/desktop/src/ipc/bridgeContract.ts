@@ -1663,7 +1663,8 @@ export type RestoreEngineMomentFileResult = z.infer<
 // the engine, linked to the file's stable engine object id so the link
 // survives renames. The renderer never supplies identity — main derives the
 // author for every sent message.
-const CHAT_BODY = z.string().min(1).max(65_536);
+// Chat writes validate normalized UTF-8 bytes in the main process.
+const CHAT_BODY = z.string().min(1);
 const CHAT_HEADING_TEXT = z.string().trim().min(1).max(300);
 const CHAT_HEADING_ANCHOR = z.string().trim().min(1).max(400);
 

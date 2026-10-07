@@ -141,6 +141,29 @@ function expectNothingWritten(test: ReturnType<typeof fixture>) {
 }
 
 describe("chat writes", () => {
+  it.each([PERSON, AGENT])("refuses invalid message bodies before any write for %j", async writer => {
+    for (const body of ["界".repeat(30_000), " \r\n\uFEFF"]) {
+      const test = fixture();
+      await expect(test.writes.sendMessage(test.place, { writer, threadId: "thread", body, resolveAttachments: test.attachments }))
+        .rejects.toThrow("Message body is required.");
+      await expect(test.writes.startThread(test.place, { writer, channelId: "channel", body, resolveAttachments: test.attachments }))
+        .rejects.toThrow("Message body is required.");
+      expect(test.attachments).not.toHaveBeenCalled();
+      expectNothingWritten(test);
+    }
+  });
+
+  it("normalizes exactly 64 KiB as UTF-8 before sending and starting a thread", async () => {
+    const test = fixture();
+    const body = "界".repeat(21_844) + "\r\nx\r\ny\uFEFF ";
+    const normalized = "界".repeat(21_844) + "\nx\ny";
+    expect(new TextEncoder().encode(normalized)).toHaveLength(65_536);
+    await test.writes.sendMessage(test.place, { writer: PERSON, threadId: "thread", body, resolveAttachments: test.attachments });
+    await test.writes.startThread(test.place, { writer: AGENT, channelId: "channel", body, resolveAttachments: test.attachments });
+    expect(test.store.sendMessage.mock.calls[0]?.[0].body).toBe(normalized);
+    expect(test.store.startChannelThread.mock.calls[0]?.[0].body).toBe(normalized);
+  });
+
   it("writes a person's message under the verified identity and runs every message effect", async () => {
     const test = fixture();
     const sent = await test.writes.sendMessage(test.place, {
