@@ -30,11 +30,8 @@ it("compares totals and distinct used days by door over 30 covered local days", 
 });
 
 it("stops treating a zero as decision evidence when a day was Off or incomplete", () => {
-  for (const status of ["off", "incomplete", "uncovered"] as const) {
-    const snapshot = usageDecisionFixture();
-    const row = snapshot.coverage.find(row => row.capabilityId === "version.try" && row.door === "renderer")!;
-    row.status = status;
-    const result = queryUsage(snapshot, { from: "2026-09-08", through: "2026-10-07", pairs: [{ capabilityId: "version.try", door: "renderer" }] })[0]!;
-    expect(result).toMatchObject({ total: null, usedDays: null, coveredDays: 29 });
-  }
+  const snapshot = usageDecisionFixture();
+  snapshot.days[0]!.complete = false;
+  const result = queryUsage(snapshot, { from: "2026-09-08", through: "2026-10-07", pairs: [{ capabilityId: "version.try", door: "renderer" }] })[0]!;
+  expect(result).toMatchObject({ total: null, usedDays: null, observedCount: null, observedUsedDays: null, coveredDays: 29 });
 });

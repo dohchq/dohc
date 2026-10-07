@@ -1,14 +1,14 @@
 import * as fs from "node:fs/promises";
 import { join } from "node:path";
 import {
-  UsageAppVersion, UsageCoverageInput, UsageInvocation, UsageSnapshot,
+  UsageAppVersion, UsageInvocation, UsageVersionCoverage, decodeUsageSnapshot,
   USAGE_MAX_COUNT, USAGE_RETENTION_DAYS, localUsageDay, queryUsage, usageRowKey,
-  type UsageCount, type UsageCoverage, type UsageDayRecord, type UsageQuery,
+  type UsageBuildPair, type UsageCount, type UsageDayRecord, type UsageQuery, type UsageSnapshot,
 } from "@dohc/workspace-contracts/usage";
 
 export const USAGE_WRITE_INTERVAL_MS = 30_000;
+export const USAGE_PENDING_LIMIT = 256;
 export const USAGE_SNAPSHOT_NAME = "dohc-usage.json";
-
 export interface UsageFileSystem {
   readFile(path: string, encoding: "utf8"): Promise<string>;
   mkdir(path: string, options: { recursive: true }): Promise<unknown>;
@@ -17,29 +17,35 @@ export interface UsageFileSystem {
   rm(path: string, options: { force: true }): Promise<unknown>;
 }
 
-// Main owns one instance. PR 2 supplies stateDir() after editable readiness.
-// Construction and recording before load perform no I/O and start no timers.
+// Main supplies one fixed build mapping after editable readiness in PR 2.
+// Until then every pair is uncovered. Early successes queue only aggregates.
 export function createUsageStore(deps: {
   stateDir(): string;
   appVersion: string;
+  coverage?: readonly UsageBuildPair[];
   now?: () => Date;
   io?: UsageFileSystem;
   onWriteFailure?: () => void;
 }) {
   const appVersion = UsageAppVersion.parse(deps.appVersion);
+  const buildCoverage = UsageVersionCoverage.parse({ appVersion, pairs: deps.coverage ?? [] });
   const io = deps.io ?? fs;
   const now = deps.now ?? (() => new Date());
   const days = new Map<string, UsageDayRecord>();
   const counts = new Map<string, UsageCount>();
-  const coverage = new Map<string, UsageCoverage>();
+  const coverage = new Map<string, UsageVersionCoverage>();
+  const pending: UsageCount[] = [];
+  let pendingOverflow = false;
   let enabled = true;
   let loaded = false;
+  let admissionReady = false;
   let activeDay: string | undefined;
   let loading: Promise<void> | undefined;
   let directory: string;
   let path: string;
   let revision = 0;
   let savedRevision = 0;
+  let committedCleanExit = true;
   let lastWriteAt = -Infinity;
   let writeTimer: ReturnType<typeof setTimeout> | undefined;
   let dayTimer: ReturnType<typeof setTimeout> | undefined;
@@ -53,9 +59,12 @@ export function createUsageStore(deps: {
     serial = result.catch(() => {});
     return result;
   }
-
+  function changed() {
+    revision++;
+    if (loaded) scheduleWrite();
+  }
   function scheduleWrite() {
-    if (closing || writeTimer || revision === savedRevision) return;
+    if (closing || writeTimer || revision === savedRevision && !committedCleanExit) return;
     const delay = Math.max(USAGE_WRITE_INTERVAL_MS, lastWriteAt + USAGE_WRITE_INTERVAL_MS - now().getTime());
     writeTimer = setTimeout(() => {
       writeTimer = undefined;
@@ -66,211 +75,191 @@ export function createUsageStore(deps: {
     }, delay);
     writeTimer.unref?.();
   }
-
-  function changed() {
-    revision++;
-    if (loaded) scheduleWrite();
+  function incomplete(day = localUsageDay(now())) {
+    const record = days.get(day);
+    if (record?.complete) { record.complete = false; changed(); }
   }
-
-  function incompleteToday() {
-    const today = localUsageDay(now());
-    for (const row of coverage.values()) {
-      if (row.day === today && row.status === "covered") {
-        row.status = "incomplete";
-        changed();
-      }
-    }
-  }
-
-  function refreshDay() {
-    const today = localUsageDay(now());
-    if (activeDay === today && days.has(today)) return;
-    const cutoff = new Date(now());
-    cutoff.setDate(cutoff.getDate() - (USAGE_RETENTION_DAYS - 1));
-    const oldest = localUsageDay(cutoff);
-    for (const map of [days, counts, coverage]) {
-      for (const [key, row] of map) {
-        if (row.day < oldest || row.day > today) {
-          map.delete(key);
-          changed();
-        }
-      }
-    }
-    const current = days.get(today);
+  function touchDay(day: string) {
+    const current = days.get(day);
     if (!current) {
-      days.set(today, { day: today, appVersions: [appVersion], collection: enabled ? "on" : "off" });
+      days.set(day, { day, appVersions: [appVersion], complete: enabled });
       changed();
     } else if (!current.appVersions.includes(appVersion)) {
-      if (current.appVersions.length >= 90) throw new Error("Too many app versions in one usage day");
+      if (current.appVersions.length >= 90) { incomplete(day); return; }
       current.appVersions.push(appVersion);
       changed();
     }
+  }
+  function oldestDay() {
+    const cutoff = new Date(now());
+    cutoff.setDate(cutoff.getDate() - (USAGE_RETENTION_DAYS - 1));
+    return localUsageDay(cutoff);
+  }
+  function refreshDay() {
+    const today = localUsageDay(now());
+    if (activeDay === today && days.has(today)) return;
+    const oldest = oldestDay();
+    for (const map of [days, counts]) {
+      for (const [key, row] of map) {
+        if (row.day < oldest) { map.delete(key); changed(); }
+      }
+    }
+    const versions = new Set([...days.values()].flatMap(day => day.appVersions));
+    for (const version of coverage.keys()) {
+      if (version !== appVersion && !versions.has(version)) { coverage.delete(version); changed(); }
+    }
+    touchDay(today);
     activeDay = today;
   }
-
   function scheduleDay() {
     if (closing) return;
     if (dayTimer) clearTimeout(dayTimer);
     const date = now();
     const midnight = new Date(date);
     midnight.setHours(24, 0, 0, 0);
-    dayTimer = setTimeout(() => {
-      dayTimer = undefined;
-      refreshDay();
-      scheduleDay();
-    }, Math.max(1, midnight.getTime() - date.getTime()));
+    dayTimer = setTimeout(() => { dayTimer = undefined; refreshDay(); scheduleDay(); },
+      Math.max(1, midnight.getTime() - date.getTime()));
     dayTimer.unref?.();
   }
-
+  function increment(row: UsageCount): boolean {
+    touchDay(row.day);
+    const key = usageRowKey(row);
+    const current = counts.get(key)?.count ?? 0;
+    if (current >= USAGE_MAX_COUNT) { incomplete(row.day); return false; }
+    counts.set(key, { ...row, count: current + 1 });
+    changed();
+    return true;
+  }
+  function applyPending() {
+    if (enabled) {
+      const oldest = oldestDay();
+      for (const row of pending) {
+        if (row.day < oldest) continue;
+        increment(row);
+        if (pendingOverflow) incomplete(row.day);
+      }
+      if (pendingOverflow) incomplete();
+    }
+    pending.length = 0;
+    pendingOverflow = false;
+  }
   async function load() {
     if (loading) return loading;
     loading = (async () => {
       directory = deps.stateDir();
       path = join(directory, USAGE_SNAPSHOT_NAME);
-      let raw: string | undefined;
+      let parsed: unknown;
+      let restored: UsageSnapshot | undefined;
       try {
-        raw = await io.readFile(path, "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        parsed = JSON.parse(await io.readFile(path, "utf8"));
+        restored = decodeUsageSnapshot(parsed);
+      } catch {
+        // Read and schema failures cannot prevent the person from using controls.
+        if (parsed && typeof parsed === "object" && "enabled" in parsed && typeof parsed.enabled === "boolean") {
+          enabled = parsed.enabled;
+        }
       }
-      if (raw !== undefined) {
-        const snapshot = UsageSnapshot.parse(JSON.parse(raw));
-        enabled = snapshot.enabled;
-        for (const row of snapshot.days) days.set(row.day, row);
-        for (const row of snapshot.counts) counts.set(usageRowKey(row), row);
-        for (const row of snapshot.coverage) coverage.set(usageRowKey(row), row);
+      if (restored) {
+        enabled = restored.enabled;
+        committedCleanExit = restored.cleanExit;
+        for (const row of restored.days) days.set(row.day, row);
+        for (const row of restored.counts) counts.set(usageRowKey(row), row);
+        for (const version of restored.coverage) coverage.set(version.appVersion, version);
       }
+      coverage.set(appVersion, buildCoverage);
+      changed();
       refreshDay();
-      // A restart cannot prove that no completions were lost before this load.
-      incompleteToday();
+      if (!restored || !restored.cleanExit) {
+        // An unflushed crash can straddle midnight. Preserve both days' gaps.
+        const previous = restored?.days.map(day => day.day).filter(day => day <= localUsageDay(now())).sort().at(-1);
+        if (previous && restored && !restored.cleanExit) incomplete(previous);
+        incomplete();
+      }
       loaded = true;
-      scheduleWrite();
+      // Invalidate the clean marker before admitting counts, even on an idle launch.
+      await write().catch(() => {});
       scheduleDay();
     })();
-    try {
-      await loading;
-    } catch (error) {
-      loading = undefined;
-      throw error;
-    }
+    return loading;
   }
-
-  function snapshot(): UsageSnapshot {
-    return {
-      version: 1, enabled,
-      days: [...days.values()].map(row => ({ day: row.day, appVersions: row.appVersions.slice(), collection: row.collection })),
+  function snapshot(cleanExit = false): UsageSnapshot {
+    return { version: 1, enabled, cleanExit,
+      days: [...days.values()].map(row => ({ day: row.day, appVersions: row.appVersions.slice(), complete: row.complete })),
       counts: [...counts.values()].map(row => ({ day: row.day, capabilityId: row.capabilityId, door: row.door, count: row.count })),
-      coverage: [...coverage.values()].map(row => ({ day: row.day, capabilityId: row.capabilityId, door: row.door, status: row.status })),
+      coverage: [...coverage.values()].map(version => ({ appVersion: version.appVersion,
+        pairs: version.pairs.map(pair => ({ capabilityId: pair.capabilityId, door: pair.door, status: pair.status })) })),
     };
   }
-
-  async function write() {
+  async function write(cleanExit = false) {
     if (!loaded) return;
     refreshDay();
-    if (revision === savedRevision) return;
+    if (cleanExit) applyPending();
+    if (revision === savedRevision && cleanExit === committedCleanExit) return;
     if (writeTimer) clearTimeout(writeTimer);
     writeTimer = undefined;
     const writingRevision = revision;
     lastWriteAt = now().getTime();
     try {
-      const data = JSON.stringify(UsageSnapshot.parse(snapshot()));
+      // Maps contain only validated aggregates; avoid re-validating the whole store.
+      const data = JSON.stringify(snapshot(cleanExit));
       await io.mkdir(directory, { recursive: true });
       await io.writeFile(path + ".tmp", data, { mode: 0o600 });
       await io.rename(path + ".tmp", path);
       savedRevision = writingRevision;
+      committedCleanExit = cleanExit;
+      admissionReady = !cleanExit;
+      if (admissionReady) applyPending();
     } catch (error) {
-      incompleteToday();
-      try { deps.onWriteFailure?.(); } catch { /* Reporting cannot replace the write failure. */ }
+      incomplete();
+      try { deps.onWriteFailure?.(); } catch { /* Preserve the write error. */ }
       throw error;
-    } finally {
-      scheduleWrite();
-    }
+    } finally { scheduleWrite(); }
   }
-
   function control(change: () => Promise<void>): Promise<void> {
     if (closing) return Promise.reject(new Error("Usage store is closed"));
-    // Close admission at call time, including while another write is pending.
     controls++;
-    return enqueue(async () => {
-      await load();
-      refreshDay();
-      await change();
-    }).finally(() => { controls--; });
+    return enqueue(async () => { await load(); refreshDay(); await change(); })
+      .finally(() => { controls--; });
   }
-
   return {
     load: () => closing ? Promise.reject(new Error("Usage store is closed")) : load(),
     recordSuccess(input: unknown): boolean {
-      if (!loaded || closing || controls) return false;
-      refreshDay();
-      if (!enabled) return false;
+      if (closing || controls) return false;
       const parsed = UsageInvocation.safeParse(input);
       if (!parsed.success) return false;
-      const row = { day: localUsageDay(now()), ...parsed.data };
-      const key = usageRowKey(row);
-      const current = counts.get(key)?.count ?? 0;
-      if (current >= USAGE_MAX_COUNT) {
-        incompleteToday();
-        return false;
+      const row = { day: localUsageDay(now()), ...parsed.data, count: 1 };
+      if (loaded) { refreshDay(); if (!enabled) return false; }
+      if (!loaded || !admissionReady) {
+        if (pending.length >= USAGE_PENDING_LIMIT) { pendingOverflow = true; return false; }
+        pending.push(row);
+        return true;
       }
-      counts.set(key, { ...row, count: current + 1 });
-      changed();
-      return true;
-    },
-    setCoverage(input: unknown): boolean {
-      if (!loaded || closing || controls) return false;
-      const parsed = UsageCoverageInput.safeParse(input);
-      if (!parsed.success) return false;
-      if (parsed.data.status === "covered" && !UsageInvocation.safeParse({
-        capabilityId: parsed.data.capabilityId, door: parsed.data.door,
-      }).success) return false;
-      refreshDay();
-      const day = localUsageDay(now());
-      const row = { day, ...parsed.data };
-      const key = usageRowKey(row);
-      const current = coverage.get(key);
-      // A gap cannot be erased later in the same day.
-      if (row.status === "covered" && (!enabled || days.get(day)?.collection !== "on"
-        || current && current.status !== "covered")) return false;
-      if (current?.status === "incomplete" || current?.status === "off") return row.status === current.status;
-      if (current?.status === row.status) return true;
-      coverage.set(key, row);
-      changed();
-      return true;
+      return increment(row);
     },
     async query(input: UsageQuery) {
       if (closing) throw new Error("Usage store is closed");
-      await load();
-      refreshDay();
+      await load(); refreshDay();
       return queryUsage(snapshot(), input);
     },
     async read(): Promise<UsageSnapshot> {
       if (closing) throw new Error("Usage store is closed");
-      await load();
-      refreshDay();
+      await load(); refreshDay();
       return snapshot();
     },
     setEnabled(value: boolean): Promise<void> {
       if (typeof value !== "boolean") return Promise.reject(new Error("Invalid usage setting"));
       return control(async () => {
-        if (enabled !== value) {
-          enabled = value;
-          days.get(localUsageDay(now()))!.collection = "partial";
-          incompleteToday();
-          changed();
-        }
+        if (enabled !== value) { enabled = value; incomplete(); changed(); }
+        if (!enabled) { pending.length = 0; pendingOverflow = false; }
         await write();
       });
     },
     clear(): Promise<void> {
       return control(async () => {
-        counts.clear();
-        coverage.clear();
-        days.clear();
-        refreshDay();
-        if (enabled) days.get(localUsageDay(now()))!.collection = "partial";
-        changed();
-        // Remove the only temporary filename this single writer can create.
+        pending.length = 0; pendingOverflow = false;
+        counts.clear(); days.clear(); coverage.clear();
+        coverage.set(appVersion, buildCoverage);
+        refreshDay(); incomplete(); changed();
         await io.rm(path + ".tmp", { force: true });
         await write();
       });
@@ -284,10 +273,12 @@ export function createUsageStore(deps: {
       closing = true;
       if (writeTimer) clearTimeout(writeTimer);
       if (dayTimer) clearTimeout(dayTimer);
-      writeTimer = undefined;
-      dayTimer = undefined;
-      // Do not initialize an unused store just because main is exiting.
-      closePromise = enqueue(async () => { if (loading) await loading; await write(); });
+      writeTimer = undefined; dayTimer = undefined;
+      closePromise = enqueue(async () => {
+        if (loading) await loading;
+        else if (pending.length) await load();
+        await write(true);
+      });
       return closePromise;
     },
   };

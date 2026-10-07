@@ -37,19 +37,33 @@ export const UsageAppVersion = z.string().max(64).regex(/^\d+\.\d+\.\d+(?:-[A-Za
 export const UsagePair = z.strictObject({ capabilityId: UsageCapabilityId, door: UsageDoor });
 export type UsagePair = z.infer<typeof UsagePair>;
 export const UsageInvocation = z.strictObject({ capabilityId: UsageActionId, door: UsageDoor });
-export const UsageCoverageStatus = z.enum(["covered", "uncovered", "incomplete", "off", "unavailable"]);
-export const UsageCoverageInput = UsagePair.extend({ status: UsageCoverageStatus });
+export const UsageCoverageStatus = z.enum(["covered", "uncovered", "unavailable"]);
+export const UsageBuildPair = UsagePair.extend({ status: UsageCoverageStatus });
+export type UsageBuildPair = z.infer<typeof UsageBuildPair>;
+export const UsageVersionCoverage = z.strictObject({
+  appVersion: UsageAppVersion,
+  pairs: z.array(UsageBuildPair).max(Object.keys(CAPABILITIES).length * USAGE_DOORS.length),
+}).superRefine((coverage, ctx) => {
+  const keys = new Set<string>();
+  for (const pair of coverage.pairs) {
+    const key = usagePairKey(pair);
+    if (keys.has(key)) ctx.addIssue({ code: "custom", message: "Duplicate coverage pair" });
+    keys.add(key);
+    if (pair.status === "covered" && !UsageActionId.safeParse(pair.capabilityId).success) {
+      ctx.addIssue({ code: "custom", message: "Only counted actions can be covered" });
+    }
+  }
+});
+export type UsageVersionCoverage = z.infer<typeof UsageVersionCoverage>;
 export const UsageCount = z.strictObject({
   day: UsageDay, capabilityId: UsageActionId, door: UsageDoor,
   count: z.number().int().positive().max(USAGE_MAX_COUNT),
 });
 export type UsageCount = z.infer<typeof UsageCount>;
-export const UsageCoverage = UsageCoverageInput.extend({ day: UsageDay });
-export type UsageCoverage = z.infer<typeof UsageCoverage>;
 export const UsageDayRecord = z.strictObject({
   day: UsageDay,
   appVersions: z.array(UsageAppVersion).min(1).max(90).refine(values => new Set(values).size === values.length),
-  collection: z.enum(["on", "off", "partial"]),
+  complete: z.boolean(),
 });
 export type UsageDayRecord = z.infer<typeof UsageDayRecord>;
 
@@ -61,31 +75,43 @@ export function usageRowKey(row: UsagePair & { day: string }): string {
 }
 
 export const UsageSnapshot = z.strictObject({
-  version: z.literal(1), enabled: z.boolean(),
-  days: z.array(UsageDayRecord).max(USAGE_RETENTION_DAYS),
-  counts: z.array(UsageCount).max(USAGE_RETENTION_DAYS * USAGE_ACTION_IDS.length * USAGE_DOORS.length),
-  coverage: z.array(UsageCoverage).max(USAGE_RETENTION_DAYS * Object.keys(CAPABILITIES).length * USAGE_DOORS.length),
+  version: z.literal(1), enabled: z.boolean(), cleanExit: z.boolean(),
+  // Retention is a calendar policy. Future days survive a clock rollback.
+  days: z.array(UsageDayRecord), counts: z.array(UsageCount),
+  coverage: z.array(UsageVersionCoverage),
 }).superRefine((snapshot, ctx) => {
-  const days = new Map(snapshot.days.map(day => [day.day, day]));
+  const days = new Set(snapshot.days.map(day => day.day));
   if (days.size !== snapshot.days.length) ctx.addIssue({ code: "custom", message: "Duplicate day" });
-  for (const [field, rows] of [["counts", snapshot.counts], ["coverage", snapshot.coverage]] as const) {
-    const keys = new Set<string>();
-    for (const row of rows) {
-      const key = usageRowKey(row);
-      if (keys.has(key) || !days.has(row.day)) ctx.addIssue({ code: "custom", path: [field], message: "Duplicate or unrecorded day" });
-      keys.add(key);
-    }
+  const keys = new Set<string>();
+  for (const row of snapshot.counts) {
+    const key = usageRowKey(row);
+    if (keys.has(key) || !days.has(row.day)) ctx.addIssue({ code: "custom", path: ["counts"], message: "Duplicate or unrecorded day" });
+    keys.add(key);
   }
-  for (const row of snapshot.coverage) {
-    if (row.status === "covered" && !UsageActionId.safeParse(row.capabilityId).success) {
-      ctx.addIssue({ code: "custom", path: ["coverage"], message: "Only counted actions can be covered" });
-    }
-    if (row.status === "covered" && days.get(row.day)?.collection !== "on") {
-      ctx.addIssue({ code: "custom", path: ["coverage"], message: "Off or partial days cannot be covered" });
-    }
+  if (new Set(snapshot.coverage.map(row => row.appVersion)).size !== snapshot.coverage.length) {
+    ctx.addIssue({ code: "custom", path: ["coverage"], message: "Duplicate app version" });
   }
 });
 export type UsageSnapshot = z.infer<typeof UsageSnapshot>;
+
+// Validate the aggregate shape before dropping ids retired by this build.
+// Unknown fields are still errors, including on a row about a retired id.
+const StoredCapabilityId = z.string().max(128).regex(/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+$/);
+const StoredSnapshot = z.strictObject({
+  version: z.literal(1), enabled: z.boolean(), cleanExit: z.boolean().default(false),
+  days: z.array(UsageDayRecord),
+  counts: z.array(UsageCount.extend({ capabilityId: StoredCapabilityId })),
+  coverage: z.array(z.strictObject({ appVersion: UsageAppVersion,
+    pairs: z.array(UsageBuildPair.extend({ capabilityId: StoredCapabilityId })) })),
+});
+export function decodeUsageSnapshot(input: unknown): UsageSnapshot {
+  const stored = StoredSnapshot.parse(input);
+  return UsageSnapshot.parse({ ...stored,
+    counts: stored.counts.filter(row => UsageActionId.safeParse(row.capabilityId).success),
+    coverage: stored.coverage.map(version => ({ ...version,
+      pairs: version.pairs.filter(pair => UsageCapabilityId.safeParse(pair.capabilityId).success) })),
+  });
+}
 
 export const UsageQuery = z.strictObject({
   from: UsageDay, through: UsageDay, pairs: z.array(UsagePair).min(1).max(Object.keys(CAPABILITIES).length * 4),
@@ -102,7 +128,6 @@ export function calendarDays(from: string, through: string): string[] {
   }
   return days;
 }
-
 export function localUsageDay(date: Date): string {
   return `${date.getFullYear().toString().padStart(4, "0")}-${(date.getMonth() + 1).toString().padStart(2, "0")}-${date.getDate().toString().padStart(2, "0")}`;
 }
@@ -111,23 +136,22 @@ export function queryUsage(snapshot: UsageSnapshot, input: UsageQuery) {
   const query = UsageQuery.parse(input);
   const days = new Map(snapshot.days.map(day => [day.day, day]));
   const counts = new Map(snapshot.counts.map(row => [usageRowKey(row), row.count]));
-  const coverage = new Map(snapshot.coverage.map(row => [usageRowKey(row), row.status]));
+  const versions = new Map(snapshot.coverage.map(version => [version.appVersion,
+    new Map(version.pairs.map(pair => [usagePairKey(pair), pair.status]))]));
   return query.pairs.map(pair => {
     const daily = calendarDays(query.from, query.through).map(day => {
       const record = days.get(day);
-      const key = usageRowKey({ ...pair, day });
-      const recorded = coverage.get(key) ?? "uncovered";
-      const status = record?.collection === "off" ? "off" as const
-        : record?.collection === "partial" && recorded === "covered" ? "incomplete" as const : recorded;
-      const observedCount = counts.get(key) ?? 0;
-      return { day, appVersions: record?.appVersions.slice() ?? [], status,
-        count: status === "covered" ? observedCount : null, observedCount };
+      const statuses = record?.appVersions.map(version => versions.get(version)?.get(usagePairKey(pair)) ?? "uncovered") ?? ["uncovered"];
+      const status = statuses.includes("uncovered") ? "uncovered" as const
+        : statuses.includes("unavailable") ? "unavailable" as const
+        : !record?.complete ? "incomplete" as const : "covered" as const;
+      const count = status === "covered" ? counts.get(usageRowKey({ ...pair, day })) ?? 0 : null;
+      return { day, appVersions: record?.appVersions.slice() ?? [], status, count, observedCount: count };
     });
     const complete = daily.every(day => day.status === "covered");
-    const observedCount = daily.reduce((sum, day) => sum + day.observedCount, 0);
-    const observedUsedDays = daily.filter(day => day.observedCount > 0).length;
+    const total = complete ? daily.reduce((sum, day) => sum + day.count!, 0) : null;
+    const usedDays = complete ? daily.filter(day => day.count! > 0).length : null;
     return { ...pair, daily, coveredDays: daily.filter(day => day.status === "covered").length,
-      total: complete ? observedCount : null, usedDays: complete ? observedUsedDays : null,
-      observedCount, observedUsedDays };
+      total, usedDays, observedCount: total, observedUsedDays: usedDays };
   });
 }
