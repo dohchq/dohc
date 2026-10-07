@@ -245,7 +245,8 @@ export function WikilinkPicker({
                   <FileText size={14} aria-hidden />
                 </span>
                 <span className={MENU_TITLE}>{display}</span>
-                <span className={MENU_PATH}>{subpath}</span>
+                {/* A page at the workspace root without a title: its path is its name. */}
+                {subpath === display ? null : <span className={MENU_PATH}>{subpath}</span>}
               </button>
             );
           })}
