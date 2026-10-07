@@ -117,6 +117,8 @@ function useFileText(input: {
   // holds text the file may no longer hold.
   const readFile = useCallback(() => {
     if (!live.current.open) {
+      // A read still out must not put the old block back.
+      latest.current += 1;
       setFile((last) => (last.stale ? last : { ...last, stale: true }));
       return;
     }
@@ -169,20 +171,21 @@ function useFileText(input: {
 
 /**
  * The section for a live document, whose file changes only when the engine
- * saves. `body` is the inspector's read of the file: the section's first
- * text, and what decides whether it starts open, so a closed section costs
- * no read. Each document gets its own reads, so nothing read for one settles
- * or clears another.
+ * saves. `body` is the inspector's read of the file, or null until its first
+ * read lands. That first read is the section's first text, and decides
+ * whether it starts open, so a closed section costs no read. Each document
+ * gets its own reads, so nothing read for one settles or clears another.
  */
 export function LiveFrontmatterAsWritten(props: {
   workspaceId: string;
   path: string;
-  body: string;
+  body: string | null;
   ydoc: Y.Doc;
   saveState: SaveState;
   propertiesShown: boolean;
 }) {
-  return <LiveSection key={`${props.workspaceId}\n${props.path}`} {...props} />;
+  if (props.body === null) return null;
+  return <LiveSection key={`${props.workspaceId}\n${props.path}`} {...props} body={props.body} />;
 }
 
 function LiveSection(props: {

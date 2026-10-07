@@ -42,7 +42,7 @@ function renameBudget(doc: Y.Doc): void {
 // Every text the section rendered, so a render of the document's own text fails.
 let rendered: string[] = [];
 
-function Live(props: { path?: string; body: string; ydoc: Y.Doc; saveState: SaveState }) {
+function Live(props: { path?: string; body: string | null; ydoc: Y.Doc; saveState: SaveState }) {
   return (
     <Profiler id="as-written" onRender={() => rendered.push(shown() ?? "")}>
       <LiveFrontmatterAsWritten
@@ -59,6 +59,15 @@ function Live(props: { path?: string; body: string; ydoc: Y.Doc; saveState: Save
 
 function activity(paths: string[]): void {
   act(() => bridgeMock.activity.forEach((listener) => listener({ workspaceId: "ws", paths })));
+}
+
+function toggle(open: boolean): void {
+  const details = screen.getByTestId("frontmatter-as-written").querySelector("details");
+  if (!details) throw new Error("no details");
+  act(() => {
+    details.open = open;
+    details.dispatchEvent(new Event("toggle"));
+  });
 }
 
 function expand(): void {
@@ -445,6 +454,35 @@ describe("useFileText", () => {
     expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
     expect(shown()).toBe("---\nstatus: draft\n---");
     expect(opened()).toBe(true);
+  });
+
+  it("drops a read still out when the closed section's text goes stale", async () => {
+    const doc = markdownToYDoc(BUDGET_FILE);
+    let answer: (text: string) => void = () => undefined;
+    bridgeMock.readWorkspaceText.mockReturnValueOnce(new Promise((resolve) => {
+      answer = (text) => resolve(fileRead(text));
+    }));
+    const view = render(<Live body={BUDGET_FILE} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
+    expect(opened()).toBe(true);
+    activity(["trip.md"]);
+    await settle();
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
+    toggle(false);
+    view.rerender(<Live body={COST_FILE} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
+    expect(shown()).toBeNull();
+    answer(BUDGET_FILE);
+    await settle();
+    expect(screen.getByTestId("frontmatter-as-written").textContent).not.toContain("budget");
+  });
+
+  it("takes its openness from the inspector's first read, not from before it lands", () => {
+    const canonical = "---\nstatus: draft\n---\n\nBody";
+    const doc = markdownToYDoc(canonical);
+    const view = render(<Live body={null} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
+    expect(screen.queryByTestId("frontmatter-as-written")).toBeNull();
+    view.rerender(<Live body={canonical} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
+    expect(opened()).toBe(false);
+    expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
   });
 
   it("never shows a slow read on another document, or an older read over a newer one", async () => {

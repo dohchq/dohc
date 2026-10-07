@@ -2008,7 +2008,8 @@ export function MarkdownView(props: {
             <LiveFrontmatterAsWritten
               workspaceId={props.workspaceId}
               path={props.path}
-              body={props.body}
+              // Null until the inspector has read the file.
+              body={props.contentRequestId > 0 ? props.body : null}
               ydoc={engine.doc}
               saveState={engine.saveState}
               propertiesShown={!readOnly}
