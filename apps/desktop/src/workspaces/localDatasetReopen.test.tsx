@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { performance as nodePerformance } from "node:perf_hooks";
 import { join } from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -43,8 +44,14 @@ async function fixture() {
   vi.stubGlobal("Uint8Array", Object.getPrototypeOf(Buffer.prototype).constructor);
   const root = await mkdtemp(join(tmpdir(), "dohc-local-reopen-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
-  const state = { clock: Date.now(), killPrepare: false, killReplay: false, applied: 0 };
+  const state = { clock: Date.now(), killPrepare: false, killReplay: false, applied: 0, replayMs: 0, costlyReplay: false, blockCache: false };
   vi.spyOn(Date, "now").mockImplementation(() => state.clock);
+  vi.stubGlobal("performance", nodePerformance);
+  vi.spyOn(nodePerformance, "now").mockImplementation(() => state.replayMs);
+  const cacheAccounting = vi.fn((_context: unknown, allocation: { bytes: number }) => {
+    // Allow the snapshot reservation, then refuse cache staging and its refund.
+    if (state.blockCache && allocation.bytes < 1024 * 1024) throw new Error("cache cleanup blocked");
+  });
   const pids: number[] = [], closedPids: number[] = [];
   const launch = vi.fn<AppRuntimeLauncher>(options => {
     const child = spawn(process.execPath, [options.entryPath], { cwd: options.cwd, env: options.env,
@@ -58,18 +65,24 @@ async function fixture() {
         if ((request.command?.kind === "prepare" && state.killPrepare) || (request.command?.kind === "applyBatch" && state.killReplay)) {
           child.kill("SIGKILL"); return;
         }
-        if (request.command?.kind === "applyBatch") state.applied++;
+        if (request.command?.kind === "applyBatch") {
+          state.applied++;
+          if (state.costlyReplay) state.replayMs += 1000;
+        }
         child.send(message as object, error => { if (error) options.onError(error); });
       },
       kill() { child.kill("SIGKILL"); },
     };
   });
-  const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024,
-    localPersonId: () => "person", compile, runtime: { launch }, persistentRuntime: { launch } });
-  cleanups.push(async () => {
-    await host.close();
-    expect([...closedPids].sort()).toEqual([...pids].sort());
-  });
+  cleanups.push(async () => { expect([...closedPids].sort()).toEqual([...pids].sort()); });
+  async function openHost() {
+    const host = await createLocalDatasetHost({ workspaceId: "w", workspaceRoot: root, capacityBytes: 1024 * 1024,
+      localPersonId: () => "person", compile, runtime: { launch }, persistentRuntime: { launch },
+      resources: () => ({ accountCheckpointStage: cacheAccounting }) });
+    cleanups.push(() => host.close());
+    return host;
+  }
+  const host = await openHost();
   const files = new Map([
     ["items/dataset.json", JSON.stringify(definition)],
     [definition.schemaPath, "CREATE TABLE items(id TEXT PRIMARY KEY NOT NULL,name TEXT NOT NULL);"],
@@ -102,7 +115,7 @@ async function fixture() {
   state.killPrepare = true;
   await expect(host.query(call())).rejects.toMatchObject({ code: "worker_stopped" });
   state.killPrepare = false; state.killReplay = true;
-  return { host, state, launch, call, write, receipt };
+  return { host, state, launch, call, write, receipt, openHost, cacheAccounting };
 }
 it("uses growing supervisor waits after repeated desktop replay worker kills", async () => {
   const f = await fixture();
@@ -135,7 +148,7 @@ it("shows the desktop reopen wait through the existing shell Try again toast and
     </>;
   }
   render(<Page />);
-  const message = "dohc's work on this Collection stopped before it finished. Try again in 5 s.";
+  const message = "This Collection is waiting to reopen. Try again in 5 seconds.";
   await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(message), workerWait);
   expect(screen.queryByText("Loading records…")).toBeNull();
   expect(f.launch).toHaveBeenCalledTimes(launches);
@@ -161,4 +174,48 @@ it("recovers desktop records and the saved receipt after the reopen wait expires
   expect(f.state.applied).toBe(1);
   expect(await f.host.action(f.write)).toEqual({ ...f.receipt, replayed: true });
   expect(await f.host.query(f.call())).toEqual(recovered);
+});
+it("caps desktop waits after repeated successful recoveries with blocked cache cleanup", async () => {
+  const f = await fixture();
+  f.state.killReplay = false;
+  f.state.costlyReplay = true;
+  f.state.blockCache = true;
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const result = { revision: f.receipt.revision, result: { rows: [
+    { id: expect.any(String), version: 1, values: { [id(4)]: "Preserved" } },
+  ] } };
+  expect(await f.host.query(f.call())).toMatchObject(result);
+  expect(warning).toHaveBeenCalledWith("dataset_materialization_deferred", expect.anything());
+  const accountingCalls = f.cacheAccounting.mock.calls.length;
+  expect(f.cacheAccounting.mock.calls.some(([, allocation]) => allocation.bytes < 0)).toBe(true);
+  for (const delay of [5000, 10000, 20000, 40000, 60000, 60000, 60000, 60000, 60000, 60000]) {
+    f.state.killPrepare = true;
+    await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "worker_stopped" });
+    f.state.killPrepare = false;
+    const launches = f.launch.mock.calls.length;
+    await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "dataset_reopen_wait", retryAfterMs: delay });
+    f.state.clock += delay - 1;
+    await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "dataset_reopen_wait", retryAfterMs: 1 });
+    expect(f.launch).toHaveBeenCalledTimes(launches);
+    f.state.clock++;
+    expect(await f.host.query(f.call())).toMatchObject(result);
+    expect(f.cacheAccounting).toHaveBeenCalledTimes(accountingCalls);
+  }
+  expect(f.state.applied).toBe(11);
+  expect(await f.host.action(f.write)).toEqual({ ...f.receipt, replayed: true });
+  f.state.killPrepare = true;
+  await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "worker_stopped" });
+  f.state.killPrepare = false;
+  await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "dataset_reopen_wait", retryAfterMs: 60000,
+    message: "This Collection is waiting to reopen. Try again in 1 minute." });
+});
+it("starts a new desktop host without the previous host's reopen wait", async () => {
+  const f = await fixture();
+  await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "worker_stopped", retryAfterMs: 5000 });
+  await expect(f.host.query(f.call())).rejects.toMatchObject({ code: "dataset_reopen_wait" });
+  await f.host.close();
+  f.state.killReplay = false;
+  const reopened = await f.openHost();
+  expect(await reopened.query(f.call())).toMatchObject({ revision: f.receipt.revision,
+    result: { rows: [{ values: { [id(4)]: "Preserved" } }] } });
 });
