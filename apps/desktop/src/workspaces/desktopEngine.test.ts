@@ -487,6 +487,51 @@ describe("desktop engine restart coordination", () => {
     } finally { await f.close(); }
   });
 
+  it.each(["stall", "cap"] as const)("keeps the first crash-report slot after a smoke %s cancellation", async cancellation => {
+    const f = fixture();
+    const opened = deferred();
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cancel = vi.fn(async (_requestId: number) => {});
+    let openId!: number;
+    const client: EngineDaemonClient = {
+      reportsProgress: () => true,
+      async sendRequest(request, _signal, onProgress) {
+        if (request.method === "workspace.open" && String(workspaceIdOf(request)).startsWith("desktop-startup-smoke-")) {
+          openId = request.id;
+          if (cancellation === "stall") onProgress?.();
+          opened.resolve();
+          return await new Promise<Response>(() => {});
+        }
+        return await f.client.sendRequest(request);
+      },
+      cancelRequest: cancel,
+      onEvent: handler => f.client.onEvent(handler),
+      close: () => f.client.close(),
+      waitForExit: () => f.client.waitForExit(),
+    };
+    f.setLaunch(async () => client);
+    try {
+      vi.useFakeTimers();
+      await f.engine.start();
+      await opened.promise;
+      await vi.advanceTimersByTimeAsync(cancellation === "stall" ? 11_000 : 120_010);
+      await vi.waitFor(() => expect(
+        log.mock.calls.some(([message]) => message === "[engine-daemon] startup smoke request cancelled:") ||
+        vi.mocked(f.dependencies.recordEngineProblem).mock.calls.length > 0,
+      ).toBe(true), { timeout: 15_000 });
+      expect(log).toHaveBeenCalledWith("[engine-daemon] startup smoke request cancelled:", expect.any(Error));
+      expect(cancel).toHaveBeenCalledWith(openId);
+      expect(f.engine.daemon!.currentClient()).toBe(client);
+      expect(f.dependencies.recordEngineProblem).not.toHaveBeenCalled();
+      expect(f.dependencies.dialog.showErrorBox).not.toHaveBeenCalled();
+      f.setLaunch(async () => new Client());
+      f.spawns[0]!.onExit!(1, null);
+      expect(f.dependencies.recordEngineProblem).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: "Rust engine daemon exited unexpectedly with code 1." }), "restarting",
+      );
+    } finally { await f.close(); }
+  });
+
   it("records one crash problem per engine crash, then the final verdict", async () => {
     const f = fixture();
     const exit = new Error("exited"); const attempt = new Error("attempt failed"); const verdict = new Error("limit");
