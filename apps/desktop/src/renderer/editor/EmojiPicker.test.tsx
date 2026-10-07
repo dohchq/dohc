@@ -216,6 +216,52 @@ describe("EmojiPicker — dismiss leaves text intact", () => {
   });
 });
 
+// While an IME composes, Enter, Tab, the arrows and Escape work its candidate
+// list. Chromium marks those keys isComposing; some platforms report only
+// keyCode 229.
+describe("EmojiPicker during IME composition", () => {
+  it("leaves the composing keys to the editor and the IME, then picks with the keys once composition ends", () => {
+    const editor = makeEditor(":smi");
+    const dom = editor.view.dom;
+    document.body.append(dom);
+    try {
+      editor.commands.focus("end");
+      const onDismiss = vi.fn();
+      render(createElement(EmojiPicker, { state: { open: true, from: 1, query: "smi" }, view: editor.view, onDismiss }));
+      const list = screen.getByRole("listbox", { name: "emoji" });
+      const options = screen.getAllByRole("option");
+      const doc = editor.getJSON();
+      const selection = editor.state.selection.toJSON();
+      const reached = vi.fn();
+      dom.addEventListener("keydown", reached);
+
+      fireEvent.compositionStart(dom);
+      for (const composing of [{ isComposing: true }, { keyCode: 229 }]) {
+        for (const key of ["Enter", "Tab", "ArrowDown", "ArrowUp", "Escape"]) {
+          const init = { key, ...composing };
+          expect(fireEvent.keyDown(dom, init), JSON.stringify(init)).toBe(true);
+          expect(reached).toHaveBeenLastCalledWith(expect.objectContaining({ key }));
+          expect(onDismiss).not.toHaveBeenCalled();
+          expect(list.getAttribute("aria-activedescendant")).toBe(options[0]!.id);
+          expect(editor.getJSON()).toEqual(doc);
+          expect(editor.state.selection.toJSON()).toEqual(selection);
+        }
+      }
+      expect(reached).toHaveBeenCalledTimes(10);
+
+      fireEvent.compositionEnd(dom);
+      fireEvent.keyDown(dom, { key: "ArrowDown" });
+      expect(list.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+      fireEvent.keyDown(dom, { key: "Enter" });
+      expect(onDismiss).toHaveBeenCalledTimes(1);
+      expect(editor.getText()).toBe(rankEmoji("smi")[1]!.entry.emoji);
+    } finally {
+      editor.destroy();
+      dom.remove();
+    }
+  });
+});
+
 describe("EmojiPicker on the Menu part's recipe", () => {
   it("keeps the active option in the list's view as the arrows move it, scrolling only the list", () => {
     const restore = mockListLayout(200);

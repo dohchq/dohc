@@ -149,6 +149,9 @@ export function WikilinkPicker({
   useEffect(() => {
     if (!state.open) return;
     function onKey(e: KeyboardEvent) {
+      // During IME composition, Enter, Escape and the arrows work the
+      // candidate list. Some platforms mark those keys only with keyCode 229.
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();

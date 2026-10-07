@@ -136,6 +136,92 @@ test("the editor's listboxes keep the option Enter acts on in view as the arrows
   }
 });
 
+// An IME takes Enter, Tab, Escape and the arrows for its candidate list while
+// it composes. Chromium hands those keys to the page with keyCode 229, and the
+// composition comes through the same input path an IME uses.
+test("the page-link and emoji pickers leave keys to the IME while it composes", async () => {
+  test.setTimeout(180_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  try {
+    await writeWorkspaceFiles(temp, [
+      { path: "plan.md", contents: "# Plan\n\nA paragraph to act on.\n\n" },
+      { path: "roadmap.md", contents: "# Roadmap\n" },
+      { path: "roads.md", contents: "# Roads\n" },
+    ]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const page = desktop.page;
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const workspace = await openWorkspaceFromFirstRun(page, temp);
+    await waitForWorkspaceFile(page, workspace.workspaceId, "roads.md");
+    await explorerRow(page, "plan.md").click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor).toBeVisible({ timeout: 20_000 });
+    await editor.locator("p").first().click();
+    await page.keyboard.press("End");
+    await page.keyboard.press("Enter");
+    const line = editor.locator("p").last();
+
+    const cdp = await page.context().newCDPSession(page);
+    const compose = (text: string) =>
+      cdp.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+    const commit = (text: string) => cdp.send("Input.insertText", { text });
+    // The editor records each key that reaches it while composing, and
+    // whether anything consumed it on the way.
+    type Recording = HTMLElement & { composingKeys: string[] };
+    await editor.evaluate((element) => {
+      const keys: string[] = [];
+      (element as Recording).composingKeys = keys;
+      (element as Recording).addEventListener("keydown", (event) => {
+        if (event.isComposing) keys.push(`${event.key} ${event.keyCode} ${event.defaultPrevented}`);
+      });
+    });
+    async function pressComposing(keys: string[]): Promise<void> {
+      await editor.evaluate((element) => (element as Recording).composingKeys.splice(0));
+      for (const key of keys) {
+        await cdp.send("Input.dispatchKeyEvent", { type: "rawKeyDown", key, code: key, windowsVirtualKeyCode: 229 });
+        await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", key, code: key, windowsVirtualKeyCode: 229 });
+      }
+      expect(await editor.evaluate((element) => (element as Recording).composingKeys)).toEqual(
+        keys.map((key) => `${key} 229 false`),
+      );
+    }
+
+    const pages = page.getByRole("listbox", { name: "page links" });
+    await page.keyboard.type("@");
+    await expect(pages).toBeVisible();
+    await compose("ro");
+    await expect(pages.getByRole("option")).toHaveCount(2);
+    await pressComposing(["Enter", "ArrowDown", "Escape"]);
+    await expect(pages.getByRole("option").first()).toHaveAttribute("aria-selected", "true");
+    await expect(line).toHaveText("@ro");
+    await expect(editor.locator(".dohc-wikilink-pill")).toHaveCount(0);
+    await commit("ro");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(pages).toBeHidden();
+    const pill = line.locator(".dohc-wikilink-pill");
+    await expect(pill).toHaveAttribute("data-dohc-wikilink", "roads");
+    const label = await pill.textContent();
+
+    const emoji = page.getByRole("listbox", { name: "emoji" });
+    await page.keyboard.type(" :");
+    await compose("smi");
+    await expect(emoji).toBeVisible();
+    const picked = await emoji.getByRole("option").nth(1).locator("span").first().textContent();
+    await pressComposing(["Enter", "Tab", "ArrowDown", "Escape"]);
+    await expect(emoji.getByRole("option").first()).toHaveAttribute("aria-selected", "true");
+    await expect(line).toHaveText(`${label} :smi`);
+    await commit("smi");
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await expect(emoji).toBeHidden();
+    await expect(line).toHaveText(`${label} ${picked}`);
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});
+
 test("the chat mention list keeps the option Enter acts on in view as the arrows move it", async () => {
   test.setTimeout(120_000);
   const temp = await createTempWorkspace();
