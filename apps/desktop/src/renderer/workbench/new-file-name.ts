@@ -13,10 +13,11 @@ export function withMarkdownDefault(relativePath: string): string {
 // "archive.tar.gz" typed as "archive" becomes "archive.gz", the same last-dot
 // rule file kinds use. A typed extension or dotfile is respected exactly, as
 // for new files. A file without an extension ("LICENSE", ".env") takes the
-// typed name exactly.
+// typed name exactly. A tail with whitespace is not an extension, so
+// "Mr. Rogers" typed as "Fred" becomes "Fred".
 export function withRenameDefault(fromPath: string, toPath: string): string {
   const extension = extensionOf(leafOf(fromPath));
-  return extension ? withDefaultExtension(toPath, extension) : toPath;
+  return extension && !/\s/.test(extension) ? withDefaultExtension(toPath, extension) : toPath;
 }
 
 function withDefaultExtension(relativePath: string, extension: string): string {

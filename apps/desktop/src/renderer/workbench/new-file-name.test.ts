@@ -73,6 +73,11 @@ describe("withRenameDefault", () => {
     expect(withRenameDefault("report.csv", ".env")).toBe(".env");
   });
 
+  it("treats a last-dot tail with whitespace as no extension", () => {
+    expect(withRenameDefault("Dr. Smith notes", "Smith")).toBe("Smith");
+    expect(withRenameDefault("Mr. Rogers", "Fred")).toBe("Fred");
+  });
+
   it("takes the typed name for a file without an extension", () => {
     expect(withRenameDefault("LICENSE", "LICENSE")).toBe("LICENSE");
     expect(withRenameDefault("LICENSE", "NOTICE")).toBe("NOTICE");
