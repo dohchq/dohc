@@ -3730,8 +3730,13 @@ async fn refused_restore_publication_keeps_new_binding_at_authenticated_restore_
 }
 
 #[tokio::test]
-async fn unchanged_restore_tail_keeps_next_proof_at_the_published_cut() {
+async fn unchanged_restore_tail_keeps_next_proof_at_the_last_settled_cut() {
     resumed_binding_publication(false, true).await;
+}
+
+#[tokio::test]
+async fn refused_restore_publication_recovers_after_an_unchanged_tail() {
+    resumed_binding_publication(true, true).await;
 }
 
 async fn resumed_binding_publication(refused: bool, unchanged_tail: bool) {
@@ -3836,12 +3841,17 @@ async fn resumed_binding_publication(refused: bool, unchanged_tail: bool) {
         .settle(Some(receipt), 100, Arc::new(NoFaults))
         .await
         .unwrap();
-    assert_eq!(settled.previous_cursor, 71);
+    let previous_cursor = if unchanged_tail && !refused { 72 } else { 71 };
+    assert_eq!(settled.previous_cursor, previous_cursor);
+    assert_eq!(
+        settled.application_count,
+        (cursor - previous_cursor) as usize
+    );
     assert_eq!(settled.terminal_cursor, cursor);
     f.read(|db| {
         let payload:String=db.query_row("SELECT payload_json FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",[&settled.moment_id],|r|r.get(0)).unwrap();
         let payload:serde_json::Value=serde_json::from_str(&payload).unwrap();
-        assert_eq!(payload["settlementReference"]["record"]["previousCursor"],71);
+        assert_eq!(payload["settlementReference"]["record"]["previousCursor"],previous_cursor);
         assert_eq!(payload["settlementReference"]["record"]["binding"]["restoreFenceGeneration"],1);
         assert_eq!(payload["payloadBeforeBlobSha256"],restored.markdown_digest);
         assert_eq!(payload["beforeLatestMomentId"],restored.moment_id);
