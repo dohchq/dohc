@@ -26,13 +26,15 @@ function opensByDefault(text: string, propertiesShown: boolean): boolean {
 
 /**
  * A live document's file text, read from disk and never from the document,
- * whose edits reach the file only when the engine saves. It starts from the
- * inspector's read and takes each later one. While `open`, it reads the file
- * again when workspace activity names the file, when the engine reports the
- * file changed on disk, and when it reports every edit saved here after the
- * document's frontmatter changed. Closed, it reads nothing, and it reads once
- * when it opens. A save to the host or a pending or failed save keeps the
- * text read last.
+ * whose edits reach the file only when the engine saves. The section is the
+ * only reader: the inspector's read is the first text, and after that only
+ * the section's own reads of this document change it. While `open`, it
+ * reads the file again when workspace activity names the file, when the
+ * engine reports the file changed on disk, and when it reports every edit
+ * saved here after the document's frontmatter changed. Closed, it reads
+ * nothing. Opening hides the text until a read started after opening
+ * succeeds. A save to the host or a pending or failed save keeps the text
+ * read last.
  */
 function useFileText(input: {
   workspaceId: string;
@@ -42,14 +44,8 @@ function useFileText(input: {
   saveState: SaveState;
   open: boolean;
 }): { text: string; stale: boolean } {
-  const { workspaceId, path, body, ydoc, open } = input;
-  // `stale` holds back text read before the section opened.
-  const [read, setRead] = useState({ body, text: body, stale: false });
-  let current = read;
-  if (read.body !== body) {
-    current = { body, text: body, stale: false };
-    setRead(current);
-  }
+  const { workspaceId, path, ydoc, open } = input;
+  const [file, setFile] = useState({ text: input.body, stale: false });
 
   // Frontmatter edits counted against the last read that covered them. A
   // body edit cannot change the block, so its save needs no read. A read that
@@ -67,13 +63,7 @@ function useFileText(input: {
     };
   }, [ydoc]);
 
-  // One order for both readers: a newer inspector read, or another document
-  // session, drops every read still pending, and only the newest read lands.
-  const latest = useRef(0);
   const live = useRef({ open, mounted: true });
-  useLayoutEffect(() => {
-    latest.current += 1;
-  }, [body, ydoc]);
   useLayoutEffect(() => {
     live.current.open = open;
   }, [open]);
@@ -84,9 +74,10 @@ function useFileText(input: {
     };
   }, []);
 
-  // At most one read in flight and one owed. Requests made before a read
-  // reaches the file share it. A request while it is out owes one more,
-  // which starts when the read settles.
+  // At most one read in flight and one owed, and only the newest read
+  // lands. Requests made before a read reaches the file share it. A request
+  // while it is out owes one more, which starts when the read settles.
+  const latest = useRef(0);
   const flight = useRef<"idle" | "queued" | "reading">("idle");
   const owed = useRef(false);
   const start = useCallback(() => {
@@ -104,7 +95,7 @@ function useFileText(input: {
         ({ result, covers }) => {
           if (latest.current !== id) return;
           edits.current.read = Math.max(edits.current.read, covers);
-          setRead((last) => ({ ...last, text: result.text, stale: false }));
+          setFile({ text: result.text, stale: false });
         },
         // The text read last stays, or stays hidden while stale. The
         // inspector reports a file it cannot read.
@@ -123,13 +114,13 @@ function useFileText(input: {
     else start();
   }, [start]);
 
-  // Opening shows only the file as it is now: text read earlier is held
-  // back, and a read already out is dropped for a fresh one.
+  // Opening shows only the file as it is now: text read earlier is hidden,
+  // and a read already out is dropped for a fresh one.
   const wasOpen = useRef(open);
   useEffect(() => {
     if (open && !wasOpen.current) {
       latest.current += 1;
-      setRead((last) => ({ ...last, stale: true }));
+      setFile((last) => ({ ...last, stale: true }));
       if (flight.current === "idle") start();
       else owed.current = true;
     }
@@ -150,14 +141,15 @@ function useFileText(input: {
       }),
     [readFile, workspaceId, path],
   );
-  return current;
+  return file;
 }
 
 /**
  * The section for a live document, whose file changes only when the engine
- * saves. `body` is the inspector's read of the file. It also decides whether
- * the section starts open, so a closed section costs no read. Each document
- * gets its own reads, so nothing read for one settles or clears another.
+ * saves. `body` is the inspector's read of the file: the section's first
+ * text, and what decides whether it starts open, so a closed section costs
+ * no read. Each document gets its own reads, so nothing read for one settles
+ * or clears another.
  */
 export function LiveFrontmatterAsWritten(props: {
   workspaceId: string;

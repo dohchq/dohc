@@ -213,7 +213,7 @@ describe("useFileText", () => {
     expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
   });
 
-  it("reads the file again when it changes on disk, and takes the inspector's later read", async () => {
+  it("reads the file again when it changes on disk, and takes no text from the inspector after it opens", async () => {
     const doc = markdownToYDoc(BUDGET_FILE);
     const outside = "---\n# Set by an agent\nbudget: 120\n---\n\nBody";
     bridgeMock.readWorkspaceText.mockResolvedValue(fileRead(outside));
@@ -223,7 +223,7 @@ describe("useFileText", () => {
     expect(shown()).toBe("---\n# Set by an agent\nbudget: 120\n---");
 
     view.rerender(<Live body={COST_FILE} ydoc={doc} saveState={SAVED_HERE} />);
-    expect(shown()).toBe(COST);
+    expect(shown()).toBe("---\n# Set by an agent\nbudget: 120\n---");
   });
 
   it("reads the file again when a write from outside dohc reaches it", async () => {
@@ -256,20 +256,25 @@ describe("useFileText", () => {
     expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
   });
 
-  it("drops a pending read when the inspector's newer read arrives", async () => {
-    const doc = markdownToYDoc(BUDGET_FILE);
+  it("keeps an opening hidden through an inspector read, until its own read lands", async () => {
+    const draft = "---\nstatus: draft\n---\n\nBody";
+    const doc = markdownToYDoc(draft);
+    const view = render(<Live body={draft} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
+    expect(opened()).toBe(false);
     let answer: (text: string) => void = () => undefined;
     bridgeMock.readWorkspaceText.mockReturnValueOnce(new Promise((resolve) => {
       answer = (text) => resolve(fileRead(text));
     }));
-    const view = render(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    expand();
     await settle();
-    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
-    view.rerender(<Live body={COST_FILE} ydoc={doc} saveState={SAVED_HERE} />);
-    expect(shown()).toBe(COST);
-    answer(BUDGET_FILE);
+    // An inspector read that started before the opening lands during it.
+    view.rerender(<Live body={"---\nstatus: review\n---\n\nBody"} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
     await settle();
-    expect(shown()).toBe(COST);
+    expect(shown()).toBeNull();
+    answer("---\nstatus: ready\n---\n\nBody");
+    await settle();
+    expect(shown()).toBe("---\nstatus: ready\n---");
+    expect(rendered.some((text) => text.includes("review"))).toBe(false);
   });
 
   it("keeps a frontmatter read owed until one succeeds, with edits made during it", async () => {
