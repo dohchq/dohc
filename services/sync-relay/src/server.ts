@@ -860,7 +860,7 @@ export function createSyncRelayHandler({
         return await respondToWorkspaceRegistration(request, actor);
       }
 
-      if (route.route === "shares-list" || route.route === "share") {
+      if (route.route === "shares-list" || route.route === "share" || route.route === "share-access") {
         return await respondToShareInventory(request, route, actor);
       }
 
@@ -1008,3 +1008,4 @@ export function streamsRequestBody(url: URL, method: string): boolean {
       route.route === "share-collection-writes" || route.route === "link-collection-writes";
   } catch { return false; }
 }
+
