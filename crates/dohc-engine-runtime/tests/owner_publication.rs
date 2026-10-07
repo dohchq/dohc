@@ -206,10 +206,19 @@ impl Fixture {
         handle: &dohc_engine_runtime::actor::ActorLiveApplicationHandle,
         terminal: Option<LiveUpdateReceipt>,
     ) -> LiveSettlementResult {
+        self.settle_with_limit(handle, terminal, 100).await
+    }
+
+    async fn settle_with_limit(
+        &self,
+        handle: &dohc_engine_runtime::actor::ActorLiveApplicationHandle,
+        terminal: Option<LiveUpdateReceipt>,
+        max_applications: usize,
+    ) -> LiveSettlementResult {
         handle
             .settle(
                 terminal,
-                100,
+                max_applications,
                 self.root.path().to_owned(),
                 30,
                 Arc::new(NoFaults),
@@ -501,10 +510,11 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     remote.apply(&f.bytes).unwrap();
     let remote_bytes = remote.richdoc_append_paragraph(REMOTE);
     f.doc.apply(&remote_bytes).unwrap();
-    // Keep each settlement interval inside the configured maximum while the
-    // accepted checkpoint segment accumulates discarded metadata above60MiB.
+    // No-change moments retain their published cut. Later proofs cover the
+    // accumulated prefix while its checkpoint metadata grows above 60 MiB.
     mark("fixture-private-edit");
     const PREFIX: i64 = 700;
+    const APPLICATION_LIMIT: usize = PREFIX as usize + 100;
     let mut accepted_head = None;
     for cursor in 1..=PREFIX {
         let (receipt, result) =
@@ -512,7 +522,11 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         assert!(matches!(result, ApplicationResult::Applied(..)));
         if cursor % 100 == 0 {
             mark("periodic-settlement-start");
-            let settled = f.settle(&handle, Some(receipt)).await;
+            let settled = f
+                .settle_with_limit(&handle, Some(receipt), APPLICATION_LIMIT)
+                .await;
+            let published_cursor = if cursor == 100 { 0 } else { 100 };
+            assert_eq!(settled.application_count, (cursor - published_cursor) as usize);
             assert!(!f.file().contains(LOCAL));
             assert!(f.file().contains(REMOTE));
             mark("periodic-settlement-complete");
@@ -578,7 +592,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         handle
             .settle(
                 terminal.clone(),
-                100,
+                APPLICATION_LIMIT,
                 f.root.path().to_owned(),
                 30,
                 Arc::new(PrefixRival {
@@ -613,7 +627,9 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     );
     mark("rival-refusal");
     std::fs::write(f.root.path().join(&f.binding.current_path), preimage).unwrap();
-    let settled = f.settle(&handle, terminal.clone()).await;
+    let settled = f
+        .settle_with_limit(&handle, terminal.clone(), APPLICATION_LIMIT)
+        .await;
     assert!(settled.materialized);
     assert!(f.file().contains(REMOTE));
     assert!(!f.file().contains(LOCAL));
@@ -694,7 +710,9 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         .await
         .unwrap();
     mark("restart");
-    let replayed = f.settle(&handle, terminal).await;
+    let replayed = f
+        .settle_with_limit(&handle, terminal, APPLICATION_LIMIT)
+        .await;
     assert_eq!(replayed.settlement_id, settled.settlement_id);
     assert_eq!(replayed.local_ydoc_sequence, settled.local_ydoc_sequence);
     assert_eq!(replayed.moment_id, settled.moment_id);
@@ -715,7 +733,9 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     // The private edit's own acceptance names its trusted agent. The second
     // private edit still waits, so the next moment holds accepted content.
     let accepted = f.accept_pending(&actor, &handle, refused + 1).await;
-    let next = f.settle(&handle, Some(accepted)).await;
+    let next = f
+        .settle_with_limit(&handle, Some(accepted), APPLICATION_LIMIT)
+        .await;
     assert!(next.materialized);
     assert_eq!(next.application_count, 2);
     assert!(f.file().contains(LOCAL));
