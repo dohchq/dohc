@@ -9,10 +9,19 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 
 import type { Event, JsonValue, Request, Response, WorkspaceHandle } from "../protocol";
+import { VERSIONED_METHOD } from "../versioned/versionedWireContract";
+import { WORKSPACE_METHOD } from "../workspace/workspaceWireContract";
 import {
   createEngineClient,
   type EngineClientSpawnOptions,
 } from "./engineClient";
+
+export const ENGINE_LIFECYCLE_METHOD = {
+  ping: "engine.ping",
+  workspaceOpen: WORKSPACE_METHOD.open,
+  workspaceClose: WORKSPACE_METHOD.close,
+  versionsActive: VERSIONED_METHOD.versionsActive,
+} as const;
 
 const ENGINE_BINARY_RESOURCE_DIR = "workspace-engine";
 const ENGINE_BINARY_BASENAME = "dohc-workspace-engine";
@@ -333,7 +342,7 @@ export class EngineDaemonLifecycle {
   // one open lock through capture adoption, and a close leaves the workspace
   // closing, which a reopen waits on, until capture drain and shutdown end.
   private readonly holdsOpenLock = (request: Request) =>
-    (request.method === "workspace.open" || request.method === "workspace.close") &&
+    (request.method === ENGINE_LIFECYCLE_METHOD.workspaceOpen || request.method === ENGINE_LIFECYCLE_METHOD.workspaceClose) &&
     !this.readRequests.has(request);
 
   constructor(options: EngineDaemonLifecycleOptions) {
@@ -473,7 +482,7 @@ export class EngineDaemonLifecycle {
         client,
         {
           id: this.requestId(),
-          method: "workspace.open",
+          method: ENGINE_LIFECYCLE_METHOD.workspaceOpen,
           params: {
             rootDir,
             workspaceId,
@@ -489,7 +498,7 @@ export class EngineDaemonLifecycle {
           read: true,
         },
       ),
-      "workspace.open",
+      ENGINE_LIFECYCLE_METHOD.workspaceOpen,
     );
     if (typeof opened.workspace !== "string" || opened.workspace.length === 0) {
       throw new EngineDaemonUnavailableError(
@@ -526,7 +535,7 @@ export class EngineDaemonLifecycle {
           client,
           {
             id: this.requestId(),
-            method: "workspace.close",
+            method: ENGINE_LIFECYCLE_METHOD.workspaceClose,
             workspace,
             params: {},
           },
@@ -608,12 +617,12 @@ export class EngineDaemonLifecycle {
         client,
         {
           id: this.requestId(),
-          method: "workspace.open",
+          method: ENGINE_LIFECYCLE_METHOD.workspaceOpen,
           params: { rootDir, workspaceId },
         },
         smokeCap,
       ),
-      "workspace.open",
+      ENGINE_LIFECYCLE_METHOD.workspaceOpen,
     );
     if (typeof opened.workspace !== "string" || opened.workspace.length === 0) {
       throw new EngineDaemonUnavailableError(
@@ -626,7 +635,7 @@ export class EngineDaemonLifecycle {
         client,
         {
           id: this.requestId(),
-          method: "workspace.close",
+          method: ENGINE_LIFECYCLE_METHOD.workspaceClose,
           workspace,
           params: {},
         },
@@ -638,7 +647,7 @@ export class EngineDaemonLifecycle {
         client,
         {
           id: this.requestId(),
-          method: "versions.active",
+          method: ENGINE_LIFECYCLE_METHOD.versionsActive,
           workspace,
           params: {},
         },
@@ -1177,7 +1186,7 @@ export class EngineDaemonLifecycle {
     const answer = client
       .sendRequest({
         id: this.requestId(),
-        method: "engine.ping",
+        method: ENGINE_LIFECYCLE_METHOD.ping,
         params: {},
       })
       .then(

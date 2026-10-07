@@ -173,6 +173,16 @@ describe("crash report messages", () => {
     expect(text).not.toContain("acme.merger.plans");
   });
 
+  it("keeps engine.ping in lifecycle diagnostics", () => {
+    for (const message of [
+      "Rust engine engine.ping returned an invalid result.",
+      "Rust engine engine.ping timed out after 5000ms.",
+      "Rust engine engine.ping got no answer: a probe expired after 45000ms with no frame of any kind from the engine.",
+    ]) {
+      expect(mainError(new EngineDaemonUnavailableError(message))).toContain(message);
+    }
+  });
+
   it("reconstructs current lifecycle caps, read budgets, and silence diagnostics", () => {
     for (const message of [
       "Rust engine workspace.open timed out after 120000ms.",
@@ -196,7 +206,7 @@ describe("crash report messages", () => {
       (method: string) => `Rust engine ${method} ran out of its 10000ms budget before the read.`,
       (method: string) => `Rust engine ${method} got no answer: a probe expired after 45000ms with no frame of any kind from the engine.`,
     ];
-    const sensitiveMethods = ["acme.merger.plans", "engine.ping", "files.drain", "liveApplication.resumeRestore",
+    const sensitiveMethods = ["acme.merger.plans", "files.drain", "liveApplication.resumeRestore",
       "engine.ping.md", "workspace.open.backup", "ENGINE.PING",
       "C:\\Users\\sam\\engine.ping", "/Private/engine.ping", "engine.ping/secret", "engine.ping\u0000secret"];
     for (const method of sensitiveMethods) {
