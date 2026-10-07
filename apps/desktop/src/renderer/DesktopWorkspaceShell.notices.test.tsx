@@ -31,7 +31,7 @@ it("reports an edit refusal once through Notices, without an ineffective retry",
   await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
   const message = 'dohc could not save an edit to "a.md". The edit is too large. Copy it from recovery.';
   const event: EngineYDocSaveStateEvent = {
-    sessionId: "session-1", seq: 1, state: "error",
+    sessionId: "session-1", seq: 1, state: { kind: "error", reason: "test failure", issueId: null },
     editRefusal: { workspaceId: WORKSPACE.workspaceId, path: "a.md", requestId: "request-1", message },
   };
   act(() => { for (const listener of listeners) listener(event); });
@@ -56,7 +56,7 @@ it("shows unsent draft failures through the existing toast and Notices reporter 
   renderShell(bridge);
   await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
   const message = "Unsent changes to a.md are not saved. Draft storage refused. Copy them from the open document before you quit dohc.";
-  const event: EngineYDocSaveStateEvent = {sessionId: "session-1", seq: 1, state: "error",
+  const event: EngineYDocSaveStateEvent = {sessionId: "session-1", seq: 1, state: { kind: "error", reason: "test failure", issueId: null },
     editRefusal: {workspaceId: WORKSPACE.workspaceId, path: "notes/a.md", requestId: "draft-preservation", message}};
   act(() => {for (const listener of listeners) listener(event);});
   expect(await screen.findByText(message)).toBeTruthy();

@@ -539,7 +539,7 @@ describe("collection folders", () => {
     act(() => {
       const sessionId = sessionsByPath.get("tasks/one.md")!;
       for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, state: "saved", seq: 1 });
+        listener({ sessionId, state: { kind: "saved-here" }, seq: 1 });
       }
     });
 

@@ -953,7 +953,8 @@ it("checkpoints a hostile 64-swap replay before each later worker failure and re
   try{expect((await reopened.invoke(read)).revision).toBe(64);expect(applied).toHaveLength(64);}
   finally{await reopened.close();}
   for(const pid of pids)expect(()=>process.kill(pid,0)).toThrow();
-});
+  // Test allowance for 128 seed/replay steps and six worker lifetimes (seed, four replay workers, reopen).
+},2*64*DEFAULT_LIMITS.evaluationMs+6*DEFAULT_LIMITS.deadlineMs);
 
 
 it("retains an earlier recovery checkpoint when a later chunk cannot be sealed",async()=>{

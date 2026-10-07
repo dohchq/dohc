@@ -183,6 +183,7 @@ impl ActorHandle {
         &self,
         binding: dohc_engine_collab::LiveObjectBinding,
         namespace: String,
+        recovery: bool,
         token: CancellationToken,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<
@@ -198,7 +199,9 @@ impl ActorHandle {
                 return Err(RuntimeError::Cancelled);
             }
             Ok(store.read_with(|conn| {
-                dohc_engine_collab::owner_outbox::enrollment::prepare_in(conn, &binding, &namespace)
+                dohc_engine_collab::owner_outbox::enrollment::prepare_in(
+                    conn, &binding, &namespace, recovery,
+                )
             }))
         })
         .await
@@ -297,6 +300,7 @@ impl ActorHandle {
         workspace_id: String,
         after: Option<dohc_engine_collab::owner_outbox::draft::OwnerDraftCursor>,
         limit: usize,
+        pending_only: bool,
         token: CancellationToken,
         reservation: Arc<dyn Send + Sync>,
     ) -> Result<
@@ -317,8 +321,34 @@ impl ActorHandle {
                     &workspace_id,
                     after.as_ref(),
                     limit,
+                    pending_only,
                 )
             }))
+        })
+        .await
+    }
+
+    pub async fn owner_ydoc_refuse_entry(
+        &self,
+        workspace_id: String,
+        input: dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput,
+        token: CancellationToken,
+        reservation: Arc<dyn Send + Sync>,
+    ) -> Result<Result<dohc_engine_collab::LiveObjectBinding, OwnerOutboxError>, RuntimeError> {
+        self.run(move |store, _cache| {
+            let _reservation = reservation;
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            Ok(
+                match store.write_with(&NoFaults, |tx| {
+                    dohc_engine_collab::owner_outbox::refuse_entry_in_tx(tx, &workspace_id, &input)
+                }) {
+                    Ok(TxnOutcome::Committed(binding)) => Ok(binding),
+                    Ok(TxnOutcome::Crashed { .. }) => Err(OwnerOutboxError::Corrupt),
+                    Err(error) => Err(error),
+                },
+            )
         })
         .await
     }

@@ -1,7 +1,7 @@
 import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {normalizeShareLabel, shareSubjectFallback, shareSenderLabel} from "@dohc/security-contract/share-labels";
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { escapeHtml } from "@dohc/workspace-core/html";
+import { generateAppSource } from "@dohc/workspace-core/app-source";
 import { isRecord } from "@dohc/workspace-core/records";
 import { fileVersionError, fileVersionReason } from "@dohc/workspace-contracts/file-version";
 // Pure MCP tool implementations. Each operates on a workspace ROOT dir and a
@@ -1137,15 +1137,6 @@ function siteTitleFromPath(root: string): string {
     .trim();
 }
 
-function packageNameFromPath(root: string): string {
-  const name = basename(root) || "app";
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "app";
-}
-
 function readPackageScripts(pkg: PackageJson | null): SiteScripts {
   if (!pkg || !isRecord(pkg.scripts)) return {};
   const scripts: SiteScripts = {};
@@ -1447,10 +1438,10 @@ async function detectSiteAt(
       severity: "warning",
       code: "invalid-type",
       path: configPath ?? relativeJoin(root, "dohc.json"),
-      message: 'dohc.json type should be "site".',
+      message: 'dohc.json type should be "app".',
     });
   }
-  const explicitNonSite = validType !== undefined && validType !== "site";
+  const explicitNonSite = validType !== undefined && validType !== "app";
 
   if (
     explicitNonSite &&
@@ -1467,7 +1458,7 @@ async function detectSiteAt(
       severity: "warning",
       code: "unexpected_dohc_type",
       path: configPath ?? relativeJoin(root, "dohc.json"),
-      message: "dohc.json has website signals but its type is not \"site\".",
+      message: "dohc.json has website signals but its type is not \"app\".",
     });
   }
 
@@ -1483,7 +1474,7 @@ async function detectSiteAt(
   // describe the same project the same way.
   const kind: SiteKind = configPath || hasPublishManifest || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
   // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
-  // counts toward high confidence when it explicitly declares type: "site"
+  // counts toward high confidence when it explicitly declares type: "app"
   // — a valid-but-empty config ({}) or one for another dohc feature isn't
   // itself a high-confidence website signal, even though it parsed
   // cleanly. The two detectors have to agree on the same dohc.json.
@@ -1494,7 +1485,7 @@ async function detectSiteAt(
   // — omitting uniqueBuildOutputs here left the two detectors disagreeing
   // on exactly that input despite this branch's own parity comment.
   const confidence: SiteConfidence =
-    validType === "site"
+    validType === "app"
       ? "high"
       : hasIndex || hasPublishManifest || frameworkConfig
         ? "high"
@@ -1616,136 +1607,11 @@ export async function createApp(
   }
 
   const title = args.title?.trim() || siteTitleFromPath(root.normalized);
-  const packageName = packageNameFromPath(root.normalized);
-  const files = [
-    {
-      path: relativeJoin(root.normalized, "index.html"),
-      content: `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml(title)}</title>
-    <link rel="stylesheet" href="./styles.css">
-  </head>
-  <body>
-    <main>
-      <p class="eyebrow">New app</p>
-      <h1>${escapeHtml(title)}</h1>
-      <p>A clean local page, ready for the shape of the work.</p>
-    </main>
-    <script type="module" src="./script.js"></script>
-  </body>
-</html>
-`,
-    },
-    {
-      path: relativeJoin(root.normalized, "styles.css"),
-      content: `:root {
-  color: #151515;
-  background: #f7f6f1;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-body {
-  margin: 0;
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-}
-
-main {
-  width: min(720px, calc(100vw - 48px));
-}
-
-.eyebrow {
-  margin: 0 0 12px;
-  color: #66635d;
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0;
-  text-transform: uppercase;
-}
-
-h1 {
-  margin: 0 0 16px;
-  font-size: 4rem;
-  line-height: 0.96;
-}
-
-p {
-  max-width: 56ch;
-  font-size: 1.08rem;
-  line-height: 1.6;
-}
-
-@media (max-width: 640px) {
-  h1 {
-    font-size: 2.25rem;
-  }
-}
-`,
-    },
-    {
-      path: relativeJoin(root.normalized, "script.js"),
-      content: `document.documentElement.dataset.siteReady = "true";
-`,
-    },
-    {
-      path: relativeJoin(root.normalized, "scripts/build-static.mjs"),
-      content: `import { existsSync } from "node:fs";
-import { copyFile, mkdir, rm } from "node:fs/promises";
-
-await rm("dist", { recursive: true, force: true });
-await mkdir("dist", { recursive: true });
-
-for (const file of ["index.html", "styles.css", "script.js"]) {
-  if (existsSync(file)) await copyFile(file, \`dist/\${file}\`);
-}
-`,
-    },
-    {
-      path: relativeJoin(root.normalized, "package.json"),
-      content: `${JSON.stringify(
-        {
-          name: packageName,
-          private: true,
-          type: "module",
-          engines: {
-            node: ">=14.8.0",
-          },
-          scripts: {
-            dev: "serve . --listen 127.0.0.1:4173",
-            build: "node scripts/build-static.mjs",
-            preview: "serve dist --listen 127.0.0.1:4173",
-          },
-          devDependencies: {
-            serve: "14.2.6",
-          },
-        },
-        null,
-        2,
-      )}\n`,
-    },
-    ...(args.withDohcJson === false
-      ? []
-      : [
-          {
-            path: relativeJoin(root.normalized, "dohc.json"),
-            content: `${JSON.stringify(
-              {
-                version: 1,
-                type: "site",
-                title,
-                preview: { mode: "static", entry: "index.html" },
-                build: { command: "npm run build", output: "dist" },
-              },
-              null,
-              2,
-            )}\n`,
-          },
-        ]),
-  ];
+  const files = generateAppSource({
+    title,
+    appRoot: root.normalized,
+    withDohcJson: args.withDohcJson !== false,
+  }).map((file) => ({ ...file, path: relativeJoin(root.normalized, file.path) }));
 
   const resolvedFiles = [];
   for (const file of files) {

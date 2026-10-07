@@ -11,7 +11,8 @@
     "./html": "./src/html.ts",
     "./records": "./src/records.ts",
     "./mergeMarkdown": "./src/mergeMarkdown.ts",
-    "./versionCompare": "./src/versionCompare.ts"
+    "./versionCompare": "./src/versionCompare.ts",
+    "./app-source": "./src/appSource.ts"
   },
   "dependencies": {
     "@dohc/workspace-contracts": "workspace:*"

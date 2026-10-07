@@ -290,10 +290,7 @@ describe("AppsView", () => {
       />,
     );
 
-    expect(await screen.findByText("No apps yet")).toBeTruthy();
-    expect(
-      screen.getByText("Start with one editable HTML file in your workspace."),
-    ).toBeTruthy();
+    expect(await screen.findByText("No apps in this workspace yet.")).toBeTruthy();
     expect(screen.getByTestId("sites-count").textContent).toContain("0 apps");
     const create = screen.getByRole("button", { name: "Create app" });
     create.focus();

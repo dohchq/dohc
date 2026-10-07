@@ -1,6 +1,6 @@
 # dohc
 
-A local-first file sync and collaboration workspace for humans and agents. This glossary is the canonical vocabulary; check new names against it before defining them.
+A local-first workspace for people and their agents. This glossary is the canonical vocabulary; check new names against it before defining them.
 
 ## Language
 

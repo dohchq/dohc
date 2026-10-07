@@ -115,5 +115,6 @@
   "data.query",
   "app.link.create",
   "workspace.open.retry",
-  "workspace.open.failures.take"
+  "workspace.open.failures.take",
+  "share.access.read"
 ]

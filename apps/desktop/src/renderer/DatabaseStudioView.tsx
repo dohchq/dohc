@@ -1,8 +1,7 @@
 import { ViewHeader } from "./fileInspectorUi";
-import { SectionLabel } from "./ui/controls";
+import { EmptyState, SectionLabel } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
-import { DohcMark } from "@dohc/brand";
-import { ArrowDown, ArrowUp, Database, Search } from "lucide-react";
+import { ArrowDown, ArrowUp, Database, Search, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   DatabaseEditResult,
@@ -293,13 +292,12 @@ export function DatabaseStudioView(props: {
       >
         <ViewHeader path={path} onShare={onShare} />
         {error ? (
-          <div
+          <EmptyState
             data-testid="view-database"
-            className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
-          >
-            <DohcMark size={28} className="text-line" />
-            <p className="text-sm text-muted">Couldn't read this database.</p>
-          </div>
+            icon={TriangleAlert}
+            tone="danger"
+            title="Couldn't read this database."
+          />
         ) : (
           <SkeletonRows inSlot layout="panel" testId="view-database" label="Loading database…" />
         )}
@@ -464,10 +462,7 @@ export function DatabaseStudioView(props: {
               />
             </>
           ) : (
-            <div className="flex flex-1 flex-col items-center justify-center gap-4 text-center">
-              <DohcMark size={28} className="text-line" />
-              <p className="text-sm text-muted">No tables in this database.</p>
-            </div>
+            <EmptyState title="No tables in this database." />
           )}
         </main>
       </div>

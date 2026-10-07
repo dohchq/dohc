@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { needsBuiltArtifact, presentBuildOutput } from "@dohc/workspace-core";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { IconButton, SecondaryButton } from "./ui/controls";
+import { EmptyState, IconButton, SecondaryButton } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { useDismiss } from "./ui/useDismiss";
 import type {
@@ -28,6 +28,7 @@ import { isLoopbackOrigin } from "../security/loopback";
 import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
 import { OwnerAppEntry, OwnerAppPublication } from "./OwnerAppPublication";
 import { ipcErrorMessage } from "./ipcError";
+import { withErrorWords } from "../ipc/errorWords";
 
 const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
 // Shown through the shell's error hook, with Try again.
@@ -305,7 +306,8 @@ export function SitePreviewPage(props: {
       if (!isCurrent()) return;
       setLoad({
         status: "error",
-        message: ipcErrorMessage(error, "Could not load this app."),
+        // The pane shows only this line, so it says what failed itself.
+        message: withErrorWords("dohc could not load this app.", error),
       });
     }
   }, [props.workspaceId, props.siteRoot, siteContext]);
@@ -788,19 +790,11 @@ export function SitePreviewPage(props: {
       {load.status === "loading" ? (
         <SkeletonRows layout="panel" label="Loading app…" />
       ) : load.status === "missing" ? (
-        <EmptyState
-          title="App not detected"
-          body="dohc no longer detects an app in this folder."
-          onUnpin={props.onUnpin}
-        />
+        <AppGone words="dohc no longer detects an app in this folder." onUnpin={props.onUnpin} />
       ) : load.status === "error" ? (
-        <EmptyState title="Could not load app" body={load.message} />
+        <EmptyState icon={AlertTriangle} tone="danger" title={load.message} />
       ) : load.status === "ready" && !site ? (
-        <EmptyState
-          title="App not detected"
-          body={APP_MISSING_MESSAGE}
-          onUnpin={props.onUnpin}
-        />
+        <AppGone words={APP_MISSING_MESSAGE} onUnpin={props.onUnpin} />
       ) : site ? (
         <>
           {site.diagnostics.length > 0 || actionError ? (
@@ -914,17 +908,15 @@ function LogsDetails(props: {
   );
 }
 
-function EmptyState(props: { title: string; body: string; onUnpin?: (() => void) | undefined }) {
+// The folder no longer holds this app. A pinned tab can let it go.
+function AppGone(props: { words: string; onUnpin?: (() => void) | undefined }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-      <AlertTriangle size={20} aria-hidden className="text-warning" />
-      <span className="text-sm text-ink">{props.title}</span>
-      <span className="max-w-sm text-xs text-muted">{props.body}</span>
+    <EmptyState icon={Globe2} title={props.words}>
       {props.onUnpin ? (
-        <SecondaryButton data-testid="site-preview-unpin" onClick={props.onUnpin} className="mt-1">
+        <SecondaryButton data-testid="site-preview-unpin" onClick={props.onUnpin}>
           Unpin
         </SecondaryButton>
       ) : null}
-    </div>
+    </EmptyState>
   );
 }
