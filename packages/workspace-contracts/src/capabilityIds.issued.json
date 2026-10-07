@@ -115,5 +115,9 @@
   "data.query",
   "app.link.create",
   "workspace.open.retry",
-  "workspace.open.failures.take"
+  "workspace.open.failures.take",
+  "diagnostics.read",
+  "diagnostics.save",
+  "reports.notice.take",
+  "reports.error.send"
 ]

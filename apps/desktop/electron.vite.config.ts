@@ -70,12 +70,28 @@ function effectFree(surface: "preload" | "renderer"): Plugin {
   };
 }
 
+// The report services a release build names, compiled into main. Empty
+// values name none; see src/telemetry/reportingConfig.ts.
+export function reportingBuild(env: NodeJS.ProcessEnv = process.env) {
+  return {
+    posthogKey: env.DOHC_POSTHOG_KEY?.trim() ?? "",
+    posthogHost: env.DOHC_POSTHOG_HOST?.trim() ?? "",
+    sentryDsn: env.DOHC_SENTRY_DSN?.trim() ?? "",
+    dist: env.DOHC_SENTRY_DIST?.trim() ?? "",
+  };
+}
+
 export default defineConfig(({ mode }) => {
   // Minify production builds only. electron-vite also builds main and
   // preload during dev, and minifying those mangles dev stack traces.
   const minify = mode === "production" ? ("esbuild" as const) : false;
+  // A production build writes source maps beside its files with no link to
+  // them, so error reports can be read against them. electron-builder.yml
+  // leaves them out of the installer.
+  const sourcemap = mode === "production" ? ("hidden" as const) : false;
   return {
     main: {
+      define: { __DOHC_REPORTING__: JSON.stringify(reportingBuild()) },
       // Workspace packages ship raw TS — they must be bundled, not
       // externalized, or Node ESM fails on their extensionless imports.
       // Bundle Effect's schema runtime to remove unused code and separate
@@ -89,6 +105,7 @@ export default defineConfig(({ mode }) => {
       build: {
         target: electronMainTarget,
         minify,
+        sourcemap,
         outDir: "dist/main",
         lib: {
           entry: mainBuildEntries,
@@ -105,6 +122,7 @@ export default defineConfig(({ mode }) => {
       build: {
         target: electronMainTarget,
         minify,
+        sourcemap,
         outDir: "dist/preload",
         // Sandboxed preloads must be CommonJS.
         lib: { entry: "src/preload.ts", formats: ["cjs"] },
@@ -116,6 +134,7 @@ export default defineConfig(({ mode }) => {
       build: {
         target: electronRendererTarget,
         minify,
+        sourcemap,
         outDir: "dist/renderer",
       },
     },

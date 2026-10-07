@@ -5746,6 +5746,62 @@ export const crashReportOperations = {
   },
 } satisfies OperationTable;
 
+// Reports and diagnostics. Only main sends usage and error reports, and
+// only when this build names a report service and the person's switches in
+// Privacy allow it. Diagnostics stay on this computer unless the person
+// copies them or saves them to a file.
+export const DIAGNOSTICS_MAX_CHARS = 40_000;
+export const ReadDiagnosticsResult = z.object({
+  text: z.string().min(1).max(DIAGNOSTICS_MAX_CHARS),
+  // Whether this build sends reports at all.
+  reports: z.boolean(),
+});
+export type ReadDiagnosticsResult = z.infer<typeof ReadDiagnosticsResult>;
+// An error a dohc window caught or did not catch. Main keeps the class only
+// when it is on a known list and a frame only inside dohc's own code; the
+// message never leaves the window.
+export const RendererThrown = z.union([
+  z.object({ name: z.string().max(100), stack: z.string().max(16_000) }),
+  // A thrown value that is not an Error.
+  z.object({ type: z.enum(["string", "number", "bigint", "boolean", "symbol", "undefined", "object", "function"]) }),
+]);
+export type RendererThrown = z.infer<typeof RendererThrown>;
+export const RendererErrorPayload = z.object({
+  origin: z.enum(["boundary", "uncaught", "rejection"]),
+  error: RendererThrown,
+});
+export type RendererErrorPayload = z.infer<typeof RendererErrorPayload>;
+
+export const reportingOperations = {
+  readDiagnostics: {
+    capabilityId: "diagnostics.read",
+    scope: "device",
+    channel: "desktop:read-diagnostics",
+    payload: z.object({}), result: ReadDiagnosticsResult, guard: "trusted-sender",
+  },
+  // Main asks where to save, then writes the text it builds itself.
+  saveDiagnostics: {
+    capabilityId: "diagnostics.save",
+    scope: "device",
+    channel: "desktop:save-diagnostics",
+    payload: z.object({}), result: z.object({ saved: z.boolean() }), guard: "trusted-sender",
+  },
+  // True once, the first time this build reports, so the window tells the
+  // person before any report leaves.
+  takeReportsNotice: {
+    capabilityId: "reports.notice.take",
+    scope: "device",
+    channel: "desktop:take-reports-notice",
+    payload: z.object({}), result: z.object({ show: z.boolean() }), guard: "trusted-sender",
+  },
+  reportRendererError: {
+    capabilityId: "reports.error.send",
+    scope: "device",
+    channel: "desktop:report-renderer-error",
+    payload: RendererErrorPayload, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // Notices sent to a person. "account" rows come from the signed-in account's
 // notice list on the relay and reach all of that person's computers. "local"
 // rows stay on this computer: nobody is signed in, the workspace does not sync
@@ -6268,6 +6324,7 @@ export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof crashReportOperations>,
+    OperationBridge<typeof reportingOperations>,
     OperationBridge<typeof noticeOperations>,
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations> {

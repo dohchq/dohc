@@ -103,6 +103,20 @@ export const DEFAULT_SIDEBAR_SETTINGS: SidebarSettings = {
   pinnedApps: {},
 };
 
+// Reports this computer sends to dohc's developers. A release build that
+// names a report service sends them until the person turns them off; other
+// builds send nothing. See telemetry/reportingConfig.ts.
+export const PrivacySettings = z.object({
+  usageReports: z.boolean(),
+  errorReports: z.boolean(),
+}).strict();
+export type PrivacySettings = z.infer<typeof PrivacySettings>;
+
+export const DEFAULT_PRIVACY_SETTINGS: PrivacySettings = {
+  usageReports: true,
+  errorReports: true,
+};
+
 export const DesktopUserSettings = z.object({
   version: z.literal(1),
   // Added after the original v1 settings shipped. The default makes old v1
@@ -135,6 +149,7 @@ export const DesktopUserSettings = z.object({
   }).strict(),
   runner: RunnerSettings.default(DEFAULT_RUNNER_SETTINGS),
   sidebar: SidebarSettings.default(DEFAULT_SIDEBAR_SETTINGS),
+  privacy: PrivacySettings.default(DEFAULT_PRIVACY_SETTINGS),
 }).strict().refine((settings) => !settings.runner.enabled || Boolean(settings.profile.agentName), {
   message: "Enter an agent name before enabling dispatch.",
   path: ["profile", "agentName"],
@@ -159,6 +174,7 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
   },
   runner: DEFAULT_RUNNER_SETTINGS,
   sidebar: DEFAULT_SIDEBAR_SETTINGS,
+  privacy: DEFAULT_PRIVACY_SETTINGS,
 };
 
 export const SETTINGS_READ_SOURCES = ["stored", "default", "recovered"] as const;

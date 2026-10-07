@@ -112,7 +112,7 @@ import {
   type WebContents,
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { lstat, mkdir, readdir } from "node:fs/promises";
+import { lstat, mkdir, readdir, writeFile } from "node:fs/promises";
 import { hostname, release as osRelease, type as osType } from "node:os";
 import { dirname, join, posix } from "node:path";
 import {
@@ -126,6 +126,7 @@ import {
   UpdateStateEvent,
   ShareHandoffStatus,
   crashReportOperations,
+  reportingOperations,
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
@@ -470,10 +471,13 @@ import {
 } from "./cli/cliServer";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import { installCrashCapture } from "./crashReports/crashCapture";
-import { createCodeFrames, crashReportRoot } from "./crashReports/crashReport";
+import { createCodeFrames, createCodeLocations, crashReportRoot, type CrashEvent } from "./crashReports/crashReport";
 import { confirmCrashReportSend } from "./crashReports/crashReportConsent";
 import { createCrashReportPreview } from "./crashReports/crashReportPreview";
 import { createCrashReportStore, crashReportEndpoint } from "./crashReports/crashReportStore";
+import { REPORTING_BUILD, resolveReporting } from "./telemetry/reportingConfig";
+import { createTelemetry, privacyInEffect, usageEventFor } from "./telemetry/telemetry";
+import { diagnosticsText, saveDiagnostics } from "./telemetry/diagnostics";
 import {
   createShareHandoffIntentSlot,
   registerShareHandoffProtocol,
@@ -487,26 +491,26 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 // top-level statement rather than moving inside app.whenReady.
 makeProcessDiagnosticsNonFatal();
 
+const crashFacts = () => ({
+  atMs: Date.now(),
+  version: app.getVersion(),
+  channel: resolveUpdateChannel(app.getVersion()),
+  packaged: app.isPackaged,
+  system: `${osType()} ${osRelease()}`,
+  arch: process.arch,
+  electron: process.versions.electron ?? "unknown",
+  uptimeSeconds: Math.round(process.uptime()),
+});
+const codeRoots = [crashReportRoot({ isPackaged: app.isPackaged, appPath: app.getAppPath(), resourcesPath: process.resourcesPath })];
+
 // Crashes are recorded on this computer before anything else can crash. A
-// report leaves only when the person confirms in main's own dialog, and
-// only to the report server this build names.
+// detailed report leaves only when the person confirms in main's own
+// dialog, and only to the report server this build names.
 const crashReports = createCrashReportStore({
   path: join(stateDir(), "crash-report.json"),
   endpoint: crashReportEndpoint(process.env.DOHC_CRASH_REPORT_URL, app.isPackaged),
-  facts: () => ({
-    atMs: Date.now(),
-    version: app.getVersion(),
-    channel: resolveUpdateChannel(app.getVersion()),
-    packaged: app.isPackaged,
-    system: `${osType()} ${osRelease()}`,
-    arch: process.arch,
-    electron: process.versions.electron ?? "unknown",
-    uptimeSeconds: Math.round(process.uptime()),
-  }),
-  codeFrame: createCodeFrames(
-    [crashReportRoot({ isPackaged: app.isPackaged, appPath: app.getAppPath(), resourcesPath: process.resourcesPath })],
-    process.platform,
-  ),
+  facts: crashFacts,
+  codeFrame: createCodeFrames(codeRoots, process.platform),
   onChanged: () => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send(CHANNELS.crashReportChanged);
@@ -519,11 +523,45 @@ const crashReportPreview = createCrashReportPreview({
   openPath: (path) => shell.openPath(path),
 });
 void crashReportPreview.remove();
+// Usage and short error reports. Only a packaged build that names a report
+// service sends them, and only as the switches in Privacy allow.
+const telemetry = createTelemetry({
+  reporting: resolveReporting({
+    build: REPORTING_BUILD,
+    packaged: app.isPackaged,
+    env: process.env,
+    argv: process.argv,
+    version: app.getVersion(),
+    channel: resolveUpdateChannel(app.getVersion()),
+  }),
+  statePath: join(stateDir(), "reporting.json"),
+  facts: () => ({
+    atMs: Date.now(),
+    version: app.getVersion(),
+    channel: resolveUpdateChannel(app.getVersion()),
+    os: osType(),
+    osVersion: osRelease(),
+    arch: process.arch,
+    electron: process.versions.electron ?? "unknown",
+  }),
+  locate: createCodeLocations(codeRoots, process.platform),
+});
+if (telemetry.active) {
+  void readCachedUserSettingsFile(stateDir()).then(
+    (result) => telemetry.setPrivacy(privacyInEffect(result)),
+    () => telemetry.setPrivacy({ usageReports: false, errorReports: false }),
+  );
+}
+telemetry.track({ name: "app_launched" });
+function recordCrash(event: CrashEvent): void {
+  crashReports.record(event);
+  telemetry.reportError({ kind: "crash", event });
+}
 installCrashCapture({
   process,
   app,
   isWindowPage: (contents: WebContents) => BrowserWindow.fromWebContents(contents)?.webContents === contents,
-  record: (event) => crashReports.record(event),
+  record: recordCrash,
 });
 
 const shareHandoffIntentSlot = createShareHandoffIntentSlot();
@@ -4535,7 +4573,7 @@ const desktopEngine = createDesktopEngine({
   findWorkspace,
   app, dialog, process, createRustEngineDaemon, defaultEngineBinaryPath,
   isQuitting: (): boolean => appLifecycle.isQuitting(),
-  recordEngineProblem: (error, stage) => crashReports.record({ kind: "engine", error, stage }),
+  recordEngineProblem: (error, stage) => recordCrash({ kind: "engine", error, stage }),
   workspaceAuthorities, notifyRenderer,
   collectionAutomations: { current: collectionAutomationsOf },
   launchMarks, desktopMarks, logLaunchMarksOnce,
@@ -5130,6 +5168,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       isPackaged: app.isPackaged,
     }),
     beginEngineShutdown: () => {
+      // Reports that wait go now, each with a short timeout. Quit does not wait for them.
+      void telemetry.flush();
       automationScheduler.dispose();
       for (const workspaceId of workspaceAuthorities.workspaceIds()) {
         activity.engineCaptureFor(workspaceId)?.beginShutdown();
@@ -5250,10 +5290,14 @@ function isTrustedFrame(frameUrl: string): boolean {
 
 // Every invoke handler registers here. Electron sends a rejected handler's
 // error to the renderer as one string, so this keeps its code in that string.
+// A handler that answers finished its action, which a usage report may count.
 function handleIpc(channel: string, listener: Parameters<typeof ipcMain.handle>[1]): void {
   ipcMain.handle(channel, async (event, ...args) => {
     try {
-      return await listener(event, ...args);
+      const result: unknown = await listener(event, ...args);
+      const counted = usageEventFor(channel, result);
+      if (counted) telemetry.track(counted);
+      return result;
     } catch (error) {
       throw ipcWireError(error);
     }
@@ -5384,11 +5428,21 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
   broadcastUserSettings: (settings) => {
     broadcastUserSettings(settings);
+    telemetry.setPrivacy(privacyInEffect(settings));
     void automationWakeConsumer.resume();
   },
   openPath: (path) => shell.openPath(path),
   knownWorkspaceIds: () => workspaceSummaries().map((workspace) => workspace.workspaceId),
 });
+
+async function currentDiagnostics(): Promise<string> {
+  return diagnosticsText({
+    facts: crashFacts(),
+    reports: telemetry.active,
+    privacy: privacyInEffect(await readCachedUserSettingsFile(stateDir())),
+    crashReport: crashReports.read().report?.text ?? null,
+  });
+}
 
 function registerIpcHandlers(): void {
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
@@ -6216,6 +6270,25 @@ function registerIpcHandlers(): void {
         }
       }),
     }),
+  });
+
+  registerOperations(operationBoundary, reportingOperations, {
+    readDiagnostics: async () => ({ text: await currentDiagnostics(), reports: telemetry.active }),
+    // Main asks where, and writes the text it builds itself.
+    saveDiagnostics: async (_input, { event }) => ({
+      saved: await saveDiagnostics({
+        showSaveDialog: async (options) => {
+          const window = BrowserWindow.fromWebContents(event.sender);
+          return window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
+        },
+        writeFile: (path, text) => writeFile(path, text, "utf8"),
+        defaultPath: join(app.getPath("documents"), "dohc-diagnostics.txt"),
+      }, await currentDiagnostics()),
+    }),
+    takeReportsNotice: () => ({ show: telemetry.takeNotice() }),
+    reportRendererError: ({ origin, error }) => {
+      telemetry.reportError({ kind: "renderer", origin, error });
+    },
   });
 
   registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<

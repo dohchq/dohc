@@ -7,6 +7,7 @@ import {
   crashReportRoot,
   crashReportText,
   createCodeFrames,
+  createCodeLocations,
   formatCrashEvent,
   type CrashFacts,
 } from "./crashReport";
@@ -72,6 +73,18 @@ describe("crash report stack frames", () => {
       .toBe("at <dohc>/Resources/app.asar/out/main/index.js:4:2");
     expect(crashReportRoot({ isPackaged: false, appPath: join(INSTALL, "apps", "desktop"), resourcesPath: "unused" }))
       .toBe(INSTALL);
+  });
+});
+
+describe("code locations for error reports", () => {
+  it("keeps a file name's own case, which Windows folds for the report text", () => {
+    const asset = join(INSTALL, "resources", "app.asar", "dist", "renderer", "assets", "Index-AbC9.js");
+    const frame = `at render (${asset}:7:8)`;
+    expect(createCodeLocations([INSTALL.toUpperCase()], "win32")(frame))
+      .toEqual({ path: "/resources/app.asar/dist/renderer/assets/Index-AbC9.js", line: 7, column: 8 });
+    expect(createCodeFrames([INSTALL], "win32")(frame))
+      .toBe("at <dohc>/resources/app.asar/dist/renderer/assets/index-abc9.js:7:8");
+    expect(createCodeLocations([INSTALL], process.platform)(`at x (${join(INSTALL, "..", "elsewhere.js")}:1:1)`)).toBeNull();
   });
 });
 

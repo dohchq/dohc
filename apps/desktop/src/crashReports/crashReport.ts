@@ -43,6 +43,8 @@ export const MESSAGE_WITHHELD = "<message withheld>";
 export const FRAME_WITHHELD = "<frame>";
 const FRAMES_PER_ERROR = 25;
 const CAUSE_DEPTH = 3;
+// Stack lines read per error, before frames outside dohc collapse.
+const STACK_LINES = 200;
 const LINE_MAX_CHARS = 500;
 
 const ENGINE_STAGE: Record<Extract<CrashEvent, { kind: "engine" }>["stage"], string> = {
@@ -143,34 +145,55 @@ export function crashReportText(events: readonly string[], leftOut: number): str
 
 function errorLines(error: unknown, codeFrame: (frame: string) => string, withStack: boolean): string[] {
   const lines: string[] = [];
+  errorChain(error).forEach((link, depth) => {
+    const label = depth === 0 ? "Error" : "Caused by";
+    if (link.kind === "value") {
+      lines.push(`${label}: a value of type ${link.type}`);
+      return;
+    }
+    lines.push(`${label}: ${link.name}: ${link.message}`);
+    if (!withStack) return;
+    const frames: string[] = [];
+    for (const line of link.stack) {
+      const frame = codeFrame(line);
+      // Runs of frames outside dohc read as one.
+      if (frame !== FRAME_WITHHELD || frames.at(-1) !== FRAME_WITHHELD) frames.push(frame);
+      if (frames.length === FRAMES_PER_ERROR) break;
+    }
+    lines.push(...frames.map((frame) => `    ${frame}`));
+  });
+  return lines;
+}
+
+// One error and its causes, outermost first. `name` and `message` hold only
+// values from fixed lists; `stack` holds the raw "at" lines, which the
+// caller must pass through a code-location filter before they leave.
+export type ErrorLink =
+  | { kind: "error"; name: string; message: string; stack: readonly string[] }
+  | { kind: "value"; type: string };
+
+export function errorChain(error: unknown): ErrorLink[] {
+  const chain: ErrorLink[] = [];
   let current: unknown = error;
   for (let depth = 0; depth <= CAUSE_DEPTH && current !== undefined; depth += 1) {
-    const label = depth === 0 ? "Error" : "Caused by";
     if (!(current instanceof Error)) {
       // A thrown value can be anything a person typed.
-      lines.push(`${label}: a value of type ${current === null ? "null" : typeof current}`);
+      chain.push({ kind: "value", type: current === null ? "null" : typeof current });
       break;
     }
-    lines.push(`${label}: ${errorSummary(current)}`);
-    if (withStack) {
-      const frames: string[] = [];
-      for (const line of (current.stack ?? "").split("\n")) {
-        if (!/^\s*at\s/.test(line)) continue;
-        const frame = codeFrame(line.trim());
-        // Runs of frames outside dohc read as one.
-        if (frame !== FRAME_WITHHELD || frames.at(-1) !== FRAME_WITHHELD) frames.push(frame);
-        if (frames.length === FRAMES_PER_ERROR) break;
-      }
-      lines.push(...frames.map((frame) => `    ${frame}`));
-    }
+    const stack = (current.stack ?? "").split("\n")
+      .filter((line) => /^\s*at\s/.test(line))
+      .slice(0, STACK_LINES)
+      .map((line) => line.trim());
+    chain.push({ kind: "error", ...errorSummary(current), stack });
     current = current.cause;
   }
-  return lines;
+  return chain;
 }
 
 // The class, the message rebuilt from a known template, and the codes Node
 // and the engine attach, each only when it is on a known list.
-function errorSummary(error: Error): string {
+function errorSummary(error: Error): { name: string; message: string } {
   const name = ERROR_NAMES.has(error.name) ? error.name : VALUE_WITHHELD;
   const message = (error instanceof EngineDaemonUnavailableError ? engineMessage(error.message) : null) ?? MESSAGE_WITHHELD;
   const fields = error as Error & { code?: unknown; wireCode?: unknown; syscall?: unknown };
@@ -181,7 +204,7 @@ function errorSummary(error: Error): string {
     ...(fields.wireCode !== undefined ? [`code ${known(fields.wireCode, WIRE_CODES)}`] : []),
     ...(fields.syscall !== undefined ? [`syscall ${known(fields.syscall, SYSCALLS)}`] : []),
   ];
-  return `${name}: ${message}${codes.length > 0 ? ` (${codes.join(", ")})` : ""}`;
+  return { name, message: `${message}${codes.length > 0 ? ` (${codes.join(", ")})` : ""}` };
 }
 
 // One line of at most `max` characters.
@@ -190,34 +213,61 @@ function clip(text: string, max = LINE_MAX_CHARS): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
+// A place in dohc's own code: a path under one of its roots, starting
+// with "/", in its own spelling, and a line and column.
+export interface CodeLocation {
+  path: string;
+  line: number;
+  column: number;
+}
+
 /**
- * Turns a V8 stack line into `at <dohc>/…:line:col` when it points into one
- * of `roots`, dohc's own code, and into `<frame>` otherwise. The function
- * name is dropped, and a path is kept only when every character in it is one
- * dohc's own file names use.
+ * Finds where a V8 stack line points when that is inside one of `roots`,
+ * dohc's own code, and answers null otherwise. The function name is dropped,
+ * and a path is kept only when every character in it is one dohc's own file
+ * names use.
  */
-export function createCodeFrames(roots: readonly string[], platform: NodeJS.Platform): (frame: string) => string {
+export function createCodeLocations(
+  roots: readonly string[],
+  platform: NodeJS.Platform,
+): (frame: string) => CodeLocation | null {
   const fold = (text: string) => platform === "win32" ? text.toLowerCase().replace(/\\/g, "/") : text;
   const rootPaths = roots.map((root) => fold(root.replace(/[\\/]+$/, "")));
   return (frame) => {
     const location = frame.length > 1_000 ? null : /(?:^at (?:async )?|\()([^()]+):(\d+):(\d+)\)?$/.exec(frame);
-    if (!location) return FRAME_WITHHELD;
+    if (!location) return null;
     let path = location[1]!;
     if (path.startsWith("file://")) {
       try {
         path = fileURLToPath(path);
       } catch {
-        return FRAME_WITHHELD;
+        return null;
       }
     }
     const folded = fold(path);
     for (const root of rootPaths) {
       if (!folded.startsWith(`${root}/`)) continue;
       const relative = folded.slice(root.length);
-      if (!/^(?:\/[\w@+-][\w.@+-]*)+$/.test(relative) || relative.includes("/..")) return FRAME_WITHHELD;
-      return `at <dohc>${relative}:${location[2]}:${location[3]}`;
+      if (!/^(?:\/[\w@+-][\w.@+-]*)+$/.test(relative) || relative.includes("/..")) return null;
+      // A source map needs the file name's own case, which Windows folds.
+      const spelled = path.replace(/\\/g, "/").slice(-relative.length);
+      return {
+        path: fold(spelled) === relative ? spelled : relative,
+        line: Number(location[2]),
+        column: Number(location[3]),
+      };
     }
-    return FRAME_WITHHELD;
+    return null;
+  };
+}
+
+/** A stack line as `at <dohc>/…:line:col`, or `<frame>` outside dohc's code. */
+export function createCodeFrames(roots: readonly string[], platform: NodeJS.Platform): (frame: string) => string {
+  const locate = createCodeLocations(roots, platform);
+  const fold = (text: string) => platform === "win32" ? text.toLowerCase() : text;
+  return (frame) => {
+    const location = locate(frame);
+    return location ? `at <dohc>${fold(location.path)}:${location.line}:${location.column}` : FRAME_WITHHELD;
   };
 }
 

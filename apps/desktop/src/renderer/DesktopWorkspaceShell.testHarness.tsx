@@ -662,6 +662,10 @@ function makeBaseBridge(
     ),
     dismissCrashReport: vi.fn(async (_payload: { through: number }) => undefined),
     sendCrashReport: vi.fn(async (_payload: Record<string, never>) => ({ sent: true })),
+    takeReportsNotice: vi.fn(async (_payload: Record<string, never>) => ({ show: false })),
+    readDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ text: "dohc diagnostics", reports: false })),
+    saveDiagnostics: vi.fn(async (_payload: Record<string, never>) => ({ saved: true })),
+    reportRendererError: vi.fn(async (_payload: unknown) => undefined),
     emitCrashReportChanged: () => {
       for (const callback of [...crashReportCallbacks]) callback();
     },

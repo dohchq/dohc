@@ -32,6 +32,7 @@ export type ShellErrorKind =
   | "kept-files"
   | "record-history"
   | "record-history-run"
+  | "reports"
   | DirectWriteNoticeKind
   | SettingsFileKind;
 
@@ -398,6 +399,17 @@ export function useShellError(workspaceId: string) {
     },
     [push],
   );
+  // The one-time notice that this build sends reports, with the way to
+  // turn them off.
+  const showReportsNotice = useCallback((openPrivacy: () => void) => {
+    push({
+      message: "dohc sends usage and error reports to its developers. They hold no file names, content, chats, or links.",
+      retry: null,
+      tone: "success",
+      kind: "reports",
+      action: { label: "Privacy settings", run: openPrivacy },
+    });
+  }, [push]);
   // One row per kept copy the engine lists. A copy listed for the first time
   // arrives as a toast; several at once arrive as one summary toast instead.
   // A copy no longer listed, because it was saved, loses its row. `more`
@@ -502,6 +514,7 @@ export function useShellError(workspaceId: string) {
     showSettingsFileNotice,
     showDirectWriteNotice,
     showSuccessNotice,
+    showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
     hideShellError,

@@ -83,6 +83,71 @@ Development builds honor the override only with `DOHC_DESKTOP_MOCK_UPDATES=1`.
 Before launch, test tampered updates against signed Windows and macOS release artifacts.
 Verify the Linux update trust model separately; the Windows verifier does not cover AppImage updates.
 
+## Configure usage and error reports
+
+Packaged builds send usage reports to PostHog and short error reports to
+Sentry when the build names those services. The
+[reports reference](../reference/usage-and-error-reports.md) lists what they
+hold for users. Development builds, test runs, isolated test launches, and dry
+runs send nothing.
+
+Set these repository variables. They are not secrets, because the app carries
+the values.
+
+| Variable | Value |
+| --- | --- |
+| `DOHC_POSTHOG_KEY` | The PostHog project API key, which starts with `phc_`. |
+| `DOHC_POSTHOG_HOST` | `https://us.i.posthog.com`, `https://eu.i.posthog.com`, or your own HTTPS host. |
+| `DOHC_SENTRY_DSN` | The Sentry project DSN. |
+
+The workflow sets `DOHC_SENTRY_DIST` to `<platform>-<arch>` for each package.
+The release name is `dohc-desktop@<version>`. A missing or invalid value turns
+off that service only. `scripts/verification/build.mjs` includes these
+variables in the desktop build fingerprint.
+
+Before the first release that reports:
+
+1. In PostHog, turn on **Discard client IP data** for the project.
+2. In PostHog, set a billing limit. The free tier covers 1 million events a month.
+3. In Sentry, turn on **Prevent storing of IP addresses** for the project.
+4. In Sentry, keep spike protection on and set a rate limit on the DSN key.
+   The Developer plan covers 5,000 errors a month; Team covers 50,000.
+
+The app limits what it sends:
+
+| Limit | Usage reports | Error reports |
+| --- | --- | --- |
+| Events per launch | 1,000 | 25 |
+| Waiting at once | 100 | 10 |
+| Sent | 60 s after the first waits, or at once when 50 wait | 1 s after the problem |
+| Repeats | Each action counts | Each distinct problem once per launch |
+
+A request times out after 10 s and is never retried. The app honors
+`Retry-After` and `X-Sentry-Rate-Limits` for up to one hour, and drops reports
+until then. At quit, waiting reports get one try of 3 s that quit does not wait for.
+
+Usage events are `app_launched`, `workspace_created`, `workspace_opened`,
+`share_created`, `app_published`, and `chat_message_sent`. To add one, add it
+to `UsageEvent` and `USAGE_EVENTS` in `apps/desktop/src/telemetry/telemetry.ts`,
+then update the reports reference.
+
+### Upload source maps
+
+A production build writes hidden source maps beside its files. The installer
+leaves them out. To let Sentry show original source lines, add these:
+
+| Name | Kind | Value |
+| --- | --- | --- |
+| `SENTRY_AUTH_TOKEN` | Environment secret | An organization token that can upload release files. |
+| `SENTRY_ORG` | Variable | The organization slug. |
+| `SENTRY_PROJECT` | Variable | The project slug. |
+| `SENTRY_URL` | Variable | Set only for self-hosted Sentry. |
+
+The **Upload source maps** step then runs `@sentry/cli` 3.8.0 for each package.
+It uploads `apps/desktop/dist` with that package's release and dist, under
+the URL prefix `app:///dist`. Error reports name frames the same way. Without
+the token, the step skips the upload.
+
 ## What the release workflow proves
 
 The workflow runs the release helper tests and the desktop release smoke. Each

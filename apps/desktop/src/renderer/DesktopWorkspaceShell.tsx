@@ -796,6 +796,7 @@ export function DesktopWorkspaceShell(props: {
     clearEditorGroupRefusalError,
     showSettingsFileNotice,
     showSuccessNotice,
+    showReportsNotice,
     showKeptCopies,
     showKeptCopySaved,
     showDirectWriteNotice,
@@ -3843,6 +3844,17 @@ export function DesktopWorkspaceShell(props: {
     reportError: reportShellError,
     showSuccess: showSuccessNotice,
   });
+  // Main answers true once per installation, the first time this build
+  // reports, so the person learns about reports before any leaves. The notice
+  // is about this computer, not the workspace, so any open window shows it.
+  useEffect(() => {
+    void bridge()
+      .takeReportsNotice({})
+      .then(({ show }) => {
+        if (show) showReportsNotice(() => openSettings("privacy"));
+      })
+      .catch(() => undefined);
+  }, [openSettings, showReportsNotice]);
 
   const refreshShareView = useCallback(async (): Promise<ShareViewRefresh> => {
     if (!shareView) return "current";

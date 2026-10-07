@@ -24,6 +24,8 @@ directories:
 files:
   - dist/**
   - "!**/*.tsbuildinfo"
+  # Source maps go to the error report service, not into the installer.
+  - "!dist/**/*.map"
   - "!node_modules/@dohc/*/src/**/*.test.ts"
   - "!node_modules/@dohc/sync-relay/dist/**"
   # Main bundles the Effect runtime; the CLI owns its dependencies.
