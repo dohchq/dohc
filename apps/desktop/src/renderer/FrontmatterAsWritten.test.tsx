@@ -328,13 +328,27 @@ describe("useFileText", () => {
     view.rerender(<Live body={canonical} ydoc={doc} saveState={saveProblem("changed-on-disk", "The file changed on disk.")} />);
     await settle();
     expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
-    expect(shown()).toBe("---\nstatus: draft\n---");
+    // Closed and stale, the old block is nowhere in the DOM.
+    expect(screen.getByTestId("frontmatter-as-written").textContent).not.toContain("status: draft");
 
     expand();
     await settle();
     expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
     expect(shown()).toBe("---\nstatus: ready\n---");
     expect(opened()).toBe(true);
+  });
+
+  it("keeps a closed section's text until a reason to read, then takes it out of the DOM", () => {
+    const canonical = "---\nstatus: draft\n---\n\nBody";
+    const doc = markdownToYDoc(canonical);
+    const view = render(<Live body={canonical} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
+    expect(opened()).toBe(false);
+    expect(shown()).toBe("---\nstatus: draft\n---");
+    // The inspector read the file again after it changed.
+    view.rerender(<Live body={"---\nstatus: ready\n---\n\nBody"} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
+    expect(screen.getByTestId("frontmatter-as-written").textContent).not.toContain("status: draft");
+    expect(screen.getByTestId("frontmatter-as-written").textContent).not.toContain("status: ready");
+    expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
   });
 
   it("reads once for activity that arrives before its read starts, and owes one more while it is out", async () => {

@@ -33,8 +33,9 @@ function opensByDefault(text: string, propertiesShown: boolean): boolean {
  * engine reports the file changed on disk, and when it reports every edit
  * saved here after the document's frontmatter changed. Activity reads
  * nothing while the text has no block; a later inspector read with a block
- * asks for one read instead. Closed, it reads nothing. Opening hides the
- * text until a read started after opening succeeds. A save to the host or a pending or failed save keeps the text
+ * asks for one read instead. Closed, it reads nothing, and any reason to
+ * read hides its text. Opening hides the text until a read started after
+ * opening succeeds. A save to the host or a pending or failed save keeps the text
  * read last.
  */
 function useFileText(input: {
@@ -112,8 +113,14 @@ function useFileText(input: {
         if (live.current.mounted && live.current.open) start();
       });
   }, [workspaceId, path]);
+  // Closed, a reason to read instead marks the text stale, so the DOM never
+  // holds text the file may no longer hold.
   const readFile = useCallback(() => {
-    if (!live.current.open || flight.current === "queued") return;
+    if (!live.current.open) {
+      setFile((last) => (last.stale ? last : { ...last, stale: true }));
+      return;
+    }
+    if (flight.current === "queued") return;
     if (flight.current === "reading") owed.current = true;
     else start();
   }, [start]);
@@ -148,12 +155,15 @@ function useFileText(input: {
     [readFile, workspaceId, path],
   );
 
-  // The inspector's later reads give no text. When one finds a block the
-  // section lacks, the section reads the file itself.
-  const hinted = blockOf(input.body) !== "";
+  // The inspector's later reads give no text, but each says the file
+  // changed. Closed, that marks the text stale. Open, a read that finds a
+  // block the section lacks makes the section read the file itself.
+  const inspected = useRef(input.body);
   useEffect(() => {
-    if (hinted && !live.current.present) readFile();
-  }, [hinted, readFile]);
+    if (inspected.current === input.body) return;
+    inspected.current = input.body;
+    if (!live.current.open || (blockOf(input.body) !== "" && !live.current.present)) readFile();
+  }, [input.body, readFile]);
   return file;
 }
 
