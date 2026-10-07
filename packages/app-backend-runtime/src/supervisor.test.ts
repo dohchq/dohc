@@ -901,7 +901,8 @@ it.each(["abort","deadline"])("settles %s promptly when its own old worker is be
 });
 
 
-it("checkpoints a hostile 64-swap replay before each later worker failure and resumes without repeating saved work",{timeout: 8 * DEFAULT_LIMITS.deadlineMs},async()=>{
+// Test allowance for 128 seed/replay steps and six worker lifetimes (seed, four replay workers, reopen).
+it("checkpoints a hostile 64-swap replay before each later worker failure and resumes without repeating saved work",{timeout: 2*64*DEFAULT_LIMITS.evaluationMs+6*DEFAULT_LIMITS.deadlineMs},async()=>{
   const swapSchema="CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL UNIQUE); INSERT INTO items VALUES(1,'left'),(2,'right');";
   const swapSource=`globalThis.operations={run(ctx,input){
     if(input.swap){const rows=ctx.db.query('SELECT value FROM items ORDER BY id');
@@ -963,8 +964,7 @@ it("checkpoints a hostile 64-swap replay before each later worker failure and re
   try{expect((await reopened.invoke(read)).revision).toBe(64);expect(applied).toHaveLength(64);}
   finally{await reopened.close();}
   expect(closedPids.sort()).toEqual(pids.sort());
-  // Test allowance for 128 seed/replay steps and six worker lifetimes (seed, four replay workers, reopen).
-},2*64*DEFAULT_LIMITS.evaluationMs+6*DEFAULT_LIMITS.deadlineMs);
+});
 
 it.each([
   {events:1,interval:100,completed:true,afterCheckpoint:false},
