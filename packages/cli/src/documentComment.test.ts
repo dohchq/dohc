@@ -2,7 +2,8 @@ import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { parseCliArguments } from "./args";
 import { executeCli } from "./index";
-import { CLI_PROTOCOL_VERSION, MAX_COMMENT_BODY_BYTES } from "./protocol";
+import { CHAT_MESSAGE_TOO_LONG, MAX_CHAT_MESSAGE_BODY_BYTES } from "@dohc/workspace-contracts/chat-message-body";
+import { CLI_PROTOCOL_VERSION } from "./protocol";
 import * as stdin from "./stdin";
 
 const started = { ok: true, path: "notes/plan.md", threadId: "thread-file", messageId: "message-first", warning: "Check the chat." };
@@ -70,16 +71,16 @@ describe("document comment", () => {
   });
 
   it.each([false, true])("refuses oversized UTF-8 bodies before dispatch with stdin=%s", async (fromStdin) => {
-    for (const body of ["a".repeat(MAX_COMMENT_BODY_BYTES + 1), "界".repeat(21_846)]) {
+    for (const body of ["a".repeat(MAX_CHAT_MESSAGE_BODY_BYTES + 1), "界".repeat(21_846)]) {
       const request = vi.fn();
       expect(await executeCli({ argv: [...base, ...(fromStdin ? ["-"] : ["--text", body])], request, readStdin: async () => body }))
-        .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: comment body is at most 64 KiB as UTF-8\n" });
+        .toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${CHAT_MESSAGE_TOO_LONG}\n` });
       expect(request).not.toHaveBeenCalled();
     }
   });
 
   it.each([false, true])("accepts the exact UTF-8 byte limit with stdin=%s", async (fromStdin) => {
-    for (const body of ["a".repeat(MAX_COMMENT_BODY_BYTES), "界".repeat(21_845) + "a"]) {
+    for (const body of ["a".repeat(MAX_CHAT_MESSAGE_BODY_BYTES), "界".repeat(21_845) + "a"]) {
       const request = vi.fn(async () => started);
       expect((await executeCli({ argv: [...base, ...(fromStdin ? ["-"] : ["--text", body])], request, readStdin: async () => body })).exitCode).toBe(0);
       expect(request).toHaveBeenCalledWith(expect.objectContaining({ args: expect.objectContaining({ body }) }));
@@ -92,7 +93,7 @@ describe("document comment", () => {
     async function* pipe() {
       try {
         chunksRead += 1;
-        yield Buffer.alloc(MAX_COMMENT_BODY_BYTES, "a");
+        yield Buffer.alloc(MAX_CHAT_MESSAGE_BODY_BYTES, "a");
         chunksRead += 1;
         yield Buffer.from("界");
         chunksRead += 1;
@@ -102,12 +103,12 @@ describe("document comment", () => {
       }
     }
     const readStdinText = stdin.readStdinText;
-    const spy = vi.spyOn(stdin, "readStdinText").mockImplementation((_stream, maxBytes) => readStdinText(pipe(), maxBytes));
+    const spy = vi.spyOn(stdin, "readStdinText").mockImplementation((_stream, limit) => readStdinText(pipe(), limit));
     const request = vi.fn();
     try {
       expect(await executeCli({ argv: [...base, "-"], request }))
-        .toEqual({ exitCode: 1, stdout: "", stderr: "dohc: stdin body is at most 64 KiB as UTF-8\n" });
-      expect(spy).toHaveBeenCalledWith(process.stdin, MAX_COMMENT_BODY_BYTES);
+        .toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${CHAT_MESSAGE_TOO_LONG}\n` });
+      expect(spy).toHaveBeenCalledWith(process.stdin, { bytes: MAX_CHAT_MESSAGE_BODY_BYTES, message: CHAT_MESSAGE_TOO_LONG });
       expect(chunksRead).toBe(2);
       expect(closed).toBe(true);
       expect(request).not.toHaveBeenCalled();
