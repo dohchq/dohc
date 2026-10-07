@@ -1,3 +1,4 @@
+import { engineSaveState } from "../../workspaces/engineYDocSaveState";
 // @vitest-environment jsdom
 import {
   act,
@@ -87,14 +88,14 @@ function sharedBridge() {
   };
 
   function emit(
-    state: EngineYDocSaveStateEvent["state"],
+    state: import("../../ipc/channels").EngineYDocSaveStateName,
     seq: number,
   ): void {
     const sessionId = openedSessionIds.at(-1);
     if (!sessionId) throw new Error("session not open yet");
     act(() => {
       for (const listener of [...saveStateListeners]) {
-        listener({ sessionId, state, seq });
+        listener({ sessionId, ...engineSaveState(state), seq });
       }
     });
   }
@@ -153,7 +154,7 @@ function Consumer(props: {
         {String(engine.available)}
       </span>
       <span data-testid={"opening-" + props.id}>{String(engine.opening)}</span>
-      <span data-testid={"state-" + props.id}>{engine.saveState}</span>
+      <span data-testid={"state-" + props.id}>{engine.goneCause ?? engine.saveState.kind}</span>
       <span data-testid={"deleted-" + props.id}>
         {String(engine.deletedWhileEditing)}
       </span>
@@ -375,8 +376,8 @@ it("shares one document lease until the final consumer unmounts", async () => {
   );
 
   harness.emit("saved", 1);
-  expect(screen.getByTestId("state-first").textContent).toBe("saved");
-  expect(screen.getByTestId("state-second").textContent).toBe("saved");
+  expect(screen.getByTestId("state-first").textContent).toBe("saved-here");
+  expect(screen.getByTestId("state-second").textContent).toBe("saved-here");
 
   harness.emit("deleted", 1);
   expect(screen.getByTestId("deleted-first").textContent).toBe("true");

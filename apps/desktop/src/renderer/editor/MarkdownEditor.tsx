@@ -655,6 +655,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
                 stateRef: slashStateRef,
                 setState: publishSlashState,
                 runCommandRef: slashCommandRunnerRef,
+                yTiptap: collaborationExtensions?.yTiptap ?? null,
               }),
               makeBlockControlsPlugin({
                 onInsertRef: blockInsertRef,
@@ -692,7 +693,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             ];
           },
         }),
-      [collab?.ydoc, publishSlashState],
+      [collab?.ydoc, collaborationExtensions, publishSlashState],
     );
 
     // Cmd/Ctrl+K registered via addKeyboardShortcuts on its own extension —

@@ -235,11 +235,15 @@ export function CollectionRecordFieldWrite({
 
   useEffect(() => {
     if (!applied.current) return;
-    switch (docState.saveState) {
+    if (docState.deletedWhileEditing || docState.readOnlyWhileEditing) {
+      onFailed(docState.saveError ? `dohc could not save this change. ${docState.saveError}` : null);
+      return;
+    }
+    switch (docState.saveState.kind) {
       case "saving":
         sawSaving.current = true;
         return;
-      case "saved":
+      case "saved-here":
         // Only a "saved" AFTER our own edit was staged counts: the session
         // opens in "saved", and releasing on that one would race the flush.
         if (sawSaving.current) onSettled();
@@ -267,10 +271,7 @@ export function CollectionRecordFieldWrite({
         onHeldDurably("Saved on this device. The shared file update is pending.");
         return;
       case "error":
-      case "read-only":
       case "changed-on-disk":
-      case "deleted":
-      case "object-changed":
         onFailed(
           docState.saveError
             ? `dohc could not save this change. ${docState.saveError}`
@@ -280,6 +281,8 @@ export function CollectionRecordFieldWrite({
     }
   }, [
     docState.saveState,
+    docState.deletedWhileEditing,
+    docState.readOnlyWhileEditing,
     docState.saveError,
     change.recordPath,
     onSettled,

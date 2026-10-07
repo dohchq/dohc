@@ -1,11 +1,22 @@
 import { constants as osConstants } from "node:os";
 import * as dns from "node:dns";
-import { DAEMON_ERROR_CODES } from "@dohc/workspace-engine-client";
-import { ENGINE_CLIENT_ERROR_CODES } from "@dohc/workspace-engine-client/daemon";
+import {
+  CHATS_METHOD, DAEMON_ERROR_CODES, KEY_ENVELOPE_METHOD, VERSIONED_METHOD, WORKSPACE_METHOD, YDOC_METHOD,
+} from "@dohc/workspace-engine-client";
+import { ENGINE_CLIENT_ERROR_CODES, ENGINE_LIFECYCLE_METHOD } from "@dohc/workspace-engine-client/daemon";
 
 // The only values a crash report copies from an error. Each comes from a
 // fixed list, never from the shape of the text, so a field that holds a
 // person's words or a secret is withheld however it looks.
+
+export const ENGINE_METHODS: ReadonlySet<string> = new Set([
+  ...Object.values(WORKSPACE_METHOD),
+  ...Object.values(VERSIONED_METHOD),
+  ...Object.values(YDOC_METHOD),
+  ...Object.values(CHATS_METHOD),
+  ...Object.values(KEY_ENVELOPE_METHOD),
+  ...Object.values(ENGINE_LIFECYCLE_METHOD),
+]);
 
 export const ERROR_NAMES: ReadonlySet<string> = new Set([
   // JavaScript and the web platform.

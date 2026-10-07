@@ -884,6 +884,33 @@ describe("EditorTabs overlay scrollbar", () => {
     expect(onCloseGroup).toHaveBeenCalledWith("left");
   });
 
+  // Forced colors remove fills, so the mark is a border, which they keep, in
+  // the system Highlight color. A strip with no tabs carries it too.
+  it.each([
+    ["with tabs", tabs],
+    ["with no tabs", []],
+  ])("draws the active-group mark as a border that forced colors keep, %s", (_label, groupTabs) => {
+    render(
+      <EditorTabs
+        groupId="left"
+        groupNumber={1}
+        tabs={groupTabs}
+        activeTab={groupTabs[0]?.path ?? null}
+        activeTabDirty={false}
+        recoveryPaths={new Set<string>()}
+        onActivate={noop}
+        onClose={noop}
+        onContextMenu={noop}
+        onMove={noop}
+        onMoveToGroup={noop}
+        onCreateGroupRight={noop}
+      />,
+    );
+    const classes = screen.getByTestId("editor-tabs-active-group").className.split(" ");
+    expect(classes).toEqual(expect.arrayContaining(["border-t-2", "border-accent", "forced-colors:border-[Highlight]"]));
+    expect(classes.some((name) => name.startsWith("bg-"))).toBe(false);
+  });
+
   it.each([
     ["Chats", CHATS_TAB_PATH],
     ["a site preview", siteTabPath("client-portal")],

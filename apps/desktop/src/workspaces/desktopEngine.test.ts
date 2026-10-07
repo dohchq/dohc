@@ -487,6 +487,49 @@ describe("desktop engine restart coordination", () => {
     } finally { await f.close(); }
   });
 
+  it("waits for the startup smoke cap after progress stalls before reporting an engine failure", async () => {
+    const f = fixture();
+    const opened = deferred();
+    const cancel = vi.fn(async (_requestId: number) => {});
+    let openId!: number;
+    const client: EngineDaemonClient = {
+      reportsProgress: () => true,
+      async sendRequest(request, _signal, onProgress) {
+        if (request.method === "workspace.open" && String(workspaceIdOf(request)).startsWith("desktop-startup-smoke-")) {
+          openId = request.id;
+          onProgress?.();
+          opened.resolve();
+          return await new Promise<Response>(() => {});
+        }
+        return await f.client.sendRequest(request);
+      },
+      cancelRequest: cancel,
+      onEvent: handler => f.client.onEvent(handler),
+      close: () => f.client.close(),
+      waitForExit: () => f.client.waitForExit(),
+    };
+    const close = vi.spyOn(client, "close");
+    f.setLaunch(async () => client);
+    try {
+      vi.useFakeTimers();
+      await f.engine.start();
+      await opened.promise;
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(cancel).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      expect(f.engine.daemon!.currentClient()).toBe(client);
+      expect(f.dependencies.recordEngineProblem).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(109_010);
+      await vi.waitFor(() => expect(f.dependencies.recordEngineProblem).toHaveBeenCalled(), { timeout: 15_000 });
+      expect(cancel).toHaveBeenCalledWith(openId);
+      expect(close).toHaveBeenCalledOnce();
+      expect(f.dependencies.recordEngineProblem).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: "Rust engine workspace.open timed out after 120000ms." }), "restarting",
+      );
+      expect(f.dependencies.dialog.showErrorBox).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
   it("records one crash problem per engine crash, then the final verdict", async () => {
     const f = fixture();
     const exit = new Error("exited"); const attempt = new Error("attempt failed"); const verdict = new Error("limit");

@@ -79,14 +79,16 @@ vi.mock("./collab/useEngineDoc", () => ({
 }));
 
 function engineDocState(
-  partial: Partial<Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError">>,
+  partial: Partial<Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError" | "readOnlyWhileEditing" | "deletedWhileEditing">>,
 ): UseEngineDoc {
   return {
     available: false,
     opening: false,
     doc: null,
-    saveState: "saved",
+    saveState: { kind: "saved-here" },
     saveError: null,
+    readOnlyWhileEditing: false,
+    deletedWhileEditing: false,
     ...partial,
   } as UseEngineDoc;
 }
@@ -622,7 +624,7 @@ describe("CollectionPage", () => {
         doc.getMap("frontmatter").set("id", item.id);
         return doc;
       });
-      const saves: UseEngineDoc["saveState"][] = ["saved", "saved"];
+      const saves: UseEngineDoc["saveState"][] = [{ kind: "saved-here" }, { kind: "saved-here" }];
       docMock.current = (input) => {
         const index = records.findIndex(
           (item) => item.path === (input as { path: string }).path,
@@ -640,9 +642,9 @@ describe("CollectionPage", () => {
       }
       for (let index = 0; index < records.length; index += 1) {
         expect(docs[index]!.getMap("frontmatter").get("done")).toBe(true);
-        saves[index] = "saving";
+        saves[index] = { kind: "saving" };
         page.rerender(pageWithHost());
-        saves[index] = "saved";
+        saves[index] = { kind: "saved-here" };
         page.rerender(pageWithHost());
         await act(() => vi.advanceTimersByTimeAsync(50));
       }
@@ -676,9 +678,9 @@ describe("CollectionPage", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
     for (let index = 0; index < 2; index += 1) {
-      docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+      docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
       page.rerender(pageWithHost());
-      docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+      docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
       page.rerender(pageWithHost());
     }
     expect(hasPendingCollectionFieldWrites()).toBe(false);
@@ -715,10 +717,10 @@ describe("CollectionPage", () => {
     vi.useFakeTimers();
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
-    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     page.rerender(pageWithHost());
     // The first write settles; the second writer cannot open its session.
-    docMock.current = engineDocState({ available: false, doc, saveState: "saved" });
+    docMock.current = engineDocState({ available: false, doc, saveState: { kind: "saved-here" } });
     page.rerender(pageWithHost());
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
     expect(collectionWriteFailures()).toHaveLength(1);
@@ -802,9 +804,9 @@ describe("CollectionPage", () => {
     await act(() => vi.advanceTimersByTimeAsync(250));
     expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
 
-    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     page.rerender(pageWithHost());
-    docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
     page.rerender(pageWithHost());
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     await act(async () => resolveQuery({
@@ -1115,14 +1117,14 @@ describe("collection authoring", () => {
     await waitFor(() =>
       expect(doc.getMap("frontmatter").get("status")).toBe("Later"),
     );
-    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     page.rerender(
       <>
         {null}
         <CollectionFieldWriteHost />
       </>,
     );
-    docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
     page.rerender(
       <>
         {null}
@@ -1352,7 +1354,7 @@ describe("cell write queue", () => {
         ? engineDocState({
             available: true,
             doc: firstDoc,
-            saveState: "read-only",
+            saveState: { kind: "unknown" }, readOnlyWhileEditing: true,
             saveError: "This workspace is read-only.",
           })
         : engineDocState({ available: true, doc: nextDoc });
@@ -1404,7 +1406,7 @@ describe("cell write queue", () => {
         ? engineDocState({
             available: true,
             doc: firstDoc,
-            saveState: "file-locked",
+            saveState: { kind: "file-locked", reason: "test failure", issueId: null },
           })
         : engineDocState({ available: true, doc: nextDoc });
     };
@@ -1453,7 +1455,7 @@ describe("cell write queue", () => {
       (input as { path: string }).path === "tasks/Plan.md"
         ? engineDocState({ available: true, doc: firstDoc, saveState })
         : engineDocState({ available: true, doc: nextDoc });
-    docMock.current = docFor("saved");
+    docMock.current = docFor({ kind: "saved-here" });
     const bridge = makeBridge(
       [withCheckbox("rec-1", "Plan"), withCheckbox("rec-2", "Ship")],
       CHECKBOX_SCHEMA,
@@ -1486,9 +1488,9 @@ describe("cell write queue", () => {
     page.unmount();
 
     // The pending head settles only now, after the page is gone.
-    docMock.current = docFor("saving");
+    docMock.current = docFor({ kind: "saving" });
     host.rerender(<CollectionFieldWriteHost />);
-    docMock.current = docFor("saved");
+    docMock.current = docFor({ kind: "saved-here" });
     host.rerender(<CollectionFieldWriteHost />);
 
     await waitFor(() =>
@@ -1899,11 +1901,11 @@ describe("CollectionRecordFieldWrite", () => {
     // the staged local-update flush, so the writer must still be waiting.
     expect(props.onSettled).not.toHaveBeenCalled();
 
-    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
     expect(props.onSettled).not.toHaveBeenCalled();
 
-    docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
     expect(props.onSettled).toHaveBeenCalledOnce();
     expect(props.onFailed).not.toHaveBeenCalled();
@@ -1919,7 +1921,7 @@ describe("CollectionRecordFieldWrite", () => {
     docMock.current = engineDocState({
       available: true,
       doc,
-      saveState: "error",
+      saveState: { kind: "error", reason: "test failure", issueId: null },
       saveError: "file too large",
     });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
@@ -1940,7 +1942,7 @@ describe("CollectionRecordFieldWrite", () => {
     docMock.current = engineDocState({
       available: true,
       doc,
-      saveState: "file-locked",
+      saveState: { kind: "file-locked", reason: "test failure", issueId: null },
     });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
     // Inside the window the writer waits on main's own retries.
@@ -1949,12 +1951,12 @@ describe("CollectionRecordFieldWrite", () => {
     expect(props.onHeldDurably).not.toHaveBeenCalled();
 
     // A retry's own saving flip must not restart the window.
-    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
     docMock.current = engineDocState({
       available: true,
       doc,
-      saveState: "file-locked",
+      saveState: { kind: "file-locked", reason: "test failure", issueId: null },
     });
     view.rerender(<CollectionRecordFieldWrite {...props} />);
     vi.advanceTimersByTime(1);
