@@ -3721,15 +3721,20 @@ async fn live_history_publication_and_settlement_benchmark() {
 
 #[tokio::test]
 async fn resumed_binding_publication_starts_at_authenticated_restore_cut() {
-    resumed_binding_publication(false).await;
+    resumed_binding_publication(false, false).await;
 }
 
 #[tokio::test]
 async fn refused_restore_publication_keeps_new_binding_at_authenticated_restore_cut() {
-    resumed_binding_publication(true).await;
+    resumed_binding_publication(true, false).await;
 }
 
-async fn resumed_binding_publication(refused: bool) {
+#[tokio::test]
+async fn unchanged_restore_tail_keeps_next_proof_at_the_published_cut() {
+    resumed_binding_publication(false, true).await;
+}
+
+async fn resumed_binding_publication(refused: bool, unchanged_tail: bool) {
     let mut f = Fixture::with_relay(true).await;
     let first = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
     // Finish publication before the authenticated stop/restore transition.
@@ -3812,9 +3817,18 @@ async fn resumed_binding_publication(refused: bool) {
         )
         .unwrap()
     });
+    if unchanged_tail {
+        let no_change = f.apply(72, vec![0, 0]).await;
+        let unchanged = f
+            .settle(Some(no_change), 100, Arc::new(NoFaults))
+            .await
+            .unwrap();
+        assert_eq!(unchanged.moment_id, restored.moment_id);
+    }
+    let cursor = if unchanged_tail { 73 } else { 72 };
     let receipt = f
         .apply(
-            72,
+            cursor,
             f.doc.richdoc_append_paragraph("After recovered binding"),
         )
         .await;
@@ -3823,7 +3837,7 @@ async fn resumed_binding_publication(refused: bool) {
         .await
         .unwrap();
     assert_eq!(settled.previous_cursor, 71);
-    assert_eq!(settled.terminal_cursor, 72);
+    assert_eq!(settled.terminal_cursor, cursor);
     f.read(|db| {
         let payload:String=db.query_row("SELECT payload_json FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",[&settled.moment_id],|r|r.get(0)).unwrap();
         let payload:serde_json::Value=serde_json::from_str(&payload).unwrap();

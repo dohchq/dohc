@@ -478,7 +478,10 @@ where
         let (previous_cursor,previous_sequence,replayed) = match previous {
             Some((_,end,_,end_sequence,_)) if end == terminal_cursor && restored_origin.as_ref().is_some_and(|anchor|anchor.cursor == end) => (end,end_sequence,None),
             Some((start,end,start_sequence,end_sequence,_)) if end == terminal_cursor => (start,start_sequence,Some(end_sequence)),
-            Some((start,end,_,end_sequence,unavailable)) if end < terminal_cursor => (if unavailable { verified_previous_cursor(conn,&held,start,origin_cursor,max_applications)? } else {end},end_sequence,None),
+            Some((start,end,_,end_sequence,unavailable)) if end < terminal_cursor => {
+                let cursor = if unavailable { verified_previous_cursor(conn,&held,start,origin_cursor,max_applications)? } else {end};
+                (moment_publication_cursor(conn,&held,cursor)?,end_sequence,None)
+            },
             Some(_) => return Err(ApplicationError::Corrupt),
             None => (origin_cursor,origin_sequence,None),
         };
@@ -512,6 +515,36 @@ where
             replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor) })
     }).map_err(E::from)?;
     settle(store, &audit)
+}
+
+/// A no-change settlement can reuse a moment already bound to an earlier cut.
+/// Its next proof includes that accepted tail instead of leaving a relay gap.
+fn moment_publication_cursor(
+    conn: &Connection,
+    held: &Registration,
+    cursor: i64,
+) -> Result<i64, ApplicationError> {
+    let b = &held.binding;
+    let published: Option<(i64, String)> = conn.query_row(
+        "SELECT p.terminal_cursor,p.binding_json FROM live_device_settlements s
+         JOIN replication_log r ON r.workspace_id=s.workspace_id AND r.op_kind='moment.append' AND r.imported=0 AND json_extract(r.payload_json,'$.momentId')=s.moment_id
+         JOIN live_device_settlements p ON p.workspace_id=s.workspace_id AND p.settlement_id=json_extract(r.payload_json,'$.settlementReference.record.settlementId')
+         WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6
+           AND p.relay_database_namespace=s.relay_database_namespace AND p.main_version_id=s.main_version_id AND p.object_id=s.object_id AND p.lineage_claim_id=s.lineage_claim_id AND p.moment_id=s.moment_id AND p.markdown_digest=s.markdown_digest AND p.terminal_cursor<=s.terminal_cursor
+           AND json_extract(p.binding_json,'$.currentPath')=?7 AND json_extract(p.binding_json,'$.restoreFenceGeneration')=?8 AND json_extract(p.binding_json,'$.selectorPaths')=json(?9)
+         ORDER BY p.terminal_cursor DESC LIMIT 1",
+        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,cursor,b.current_path,b.restore_fence_generation,serde_json::to_string(&b.selector_paths).map_err(|_|ApplicationError::Corrupt)?],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(read_sql)?;
+    let Some((published, binding)) = published else {
+        return Ok(cursor);
+    };
+    let binding: LiveObjectBinding =
+        serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
+    if binding != *b {
+        return Err(ApplicationError::Corrupt);
+    }
+    Ok(published)
 }
 
 /// Refused queued proofs can point to one another. Only this full binding's
