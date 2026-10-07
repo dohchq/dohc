@@ -178,17 +178,19 @@ describe("error words", () => {
     ))).toBe("dohc could not prepare this review. The Collection changed after this preview. Preview the change again.");
   });
 
-  it("reads a Collection's reopen wait across IPC, rounded up as its words state it", () => {
-    for (const [retryAfterMs, words, waitMs] of [
-      [1, "Try again in 1 second.", 1000],
-      [4_200, "Try again in 5 seconds.", 5000],
-      [59_999, "Try again in 60 seconds.", 60_000],
-      [60_000, "Try again in 1 minute.", 60_000],
-    ] as const) {
-      expect(readCollectionReopenWait(acrossIpc(new DatasetReopenWaitError(retryAfterMs), "desktop:dataset")))
-        .toEqual({ words: `This Collection is waiting to reopen. ${words}`, waitMs });
+  it("carries a Collection's reopen wait across IPC as a number beside its code", () => {
+    for (const [retryAfterMs, words] of [[1, "1 second"], [4_200, "5 seconds"], [60_000, "1 minute"]] as const) {
+      const wait = new DatasetReopenWaitError(retryAfterMs);
+      expect(String(ipcWireError(wait))).toBe(`DatasetReopenWaitError [dataset_reopen_wait] [retryAfterMs=${retryAfterMs}]: ${wait.message}`);
+      expect(readCollectionReopenWait(acrossIpc(wait, "desktop:dataset")))
+        .toEqual({ words: `This Collection is waiting to reopen. Try again in ${words}.`, waitMs: retryAfterMs });
+      expect(readCollectionReopenWait(wait)).toEqual({ words: wait.message, waitMs: retryAfterMs });
     }
-    expect(readCollectionReopenWait(acrossIpc(new PersistentRuntimeError("worker_stopped", "stopped"), "desktop:dataset"))).toBeNull();
+    // A worker failure that starts a wait carries it too, and keeps its own words.
+    const stopped = Object.assign(new PersistentRuntimeError("worker_stopped", "stopped"), { retryAfterMs: 5000 });
+    expect(String(ipcWireError(stopped))).toBe("PersistentRuntimeError [worker_stopped] [retryAfterMs=5000]: stopped");
+    expect(readError(acrossIpc(stopped, "desktop:dataset")).words).toBe(readError(acrossIpc(new PersistentRuntimeError("worker_stopped", "stopped"), "desktop:dataset")).words);
+    expect(readCollectionReopenWait(acrossIpc(stopped, "desktop:dataset"))).toBeNull();
     expect(readCollectionReopenWait(new Error("This Collection is waiting to reopen. Try again in 5 seconds."))).toBeNull();
   });
 

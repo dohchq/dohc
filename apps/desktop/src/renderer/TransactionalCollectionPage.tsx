@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { Archive, CalendarDays, CheckSquare, ChevronLeft, ChevronRight, Clock, Download, Expand, FileInput, FileSpreadsheet, History, Inbox, LayoutList, MoreHorizontal, PanelsTopLeft, Plus, RefreshCw, Search, Shield, SlidersHorizontal, Square, Table2, Trash2, Undo2 } from "lucide-react";
+import { AlertTriangle, Archive, CalendarDays, CheckSquare, ChevronLeft, ChevronRight, Clock, Download, Expand, FileInput, FileSpreadsheet, History, Inbox, LayoutList, MoreHorizontal, PanelsTopLeft, Plus, RefreshCw, Search, Shield, SlidersHorizontal, Square, Table2, Trash2, Undo2 } from "lucide-react";
 import { parseAppBackendJson, type AppBackendJson } from "@dohc/security-contract/app-backend";
 import type { DatasetOperation } from "@dohc/security-contract/dataset";
 import type { DatasetCopyStatus } from "@dohc/cli/dataset";
@@ -144,8 +144,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   useLayoutEffect(() => { setLocalView(null); }, [props.activeView]);
   const [page, setPage] = useState<TransactionalPage | null>(null);
   const [busy, setBusy] = useState(false);
-  // A Collection waiting to reopen: the wait's words, the load to try again, and whether the wait has ended.
-  const [waiting, setWaiting] = useState<{ words: string; waitMs: number; retry(): void; ended: boolean } | null>(null);
+  // The last read of records that failed, until a read succeeds: its words, the toast's retry, and the wait a reopening Collection set.
+  const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [visualBusy, setVisualBusy] = useState(false), [visualRefresh, setVisualRefresh] = useState(0), [visualChanged, setVisualChanged] = useState(0);
   const visual = selectedView?.kind === "board" || selectedView?.kind === "calendar";
   const [search, setSearch] = useState("");
@@ -189,38 +189,46 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   }
   // One row in Notices for this table's failed loads: a newer failure replaces it, and a load that succeeds removes it.
   const loadIdentity = `collection-load:${dataset.datasetId}:${tableId}`;
+  /** A read of records failed: the page says so in place, and Notices keeps one row for it. */
+  function failLoad(words: string, cause: unknown, retry: () => void): void {
+    const wait = readCollectionReopenWait(cause);
+    setFailure({ words: wait?.words ?? words, retry, wait: wait && { ms: wait.waitMs, ended: false } });
+    onError(words, cause, retry, loadIdentity);
+  }
+  /** A read of records succeeded, in a page, a view, or in place, so nothing about a failed one stays. */
+  function settle(): void {
+    setFailure(null);
+    props.onSettled?.(loadIdentity);
+  }
   async function load(next: Query, history = previous): Promise<void> {
     if (!read || !alive.current) return;
     if (visual) { setDetails(null); setQuery(next); setVisualRefresh(value => value + 1); return; }
     readActive.current?.abort();
     const abort = new AbortController(); readActive.current = abort;
     const mine = ++sequence.current;
-    locked.current = true; setBusy(true); setWaiting(null);
+    locked.current = true; setBusy(true);
     try {
       const response = await invoke(request(read, pageInput(next), crypto.randomUUID()), abort.signal);
       if (!alive.current || sequence.current !== mine || abort.signal.aborted) return;
       const loaded = parsePage(response.result, read.fieldIds);
       setPage(loaded); setQuery(next); setPrevious(history);
       setDetails(open => open && (loaded.rows.find(row => JSON.stringify(row.id) === JSON.stringify(open.id)) ?? null));
-      props.onSettled?.(loadIdentity);
+      settle();
     } catch (cause) {
       if (alive.current && sequence.current === mine && !abort.signal.aborted) {
         setPage(null); setDetails(null);
-        const retry = () => { if (alive.current) void load(next, history); };
-        const wait = readCollectionReopenWait(cause);
-        if (wait) setWaiting({ ...wait, retry, ended: false });
-        onError(`dohc could not load ${table?.name ?? "this collection"}.`, cause, retry, loadIdentity);
+        failLoad(`dohc could not load ${table?.name ?? "this collection"}.`, cause, () => { if (alive.current) void load(next, history); });
       }
     } finally {
       if (alive.current && sequence.current === mine) { locked.current = false; setBusy(false); }
     }
   }
-  // The words state the wait when it began, so once it ends the page says the Collection can reopen.
+  // The words state the wait when it began, so once it ends the page says so.
   useEffect(() => {
-    if (!waiting || waiting.ended) return;
-    const timer = setTimeout(() => setWaiting(current => current === waiting ? { ...waiting, ended: true } : current), waiting.waitMs);
+    if (!failure?.wait || failure.wait.ended) return;
+    const timer = setTimeout(() => setFailure(current => current === failure ? { ...failure, wait: { ms: failure.wait!.ms, ended: true } } : current), failure.wait.ms);
     return () => clearTimeout(timer);
-  }, [waiting]);
+  }, [failure]);
   const contractKey = JSON.stringify([dataset.revision, dataset.revisionSha256, dataset.operations, props.copy?.offline ?? false]);
   const priorContract = useRef(contractKey);
   const activeViewKey = JSON.stringify([selectedView ?? null, contractKey]);
@@ -264,6 +272,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       if (!alive.current || sequence.current !== mine || abort.signal.aborted) return;
       const loaded = parsePage(response.result, read.fieldIds);
       setPage(loaded);
+      settle();
       showOpenRecord(loaded.rows);
     } catch {
       // Nothing to say: the change happened elsewhere, and the page still shows its last read.
@@ -363,6 +372,8 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   }
   const disabled = busy || visualBusy || pending !== null || resourceBusy;
   const readDisabled = busy || visualBusy || resourceBusy;
+  // Records that could not load take no changes until a read shows them; Search and Refresh still read again.
+  const writeDisabled = disabled || failure !== null;
   if (!table || !read) return <section aria-label="Collection" className="p-4 text-sm text-muted">This collection is unavailable. Ask its owner for access.</section>;
   const editorFields = editor?.kind === "edit" ? [editor.field] : createFields;
   const canCreateForm = props.onCreateForm && operations.some(operation => operation.kind === "create" && operation.access === "link" && !operation.readOnly);
@@ -371,7 +382,7 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   return <section aria-label={table.name} aria-busy={busy} className="flex h-full min-h-0 flex-col gap-3 p-4">
     <header className="flex flex-wrap items-center justify-between gap-3"><h2 className="m-0 min-w-0 truncate text-sm font-semibold text-ink">{table.name}</h2>
       <div className="flex shrink-0 items-center gap-2">{props.automationsButton}
-      {canCreate ? <PrimaryButton className="flex shrink-0 items-center gap-1.5" disabled={disabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}><Plus size={16} strokeWidth={1.9} aria-hidden />New record</PrimaryButton> : null}</div>
+      {canCreate ? <PrimaryButton className="flex shrink-0 items-center gap-1.5" disabled={writeDisabled || editor !== null} onClick={event => { trigger.current = event.currentTarget; setDraft(Object.fromEntries(createFields.map(field => [field.fieldId, initialValue(field)]))); setInvalid(null); setEditor({ kind: "create", operation: create }); }}><Plus size={16} strokeWidth={1.9} aria-hidden />New record</PrimaryButton> : null}</div>
     </header>
     <div className="flex flex-wrap items-center gap-2">
       {props.viewControls?.(disabled || editor !== null)}
@@ -385,13 +396,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
       }}><option value="table">Table</option><option value="board" disabled={!fields.some(supportsSort)}>Board</option><option value="calendar" disabled={!fields.some(field=>field.type==="date")}>Calendar</option></select></span>
       {selectedView?.kind==="board" ? <select aria-label="Group board by" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor!==null} value={selectedView.groupBy??""} onChange={event=>setLocalView({...selectedView,groupBy:event.target.value})}>{fields.filter(supportsSort).map(field=><option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select> : null}
       {selectedView?.kind==="calendar" ? <select aria-label="Calendar date" className={selectClass.replace("w-full", "w-auto")} disabled={disabled || editor!==null} value={selectedView.dateField??""} onChange={event=>setLocalView({...selectedView,dateField:event.target.value})}>{fields.filter(field=>field.type==="date").map(field=><option key={field.fieldId} value={field.fieldId}>{field.name}</option>)}</select> : null}
-      {onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => <SecondaryButton key={operation.operationId} disabled={disabled} onClick={() => onCustomAction(operation.operationId)}>{operation.label}</SecondaryButton>) : null}
-      {undo && !props.copy?.offline ? <SecondaryButton disabled={disabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })} className="flex items-center gap-1.5"><Undo2 size={14} strokeWidth={1.9} aria-hidden />Undo last edit</SecondaryButton> : null}
+      {onCustomAction ? operations.filter(operation => operation.kind === "action").map(operation => <SecondaryButton key={operation.operationId} disabled={writeDisabled} onClick={() => onCustomAction(operation.operationId)}>{operation.label}</SecondaryButton>) : null}
+      {undo && !props.copy?.offline ? <SecondaryButton disabled={writeDisabled} onClick={() => void execute({ ...undo, key: crypto.randomUUID(), label: "Reversed the last edit", undo: true })} className="flex items-center gap-1.5"><Undo2 size={14} strokeWidth={1.9} aria-hidden />Undo last edit</SecondaryButton> : null}
       <form className="ml-auto flex min-w-40 flex-1 items-center gap-1" onSubmit={event => { event.preventDefault(); void load({ ...query, after: null, search }, []); }}>
       <input aria-label="Search collection" placeholder="Search records" type="search" maxLength={200} className={`${inputClass.replace("w-full", "w-48 min-w-32 flex-1")}`} value={search} disabled={readDisabled || editor !== null} onChange={event => setSearch(event.target.value)} />
       <IconButton type="submit" aria-label="Search" title="Search" disabled={readDisabled || editor !== null}><Search size={16} strokeWidth={1.9} aria-hidden /></IconButton><IconButton aria-label="Refresh" title="Refresh" disabled={readDisabled || editor !== null} onClick={() => props.onRefresh ? props.onRefresh() : void load(query)}><RefreshCw size={16} strokeWidth={1.9} aria-hidden /></IconButton>
       </form>
-      {canCreateForm ? <SecondaryButton className="flex items-center gap-1.5" disabled={disabled || editor !== null} onClick={props.onCreateForm}><FileInput size={14} strokeWidth={1.9} aria-hidden />Create form</SecondaryButton> : null}
+      {canCreateForm ? <SecondaryButton className="flex items-center gap-1.5" disabled={writeDisabled || editor !== null} onClick={props.onCreateForm}><FileInput size={14} strokeWidth={1.9} aria-hidden />Create form</SecondaryButton> : null}
       {hasManagement ? <details className="group relative" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }} onClick={event => { if (event.target instanceof Element && event.target.closest("button:not(:disabled)")) event.currentTarget.open = false; }} onKeyDown={event => { if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); event.stopPropagation(); } }}>
         <summary aria-label="Manage Collection" title="Manage Collection" className="flex cursor-pointer list-none items-center gap-1 rounded-lg border border-line bg-transparent px-2.5 py-1.5 text-xs text-muted hover:bg-hover hover:text-ink [&::-webkit-details-marker]:hidden">
           <MoreHorizontal size={16} strokeWidth={1.9} aria-hidden />
@@ -413,13 +424,13 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
     {/* Lines stand in only for records not yet shown; a page already shown keeps its records and says it is loading. */}
     {busy ? pending || page ? <p role="status" className="m-0 text-[12px] text-muted">{pending ? "Saving…" : "Loading records…"}</p> : <SkeletonRows label="Loading records…" /> : null}
     {visual && selectedView ? <Suspense fallback={<SkeletonRows label="Opening view…" />}><TransactionalCollectionViews key={JSON.stringify([activeViewKey,query.search])} view={selectedView} fields={fields} search={query.search} refresh={visualRefresh} changed={visualChanged} onReadInPlace={showOpenRecord}
-      disabled={busy || pending !== null || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={onError}
+      disabled={busy || pending !== null || resourceBusy || editor !== null} onBusy={setVisualBusy} onError={failLoad} onLoaded={settle}
       read={(input,signal)=>invoke(request(read,input,crypto.randomUUID()),signal)}
       onOpen={row=>{trigger.current=document.activeElement instanceof HTMLElement ? document.activeElement : null;setDetails(row);}}
       canMove={fieldId=>!props.copy?.offline&&operations.some(operation=>operation.kind==="edit"&&!operation.readOnly&&operation.fieldIds.includes(fieldId))}
       onMove={(row,fieldId,value)=>{const operation=operations.find(operation=>operation.kind==="edit"&&!operation.readOnly&&operation.fieldIds.includes(fieldId));if(!operation||disabled)return;
         void execute({operation,input:{id:row.id,expectedVersion:row.version,values:{[fieldId]:value}},key:crypto.randomUUID(),label:"Moved the record"});}} /></Suspense> : null}
-    {!visual && waiting ? <CollectionReopenWait words={waiting.ended ? REOPEN_READY : waiting.words} onRetry={waiting.retry} /> : null}
+    {failure && !busy && !visualBusy && (visual || !page) ? <CollectionUnavailable waiting={failure.wait !== null} words={failure.wait?.ended ? WAIT_ENDED : failure.words} onRetry={failure.retry} /> : null}
     {!visual && page && page.rows.length === 0 ? <p className="m-0 text-sm text-muted">{query.search ? "No records match. Try a shorter search." : canCreate ? "No records yet. Add a record to start." : "No records yet. Refresh to check for new submissions."}</p> : null}
     {!visual && page && page.rows.length > 0 ? <div className="min-h-0 overflow-auto rounded-md border border-line"><table className="w-full border-collapse text-[13px]">
       <thead className="sticky top-0 bg-panel"><tr>{fields.map(field => <th key={field.fieldId} scope="col" aria-sort={query.sort?.fieldId === field.fieldId ? query.sort.direction === "asc" ? "ascending" : "descending" : undefined} className="border-b border-line px-3 py-2 text-left font-medium text-muted">
@@ -452,8 +463,9 @@ function ScopedCollectionPage(props: TransactionalCollectionPageProps) {
   </section>;
 }
 
-const REOPEN_READY = "This Collection can reopen now.";
-/** A Collection waiting to reopen: the wait, and Try again, which loads the records as the toast's Try again does. */
-export function CollectionReopenWait({ words, onRetry }: { words: string; onRetry(): void }) {
-  return <EmptyState icon={Clock} title={words}><SecondaryButton onClick={onRetry}>Try again</SecondaryButton></EmptyState>;
+type LoadFailure = { words: string; retry(): void; wait: { ms: number; ended: boolean } | null };
+const WAIT_ENDED = "The wait has ended.";
+/** Records that could not load: why, and Try again, which reads them as the toast's Try again does. A Collection waiting to reopen shows a clock. */
+export function CollectionUnavailable({ waiting, words, onRetry }: { waiting: boolean; words: string; onRetry(): void }) {
+  return <EmptyState icon={waiting ? Clock : AlertTriangle} tone={waiting ? "ghost" : "danger"} title={words}><SecondaryButton onClick={onRetry}>Try again</SecondaryButton></EmptyState>;
 }

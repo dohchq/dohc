@@ -22,7 +22,7 @@ const board:CollectionTableView={viewId:"board",name:"Board",kind:"board",groupB
 const calendar:CollectionTableView={...board,viewId:"calendar",name:"Calendar",kind:"calendar",dateField:"date"};
 const empty={rows:[],nextCursor:null};
 function setup(invoke:(request:TransactionalInvoke,signal:AbortSignal)=>Promise<{result:AppBackendJson}>,view=board) {
-  const props={workspaceId:"w",dataset,tableId:"table",invoke,onError:vi.fn(),onNotice:vi.fn(),activeView:view};
+  const props={workspaceId:"w",dataset,tableId:"table",invoke,onError:vi.fn(),onSettled:vi.fn(),onNotice:vi.fn(),activeView:view};
   return {...render(<TransactionalCollectionPage {...props}/>),props};
 }
 afterEach(cleanup);
@@ -39,6 +39,24 @@ it("queries every board group beyond the first table page and pages each indepen
   await screen.findByText("Later task");
   expect(invoke.mock.calls.some(([request])=>(request.input as Record<string,AppBackendJson>).after!==undefined)).toBe(true);
   expect(result.props.onError).not.toHaveBeenCalled();
+});
+it("shows a board's failed read in the page under the table's Notices row, and drops both when the board loads",async()=>{
+  const waiting=new Error("Error invoking remote method 'desktop:dataset': DatasetReopenWaitError [dataset_reopen_wait] [retryAfterMs=5000]: This Collection is waiting to reopen. Try again in 5 seconds.");
+  let open=false;
+  const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{
+    if(!open)throw waiting;
+    const group=(request.input as Record<string,AppBackendJson>).group as {fieldId:string;value:string};
+    return {result:{...empty,group,rows:group.value==="Todo"?[{id:4,version:7,values:{name:"Task",status:"Todo"}}]:[]}};
+  });
+  const result=setup(invoke);
+  expect(await screen.findByText("This Collection is waiting to reopen. Try again in 5 seconds.")).toBeTruthy();
+  expect(result.props.onError).toHaveBeenCalledWith("Could not open this Collection view.",waiting,expect.any(Function),"collection-load:dataset:table");
+  expect(result.props.onSettled).not.toHaveBeenCalled();
+  open=true;
+  fireEvent.click(screen.getByRole("button",{name:"Try again"}));
+  expect(await screen.findByText("Task")).toBeTruthy();
+  expect(screen.queryByText(/waiting to reopen/)).toBeNull();
+  expect(result.props.onSettled).toHaveBeenCalledWith("collection-load:dataset:table");
 });
 it("routes board moves through approved edits with the real version, then offers Undo",async()=>{
   const invoke=vi.fn(async(request:TransactionalInvoke):Promise<{result:AppBackendJson}>=>{

@@ -22,7 +22,10 @@ interface Props {
   disabled: boolean;
   read(input: AppBackendJson, signal: AbortSignal): Promise<{ result: AppBackendJson }>;
   onBusy(busy: boolean): void;
+  /** A read failed; the page shows it and offers `retry`. */
   onError(message: string, error: unknown, retry: () => void): void;
+  /** A read showed records, so the page drops what a failed read left. */
+  onLoaded(): void;
   onOpen(row: TransactionalRow): void;
   onMove(row: TransactionalRow, fieldId: string, value: AppBackendJson): void;
   canMove(fieldId: string): boolean;
@@ -103,7 +106,7 @@ export function TransactionalCollectionViews(props: Props) {
     const { onError, onBusy } = latest.current;
     setLoaded(null); setBusy(true); onBusy(true); reading.current = true;
     void readView(abort.signal).then(next => {
-      if (request===current.current&&!abort.signal.aborted) setLoaded(next);
+      if (request===current.current&&!abort.signal.aborted) { setLoaded(next); latest.current.onLoaded(); }
     }).catch(error => {
       if(request===current.current&&!abort.signal.aborted) onError("Could not open this Collection view.",error,()=>{if(request===current.current)setAttempt(value=>value+1);});
     }).finally(()=>{if(request===current.current&&!abort.signal.aborted){reading.current=false;setBusy(false);onBusy(false);}});
@@ -119,6 +122,7 @@ export function TransactionalCollectionViews(props: Props) {
     void readLatest.current(abort.signal).then(next => {
       if (request!==current.current||abort.signal.aborted) return;
       setLoaded(next);
+      latest.current.onLoaded();
       latest.current.onReadInPlace(next.calendar?.rows ?? next.columns.flatMap(column=>column.page.rows));
     }, () => undefined);
     return () => abort.abort();
@@ -140,7 +144,8 @@ export function TransactionalCollectionViews(props: Props) {
       <IconButton aria-label={`Previous records in ${label}`} title={`Previous records in ${label}`} disabled={disabled||!position.history.length} onClick={()=>onChange({after:position.history.at(-1)??null,history:position.history.slice(0,-1)})}><ChevronLeft size={14} strokeWidth={1.9} aria-hidden /></IconButton>
       <IconButton aria-label={`Next records in ${label}`} title={`Next records in ${label}`} disabled={disabled||!page.nextCursor} onClick={()=>onChange({after:page.nextCursor,history:[...position.history,position.after]})}><ChevronRight size={14} strokeWidth={1.9} aria-hidden /></IconButton></div>;
   }
-  if(!loaded) return busy ? <SkeletonRows label="Loading view…" /> : <div role="status" className="text-sm text-muted">This view could not open. Refresh to try again.</div>;
+  // A view that could not open shows nothing; the page says why and offers Try again.
+  if(!loaded) return busy ? <SkeletonRows label="Loading view…" /> : null;
   const visibleFields = [...props.fields.filter(field=>field.type==="text"),...props.fields.filter(field=>field.type!=="text")].map(field=>field.fieldId);
   return <div className="flex min-h-0 flex-1 flex-col gap-2" aria-busy={busy}>
     {props.view.kind==="board" ? <>

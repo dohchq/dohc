@@ -180,6 +180,9 @@ it("keeps one current Notices row and the wait in the page until the records loa
   fireEvent.click(pageRetry());
   await waitFor(() => expect(noticeRows()).toEqual(["dohc could not load Items. It stopped before it finished. Try again."]), workerWait);
   expect(within(page).queryByText(wait(5))).toBeNull();
+  // The page says the load failed, and offers the toast's Try again.
+  expect(within(page).getByText("dohc could not load Items.")).toBeTruthy();
+  expect(pageRetry()).toBeTruthy();
   // The next wait is longer, and its row replaces the last one.
   fireEvent.click(toastRetry());
   await within(page).findByText(wait(10), {}, workerWait);

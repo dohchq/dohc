@@ -10,7 +10,7 @@ import { BlockMenu } from "../editor/blockControls";
 import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
-import { CollectionReopenWait } from "../TransactionalCollectionPage";
+import { CollectionUnavailable } from "../TransactionalCollectionPage";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
 import { ConfirmDialogCard } from "../ui/ConfirmDialog";
 import { CopyButton, CopyField } from "../ui/CopyButton";
@@ -802,7 +802,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         <Specimen label="Collection waiting, Try again in focus">
           <EmptyPanel>
             <div className="contents" data-force-state="focus-visible" data-force-target="button">
-              <CollectionReopenWait words="This Collection is waiting to reopen. Try again in 10 seconds." onRetry={noop} />
+              <CollectionUnavailable waiting words="This Collection is waiting to reopen. Try again in 10 seconds." onRetry={noop} />
             </div>
           </EmptyPanel>
         </Specimen>
