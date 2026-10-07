@@ -55,11 +55,22 @@ describe("withMarkdownDefault", () => {
 });
 
 describe("withRenameDefault", () => {
-  it("keeps the Markdown default for a file with an extension", () => {
+  it("gives a typed name without an extension the file's own extension", () => {
     expect(withRenameDefault("notes.md", "notes")).toBe("notes.md");
-    expect(withRenameDefault("hello.m", "hello")).toBe("hello.md");
-    expect(withRenameDefault("docs/plan.txt", "docs/plan")).toBe("docs/plan.md");
+    expect(withRenameDefault("report.csv", "report")).toBe("report.csv");
+    expect(withRenameDefault("report.csv", "summary")).toBe("summary.csv");
+    expect(withRenameDefault("report.csv", "summary.")).toBe("summary.csv");
+    expect(withRenameDefault("docs/plan.txt", "docs/outline")).toBe("docs/outline.txt");
+  });
+
+  it("gives back only the last part of a multi-part extension", () => {
+    expect(withRenameDefault("archive.tar.gz", "archive")).toBe("archive.gz");
+  });
+
+  it("respects a typed extension or dotfile exactly", () => {
     expect(withRenameDefault("hello.m", "hello.txt")).toBe("hello.txt");
+    expect(withRenameDefault("archive.tar.gz", "backup.tar.gz")).toBe("backup.tar.gz");
+    expect(withRenameDefault("report.csv", ".env")).toBe(".env");
   });
 
   it("takes the typed name for a file without an extension", () => {

@@ -4,6 +4,22 @@
 // an extension — and a trailing dot reads as "extension not typed yet", so
 // "notes." becomes "notes.md".
 export function withMarkdownDefault(relativePath: string): string {
+  return withDefaultExtension(relativePath, "md");
+}
+
+// A rename keeps the file's own extension. When the renamed file has one and
+// the typed name has none, the typed name takes the file's last extension
+// back: "report.csv" typed as "report" stays "report.csv", and
+// "archive.tar.gz" typed as "archive" becomes "archive.gz", the same last-dot
+// rule file kinds use. A typed extension or dotfile is respected exactly, as
+// for new files. A file without an extension ("LICENSE", ".env") takes the
+// typed name exactly.
+export function withRenameDefault(fromPath: string, toPath: string): string {
+  const extension = extensionOf(leafOf(fromPath));
+  return extension ? withDefaultExtension(toPath, extension) : toPath;
+}
+
+function withDefaultExtension(relativePath: string, extension: string): string {
   // Backend validation accepts "\" as a separator too and drops empty
   // segments (workspace-core paths.ts), so a trailing separator is noise:
   // "notes/" creates the file "notes". Strip it so the default still lands,
@@ -13,25 +29,18 @@ export function withMarkdownDefault(relativePath: string): string {
   if (!leaf || leaf === "." || leaf === "..") return relativePath;
   const dot = leaf.lastIndexOf(".");
   if (dot === 0 && leaf.length > 1) return relativePath; // dotfile: .env
-  if (hasExtension(leaf)) return relativePath; // extension: a.txt
-  if (dot === leaf.length - 1) return `${base}md`; // trailing dot: a.
-  return `${base}.md`; // no extension: a
-}
-
-// Renames keep a file's own extension rules. A file with an extension never
-// loses it: a typed name without one gets the Markdown default, so
-// "notes.md" typed as "notes" stays put. A file without an extension
-// ("LICENSE", ".env") takes the typed name exactly.
-export function withRenameDefault(fromPath: string, toPath: string): string {
-  return hasExtension(leafOf(fromPath)) ? withMarkdownDefault(toPath) : toPath;
+  if (extensionOf(leaf)) return relativePath; // extension: a.txt
+  if (dot === leaf.length - 1) return `${base}${extension}`; // trailing dot: a.
+  return `${base}.${extension}`; // no extension: a
 }
 
 function leafOf(path: string): string {
   return path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
 }
 
-// "a.txt" has an extension. "a", "a." and the dotfile ".env" do not.
-function hasExtension(leaf: string): boolean {
+// The text after the leaf's last dot: "txt" for "a.txt", "gz" for
+// "a.tar.gz". "a", "a." and the dotfile ".env" have none.
+function extensionOf(leaf: string): string | null {
   const dot = leaf.lastIndexOf(".");
-  return dot > 0 && dot < leaf.length - 1;
+  return dot > 0 && dot < leaf.length - 1 ? leaf.slice(dot + 1) : null;
 }

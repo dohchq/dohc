@@ -198,13 +198,18 @@ describe("Explorer kind glyphs", () => {
     fireEvent.keyDown(rename, { key: "Escape" });
   });
 
-  it("keeps a file without an extension a plain file while renaming", async () => {
-    render(<Explorer {...explorerProps({ files: [file("LICENSE")] })} />);
-    fireEvent.click(treeRow("LICENSE"));
-    fireEvent.keyDown(treeRow("LICENSE"), { key: "F2" });
+  it.each([
+    // A file without an extension stays a plain file.
+    ["LICENSE", "NOTICE", "lucide-file"],
+    // A name typed without an extension keeps the file's own.
+    ["report.csv", "summary", "lucide-file-spreadsheet"],
+  ])("keeps %s's kind while renaming it to %s", async (path, name, glyph) => {
+    render(<Explorer {...explorerProps({ files: [file(path)] })} />);
+    fireEvent.click(treeRow(path));
+    fireEvent.keyDown(treeRow(path), { key: "F2" });
     const rename = await screen.findByTestId("tree-edit-input");
-    fireEvent.change(rename, { target: { value: "NOTICE" } });
-    expect(editRowGlyph().classList.contains("lucide-file")).toBe(true);
+    fireEvent.change(rename, { target: { value: name } });
+    expect(editRowGlyph().classList.contains(glyph)).toBe(true);
     fireEvent.keyDown(rename, { key: "Escape" });
   });
 

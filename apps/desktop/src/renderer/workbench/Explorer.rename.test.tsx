@@ -25,6 +25,8 @@ function explorerProps(): ExplorerProps {
       { path: "hello.m", kind: "file" },
       { path: "notes.md", kind: "file" },
       { path: "LICENSE", kind: "file" },
+      { path: "report.csv", kind: "file" },
+      { path: "archive.tar.gz", kind: "file" },
     ],
     folders: ["drafts"],
     editorGroups: [{ id: "group-1", tabs: [], activeTab: null, size: 1 }],
@@ -76,23 +78,38 @@ async function renameTo(path: string, name: string): Promise<void> {
 }
 
 describe("Explorer rename", () => {
-  it("makes a file markdown when the new name has no extension", async () => {
+  it("gives a new name without an extension the file's own extension", async () => {
     render(<Explorer {...explorerProps()} />);
-    await renameTo("hello.m", "hello");
+    await renameTo("report.csv", "summary");
     await waitFor(() =>
       expect(moveWorkspacePath).toHaveBeenCalledWith({
         workspaceId: "workspace-1",
-        fromPath: "hello.m",
-        toPath: "hello.md",
+        fromPath: "report.csv",
+        toPath: "summary.csv",
       }),
     );
+    await waitFor(() => expect((document.activeElement as HTMLElement).dataset.path).toBe("summary.csv"));
   });
 
-  it("leaves a markdown file in place when only its extension is removed", async () => {
+  it.each([
+    ["notes.md", "notes"],
+    ["report.csv", "report"],
+  ])("leaves %s in place when only its extension is removed", async (path, name) => {
     render(<Explorer {...explorerProps()} />);
-    await renameTo("notes.md", "notes");
+    await renameTo(path, name);
+    await act(async () => {});
     expect(screen.queryByTestId("tree-edit-input")).toBeNull();
     expect(moveWorkspacePath).not.toHaveBeenCalled();
+  });
+
+  it("gives back only the last part of a multi-part extension", async () => {
+    render(<Explorer {...explorerProps()} />);
+    await renameTo("archive.tar.gz", "backup");
+    await waitFor(() =>
+      expect(moveWorkspacePath).toHaveBeenCalledWith(
+        expect.objectContaining({ fromPath: "archive.tar.gz", toPath: "backup.gz" }),
+      ),
+    );
   });
 
   it("leaves a file without an extension in place when its name is untouched", async () => {
