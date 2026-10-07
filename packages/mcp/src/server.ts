@@ -445,7 +445,8 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
   );
 
   const chatWriteInput = {
-    body: z.string().min(1).max(65536),
+    // The desktop validates normalized UTF-8 bytes before any chat write.
+    body: z.string().min(1),
     attachments: z.array(z.string().min(1).max(4096)).max(32).optional(),
     needsDecision: z.boolean().optional(),
     options: z.array(z.string().min(1).max(200)).max(12).optional(),

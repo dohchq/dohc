@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
 import {
   AcceptDmPayload, AcceptDmResult, DeclineDmPayload, RequestDmAgainPayload,
   SyncDmsPayload, SyncDmsResult, StartDmPayload, StartDmResult, LeaveDmPayload,
@@ -476,6 +477,7 @@ export function registerDirectMessagesIpcHandlers<
   registerHandler(CHANNELS.startDm, async (event, payload) => {
     assertTrustedSender(event);
     const input = StartDmPayload.parse(payload);
+    const body = normalizeChatMessageBody(input.body);
     return withRendererWorkspaceOperation(
       event.sender,
       input.workspaceId,
@@ -652,7 +654,7 @@ export function registerDirectMessagesIpcHandlers<
                   threadId: running.thread.id,
                   author,
                   authorUserId,
-                  body: input.body,
+                  body,
                   ...(attachments.length > 0 ? { attachments } : {}),
                 })
               : (
@@ -661,7 +663,7 @@ export function registerDirectMessagesIpcHandlers<
                     channelId,
                     author,
                     authorUserId,
-                    body: input.body,
+                    body,
                     ...(attachments.length > 0 ? { attachments } : {}),
                   })
                 ).message;
