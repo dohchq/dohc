@@ -107,8 +107,8 @@ export type UseEngineDoc = {
   // A local update exceeded the permanent transport limit, or main refused a
   // delivery outright. The rejected document is retained for recovery only.
   permanentFailureWhileEditing: boolean;
-  // Main refused a live edit because this workspace became read-only after
-  // the session opened. The rejected document is retained for recovery only.
+  // The live session became read-only after it opened. Unconfirmed local
+  // edits are retained for recovery; a clean access stop creates no draft.
   readOnlyWhileEditing: boolean;
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
