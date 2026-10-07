@@ -259,16 +259,40 @@ function prepareBindingBase(
   }
   p.baseBindingJson = stableJsonStringify(metadata.accepted.binding);
 }
+function requirePublicationPredecessor(
+  storage: StorageContext,
+  p: Prepared,
+  prior: { terminal: number; markdown: string; namespace: string },
+) {
+  require(prior.terminal <= p.previous && prior.markdown === p.before && prior.namespace === p.namespace);
+  if (prior.terminal === p.previous) return;
+  const b = p.initialBinding;
+  // No-change settlements consume their interval without another moment.
+  // Only relay-computed cuts can advance that unchanged artifact's anchor.
+  const cut = storage.db.prepare(
+    `SELECT j.relay_database_namespace,j.current_path,j.selector_paths_json,j.restore_fence_generation,c.markdown_sha256,
+      EXISTS(SELECT 1 FROM sync_relay_live_update_journal gap
+        WHERE gap.workspace_id=j.workspace_id AND gap.main_version_id=j.main_version_id
+          AND gap.object_id=j.object_id AND gap.lineage_claim_id=j.lineage_claim_id
+          AND gap.journal_cursor>? AND gap.journal_cursor<=j.journal_cursor
+          AND (gap.relay_database_namespace<>? OR gap.current_path<>? OR json(gap.selector_paths_json)<>json(?)
+            OR gap.restore_fence_generation<>? OR gap.restore_operation_id IS NOT NULL)) AS changed_binding
+      FROM sync_relay_live_update_journal j JOIN ${SETTLEMENT_CUTS} c USING(journal_cursor)
+      WHERE j.workspace_id=? AND j.main_version_id=? AND j.object_id=? AND j.lineage_claim_id=? AND j.journal_cursor=?`,
+  ).get(prior.terminal, p.namespace, b.currentPath, JSON.stringify(b.selectorPaths), b.restoreFenceGeneration,
+    ...documentParams(b), p.previous);
+  require(cut && !cut.changed_binding && cut.relay_database_namespace === p.namespace &&
+    cut.current_path === b.currentPath && cut.restore_fence_generation === b.restoreFenceGeneration &&
+    isDeepStrictEqual(JSON.parse(String(cut.selector_paths_json)), b.selectorPaths) && cut.markdown_sha256 === prior.markdown);
+}
 function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBudget) {
   const prior = storage.db
     .prepare(`SELECT * FROM ${SETTLEMENT_BINDINGS} WHERE ${where} ORDER BY terminal_cursor DESC LIMIT 1`)
     .get(...documentParams(p.binding));
   if (prior && prior.binding_json === stableJsonStringify(p.initialBinding)) {
-    require(
-      prior.terminal_cursor === p.previous &&
-      prior.markdown_sha256 === p.before &&
-      prior.namespace === p.namespace,
-    );
+    requirePublicationPredecessor(storage, p, {
+      terminal: integer(prior.terminal_cursor), markdown: String(prior.markdown_sha256), namespace: String(prior.namespace),
+    });
     return;
   }
   if (p.previous === 0) {
@@ -465,9 +489,7 @@ export async function prepareHostedSettlements(
       const key = JSON.stringify(documentParams(document)),
         prior = provisional.get(key);
       if (prior && isDeepStrictEqual(prior.binding, p.initialBinding))
-        require(
-          prior.terminal === previous && prior.markdown === p.before,
-        );
+        requirePublicationPredecessor(storage, p, prior);
       else anchor(storage, p, budget);
       const authors = new Map<string, LiveAuthorEntry>();
       for (const { metadata } of events) {

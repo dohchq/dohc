@@ -91,6 +91,8 @@ function publication(
   before = f.input.evidence.projectedMarkdownSha256,
   originSeq = 0,
   automation?: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration,
+  update?: Uint8Array,
+  agentId = "trip",
 ) {
   f.doc.gc = false;
   const baselineBytes = new TextEncoder().encode(
@@ -102,7 +104,7 @@ function publication(
     content: baselineBytes,
     createdAtMs: 1,
   });
-  const captured = f.capture(f.update("title", id), id, automation ? {kind: "owner", userId: "owner", shareId: "share"} : {
+  const captured = f.capture(update ?? f.update("title", id), id, automation ? {kind: "owner", userId: "owner", shareId: "share"} : {
     kind: "named",
     userId: "reader",
     grantId: "grant",
@@ -116,7 +118,7 @@ function publication(
         kind: "account",
         accountId: "reader",
         agent: {
-          agentId: "trip",
+          agentId,
           agentName: "Trip",
           onBehalfOf: "reader",
           depth: 2,
@@ -644,4 +646,86 @@ it.each(["transition", "skipped-base"])("anchors a changed full selector binding
       await prepare(f,[later.op]);expect(append(f,[later.op]).settlementRefusals).toBeUndefined();
     } else expect(result.settlementRefusals).toHaveLength(1);
   } finally {f.close();}
+});
+
+
+it.each([false, true])("anchors a projection-neutral accepted gap with same-push=%s", async samePush => {
+  const f = registered({deployment: true});
+  try {
+    const first = publication(f, "first");
+    if (!samePush) { await prepare(f, [first.op]); append(f, [first.op]); }
+    f.doc.clientID = 7654321;
+    const neutral = publication(f, "neutral", first.receipt.journalCursor, first.markdownSha, 1,
+      undefined, f.update("title", "first"), "neutral-author");
+    expect(neutral.markdownSha).toBe(first.markdownSha);
+    expect(neutral.record.acceptedStateBlobSha256).not.toBe(first.record.acceptedStateBlobSha256);
+    f.doc.clientID = 7654322;
+    const next = publication(f, "visible", neutral.receipt.journalCursor, first.markdownSha, 1);
+    const ops = samePush ? [first.op, next.op] : [next.op];
+    await prepare(f, ops);
+    expect(append(f, ops).settlementRefusals).toBeUndefined();
+    const snapshot = f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "proof", originSeq: 1})!.admittedAuthorSnapshot;
+    expect(snapshot).toContainEqual(expect.objectContaining({kind: "agent", agentId: "trip"}));
+    expect(snapshot).not.toContainEqual(expect.objectContaining({agentId: "neutral-author"}));
+    expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_settlement_bindings").get()!.n).toBe(2);
+  } finally { f.close(); }
+});
+
+it.each(["changed-markdown", "missing-cut", "wrong-document", "selector", "path", "fence", "namespace", "restore", "backwards"])(
+  "refuses an advanced publication anchor with %s", async variant => {
+    const f = registered({deployment: true});
+    try {
+      const first = publication(f, "first"); await prepare(f, [first.op]); append(f, [first.op]);
+      const gap = publication(f, "gap", first.receipt.journalCursor, first.markdownSha, 1,
+        undefined, f.update("title", "first"));
+      const selected = publication(f, "selected", gap.receipt.journalCursor, first.markdownSha, 1,
+        undefined, f.update("title", variant === "changed-markdown" ? "different" : "first"));
+      const next = publication(f, "next", variant === "backwards" ? 0 : selected.receipt.journalCursor, first.markdownSha, 1);
+      f.write(db => {
+        if (variant === "missing-cut") db.prepare("DELETE FROM sync_relay_live_settlement_cuts WHERE journal_cursor=?").run(selected.receipt.journalCursor);
+        if (variant === "wrong-document") {
+          db.exec("PRAGMA defer_foreign_keys=ON");
+          db.prepare("UPDATE sync_relay_live_update_struct_provenance SET object_id='other' WHERE journal_cursor=?").run(selected.receipt.journalCursor);
+          db.prepare("UPDATE sync_relay_live_update_journal SET object_id='other' WHERE journal_cursor=?").run(selected.receipt.journalCursor);
+        }
+        const change: Record<string, [string, string | number]> = {
+          selector: ["selector_paths_json", '["docs/other.md"]'], path: ["current_path", "docs/other.md"],
+          fence: ["restore_fence_generation", first.record.binding.restoreFenceGeneration + 1], namespace: ["relay_database_namespace", "other"],
+
+        };
+        if (variant === "restore") {
+          const b = first.record.binding;
+          db.prepare(`INSERT INTO sync_relay_live_restore_operations
+            (operation_id,relay_database_namespace,workspace_id,main_version_id,object_id,lineage_claim_id,
+              intent_json,basis_json,phase,old_fence,revoked_generation,invalidated_at_ms,accounted_bytes)
+            VALUES ('skipped-restore',?,?,?,?,?,'{}','{}','authority-invalidated',?,2,0,1)`)
+            .run(first.record.relayDatabaseNamespace,b.workspaceId,b.mainVersionId,b.objectId,b.lineageClaimId,b.restoreFenceGeneration);
+          const bytes = encodeStateAsUpdate(f.doc);
+          db.prepare(`UPDATE sync_relay_live_update_journal SET restore_operation_id='skipped-restore',
+            validation_checkpoint_sha256=?,validation_checkpoint_bytes=? WHERE journal_cursor=?`)
+            .run(hash(bytes),bytes,gap.receipt.journalCursor);
+        }
+        const altered = change[variant];
+        if (altered) db.prepare(`UPDATE sync_relay_live_update_journal SET ${altered[0]}=? WHERE journal_cursor=?`).run(altered[1], gap.receipt.journalCursor);
+      });
+      await prepare(f, [next.op]);
+      expect(append(f, [next.op]).settlementRefusals).toHaveLength(1);
+      expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_settlement_bindings").get()!.n).toBe(1);
+    } finally { f.close(); }
+  });
+
+it("rechecks an unchanged publication anchor at commit", async () => {
+  const f = registered({deployment: true});
+  try {
+    const first = publication(f, "first"); await prepare(f, [first.op]); append(f, [first.op]);
+    const neutral = publication(f, "neutral", first.receipt.journalCursor, first.markdownSha, 1,
+      undefined, f.update("title", "first"));
+    const next = publication(f, "next", neutral.receipt.journalCursor, first.markdownSha, 1);
+    await prepare(f, [next.op]);
+    f.write(db => db.prepare("UPDATE sync_relay_live_settlement_cuts SET markdown_sha256=? WHERE journal_cursor=?")
+      .run("f".repeat(64), neutral.receipt.journalCursor));
+    expect(append(f, [next.op]).settlementRefusals).toHaveLength(1);
+    expect(f.storage.maxOriginSeq("workspace", "proof")).toBe(1);
+    expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_settlement_bindings").get()!.n).toBe(1);
+  } finally { f.close(); }
 });

@@ -510,11 +510,10 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     remote.apply(&f.bytes).unwrap();
     let remote_bytes = remote.richdoc_append_paragraph(REMOTE);
     f.doc.apply(&remote_bytes).unwrap();
-    // No-change moments retain their published cut. Later proofs cover the
-    // accumulated prefix while its checkpoint metadata grows above 60 MiB.
+    // Keep each settlement interval inside the configured maximum while the
+    // accepted checkpoint segment accumulates discarded metadata above60MiB.
     mark("fixture-private-edit");
     const PREFIX: i64 = 700;
-    const APPLICATION_LIMIT: usize = PREFIX as usize + 100;
     let mut accepted_head = None;
     for cursor in 1..=PREFIX {
         let (receipt, result) =
@@ -522,11 +521,8 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         assert!(matches!(result, ApplicationResult::Applied(..)));
         if cursor % 100 == 0 {
             mark("periodic-settlement-start");
-            let settled = f
-                .settle_with_limit(&handle, Some(receipt), APPLICATION_LIMIT)
-                .await;
-            let published_cursor = if cursor == 100 { 0 } else { 100 };
-            assert_eq!(settled.application_count, (cursor - published_cursor) as usize);
+            let settled = f.settle(&handle, Some(receipt)).await;
+            assert_eq!(settled.application_count, 100);
             assert!(!f.file().contains(LOCAL));
             assert!(f.file().contains(REMOTE));
             mark("periodic-settlement-complete");
@@ -592,7 +588,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         handle
             .settle(
                 terminal.clone(),
-                APPLICATION_LIMIT,
+                100,
                 f.root.path().to_owned(),
                 30,
                 Arc::new(PrefixRival {
@@ -627,9 +623,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     );
     mark("rival-refusal");
     std::fs::write(f.root.path().join(&f.binding.current_path), preimage).unwrap();
-    let settled = f
-        .settle_with_limit(&handle, terminal.clone(), APPLICATION_LIMIT)
-        .await;
+    let settled = f.settle(&handle, terminal.clone()).await;
     assert!(settled.materialized);
     assert!(f.file().contains(REMOTE));
     assert!(!f.file().contains(LOCAL));
@@ -710,9 +704,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         .await
         .unwrap();
     mark("restart");
-    let replayed = f
-        .settle_with_limit(&handle, terminal, APPLICATION_LIMIT)
-        .await;
+    let replayed = f.settle(&handle, terminal).await;
     assert_eq!(replayed.settlement_id, settled.settlement_id);
     assert_eq!(replayed.local_ydoc_sequence, settled.local_ydoc_sequence);
     assert_eq!(replayed.moment_id, settled.moment_id);
@@ -733,9 +725,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     // The private edit's own acceptance names its trusted agent. The second
     // private edit still waits, so the next moment holds accepted content.
     let accepted = f.accept_pending(&actor, &handle, refused + 1).await;
-    let next = f
-        .settle_with_limit(&handle, Some(accepted), APPLICATION_LIMIT)
-        .await;
+    let next = f.settle(&handle, Some(accepted)).await;
     assert!(next.materialized);
     assert_eq!(next.application_count, 2);
     assert!(f.file().contains(LOCAL));
@@ -752,6 +742,87 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
     mark("complete");
+}
+
+#[tokio::test]
+async fn projection_neutral_settlements_keep_the_application_interval_bounded() {
+    let mut f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt(&owner).await;
+    let attribution = ChangeAttribution {
+        actor_kind: ChangeActorKind::Agent,
+        on_behalf_of: Some("owner".into()),
+        depth: 1,
+        run: None,
+    };
+    f.record_by(
+        &actor,
+        f.doc.richdoc_append_paragraph("Accepted baseline"),
+        "first",
+        10,
+        "first-agent",
+        attribution.clone(),
+    )
+    .await;
+    let receipt = f.accept_pending(&actor, &handle, 1).await;
+    let first = f.settle_with_limit(&handle, Some(receipt), 1).await;
+    let mut latest = first.clone();
+    for cursor in 2..=5 {
+        let same = f
+            .doc
+            .rewrite_content_to_markdown(ContentKind::Richdoc, &f.file())
+            .unwrap();
+        f.record_by(
+            &actor,
+            same,
+            &format!("neutral-{cursor}"),
+            10 + cursor,
+            "neutral-agent",
+            attribution.clone(),
+        )
+        .await;
+        let receipt = f.accept_pending(&actor, &handle, cursor).await;
+        latest = f.settle_with_limit(&handle, Some(receipt), 1).await;
+        assert_eq!(latest.previous_cursor, cursor - 1);
+        assert_eq!(latest.application_count, 1);
+        assert_eq!(latest.moment_id, first.moment_id);
+    }
+    // A mark naming a later reused settlement cannot refuse the original publisher.
+    f.store.write_with(&NoFaults, |tx| {
+        tx.execute("INSERT INTO live_settlement_attribution_unavailable(workspace_id,moment_id,settlement_id,reason) VALUES (?1,?2,?3,'terminal-owner-source')",
+            rusqlite::params!["workspace",first.moment_id,latest.settlement_id])
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+        Ok::<_,dohc_engine_storage::StorageError>(())
+    }).unwrap();
+    f.record_by(
+        &actor,
+        f.doc.richdoc_append_paragraph("Visible later edit"),
+        "visible",
+        30,
+        "visible-agent",
+        attribution,
+    )
+    .await;
+    let receipt = f.accept_pending(&actor, &handle, 6).await;
+    let next = f.settle_with_limit(&handle, Some(receipt), 1).await;
+    assert_eq!(next.previous_cursor, 5);
+    assert_eq!(next.application_count, 1);
+    assert!(f.file().contains("Visible later edit"));
+    let authors = f.moment_authors(&next.moment_id);
+    assert_eq!(
+        authors
+            .iter()
+            .map(|author| author["agentId"].as_str())
+            .collect::<Vec<_>>(),
+        vec![Some("visible-agent")]
+    );
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
 }
 
 #[tokio::test]
@@ -2142,15 +2213,20 @@ async fn native_refusal_rejects_wrong_digest_stale_binding_and_accepted_delivery
 
 #[tokio::test]
 async fn refused_admission_keeps_the_next_native_proof_at_the_last_verified_cut() {
-    refused_native_publications_continue(1).await;
+    refused_native_publications_continue(1, false).await;
 }
 
 #[tokio::test]
 async fn queued_refused_admissions_keep_the_third_native_proof_at_the_last_verified_cut() {
-    refused_native_publications_continue(2).await;
+    refused_native_publications_continue(2, false).await;
 }
 
-async fn refused_native_publications_continue(queued: i64) {
+#[tokio::test]
+async fn refused_publication_followed_by_a_neutral_settlement_recovers_its_verified_cut() {
+    refused_native_publications_continue(1, true).await;
+}
+
+async fn refused_native_publications_continue(queued: i64, neutral: bool) {
     use dohc_engine_sync::{NoLiveLeases, SettlementAdmission, apply_replication_envelope};
     let mut f = Fixture::new();
     let supervisor = WorkspaceSupervisor::new();
@@ -2211,6 +2287,24 @@ async fn refused_native_publications_continue(queued: i64) {
             .unwrap(),
         queued
     );
+    if neutral {
+        let (receipt, result) = deliver_declared(
+            &handle,
+            &f.binding,
+            queued + 1,
+            &f.doc.encode_full_state(),
+            AgentDeclaration {
+                agent_id: "neutral-agent".into(),
+                on_behalf_of: Some("owner".into()),
+                depth: 1,
+            },
+        )
+        .await;
+        assert!(matches!(result, ApplicationResult::Applied(..)));
+        let unchanged = f.settle(&handle, Some(receipt)).await;
+        assert_eq!(unchanged.moment_id, settlements.last().unwrap().moment_id);
+    }
+    let next_cursor = queued + 1 + i64::from(neutral);
     f.record(
         &actor,
         f.doc.richdoc_append_paragraph("Accepted next content"),
@@ -2218,10 +2312,10 @@ async fn refused_native_publications_continue(queued: i64) {
         40,
     )
     .await;
-    let receipt = f.accept_pending(&actor, &handle, queued + 1).await;
+    let receipt = f.accept_pending(&actor, &handle, next_cursor).await;
     let next = f.settle(&handle, Some(receipt)).await;
     assert_eq!(next.previous_cursor, 0);
-    assert_eq!(next.terminal_cursor, queued + 1);
+    assert_eq!(next.terminal_cursor, next_cursor);
     let payload:serde_json::Value=f.store.read_with(|conn|conn.query_row("SELECT payload_json FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",[&next.moment_id],|r|r.get::<_,String>(0))).map(|s|serde_json::from_str(&s).unwrap()).unwrap();
     assert_eq!(
         payload["settlementReference"]["record"]["previousCursor"],

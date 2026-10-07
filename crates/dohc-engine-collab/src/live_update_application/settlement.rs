@@ -466,10 +466,24 @@ where
         let latest = latest_receipt(conn,&held)?;
         if latest != terminal { return Err(invalid("settlement terminal is not current")); }
         let terminal_cursor = terminal.as_ref().map_or(0,|r|r.journal_cursor);
-        let previous: Option<(i64,i64,i64,i64,bool)> = conn.query_row("SELECT previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,EXISTS(SELECT 1 FROM live_settlement_attribution_unavailable u WHERE u.workspace_id=live_device_settlements.workspace_id AND u.settlement_id=live_device_settlements.settlement_id),binding_json FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY terminal_cursor DESC LIMIT 1",
+        let previous: Option<(i64,i64,i64,i64,Option<i64>)> = conn.query_row(
+            "SELECT s.previous_cursor,s.terminal_cursor,s.previous_ydoc_sequence,s.local_ydoc_sequence,
+             (SELECT p.previous_cursor FROM live_settlement_attribution_unavailable u
+              JOIN live_device_settlements p ON p.settlement_id=u.settlement_id
+              WHERE u.workspace_id=s.workspace_id AND u.moment_id=s.moment_id
+                AND p.relay_database_namespace=s.relay_database_namespace AND p.workspace_id=s.workspace_id
+                AND p.main_version_id=s.main_version_id AND p.object_id=s.object_id
+                AND p.lineage_claim_id=s.lineage_claim_id AND p.moment_id=s.moment_id AND p.binding_json=s.binding_json
+                AND p.terminal_cursor=(SELECT min(f.terminal_cursor) FROM live_device_settlements f
+                  WHERE f.relay_database_namespace=s.relay_database_namespace AND f.workspace_id=s.workspace_id
+                    AND f.main_version_id=s.main_version_id AND f.object_id=s.object_id
+                    AND f.lineage_claim_id=s.lineage_claim_id AND f.moment_id=s.moment_id AND f.binding_json=s.binding_json)),
+             s.binding_json FROM live_device_settlements s
+             WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3
+               AND s.object_id=?4 AND s.lineage_claim_id=?5 ORDER BY s.terminal_cursor DESC LIMIT 1",
             params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row| {
                 let binding: LiveObjectBinding = serde_json::from_str(&row.get::<_,String>(5)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(5,rusqlite::types::Type::Text,Box::new(error)))?;
-                Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get::<_,bool>(4)? && binding == *b))
+                Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get::<_,Option<i64>>(4)?.filter(|_| binding == *b)))
             }).optional().map_err(read_sql)?;
         // A settlement at the current terminal replays with the native head
         // it first covered. Private native edits since then extend the head
@@ -478,9 +492,9 @@ where
         let (previous_cursor,previous_sequence,replayed) = match previous {
             Some((_,end,_,end_sequence,_)) if end == terminal_cursor && restored_origin.as_ref().is_some_and(|anchor|anchor.cursor == end) => (end,end_sequence,None),
             Some((start,end,start_sequence,end_sequence,_)) if end == terminal_cursor => (start,start_sequence,Some(end_sequence)),
-            Some((start,end,_,end_sequence,unavailable)) if end < terminal_cursor => {
-                let cursor = if unavailable { verified_previous_cursor(conn,&held,start,origin_cursor,max_applications)? } else {end};
-                (moment_publication_cursor(conn,&held,cursor)?,end_sequence,None)
+            Some((_,end,_,end_sequence,refused_start)) if end < terminal_cursor => {
+                let cursor = if let Some(start) = refused_start { verified_previous_cursor(conn,&held,start,origin_cursor,max_applications)? } else {end};
+                (cursor,end_sequence,None)
             },
             Some(_) => return Err(ApplicationError::Corrupt),
             None => (origin_cursor,origin_sequence,None),
@@ -517,36 +531,6 @@ where
     settle(store, &audit)
 }
 
-/// A no-change settlement can reuse a moment already bound to an earlier cut.
-/// Its next proof includes that accepted tail instead of leaving a relay gap.
-fn moment_publication_cursor(
-    conn: &Connection,
-    held: &Registration,
-    cursor: i64,
-) -> Result<i64, ApplicationError> {
-    let b = &held.binding;
-    let published: Option<(i64, String)> = conn.query_row(
-        "SELECT p.terminal_cursor,p.binding_json FROM live_device_settlements s
-         JOIN replication_log r ON r.workspace_id=s.workspace_id AND r.op_kind='moment.append' AND r.imported=0 AND json_extract(r.payload_json,'$.momentId')=s.moment_id
-         JOIN live_device_settlements p ON p.workspace_id=s.workspace_id AND p.settlement_id=json_extract(r.payload_json,'$.settlementReference.record.settlementId')
-         WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6
-           AND p.relay_database_namespace=s.relay_database_namespace AND p.main_version_id=s.main_version_id AND p.object_id=s.object_id AND p.lineage_claim_id=s.lineage_claim_id AND p.moment_id=s.moment_id AND p.markdown_digest=s.markdown_digest AND p.terminal_cursor<=s.terminal_cursor
-           AND json_extract(p.binding_json,'$.currentPath')=?7 AND json_extract(p.binding_json,'$.restoreFenceGeneration')=?8 AND json_extract(p.binding_json,'$.selectorPaths')=json(?9)
-         ORDER BY p.terminal_cursor DESC LIMIT 1",
-        params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,cursor,b.current_path,b.restore_fence_generation,serde_json::to_string(&b.selector_paths).map_err(|_|ApplicationError::Corrupt)?],
-        |row| Ok((row.get(0)?,row.get(1)?)),
-    ).optional().map_err(read_sql)?;
-    let Some((published, binding)) = published else {
-        return Ok(cursor);
-    };
-    let binding: LiveObjectBinding =
-        serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
-    if binding != *b {
-        return Err(ApplicationError::Corrupt);
-    }
-    Ok(published)
-}
-
 /// Refused queued proofs can point to one another. Only this full binding's
 /// unavailable native predecessors are skipped; the authenticated origin stays.
 fn verified_previous_cursor(
@@ -564,7 +548,19 @@ fn verified_previous_cursor(
             return Err(invalid("settlement application limit exceeded"));
         }
         let prior: Option<(i64,String)> = conn.query_row(
-            "SELECT previous_cursor,binding_json FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND json_extract(s.binding_json,'$.currentPath')=?7 AND json_extract(s.binding_json,'$.restoreFenceGeneration')=?8 AND json_extract(s.binding_json,'$.selectorPaths')=json(?9) AND EXISTS(SELECT 1 FROM live_settlement_attribution_unavailable u WHERE u.workspace_id=s.workspace_id AND u.settlement_id=s.settlement_id)",
+            "SELECT p.previous_cursor,p.binding_json FROM live_device_settlements s
+             JOIN live_settlement_attribution_unavailable u ON u.workspace_id=s.workspace_id AND u.moment_id=s.moment_id
+             JOIN live_device_settlements p ON p.settlement_id=u.settlement_id
+             WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4
+               AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND json_extract(s.binding_json,'$.currentPath')=?7
+               AND json_extract(s.binding_json,'$.restoreFenceGeneration')=?8 AND json_extract(s.binding_json,'$.selectorPaths')=json(?9)
+               AND p.relay_database_namespace=s.relay_database_namespace AND p.workspace_id=s.workspace_id
+               AND p.main_version_id=s.main_version_id AND p.object_id=s.object_id AND p.lineage_claim_id=s.lineage_claim_id
+               AND p.moment_id=s.moment_id AND p.binding_json=s.binding_json AND p.terminal_cursor<=s.terminal_cursor
+               AND p.terminal_cursor=(SELECT min(f.terminal_cursor) FROM live_device_settlements f
+                 WHERE f.relay_database_namespace=s.relay_database_namespace AND f.workspace_id=s.workspace_id
+                   AND f.main_version_id=s.main_version_id AND f.object_id=s.object_id AND f.lineage_claim_id=s.lineage_claim_id
+                   AND f.moment_id=s.moment_id AND f.binding_json=s.binding_json)",
             params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,cursor,b.current_path,b.restore_fence_generation,serde_json::to_string(&b.selector_paths).map_err(|_|ApplicationError::Corrupt)?],|row|Ok((row.get(0)?,row.get(1)?)),
         ).optional().map_err(read_sql)?;
         let Some((previous, binding)) = prior else {
