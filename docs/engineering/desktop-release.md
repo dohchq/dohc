@@ -48,6 +48,8 @@ Each runner needs Git with bash, rustup, and the platform's native build tools.
 The coordinator runner also needs the GitHub CLI, `gh`, for the version check and publishing.
 Run it in a signed-in desktop session for the packaged app check.
 The Linux runner also needs `xvfb-run` for the fuse smoke.
+After packaging, that check verifies the actual executable's fuse values and starts it with an isolated profile.
+Local packages outside `apps/desktop/release/linux-unpacked` need `DOHC_SMOKE_PACKAGE_DIRECTORY` set to their unpacked directory.
 The package and publish jobs receive the environment's secrets.
 Register only runners that the release owner controls.
 On a shared Windows runner, set `DOHC_BUILD_SLOT_ROOT=C:\w\_locks` in the runner's `.env` file.

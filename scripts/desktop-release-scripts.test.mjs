@@ -661,6 +661,10 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   assert.match(fuseSmoke, /^ {8}if: runner\.os == 'Linux'$/m);
   assert.match(fuseSmoke, /^ {10}DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"$/m);
   assert.match(fuseSmoke, /^ {8}run: xvfb-run -a pnpm smoke:fuses:desktop$/m);
+  assert.ok(workflow.indexOf(packageDesktop) < workflow.indexOf(fuseSmoke),
+    "Linux fuse smoke reads the actual package after electron-builder finishes");
+  assert.ok(workflow.indexOf(fuseSmoke) < workflow.indexOf(stepBlock(workflow, "Upload packaged artifacts")),
+    "a failed packaged boot must prevent artifact upload");
 
   const secretLines = workflow
     .split(/\r?\n/)
