@@ -285,6 +285,41 @@ test("kept typing survives capture before the renderer reopens after restart", a
   } finally {await cleanupDesktopWorkspace(desktop, temp);}
 });
 
+test("renaming a property of a live document keeps its place and comments through save and reopen", async () => {
+  test.setTimeout(120_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+  const path = "trip.md";
+  const written = '---\n# Monthly\nbudget:  100 # euros\n# Wi-Fi password\n"wifi": hunter2\n---\n\n# Trip\n\nBase paragraph.';
+  const renamed = written.replace("budget:", "cost:");
+  const fileText = () => readFile(join(temp.rootPath, path), "utf8");
+  const names = (page: import("@playwright/test").Page) =>
+    page.getByTestId("property-key").evaluateAll(inputs => inputs.map(input => (input as HTMLInputElement).value));
+  try {
+    await writeWorkspaceFiles(temp, [{path, contents: written}]);
+    desktop = await launchDesktopApp({workspace: temp});
+    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+    await openEngineDoc(desktop.page, path);
+    const name = desktop.page.getByLabel("Property 1 name");
+    await expect(name).toHaveValue("budget");
+    await name.fill("");
+    // One key at a time, as a person types: each letter renames the property.
+    await name.pressSequentially("cost");
+    await expect.poll(fileText, {timeout: 20_000}).toBe(renamed);
+    expect(await names(desktop.page)).toEqual(["cost", "wifi"]);
+    await quitDesktop(desktop);
+
+    desktop = await launchDesktopApp({workspace: temp});
+    await openWorkspaceFromFirstRun(desktop.page, temp);
+    await waitForWorkspaceFile(desktop.page, workspace.workspaceId, path);
+    await expect(desktop.page.getByLabel("Property cost value")).toHaveValue("100");
+    expect(await names(desktop.page)).toEqual(["cost", "wifi"]);
+    expect(await fileText()).toBe(renamed);
+    await quitDesktop(desktop);
+  } finally {await cleanupDesktopWorkspace(desktop, temp);}
+});
+
 // WS-G2-C-2 gate fix 2 — a version op while a rich doc is live must settle +
 // close the session FIRST. Otherwise the live session keeps its old versionId
 // and a later settle writes a stale projection into the now-active version

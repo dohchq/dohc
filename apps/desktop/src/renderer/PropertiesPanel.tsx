@@ -143,6 +143,20 @@ function renamedKeys(
   return renamed;
 }
 
+// A live document's map adds a renamed key last. Rows keep the order they
+// show, so the row being renamed stays under the person typing; new keys follow.
+function inShownOrder(entries: FrontmatterEntry[], shown: FrontmatterEntry[]): FrontmatterEntry[] {
+  const row = (entry: FrontmatterEntry): number => {
+    const held = shown.findIndex((candidate) => candidate.sourceKey === entry.key);
+    const index = held === -1 ? shown.findIndex((candidate) => propertyKey(candidate) === entry.key) : held;
+    return index === -1 ? shown.length : index;
+  };
+  return entries
+    .map((entry) => ({ entry, row: row(entry) }))
+    .sort((left, right) => left.row - right.row)
+    .map(({ entry }) => entry);
+}
+
 function applySharedFrontmatterPatch(
   doc: Y.Doc,
   previousEntries: FrontmatterEntry[],
@@ -158,7 +172,11 @@ function applySharedFrontmatterPatch(
       values.set(key, value);
     }
   }
-  patchFrontmatter(doc, values, remove);
+  patchFrontmatter(doc, values, remove, renamedKeys(previousEntries, nextEntries));
+}
+
+function liveEntries(doc: Y.Doc): FrontmatterEntry[] {
+  return frontmatterEntriesFromMeta(mapToObject(doc.getMap(FRONTMATTER_FIELD)));
 }
 
 export function PropertiesPanel(props: PropertiesPanelProps) {
@@ -166,12 +184,10 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   const body = props.body ?? "";
   const [ydocRevision, setYdocRevision] = useState(0);
   const [editRefused, setEditRefused] = useState(false);
-  const sourceEntries = useMemo(() => {
-    if (ydoc) {
-      return frontmatterEntriesFromMeta(mapToObject(ydoc.getMap(FRONTMATTER_FIELD)));
-    }
-    return frontmatterEntries(body);
-  }, [body, ydoc, ydocRevision]);
+  const sourceEntries = useMemo(
+    () => (ydoc ? liveEntries(ydoc) : frontmatterEntries(body)),
+    [body, ydoc, ydocRevision],
+  );
   const [entries, setEntries] = useState<FrontmatterEntry[]>(() =>
     editableEntries(sourceEntries),
   );
@@ -185,9 +201,13 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   }, [ydoc]);
 
   useEffect(() => {
-    setEntries(editableEntries(sourceEntries));
+    // This can apply after the person's next keystroke has changed the
+    // document, so a live document's rows read the document as it is now.
+    setEntries((shown) =>
+      ydoc ? inShownOrder(editableEntries(liveEntries(ydoc)), shown) : editableEntries(sourceEntries),
+    );
     setEditRefused(false);
-  }, [sourceEntries]);
+  }, [sourceEntries, ydoc]);
 
   // An unsplittable block cannot change one property without
   // rewriting the others, so the panel refuses edits before any write.
@@ -201,6 +221,12 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     try {
       if (ydoc) {
         applySharedFrontmatterPatch(ydoc, previous, next);
+        // Each row now names the key it wrote. The document's update reaches
+        // the rows later, and a keystroke before then renames from this key.
+        setEntries(next.map((entry) => {
+          const key = propertyKey(entry);
+          return key === null ? entry : { ...entry, sourceKey: key };
+        }));
       } else {
         props.onChange?.(
           applyFrontmatter(body, buildProperties(sourceEntries, next), renamedKeys(previous, next)),
