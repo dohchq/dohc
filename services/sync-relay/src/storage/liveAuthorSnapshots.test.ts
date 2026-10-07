@@ -11,6 +11,35 @@ import type {NativeRestoreProposalReceipt} from "../liveRestoreProposal.js";
 
 afterEach(cleanupLiveDeliveryFixtures);
 
+it("binds server automation provenance to owner admission and exact retries", () => {
+  const f = registered({deployment: true});
+  try {
+    const trustedAutomation = {automationId: "collection:Tasks#mark", attribution: {actorKind: "automation" as const,
+      onBehalfOf: "reader", depth: 1, run: {claimId: "claim", automationName: "Mark done"}}};
+    const first = {...f.capture(f.update(), "automation"), trustedAutomation, trustedAutomationGrant: {grantId: "grant", grantGeneration: 4}};
+    const accepted = f.storage.commitLiveUpdateJournal(first);
+    expect(accepted.result).toMatchObject({kind: "accepted", replayed: false});
+    expect(accepted.admitted!.metadata.authorSnapshot).toEqual([{kind: "automation", ...trustedAutomation}]);
+    expect(accepted.admitted!.metadata.accepted.authority.principalKind).toBe("owner");
+    const source: NativeRestoreProposalReceipt["nativeSources"][number] = {outboxId: "outbox", outboxSequence: 1, binding: first.metadata.binding,
+      deliveryId: first.metadata.deliveryId, byteLength: first.updateBytes.length, createdAtMs: 1, acceptedReceipt: accepted.admitted!.metadata.accepted.receipt,
+      appendKey: "write/Status", updateDigest: first.metadata.updateDigest,
+      source: {binding: first.metadata.binding, updateDigest: first.metadata.updateDigest, origin: {kind: "ownerDraft", automationDeclaration: trustedAutomation}}};
+    const matches = (candidate: typeof source) => nativeSourceAuthorMatches(f.storage as StorageContext, candidate, accepted.admitted!.metadata, new RestoreHistoryBudget(1 << 20, 100));
+    expect(matches(source)).toBe(true);
+    expect(matches({...source, source: {...source.source, origin: {kind: "ownerDraft"}}})).toBe(false);
+    expect(matches({...source, source: {...source.source, origin: {kind: "ownerDraft", automationDeclaration: {...trustedAutomation,
+      attribution: {...trustedAutomation.attribution, onBehalfOf: "someone-else"}}}}})).toBe(false);
+    expect(f.storage.commitLiveUpdateJournal(first).result).toMatchObject({kind: "accepted", replayed: true});
+    for (const retry of [f.capture(f.update(), "automation"), {...first, trustedAutomation: {...trustedAutomation,
+      attribution: {...trustedAutomation.attribution, onBehalfOf: "different-reader"}}}]) {
+      expect(f.storage.commitLiveUpdateJournal(retry).result).toEqual({kind: "refused", reason: "delivery-conflict"});
+    }
+    const named = f.capture(f.update("more", "named"), "named", {kind: "named", userId: "reader", grantId: "grant"});
+    expect(f.storage.commitLiveUpdateJournal({...named, trustedAutomation}).result).toEqual({kind: "refused", reason: "authority-refused"});
+  } finally {f.close();}
+});
+
 type Fixture = ReturnType<typeof registered>;
 type Input = ReturnType<Fixture["capture"]> & {trustedAccount?: {accountId:string;name:string}; metadata: ReturnType<Fixture["capture"]>["metadata"] & {authorContext?: import("@dohc/live-session-contract").LiveAuthorContext}};
 const declared: AgentDeclaration = {agentId: "trip-agent-ü", onBehalfOf: "local-person", depth: 2};

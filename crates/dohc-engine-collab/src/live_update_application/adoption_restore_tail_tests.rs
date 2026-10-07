@@ -1496,6 +1496,16 @@ fn restored_owner_capacity_rescue_streams_past_a_large_baseline_restore_proof_an
 }
 
 fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
+    let started = std::time::Instant::now();
+    let mark = |phase| {
+        if std::env::var_os("DOHC_RUST_PROFILE").is_some() {
+            eprintln!(
+                "RUST_PROFILE restored-{events}-{select_terminal} {phase} {:.3}s",
+                started.elapsed().as_secs_f64()
+            );
+        }
+    };
+    mark("fixture-start");
     let seed = Fixture::new();
     let baseline = seed.cut.baseline_bytes.clone();
     let source: String = seed
@@ -1514,6 +1524,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     selectors.sort();
     let mut f = Fixture::with_source_selectors(source, baseline.clone(), selectors);
     f.adopt().unwrap();
+    mark("fixture");
     let mut terminal = None;
     let mut sequence = 0;
     for cursor in 1..=events {
@@ -1526,6 +1537,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             accepting_host_epoch: 1,
         });
     }
+    mark("ingress");
     let mut preparation = native_tail_input(&mut f, terminal, sequence);
     // The selected current point retains a second authentic copy of the
     // accepted suffix: >60MiB of proof with half as many ingress operations.
@@ -1556,6 +1568,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
         })
         .unwrap();
     assert!(proof_length > 60 * 1024 * 1024);
+    mark("prepare-proof");
     let mut binding = f.binding.clone();
     binding.restore_fence_generation = 1;
     let input = NativeRestoreApplication {
@@ -1601,6 +1614,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             |_, _, _, _| Ok(()),
         )
         .unwrap();
+    mark("apply-restore");
     let settled = f
         ._owner
         .with_restore_settlement(
@@ -1614,6 +1628,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             },
         )
         .unwrap();
+    mark("settle-restore");
     f._owner
         .resume_restore(
             &mut f.store,
@@ -1629,6 +1644,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             |_, _, _, _| Ok(()),
         )
         .unwrap();
+    mark("resume-restore");
     f.binding = binding;
     f.doc = f
         .store
@@ -1653,6 +1669,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
         assert_eq!(resumed.application_receipt.journal_cursor, events + 1);
         assert_eq!(resumed.binding, f.binding);
     }
+    mark("register-resumed");
     let peer = Ydoc::wire();
     peer.apply(&f.doc.encode_full_state()).unwrap();
     native_tail_edit(&mut f, "Private after restore", events + 4);
@@ -1716,6 +1733,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
             other => panic!("unexpected {other:?}"),
         }
     };
+    mark("fill-capacity");
     let rescue = with_settlement(
         &mut f.store,
         &f.handle,
@@ -1735,6 +1753,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
         },
     )
     .unwrap();
+    mark("rescue");
     let text: String = f
         .store
         .read_with(|conn| {
@@ -1761,6 +1780,7 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
         Err(ApplicationError::ConfiguredByteBudgetExceeded)
     ));
     drop(held);
+    mark("proof-budget-refusal");
     let retry = apply_committed(
         &mut f.store,
         &mut WriterDocCache::new(),
@@ -1772,4 +1792,5 @@ fn restored_owner_capacity_rescue(events: i64, select_terminal: bool) {
     )
     .unwrap();
     assert!(matches!(retry, ApplicationResult::Applied(..)));
+    mark("complete");
 }

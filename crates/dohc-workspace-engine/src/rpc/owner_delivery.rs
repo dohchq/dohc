@@ -38,6 +38,8 @@ pub(crate) struct OwnerEnrollmentUploadParams {
     stream_id: u64,
     byte_length: usize,
     digest: String,
+    #[serde(default)]
+    recovery: bool,
 }
 
 #[derive(Clone)]
@@ -240,6 +242,7 @@ impl EngineService {
                     update: bytes,
                     now_ms: now_ms()?,
                     agent_declaration: None,
+                    automation_declaration: None,
                 },
                 cancellation.token(),
                 guard.reservation.clone(),
@@ -330,6 +333,8 @@ impl EngineService {
         struct Params {
             after: Option<OwnerDraftCursor>,
             limit: usize,
+            #[serde(default)]
+            pending_only: bool,
             writes: Option<Vec<dohc_engine_collab::owner_outbox::draft::OwnerDraftWrite>>,
         }
         let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
@@ -372,6 +377,7 @@ impl EngineService {
                 guard.open.workspace_id.clone(),
                 params.after,
                 params.limit,
+                params.pending_only,
                 cancellation.token(),
                 guard.reservation.clone(),
             )
@@ -626,6 +632,7 @@ impl EngineService {
                     journal_cursor: params.journal_cursor,
                     checkpoint,
                     host_vector: bytes,
+                    recovery: params.recovery,
                 },
                 limits,
                 now_ms()?,
@@ -673,6 +680,8 @@ impl EngineService {
         struct Params {
             binding: LiveObjectBinding,
             relay_database_namespace: String,
+            #[serde(default)]
+            recovery: bool,
         }
         let params: Params = serde_json::from_value(request.params).map_err(|_| invalid())?;
         let connection = ctx.connection.as_ref().ok_or_else(workspace_unavailable)?;
@@ -691,6 +700,7 @@ impl EngineService {
             .owner_ydoc_prepare_enrollment(
                 params.binding,
                 params.relay_database_namespace,
+                params.recovery,
                 cancellation.token(),
                 guard.reservation.clone(),
             )
@@ -707,6 +717,54 @@ impl EngineService {
             },
             blob_egress: None,
             output_guard: Some(guard),
+        })
+    }
+
+    pub(crate) fn owner_delivery_refuse_entry(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> impl std::future::Future<Output = Result<ServiceResponse, WireError>> + Send + '_ {
+        // Keep the refusal future and its construction out of the RPC dispatcher.
+        Box::pin(async move {
+            let input = serde_json::from_value(request.params).map_err(|_| invalid())?;
+            let guard = self.owner_delivery_guard(
+                &ctx,
+                request.workspace.as_ref(),
+                None,
+                self.reserve_owner_delivery()?,
+            )?;
+            let cancellation = OperationCancellation::new(&ctx);
+            let _serial = self
+                .mutation_session_guard(&guard.open, &cancellation, "owner refusal (queued)")
+                .await?;
+            if !guard.is_current() {
+                return Err(workspace_unavailable());
+            }
+            let binding = guard
+                .open
+                .actor
+                .owner_ydoc_refuse_entry(
+                    guard.open.workspace_id.clone(),
+                    input,
+                    cancellation.token(),
+                    guard.reservation.clone(),
+                )
+                .await
+                .map_err(map_runtime)?
+                .map_err(map_owner_outbox)?;
+            self.notify_owner_sessions(&guard.workspace, &binding);
+            if !guard.is_current() {
+                return Err(workspace_unavailable());
+            }
+            Ok(ServiceResponse {
+                response: Response {
+                    id: request.id,
+                    result: json!({"refused":true}),
+                },
+                blob_egress: None,
+                output_guard: Some(guard),
+            })
         })
     }
 

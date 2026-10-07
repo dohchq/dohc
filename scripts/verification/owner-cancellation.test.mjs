@@ -51,6 +51,7 @@ for (const kind of ["prepare", "verify"]) for (const signal of ["SIGINT", "SIGTE
         assert.equal(result.commands.some(({ command }) => command === "cargo"), false);
         if (kind === "prepare") assert.deepEqual(result.commands, [{ command: "pnpm", args: ["install", "--frozen-lockfile"] }]);
         else {
+          assert.equal(result.outcome.checkoutReleased, true);
           assert.equal(result.report.verdict, "FAIL");
           assert.ok(result.report.seconds >= 0 && result.report.startedAt && result.report.finishedAt);
           assert.ok(result.report.timings.every(phase => phase.seconds >= 0 && phase.finishedAt));

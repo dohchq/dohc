@@ -328,6 +328,21 @@ it.each(["applied", "missing", "ambiguous"])("requires exact native evidence for
   }));
 });
 
+it("passes only an internal owner automation's durable press binding into journal admission", async () => {
+  const f = await setup(), capture = ownerCapture(f), commit = journal(f);
+  const trustedAutomation = {automationId: "collection:Tasks#mark", attribution: {actorKind: "automation" as const,
+    onBehalfOf: scope.userId, depth: 1, run: {claimId: "claim", automationName: "Mark done"}}};
+  const trustedAutomationPress = {hostPressId: "relay-press", automationId: trustedAutomation.automationId};
+  const input = {deliveryId: ack.deliveryId, updateDigest: hash(bytes), updateBytes: bytes, trustedAutomation, trustedAutomationPress};
+  expect(await capture.submit(input, new AbortController().signal)).toEqual({result: "success", ack});
+  expect(commit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({trustedAutomation, trustedAutomationPress}));
+  commit.mockClear();
+  expect(await f.capture.submit(input, new AbortController().signal)).toEqual({result: "refused", reason: "authority-refused"});
+  expect(await capture.submit({...input, trustedAutomation: undefined}, new AbortController().signal))
+    .toEqual({result: "refused", reason: "authority-refused"});
+  expect(commit).not.toHaveBeenCalled();
+});
+
 it.each(["owner", "selector", "restore"])("invalidates owner capture when %s changes", async kind => {
   const f = await setup(), capture = ownerCapture(f);
   if (kind === "owner") f.raw.prepare("UPDATE sync_relay_workspaces SET owner_user_id='different-owner'").run();
@@ -410,4 +425,15 @@ it("returns transient worker saturation as retry before calling the journal comm
   expect(await capture.submit({deliveryId: "delivery", updateDigest: hash(bytes), updateBytes: bytes}, new AbortController().signal))
     .toEqual({result: "retry", reason: "admission-unavailable"});
   expect(commit).not.toHaveBeenCalled();
+});
+
+it("terminally refuses an oversized submission before validation or journal admission", async () => {
+  const f = await setup();
+  const commit = journal(f);
+  const oversized = new Uint8Array(f.bounds.maxSubmissionBytes + 1);
+  const capture = ownerCapture(f);
+  expect(await capture.submit({deliveryId: "oversized", updateDigest: hash(oversized), updateBytes: oversized}, new AbortController().signal))
+    .toEqual({result: "refused", reason: "invalid-update"});
+  expect(commit).not.toHaveBeenCalled();
+  expect(f.validate).not.toHaveBeenCalled();
 });

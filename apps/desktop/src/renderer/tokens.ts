@@ -61,7 +61,9 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     match: "#326fce",
     success: "#38684e",
     warning: "#8a6420",
-    danger: "#a6402c",
+    // AA as text on a menu row's 11% fill, its tightest surface (see the
+    // contrast test).
+    danger: "#a43e2a",
     selection: "rgba(58, 126, 233, 0.22)",
   },
   dark: {

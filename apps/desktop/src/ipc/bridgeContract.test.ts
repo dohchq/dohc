@@ -34,6 +34,8 @@ import {
   COLLECTION_VALUE_MAX_DEPTH,
   DesktopMarksResult,
   CreateWorkspaceFilePayload,
+  CreateWorkspaceFolderPayload,
+  DeleteWorkspacePathPayload,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
@@ -2762,8 +2764,8 @@ describe("engine Y.Doc event boundaries", () => {
 
   it("accept the deleted state that turns a live editor read-only", () => {
     expect(
-      EngineYDocSaveStateEvent.parse({ sessionId: "session-1", state: "deleted", seq: 4 }),
-    ).toEqual({ sessionId: "session-1", state: "deleted", seq: 4 });
+      EngineYDocSaveStateEvent.parse({ sessionId: "session-1", state: { kind: "unknown" }, access: "deleted", seq: 4 }),
+    ).toEqual({ sessionId: "session-1", state: { kind: "unknown" }, access: "deleted", seq: 4 });
   });
 });
 
@@ -3551,7 +3553,7 @@ describe("engine history and linked Chats IPC contract", () => {
     ).toBe("text");
   });
 
-  it("rejects empty paths, bad limits, and oversized chat bodies", () => {
+  it("rejects empty paths, bad limits, and empty chat bodies", () => {
     // Path CONTAINMENT is enforced main-side (validateUserWritePath and the
     // engine's own path normalization); the wire schema only bounds shape.
     expect(
@@ -3590,9 +3592,9 @@ describe("engine history and linked Chats IPC contract", () => {
       SendChatMessagePayload.safeParse({
         workspaceId: "ws-engine",
         threadId: "thread-1",
-        body: "x".repeat(65_537),
+        body: "x".repeat(65_536) + "\r\n\uFEFF ",
       }).success,
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("round-trips a sent chat message with main-derived authorship", () => {
@@ -4482,5 +4484,25 @@ describe("launch path failure event", () => {
   ])("rejects malformed failure packets %j", (change) => {
     expect(WorkspacePathOpenFailure.safeParse({ attemptId: "attempt-1", path: "attempted", cause: "refused",
       workspaceId: null, ...change }).success).toBe(false);
+  });
+});
+
+
+describe("exclusive app creation IPC contract", () => {
+  const path = { workspaceId: "workspace", relativePath: "app" };
+  it("retains optional exclusive file and folder admission and rejects non-booleans", () => {
+    for (const [schema, base] of [
+      [CreateWorkspaceFilePayload, { ...path, initialText: "source" }],
+      [CreateWorkspaceFolderPayload, path],
+    ] as const) {
+      expect(schema.parse(base)).toEqual(base);
+      expect(schema.parse({ ...base, exclusive: true })).toEqual({ ...base, exclusive: true });
+      expect(schema.safeParse({ ...base, exclusive: "true" }).success).toBe(false);
+    }
+  });
+  it("retains the empty-only folder rollback constraint and rejects non-booleans", () => {
+    expect(DeleteWorkspacePathPayload.parse({ ...path, emptyFolderOnly: true }))
+      .toEqual({ ...path, emptyFolderOnly: true });
+    expect(DeleteWorkspacePathPayload.safeParse({ ...path, emptyFolderOnly: "true" }).success).toBe(false);
   });
 });

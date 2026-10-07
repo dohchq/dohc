@@ -193,12 +193,12 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
       closes.push(client.close);
       return client;
     }
-    function saveWhen(client: Awaited<ReturnType<typeof desktop>>, state: EngineYDocSaveStateEvent["state"]) {
-      const previous = client.states.find(event => event.state === state);
+    function saveWhen(client: Awaited<ReturnType<typeof desktop>>, state: EngineYDocSaveStateEvent["state"]["kind"] | "read-only") {
+      const previous = client.states.find(event => (state === "read-only" ? event.access === state : event.state.kind === state));
       if (previous) return Promise.resolve(previous);
       return new Promise<EngineYDocSaveStateEvent>((resolve, reject) => {
         const timer = setTimeout(() => {client.sender.off(CHANNELS.engineYDocSaveState, receive); reject(new Error(`Missing ${state} save event.`));}, 30000);
-        const receive = (payload: unknown) => {const event = EngineYDocSaveStateEvent.parse(payload); if (event.state !== state) return;
+        const receive = (payload: unknown) => {const event = EngineYDocSaveStateEvent.parse(payload); if (state === "read-only" ? event.access !== state : event.state.kind !== state) return;
           clearTimeout(timer); client.sender.off(CHANNELS.engineYDocSaveState, receive); resolve(event);};
         client.sender.on(CHANNELS.engineYDocSaveState, receive);
       });
@@ -216,7 +216,7 @@ it("edits and pauses through the desktop capture, IPC, renderer mirror and a rea
     expect(first.mirror.available).toBe(true); expect(peer.mirror.available).toBe(true);
     if (!first.mirror.doc || !peer.mirror.doc) throw new Error("Missing live renderer mirrors.");
     expect(yDocToMarkdown(first.mirror.doc)).toBe("Hello"); expect(yDocToMarkdown(peer.mirror.doc)).toBe("Hello");
-    const peerSeen = fieldWhen(peer.mirror.doc, "title", "desktop-over-tls"), saved = saveWhen(first, "saved");
+    const peerSeen = fieldWhen(peer.mirror.doc, "title", "desktop-over-tls"), saved = saveWhen(first, "saved-to-host");
     let localUpdate!: Uint8Array;
     first.mirror.doc.once("update", update => {localUpdate = update.slice();});
     first.mirror.doc.getMap("frontmatter").set("title", "desktop-over-tls");

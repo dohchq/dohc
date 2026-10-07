@@ -77,7 +77,7 @@ describe("private owner delivery transport", () => {
       else await expect(pending).rejects.toThrow("Owner enrollment target changed");
     } finally { transport.close(); }
   });
-  it.each(["binding", "namespace", "cursor", "revision"])("preserves enrollment %s comparisons after upload", async (scenario) => {
+  it.each(["binding", "namespace", "cursor"])("preserves enrollment %s comparisons after upload", async (scenario) => {
     const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });
     peer.acknowledge(); await transport.ready();
     const draft = { ...target, binding: { ...target.binding, objectId: scenario === "binding" ? "other" : "object" }, relayDatabaseNamespace: scenario === "namespace" ? "other" : "relay", revision: scenario === "revision" ? 2 : 1, acceptedCursor: scenario === "cursor" ? 8 : 9, nativeHeadSequence: 3, nativeUnsettled: false, outboxId: null, pendingBytes: 0, state: null };
@@ -87,6 +87,36 @@ describe("private owner delivery transport", () => {
     try {
       await expect(transport.ownerYDocEnroll(request, { ...target, captured: { nativeHeadSequence: 2, localStateDigest: "ab".repeat(32) }, journalCursor: 9, hostVector: Uint8Array.of(0), checkpoint: Uint8Array.of(0, 0) })).rejects.toThrow("Owner enrollment differs from request");
     } finally { transport.close(); }
+  });
+  it("accepts an advanced revision from authenticated recovery enrollment", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();
+    const draft={...target,revision:2,acceptedCursor:9,nativeHeadSequence:3,nativeUnsettled:false,outboxId:null,pendingBytes:0,state:null};
+    let wireId=0;
+    peer.onEnvelope=e=>{if(e.type==="request"){wireId=e.id;expect(e.params).toHaveProperty("recovery",true);}};
+    peer.onBlobChunk=frame=>{if(frame.fin)peer.send({type:"response",id:wireId,result:{draft}});};
+    try {
+      await expect(transport.ownerYDocEnroll(request,{...target,recovery:true,captured:{nativeHeadSequence:2,localStateDigest:"ab".repeat(32)},journalCursor:9,hostVector:Uint8Array.of(0),checkpoint:Uint8Array.of(0,0)})).resolves.toEqual(draft);
+    } finally {transport.close();}
+  });
+  it("uses the guarded channel for pending pages and exact entry refusals", async () => {
+    const peer=new FakePeerConnection(),transport=client(peer,{privateLiveApplication:{aggregateBytes:128*1024*1024,maxUploads:1}});
+    peer.acknowledge();await transport.ready();
+    peer.onEnvelope=e=>{
+      if(e.type!=="request")return;
+      if(e.method==="ydoc.ownerDelivery.listDrafts") {
+        expect(e.params).toEqual({after:null,limit:8,pendingOnly:true});
+        peer.send({type:"response",id:e.id,result:{drafts:[],next:null}});
+      } else {
+        expect(e.method).toBe("ydoc.ownerDelivery.refuseEntry");
+        expect(e.params).toEqual({outboxId:"outbox",deliveryId:"delivery",updateDigest:"ab".repeat(32),reason:"grant-revoked"});
+        peer.send({type:"response",id:e.id,result:{refused:true}});
+      }
+    };
+    try {
+      await transport.ownerYDocListDrafts(request,{after:null,limit:8,pendingOnly:true});
+      await transport.ownerYDocRefuseEntry(request,{outboxId:"outbox",deliveryId:"delivery",updateDigest:"ab".repeat(32),reason:"grant-revoked"});
+    } finally {transport.close();}
   });
   it.each(["active", "sealed", "extra", "wrong digest", "zero count", "invalid ID", "null", "array"])("checks draft append %s replies after binary upload", async (scenario) => {
     const peer = new FakePeerConnection(), transport = client(peer, { privateLiveApplication: { aggregateBytes: 128 * 1024 * 1024, maxUploads: 1 } });

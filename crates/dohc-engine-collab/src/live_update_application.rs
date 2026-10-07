@@ -357,6 +357,10 @@ pub fn nonnull_optional<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     deny_unknown_fields
 )]
 pub enum LiveAuthorEntry {
+    Automation {
+        automation_id: String,
+        attribution: dohc_engine_domain::ChangeAttribution,
+    },
     Human {
         human_id: String,
         human_name: String,
@@ -400,6 +404,16 @@ impl From<AgentDeclaration> for LiveAuthorEntry {
 impl LiveAuthorEntry {
     pub fn validate(&self) -> Result<(), ApplicationError> {
         match self {
+            Self::Automation {
+                automation_id,
+                attribution,
+            } => {
+                identifier(automation_id, 512)?;
+                if attribution.actor_kind != dohc_engine_domain::ChangeActorKind::Automation {
+                    return Err(invalid("invalid automation actor"));
+                }
+                attribution.validate().map_err(invalid)?;
+            }
             Self::Human {
                 human_id,
                 human_name,
@@ -435,7 +449,7 @@ impl LiveAuthorEntry {
         if serde_json::to_vec(self)
             .map_err(|_| invalid("author JSON"))?
             .len()
-            > 2114
+            > 4096
         {
             return Err(invalid("author entry exceeds byte bound"));
         }
@@ -443,6 +457,14 @@ impl LiveAuthorEntry {
     }
     pub fn identity(&self) -> (&'static str, Option<&str>, &str) {
         match self {
+            Self::Automation {
+                automation_id,
+                attribution,
+            } => (
+                "automation",
+                attribution.run.as_ref().map(|run| run.claim_id.as_str()),
+                automation_id,
+            ),
             Self::Human { human_id, .. } => ("human", None, human_id),
             Self::Link {
                 public_principal_id,
@@ -543,6 +565,25 @@ impl AdmittedLiveUpdateMetadata {
             .is_none_or(|admitted| Some(admitted) == declaration)
     }
 
+    pub fn matches_automation_declaration(
+        &self,
+        declaration: Option<&dohc_engine_domain::AutomationDeclaration>,
+    ) -> bool {
+        let admitted = self.author_snapshot.as_ref().and_then(|authors| {
+            authors.iter().find_map(|author| match author {
+                LiveAuthorEntry::Automation {
+                    automation_id,
+                    attribution,
+                } => Some(dohc_engine_domain::AutomationDeclaration {
+                    automation_id: automation_id.clone(),
+                    attribution: attribution.clone(),
+                }),
+                _ => None,
+            })
+        });
+        admitted.as_ref() == declaration
+    }
+
     pub fn validate_extensions(&self) -> Result<(), ApplicationError> {
         match (
             self.canonical_version,
@@ -553,8 +594,10 @@ impl AdmittedLiveUpdateMetadata {
             (Some(2), Some(authors), Some(deletes)) => {
                 if authors.len() > 2
                     || (authors.len() == 2
-                        && (matches!(authors[0], LiveAuthorEntry::Agent { .. })
-                            || !matches!(authors[1], LiveAuthorEntry::Agent { .. })))
+                        && (matches!(
+                            authors[0],
+                            LiveAuthorEntry::Agent { .. } | LiveAuthorEntry::Automation { .. }
+                        ) || !matches!(authors[1], LiveAuthorEntry::Agent { .. })))
                 {
                     return Err(invalid("noncanonical author snapshot"));
                 }
@@ -1094,8 +1137,19 @@ pub fn apply_committed(
             }) {
                 return Err(ApplicationError::Conflict.into());
             }
+            let admitted_actor = if let Some(own) = &own {
+                own.author.clone()
+            } else if event.metadata.canonical_version == Some(2) {
+                event.metadata.author_snapshot.as_ref().and_then(|authors| authors.iter().find_map(|author| match author {
+                    LiveAuthorEntry::Automation { automation_id, attribution } => Some((Some(automation_id.clone()), Some(attribution.clone()))),
+                    _ => None,
+                })).or_else(|| event.metadata.admitted_declaration().map(|declaration| (Some(declaration.agent_id.clone()), Some(declaration.attribution()))))
+            } else { None };
             let authors = event.metadata.author_snapshot.as_ref()
-                .map(|authors| authors.iter().map(|author| serde_json::to_string(&[author])).collect::<Result<Vec<_>, _>>())
+                .map(|authors| authors.iter().map(|author| match author {
+                    LiveAuthorEntry::Automation { automation_id, attribution } => Ok(dohc_engine_domain::moment_author_json(Some(automation_id), Some(attribution)).expect("validated automation author")),
+                    _ => serde_json::to_string(&[author]),
+                }).collect::<Result<Vec<_>, _>>())
                 .transpose().map_err(|_| ApplicationError::Corrupt)?
                 .unwrap_or_default();
             match crate::author_coverage::admit_accepted_in(tx, &key, &authors) {
@@ -1112,12 +1166,18 @@ pub fn apply_committed(
                 result => result?,
             }
             mutation_attempted = true;
+            // Canonical person and agent snapshots retain names and explicit depths.
+            let native_actor = admitted_actor.as_ref().filter(|(_, attribution)| {
+                own.is_some() || attribution.as_ref().is_some_and(|attribution| {
+                    attribution.actor_kind == dohc_engine_domain::ChangeActorKind::Automation
+                })
+            });
             let append = durable::record_authorized_update_in_tx(
                 tx,
                 &key,
                 &event.update_bytes,
-                None,
-                None,
+                native_actor.and_then(|(actor, _)| actor.as_deref()),
+                native_actor.and_then(|(_, attribution)| attribution.as_ref()),
                 event.metadata.accepted.received_at_ms,
             )?;
             // A new delivery can reuse old bytes and an older local sequence.
@@ -1161,11 +1221,6 @@ pub fn apply_committed(
                 // the relay's log. The claim keeps its history-row key, so it
                 // dedupes as before, and the cursor lets the relay place it.
                 facts.live_cursor = Some(event.metadata.accepted.receipt.journal_cursor);
-                let admitted_actor = if let Some(own) = own {
-                    own.author
-                } else if event.metadata.canonical_version == Some(2) {
-                    event.metadata.admitted_declaration().map(|declaration| (Some(declaration.agent_id.clone()), Some(declaration.attribution())))
-                } else { None };
                 match admitted_actor {
                     Some((actor, attribution)) => {
                         facts.author_origin_id = actor;
@@ -1777,6 +1832,30 @@ mod tests {
     }
 
     #[test]
+    fn owner_admission_without_authorship_does_not_invent_a_human_author() {
+        for canonical in [false, true] {
+            let (_dir, mut store, mut cache, _owner, handle) = fixture();
+            let source = Ydoc::wire();
+            let mut update = event(
+                "owner-unknown-author",
+                1,
+                source.plaintext_insert(0, "text"),
+            );
+            if canonical {
+                update.metadata.canonical_version = Some(2);
+                update.metadata.author_snapshot = Some(vec![]);
+                update.metadata.first_seen_deletes = Some(vec![]);
+            }
+            ack(apply(&mut store, &mut cache, &handle, update));
+            let author: (Option<String>, Option<String>) = store.read_with(|conn| conn.query_row(
+                "SELECT actor_origin_id,actor_kind FROM ydoc_updates WHERE workspace_id='workspace-1' AND version_id='main' AND object_id='object-1' AND seq=1",
+                [], |row| Ok((row.get(0)?,row.get(1)?)),
+            )).unwrap();
+            assert_eq!(author, (None, None));
+        }
+    }
+
+    #[test]
     fn admitted_metadata_v1_bytes_and_v2_digest_versions() {
         let source = Ydoc::wire();
         let legacy = event("versioned", 1, source.plaintext_insert(0, "text"));
@@ -2376,6 +2455,38 @@ mod tests {
         assert!(metadata.matches_draft_declaration(declared("agent").as_ref()));
         assert!(!metadata.matches_draft_declaration(declared("other").as_ref()));
         assert!(!metadata.matches_draft_declaration(None));
+    }
+
+    #[test]
+    fn automation_snapshot_requires_exact_draft_provenance() {
+        let mut metadata = event("owner", 1, Ydoc::wire().plaintext_insert(0, "x")).metadata;
+        let declaration = dohc_engine_domain::AutomationDeclaration {
+            automation_id: "collection:Tasks#mark".into(),
+            attribution: dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::Automation,
+                on_behalf_of: Some("presser".into()),
+                depth: 1,
+                run: None,
+            },
+        };
+        snapshot(&mut metadata, None);
+        assert!(!metadata.matches_automation_declaration(Some(&declaration)));
+        metadata.author_snapshot = Some(vec![LiveAuthorEntry::Automation {
+            automation_id: declaration.automation_id.clone(),
+            attribution: declaration.attribution.clone(),
+        }]);
+        metadata.validate_extensions().unwrap();
+        assert!(metadata.matches_automation_declaration(Some(&declaration)));
+        assert!(!metadata.matches_automation_declaration(None));
+        let mut changed = declaration.clone();
+        changed.attribution.on_behalf_of = Some("other".into());
+        assert!(!metadata.matches_automation_declaration(Some(&changed)));
+        metadata
+            .author_snapshot
+            .as_mut()
+            .unwrap()
+            .push(LiveAuthorEntry::from(declared("agent").unwrap()));
+        assert!(metadata.validate_extensions().is_err());
     }
 
     fn warm_cache(store: &mut EngineStore, cache: &mut WriterDocCache) {

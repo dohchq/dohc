@@ -1110,6 +1110,7 @@ describe("shared view with an unreadable grant", () => {
     ...SHARE_VIEW,
     shareView: {
       shareId: "share-1",
+      recipientUserId: "recipient",
       granterEmail: "sam@dohc.test",
       damaged: true as const,
     },
@@ -1125,6 +1126,8 @@ describe("shared view with an unreadable grant", () => {
     );
     // No level is stated, because none could be read.
     expect(banner.textContent).not.toContain("read-only. Ask");
+    expect(banner.textContent).not.toContain("This share must be reopened");
+    expect(banner.textContent).toContain("sam@dohc.test dohc can't read");
   });
 
   // The chat half of the same stance. A grant that names no

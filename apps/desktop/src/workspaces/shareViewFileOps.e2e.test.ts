@@ -230,6 +230,7 @@ function shareViewFilesOwner(
         throw new Error("Unexpected pull");
       },
       recordRefusals: async () => undefined,
+      updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
       markEnded: async () => undefined,
       retireTarget: async () => undefined,
       assertProjectionRoot: async () => undefined,

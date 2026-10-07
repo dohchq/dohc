@@ -40,6 +40,23 @@ const WORKSPACE = "workspace-handle-1";
 const VERSION = "version-1";
 const PATH = "notes/live.txt";
 
+describe("server automation draft declarations", () => {
+  it.each([false, true])("retains the explicit server declaration option (%s)", async trustedAutomationDraft => {
+    const engine = seedPlaintextEngine("seed");
+    const provider = await openEngineYdocProviderSession({
+      transport:engine,workspace:WORKSPACE,versionId:VERSION,path:PATH,contentKind:"plaintext",
+      onRemoteUpdate:()=>undefined,scheduleSettle:()=>()=>undefined,
+      ...(trustedAutomationDraft ? {trustedAutomationDraft:true} : {}),
+    });
+    await provider.applyLocalUpdate(plaintextUpdate(provider.initialUpdate, text => text.insert(0,"automation ")), {
+      actorOriginId:"collection:Tasks#mark",attribution:{actorKind:"automation",depth:1,onBehalfOf:"presser"},armSettle:false,
+    });
+    const params=engine.requests.filter(request=>request.method===YDOC_METHOD.recordUpdate).at(-1)!.params as {trustedAutomationDraft?:boolean};
+    expect(params.trustedAutomationDraft).toBe(trustedAutomationDraft ? true : undefined);
+    await provider.evict();
+  });
+});
+
 describe("closing a settled revision", () => {
   async function fixture(onSettled?: (result: YdocSettleResult) => boolean | void | Promise<boolean | void>) {
     const engine = seedPlaintextEngine("seed");
