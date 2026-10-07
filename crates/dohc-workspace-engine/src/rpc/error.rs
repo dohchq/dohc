@@ -331,9 +331,9 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         // A 429 asks the caller to back off and retry, which is exactly
         // Overloaded's wire contract (Retryability::AfterBackoff) — unlike
         // QuotaExceeded, which reads as a persistent ceiling.
-        RelayError::DiscussionRateLimited | RelayError::LinkReadRateLimited => {
-            ErrorCode::Overloaded
-        }
+        RelayError::DiscussionRateLimited
+        | RelayError::LinkReadRateLimited
+        | RelayError::ShareAccessRateLimited => ErrorCode::Overloaded,
         RelayError::NoProgress => ErrorCode::RelayNoProgress,
         RelayError::BlobMissing => ErrorCode::BlobMissing,
         RelayError::BlobReferenceMissing => ErrorCode::BlobReferenceMissing,
@@ -990,6 +990,7 @@ mod tests {
             (RelayError::QuotaExceeded, ErrorCode::QuotaExceeded),
             (RelayError::DiscussionRateLimited, ErrorCode::Overloaded),
             (RelayError::LinkReadRateLimited, ErrorCode::Overloaded),
+            (RelayError::ShareAccessRateLimited, ErrorCode::Overloaded),
             (RelayError::PayloadTooLarge, ErrorCode::PayloadTooLarge),
             (RelayError::Forbidden, ErrorCode::Forbidden),
             (RelayError::ShareReadOnly, ErrorCode::ShareReadOnly),
@@ -1018,6 +1019,7 @@ mod tests {
                 ErrorCode::UnknownChatOperation,
             ),
             (RelayError::LinkReadRateLimited, ErrorCode::Overloaded),
+            (RelayError::ShareAccessRateLimited, ErrorCode::Overloaded),
             (RelayError::PresenceCapacity, ErrorCode::PresenceCapacity),
             (RelayError::SelfShare, ErrorCode::SelfShare),
             (RelayError::AmbiguousSelector, ErrorCode::AmbiguousSelector),
@@ -1055,6 +1057,7 @@ mod tests {
         for relay in [
             RelayError::DiscussionRateLimited,
             RelayError::LinkReadRateLimited,
+            RelayError::ShareAccessRateLimited,
         ] {
             let wire = map_runtime(RuntimeError::Relay(relay));
             assert_eq!(wire.code, ErrorCode::Overloaded);

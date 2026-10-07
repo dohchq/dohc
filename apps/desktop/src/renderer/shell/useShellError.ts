@@ -27,6 +27,7 @@ export type ShellErrorKind =
   | "sync-refusal"
   | "import-files"
   | "share-refresh"
+  | "share-capture"
   | "kept-copies-summary"
   | "kept-copies-more"
   | "drive-no-atomic-placement"
@@ -41,6 +42,8 @@ export type ShellErrorKind =
 // A message the toast and the Notices row can hold. A protocol response or a
 // validation reason can run long; the report Copy makes keeps the rest.
 export const SHELL_ERROR_MAX_CHARS = 500;
+
+const shareCaptureNotices = new Map<string, { key: string; dismissed: boolean }>();
 
 // One workspace error the notice center shows: a toast when it arrives, a
 // row in Notices until it is retried or dismissed. An error that names a
@@ -142,6 +145,34 @@ export function useShellError(workspaceId: string) {
     );
   }, []);
 
+  const filedShareCapture = useRef<string | null>(null);
+  const reportShareCapture = useCallback((shareId: string, paths: readonly string[] | null | undefined) => {
+    const identity = `share-capture:${workspaceId}:${shareId}`;
+    const sortedPaths = paths === null ? null : [...new Set(paths ?? [])].sort();
+    const key = JSON.stringify(sortedPaths);
+    if (sortedPaths !== null && sortedPaths.length === 0) {
+      shareCaptureNotices.delete(identity);
+      filedShareCapture.current = null;
+      clearKind("share-capture");
+      return;
+    }
+    const previous = shareCaptureNotices.get(identity);
+    if (previous?.key === key && (previous.dismissed || filedShareCapture.current === `${identity}:${key}`)) return;
+    const notice = { key, dismissed: false };
+    shareCaptureNotices.set(identity, notice);
+    filedShareCapture.current = `${identity}:${key}`;
+    push({
+      identity,
+      kind: "share-capture",
+      message: sortedPaths === null
+        ? "dohc could not check this share's files. Your changes may not have been sent. Copy your changed files to another workspace."
+        : "Your changes weren't sent and remain on this computer. Copy these files to another workspace.",
+      details: sortedPaths?.map(path => ["File", path, path.length] as const),
+      retry: null,
+      onDismiss: () => { notice.dismissed = true; },
+    }, previous?.key === key ? true : false);
+  }, [workspaceId, clearKind, push]);
+
   const showTabLimitError = useCallback(
     (
       openTabCount: number,
@@ -173,6 +204,7 @@ export function useShellError(workspaceId: string) {
     setShellErrors([]);
     shownKeptCopies.current = new Set();
     shownKeptCopiesMore.current = false;
+    filedShareCapture.current = null;
   }, [workspaceId]);
 
   const reportShellError = useCallback(
@@ -503,6 +535,7 @@ export function useShellError(workspaceId: string) {
     clearIdentity,
     reportShellError,
     reportShellFailure,
+    reportShareCapture,
     reportLaneFailure,
     reportSearchError,
     clearSearchError,

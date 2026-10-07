@@ -1196,6 +1196,7 @@ define_server_error_codes! {
     "self_share" => |_| RelayError::SelfShare,
     "share_op_rejected" => |_| RelayError::ShareOperationRejected,
     "share_read_only" => |_| RelayError::ShareReadOnly,
+    "share_access_rate_limited" => |_| RelayError::ShareAccessRateLimited,
     "share_access_removed" => unavailable,
     "stale" => |_| RelayError::Conflict,
     "stream_identity_mismatch" => |_| RelayError::StreamIdentityMismatch,

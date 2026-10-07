@@ -232,11 +232,12 @@ test("@two-client a recipient with Edit changes a Collection directly, and the o
     const ledger = await relayJson(relay.baseUrl, OWNER_TOKEN, `/sync/${ownerWorkspaceId}/collection-writes/${grantId}`);
     expect((JSON.parse(ledger.body) as { writes: unknown[] }).writes).toHaveLength(2);
 
-    // --- A write after the stop is refused ---------------------------------
-    await saveText(page, SCHEMA_PATH, SCHEMA_AFTER_STOP);
-    // The save pushes on its own. The relay's answer makes the view refresh,
-    // and the refresh finds the share ended.
+    // Keep the recipient open. Metadata checks discover the owner's stop
+    // without a refresh click or a write attempt.
+    await page.bringToFront();
     await expect(page.getByTestId("shared-view-banner")).toContainText("This share was ended", { timeout: 60_000 });
+    await expect(page.getByTestId("share-changes-send")).toHaveCount(0);
+    // --- A server write after the stop is still refused ---------------------
     const refused = await relayJson(relay.baseUrl, RECIPIENT_TOKEN, `/sync/shares/${shareId}/collection-writes`, {
       method: "POST",
       body: JSON.stringify({

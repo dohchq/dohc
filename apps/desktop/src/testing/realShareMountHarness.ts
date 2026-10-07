@@ -85,6 +85,7 @@ export function createRealShareMountHarness(input: {
         },
       })(refusals);
     },
+    updateUnsavedPaths: async () => { throw new Error("Mounted shares have no unsaved paths"); },
     markEnded: async (target) => {
       workspace.shareMounts = workspace.shareMounts.map((mount) =>
         mount.shareId === target.shareId ? { ...mount, ended: true } : mount,

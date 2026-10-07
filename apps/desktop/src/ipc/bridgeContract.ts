@@ -286,6 +286,7 @@ export const WorkspaceSummary = z.object({
       // live-share action (refresh, dismiss) is addressed by share id, so a
       // marker that cannot name itself cannot be presented as a live share.
       shareId: OPAQUE_ID.optional(),
+      recipientUserId: OPAQUE_ID.optional(),
       subjectName: z.string().max(320).nullable().optional(),
       sharerName: z.string().max(320).nullable().optional(),
       granterEmail: z.string().min(3).max(320).nullable(),
@@ -300,6 +301,7 @@ export const WorkspaceSummary = z.object({
       // keeps the view read-only, keeps the share surfaces hidden, skips the
       // refresh it has no grant to pull with, and says so in the banner.
       damaged: z.literal(true).optional(),
+      unsavedPaths: z.array(z.string()).nullable().optional(),
       ended: z.boolean().optional(),
       skippedOps: ShareSkippedOpsSummary.optional(),
     })
@@ -5165,6 +5167,25 @@ export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
 ]);
 export type RefreshSharedViewResult = z.infer<typeof RefreshSharedViewResult>;
 
+export const CheckSharedViewAccessPayload = WorkspaceIdPayload;
+export type CheckSharedViewAccessPayload = z.infer<typeof CheckSharedViewAccessPayload>;
+export const CheckSharedViewAccessResult = z.object({
+  status: z.enum(["current", "ended", "unverified", "needs-reopen"]),
+  access: z.enum(["view", "comment", "edit"]).optional(),
+});
+export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessResult>;
+
+// The handler owns its workspace operation so a stale check replies unverified.
+export const sharedViewAccessOperations = {
+  checkSharedViewAccess: {
+    capabilityId: "share.access.read",
+    scope: "workspace",
+    handlerCheck: { check: "sharedViewsIpc.withRendererWorkspaceOperation", reason: "The handler owns the workspace operation so stale checks reply unverified." },
+    channel: "desktop:check-shared-view-access",
+    payload: CheckSharedViewAccessPayload, result: CheckSharedViewAccessResult, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // ---- Share mounts ----
 // The receive side of a relay share materialized inside a host workspace as
 // shared-with-me/<label>/ — ordinary read-only files (agent-readable through
@@ -6337,7 +6358,8 @@ export interface DohcDesktopBridge
     OperationBridge<typeof reportingOperations>,
     OperationBridge<typeof noticeOperations>,
     OperationBridge<typeof scheduleHostOperations>,
-    OperationBridge<typeof chatDispatchNoticeOperations> {
+    OperationBridge<typeof chatDispatchNoticeOperations>,
+    OperationBridge<typeof sharedViewAccessOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;

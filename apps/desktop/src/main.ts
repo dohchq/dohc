@@ -208,7 +208,6 @@ import {
   removeWorkspace,
   setWorkspaceRemote,
   acknowledgeWorkspaceShareSkips,
-  endWorkspaceShareView,
   setWorkspaceShareMounts,
   markWorkspaceShareRosterPulled,
   setWorkspaceShareRoster,
@@ -337,7 +336,7 @@ import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import { SharedChannelReadOnlyError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { type ShareAccess } from "@dohc/security-contract/share-selector";
 import {
-  fetchShareViewInfo, fetchShareAutomationSwitchable,
+  fetchShareViewInfo, fetchShareViewAccess, fetchShareAutomationSwitchable,
 } from "./workspaces/shareViewInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
@@ -4732,6 +4731,9 @@ function createShareViewFilesForOperation(
     resolveRelay: async (target) => {
       await warmCredentialCache().catch(() => undefined);
       const credentials = cachedCredentials;
+      if (target.kind === "standalone" && !target.recipientUserId) {
+        throw new Error("This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.");
+      }
       if (!credentials?.relayUrl) {
         if (target.kind === "standalone") {
           throw new Error("Sign in to your server first.");
@@ -4741,6 +4743,7 @@ function createShareViewFilesForOperation(
       if (
         (target.relayUrl &&
           !relayUrlsMatch(credentials.relayUrl, target.relayUrl)) ||
+        (target.kind === "standalone" && target.recipientUserId !== credentials.userId) ||
         (target.kind === "mount" &&
           target.recipientEmail != null &&
           credentials.email != null &&
@@ -4796,10 +4799,19 @@ function createShareViewFilesForOperation(
             });
       await recorder([...refusals]);
     },
-    markEnded: async (target) => {
+    updateUnsavedPaths: async (target, paths) => {
+      assertCurrent();
+      const view = currentWorkspace().shareView;
+      if (target.kind !== "standalone" || !view) throw new Error("This shared view is no longer registered.");
+      setWorkspaceShareView(target.workspaceId, { ...view, unsavedPaths: paths });
+    },
+    markEnded: async (target, unsavedPaths) => {
       assertCurrent();
       if (target.kind === "standalone") {
-        endWorkspaceShareView(target.workspaceId);
+        const view = currentWorkspace().shareView;
+        if (!view) throw new Error("This shared view is no longer registered.");
+        setWorkspaceShareView(target.workspaceId, { ...view, ended: true,
+          ...(unsavedPaths !== undefined ? { unsavedPaths } : {}) });
         return;
       }
       const mounts = storedShareMounts(currentWorkspace());
@@ -4855,6 +4867,10 @@ function withShareViewFilesOperation<Result>(
 }
 
 shareViewFiles = {
+  narrow: (lease, target, assertCurrent, commit) =>
+    withShareViewFilesOperation(target, files => files.narrow(lease, target, assertCurrent, commit)),
+  end: (lease, target, assertCurrent) =>
+    withShareViewFilesOperation(target, (files) => files.end(lease, target, assertCurrent)),
   mount: (lease, target) =>
     withShareViewFilesOperation(target, (files) => files.mount(lease, target)),
   change: (lease, target, change) =>
@@ -5819,7 +5835,12 @@ function registerIpcHandlers(): void {
       localPerson,
       withWorkspaceOperation: work => withRendererWorkspaceOperation(event.sender, input.workspaceId,
         "Record creation stopped because this window changed workspaces.", work),
-      editContext: (operation: DesktopWorkspaceOperation, person) => collectionEditContextFor(operation, person),
+      editContext: (operation: DesktopWorkspaceOperation, person) => {
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          throw new Error("New record is not available in received shares yet. Ask the owner to create the record.");
+        }
+        return collectionEditContextFor(operation, person);
+      },
     });
   });
   handleIpc(CHANNELS.dataset, async (event, raw: unknown) => {
@@ -6094,8 +6115,13 @@ function registerIpcHandlers(): void {
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, loadAndCacheCurrentCredentials,
     warmCredentialCache, currentCredentials: () => cachedCredentials,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    onSenderClosed: (sender, close) => {
+      sender.once("destroyed", close);
+      return () => { sender.removeListener("destroyed", close); };
+    },
     engineDaemonStartup: () => desktopEngine.startup,
-    fetchShareViewInfo, usableRoot, readdir, mkdir, createJoinedWorkspace,
+    fetchShareViewInfo, fetchShareViewAccess, usableRoot, readdir, mkdir, createJoinedWorkspace,
     setWorkspaceShareView, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
     canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
     receivedShareEngine, openWorkspaceActivity, requireWorkspace, notifyRenderer,
