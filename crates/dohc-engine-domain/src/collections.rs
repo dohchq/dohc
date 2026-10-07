@@ -3801,11 +3801,15 @@ pub fn index_historical_record_owner_moment_in_tx(
 ) -> Result<(), StorageError> {
     let moment = tx
         .query_row(
-            "SELECT m.version_id,m.object_id,m.path,b.text FROM moments m \
+            concat!(
+                "SELECT m.version_id,m.object_id,m.path,b.text FROM moments m \
              JOIN blobs b ON b.sha256=m.after_blob_sha256 \
              WHERE m.workspace_id=?1 AND m.moment_order=?2 \
                AND m.after_content_kind='text' \
-               AND m.metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared')",
+               AND ",
+                crate::exclude_capture_recovery_sql!("m"),
+                ""
+            ),
             params![workspace_id, moment_order],
             |row| {
                 Ok((
@@ -3875,14 +3879,16 @@ fn ensure_historical_record_owners_backfilled(
     }
 
     let mut statement = tx
-        .prepare(
+        .prepare(concat!(
             "SELECT m.moment_order,m.object_id,m.path,b.text FROM moments m \
              JOIN blobs b ON b.sha256=m.after_blob_sha256 \
              WHERE m.workspace_id=?1 AND m.version_id=?2 \
                AND m.after_content_kind='text' AND lower(substr(m.path,-3))='.md' \
-               AND m.metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared') \
-             ORDER BY m.moment_order",
-        )
+               AND ",
+            crate::exclude_capture_recovery_sql!("m"),
+            " \
+             ORDER BY m.moment_order"
+        ))
         .map_err(crate::DomainError::sql_corrupt)?;
     let moments = statement
         .query_map(params![workspace_id, version_id], |row| {

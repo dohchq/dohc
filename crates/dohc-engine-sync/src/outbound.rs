@@ -148,9 +148,17 @@ pub fn journal_moment_append_in_tx(
     workspace_id: &str,
     moment_id: &str,
 ) -> Result<(), SyncError> {
-    let recovery: bool = tx.query_row(
-        "SELECT metadata_origin IN ('capture-recovery','capture-recovery-cleared') FROM moments WHERE workspace_id=?1 AND moment_id=?2",
-        params![workspace_id,moment_id], |row| row.get(0)).map_err(SyncError::corrupt)?;
+    let recovery: bool = tx
+        .query_row(
+            concat!(
+                "SELECT NOT (",
+                dohc_engine_domain::exclude_capture_recovery_sql!(),
+                ") FROM moments WHERE workspace_id=?1 AND moment_id=?2"
+            ),
+            params![workspace_id, moment_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
     if recovery {
         return Ok(());
     }

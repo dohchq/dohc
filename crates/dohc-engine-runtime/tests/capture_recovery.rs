@@ -410,6 +410,99 @@ async fn recovery_after_pruning_and_reenrollment_never_exports_private_typing() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_live_settlement_generation_skips_redundant_recovery() {
+    for pending in [false, true] {
+        let scratch = ScratchDir::new().unwrap();
+        let db = engine_db_path(&scratch).unwrap();
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).unwrap().actor;
+        let (state, doc) = dirty(&actor).await;
+        let typing = doc.plaintext_string();
+        supervisor.close(&db).unwrap();
+        inspect(&db, |store| {
+            dohc_engine_collab::claim_base(
+                store,
+                &state.key,
+                ContentKind::Plaintext,
+                &doc.encode_full_state(),
+                &NoFaults,
+                3,
+            )
+            .unwrap();
+            // Native live settlement uses a per-document generation. Its
+            // committed History head has a separate workspace moment order.
+            let dohc_engine_storage::TxnOutcome::Committed(settled) =
+                dohc_engine_collab::settle(store, &state.key, FILE, &NoFaults, 3).unwrap()
+            else {
+                panic!("settlement must commit");
+            };
+            let result = VersionedTextStore::new(store)
+                .write_text(
+                    &WriteText {
+                        workspace_id: WS.into(),
+                        version_id: "main".into(),
+                        object_id: state.key.object_id.clone(),
+                        path: FILE.into(),
+                        text: typing.clone(),
+                        moment_id: "committed-live-settlement".into(),
+                        metadata_origin: "ydoc".into(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 3,
+                        request_id: None,
+                    },
+                    &NoFaults,
+                )
+                .unwrap();
+            store
+                .write_with(&NoFaults, |tx| {
+                    dohc_engine_collab::author_coverage::advance_in(tx, &state.key, false)
+                })
+                .unwrap();
+            std::fs::write(scratch.path().join(FILE), &typing).unwrap();
+            if !pending {
+                store
+                    .mark_materialization_complete(&settled.job_id, 4)
+                    .unwrap();
+            }
+            let generation = store
+                .load_materialization_job(&settled.job_id)
+                .unwrap()
+                .unwrap()
+                .target_generation;
+            let settle_seq: i64 = store.read_with(|conn| conn.query_row(
+                "SELECT settle_seq FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                rusqlite::params![WS, state.key.version_id, state.key.object_id], |row| row.get(0),
+            )).unwrap();
+            assert_eq!(settle_seq, generation);
+            assert_ne!(
+                generation, result.moment.moment_order,
+                "the test must distinguish document generation from moment order"
+            );
+            let audits: i64 = store
+                .read_with(|conn| {
+                    conn.query_row("SELECT COUNT(*) FROM live_device_settlements", [], |row| {
+                        row.get(0)
+                    })
+                })
+                .unwrap();
+            assert_eq!(
+                audits, 0,
+                "accepted-prefix coverage must not hide this regression"
+            );
+        });
+        let actor = supervisor.open(&db, 5).unwrap().actor;
+        capture(&actor, "outside\n").await;
+        assert_eq!(
+            actor.capture_recoveries(WS.into()).await.unwrap().len(),
+            usize::from(pending)
+        );
+        supervisor.close(&db).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unrelated_identical_file_moment_does_not_cover_native_updates() {
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();

@@ -454,33 +454,41 @@ struct CaptureBatchSharedContext {
     journals_file_moments: Option<bool>,
 }
 
+struct PreparedCaptureRecovery {
+    lineage: dohc_engine_sync::PreparedLocalYdocLineage,
+    preserve: bool,
+    authors: Option<String>,
+}
+
 fn prepare_capture_recovery_in(
     tx: &Transaction<'_>,
     input: &CaptureIngest,
     object_id: &str,
-) -> Result<Option<(dohc_engine_collab::Projection, Option<String>)>, RuntimeError> {
+) -> Result<PreparedCaptureRecovery, RuntimeError> {
     let key = DocKey::new(&input.workspace_id, &input.version_id, object_id)?;
-    let Some(marker) = dohc_engine_collab::durable::read_marker_in(tx, &key)? else {
-        return Ok(None);
+    let mut prepared = PreparedCaptureRecovery {
+        lineage: dohc_engine_sync::prepare_local_ydoc_lineage_in_tx(tx, &key)?,
+        preserve: false,
+        authors: None,
     };
-    if marker.head_update_seq == 0 && marker.head_snapshot_seq == 0 {
-        return Ok(None);
-    }
-    let doc = dohc_engine_collab::durable::load_doc_in(tx, &key)?;
-    let projection =
-        dohc_engine_sync::project_ydoc_with_store(tx, &key, &doc, marker.content_kind)?;
+    let Some(projection) = prepared.lineage.projection() else {
+        return Ok(prepared);
+    };
     if projection.content == input.text {
-        return Ok(None);
+        return Ok(prepared);
     }
     let sha = dohc_engine_storage::hex_sha256(projection.content.as_bytes());
-    // A committed settlement covers the native boundary. Accepted-prefix
+    // The committed head's identity and digest cover the native boundary;
+    // settle_seq can be a per-document generation, not a moment order. Accepted-prefix
     // audits cover their exact vector, independently of that boundary.
     let covered: bool = tx.query_row(
         "SELECT NOT EXISTS(SELECT 1 FROM materialization_jobs WHERE workspace_id IN (?1,'') AND target_path=?4 AND status='pending') AND (
-          EXISTS(SELECT 1 FROM ydoc_docs d JOIN moments m ON m.workspace_id=d.workspace_id
-            AND m.version_id=d.version_id AND m.object_id=d.object_id AND m.moment_order=d.settle_seq
+          EXISTS(SELECT 1 FROM ydoc_docs d JOIN snapshots s ON s.workspace_id=d.workspace_id
+            AND s.version_id=d.version_id AND s.object_id=d.object_id
+            JOIN moments m ON m.workspace_id=s.workspace_id AND m.version_id=s.version_id
+            AND m.object_id=s.object_id AND m.moment_id=s.latest_moment_id
             WHERE d.workspace_id=?1 AND d.version_id=?2 AND d.object_id=?3
-            AND d.settled_update_seq=d.head_update_seq AND m.after_blob_sha256=?5
+            AND d.settled_update_seq=d.head_update_seq AND m.after_blob_sha256=?5 AND s.blob_sha256=?5
             AND d.last_settled_sha=?5) OR
           EXISTS(SELECT 1 FROM live_device_settlements a JOIN moments m
             ON m.workspace_id=a.workspace_id AND m.moment_id=a.moment_id
@@ -497,10 +505,11 @@ fn prepare_capture_recovery_in(
         params![input.workspace_id,input.version_id,object_id,input.path,sha,projection.source_state_vector_sha256], |row| row.get(0),
     ).map_err(StorageError::corrupt_public)?;
     if covered {
-        return Ok(None);
+        return Ok(prepared);
     }
-    let authors = dohc_engine_collab::author_coverage::recovery_in(tx, &key)?.moment_json();
-    Ok(Some((projection, authors)))
+    prepared.authors = dohc_engine_collab::author_coverage::recovery_in(tx, &key)?.moment_json();
+    prepared.preserve = true;
+    Ok(prepared)
 }
 
 fn capture_ingest_in_tx(
@@ -525,7 +534,7 @@ fn capture_ingest_in_tx(
             |workspace_id, version_id, object_id| {
                 ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
                 if may_have_ydoc_state {
-                    recovery = prepare_capture_recovery_in(tx, input, object_id)?;
+                    recovery = Some(prepare_capture_recovery_in(tx, input, object_id)?);
                 }
                 admitted = true;
                 Ok::<_, RuntimeError>(())
@@ -537,7 +546,7 @@ fn capture_ingest_in_tx(
             |workspace_id, version_id, object_id| {
                 ensure_capture_target_not_leased(tx, leases, workspace_id, version_id, object_id)?;
                 if may_have_ydoc_state {
-                    recovery = prepare_capture_recovery_in(tx, input, object_id)?;
+                    recovery = Some(prepare_capture_recovery_in(tx, input, object_id)?);
                 }
                 admitted = true;
                 Ok::<_, RuntimeError>(())
@@ -547,14 +556,18 @@ fn capture_ingest_in_tx(
     if let Some(batch) = batch.as_deref_mut() {
         batch.capture.commit_result(&result)?;
     }
-    if let Some((projection, authors)) = recovery {
+    if let Some(prepared) = recovery.as_ref().filter(|prepared| prepared.preserve) {
+        let projection = prepared
+            .lineage
+            .projection()
+            .expect("recovery has a projection");
         if let Some(order) = dohc_engine_domain::record_capture_recovery_in_tx(
             tx,
             &input.workspace_id,
             &result.snapshot,
             &projection.content,
             &projection.source_state_vector_sha256,
-            authors.as_deref(),
+            prepared.authors.as_deref(),
             input.now_ms,
         )? {
             if let Some(batch) = batch.as_deref_mut() {
@@ -579,19 +592,30 @@ fn capture_ingest_in_tx(
             None => true,
         };
         let changed = if has_ydoc_state {
-            dohc_engine_sync::reconcile_local_resulting_head_in_tx(
-                tx,
-                &input.workspace_id,
-                &input.version_id,
-                &result.snapshot.object_id,
-                dohc_engine_sync::ResultingHead::Text {
-                    path: &result.snapshot.path,
-                    text: &result.snapshot.text,
-                },
-                actor_origin_id.as_deref(),
-                attribution.as_ref(),
-                input.now_ms,
-            )?
+            let resulting = dohc_engine_sync::ResultingHead::Text {
+                path: &result.snapshot.path,
+                text: &result.snapshot.text,
+            };
+            match recovery {
+                Some(prepared) => dohc_engine_sync::reconcile_prepared_local_resulting_head_in_tx(
+                    tx,
+                    prepared.lineage,
+                    resulting,
+                    actor_origin_id.as_deref(),
+                    attribution.as_ref(),
+                    input.now_ms,
+                )?,
+                None => dohc_engine_sync::reconcile_local_resulting_head_in_tx(
+                    tx,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &result.snapshot.object_id,
+                    resulting,
+                    actor_origin_id.as_deref(),
+                    attribution.as_ref(),
+                    input.now_ms,
+                )?,
+            }
         } else {
             // No Y.Doc lineage exists in this version, so the file alone
             // carries the write.

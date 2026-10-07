@@ -19,11 +19,11 @@ pub fn is_capture_recovery_origin(origin: &str) -> bool {
 /// LAST_FILE_EXPORT_SQL and file_version_before_in_tx's bootstrap preimage.
 #[macro_export]
 macro_rules! exclude_capture_recovery_sql {
+    () => {
+        "metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared')"
+    };
     ($alias:literal) => {
-        concat!(
-            $alias,
-            ".metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared')"
-        )
+        concat!($alias, ".", $crate::exclude_capture_recovery_sql!())
     };
 }
 

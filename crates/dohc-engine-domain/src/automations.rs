@@ -2054,14 +2054,16 @@ fn walk_object_moments(
     decide: impl Fn(&ObjectMoment) -> Option<bool>,
 ) -> Result<Option<LifecycleMoment>, DomainError> {
     let mut statement = conn
-        .prepare(
+        .prepare(concat!(
             "SELECT moment_order, recorded_at_ms, author_json, path, operation, \
                     before_present, payload_before_path \
              FROM moments \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
-               AND metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared') \
-             ORDER BY moment_order DESC",
-        )
+               AND ",
+            crate::exclude_capture_recovery_sql!(),
+            " \
+             ORDER BY moment_order DESC"
+        ))
         .map_err(DomainError::sql_corrupt)?;
     let mut rows = statement
         .query(params![workspace_id, version_id, object_id])

@@ -1535,6 +1535,40 @@ pub(crate) struct CompleteYdocLineage {
     state: Option<(dohc_engine_collab::Marker, dohc_engine_collab::Ydoc)>,
 }
 
+/// A complete lineage and its pre-mutation projection, reused by capture's fold
+/// in the same writer transaction. Preparation does not change durable state.
+pub struct PreparedLocalYdocLineage {
+    complete: CompleteYdocLineage,
+    projection: Option<dohc_engine_collab::Projection>,
+}
+
+impl PreparedLocalYdocLineage {
+    pub fn projection(&self) -> Option<&dohc_engine_collab::Projection> {
+        self.projection.as_ref()
+    }
+}
+
+pub fn prepare_local_ydoc_lineage_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+) -> Result<PreparedLocalYdocLineage, SyncError> {
+    let complete = ensure_ydoc_lineage_complete_in_tx(tx, key)?;
+    let projection = match complete.state.as_ref() {
+        Some((marker, doc))
+            if marker.lineage_claim_status.has_claimed_base()
+                || marker.head_update_seq > 0
+                || marker.head_snapshot_seq > 0 =>
+        {
+            Some(project_ydoc_with_store(tx, key, doc, marker.content_kind)?)
+        }
+        _ => None,
+    };
+    Ok(PreparedLocalYdocLineage {
+        complete,
+        projection,
+    })
+}
+
 /// The durable file head that must remain canonical after a non-Y.Doc
 /// mutation commits.
 pub enum ResultingHead<'a> {
@@ -1680,7 +1714,8 @@ pub(crate) fn ydoc_lineage_blocks_absent_delete_in_tx(
     // proof of retained deleted state, not an unmaterialized local draft.
     let retained_scene: bool = tx
         .query_row(
-            "SELECT EXISTS(
+            concat!(
+                "SELECT EXISTS(
                  SELECT 1 FROM ydoc_docs d
                  JOIN scene_asset_delete_authorities a
                    ON a.workspace_id=d.workspace_id
@@ -1702,9 +1737,12 @@ pub(crate) fn ydoc_lineage_blocks_absent_delete_in_tx(
                          AND later.object_id=m.object_id
                          AND later.moment_order > m.moment_order
                          AND COALESCE(later.sync_record_only,0)=0
-                         AND later.metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared')
+                         AND ",
+                dohc_engine_domain::exclude_capture_recovery_sql!("later"),
+                "
                   )
-             )",
+             )"
+            ),
             params![key.workspace_id, key.version_id, key.object_id],
             |row| row.get(0),
         )
@@ -1898,14 +1936,55 @@ pub fn reconcile_local_resulting_head_in_tx(
             reason: "Y.Doc lineage coordinates are invalid",
         })?;
     let complete = ensure_ydoc_lineage_complete_in_tx(tx, &key)?;
+    reconcile_local_complete_resulting_head_in_tx(
+        tx,
+        &complete,
+        None,
+        resulting,
+        actor_origin_id,
+        attribution,
+        now_ms,
+    )
+}
+
+/// Consume capture's pre-mutation lineage without loading or projecting it again.
+pub fn reconcile_prepared_local_resulting_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    prepared: PreparedLocalYdocLineage,
+    resulting: ResultingHead<'_>,
+    actor_origin_id: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    now_ms: i64,
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
+    reconcile_local_complete_resulting_head_in_tx(
+        tx,
+        &prepared.complete,
+        prepared.projection.as_ref(),
+        resulting,
+        actor_origin_id,
+        attribution,
+        now_ms,
+    )
+}
+
+fn reconcile_local_complete_resulting_head_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    complete: &CompleteYdocLineage,
+    projection: Option<&dohc_engine_collab::Projection>,
+    resulting: ResultingHead<'_>,
+    actor_origin_id: Option<&str>,
+    attribution: Option<&dohc_engine_domain::ChangeAttribution>,
+    now_ms: i64,
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
+    let key = &complete.key;
     match resulting {
         ResultingHead::Text { path, text } => {
             // A blocked settlement write must not refuse this head forever.
-            dohc_engine_collab::author_coverage::supersede_in(tx, &key, now_ms)
+            dohc_engine_collab::author_coverage::supersede_in(tx, key, now_ms)
                 .map_err(map_collab_hard_error)?;
-            let folded = fold_complete_ydoc_lineage_in_tx(
+            let folded = fold_projected_complete_ydoc_lineage_in_tx(
                 tx,
-                &complete,
+                complete,
                 path,
                 text,
                 LineageFoldAuthor {
@@ -1914,14 +1993,15 @@ pub fn reconcile_local_resulting_head_in_tx(
                 },
                 now_ms,
                 true,
+                projection,
             )?;
             match folded {
                 LineageFold::Folded(facts) => Ok(facts.map(|facts| *facts)),
                 LineageFold::NoContent => dohc_engine_domain::index_collection_record_text_in_tx(
                     tx,
-                    workspace_id,
-                    version_id,
-                    object_id,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
                     path,
                     text,
                     actor_origin_id,
@@ -1932,7 +2012,7 @@ pub fn reconcile_local_resulting_head_in_tx(
             }
         }
         ResultingHead::BinaryOrAbsent => {
-            retire_complete_ydoc_lineage_in_tx(tx, &complete).map(|()| None)
+            retire_complete_ydoc_lineage_in_tx(tx, complete).map(|()| None)
         }
     }
 }
@@ -2154,6 +2234,29 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
     now_ms: i64,
     journal: bool,
 ) -> Result<LineageFold, SyncError> {
+    fold_projected_complete_ydoc_lineage_in_tx(
+        tx,
+        complete,
+        path,
+        chosen_text,
+        author,
+        now_ms,
+        journal,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fold_projected_complete_ydoc_lineage_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    complete: &CompleteYdocLineage,
+    path: &str,
+    chosen_text: &str,
+    author: LineageFoldAuthor<'_>,
+    now_ms: i64,
+    journal: bool,
+    projection: Option<&dohc_engine_collab::Projection>,
+) -> Result<LineageFold, SyncError> {
     let LineageFoldAuthor {
         actor_origin_id,
         attribution,
@@ -2184,7 +2287,13 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
         return Ok(LineageFold::NoContent);
     }
     let mut record_facts = None;
-    let projection = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
+    let loaded_projection;
+    let projection = if let Some(projection) = projection {
+        projection
+    } else {
+        loaded_projection = project_ydoc_with_store(tx, key, doc, marker.content_kind)?;
+        &loaded_projection
+    };
     // Keep this witness from before the rewrite mutates the in-memory doc.
     let pristine_empty = projection.content.is_empty() && pristine_empty_seed_in_tx(tx, complete)?;
     if projection.content != chosen_text {
@@ -3327,7 +3436,8 @@ fn retired_scene_asset_byte_length(
     sha256: &str,
 ) -> Result<Option<i64>, SyncError> {
     conn.query_row(
-        "SELECT b.byte_length FROM moments deleted \
+        concat!(
+            "SELECT b.byte_length FROM moments deleted \
          JOIN moments producer ON producer.workspace_id=deleted.workspace_id \
            AND producer.moment_id=deleted.before_latest_moment_id \
          JOIN binary_blobs b ON b.sha256=deleted.before_binary_sha256 \
@@ -3349,9 +3459,12 @@ fn retired_scene_asset_byte_length(
              WHERE newer.workspace_id=deleted.workspace_id \
                AND newer.version_id=deleted.version_id AND newer.path=deleted.path \
                AND COALESCE(newer.sync_record_only,0)=0 \
-               AND newer.metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared') \
+               AND ",
+            dohc_engine_domain::exclude_capture_recovery_sql!("newer"),
+            " \
                AND newer.moment_order>deleted.moment_order) \
-         ORDER BY deleted.moment_order DESC LIMIT 1",
+         ORDER BY deleted.moment_order DESC LIMIT 1"
+        ),
         params![key.workspace_id, key.version_id, path, sha256],
         |row| row.get(0),
     )

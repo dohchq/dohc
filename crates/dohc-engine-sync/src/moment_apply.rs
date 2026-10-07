@@ -2424,12 +2424,16 @@ fn local_branch_root(
     base_moment_id: Option<&str>,
 ) -> Result<Option<String>, SyncError> {
     tx.query_row(
-        "SELECT moment_id FROM moments \
+        concat!(
+            "SELECT moment_id FROM moments \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
            AND before_latest_moment_id IS ?4 \
            AND (sync_record_only IS NULL OR sync_record_only=0) \
-           AND metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared') \
-         ORDER BY moment_order LIMIT 1",
+           AND ",
+            dohc_engine_domain::exclude_capture_recovery_sql!(),
+            " \
+         ORDER BY moment_order LIMIT 1"
+        ),
         params![workspace_id, version_id, object_id, base_moment_id],
         |row| row.get(0),
     )

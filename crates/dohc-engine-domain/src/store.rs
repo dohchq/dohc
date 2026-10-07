@@ -1709,11 +1709,15 @@ fn latest_materialized_moment_id(
     version_id: &str,
 ) -> Result<Option<String>, DomainError> {
     conn.query_row(
-        "SELECT moment_id FROM moments \
+        concat!(
+            "SELECT moment_id FROM moments \
          WHERE workspace_id = ?1 AND version_id = ?2 \
            AND (sync_record_only IS NULL OR sync_record_only = 0) \
-           AND metadata_origin NOT IN ('capture-recovery','capture-recovery-cleared') \
-         ORDER BY moment_order DESC LIMIT 1",
+           AND ",
+            crate::exclude_capture_recovery_sql!(),
+            " \
+         ORDER BY moment_order DESC LIMIT 1"
+        ),
         params![workspace_id, version_id],
         |row| row.get(0),
     )
