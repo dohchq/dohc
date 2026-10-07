@@ -3869,10 +3869,11 @@ export function DesktopWorkspaceShell(props: {
   });
   // The person learns about reports before any leaves. The notice is about
   // this computer, not the workspace, so any open window shows it.
+  const reportsNoticeRow = shellErrors.find((error) => error.kind === "reports");
   const reportsNoticeShown = useReportsNotice({
     workspaceId,
     privacy: props.userSettings?.settings.privacy ?? null,
-    noticeId: shellErrors.find((error) => error.kind === "reports")?.id ?? null,
+    notice: reportsNoticeRow?.reports ? { id: reportsNoticeRow.id, reports: reportsNoticeRow.reports } : null,
     show: (reports) => showReportsNotice(reports, () => openSettings("privacy")),
   });
 

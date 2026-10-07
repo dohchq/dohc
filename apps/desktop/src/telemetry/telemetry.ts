@@ -60,11 +60,18 @@ export const REPORT_LIMITS = {
   maxPauseMs: 3_600_000,
 } as const;
 
+// The kinds of report a notice on screen has named, each on its own. A file
+// main cannot read names none, so the notice shows again.
 const ReportingState = z.object({
-  // A random number for this installation. Usage reports carry it so a
-  // count of people is possible; nothing else does.
-  installId: z.string().uuid(),
+  usage: z.object({
+    // A random number for this installation, made when a notice first names
+    // usage reports. Usage reports carry it so a count of people is
+    // possible; nothing else does.
+    installId: z.string().uuid(),
+  }).strict().optional(),
+  errors: z.literal(true).optional(),
 }).strict();
+type ReportingState = z.infer<typeof ReportingState>;
 
 export interface Telemetry {
   track(event: UsageEvent): void;
@@ -74,34 +81,37 @@ export interface Telemetry {
   // switch that turns off drops what waits and stops a send under way.
   setPrivacy(privacy: PrivacySettings): void;
   // The reports the notice must name: those this launch can send and
-  // `privacy` allows, until a window has shown the notice. None means no
+  // `privacy` allows that no notice on screen has named yet. None means no
   // notice is due. Asking changes nothing.
   noticeDue(privacy: PrivacySettings): ReportKinds;
-  // A window shows the notice. Main saves the install ID, and reports may
-  // leave from now on.
-  acknowledgeNotice(): void;
+  // A window shows a notice that names `shown`. Main saves those kinds, and
+  // reports of those kinds may leave from now on.
+  acknowledgeNotice(shown: ReportKinds): void;
   // The services this launch can send to.
   readonly available: ReportKinds;
-  // Sends what waits, within the shutdown budget.
+  // At quit: sends what waits, a send under way included, within one
+  // shutdown deadline, then drops the rest. Nothing leaves after it.
   flush(): Promise<void>;
 }
 
 interface Lane<Item> {
   queue: Item[];
   sending: AbortController | null;
+  // The loop that sends what waits, while one runs.
+  draining: Promise<void> | null;
   pausedUntilMs: number;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
- * Usage and error reports, sent from main only. Nothing leaves before the
- * person has seen the notice and main has read their switches, and each
- * switch is read again just before every send. A failed send is dropped,
- * never retried.
+ * Usage and error reports, sent from main only. No report leaves before a
+ * notice on screen has named its kind and main has read the switches, and
+ * each switch is read again just before every send. A failed send is
+ * dropped, never retried.
  */
 export function createTelemetry(deps: {
   reporting: Reporting | null;
-  // Holds the install ID. It exists once a window showed the notice.
+  // Holds the kinds a notice on screen has named, and the install ID.
   statePath: string;
   facts(): ErrorFacts & { channel: string };
   locate(frame: string): CodeLocation | null;
@@ -112,7 +122,10 @@ export function createTelemetry(deps: {
   const send = deps.fetch ?? fetch;
   const now = deps.now ?? Date.now;
   let privacy: PrivacySettings | null = null;
-  let installId = reporting ? readInstallId(deps.statePath) : null;
+  let named: ReportingState = reporting ? readState(deps.statePath) : {};
+  // Quit began, so no timer starts; then quit's flush ended, so nothing leaves.
+  let quitting = false;
+  let ended = false;
   let usageCount = 0;
   let errorCount = 0;
   let errorsPrepared = 0;
@@ -120,12 +133,12 @@ export function createTelemetry(deps: {
   const usage: Lane<{ event: string; properties: Record<string, unknown>; timestamp: string }> = lane();
   const errors: Lane<SentryEvent> = lane();
 
-  const usageOn = () => Boolean(reporting?.usage && installId && privacy?.usageReports);
-  const errorsOn = () => Boolean(reporting?.errors && installId && privacy?.errorReports);
+  const usageOn = () => !ended && Boolean(reporting?.usage && named.usage && privacy?.usageReports);
+  const errorsOn = () => !ended && Boolean(reporting?.errors && named.errors && privacy?.errorReports);
   // Before the switches are known, reports wait; afterwards, a switch that
   // is off takes nothing in.
-  const usageMayQueue = () => Boolean(reporting?.usage) && (privacy === null || privacy.usageReports);
-  const errorsMayQueue = () => Boolean(reporting?.errors) && (privacy === null || privacy.errorReports);
+  const usageMayQueue = () => !ended && Boolean(reporting?.usage) && (privacy === null || privacy.usageReports);
+  const errorsMayQueue = () => !ended && Boolean(reporting?.errors) && (privacy === null || privacy.errorReports);
 
   function drop<Item>(target: Lane<Item>): void {
     target.queue.length = 0;
@@ -135,7 +148,7 @@ export function createTelemetry(deps: {
   }
 
   function schedule<Item>(target: Lane<Item>, on: () => boolean, delayMs: number, run: () => Promise<void>): void {
-    if (!on() || target.timer || target.queue.length === 0) return;
+    if (quitting || !on() || target.timer || target.queue.length === 0) return;
     target.timer = setTimeout(() => {
       target.timer = null;
       void run();
@@ -143,15 +156,33 @@ export function createTelemetry(deps: {
     target.timer.unref?.();
   }
 
-  async function post(
-    target: Lane<unknown>,
-    request: (signal: AbortSignal) => Promise<Response>,
-    timeoutMs: number,
-  ): Promise<void> {
+  // One loop sends a lane's reports while it may, and a second caller joins
+  // it. The loop clears itself in the step that ends it, so nobody joins a
+  // loop that has stopped. A rate limit drops what waits.
+  function drain<Item>(target: Lane<Item>, on: () => boolean, sendNext: () => Promise<void>): Promise<void> {
+    const ready = () => on() && target.queue.length > 0 && now() >= target.pausedUntilMs;
+    const dropIfPaused = () => {
+      if (now() < target.pausedUntilMs) target.queue.length = 0;
+    };
+    if (!target.draining && ready()) {
+      target.draining = (async () => {
+        try {
+          do await sendNext(); while (ready());
+        } finally {
+          target.draining = null;
+          dropIfPaused();
+        }
+      })();
+    }
+    if (!target.draining) dropIfPaused();
+    return target.draining ?? Promise.resolve();
+  }
+
+  async function post(target: Lane<unknown>, request: (signal: AbortSignal) => Promise<Response>): Promise<void> {
     const controller = new AbortController();
     target.sending = controller;
     try {
-      const response = await request(AbortSignal.any([controller.signal, AbortSignal.timeout(timeoutMs)]));
+      const response = await request(AbortSignal.any([controller.signal, AbortSignal.timeout(REPORT_LIMITS.requestTimeoutMs)]));
       const pauseMs = rateLimitMs(response);
       if (pauseMs > 0) target.pausedUntilMs = now() + pauseMs;
     } catch {
@@ -161,42 +192,38 @@ export function createTelemetry(deps: {
     }
   }
 
-  async function sendUsage(timeoutMs: number = REPORT_LIMITS.requestTimeoutMs): Promise<void> {
+  const sendUsage = () => drain(usage, usageOn, async () => {
+    const batch = usage.queue.splice(0, REPORT_LIMITS.usageBatch);
     const service = reporting?.usage;
-    while (service && usageOn() && !usage.sending && usage.queue.length > 0 && now() >= usage.pausedUntilMs) {
-      const batch = usage.queue.splice(0, REPORT_LIMITS.usageBatch);
-      const distinctId = installId!;
-      await post(usage, (signal) => send(service.url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          api_key: service.key,
-          batch: batch.map((item) => ({ ...item, distinct_id: distinctId })),
-        }),
-        redirect: "error",
-        signal,
-      }), timeoutMs);
-    }
-    if (now() < usage.pausedUntilMs) usage.queue.length = 0;
-  }
+    if (!service || !named.usage) return;
+    const distinctId = named.usage.installId;
+    await post(usage, (signal) => send(service.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        api_key: service.key,
+        batch: batch.map((item) => ({ ...item, distinct_id: distinctId })),
+      }),
+      redirect: "error",
+      signal,
+    }));
+  });
 
-  async function sendErrors(timeoutMs: number = REPORT_LIMITS.requestTimeoutMs): Promise<void> {
+  const sendErrors = () => drain(errors, errorsOn, async () => {
     const service = reporting?.errors;
-    while (service && errorsOn() && !errors.sending && errors.queue.length > 0 && now() >= errors.pausedUntilMs) {
-      const event = errors.queue.shift()!;
-      await post(errors, (signal) => send(service.url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-sentry-envelope",
-          "x-sentry-auth": `Sentry sentry_version=7, sentry_key=${service.publicKey}, sentry_client=dohc-desktop/1`,
-        },
-        body: sentryEnvelope(event, now()),
-        redirect: "error",
-        signal,
-      }), timeoutMs);
-    }
-    if (now() < errors.pausedUntilMs) errors.queue.length = 0;
-  }
+    const event = errors.queue.shift();
+    if (!service || !event) return;
+    await post(errors, (signal) => send(service.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-sentry-envelope",
+        "x-sentry-auth": `Sentry sentry_version=7, sentry_key=${service.publicKey}, sentry_client=dohc-desktop/1`,
+      },
+      body: sentryEnvelope(event, now()),
+      redirect: "error",
+      signal,
+    }));
+  });
 
   return {
     available: { usage: Boolean(reporting?.usage), errors: Boolean(reporting?.errors) },
@@ -251,57 +278,74 @@ export function createTelemetry(deps: {
     },
 
     noticeDue(next) {
-      if (installId) return { usage: false, errors: false };
       return {
-        usage: Boolean(reporting?.usage) && next.usageReports,
-        errors: Boolean(reporting?.errors) && next.errorReports,
+        usage: Boolean(reporting?.usage) && next.usageReports && !named.usage,
+        errors: Boolean(reporting?.errors) && next.errorReports && !named.errors,
       };
     },
 
-    acknowledgeNotice() {
-      if (!reporting || installId) return;
+    acknowledgeNotice(shown) {
+      // What the notice named counts, whatever the switches say by now.
+      const usageNamed = shown.usage && Boolean(reporting?.usage) && !named.usage;
+      const errorsNamed = shown.errors && Boolean(reporting?.errors) && !named.errors;
+      if (!usageNamed && !errorsNamed) return;
+      const next: ReportingState = {
+        ...named,
+        ...(usageNamed ? { usage: { installId: randomUUID() } } : {}),
+        ...(errorsNamed ? { errors: true as const } : {}),
+      };
       try {
-        installId = writeInstallId(deps.statePath);
+        writeState(deps.statePath, next);
       } catch (error) {
         // Without the file the notice shows again, and nothing is sent.
         console.error("[reports] could not save the report state", error);
         return;
       }
+      named = next;
       schedule(usage, usageOn, REPORT_LIMITS.usageFlushMs, sendUsage);
       schedule(errors, errorsOn, REPORT_LIMITS.errorFlushMs, sendErrors);
     },
 
     async flush() {
+      if (quitting) return;
+      quitting = true;
       for (const target of [usage, errors]) {
         if (target.timer) clearTimeout(target.timer);
         target.timer = null;
       }
-      await Promise.allSettled([
-        sendUsage(REPORT_LIMITS.shutdownTimeoutMs),
-        sendErrors(REPORT_LIMITS.shutdownTimeoutMs),
+      // A send under way is joined, not repeated. A service that does not
+      // answer in time costs the deadline, and what waits is dropped.
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.allSettled([sendUsage(), sendErrors()]),
+        new Promise<void>((resolve) => {
+          deadline = setTimeout(resolve, REPORT_LIMITS.shutdownTimeoutMs);
+        }),
       ]);
+      clearTimeout(deadline);
+      ended = true;
+      drop(usage);
+      drop(errors);
     },
   };
 }
 
 function lane<Item>(): Lane<Item> {
-  return { queue: [], sending: null, pausedUntilMs: 0, timer: null };
+  return { queue: [], sending: null, draining: null, pausedUntilMs: 0, timer: null };
 }
 
-function readInstallId(path: string): string | null {
+function readState(path: string): ReportingState {
   try {
-    return ReportingState.parse(JSON.parse(readFileSync(path, "utf8"))).installId;
+    return ReportingState.parse(JSON.parse(readFileSync(path, "utf8")));
   } catch {
-    return null;
+    return {};
   }
 }
 
-function writeInstallId(path: string): string {
-  const installId = randomUUID();
+function writeState(path: string, state: ReportingState): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(`${path}.tmp`, JSON.stringify({ installId }), { mode: 0o600 });
+  writeFileSync(`${path}.tmp`, JSON.stringify(state), { mode: 0o600 });
   renameSync(`${path}.tmp`, path);
-  return installId;
 }
 
 /**

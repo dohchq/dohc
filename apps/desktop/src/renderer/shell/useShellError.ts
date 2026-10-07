@@ -68,6 +68,8 @@ export interface ShellError {
   kind?: ShellErrorKind;
   // A kept copy's row: it stays while the engine lists that copy.
   keptCopyId?: number;
+  // The reports notice's row: the reports its words name.
+  reports?: ReportKinds;
   // What the row is about, such as one record a creation left part way or
   // one person's Stop and restore. A row replaces only a row of the same
   // identity, whatever its message.
@@ -444,6 +446,7 @@ export function useShellError(workspaceId: string) {
       tone: "success",
       stays: true,
       kind: "reports",
+      reports,
       action: { label: "Privacy settings", run: openPrivacy },
     });
   }, [push]);

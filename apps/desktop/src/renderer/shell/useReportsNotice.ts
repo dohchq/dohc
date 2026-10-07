@@ -13,17 +13,18 @@ export function reportsNoticeText(reports: ReportKinds): string {
 /**
  * Shows the notice about reports when main says one is due. Returns what the
  * notice center calls when a toast comes on screen: the notice's own toast
- * tells main, and until then no report leaves. A notice waiting behind a
- * newer toast tells main nothing yet. A window that closes or changes
- * workspace while it asks shows nothing and tells main nothing, so the next
- * ask shows the notice again. A switch turned on later asks again.
+ * tells main which reports its words name, and until then none of them
+ * leaves. A notice waiting behind a newer toast tells main nothing yet. A
+ * window that closes or changes workspace while it asks shows nothing and
+ * tells main nothing, so the next ask shows the notice again. A switch
+ * turned on later asks again.
  */
 export function useReportsNotice(input: {
   workspaceId: string;
   // The saved switches, or null until the window has read them.
   privacy: PrivacySettings | null;
-  // The notice's row, while the window holds one.
-  noticeId: string | null;
+  // The notice's row and the reports it names, while the window holds one.
+  notice: { id: string; reports: ReportKinds } | null;
   show(reports: ReportKinds): void;
 }): (toastId: string) => void {
   const { workspaceId } = input;
@@ -31,8 +32,8 @@ export function useReportsNotice(input: {
   const errorReports = input.privacy?.errorReports ?? false;
   const show = useRef(input.show);
   show.current = input.show;
-  const noticeId = useRef(input.noticeId);
-  noticeId.current = input.noticeId;
+  const notice = useRef(input.notice);
+  notice.current = input.notice;
 
   useEffect(() => {
     if (!usageReports && !errorReports) return;
@@ -49,6 +50,7 @@ export function useReportsNotice(input: {
   }, [workspaceId, usageReports, errorReports]);
 
   return useCallback((toastId: string) => {
-    if (toastId === noticeId.current) void bridge().acknowledgeReportsNotice({}).catch(() => undefined);
+    const shown = notice.current;
+    if (shown?.id === toastId) void bridge().acknowledgeReportsNotice(shown.reports).catch(() => undefined);
   }, []);
 }

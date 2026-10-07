@@ -5187,8 +5187,6 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       isPackaged: app.isPackaged,
     }),
     beginEngineShutdown: () => {
-      // Reports that wait go now, each with a short timeout. Quit does not wait for them.
-      void telemetry.flush();
       automationScheduler.dispose();
       for (const workspaceId of workspaceAuthorities.workspaceIds()) {
         activity.engineCaptureFor(workspaceId)?.beginShutdown();
@@ -5204,6 +5202,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       closeAllEngineYDocSessions,
     ),
     stopAgentIntegration: () => agentIntegration.stopAll(),
+    flushReports: () => telemetry.flush(),
     closeWorkspaces: async () => {
       await workspaceAuthorities.close();
       await Promise.allSettled([...activeDatasetHosts].map(async pending => (await pending).close()));
@@ -6318,7 +6317,7 @@ function registerIpcHandlers(): void {
     // The settings file decides, not the window, and is read here so a
     // window that asks early still gets the saved switches.
     readReportsNotice: async () => telemetry.noticeDue(await readPrivacy()),
-    acknowledgeReportsNotice: () => telemetry.acknowledgeNotice(),
+    acknowledgeReportsNotice: (shown) => telemetry.acknowledgeNotice(shown),
     reportRendererError: ({ origin, error }) => {
       telemetry.reportError({ kind: "renderer", origin, error });
     },

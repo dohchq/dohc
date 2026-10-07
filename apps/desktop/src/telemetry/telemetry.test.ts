@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -47,13 +47,17 @@ const FACTS = () => ({
   arch: "x64", electron: "43.3.0",
 });
 
+const statePath = () => join(dir, "reporting.json");
+const savedState = () => JSON.parse(readFileSync(statePath(), "utf8")) as Record<string, unknown>;
+const INSTALL_ID = "6f1c1c55-6a52-4a40-8d38-1b2d2e1c1f10";
+
 function telemetry(
   reporting: Reporting | null = REPORTING,
-  overrides: Partial<Pick<Parameters<typeof createTelemetry>[0], "facts" | "locate">> = {},
+  overrides: Partial<Pick<Parameters<typeof createTelemetry>[0], "facts" | "locate" | "statePath">> = {},
 ) {
   return createTelemetry({
     reporting,
-    statePath: join(dir, "reporting.json"),
+    statePath: statePath(),
     facts: FACTS,
     locate: createCodeLocations([INSTALL], process.platform),
     ...overrides,
@@ -66,11 +70,16 @@ function telemetry(
   });
 }
 
-// A telemetry whose person already saw the notice on an earlier launch.
+// A telemetry whose person already saw a notice naming both reports on an earlier launch.
 function shown(reporting: Reporting | null = REPORTING, overrides: Parameters<typeof telemetry>[1] = {}) {
-  writeFileSync(join(dir, "reporting.json"), JSON.stringify({ installId: "6f1c1c55-6a52-4a40-8d38-1b2d2e1c1f10" }));
+  writeFileSync(statePath(), JSON.stringify({ usage: { installId: INSTALL_ID }, errors: true }));
   return telemetry(reporting, overrides);
 }
+
+// Lets both lanes' timers fire.
+const settle = () => vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs);
+const anError = (name = "TypeError") =>
+  ({ kind: "renderer", origin: "uncaught", error: { name, stack: "" } }) as const;
 
 const usageCalls = () => calls.filter((call) => call.url.startsWith("https://ph.example.test/"));
 const errorCalls = () => calls.filter((call) => call.url.startsWith("https://sentry.example.test/"));
@@ -104,8 +113,8 @@ describe("reports wait for the notice and the switches", () => {
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs * 2);
     expect(calls).toEqual([]);
 
-    reports.acknowledgeNotice();
-    expect(existsSync(join(dir, "reporting.json"))).toBe(true);
+    reports.acknowledgeNotice({ usage: true, errors: true });
+    expect(savedState()).toEqual({ usage: { installId: expect.stringMatching(/^[0-9a-f-]{36}$/) }, errors: true });
     expect(reports.noticeDue(ON)).toEqual({ usage: false, errors: false });
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs);
     expect(usageCalls()).toHaveLength(1);
@@ -169,12 +178,14 @@ describe("reports wait for the notice and the switches", () => {
     const errorsOnly = { usageReports: false, errorReports: true };
     reports.setPrivacy(errorsOnly);
     expect(reports.noticeDue(errorsOnly)).toEqual({ usage: false, errors: true });
-    reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: "" } });
-    await reports.flush();
+    reports.reportError(anError());
+    await settle();
     expect(calls).toEqual([]);
-    reports.acknowledgeNotice();
+    reports.acknowledgeNotice({ usage: false, errors: true });
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.errorFlushMs);
     expect(errorCalls()).toHaveLength(1);
+    // An error report carries no install ID, so none is made for it.
+    expect(savedState()).toEqual({ errors: true });
   });
 
   it("names only the reports this launch can send", () => {
@@ -190,14 +201,14 @@ describe("reports wait for the notice and the switches", () => {
     reports.setPrivacy({ usageReports: false, errorReports: true });
     reports.track({ name: "chat_message_sent" });
     reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: `at x (${BUNDLE}:1:2)` } });
-    await reports.flush();
+    await settle();
     expect(usageCalls()).toHaveLength(0);
     expect(errorCalls()).toHaveLength(1);
 
     calls.length = 0;
     reports.setPrivacy({ usageReports: true, errorReports: false });
     reports.track({ name: "chat_message_sent" });
-    reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "RangeError", stack: "" } });
+    reports.reportError(anError("RangeError"));
     await reports.flush();
     expect(usageCalls()).toHaveLength(1);
     expect(errorCalls()).toHaveLength(0);
@@ -229,12 +240,278 @@ describe("reports wait for the notice and the switches", () => {
     reports.setPrivacy(ON);
     expect(reports.available).toEqual({ usage: false, errors: false });
     expect(reports.noticeDue(ON)).toEqual({ usage: false, errors: false });
-    reports.acknowledgeNotice();
+    reports.acknowledgeNotice({ usage: true, errors: true });
     reports.track({ name: "app_launched" });
     reports.reportError({ kind: "renderer", origin: "boundary", error: { type: "string" } });
     await reports.flush();
     expect(calls).toEqual([]);
     expect(existsSync(join(dir, "reporting.json"))).toBe(false);
+  });
+});
+
+describe("each kind of report waits for a notice that names it", () => {
+  const USAGE = { usage: true, errors: false };
+  const ERRORS = { usage: false, errors: true };
+  const usageOnly = { usageReports: true, errorReports: false };
+  const errorsOnly = { usageReports: false, errorReports: true };
+
+  it("sends no usage report after a notice that named only error reports, until a notice names usage", async () => {
+    const reports = telemetry();
+    reports.setPrivacy(errorsOnly);
+    expect(reports.noticeDue(errorsOnly)).toEqual(ERRORS);
+    reports.acknowledgeNotice(ERRORS);
+
+    reports.setPrivacy(ON);
+    reports.track({ name: "app_launched" });
+    reports.reportError(anError());
+    await settle();
+    expect(usageCalls()).toHaveLength(0);
+    expect(errorCalls()).toHaveLength(1);
+    expect(reports.noticeDue(ON)).toEqual(USAGE);
+
+    reports.acknowledgeNotice(USAGE);
+    await settle();
+    expect(usageCalls()).toHaveLength(1);
+    expect(savedState()).toEqual({ usage: { installId: expect.any(String) }, errors: true });
+  });
+
+  it("sends no error report after a notice that named only usage reports, until a notice names errors", async () => {
+    const reports = telemetry();
+    reports.setPrivacy(usageOnly);
+    expect(reports.noticeDue(usageOnly)).toEqual(USAGE);
+    reports.acknowledgeNotice(USAGE);
+
+    reports.setPrivacy(ON);
+    reports.track({ name: "app_launched" });
+    reports.reportError(anError());
+    await settle();
+    expect(usageCalls()).toHaveLength(1);
+    expect(errorCalls()).toHaveLength(0);
+    expect(reports.noticeDue(ON)).toEqual(ERRORS);
+
+    reports.acknowledgeNotice(ERRORS);
+    await settle();
+    expect(errorCalls()).toHaveLength(1);
+  });
+
+  it.each([
+    { first: ERRORS, then: USAGE },
+    { first: USAGE, then: ERRORS },
+  ])("keeps the other kind due on the next launch after a notice that named $first", async ({ first, then }) => {
+    const before = telemetry();
+    before.setPrivacy(ON);
+    before.acknowledgeNotice(first);
+    await before.flush();
+
+    calls.length = 0;
+    const after = telemetry();
+    after.setPrivacy(ON);
+    expect(after.noticeDue(ON)).toEqual(then);
+    after.track({ name: "app_launched" });
+    after.reportError(anError());
+    await settle();
+    expect(usageCalls()).toHaveLength(first.usage ? 1 : 0);
+    expect(errorCalls()).toHaveLength(first.errors ? 1 : 0);
+  });
+
+  it("keeps the install ID once usage reports were named", () => {
+    const before = telemetry();
+    before.acknowledgeNotice(USAGE);
+    const { usage } = savedState();
+    telemetry().acknowledgeNotice(ERRORS);
+    expect(savedState()).toEqual({ usage, errors: true });
+  });
+
+  it("names usage reports when a later build adds their service", async () => {
+    const partial = telemetry({ ...REPORTING, usage: null });
+    partial.setPrivacy(ON);
+    expect(partial.noticeDue(ON)).toEqual(ERRORS);
+    // The window says what it showed; this build could not send usage reports.
+    partial.acknowledgeNotice({ usage: true, errors: true });
+    expect(savedState()).toEqual({ errors: true });
+
+    const full = telemetry();
+    full.setPrivacy(ON);
+    expect(full.noticeDue(ON)).toEqual(USAGE);
+    full.track({ name: "app_launched" });
+    await settle();
+    expect(usageCalls()).toHaveLength(0);
+  });
+
+  it("saves exactly the kinds the notice named, whatever the switches say by then", () => {
+    const reports = telemetry();
+    reports.setPrivacy(ON);
+    expect(reports.noticeDue(ON)).toEqual({ usage: true, errors: true });
+    reports.setPrivacy(OFF);
+    reports.acknowledgeNotice({ usage: true, errors: true });
+    expect(reports.noticeDue(ON)).toEqual({ usage: false, errors: false });
+
+    const partly = mkdtempSync(join(tmpdir(), "dohc-reports-"));
+    try {
+      const other = telemetry(REPORTING, { statePath: join(partly, "reporting.json") });
+      other.setPrivacy(ON);
+      other.acknowledgeNotice(ERRORS);
+      expect(other.noticeDue(ON)).toEqual(USAGE);
+    } finally {
+      rmSync(partly, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["an earlier format", JSON.stringify({ installId: INSTALL_ID })],
+    ["damaged JSON", "{"],
+    ["a kind turned off by hand", JSON.stringify({ usage: { installId: INSTALL_ID }, errors: false })],
+    ["an install ID that is not random", JSON.stringify({ usage: { installId: "sam" }, errors: true })],
+  ])("names both kinds again after a state file with %s", async (_label, text) => {
+    writeFileSync(statePath(), text);
+    const reports = telemetry();
+    reports.setPrivacy(ON);
+    expect(reports.noticeDue(ON)).toEqual({ usage: true, errors: true });
+    reports.track({ name: "app_launched" });
+    reports.reportError(anError());
+    await settle();
+    expect(calls).toEqual([]);
+  });
+
+  it("sends nothing and keeps the notice due when the state cannot be saved", async () => {
+    const blocked = join(dir, "blocked");
+    writeFileSync(blocked, "a file where a folder should be");
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const reports = telemetry(REPORTING, { statePath: join(blocked, "reporting.json") });
+    reports.setPrivacy(ON);
+    reports.acknowledgeNotice({ usage: true, errors: true });
+    expect(errorLog).toHaveBeenCalledOnce();
+    errorLog.mockRestore();
+    expect(reports.noticeDue(ON)).toEqual({ usage: true, errors: true });
+    reports.track({ name: "app_launched" });
+    reports.reportError(anError());
+    await settle();
+    await reports.flush();
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("reports at quit", () => {
+  function heldResponses() {
+    const held: Array<{ call: Call; answer: (response: Response) => void }> = [];
+    respond = (call) => new Promise((resolve, reject) => {
+      held.push({ call, answer: resolve });
+      call.init.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    });
+    return held;
+  }
+
+  it("sends what waits right away, without waiting for the usage timer", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    reports.track({ name: "app_launched" });
+    reports.reportError(anError());
+    await reports.flush();
+    expect(usageCalls()).toHaveLength(1);
+    expect(errorCalls()).toHaveLength(1);
+  });
+
+  it("waits for a send under way, then sends what queued behind it", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    const held = heldResponses();
+    reports.reportError(anError());
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.errorFlushMs);
+    expect(held).toHaveLength(1);
+    reports.reportError(anError("RangeError"));
+
+    let done = false;
+    const flushing = reports.flush().then(() => { done = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(done).toBe(false);
+    expect(held).toHaveLength(1);
+
+    held[0]!.answer(new Response(null, { status: 200 }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(held).toHaveLength(2);
+    expect(done).toBe(false);
+    held[1]!.answer(new Response(null, { status: 200 }));
+    await flushing;
+    expect(errorCalls()).toHaveLength(2);
+  });
+
+  it("stops at one deadline for every report together, and drops the rest", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    const held = heldResponses();
+    for (const name of ["TypeError", "RangeError", "SyntaxError", "EvalError"]) reports.reportError(anError(name));
+    reports.track({ name: "app_launched" });
+
+    let done = false;
+    const flushing = reports.flush().then(() => { done = true; });
+    // The first send of each kind takes half the deadline; the next error's send never finishes.
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.shutdownTimeoutMs / 2);
+    expect(held).toHaveLength(2);
+    for (const { answer } of held.splice(0)) answer(new Response(null, { status: 200 }));
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.shutdownTimeoutMs / 2 - 1);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushing;
+    expect(usageCalls()).toHaveLength(1);
+    expect(errorCalls()).toHaveLength(2);
+    expect(held).toHaveLength(1);
+    expect(held[0]!.call.init.signal?.aborted).toBe(true);
+    const sent = calls.length;
+
+    reports.reportError(anError("URIError"));
+    reports.track({ name: "workspace_opened" });
+    await settle();
+    expect(calls).toHaveLength(sent);
+  });
+
+  it("stops at the deadline when a service never answers, even to an abort", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    respond = () => new Promise<Response>(() => undefined);
+    reports.reportError(anError());
+    reports.reportError(anError("RangeError"));
+
+    let done = false;
+    const flushing = reports.flush().then(() => { done = true; });
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.shutdownTimeoutMs - 1);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushing;
+    expect(errorCalls()).toHaveLength(1);
+    expect(errorCalls()[0]!.init.signal?.aborted).toBe(true);
+  });
+
+  it("stops the send under way and ends early when a switch turns off during quit", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    const held = heldResponses();
+    reports.reportError(anError());
+    reports.reportError(anError("RangeError"));
+
+    let done = false;
+    const flushing = reports.flush().then(() => { done = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(held).toHaveLength(1);
+    reports.setPrivacy({ usageReports: true, errorReports: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(done).toBe(true);
+    await flushing;
+    expect(held[0]!.call.init.signal?.aborted).toBe(true);
+    expect(errorCalls()).toHaveLength(1);
+  });
+
+  it("starts no timer and sends nothing after quit", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    await reports.flush();
+    reports.track({ name: "app_launched" });
+    reports.reportError(anError());
+    reports.setPrivacy(ON);
+    reports.acknowledgeNotice({ usage: true, errors: true });
+    for (let index = 0; index < REPORT_LIMITS.usageBatch; index += 1) reports.track({ name: "workspace_opened" });
+    expect(vi.getTimerCount()).toBe(0);
+    await settle();
+    expect(calls).toEqual([]);
   });
 });
 
@@ -378,16 +655,28 @@ describe("limits", () => {
     const reports = shown();
     reports.setPrivacy(ON);
     respond = async () => new Response(null, { status: 429, headers: { "retry-after": "120" } });
-    reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: "" } });
-    await reports.flush();
+    reports.reportError(anError());
+    await settle();
     respond = async () => new Response(null, { status: 200 });
-    reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "RangeError", stack: "" } });
-    await reports.flush();
+    reports.reportError(anError("RangeError"));
+    await settle();
     expect(errorCalls()).toHaveLength(1);
     nowMs += 121_000;
-    reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "SyntaxError", stack: "" } });
-    await reports.flush();
+    reports.reportError(anError("SyntaxError"));
+    await settle();
     expect(errorCalls()).toHaveLength(2);
+  });
+
+  it("honors a rate limit at quit", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    respond = async () => new Response(null, { status: 429, headers: { "retry-after": "120" } });
+    reports.reportError(anError());
+    await settle();
+    respond = async () => new Response(null, { status: 200 });
+    reports.reportError(anError("RangeError"));
+    await reports.flush();
+    expect(errorCalls()).toHaveLength(1);
   });
 
   it("reads Sentry's rate limit headers", () => {

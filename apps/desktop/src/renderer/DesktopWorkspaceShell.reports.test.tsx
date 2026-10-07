@@ -58,7 +58,7 @@ describe("the notice about reports", () => {
     const toast = await screen.findByTestId("workspace-shell-notice");
     expect(toast.textContent).toContain(reportsNoticeText(BOTH));
     expect(toast.textContent).toContain("random ID for this installation");
-    expect(bridge.acknowledgeReportsNotice).toHaveBeenCalledOnce();
+    expect(bridge.acknowledgeReportsNotice).toHaveBeenCalledExactlyOnceWith(BOTH);
 
     // A success toast fades after a few seconds; this one waits to be closed.
     await act(async () => {
@@ -95,7 +95,7 @@ describe("the notice about reports", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Dismiss workspace error" }));
     expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain(reportsNoticeText(BOTH));
-    expect(bridge.acknowledgeReportsNotice).toHaveBeenCalledOnce();
+    expect(bridge.acknowledgeReportsNotice).toHaveBeenCalledExactlyOnceWith(BOTH);
   });
 
   it("shows nothing and tells main nothing when the window closes before main answers", async () => {
@@ -122,7 +122,7 @@ describe("the notice about reports", () => {
 
     await act(async () => answers[1]!.resolve({ usage: false, errors: true }));
     expect(await screen.findByText(reportsNoticeText({ usage: false, errors: true }))).toBeTruthy();
-    expect(bridge.acknowledgeReportsNotice).toHaveBeenCalledOnce();
+    expect(bridge.acknowledgeReportsNotice).toHaveBeenCalledExactlyOnceWith({ usage: false, errors: true });
   });
 
   it("waits for the saved switches, asks nothing while both are off, and asks once one turns on", async () => {
@@ -137,7 +137,24 @@ describe("the notice about reports", () => {
     view.rerender(shell(bridge, { usageReports: true, errorReports: false }));
     expect(await screen.findByText(reportsNoticeText({ usage: true, errors: false }))).toBeTruthy();
     expect(bridge.readReportsNotice).toHaveBeenCalledOnce();
-    expect(bridge.acknowledgeReportsNotice).toHaveBeenCalledOnce();
+    expect(bridge.acknowledgeReportsNotice).toHaveBeenCalledExactlyOnceWith({ usage: true, errors: false });
+  });
+
+  it("names usage reports in a new notice when they turn on after a notice that named only error reports", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const answers = heldAnswers(bridge);
+    const view = render(shell(bridge, { usageReports: false, errorReports: true }));
+    await waitFor(() => expect(answers).toHaveLength(1));
+    await act(async () => answers[0]!.resolve({ usage: false, errors: true }));
+    expect(await screen.findByText(reportsNoticeText({ usage: false, errors: true }))).toBeTruthy();
+    expect(bridge.acknowledgeReportsNotice).toHaveBeenLastCalledWith({ usage: false, errors: true });
+
+    view.rerender(shell(bridge, ON));
+    await waitFor(() => expect(answers).toHaveLength(2));
+    await act(async () => answers[1]!.resolve({ usage: true, errors: false }));
+    expect(await screen.findByText(reportsNoticeText({ usage: true, errors: false }))).toBeTruthy();
+    expect(bridge.acknowledgeReportsNotice).toHaveBeenLastCalledWith({ usage: true, errors: false });
+    expect(bridge.acknowledgeReportsNotice).not.toHaveBeenCalledWith(BOTH);
   });
 
   it("shows nothing when main says no notice is due", async () => {

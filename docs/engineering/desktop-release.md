@@ -170,7 +170,8 @@ The app limits what it sends:
 
 A request times out after 10 s and is never retried. The app honors
 `Retry-After` and `X-Sentry-Rate-Limits` for up to one hour, and drops reports
-until then. At quit, waiting reports get one try of 3 s that quit does not wait for.
+until then. At quit, the app waits up to 3 s in total for a send under way and
+the reports behind it, alongside workspace shutdown, then drops the rest.
 
 Usage events are `app_launched`, `workspace_created`, `workspace_opened`,
 `share_created`, `app_published`, and `chat_message_sent`. To add one, add it

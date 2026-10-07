@@ -5818,12 +5818,13 @@ export const reportingOperations = {
     channel: "desktop:read-reports-notice",
     payload: z.object({}), result: ReportKinds, guard: "trusted-sender",
   },
-  // The window shows the notice, so reports may leave from now on.
+  // The window shows a notice that names these reports, so they may leave
+  // from now on.
   acknowledgeReportsNotice: {
     capabilityId: "reports.notice.acknowledge",
     scope: "device",
     channel: "desktop:acknowledge-reports-notice",
-    payload: z.object({}), guard: "trusted-sender",
+    payload: ReportKinds, guard: "trusted-sender",
   },
   reportRendererError: {
     capabilityId: "reports.error.send",
