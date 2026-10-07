@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { StrictMode, useRef, useState } from "react";
+import { StrictMode, useCallback, useRef, useState } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { useFocusReturn, useFocusSurface } from "./focusReturn";
 import { SidePanel } from "../workbench/SidePanel";
@@ -139,8 +139,58 @@ it("keeps a deliberate blur when the previously focused child is later removed",
   const child = screen.getByText("Transient");
   child.focus();
   child.blur();
+  // A removal in the same script would be Chromium's blur before a detach.
+  await act(async () => {});
   expect(document.activeElement).toBe(document.body);
   view.rerender(<Surface show={false} />);
+  await act(async () => {});
+  expect(document.activeElement).toBe(document.body);
+});
+
+it.each(["click", "Enter"])("recovers when Chromium blurs a child before a %s removes it", async (action) => {
+  const user = userEvent.setup();
+  function Surface() {
+    const root = useRef<HTMLElement>(null);
+    const [show, setShow] = useState(true);
+    useFocusSurface(root, () => root.current);
+    // React detaches the ref before it removes the node, where Chromium blurs it.
+    const blurBeforeDetach = useCallback((node: HTMLButtonElement | null) => node ? () => node.blur() : undefined, []);
+    return <section ref={root} tabIndex={-1} data-testid="surface">
+      {show && <button ref={blurBeforeDetach} onClick={() => setShow(false)}>Remove</button>}
+    </section>;
+  }
+  const blurs: string[] = [];
+  const record = (event: FocusEvent) => {
+    if (event.target instanceof HTMLButtonElement) blurs.push(`connected ${event.target.isConnected}, body active ${document.activeElement === document.body}`);
+  };
+  document.addEventListener("focusout", record);
+  try {
+    render(<Surface />);
+    const button = screen.getByText("Remove");
+    if (action === "click") await user.click(button);
+    else {
+      button.focus();
+      await user.keyboard("{Enter}");
+    }
+    expect(blurs).toEqual(["connected true, body active true"]);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("surface")));
+  } finally {
+    document.removeEventListener("focusout", record);
+  }
+});
+
+it("keeps a deliberate blur that follows a sibling change in the same script", async () => {
+  function Surface() {
+    const root = useRef<HTMLElement>(null);
+    useFocusSurface(root, () => root.current);
+    return <section ref={root} tabIndex={-1}><button>Row</button></section>;
+  }
+  render(<Surface />);
+  const row = screen.getByText("Row");
+  row.focus();
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  row.parentElement!.append(document.createElement("div"));
+  row.blur();
   await act(async () => {});
   expect(document.activeElement).toBe(document.body);
 });
