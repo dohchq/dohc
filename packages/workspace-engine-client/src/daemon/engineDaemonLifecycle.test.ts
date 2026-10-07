@@ -1902,7 +1902,7 @@ describe("Rust engine daemon lifecycle", () => {
     }
   });
 
-  it("cancels the smoke at the cap without killing an engine that answers probes", async () => {
+  it("replaces an engine at the smoke cap even when probes answer", async () => {
     const client = new FakeClient((request) =>
       request.method === "engine.ping"
         ? healthyPing(request)
@@ -1923,16 +1923,15 @@ describe("Rust engine daemon lifecycle", () => {
     });
     try {
       await lifecycle.start();
-      await vi.waitFor(() => expect(log).toHaveBeenCalledWith(
-        "[engine-daemon] startup smoke request cancelled:",
-        expect.objectContaining({ message: "Rust engine workspace.open timed out after 200ms." }),
-      ), WAIT);
-      expect(failures).toEqual([]);
-      expect(lifecycle.currentClient()).toBe(client);
+      await vi.waitFor(() => expect(
+        failures.length > 0 || log.mock.calls.some(([message]) => message === "[engine-daemon] startup smoke request cancelled:"),
+      ).toBe(true), WAIT);
+      expect(failures).toEqual([{ error: expect.objectContaining({ message: "Rust engine workspace.open timed out after 200ms." }), terminal: false }]);
+      expect(log).not.toHaveBeenCalledWith("[engine-daemon] startup smoke request cancelled:", expect.any(Error));
       expect(
         client.requests.filter(({ method }) => method === "engine.ping").length,
       ).toBeGreaterThan(1);
-      expect(client.closed).toBe(false);
+      expect(client.closeCause).toBe("transport-error");
       expect(client.cancelledRequestIds).toContain(client.requests[0]!.id);
     } finally {
       await lifecycle.stop();
@@ -2594,6 +2593,68 @@ async function progressFixture(options: { silent?: boolean; capMs?: number } = {
 }
 
 describe("lifecycle request progress", () => {
+  it.each(["background", "blocking"] as const)("ends the restart budget when a hung lock holder reaches the %s smoke cap", async mode => {
+    const capMs = 120_000, maxRestarts = 2;
+    const clients: SelfExitingClient[] = [];
+    const opened = Array.from({ length: maxRestarts + 1 }, () => deferred());
+    const failures: Array<{ error: Error; terminal: boolean }> = [];
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const capFailures = () => failures.filter(({ error }) => error.message === `Rust engine workspace.open timed out after ${capMs}ms.`).length;
+    const cancelledLogs = () => log.mock.calls.filter(([message]) => message === "[engine-daemon] startup smoke request cancelled:").length;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(), initialBackoffMs: 0, maxRestarts,
+      requestTimeoutMs: capMs, monotonicNowMs: () => Date.now(),
+      launch: async options => {
+        const index = clients.length;
+        const hung = mode === "background" || index > 0;
+        const client = Object.assign(new SelfExitingClient(request => {
+          if (hung && request.method === "workspace.open") {
+            // This lock holder never completes or emits request progress.
+            opened[index]!.resolve();
+            return new Promise<Response>(() => {});
+          }
+          return healthyPing(request);
+        }), { reportsProgress: () => true });
+        client.exit = options.onExit;
+        clients.push(client);
+        return client;
+      },
+      onFailure: (error, terminal) => failures.push({ error, terminal }),
+    });
+    try {
+      if (mode === "background") vi.useFakeTimers();
+      await lifecycle.start();
+      if (mode === "blocking") {
+        await startupSmokeDone(clients[0]!);
+        vi.useFakeTimers();
+        clients[0]!.exit?.(1, null);
+      }
+      const firstHung = mode === "background" ? 0 : 1;
+      for (let index = firstHung; index <= maxRestarts; index++) {
+        await opened[index]!.promise;
+        const client = clients[index]!;
+        expect(client.outstandingRequests(request => request.method === "workspace.open")).toBe(1);
+        const failuresBefore = capFailures(), logsBefore = cancelledLogs();
+        await vi.advanceTimersByTimeAsync(capMs + 10);
+        await vi.waitFor(() => expect(capFailures() > failuresBefore || cancelledLogs() > logsBefore).toBe(true), WAIT);
+        expect(capFailures()).toBe(failuresBefore + 1);
+        expect(client.closed).toBe(true);
+        expect(probesSent(client)).toBeGreaterThan(0);
+        const open = client.requests.find(request => request.method === "workspace.open")!;
+        expect(open.deadlineMs).toBe(capMs);
+        expect(client.cancelledRequestIds).toContain(open.id);
+      }
+      await vi.waitFor(() => expect(failures.some(({ terminal }) => terminal)).toBe(true), WAIT);
+      expect(clients).toHaveLength(maxRestarts + 1);
+      expect(capFailures()).toBe(mode === "background" ? maxRestarts + 1 : maxRestarts);
+      expect(cancelledLogs()).toBe(0);
+      expect(failures.at(-1)).toEqual({
+        error: expect.objectContaining({ message: `Rust engine restart limit exceeded after ${maxRestarts} attempts.` }), terminal: true,
+      });
+      expect(() => lifecycle.currentClient()).toThrow("Rust engine daemon is not available.");
+    } finally { await lifecycle.stop(); }
+  });
+
   it.each(["background smoke", "CLI read"] as const)("keeps a queued %s past the progress delay until its cap", async caller => {
     const capMs = caller === "background smoke" ? 120_000 : 10_000;
     const queued = deferred(), holder = deferred();
@@ -2646,14 +2707,18 @@ describe("lifecycle request progress", () => {
       expect(client.closed).toBe(false);
       await vi.advanceTimersByTimeAsync(capMs - 6_000 + 10);
       if (read) expect(await read).toHaveProperty("message", `Rust engine workspace.open timed out after ${capMs}ms.`);
-      else await vi.waitFor(() => expect(log).toHaveBeenCalledWith(
-        "[engine-daemon] startup smoke request cancelled:",
-        expect.objectContaining({ message: `Rust engine workspace.open timed out after ${capMs}ms.` }),
-      ), WAIT);
+      else await vi.waitFor(() => expect(
+        failures.length > 0 || log.mock.calls.some(([message]) => message === "[engine-daemon] startup smoke request cancelled:"),
+      ).toBe(true), WAIT);
       expect(client.cancelledRequestIds).toContain(queuedId);
-      expect(client.closed).toBe(false);
-      expect(lifecycle.currentClient()).toBe(client);
-      expect(failures).toEqual([]);
+      if (read) {
+        expect(client.closed).toBe(false);
+        expect(lifecycle.currentClient()).toBe(client);
+        expect(failures).toEqual([]);
+      } else {
+        expect(client.closeCause).toBe("transport-error");
+        expect(failures).toEqual([expect.objectContaining({ message: `Rust engine workspace.open timed out after ${capMs}ms.` })]);
+      }
     } finally { holder.resolve(); await lifecycle.stop(); }
   });
 

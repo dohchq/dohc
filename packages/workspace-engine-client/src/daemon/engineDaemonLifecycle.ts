@@ -192,8 +192,8 @@ interface InFlightLaunch {
 // launch runs its smoke in the background so start() can resolve on the
 // handshake; every restart keeps the blocking smoke, because restartAfterExit
 // counts a failed smoke as a failed attempt — which is what bounds a daemon
-// that relaunches but cannot do workspace work. A cancelled request on a
-// responding daemon is inconclusive and does not fail publication.
+// that relaunches but cannot do workspace work. A stall after request progress
+// is inconclusive on a responding daemon; reaching the smoke cap still fails.
 type SmokeMode = "background" | "blocking";
 
 export class EngineDaemonUnavailableError extends Error {
@@ -328,7 +328,7 @@ export class EngineDaemonLifecycle {
   // exit it caused; either way the reason is reported once.
   private readonly reportedFailures = new WeakSet<Error>();
   private readonly condemnedClients = new WeakSet<EngineDaemonClient>();
-  private readonly cancelledLifecycleErrors = new WeakSet<Error>();
+  private readonly stalledLifecycleErrors = new WeakSet<Error>();
   // Requests a CLI read sends. They wait for the engine's open lock like any
   // open, but they never hold it for long, so they are not what a stuck
   // attach waits behind.
@@ -718,7 +718,6 @@ export class EngineDaemonLifecycle {
             `Rust engine ${method} timed out after ${timeoutMs}ms.`,
           );
           if (condemnOnCap) this.condemn(client, error);
-          else this.cancelledLifecycleErrors.add(error);
           reject(error);
         });
       }, timeoutMs);
@@ -729,7 +728,7 @@ export class EngineDaemonLifecycle {
       // A stalled open can fail while the rest of the daemon remains healthy.
       void client.cancelRequest?.(request.id).catch(() => undefined);
       if (current() && watch.daemonSilent()) this.condemn(client, asError(error));
-      else this.cancelledLifecycleErrors.add(asError(error));
+      else this.stalledLifecycleErrors.add(asError(error));
       throw error;
     });
     let rejectRetired!: (error: Error) => void;
@@ -973,15 +972,15 @@ export class EngineDaemonLifecycle {
         ),
       );
     } catch (error) {
-      if (!this.cancelledLifecycleErrors.has(asError(error))) throw error;
-      // Cancellation says the smoke did not finish, not that the daemon died.
-      // Both launch modes can keep a daemon that is still responding.
+      if (!this.stalledLifecycleErrors.has(asError(error))) throw error;
+      // A progress stall is inconclusive on a responding daemon. A request
+      // that reaches its absolute cap is still a failed smoke in either mode.
       console.warn("[engine-daemon] startup smoke request cancelled:", error);
     }
   }
 
   // The first launch's smoke checks workspace work after the handshake. A
-  // cancelled request is logged without reporting a daemon failure.
+  // stall after progress is logged without reporting a daemon failure.
   // Other failures kill for replacement through the normal restart path.
   private async runDeferredSmoke(
     generation: number,

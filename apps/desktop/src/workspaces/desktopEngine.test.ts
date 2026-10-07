@@ -487,7 +487,7 @@ describe("desktop engine restart coordination", () => {
     } finally { await f.close(); }
   });
 
-  it.each(["stall", "cap"] as const)("keeps the first crash-report slot after a smoke %s cancellation", async cancellation => {
+  it.each(["stall", "cap"] as const)("reports smoke %s outcomes according to their cancellation reason", async cancellation => {
     const f = fixture();
     const opened = deferred();
     const log = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -509,6 +509,7 @@ describe("desktop engine restart coordination", () => {
       close: () => f.client.close(),
       waitForExit: () => f.client.waitForExit(),
     };
+    const close = vi.spyOn(client, "close");
     f.setLaunch(async () => client);
     try {
       vi.useFakeTimers();
@@ -519,16 +520,25 @@ describe("desktop engine restart coordination", () => {
         log.mock.calls.some(([message]) => message === "[engine-daemon] startup smoke request cancelled:") ||
         vi.mocked(f.dependencies.recordEngineProblem).mock.calls.length > 0,
       ).toBe(true), { timeout: 15_000 });
-      expect(log).toHaveBeenCalledWith("[engine-daemon] startup smoke request cancelled:", expect.any(Error));
       expect(cancel).toHaveBeenCalledWith(openId);
-      expect(f.engine.daemon!.currentClient()).toBe(client);
-      expect(f.dependencies.recordEngineProblem).not.toHaveBeenCalled();
       expect(f.dependencies.dialog.showErrorBox).not.toHaveBeenCalled();
-      f.setLaunch(async () => new Client());
-      f.spawns[0]!.onExit!(1, null);
-      expect(f.dependencies.recordEngineProblem).toHaveBeenCalledExactlyOnceWith(
-        expect.objectContaining({ message: "Rust engine daemon exited unexpectedly with code 1." }), "restarting",
-      );
+      if (cancellation === "stall") {
+        expect(log).toHaveBeenCalledWith("[engine-daemon] startup smoke request cancelled:", expect.any(Error));
+        expect(close).not.toHaveBeenCalled();
+        expect(f.engine.daemon!.currentClient()).toBe(client);
+        expect(f.dependencies.recordEngineProblem).not.toHaveBeenCalled();
+        f.setLaunch(async () => new Client());
+        f.spawns[0]!.onExit!(1, null);
+        expect(f.dependencies.recordEngineProblem).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ message: "Rust engine daemon exited unexpectedly with code 1." }), "restarting",
+        );
+      } else {
+        expect(log).not.toHaveBeenCalledWith("[engine-daemon] startup smoke request cancelled:", expect.any(Error));
+        expect(close).toHaveBeenCalledOnce();
+        expect(f.dependencies.recordEngineProblem).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ message: "Rust engine workspace.open timed out after 120000ms." }), "restarting",
+        );
+      }
     } finally { await f.close(); }
   });
 
