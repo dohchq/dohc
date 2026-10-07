@@ -1,29 +1,19 @@
+import { generateAppSource } from "@dohc/workspace-core/app-source";
 import type {
   DohcDesktopBridge,
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
-
-const FIRST_APP_HTML = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>My app</title>
-  </head>
-  <body>
-    <main>
-      <h1>My app</h1>
-    </main>
-  </body>
-</html>
-`;
 
 export function firstAppRoot(
   files: WorkspaceFileEntry[],
   folders: string[],
 ): string {
   const filePaths = new Set(files.map((file) => file.path.toLowerCase()));
-  const folderPaths = new Set(folders.map((folder) => folder.toLowerCase()));
+  const nonemptyRoots = new Set(
+    [...files.map((file) => file.path), ...folders]
+      .filter((path) => path.includes("/"))
+      .map((path) => path.split("/")[0]!.toLowerCase()),
+  );
   const existingFolderByLowerPath = new Map(
     folders.map((folder) => [folder.toLowerCase(), folder]),
   );
@@ -31,11 +21,9 @@ export function firstAppRoot(
     const defaultRoot = index === 1 ? "app" : `app-${index}`;
     const normalizedRoot = defaultRoot.toLowerCase();
     const root = existingFolderByLowerPath.get(normalizedRoot) ?? defaultRoot;
-    const entryPath = `${normalizedRoot}/index.html`;
     if (
       !filePaths.has(normalizedRoot) &&
-      !filePaths.has(entryPath) &&
-      !folderPaths.has(entryPath)
+      !nonemptyRoots.has(normalizedRoot)
     ) {
       return root;
     }
@@ -62,10 +50,29 @@ export async function createFirstAppFiles(input: {
       relativePath: root,
     });
   }
-  await input.mutations.createWorkspaceFile({
-    workspaceId: input.workspaceId,
-    relativePath: `${root}/index.html`,
-    initialText: FIRST_APP_HTML,
+  const files = generateAppSource({
+    title: "My app",
+    packageName: root.toLowerCase(),
+    withDohcJson: false,
   });
+  const createdFolders = new Set([root]);
+  for (const file of files) {
+    const separator = file.path.lastIndexOf("/");
+    if (separator !== -1) {
+      const folder = `${root}/${file.path.slice(0, separator)}`;
+      if (!createdFolders.has(folder)) {
+        await input.mutations.createWorkspaceFolder({
+          workspaceId: input.workspaceId,
+          relativePath: folder,
+        });
+        createdFolders.add(folder);
+      }
+    }
+    await input.mutations.createWorkspaceFile({
+      workspaceId: input.workspaceId,
+      relativePath: `${root}/${file.path}`,
+      initialText: file.content,
+    });
+  }
   return { root };
 }

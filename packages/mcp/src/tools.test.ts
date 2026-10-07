@@ -916,7 +916,12 @@ describe("mcp tools operate on allowed paths", () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "existing"), { recursive: true });
       await writeFile(join(ctx.root, "existing/file.txt"), "no overwrite");
+      const request = vi.fn(ctx.request!);
+      ctx.request = request;
       await expect(createApp(ctx, { appRoot: "existing" })).resolves.toMatchObject({ ok: false });
+      expect(request).not.toHaveBeenCalled();
+      expect(await readdir(join(ctx.root, "existing"))).toEqual(["file.txt"]);
+      expect(await readFile(join(ctx.root, "existing/file.txt"), "utf8")).toBe("no overwrite");
 
       const result = await createApp(ctx, {
         appRoot: "plain-site",
@@ -925,6 +930,78 @@ describe("mcp tools operate on allowed paths", () => {
       });
       expect(result).toMatchObject({ ok: true, appRoot: "plain-site" });
       await expect(readFile(join(ctx.root, "plain-site/dohc.json"), "utf8")).rejects.toThrow();
+    });
+  });
+
+  it.each([undefined, "", "  ", "  Ledger  ", '<Ledger & "quoted">'])("dohc_create_app resolves and escapes title %s", async (title) => {
+    await withWorkspace(async (ctx) => {
+      const result = await createApp(ctx, { appRoot: "finance/my_ledger", title });
+      expect(result).toMatchObject({ ok: true });
+      const resolvedTitle = title?.trim() || "My Ledger";
+      const html = await readFile(join(ctx.root, "finance/my_ledger/index.html"), "utf8");
+      const escaped = resolvedTitle === '<Ledger & "quoted">' ? "&lt;Ledger &amp; &quot;quoted&quot;&gt;" : resolvedTitle;
+      expect(html).toContain(`<title>${escaped}</title>`);
+      expect(html).toContain(`<h1>${escaped}</h1>`);
+      const manifest = JSON.parse(await readFile(join(ctx.root, "finance/my_ledger/dohc.json"), "utf8"));
+      expect(manifest).toMatchObject({ type: "app", title: resolvedTitle });
+      const pkg = JSON.parse(await readFile(join(ctx.root, "finance/my_ledger/package.json"), "utf8"));
+      expect(pkg.name).toBe("my_ledger");
+    });
+  });
+
+  it("dohc_create_app reuses an empty folder but refuses an existing file", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "empty"));
+      await expect(createApp(ctx, { appRoot: "empty" })).resolves.toMatchObject({ ok: true });
+      await writeFile(join(ctx.root, "occupied"), "keep this file");
+      await expect(createApp(ctx, { appRoot: "occupied" })).resolves.toMatchObject({
+        ok: false, reason: "appRoot is not a directory: occupied",
+      });
+      expect(await readFile(join(ctx.root, "occupied"), "utf8")).toBe("keep this file");
+    });
+  });
+
+  it.each([...TRAVERSALS, ".git/app", "shared-with-me/app", "Shared-With-Me/app"])("dohc_create_app preserves path refusal for %s", async (appRoot) => {
+    await withWorkspace(async (ctx) => {
+      const request = vi.fn<NonNullable<ToolContext["request"]>>();
+      ctx.request = request;
+      await expect(createApp(ctx, { appRoot })).resolves.toMatchObject({ ok: false });
+      expect(request).not.toHaveBeenCalled();
+      expect(await readdir(ctx.root)).toEqual([]);
+    });
+  });
+
+  it.each([
+    { appRoot: ".env/app", path: ".env/app/index.html" },
+    { appRoot: "app", path: "app/styles.css" },
+  ])("dohc_create_app preserves authored path-policy refusal for $path", async ({ appRoot, path }) => {
+    await withWorkspace(async (ctx) => {
+      const refusal = { ok: false, written: [], path,
+        reason: `History cannot record ${path}. Choose a non-secret path included by files.toml.`,
+      };
+      const request = vi.fn<NonNullable<ToolContext["request"]>>(async () => refusal);
+      ctx.request = request;
+      expect(await createApp(ctx, { appRoot }, "Client")).toEqual(refusal);
+      expect(request).toHaveBeenCalledOnce();
+      const sent = request.mock.calls[0]![0];
+      expect(sent.verb).toBe("fileWrite");
+      if (sent.verb !== "fileWrite") throw new Error("expected authored file write");
+      expect(sent.args.actor).toBe("agent");
+      expect(sent.args.agent).toBe("Client");
+      expect(sent.args.files.every((file) => file.createOnly)).toBe(true);
+      expect(await readdir(ctx.root)).toEqual([]);
+    });
+  });
+
+  it.each([".dohc", "shared-with-me"])("dohc_create_app refuses an alias into %s", async (reserved) => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, reserved));
+      await symlink(join(ctx.root, reserved), join(ctx.root, "alias"), "junction");
+      const request = vi.fn<NonNullable<ToolContext["request"]>>();
+      ctx.request = request;
+      await expect(createApp(ctx, { appRoot: "alias/new-app" })).resolves.toMatchObject({ ok: false });
+      expect(request).not.toHaveBeenCalled();
+      expect(await readdir(join(ctx.root, reserved))).toEqual([]);
     });
   });
 
