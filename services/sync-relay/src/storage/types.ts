@@ -686,7 +686,7 @@ export interface SyncRelayStorage {
   readLiveAuthority<T>(run: () => T): T;
   resolveLiveObjectHostBinding(scope: LiveBrowserContext, objectId: string): import("./liveDocumentAuthority").LiveObjectHostBindingResult;
   registerLiveDocumentBaseline(input: LiveDocumentBaselineRegistrationInput): RelayBaselineRegistrationResult;
-  mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number } | null;
+  mintLiveTicket(input: LiveTicketMint): { expiresAtMs: number; publicPrincipalId?: string } | null;
   readLiveTicketTarget(input: LiveTicketLookup): { workspaceId: string; objectId: string } | null;
   redeemLiveTicket(input: LiveTicketRedemption): RedeemedLiveTicket | null;
   getLiveHostControl(): HostControlSnapshot | null;

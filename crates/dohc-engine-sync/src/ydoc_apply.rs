@@ -959,6 +959,8 @@ fn drain_deferred_ydoc(
     let mut payload_recorded_at = 0_i64;
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
     let mut last_coordinate: Option<(String, i64)> = None;
+    let mut projection_coordinates = Vec::new();
+    let mut projection_authors = dohc_engine_collab::author_coverage::Authors::default();
     let mut lineage_replacements = Vec::new();
     let mut conflicts_opened = 0;
     let mut record_facts = Vec::new();
@@ -1112,6 +1114,48 @@ fn drain_deferred_ydoc(
                 Err(SyncError::InvalidInput { reason }) => Some(reason),
                 Err(hard) => return Err(hard),
             };
+        let mut candidate_authors = dohc_engine_collab::author_coverage::Authors::default();
+        candidate_authors
+            .union_json(&projection_authors.json())
+            .map_err(map_collab_hard_error)?;
+        candidate_authors
+            .union_json(
+                &store
+                    .read_with(|conn| {
+                        crate::live_audit::drained_coordinate_authors(
+                            conn,
+                            key,
+                            &payload.path,
+                            &origin_id,
+                            origin_seq,
+                        )
+                    })?
+                    .json(),
+            )
+            .map_err(map_collab_hard_error)?;
+        if !projection_coordinates.is_empty() {
+            // Stop before accepting bytes whose combined projection cannot name
+            // all contributors, including a missing audit's coverage marker.
+            let mut covered = store.read_with(|conn| {
+                dohc_engine_collab::author_coverage::reserved_in(conn, key)
+                    .map_err(map_collab_hard_error)
+            })?;
+            covered
+                .union_json(&candidate_authors.json())
+                .map_err(map_collab_hard_error)?;
+            if let Some(author) = dohc_engine_domain::moment_author_json(
+                payload.actor_origin_id.as_deref(),
+                payload.attribution.as_ref(),
+            ) {
+                covered.union_json(&author).map_err(map_collab_hard_error)?;
+            }
+            if covered.len() > dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHORS
+                || covered.journal_bytes()
+                    > dohc_engine_collab::author_coverage::MAX_INTERVAL_AUTHOR_BYTES
+            {
+                break;
+            }
+        }
         let remote = RemoteUpdate {
             origin_id: origin_id.clone(),
             origin_seq,
@@ -1164,6 +1208,9 @@ fn drain_deferred_ydoc(
                 )?);
             }
         }
+        // Even a refused projection can contribute bytes to the final CRDT.
+        projection_authors = candidate_authors;
+        projection_coordinates.push((origin_id.clone(), origin_seq));
         if let Some(reason) = content_kind_refusal.or(identity_refusal) {
             // The CRDT bytes landed even though the established path identity
             // forbids projection. Count the coordinate as drained before its
@@ -1203,6 +1250,7 @@ fn drain_deferred_ydoc(
             &payload,
             drain_origin,
             drain_seq,
+            &projection_coordinates,
             payload_recorded_at,
             search_policy.as_ref(),
             faults,
@@ -1314,6 +1362,7 @@ fn project_final_drained_doc(
     payload: &YdocUpdatePayload,
     drain_origin: &str,
     drain_seq: i64,
+    projection_coordinates: &[(String, i64)],
     payload_recorded_at: i64,
     search_policy: Option<&SearchPolicySnapshot>,
     faults: &dyn FaultInjector,
@@ -1336,6 +1385,7 @@ fn project_final_drained_doc(
             marker.content_kind,
             drain_origin,
             drain_seq,
+            projection_coordinates,
             payload_recorded_at,
             search_policy,
             faults,
@@ -1360,6 +1410,7 @@ fn project_final_drained_doc(
         kind,
         drain_origin,
         drain_seq,
+        projection_coordinates,
         payload_recorded_at,
         search_policy,
         faults,
@@ -1376,6 +1427,7 @@ fn write_final_drained_projection(
     content_kind: ContentKind,
     drain_origin: &str,
     drain_seq: i64,
+    projection_coordinates: &[(String, i64)],
     payload_recorded_at: i64,
     search_policy: Option<&SearchPolicySnapshot>,
     faults: &dyn FaultInjector,
@@ -1394,6 +1446,16 @@ fn write_final_drained_projection(
             payload_recorded_at,
             search_policy,
         )?;
+        if projection_coordinates.len() > 1 {
+            crate::live_audit::annotate_drained_projection_in_tx(
+                tx,
+                key,
+                &payload.path,
+                drain_origin,
+                drain_seq,
+                projection_coordinates,
+            )?;
+        }
         // Origination intentionally remains a full cold reconstruction.
         crate::originate_ydoc_base_in_tx(
             tx,
@@ -3549,6 +3611,7 @@ pub fn project_and_write_in_tx(
         },
     )
     .map_err(|error| map_domain_payload_error(error, "ydoc.update projection write failed"))?;
+    crate::live_audit::annotate_projected_moment_in_tx(tx, key, path, origin_id, origin_seq)?;
     if !result.deduped {
         upsert_file_search_index(
             tx,

@@ -55,6 +55,7 @@ import {
   ChatDispatchNoticesEvent,
   workspaceSearchOperations,
   workspaceVersionOperations,
+  engineYDocAdmissionOperations,
   parseWorkspaceActivityEventForIpc,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
@@ -647,6 +648,7 @@ const bridge: DohcDesktopBridge = {
   // session.
   openEngineYDocSession: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocOpen, payload),
+  ...operationBridge(engineYDocAdmissionOperations, invoke),
   readEngineYDocArtifactAsset: (payload) =>
     ipcRenderer.invoke(CHANNELS.engineYDocReadArtifactAsset, payload),
   applyEngineYDocUpdate: (payload) =>

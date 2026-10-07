@@ -1,6 +1,7 @@
 import {beforeEach, expect, it, vi} from "vitest";
 import {parseHostEpoch} from "@dohc/live-session-contract/host-control";
 import {createDeviceLiveDelivery} from "./deviceLiveDelivery.js";
+import {createNamedFrameChanges} from "./liveHostChanges.js";
 
 const state = vi.hoisted(() => ({
   event: undefined as undefined | ((event: {name: string; payload: unknown}) => void),
@@ -45,8 +46,8 @@ beforeEach(() => {
   state.settle.mockReset().mockResolvedValue({materialized: true});
   state.seedApplied.mockReset().mockReturnValue(true);
 });
-async function fixture() {
-  const lifetime = new AbortController(), notify = vi.fn(), stop = vi.fn();
+async function fixture(changes = createNamedFrameChanges(16)) {
+  const lifetime = new AbortController(), notify = vi.spyOn(changes, "notify"), stop = vi.fn();
   state.registration = {id: 9, binding, invalidated: lifetime.signal};
   const limits = {maxPayloadBytes: 4096, maxPendingBytes: 2_000_000};
   const delivery = createDeviceLiveDelivery({
@@ -55,12 +56,28 @@ async function fixture() {
       client: {maxFrameBytes: 1_048_576, aggregateBytes: 200_000_000, maxUploads: 2, connectTimeoutMs: 30_000, requestDeadlineMs: 30_000}} as never,
     storage: {} as never, history: {namespace: "namespace", reconciled: true} as never,
     host: {hostId: "host", hostEpoch: parseHostEpoch(1), instanceId: "instance", connectionId: "connection", mode: "device"},
-    ownerAdmission: {} as never, frameChanges: {maxListeners: 16, notify, subscribe: () => () => {}}, isCurrent: () => true, stop,
+    ownerAdmission: {} as never, frameChanges: changes, isCurrent: () => true, stop,
   });
   delivery.receive(Buffer.from(JSON.stringify({type: "liveHost.transport", version: 1, receive: limits})), false);
   await expect.poll(() => state.madeOwner).toBe(true);
   return {delivery, lifetime, notify, stop, wake: (payload: unknown = {registrationId: 9, binding}) => state.event!({name: "liveApplication.ownerOutboxChanged", payload})};
 }
+
+it("wakes document and desktop listeners when the device becomes ready and closes", async () => {
+  const changes = createNamedFrameChanges(16), becameReady = deferred<void>();
+  const documentWake = vi.fn(() => becameReady.resolve()), desktopWake = vi.fn();
+  changes.subscribe(documentWake, document);
+  changes.subscribe(desktopWake, {workspaceId: binding.workspaceId, objectId: "waiting-object"});
+  const f = await fixture(changes);
+  try {
+    await becameReady.promise;
+    expect(documentWake).toHaveBeenCalledOnce(); expect(desktopWake).toHaveBeenCalledOnce();
+    expect(f.stop).not.toHaveBeenCalled();
+    f.delivery.close();
+    await new Promise<void>(queueMicrotask);
+    expect(documentWake).toHaveBeenCalledTimes(2); expect(desktopWake).toHaveBeenCalledTimes(2);
+  } finally {f.delivery.close();}
+});
 
 it("autonomously drains durable owner notices and wakes an already-open frame subscriber", async () => {
   const f = await fixture();

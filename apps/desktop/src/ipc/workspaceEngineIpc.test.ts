@@ -10,7 +10,7 @@ import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createWorkspaceEngineIpc } from "./workspaceEngineIpc";
 import { CHANNELS } from "./channels";
 import type { EngineMomentRecord, RebuildEngineStoreResult, SyncStatusResult } from "./bridgeContract";
-import { GetCollectionRecordHistoryResult } from "./bridgeContract";
+import { GetCollectionRecordHistoryResult, engineYDocAdmissionOperations } from "./bridgeContract";
 import { engineMomentSourceLabel } from "../renderer/workbench/EngineHistory";
 import { createWorkspaceAuthorityOwner, type WorkspaceAuthorityLease } from "../workspaces/workspaceAuthorityOwner";
 import { runInWorkspaceAuthorityLane } from "../workspaces/workspaceAuthorityLane";
@@ -237,7 +237,7 @@ const channels = [
   CHANNELS.locateRecordHistoryRun, CHANNELS.listEngineMoments, CHANNELS.readEngineMoment, CHANNELS.restoreEngineMomentFile,
   CHANNELS.getSyncStatus, CHANNELS.retryFileRecovery, CHANNELS.retryOwnerLiveDelivery, CHANNELS.retryCloudSync,
   CHANNELS.rebuildEngineStore,
-  CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
+  engineYDocAdmissionOperations.waitForEngineYDocAdmission.channel, CHANNELS.engineYDocOpen, CHANNELS.engineYDocReadArtifactAsset, CHANNELS.engineYDocApplyUpdate,
   CHANNELS.engineYDocAcknowledgeLineageReplacement, CHANNELS.engineYDocClose,
   CHANNELS.engineYDocPrepareOwnerHandoff,
 ];

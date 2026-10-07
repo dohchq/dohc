@@ -28,6 +28,8 @@ describe("the last person who changed an automation entry", () => {
     { authors: undefined, expected: "owner" },
     { authors: [], expected: "owner" },
     { authors: [human], expected: "owner" },
+    { authors: [{ kind: "unattributed" } as const], expected: null },
+    { authors: [named("editor"), { kind: "unattributed" } as const], expected: null },
     { authors: [agent], expected: "owner" },
     { authors: [human, agent], expected: "owner" },
     { authors: [named("editor"), named("editor")], expected: "editor" },

@@ -196,6 +196,10 @@ export interface CollectionRecord {
   path: string;
   conflicted: boolean;
   values: CollectionIndexedValue[];
+  /** Present for a received share's locally created record. Acceptance is a relay receipt. */
+  creationDelivery?: "pending" | "offline" | "accepted" | "refused";
+  creationRefusal?: string;
+  creationCanDiscard?: boolean;
 }
 
 export interface CollectionRecordGroup {
