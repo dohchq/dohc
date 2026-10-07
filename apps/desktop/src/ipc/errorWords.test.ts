@@ -4,9 +4,17 @@ import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
 import { describe, expect, it } from "vitest";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
+import { WorkspaceManifestError } from "../workspaces/createWorkspaceFolder";
 import { RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
 import type { WorkspacePolicyPath } from "./bridgeContract";
-import { ERROR_WORDS, ipcWireError, isWorkspaceUpdatingError, readError, withErrorWords } from "./errorWords";
+import {
+  ERROR_WORDS,
+  ipcWireError,
+  isWorkspaceUpdatingError,
+  needsNewerDohc,
+  readError,
+  withErrorWords,
+} from "./errorWords";
 
 // What the renderer receives when a main-process handler rejects: Electron
 // sends `error.toString()` and prefixes the channel.
@@ -35,6 +43,23 @@ describe("error words", () => {
     };
     expect(readError(error)).toEqual(expected);
     expect(readError(acrossIpc(error, "desktop:attach-workspace-folder"))).toEqual(expected);
+  });
+
+  it("says why a folder's manifest stops it opening, and keeps the parser's reason for Copy", () => {
+    const unreadable = new WorkspaceManifestError("unreadable", "this folder has an invalid .dohc/manifest.json: manifest kind is invalid");
+    expect(readError(acrossIpc(unreadable, "desktop:attach-workspace-folder"))).toEqual({
+      words: "dohc can't read its .dohc/manifest.json. Fix the file, then try again.",
+      mapped: true,
+      cause: "WorkspaceManifestError [unreadable]: this folder has an invalid .dohc/manifest.json: manifest kind is invalid",
+    });
+    const newer = new WorkspaceManifestError("newer-version", "this workspace was created by a newer version of dohc (manifest v2)");
+    // Main sends a failed launch open's cause as this one string.
+    expect(withErrorWords("dohc could not open Trips.", String(ipcWireError(newer))))
+      .toBe("dohc could not open Trips. It needs a newer version of dohc. Update dohc to open it.");
+    expect(needsNewerDohc(String(ipcWireError(newer)))).toBe(true);
+    expect(needsNewerDohc(acrossIpc(newer))).toBe(true);
+    expect(needsNewerDohc(acrossIpc(unreadable))).toBe(false);
+    expect(needsNewerDohc(new ReservedWorkspaceIdError("link"))).toBe(false);
   });
 
   it("has words, or the caller's words by decision, for every code the engine refuses with", () => {

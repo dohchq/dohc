@@ -195,7 +195,7 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
         ok: true,
         snapshot: {
           version: 1,
-          peers: [{ userId: "ghost", clientId: "cg", state: { displayName: "Ghost" }, updatedAtMs: 0 }],
+          peers: [{ faceToken: "ghost", sessionToken: "cg", isSelf: false, displayName: "Ghost", paletteSlot: 0, state: { displayName: "Ghost" }, updatedAtMs: 0 }],
         },
       });
     });
@@ -211,8 +211,8 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
         snapshot: {
           version: 1,
           peers: [
-            { userId: "me", clientId: "me", state: { displayName: "a@x.com" }, updatedAtMs: 0 },
-            { userId: "bob", clientId: "cb", state: { displayName: "Bob" }, updatedAtMs: 0 },
+            { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "a@x.com", paletteSlot: 0, state: { displayName: "a@x.com" }, updatedAtMs: 0 },
+            { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob" }, updatedAtMs: 0 },
           ],
         },
       });
@@ -318,7 +318,7 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
         ok: true,
         snapshot: {
           version: 1,
-          peers: [{ userId: "ghost", clientId: "cg", state: { displayName: "Ghost" }, updatedAtMs: 0 }],
+          peers: [{ faceToken: "ghost", sessionToken: "cg", isSelf: false, displayName: "Ghost", paletteSlot: 0, state: { displayName: "Ghost" }, updatedAtMs: 0 }],
         },
       });
     });
@@ -334,8 +334,8 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
         snapshot: {
           version: 1,
           peers: [
-            { userId: "me", clientId: "me", state: { displayName: "a@x.com" }, updatedAtMs: 0 },
-            { userId: "bob", clientId: "cb", state: { displayName: "Bob" }, updatedAtMs: 0 },
+            { faceToken: "me", sessionToken: "me", isSelf: true, displayName: "a@x.com", paletteSlot: 0, state: { displayName: "a@x.com" }, updatedAtMs: 0 },
+            { faceToken: "bob", sessionToken: "cb", isSelf: false, displayName: "Bob", paletteSlot: 0, state: { displayName: "Bob" }, updatedAtMs: 0 },
           ],
         },
       });

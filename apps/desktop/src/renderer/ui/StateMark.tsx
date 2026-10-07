@@ -1,4 +1,5 @@
 import { Lock, TriangleAlert } from "lucide-react";
+import { useId, useLayoutEffect, useRef, useState } from "react";
 import type { EngineDocSaveState } from "../collab/engineDocLease";
 
 // One mark and one label map for every save state a person can see: the
@@ -134,26 +135,139 @@ function Mark(props: { kind: StateMarkKind }) {
  * shell keep reading it. `shown` picks the row to draw when it differs from
  * the stored state, such as a disabled editor over a `saved` draft. `title`
  * replaces the row's title when the caller knows more, such as the engine's
- * own save error. */
+ * own save error. `truncate` lets the label end in an ellipsis where room
+ * runs out, such as a narrow file header. While the label is cut short, the
+ * chip takes keyboard focus and shows the whole label and its explanation in
+ * a tooltip, on focus or hover, in place of the title; with room to spare it
+ * is not a tab stop and keeps its title. */
 export function StateMark(props: {
   state: string;
   shown: SaveStateKey;
   title?: string;
   testId: string;
   className?: string;
+  truncate?: boolean;
 }) {
   const presentation = SAVE_STATE[props.shown];
-  return (
+  const title = props.title ?? presentation.title;
+  const { label, cut } = useCutShort(presentation.label, props.truncate === true);
+  const [open, setOpen] = useState(false);
+  // A focused chip keeps its tab stop when its label stops being cut, so
+  // focus never falls to the page; it gives the stop up on blur.
+  const [focused, setFocused] = useState(false);
+  const explanationId = useId();
+  const shown = open && cut;
+  const chipRef = useRef<HTMLSpanElement>(null);
+  const tooltip = useRef<HTMLSpanElement>(null);
+  const [place, setPlace] = useState<{ left: number; top: number } | null>(null);
+  // Placed as Menu places its list: measured before the first paint, under
+  // the chip with its right edge at the chip's, and kept inside the window,
+  // so no pane or panel edge cuts it off. Placed again while it shows,
+  // whenever the window, the chip or the tooltip changes size.
+  useLayoutEffect(() => {
+    const chipElement = chipRef.current;
+    if (!shown || !chipElement) return;
+    const position = () => {
+      const box = chipElement.getBoundingClientRect();
+      const width = tooltip.current?.offsetWidth ?? 0;
+      const left = Math.max(TOOLTIP_GAP_PX, Math.min(box.right - width, window.innerWidth - TOOLTIP_GAP_PX - width));
+      const top = box.bottom + TOOLTIP_GAP_PX;
+      setPlace((current) => (current?.left === left && current.top === top ? current : { left, top }));
+    };
+    position();
+    window.addEventListener("resize", position);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
+    observer?.observe(chipElement);
+    if (tooltip.current) observer?.observe(tooltip.current);
+    return () => {
+      window.removeEventListener("resize", position);
+      observer?.disconnect();
+      setPlace(null);
+    };
+  }, [shown]);
+  const chip = (
     <span
+      ref={chipRef}
       data-testid={props.testId}
       data-state={props.state}
-      title={props.title ?? presentation.title}
+      // Cut short, the tooltip says what the title would, so the browser's
+      // own tooltip does not repeat it a moment later.
+      title={cut ? undefined : title}
+      tabIndex={cut || focused ? 0 : undefined}
+      // The chip's words are its label, so only the explanation describes it.
+      aria-describedby={shown && title ? explanationId : undefined}
+      onFocus={() => {
+        setFocused(true);
+        setOpen(true);
+      }}
+      onBlur={() => {
+        setFocused(false);
+        setOpen(false);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && shown) {
+          event.stopPropagation();
+          setOpen(false);
+        }
+      }}
       // A 16px line box: the 11px face's default is 16.5px, and a half-pixel
       // chip moves everything under it by half a pixel.
-      className={`inline-flex items-center gap-1.5 font-mono text-[11px] leading-4 ${MARK_TONE[presentation.mark]} ${props.className ?? ""}`}
+      className={`inline-flex items-center gap-1.5 font-mono text-[11px] leading-4 ${MARK_TONE[presentation.mark]} ${props.truncate ? "min-w-0 rounded" : ""} ${props.className ?? ""}`}
     >
       <Mark kind={presentation.mark} />
-      {presentation.label}
+      {props.truncate ? (
+        <span ref={label} className="min-w-0 truncate">
+          {presentation.label}
+        </span>
+      ) : (
+        presentation.label
+      )}
     </span>
   );
+  if (!props.truncate) return chip;
+  // The tooltip sits beside the chip, not in it, so the chip's text stays its
+  // label while the tooltip is open.
+  return (
+    <span
+      className="inline-flex min-w-0 max-w-full"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={(event) => {
+        if (!event.currentTarget.contains(document.activeElement)) setOpen(false);
+      }}
+    >
+      {chip}
+      {shown ? (
+        <span
+          ref={tooltip}
+          role="tooltip"
+          style={place ?? undefined}
+          className={`dohc-popover fixed z-50 flex w-max max-w-72 flex-col gap-1 rounded-xl border border-line bg-panel p-3 text-[12px] font-normal text-ink ${place ? "dohc-pop-in" : "invisible"}`}
+        >
+          <span className="font-medium">{presentation.label}</span>
+          {title ? <span id={explanationId} className="text-muted">{title}</span> : null}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+// Between the chip and its tooltip, and between the tooltip and the window's edge.
+const TOOLTIP_GAP_PX = 4;
+
+// Whether a truncating label is cut short now. Measured again when its box
+// changes size or its words change.
+function useCutShort(text: string, enabled: boolean) {
+  const label = useRef<HTMLSpanElement>(null);
+  const [cut, setCut] = useState(false);
+  useLayoutEffect(() => {
+    const element = label.current;
+    if (!enabled || !element) return;
+    const measure = () => setCut(element.scrollWidth > element.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [enabled, text]);
+  return { label, cut };
 }

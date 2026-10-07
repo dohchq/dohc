@@ -3,7 +3,7 @@ import { APP_BACKEND_OPERATION_FILES } from "@dohc/security-contract/app-backend
 import { randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AppBackendRuntimeError, approvedTables, boundedText, runtimeLimits } from "./protocol.js";
 import type { AppOperationResult, AppRuntimeChild, AppRuntimeLauncher, ChildReply, ChildRequest, EvaluateAppOperationInput, InitializeAppDatabaseInput, ValidateAppDatabaseInput } from "./protocol.js";
@@ -12,6 +12,27 @@ export { AppBackendRuntimeError, isAppBackendRuntimeError } from "./protocol.js"
 
 let active = 0;
 const MAX_ACTIVE = 8;
+
+const CLEANUP_RETRY_DELAYS_MS = [1000, 5000, 30_000] as const;
+
+async function cleanupOperationDirectory(directory: string, retry = 0): Promise<void> {
+  try {
+    const path = resolve(directory);
+    if (dirname(path) !== resolve(tmpdir()) || !/^dohc-app-operation-.+$/.test(basename(path))) {
+      throw new Error("Invalid app temporary directory.");
+    }
+    await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
+  } catch (error) {
+    const delay = CLEANUP_RETRY_DELAYS_MS[retry];
+    if (delay !== undefined) {
+      // Keep only this operation's path until its bounded cleanup attempts finish.
+      setTimeout(() => { void cleanupOperationDirectory(directory, retry + 1); }, delay).unref();
+    } else {
+      // Host diagnostics must not replace an operation result or reject a timer task.
+      try { console.warn("app_operation_cleanup_exhausted", { directory, error }); } catch {}
+    }
+  }
+}
 
 const nodeLauncher: AppRuntimeLauncher = options => {
   if (process.versions.electron) throw new Error("Electron must configure an app runtime utility-process launcher.");
@@ -80,14 +101,7 @@ async function run(request: Omit<ChildRequest, "directory">, signal?: AbortSigna
     return { result: JSON.parse(reply.resultJson), database: reply.database, changeset: reply.changeset, changed: reply.changed, attachedFileIds: reply.attachedFileIds };
   } finally {
     try {
-      if (directory) {
-        const expectedParent = resolve(tmpdir());
-        if (!resolve(directory).startsWith(`${expectedParent}${process.platform === "win32" ? "\\" : "/"}dohc-app-operation-`)) throw new Error("Invalid app temporary directory.");
-        // Windows keeps the utility child cwd handle open briefly after its
-        // exit event. Retry the bounded temp cleanup instead of leaking a
-        // workspace-owned operation directory on every request.
-        await rm(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 25 });
-      }
+      if (directory) await cleanupOperationDirectory(directory);
     } finally { active -= 1; }
   }
 }

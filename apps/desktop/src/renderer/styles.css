@@ -39,7 +39,7 @@
   --dohc-match: #326fce;
   --dohc-success: #38684e;
   --dohc-warning: #8a6420;
-  --dohc-danger: #a6402c;
+  --dohc-danger: #a43e2a;
   --dohc-selection: rgba(58, 126, 233, 0.22);
 
   /* Identity hues: one per person, chosen by a hash of who they are (see
@@ -3110,7 +3110,7 @@ mark.dohc-highlight,
  * field, and the empty/error states so math reads correctly in both themes.
  * KaTeX renders with `currentColor`, so math inherits --dohc-ink for free. */
 :root {
-  --dohc-math-error-color: #a6402c;
+  --dohc-math-error-color: #a43e2a;
 }
 [data-theme='dark'] {
   --dohc-math-error-color: #e08065;

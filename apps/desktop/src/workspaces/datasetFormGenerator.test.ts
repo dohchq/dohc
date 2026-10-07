@@ -26,7 +26,7 @@ describe("dataset form generation", () => {
     expect(Object.keys(files).sort()).toEqual(["app.publish.json", "dohc.json", "frontend.css", "frontend.js"]);
     const manifest = JSON.parse(files["app.publish.json"]!);
     expect(manifest.version).toBe(1);
-    expect(JSON.parse(files["dohc.json"]!).version).toBe(1);
+    expect(JSON.parse(files["dohc.json"]!)).toMatchObject({ version: 1, type: "app" });
     expect(parseDohcSiteConfig(files["dohc.json"]!).diagnostics).toEqual([]);
     expect(parseAppPublicationDeclaration(new TextEncoder().encode(files["app.publish.json"]!), "apps/register").entryPath).toBe("apps/register/frontend.js");
     expect(manifest.dataset).toEqual({ kind: "dataset", datasetPath: "data/dataset.json", revision: 1, revisionSha256: approvedRevision.revisionSha256, operationIds: [id(7)], createFields: [{ operationId: id(7), fieldIds: [id(4), id(5)] }] });

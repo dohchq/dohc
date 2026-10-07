@@ -17,6 +17,9 @@ The product sections below are decision boundaries, not a feature checklist. Use
 
 The workspace is the primary product object. It can contain files, live documents, structured data, chats, and apps.
 
+Keep routine work useful without programming knowledge or an agent.
+Expose source and advanced controls when people need to change an app.
+
 Files are the portable foundation, not the required runtime representation for every feature. Use the state model that fits the subsystem. A live document can be a Y.Doc and structured data can live in SQLite. Keep work owned, inspectable, and exportable instead of forcing all state into flat text.
 
 Start with a job people need to finish. Design capabilities around how they use, change, and share its result.

@@ -7,7 +7,7 @@ import { TITLEBAR_HEIGHT_PX } from "./tokens";
 import { useDismiss } from "./ui/useDismiss";
 
 // Workspace labels use the final folder name on either platform.
-export function workspaceName(workspace: WorkspaceSummary): string {
+export function workspaceName(workspace: Pick<WorkspaceSummary, "rootPath">): string {
   // Separator-agnostic: rootPath is backslash-separated on native Windows.
   return workspace.rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "workspace";
 }

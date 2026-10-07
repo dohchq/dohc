@@ -12,6 +12,7 @@ import {
   type ThemeTokens,
 } from "./tokens";
 import { contrastRatio as contrast, luminance, mixHex as mix } from "./accentColor";
+import { MENU_FRAME } from "./ui/Menu";
 
 const SURFACES = ["bg", "panel", "panel2"] as const;
 
@@ -137,6 +138,20 @@ describe("WCAG AA contrast, both modes", () => {
           // fill, the only fill rows use (see the attenuation scan below).
           expect(contrast(palette[mode].match, fill), `match on ${state}/${surface} (${mode})`).toBeGreaterThanOrEqual(3);
         }
+      }
+    });
+
+    // A destructive row (Delete, Forget) is a menu row: danger text on the
+    // menu frame's panel at rest, hovered, and focused, selected or active.
+    it(`${mode} danger text is AA on every menu row fill`, () => {
+      expect(MENU_FRAME.split(" ")).toContain("bg-panel");
+      for (const [fill, amount] of [
+        ["rest", 0],
+        ["hover", inkAlpha(palette[mode].hover, "hover")],
+        ["selected", inkAlpha(palette[mode].selected, "selected")],
+      ] as const) {
+        const ratio = contrast(palette[mode].danger, mix(palette[mode].ink, palette[mode].panel, amount));
+        expect(ratio, `danger on ${fill}/panel (${mode}) = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
       }
     });
 

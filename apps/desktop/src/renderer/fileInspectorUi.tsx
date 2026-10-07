@@ -1,21 +1,34 @@
+import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
 import { dismissOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { DismissDraftControls } from "./RecoveryList";
 import { Share2 } from "lucide-react";
+import type { ComponentProps, ReactNode } from "react";
 import { bridge } from "./bridge";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
-import { IconButton, SectionLabel } from "./ui/controls";
+import { DocumentMenu } from "./DocumentMenu";
+import { IconButton } from "./ui/controls";
+import { KindGlyph } from "./ui/KindGlyph";
 import type { SaveState } from "./useAutosavedTextDraft";
 
-// `actions` puts a view's controls (edit toggle, save state, presence) in the
-// one document header — views never stack a second near-empty toolbar.
+// The one header over every file view. It is final on the click frame: the
+// kind's glyph comes from the path, the same glyph Explorer draws, and it says
+// the kind, so loading, ready and
+// failed views of one file draw the same header. `actions` are the view's
+// controls, right of Share; a view that has controls draws them, disabled,
+// while it loads or when it cannot open (DocumentControls). Share and the
+// controls never shrink. `status` (a save state, "Opening…") sits left of
+// them and gives way first: its words can change width without moving a
+// control, and in a narrow pane it ends in an ellipsis. The status slot takes
+// only the room the path leaves (flex-1 from a zero basis), so the file name
+// stays whole until the status is down to its mark and an ellipsis; only then
+// does the path shrink.
 export function ViewHeader(props: {
-  icon: React.ReactNode;
   path: string;
-  label: string;
   onShare?: () => void;
-  actions?: React.ReactNode;
+  status?: ReactNode;
+  actions?: ReactNode;
 }) {
   // Breadcrumb weighting: the folder path recedes, the file name carries ink.
   const slash = props.path.lastIndexOf("/");
@@ -23,26 +36,64 @@ export function ViewHeader(props: {
   const leaf = slash >= 0 ? props.path.slice(slash + 1) : props.path;
   return (
     <header className="flex items-center gap-2 border-b border-line px-4 py-1.5 text-[13px]">
-      {props.icon}
+      <KindGlyph kind={fileKindForPath(props.path)} size={13} />
       <span className="min-w-0 truncate font-mono">
         {dir ? <span className="text-subtle">{dir}</span> : null}
         <span className="font-medium text-ink">{leaf}</span>
       </span>
-      <SectionLabel className="ml-auto shrink-0">
-        {props.label}
-      </SectionLabel>
+      {/* 25px: the widest mark (12px), its gap and an ellipsis. */}
+      <div className="flex min-w-[25px] flex-1 items-center justify-end gap-2 empty:min-w-0">{props.status}</div>
       {props.onShare ? (
         <IconButton
           data-testid="file-share"
           aria-label="Share file"
           title="Share file"
           onClick={props.onShare}
+          className="shrink-0"
         >
           <Share2 size={13} aria-hidden />
         </IconButton>
       ) : null}
       {props.actions}
     </header>
+  );
+}
+
+export const OPENING_TITLE = "You can edit this document when it finishes opening.";
+
+// A document's controls, the same pair in every phase of an open: the mode
+// toggle and the document menu. The toggle's box holds "Edit", "Source" and
+// "Editor", so the words it says on its own never move the menu or Share;
+// only a person's own click to "WYSIWYG" widens it. A truncated read never
+// has the whole document to copy, so it has no menu, and the menu's place
+// stays empty instead of closing up.
+export function DocumentControls(props: {
+  toggle: {
+    label: string;
+    testId?: string;
+    pressed?: boolean;
+    disabled?: boolean;
+    title?: string;
+    onClick?: () => void;
+  };
+  menu: ComponentProps<typeof DocumentMenu> | null;
+}) {
+  const { toggle } = props;
+  return (
+    <>
+      <button
+        type="button"
+        data-testid={toggle.testId}
+        aria-pressed={toggle.pressed}
+        disabled={toggle.disabled}
+        title={toggle.title}
+        onClick={toggle.onClick}
+        className="min-w-14 shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-muted transition-colors hover:bg-hover hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {toggle.label}
+      </button>
+      {props.menu ? <DocumentMenu {...props.menu} /> : <span aria-hidden className="size-6 shrink-0" />}
+    </>
   );
 }
 

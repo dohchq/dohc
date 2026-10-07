@@ -371,6 +371,7 @@ export function createSyncRelayHandler({
     claimPendingShares,
     requireShareAction,
     chatResolverFor,
+    lookupUserDisplayName,
   );
 
   function requireShareWorkspace(

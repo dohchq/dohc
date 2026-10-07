@@ -231,6 +231,8 @@ export function Menu(props: {
   trigger?: (trigger: MenuTriggerProps) => ReactNode;
   /** The default trigger's test id. */
   testId?: string;
+  /** The default trigger stays in its place but cannot open the list. */
+  disabled?: boolean;
   menuTestId?: string;
   width?: number;
   closeOnPick?: boolean;
@@ -339,7 +341,7 @@ export function Menu(props: {
       {props.trigger ? (
         props.trigger(triggerProps)
       ) : (
-        <IconButton {...triggerProps} data-testid={props.testId} aria-label={props.label} title={props.label} className="shrink-0">
+        <IconButton {...triggerProps} disabled={props.disabled} data-testid={props.testId} aria-label={props.label} title={props.label} className="shrink-0">
           <MoreHorizontal size={14} aria-hidden />
         </IconButton>
       )}

@@ -216,7 +216,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "dohc.json"),
       JSON.stringify({
-        type: "site",
+        type: "app",
         preview: { mode: "static", entry: "public/index.html" },
       }),
     );
@@ -255,7 +255,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "dohc.json"),
       JSON.stringify({
-        type: "site",
+        type: "app",
         preview: { mode: "static", entry: "public/index.html" },
       }),
     );
@@ -787,7 +787,7 @@ describe("listSitePackages", () => {
     await mkdir(join(root, "shared-with-me", "alex"), { recursive: true });
     await writeFile(
       join(root, "dohc.json"),
-      JSON.stringify({ type: "site", preview: { mode: "static", entry: "index.html" } }),
+      JSON.stringify({ type: "app", preview: { mode: "static", entry: "index.html" } }),
     );
     await writeFile(
       join(root, "index.html"),
@@ -914,7 +914,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "static-share", "dohc.json"),
       JSON.stringify({
-        type: "site",
+        type: "app",
         preview: { mode: "static", entry: "index.html" },
         build: { output: "dist" },
       }),
@@ -947,7 +947,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "build-share", "dohc.json"),
       JSON.stringify({
-        type: "site",
+        type: "app",
         preview: { mode: "build" },
         build: { output: "dist" },
       }),
@@ -2402,7 +2402,7 @@ describe("listSitePackages", () => {
     );
     await writeFile(
       join(root, "configured-mode", "dohc.json"),
-      JSON.stringify({ type: "site", preview: { mode: "static" } }),
+      JSON.stringify({ type: "app", preview: { mode: "static" } }),
     );
 
     const site = (await listSitePackages(root)).find(
@@ -2426,7 +2426,7 @@ describe("listSitePackages", () => {
       await writeFile(
         join(root, folder, "dohc.json"),
         JSON.stringify({
-          type: "site",
+          type: "app",
           title: folder,
           preview: { mode, command: `node /tmp/${folder}.js --host 127.0.0.1` },
         }),
@@ -2462,7 +2462,7 @@ describe("listSitePackages", () => {
       await writeFile(
         join(root, folder, "dohc.json"),
         JSON.stringify({
-          type: "site",
+          type: "app",
           title: folder,
           preview: {
             ...(mode ? { mode } : {}),
@@ -2496,7 +2496,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "dohc.json"),
       JSON.stringify({
-        type: "site",
+        type: "app",
         preview: { mode: "dev", command: "npm run dev" },
       }),
     );
@@ -2565,7 +2565,7 @@ describe("listSitePackages", () => {
         await writeFile(
           join(root, folder, "dohc.json"),
           JSON.stringify({
-            type: "site",
+            type: "app",
             preview: { mode, command },
           }),
         );
@@ -2604,7 +2604,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "client..portal", "dohc.json"),
       JSON.stringify({
-        type: "site",
+        type: "app",
         preview: { mode: "dev", command: "npm run dev" },
       }),
     );

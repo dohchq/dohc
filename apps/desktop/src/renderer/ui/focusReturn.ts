@@ -102,18 +102,18 @@ function createSurfaceTracker() {
     owners: { registration: SurfaceRegistration; element: HTMLElement }[];
   } | null = null;
   let pointerDown = false;
-  let blurredByPointer = false;
+  let blurred = false;
   let completion: ReturnType<typeof setTimeout> | undefined;
   const forget = () => {
     remembered = null;
-    blurredByPointer = false;
+    blurred = false;
     observer.disconnect();
   };
   const restoreRemovedFocus = () => {
     const memory = remembered;
     if (!memory) return;
     if (memory.element.isConnected) {
-      if (!blurredByPointer && document.hasFocus() && document.activeElement === document.body) {
+      if (!blurred && document.hasFocus() && document.activeElement === document.body) {
         memory.element.focus({ preventScroll: true });
       }
       return;
@@ -150,24 +150,31 @@ function createSurfaceTracker() {
   };
   const onFocusIn = (event: FocusEvent) => remember(event.target instanceof Element ? event.target : null);
   const onFocusOut = (event: FocusEvent) => {
-    if (event.target !== remembered?.element || !remembered.element.isConnected || document.activeElement === event.target) return;
-    if (event.relatedTarget === null && pointerDown) blurredByPointer = true;
-    else forget();
+    const memory = remembered;
+    if (event.target !== memory?.element || !memory.element.isConnected || document.activeElement === event.target) return;
+    if (event.relatedTarget !== null) return forget();
+    blurred = true;
+    if (pointerDown) return;
+    // Chromium blurs a removed element before it detaches it, so decide after the running script:
+    // a blur that leaves the element in place was deliberate.
+    queueMicrotask(() => {
+      if (remembered === memory && memory.element.isConnected) forget();
+    });
   };
   const finishPointer = () => {
     pointerDown = false;
     clearTimeout(completion);
-    if (!blurredByPointer) return;
+    if (!blurred) return;
     // Click handlers can remove the blurred item. A blank-space click must forget it.
     completion = setTimeout(() => {
-      if (!blurredByPointer) return;
+      if (!blurred) return;
       if (remembered?.element.isConnected) forget();
       else restoreRemovedFocus();
     }, 0);
   };
   const onPointerDown = () => {
     clearTimeout(completion);
-    if (blurredByPointer) forget();
+    if (blurred) forget();
     pointerDown = true;
   };
   const onWindowBlur = () => {

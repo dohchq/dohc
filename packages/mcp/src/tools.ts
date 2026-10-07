@@ -1447,10 +1447,10 @@ async function detectSiteAt(
       severity: "warning",
       code: "invalid-type",
       path: configPath ?? relativeJoin(root, "dohc.json"),
-      message: 'dohc.json type should be "site".',
+      message: 'dohc.json type should be "app".',
     });
   }
-  const explicitNonSite = validType !== undefined && validType !== "site";
+  const explicitNonSite = validType !== undefined && validType !== "app";
 
   if (
     explicitNonSite &&
@@ -1467,7 +1467,7 @@ async function detectSiteAt(
       severity: "warning",
       code: "unexpected_dohc_type",
       path: configPath ?? relativeJoin(root, "dohc.json"),
-      message: "dohc.json has website signals but its type is not \"site\".",
+      message: "dohc.json has website signals but its type is not \"app\".",
     });
   }
 
@@ -1483,7 +1483,7 @@ async function detectSiteAt(
   // describe the same project the same way.
   const kind: SiteKind = configPath || hasPublishManifest || frameworkConfig ? "configured" : hasPackageSignal ? "package" : "static";
   // Mirrors workspace-core's own siteConfidence exactly: a dohc.json only
-  // counts toward high confidence when it explicitly declares type: "site"
+  // counts toward high confidence when it explicitly declares type: "app"
   // — a valid-but-empty config ({}) or one for another dohc feature isn't
   // itself a high-confidence website signal, even though it parsed
   // cleanly. The two detectors have to agree on the same dohc.json.
@@ -1494,7 +1494,7 @@ async function detectSiteAt(
   // — omitting uniqueBuildOutputs here left the two detectors disagreeing
   // on exactly that input despite this branch's own parity comment.
   const confidence: SiteConfidence =
-    validType === "site"
+    validType === "app"
       ? "high"
       : hasIndex || hasPublishManifest || frameworkConfig
         ? "high"
@@ -1735,7 +1735,7 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
             content: `${JSON.stringify(
               {
                 version: 1,
-                type: "site",
+                type: "app",
                 title,
                 preview: { mode: "static", entry: "index.html" },
                 build: { command: "npm run build", output: "dist" },
