@@ -46,7 +46,7 @@ Every release job runs on a self-hosted runner. Cloud runners stay off.
 A job waits in the queue until a runner with its labels is online.
 Each runner needs Git with bash, rustup, and the platform's native build tools.
 The coordinator runner also needs the GitHub CLI, `gh`, for the version check and publishing.
-Run it in a signed-in desktop session for the packaged app check.
+Run the Windows runner in a signed-in desktop session for the packaged app check.
 The Linux runner also needs `xvfb-run` for the fuse smoke.
 After packaging, that check verifies the actual executable's fuse values and starts it with an isolated profile.
 Local packages outside `apps/desktop/release/linux-unpacked` need `DOHC_SMOKE_PACKAGE_DIRECTORY` set to their unpacked directory.
@@ -72,6 +72,8 @@ Check host disk space and build admission before a release.
 Coordinate WSL builds with other work on the PC and cap Cargo parallelism to the host's build budget.
 Do not share Windows slot records with Linux processes because their PID namespaces differ.
 The `windows-linux` selection packages its two targets sequentially.
+The `all` selection can package Windows and WSL Linux concurrently.
+Before selecting `all`, confirm that the PC has enough resources for both builds.
 
 WSLg can display the packaged app, and Xvfb supports automated startup checks.
 These checks do not prove Linux desktop installation, protocol registration, or real AppImage upgrades.
@@ -196,8 +198,9 @@ following:
 - The expected installer files exist for the target architecture.
 - Artifact paths stay inside the release directory.
 
-The Linux job also runs the packaged fuse smoke. It boots an asar assembled
-from the built desktop files and verifies that the packaged window can start.
+The Linux job also runs the packaged fuse smoke.
+It verifies the packaged executable's fuse values against `electron-builder.yml`.
+It then boots that package with an isolated profile and checks that the window can start.
 Windows-only selections skip that Linux check.
 The Windows job runs the packaged executable with an isolated profile and test workspace.
 It checks startup, editing, disk persistence, and restart before uploading artifacts.
