@@ -472,7 +472,10 @@ export function MentionComposer(props: {
                 <span className={`${MENU_ICON} text-subtle`}>
                   <AtSign size={14} aria-hidden />
                 </span>
-                <span className={MENU_TITLE}>{candidate.handle}</span>
+                <span className={MENU_TITLE}>
+                  <span className="sr-only">@</span>
+                  {candidate.handle}
+                </span>
                 {(candidate.description ?? candidate.label).toLocaleLowerCase() === candidate.handle.toLocaleLowerCase() ? null : (
                   <span className={MENU_DETAIL}>{candidate.description ?? candidate.label}</span>
                 )}

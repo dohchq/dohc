@@ -153,9 +153,16 @@ export function menuEnterFrom(side: "above" | "below" | "left" | "right"): CSSPr
 /**
  * Where a key moves a menu's active row among `labels`: the arrows wrap,
  * Home and End jump, and a typed letter finds the next row whose label
- * starts with it. Null for every other key, and for a letter no row starts with.
+ * starts with it. Null for every other key, for a letter no row starts with,
+ * and for a letter held with Ctrl, Meta or Alt, which is a shortcut the app
+ * answers, so the caller leaves it alone.
  */
-export function moveInMenu(key: string, current: number, labels: readonly string[]): number | null {
+export function moveInMenu(
+  event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey">,
+  current: number,
+  labels: readonly string[],
+): number | null {
+  const { key } = event;
   const count = labels.length;
   if (count === 0) return null;
   const wrap = (index: number) => ((index % count) + count) % count;
@@ -163,7 +170,7 @@ export function moveInMenu(key: string, current: number, labels: readonly string
   if (key === "ArrowUp") return wrap(current - 1);
   if (key === "Home") return 0;
   if (key === "End") return count - 1;
-  if (key.length !== 1 || key === " ") return null;
+  if (key.length !== 1 || key === " " || event.ctrlKey || event.metaKey || event.altKey) return null;
   const letter = key.toLocaleLowerCase();
   for (let step = 1; step <= count; step += 1) {
     const index = wrap(current + step);
@@ -296,7 +303,7 @@ export function Menu(props: {
     const letter = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
     // A field keeps Home, End and the typed letters; the arrows leave it.
     const next = arrow || (!inField && (letter || event.key === "Home" || event.key === "End"))
-      ? moveInMenu(event.key, current(), rowElements.current.slice(0, count).map((row) => row?.textContent ?? ""))
+      ? moveInMenu(event, current(), rowElements.current.slice(0, count).map((row) => row?.textContent ?? ""))
       : null;
     if (next !== null) {
       if (!letter) event.preventDefault();

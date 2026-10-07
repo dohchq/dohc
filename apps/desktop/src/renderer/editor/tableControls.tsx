@@ -656,7 +656,7 @@ function openGripMenu(
   highlight();
 
   function onKeyDown(event: KeyboardEvent): void {
-    const next = moveInMenu(event.key, selected, labels);
+    const next = moveInMenu(event, selected, labels);
     if (next !== null) {
       event.preventDefault();
       selected = next;

@@ -301,6 +301,19 @@ describe("MentionComposer menu on the Menu part's recipe", () => {
     }
   });
 
+  // The @ shows as an icon; a screen reader still hears it, so a person or
+  // an agent never reads like a file.
+  it("keeps @ in a person's or agent's name", async () => {
+    render(<Harness />);
+    await userEvent.type(screen.getByTestId("chats-composer"), "@");
+    const menu = await screen.findByTestId("chats-mention-menu");
+    // The menu is a popover, which jsdom leaves out of the accessibility tree.
+    const agent = within(menu).getByRole("option", { hidden: true, name: /^@agent/ });
+    const user = within(menu).getByRole("option", { hidden: true, name: "@you" });
+    expect(agent.getAttribute("data-candidate-id")).toBe("agent:default");
+    expect(user.getAttribute("data-candidate-id")).toBe("user:you");
+  });
+
   it("takes the active option only from a pointer that moves", async () => {
     render(<Harness />);
     await userEvent.type(screen.getByTestId("chats-composer"), "@");

@@ -161,7 +161,7 @@ export function WikilinkPicker({
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
         e.stopPropagation();
-        const next = moveInMenu(e.key, activeIdx, matches.map((file) => file.path));
+        const next = moveInMenu(e, activeIdx, matches.map((file) => file.path));
         if (next !== null) setActiveIdx(next);
       } else if (e.key === "Enter") {
         e.preventDefault();

@@ -735,7 +735,7 @@ export function BlockMenu({
       style={{ left: state.x, top: state.y, maxHeight: state.maxHeight, ...menuEnterFrom(state.placement) }}
       onMouseDown={(event) => event.preventDefault()}
       onKeyDown={(event) => {
-        const next = moveInMenu(event.key, active, labels);
+        const next = moveInMenu(event, active, labels);
         if (next !== null) {
           event.preventDefault();
           setActive(next);
@@ -921,7 +921,7 @@ export function TurnIntoMenu({
           style={{ maxHeight: dropdown.maxHeight, ...menuEnterFrom(dropdown.placement) }}
           onMouseDown={(event) => event.preventDefault()}
           onKeyDown={(event) => {
-            const next = moveInMenu(event.key, selected, labels);
+            const next = moveInMenu(event, selected, labels);
             if (next !== null) {
               event.preventDefault();
               setSelected(next);

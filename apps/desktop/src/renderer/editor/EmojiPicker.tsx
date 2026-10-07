@@ -115,7 +115,7 @@ export function EmojiPicker({ state, view, onDismiss }: Props) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
         e.stopPropagation();
-        const next = moveInMenu(e.key, activeIdx, matches.map((entry) => entry.shortcode));
+        const next = moveInMenu(e, activeIdx, matches.map((entry) => entry.shortcode));
         if (next !== null) setActiveIdx(next);
       } else if (e.key === "Enter" || e.key === "Tab") {
         // Tab commits (rather than moving focus out of the editor) —
