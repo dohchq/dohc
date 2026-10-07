@@ -2,7 +2,7 @@ import { escapeHtml } from "./html";
 
 export interface AppSourceOptions {
   title: string;
-  packageName: string;
+  appRoot: string;
   withDohcJson: boolean;
 }
 
@@ -11,11 +11,21 @@ export interface AppSourceFile {
   content: string;
 }
 
+function packageNameFromPath(root: string): string {
+  const name = root.split("/").at(-1) || "app";
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "app";
+}
+
 export function generateAppSource({
   title,
-  packageName,
+  appRoot,
   withDohcJson,
 }: AppSourceOptions): AppSourceFile[] {
+  const packageName = packageNameFromPath(appRoot);
   return [
     {
       path: "index.html",
@@ -29,9 +39,7 @@ export function generateAppSource({
   </head>
   <body>
     <main>
-      <p class="eyebrow">New app</p>
       <h1>${escapeHtml(title)}</h1>
-      <p>A clean local page, ready for the shape of the work.</p>
     </main>
     <script type="module" src="./script.js"></script>
   </body>
@@ -40,50 +48,7 @@ export function generateAppSource({
     },
     {
       path: "styles.css",
-      content: `:root {
-  color: #151515;
-  background: #f7f6f1;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-body {
-  margin: 0;
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-}
-
-main {
-  width: min(720px, calc(100vw - 48px));
-}
-
-.eyebrow {
-  margin: 0 0 12px;
-  color: #66635d;
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0;
-  text-transform: uppercase;
-}
-
-h1 {
-  margin: 0 0 16px;
-  font-size: 4rem;
-  line-height: 0.96;
-}
-
-p {
-  max-width: 56ch;
-  font-size: 1.08rem;
-  line-height: 1.6;
-}
-
-@media (max-width: 640px) {
-  h1 {
-    font-size: 2.25rem;
-  }
-}
-`,
+      content: "",
     },
     {
       path: "script.js",

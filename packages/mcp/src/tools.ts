@@ -1137,15 +1137,6 @@ function siteTitleFromPath(root: string): string {
     .trim();
 }
 
-function packageNameFromPath(root: string): string {
-  const name = basename(root) || "app";
-  const slug = name
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "app";
-}
-
 function readPackageScripts(pkg: PackageJson | null): SiteScripts {
   if (!pkg || !isRecord(pkg.scripts)) return {};
   const scripts: SiteScripts = {};
@@ -1616,10 +1607,9 @@ export async function createApp(
   }
 
   const title = args.title?.trim() || siteTitleFromPath(root.normalized);
-  const packageName = packageNameFromPath(root.normalized);
   const files = generateAppSource({
     title,
-    packageName,
+    appRoot: root.normalized,
     withDohcJson: args.withDohcJson !== false,
   }).map((file) => ({ ...file, path: relativeJoin(root.normalized, file.path) }));
 

@@ -37,42 +37,69 @@ export async function createFirstAppFiles(input: {
   folders: string[];
   mutations: Pick<
     DohcDesktopBridge,
-    "createWorkspaceFile" | "createWorkspaceFolder"
+    "createWorkspaceFile" | "createWorkspaceFolder" | "deleteWorkspacePath"
   >;
 }): Promise<{ root: string }> {
   const root = firstAppRoot(input.files, input.folders);
   const rootExists = input.folders.some(
     (folder) => folder.toLowerCase() === root.toLowerCase(),
   );
-  if (!rootExists) {
-    await input.mutations.createWorkspaceFolder({
-      workspaceId: input.workspaceId,
-      relativePath: root,
-    });
-  }
   const files = generateAppSource({
     title: "My app",
-    packageName: root.toLowerCase(),
-    withDohcJson: false,
+    appRoot: root,
+    withDohcJson: true,
   });
+  const createdPaths: string[] = [];
   const createdFolders = new Set([root]);
-  for (const file of files) {
-    const separator = file.path.lastIndexOf("/");
-    if (separator !== -1) {
-      const folder = `${root}/${file.path.slice(0, separator)}`;
-      if (!createdFolders.has(folder)) {
-        await input.mutations.createWorkspaceFolder({
+  try {
+    if (!rootExists) {
+      await input.mutations.createWorkspaceFolder({
+        workspaceId: input.workspaceId,
+        relativePath: root,
+      });
+      createdPaths.push(root);
+    }
+    for (const file of files) {
+      const separator = file.path.lastIndexOf("/");
+      if (separator !== -1) {
+        const folder = `${root}/${file.path.slice(0, separator)}`;
+        if (!createdFolders.has(folder)) {
+          await input.mutations.createWorkspaceFolder({
+            workspaceId: input.workspaceId,
+            relativePath: folder,
+          });
+          createdFolders.add(folder);
+          createdPaths.push(folder);
+        }
+      }
+      const path = `${root}/${file.path}`;
+      await input.mutations.createWorkspaceFile({
+        workspaceId: input.workspaceId,
+        relativePath: path,
+        initialText: file.content,
+      });
+      createdPaths.push(path);
+    }
+    return { root };
+  } catch (error) {
+    const cleanupErrors: unknown[] = [];
+    for (const path of createdPaths.reverse()) {
+      try {
+        await input.mutations.deleteWorkspacePath({
           workspaceId: input.workspaceId,
-          relativePath: folder,
+          relativePath: path,
         });
-        createdFolders.add(folder);
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
       }
     }
-    await input.mutations.createWorkspaceFile({
-      workspaceId: input.workspaceId,
-      relativePath: `${root}/${file.path}`,
-      initialText: file.content,
-    });
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        "The app could not be created or fully removed. Check its folder before trying again.",
+        { cause: error },
+      );
+    }
+    throw error;
   }
-  return { root };
 }

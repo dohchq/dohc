@@ -22,7 +22,7 @@ describe("first app creation", () => {
         workspaceId: "ws-apps",
         files: [],
         folders: [],
-        mutations: { createWorkspaceFile, createWorkspaceFolder },
+        mutations: { createWorkspaceFile, createWorkspaceFolder, deleteWorkspacePath: vi.fn(async () => ({ trashed: true })) },
       }),
     ).resolves.toEqual({ root: "app" });
 
@@ -34,6 +34,7 @@ describe("first app creation", () => {
       "folder:app/scripts",
       "file:app/scripts/build-static.mjs",
       "file:app/package.json",
+      "file:app/dohc.json",
     ]);
     expect(createWorkspaceFile).toHaveBeenCalledWith({
       workspaceId: "ws-apps",
@@ -51,7 +52,7 @@ describe("first app creation", () => {
         workspaceId: "ws-apps",
         files: [{ path: "App/notes.txt", kind: "file" }],
         folders: ["App"],
-        mutations: { createWorkspaceFile, createWorkspaceFolder },
+        mutations: { createWorkspaceFile, createWorkspaceFolder, deleteWorkspacePath: vi.fn(async () => ({ trashed: true })) },
       }),
     ).resolves.toEqual({ root: "app-2" });
 
@@ -74,7 +75,7 @@ describe("first app creation", () => {
         workspaceId: "ws-apps",
         files: [],
         folders: [],
-        mutations: { createWorkspaceFile, createWorkspaceFolder },
+        mutations: { createWorkspaceFile, createWorkspaceFolder, deleteWorkspacePath: vi.fn(async () => ({ trashed: true })) },
       }),
     ).rejects.toThrow("disk full");
 
@@ -94,7 +95,7 @@ describe("first app creation", () => {
     const createWorkspaceFile = vi.fn(async () => ({ path: "App/index.html" }));
     await expect(createFirstAppFiles({
       workspaceId: "ws-apps", files: [], folders: ["App"],
-      mutations: { createWorkspaceFile, createWorkspaceFolder },
+      mutations: { createWorkspaceFile, createWorkspaceFolder, deleteWorkspacePath: vi.fn(async () => ({ trashed: true })) },
     })).resolves.toEqual({ root: "App" });
     expect(createWorkspaceFolder.mock.calls).toEqual([[{ workspaceId: "ws-apps", relativePath: "App/scripts" }]]);
   });
@@ -110,7 +111,7 @@ describe("first app creation", () => {
     const createWorkspaceFile = vi.fn(async () => { throw new Error("path refused"); });
     await expect(createFirstAppFiles({
       workspaceId: "ws-apps", files: [], folders: [],
-      mutations: { createWorkspaceFile, createWorkspaceFolder },
+      mutations: { createWorkspaceFile, createWorkspaceFolder, deleteWorkspacePath: vi.fn(async () => ({ trashed: true })) },
     })).rejects.toThrow("path refused");
     expect(createWorkspaceFile).toHaveBeenCalledTimes(1);
   });
@@ -123,6 +124,7 @@ describe("first app creation", () => {
         workspaceId: "ws-apps", files: [], folders: [],
         mutations: {
           createWorkspaceFolder: async ({ relativePath }) => ({ path: relativePath }),
+          deleteWorkspacePath: async () => ({ trashed: true }),
           createWorkspaceFile: async ({ relativePath, initialText }) => {
             desktopFiles[relativePath] = initialText ?? "";
             return { path: relativePath };
@@ -139,13 +141,89 @@ describe("first app creation", () => {
         return { ok: true, written: Object.keys(mcpFiles) };
       };
       await expect(createApp({ root: workspaceRoot, home: workspaceRoot, request }, {
-        appRoot: "app", title: "My app", withDohcJson: false,
+        appRoot: "app", title: "My app", withDohcJson: true,
       })).resolves.toMatchObject({ ok: true });
       expect(desktopFiles).toEqual(mcpFiles);
-      expect(Object.keys(desktopFiles)).toHaveLength(5);
-      expect(desktopFiles).not.toHaveProperty("app/dohc.json");
+      expect(Object.keys(desktopFiles)).toHaveLength(6);
+      expect(JSON.parse(desktopFiles["app/dohc.json"]!)).toMatchObject({
+        type: "app", preview: { mode: "static", entry: "index.html" },
+      });
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
   });
+  it.each([false, true])("rolls back a third-file failure and preserves a pre-existing root: %s", async (rootExists) => {
+    const files = new Set<string>();
+    const folders = new Set(rootExists ? ["App"] : []);
+    const initialRoot = rootExists ? "App" : "app";
+    const failure = new Error("third file failed");
+    let failThirdFile = true;
+    let writes = 0;
+    const createWorkspaceFolder = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      folders.add(relativePath);
+      return { path: relativePath };
+    });
+    const createWorkspaceFile = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      writes += 1;
+      if (failThirdFile && writes === 3) throw failure;
+      files.add(relativePath);
+      return { path: relativePath };
+    });
+    const deleteWorkspacePath = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      files.delete(relativePath);
+      folders.delete(relativePath);
+      return { trashed: true };
+    });
+    const mutations = { createWorkspaceFolder, createWorkspaceFile, deleteWorkspacePath };
+    await expect(createFirstAppFiles({
+      workspaceId: "ws-apps", files: [], folders: [...folders], mutations,
+    })).rejects.toBe(failure);
+    expect(deleteWorkspacePath.mock.calls.map(([payload]) => payload.relativePath)).toEqual([
+      `${initialRoot}/styles.css`, `${initialRoot}/index.html`, ...(rootExists ? [] : [initialRoot]),
+    ]);
+    expect([...files]).toEqual([]);
+    expect([...folders]).toEqual(rootExists ? ["App"] : []);
+    failThirdFile = false;
+    await expect(createFirstAppFiles({
+      workspaceId: "ws-apps", files: [], folders: [...folders], mutations,
+    })).resolves.toEqual({ root: initialRoot });
+  });
+
+  it("removes created child folders after a later failure", async () => {
+    const createWorkspaceFolder = vi.fn(async ({ relativePath }: { relativePath: string }) => ({ path: relativePath }));
+    const createWorkspaceFile = vi.fn(async ({ relativePath }: { relativePath: string }) => {
+      if (relativePath.endsWith("package.json")) throw new Error("package write failed");
+      return { path: relativePath };
+    });
+    const deleteWorkspacePath = vi.fn(async () => ({ trashed: true }));
+    await expect(createFirstAppFiles({
+      workspaceId: "ws-apps", files: [], folders: ["App"],
+      mutations: { createWorkspaceFolder, createWorkspaceFile, deleteWorkspacePath },
+    })).rejects.toThrow("package write failed");
+    expect(deleteWorkspacePath.mock.calls).toEqual([
+      [{ workspaceId: "ws-apps", relativePath: "App/scripts/build-static.mjs" }],
+      [{ workspaceId: "ws-apps", relativePath: "App/scripts" }],
+      [{ workspaceId: "ws-apps", relativePath: "App/script.js" }],
+      [{ workspaceId: "ws-apps", relativePath: "App/styles.css" }],
+      [{ workspaceId: "ws-apps", relativePath: "App/index.html" }],
+    ]);
+  });
+
+  it("reports rollback failure and still attempts the remaining cleanup", async () => {
+    const createFailure = new Error("third file failed");
+    const rollbackFailure = new Error("cleanup failed");
+    const createWorkspaceFolder = vi.fn(async () => ({ path: "app" }));
+    const createWorkspaceFile = vi.fn(async () => ({ path: "app/index.html" }))
+      .mockResolvedValueOnce({ path: "app/index.html" })
+      .mockResolvedValueOnce({ path: "app/styles.css" })
+      .mockRejectedValueOnce(createFailure);
+    const deleteWorkspacePath = vi.fn(async () => ({ trashed: true })).mockRejectedValueOnce(rollbackFailure);
+    const result = createFirstAppFiles({
+      workspaceId: "ws-apps", files: [], folders: [],
+      mutations: { createWorkspaceFolder, createWorkspaceFile, deleteWorkspacePath },
+    });
+    await expect(result).rejects.toMatchObject({ cause: createFailure, errors: [createFailure, rollbackFailure] });
+    expect(deleteWorkspacePath).toHaveBeenCalledTimes(3);
+  });
+
 });

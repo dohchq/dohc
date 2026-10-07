@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { generateAppSource } from "./appSource";
 
-const options = { title: "Ledger", packageName: "ledger", withDohcJson: true };
+const options = { title: "Ledger", appRoot: "finance/ledger", withDohcJson: true };
 
 describe("app source generation", () => {
   it("matches the starter fixture", () => {
@@ -42,5 +42,24 @@ describe("app source generation", () => {
       "index.html", "styles.css", "script.js", "scripts/build-static.mjs", "package.json",
     ]);
     expect(JSON.parse(withoutManifest.find((file) => file.path === "package.json")!.content).name).toBe("ledger");
+  });
+  it.each([
+    ["finance/My Ledger", "my-ledger"],
+    ["finance/MY_ledger.v2", "my_ledger.v2"],
+    ["finance/---Ledger!!!", "ledger"],
+    ["finance/会议", "app"],
+  ])("derives the package name from app root %s", (appRoot, expected) => {
+    const files = generateAppSource({ ...options, appRoot });
+    expect(JSON.parse(files.find((file) => file.path === "package.json")!.content).name).toBe(expected);
+  });
+
+  it("keeps the page plain without filler copy or styles", () => {
+    const files = generateAppSource(options);
+    const html = files.find((file) => file.path === "index.html")!.content;
+    expect(html).not.toContain("New app");
+    expect(html).not.toContain("A clean local page");
+    expect(html).not.toContain("<p");
+    expect(html).toContain("<h1>Ledger</h1>");
+    expect(files.find((file) => file.path === "styles.css")!.content).toBe("");
   });
 });
