@@ -56,7 +56,7 @@ describe("local usage store", () => {
     const rows = await store.query({ ...query(), pairs: [pair, { capabilityId: "file.list", door: "mcp" },
       { capabilityId: "file.read", door: "mcp" }, { capabilityId: "file.search", door: "mcp" },
       { capabilityId: "workspace.list", door: "mcp" }, { capabilityId: "version.try", door: "automation" }] });
-    expect(rows.every(row => row.total === null && row.observedCount === null && row.observedUsedDays === null)).toBe(true);
+    expect(rows.every(row => row.total === null && row.usedDays === null)).toBe(true);
   });
   it("rejects payloads and background ids, isolates snapshots, and keeps a measured zero", async () => {
     const { store } = memoryStore();
@@ -197,7 +197,7 @@ describe("local usage store", () => {
     await expect(store.flush()).rejects.toThrow("disk unavailable");
     expect(saved().counts[0]!.count).toBe(1);
     expect((await store.read()).counts[0]!.count).toBe(2);
-    expect((await store.query(query()))[0]!.observedCount).toBeNull();
+    expect((await store.query(query()))[0]!.total).toBeNull();
     expect(onWriteFailure).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(saved().counts[0]!.count).toBe(2);
@@ -220,11 +220,52 @@ describe("local usage store", () => {
     expect(saved().coverage[0]!.pairs).toEqual(mapping);
     expect(saved().enabled).toBe(action === "clear");
   });
-  it("recovers from non-ENOENT read failures and can still disable collection", async () => {
-    const { store, io, saved } = memoryStore();
-    io.readFile.mockRejectedValueOnce(Object.assign(new Error("unreadable"), { code: "EACCES" }));
-    await store.setEnabled(false);
+  it.each(["EBUSY", "EPERM", "EACCES"])("leaves the record byte-identical and stays inert for the session after %s", async code => {
+    const initial = seed(false);
+    initial.counts.push({ ...pair, day: today(), count: 3 });
+    const { store, io, disk, path, restart } = memoryStore(initial);
+    const original = disk.get(path);
+    disk.set(path + ".tmp", "interrupted snapshot");
+    const readError = Object.assign(new Error("temporarily locked"), { code });
+    io.readFile.mockRejectedValueOnce(readError);
+    expect(store.recordSuccess(pair)).toBe(true);
+    await store.load();
+    expect(store.recordSuccess(pair)).toBe(false);
+    await expect(store.read()).rejects.toBe(readError);
+    await expect(store.query(query())).rejects.toBe(readError);
+    await expect(store.setEnabled(false)).rejects.toBe(readError);
+    await expect(store.setEnabled(true)).rejects.toBe(readError);
+    await expect(store.clear()).rejects.toBe(readError);
+    await expect(store.flush()).rejects.toBe(readError);
+    await store.load();
+    await vi.advanceTimersByTimeAsync(86_400_000);
+    await store.close();
+    expect(io.readFile).toHaveBeenCalledTimes(1);
+    expect(io.writeFile).not.toHaveBeenCalled();
+    expect(io.rename).not.toHaveBeenCalled();
+    expect(io.rm).not.toHaveBeenCalled();
+    expect(disk.get(path)).toBe(original);
+    expect(disk.get(path + ".tmp")).toBe("interrupted snapshot");
+    const nextSession = restart();
+    expect((await nextSession.read()).enabled).toBe(false);
+    expect((await nextSession.read()).counts).toEqual(initial.counts);
+  });
+  it("keeps collection Off when a saved Off record becomes torn", async () => {
+    const { store, restart, disk, path, saved } = memoryStore();
+    await store.load(); store.recordSuccess(pair); await store.setEnabled(false); await store.close();
+    expect(saved().enabled).toBe(false);
+    disk.set(path, '{"version":1,"enabled":false,"counts":[');
+    const next = restart(); await next.load();
     expect(saved()).toMatchObject({ enabled: false, counts: [], days: [{ complete: false }] });
+    expect(next.recordSuccess(pair)).toBe(false);
+    await next.clear();
+    expect(saved().enabled).toBe(false);
+  });
+  it.each(['{"enabled":true,"content":"corrupt"}', "not JSON"])("defaults a read but unrecoverable record to Off", async raw => {
+    const { store, disk, path, saved } = memoryStore();
+    disk.set(path, raw); await store.load();
+    expect(saved()).toMatchObject({ enabled: false, counts: [], days: [{ complete: false }] });
+    expect(store.recordSuccess(pair)).toBe(false);
   });
   it("ignores interrupted temporary snapshots and can retry a failed Clear", async () => {
     const { store, io, saved, disk, path } = memoryStore();

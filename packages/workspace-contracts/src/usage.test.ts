@@ -46,11 +46,14 @@ describe("local usage contracts", () => {
       { ...snapshot, days: [{ ...snapshot.days[0]!, complete: false }] },
       { ...snapshot, coverage: [{ appVersion: "0.1.0", pairs: [{ ...pair, status: "unavailable" as const }] }] }]) {
       const result = queryUsage(input, { from: day, through: day, pairs: [pair] })[0]!;
-      expect(result).toMatchObject({ total: null, usedDays: null, observedCount: null, observedUsedDays: null });
-      expect(result.daily[0]).toMatchObject({ count: null, observedCount: null });
+      expect(result).toMatchObject({ total: null, usedDays: null });
+      expect(result.daily[0]).toMatchObject({ count: null });
+      expect(result).not.toHaveProperty("observedCount");
+      expect(result).not.toHaveProperty("observedUsedDays");
+      expect(result.daily[0]).not.toHaveProperty("observedCount");
     }
     expect(queryUsage(snapshot, { from: day, through: day, pairs: [pair] })[0])
-      .toMatchObject({ total: 0, usedDays: 0, observedCount: 0, observedUsedDays: 0, coveredDays: 1 });
+      .toMatchObject({ total: 0, usedDays: 0, coveredDays: 1 });
   });
   it("requires every version used that day to cover the pair", () => {
     const upgraded = { ...snapshot, days: [{ ...snapshot.days[0]!, appVersions: ["0.1.0", "0.2.0"] }] };

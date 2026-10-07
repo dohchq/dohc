@@ -146,12 +146,12 @@ export function queryUsage(snapshot: UsageSnapshot, input: UsageQuery) {
         : statuses.includes("unavailable") ? "unavailable" as const
         : !record?.complete ? "incomplete" as const : "covered" as const;
       const count = status === "covered" ? counts.get(usageRowKey({ ...pair, day })) ?? 0 : null;
-      return { day, appVersions: record?.appVersions.slice() ?? [], status, count, observedCount: count };
+      return { day, appVersions: record?.appVersions.slice() ?? [], status, count };
     });
     const complete = daily.every(day => day.status === "covered");
     const total = complete ? daily.reduce((sum, day) => sum + day.count!, 0) : null;
     const usedDays = complete ? daily.filter(day => day.count! > 0).length : null;
     return { ...pair, daily, coveredDays: daily.filter(day => day.status === "covered").length,
-      total, usedDays, observedCount: total, observedUsedDays: usedDays };
+      total, usedDays };
   });
 }

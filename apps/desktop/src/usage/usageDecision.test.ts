@@ -33,5 +33,5 @@ it("stops treating a zero as decision evidence when a day was Off or incomplete"
   const snapshot = usageDecisionFixture();
   snapshot.days[0]!.complete = false;
   const result = queryUsage(snapshot, { from: "2026-09-08", through: "2026-10-07", pairs: [{ capabilityId: "version.try", door: "renderer" }] })[0]!;
-  expect(result).toMatchObject({ total: null, usedDays: null, observedCount: null, observedUsedDays: null, coveredDays: 29 });
+  expect(result).toMatchObject({ total: null, usedDays: null, coveredDays: 29 });
 });

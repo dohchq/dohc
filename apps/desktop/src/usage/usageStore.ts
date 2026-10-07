@@ -39,6 +39,7 @@ export function createUsageStore(deps: {
   let enabled = true;
   let loaded = false;
   let admissionReady = false;
+  let unreadable: { error: unknown } | undefined;
   let activeDay: string | undefined;
   let loading: Promise<void> | undefined;
   let directory: string;
@@ -148,16 +149,24 @@ export function createUsageStore(deps: {
     loading = (async () => {
       directory = deps.stateDir();
       path = join(directory, USAGE_SNAPSHOT_NAME);
-      let parsed: unknown;
-      let restored: UsageSnapshot | undefined;
+      let raw: string | undefined;
       try {
-        parsed = JSON.parse(await io.readFile(path, "utf8"));
-        restored = decodeUsageSnapshot(parsed);
-      } catch {
-        // Read and schema failures cannot prevent the person from using controls.
-        if (parsed && typeof parsed === "object" && "enabled" in parsed && typeof parsed.enabled === "boolean") {
-          enabled = parsed.enabled;
+        raw = await io.readFile(path, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+          // Stay inert for this session. No control or exit flush may replace
+          // a record whose contents and saved setting we could not inspect.
+          unreadable = { error };
+          enabled = false;
+          pending.length = 0;
+          pendingOverflow = false;
+          return;
         }
+      }
+      let restored: UsageSnapshot | undefined;
+      if (raw !== undefined) {
+        try { restored = decodeUsageSnapshot(JSON.parse(raw)); }
+        catch { enabled = false; }
       }
       if (restored) {
         enabled = restored.enabled;
@@ -215,16 +224,19 @@ export function createUsageStore(deps: {
       throw error;
     } finally { scheduleWrite(); }
   }
+  function requireReadable() {
+    if (unreadable) throw unreadable.error;
+  }
   function control(change: () => Promise<void>): Promise<void> {
     if (closing) return Promise.reject(new Error("Usage store is closed"));
     controls++;
-    return enqueue(async () => { await load(); refreshDay(); await change(); })
+    return enqueue(async () => { await load(); requireReadable(); refreshDay(); await change(); })
       .finally(() => { controls--; });
   }
   return {
     load: () => closing ? Promise.reject(new Error("Usage store is closed")) : load(),
     recordSuccess(input: unknown): boolean {
-      if (closing || controls) return false;
+      if (closing || controls || unreadable) return false;
       const parsed = UsageInvocation.safeParse(input);
       if (!parsed.success) return false;
       const row = { day: localUsageDay(now()), ...parsed.data, count: 1 };
@@ -238,12 +250,12 @@ export function createUsageStore(deps: {
     },
     async query(input: UsageQuery) {
       if (closing) throw new Error("Usage store is closed");
-      await load(); refreshDay();
+      await load(); requireReadable(); refreshDay();
       return queryUsage(snapshot(), input);
     },
     async read(): Promise<UsageSnapshot> {
       if (closing) throw new Error("Usage store is closed");
-      await load(); refreshDay();
+      await load(); requireReadable(); refreshDay();
       return snapshot();
     },
     setEnabled(value: boolean): Promise<void> {
@@ -266,7 +278,7 @@ export function createUsageStore(deps: {
     },
     flush(): Promise<void> {
       if (closing) return Promise.reject(new Error("Usage store is closed"));
-      return enqueue(async () => { await load(); await write(); });
+      return enqueue(async () => { await load(); requireReadable(); await write(); });
     },
     close(): Promise<void> {
       if (closePromise) return closePromise;
