@@ -220,14 +220,15 @@ describe("local usage store", () => {
     expect(saved().coverage[0]!.pairs).toEqual(mapping);
     expect(saved().enabled).toBe(action === "clear");
   });
-  it.each(["EBUSY", "EPERM", "EACCES"])("leaves the record byte-identical and stays inert for the session after %s", async code => {
+  it.each(["EBUSY", "EPERM", "EACCES"])("leaves the record byte-identical while controls retry a persistent %s", async code => {
     const initial = seed(false);
     initial.counts.push({ ...pair, day: today(), count: 3 });
     const { store, io, disk, path, restart } = memoryStore(initial);
     const original = disk.get(path);
     disk.set(path + ".tmp", "interrupted snapshot");
     const readError = Object.assign(new Error("temporarily locked"), { code });
-    io.readFile.mockRejectedValueOnce(readError);
+    const readFile = io.readFile.getMockImplementation()!;
+    io.readFile.mockRejectedValue(readError);
     expect(store.recordSuccess(pair)).toBe(true);
     await store.load();
     expect(store.recordSuccess(pair)).toBe(false);
@@ -240,15 +241,31 @@ describe("local usage store", () => {
     await store.load();
     await vi.advanceTimersByTimeAsync(86_400_000);
     await store.close();
-    expect(io.readFile).toHaveBeenCalledTimes(1);
+    expect(io.readFile).toHaveBeenCalledTimes(4);
     expect(io.writeFile).not.toHaveBeenCalled();
     expect(io.rename).not.toHaveBeenCalled();
     expect(io.rm).not.toHaveBeenCalled();
     expect(disk.get(path)).toBe(original);
     expect(disk.get(path + ".tmp")).toBe("interrupted snapshot");
+    io.readFile.mockImplementation(readFile);
     const nextSession = restart();
     expect((await nextSession.read()).enabled).toBe(false);
     expect((await nextSession.read()).counts).toEqual(initial.counts);
+  });
+  it.each(["clear", "off", "on"] as const)("retries a failed load before %s once the lock clears", async action => {
+    const initial = seed(action === "off");
+    initial.counts.push({ ...pair, day: today(), count: 3 });
+    const { store, io, disk, path, saved } = memoryStore(initial);
+    disk.set(path + ".tmp", "interrupted snapshot");
+    io.readFile.mockRejectedValueOnce(Object.assign(new Error("temporarily locked"), { code: "EBUSY" }));
+    await store.load();
+    expect(store.recordSuccess(pair)).toBe(false);
+    if (action === "clear") await store.clear(); else await store.setEnabled(action === "on");
+    expect(io.readFile).toHaveBeenCalledTimes(2);
+    expect(saved().enabled).toBe(action === "on");
+    expect(saved().counts).toEqual(action === "clear" ? [] : initial.counts);
+    expect(disk.has(path + ".tmp")).toBe(false);
+    expect(store.recordSuccess(pair)).toBe(action === "on");
   });
   it("keeps collection Off when a saved Off record becomes torn", async () => {
     const { store, restart, disk, path, saved } = memoryStore();

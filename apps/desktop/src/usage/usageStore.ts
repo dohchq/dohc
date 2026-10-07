@@ -154,7 +154,7 @@ export function createUsageStore(deps: {
         raw = await io.readFile(path, "utf8");
       } catch (error) {
         if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
-          // Stay inert for this session. No control or exit flush may replace
+          // Stay inert until a control retries the read. Never replace
           // a record whose contents and saved setting we could not inspect.
           unreadable = { error };
           enabled = false;
@@ -163,6 +163,8 @@ export function createUsageStore(deps: {
           return;
         }
       }
+      unreadable = undefined;
+      enabled = true;
       let restored: UsageSnapshot | undefined;
       if (raw !== undefined) {
         try { restored = decodeUsageSnapshot(JSON.parse(raw)); }
@@ -230,7 +232,10 @@ export function createUsageStore(deps: {
   function control(change: () => Promise<void>): Promise<void> {
     if (closing) return Promise.reject(new Error("Usage store is closed"));
     controls++;
-    return enqueue(async () => { await load(); requireReadable(); refreshDay(); await change(); })
+    return enqueue(async () => {
+      if (unreadable) loading = undefined;
+      await load(); requireReadable(); refreshDay(); await change();
+    })
       .finally(() => { controls--; });
   }
   return {
