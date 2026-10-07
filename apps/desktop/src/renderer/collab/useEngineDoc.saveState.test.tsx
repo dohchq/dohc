@@ -1004,6 +1004,80 @@ it("sets aside a winner edit beside the retired draft when read-only follows it"
   await waitFor(() => expect(harness.closed).toHaveLength(1));
 });
 
+// A received share's live host reports saved-to-host once it has accepted
+// every pending edit, then read-only when access ends.
+async function mountHostAcknowledgedDocument() {
+  const hook = renderHook(() =>
+    useEngineDoc({ workspaceId: "ws-1", path: "notes/a.md", enabled: true }),
+  );
+  const drafts = renderHook(() => useOrphanedDrafts("ws-1", "notes/a.md"));
+  await waitFor(() => expect(hook.result.current.available).toBe(true));
+  const typeAndDeliver = async (delivered: number) => {
+    act(() => {
+      const text = hook.result.current.doc!.getText("plainText");
+      text.insert(text.length, "!");
+    });
+    expect(hook.result.current.saveState.kind).toBe("saving");
+    await act(async () => {
+      await hook.result.current.flushPendingLocalUpdates();
+    });
+    expect(harness.applied).toHaveLength(delivered);
+  };
+  return { hook, drafts, typeAndDeliver };
+}
+
+it("host acknowledgement recovery sets nothing aside for a delivered edit the host saved", async () => {
+  const { hook, drafts, typeAndDeliver } = await mountHostAcknowledgedDocument();
+  await typeAndDeliver(1);
+  act(() => harness.emitNow("saved-to-host", harness.applied.at(-1)!.seq));
+  expect(hook.result.current.saveState.kind).toBe("saved-to-host");
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(hook.result.current.readOnlyWhileEditing).toBe(true);
+  expect(hook.result.current.saveState.kind).toBe("unknown");
+  expect(drafts.result.current).toEqual([]);
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toEqual([]);
+});
+
+it("host acknowledgement recovery sets aside a newer edit after the host saved an earlier one", async () => {
+  const { hook, drafts, typeAndDeliver } = await mountHostAcknowledgedDocument();
+  await typeAndDeliver(1);
+  act(() => harness.emitNow("saved-to-host", harness.applied.at(-1)!.seq));
+  expect(hook.result.current.saveState.kind).toBe("saved-to-host");
+  await typeAndDeliver(2);
+  expect(hook.result.current.saveState.kind).toBe("saving");
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(hook.result.current.readOnlyWhileEditing).toBe(true);
+  expect(drafts.result.current).toHaveLength(1);
+  await waitFor(() =>
+    expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!!"]),
+  );
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toHaveLength(1);
+});
+
+it("host acknowledgement recovery keeps the draft when a stale host save arrives", async () => {
+  const { hook, drafts, typeAndDeliver } = await mountHostAcknowledgedDocument();
+  await typeAndDeliver(1);
+  await typeAndDeliver(2);
+  act(() => harness.emitNow("saved-to-host", 1));
+  expect(hook.result.current.saveState.kind).toBe("saving");
+
+  act(() => harness.emitNow("read-only", 0));
+
+  expect(hook.result.current.readOnlyWhileEditing).toBe(true);
+  expect(drafts.result.current).toHaveLength(1);
+  await waitFor(() =>
+    expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!!"]),
+  );
+  await waitFor(() => expect(harness.closed).toHaveLength(1));
+  expect(drafts.result.current).toHaveLength(1);
+});
+
 it("replaces the same deletion's draft when a keystroke lands before read-only commits", async () => {
   await mountBound();
 
