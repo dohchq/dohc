@@ -109,21 +109,22 @@ test("the editor's listboxes keep the option Enter acts on in view as the arrows
     await expect(emoji).toBeHidden();
 
     // The selection toolbar's turn-into list fits under its cap here; it is
-    // captured for its recipe, and its link form for the frame it shares.
+    // captured for its recipe, and the toolbar and its link form for the
+    // frame they share. Escape keeps the selection, so the link form opens
+    // on it.
     await editor.getByText("A paragraph to act on.").click({ clickCount: 3 });
     const toolbar = page.locator(".dohc-bubble-menu");
     await expect(toolbar).toBeVisible();
+    await capture(page, toolbar, "selection-toolbar");
     await toolbar.getByTitle("Turn into").click();
     const turnInto = page.getByRole("listbox", { name: "turn into" });
     await expect(turnInto).toBeFocused();
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("ArrowDown");
+    await expect(turnInto.getByRole("option").nth(2)).toHaveAttribute("aria-selected", "true");
     await capture(page, turnInto, "turn-into");
     await page.keyboard.press("Escape");
     await expect(turnInto).toBeHidden();
-    await editor.getByText("A paragraph to act on.").click({ clickCount: 3 });
-    await expect(toolbar).toBeVisible();
-    await capture(page, toolbar, "selection-toolbar");
     await page.keyboard.press("Control+k");
     const linkForm = page.locator(".dohc-link-menu");
     await expect(linkForm).toBeVisible();
@@ -146,12 +147,13 @@ test("the chat mention list keeps the option Enter acts on in view as the arrows
     await waitForWorkspaceFile(page, workspace.workspaceId, PAGES.at(-1)!);
     await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     await page.getByTestId("chats-channel").click();
-    const composer = page.getByTestId("chats-new-thread-composer");
-    await composer.click();
-    await composer.pressSequentially("@");
-    const menu = page.getByTestId("chats-new-thread-mention-menu");
+    await page.getByTestId("chats-new-thread-composer").fill("Mentions");
+    await page.getByTestId("chats-new-thread-composer").press("Enter");
+    const composer = page.locator("main").getByTestId("chats-composer");
+    await composer.fill("@");
+    const menu = page.locator("main").getByTestId("chats-mention-menu");
     await expect(menu).toBeVisible();
-    await expect(menu.getByTestId("chats-new-thread-file-mention-option")).toHaveCount(6);
+    await expect(menu.getByTestId("chats-file-mention-option")).toHaveCount(6);
     await capture(page, menu, "chat-mentions");
     const options = menu.locator('[role="option"]');
     const last = options.last();
