@@ -117,9 +117,17 @@ export function useDesktopLoad<K extends ReadName>(identity: DependencyList, req
 export function useDesktopLoad<I, R, C = undefined>(identity: DependencyList, request: DataExecutor<I, R, C>, input: DataInput<I> | null, delivery: Delivery<R>, ...context: C extends undefined ? [] : [DataInput<C>]): { readonly pending: boolean };
 export function useDesktopLoad(identity: DependencyList, request: AnyRequest, input: unknown, delivery: Delivery<unknown>, context?: unknown): { readonly pending: boolean } {
   const { current, changed, pending } = useBinding<ReadPublication>([...identity, stableKey(input)], { request, delivery, input, context });
-  const load = useIssueRead(current, changed);
+  const observesPending = useRef(false);
+  // Each render owns its observation; only a commit can change notifications for the live binding.
+  let pendingRead = false;
+  useLayoutEffect(() => {
+    observesPending.current = pendingRead;
+    if (pendingRead && pending !== ((current()?.inFlight ?? 0) > 0)) changed();
+  });
+  const changedIfObserved = useCallback(() => { if (observesPending.current) changed(); }, [changed]);
+  const load = useIssueRead(current, changedIfObserved);
   useEffect(() => { const binding = current(); if (binding && binding.published.input !== null) load(binding.published.input); }, [current, load]);
-  return { pending };
+  return { get pending() { pendingRead = true; return pending; } };
 }
 
 export interface OutcomeScope { readonly live: () => boolean }

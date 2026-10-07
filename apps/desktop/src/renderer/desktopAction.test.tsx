@@ -723,3 +723,195 @@ it("dropped-file paths are read synchronously from the original files", () => {
   expect(read).toHaveBeenCalledExactlyOnceWith([file]);
   expect(read.mock.calls[0]?.[0]?.[0]).toBe(file);
 });
+
+describe("load pending observation", () => {
+  it("an unused pending result causes no hook-only render on issue or settle", async () => {
+    const reply = deferred<string>();
+    const read = vi.fn(() => reply.promise);
+    const success = vi.fn();
+    desktop({ readWorkspaceGraph: read });
+    let renders = 0;
+    function Viewer() {
+      renders++;
+      useDesktopLoad([], "readWorkspaceGraph", { workspaceId: "w", includeChatMentions: false }, { success: success as never, failure: ok });
+      return null;
+    }
+    render(<Viewer />);
+    expect(read).toHaveBeenCalledExactlyOnceWith({ workspaceId: "w", includeChatMentions: false });
+    expect(renders).toBe(1);
+    await act(async () => { reply.resolve("graph"); await reply.promise; });
+    expect(success).toHaveBeenCalledExactlyOnceWith("graph");
+    expect(renders).toBe(1);
+  });
+
+  it("a pending consumer sees false, true, false and a later unobserved load stays quiet", async () => {
+    const reply = deferred<string>();
+    const next = deferred<string>();
+    desktop({ readWorkspaceGraph: vi.fn().mockReturnValueOnce(reply.promise).mockReturnValueOnce(next.promise) });
+    const values: boolean[] = [];
+    let renders = 0;
+    function Viewer(props: { observe: boolean }) {
+      renders++;
+      const load = useDesktopLoad([props.observe], "readWorkspaceGraph", { workspaceId: "w", includeChatMentions: false }, { success: ok, failure: ok });
+      if (props.observe) values.push(load.pending);
+      return <p>{props.observe && load.pending ? "loading" : "idle"}</p>;
+    }
+    const view = render(<Viewer observe />);
+    expect(values).toEqual([false, true]);
+    expect(screen.getByText("loading")).toBeTruthy();
+    await act(async () => { reply.resolve("graph"); await reply.promise; });
+    expect(values).toEqual([false, true, false]);
+    expect(screen.getByText("idle")).toBeTruthy();
+    expect(renders).toBe(3);
+    view.rerender(<Viewer observe={false} />);
+    expect(renders).toBe(4);
+    await act(async () => { next.resolve("next"); await next.promise; });
+    expect(renders).toBe(4);
+    expect(values).toEqual([false, true, false]);
+  });
+
+  it("starting to consume pending mid-flight observes the current value and settlement", async () => {
+    const reply = deferred<string>();
+    const read = vi.fn(() => reply.promise);
+    desktop({ readWorkspaceGraph: read });
+    let renders = 0;
+    const values: boolean[] = [];
+    function Viewer(props: { observe: boolean }) {
+      renders++;
+      const load = useDesktopLoad([], "readWorkspaceGraph", { workspaceId: "w", includeChatMentions: false }, { success: ok, failure: ok });
+      if (props.observe) values.push(load.pending);
+      return null;
+    }
+    const view = render(<Viewer observe={false} />);
+    expect(renders).toBe(1);
+    view.rerender(<Viewer observe />);
+    expect(renders).toBe(2);
+    expect(values).toEqual([true]);
+    await act(async () => { reply.resolve("graph"); await reply.promise; });
+    expect(values).toEqual([true, false]);
+    expect(renders).toBe(3);
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("stopping consumption at commit removes pending settlement renders", async () => {
+    const reply = deferred<string>();
+    desktop({ readWorkspaceGraph: () => reply.promise });
+    let renders = 0;
+    const values: boolean[] = [];
+    function Viewer(props: { observe: boolean }) {
+      renders++;
+      const load = useDesktopLoad([], "readWorkspaceGraph", { workspaceId: "w", includeChatMentions: false }, { success: ok, failure: ok });
+      if (props.observe) values.push(load.pending);
+      return null;
+    }
+    const view = render(<Viewer observe={false} />);
+    expect(renders).toBe(1);
+    view.rerender(<Viewer observe />);
+    expect(values).toEqual([true]);
+    view.rerender(<Viewer observe={false} />);
+    expect(renders).toBe(3);
+    await act(async () => { reply.resolve("graph"); await reply.promise; });
+    expect(renders).toBe(3);
+    expect(values).toEqual([true]);
+  });
+
+  it("retired loads cannot notify a replacement binding or an unmounted consumer", async () => {
+    const replies = [deferred<string>(), deferred<string>(), deferred<string>()];
+    const read = vi.fn().mockReturnValueOnce(replies[0]!.promise).mockReturnValueOnce(replies[1]!.promise).mockReturnValueOnce(replies[2]!.promise);
+    const success = vi.fn();
+    desktop({ readWorkspaceGraph: read });
+    let renders = 0;
+    function Viewer(props: { workspaceId: string; observe: boolean }) {
+      renders++;
+      const load = useDesktopLoad([props.workspaceId], "readWorkspaceGraph", { workspaceId: props.workspaceId, includeChatMentions: false }, { success: success as never, failure: ok });
+      return <p>{props.observe ? String(load.pending) : "unobserved"}</p>;
+    }
+    const view = render(<Viewer workspaceId="A" observe={false} />);
+    expect(renders).toBe(1);
+    view.rerender(<Viewer workspaceId="B" observe />);
+    expect(screen.getByText("true")).toBeTruthy();
+    const beforeOldSettlement = renders;
+    await act(async () => { replies[0]!.resolve("old"); await replies[0]!.promise; });
+    expect(renders).toBe(beforeOldSettlement);
+    expect(success).not.toHaveBeenCalled();
+    await act(async () => { replies[1]!.resolve("current"); await replies[1]!.promise; });
+    expect(success).toHaveBeenCalledExactlyOnceWith("current");
+    expect(screen.getByText("false")).toBeTruthy();
+    view.rerender(<Viewer workspaceId="C" observe />);
+    expect(read).toHaveBeenCalledTimes(3);
+    view.unmount();
+    const beforeUnmountedSettlement = renders;
+    await act(async () => { replies[2]!.resolve("unmounted"); await replies[2]!.promise; });
+    expect(renders).toBe(beforeUnmountedSettlement);
+    expect(success).toHaveBeenCalledOnce();
+  });
+
+  it("a pending read in an abandoned render cannot enable live notifications", async () => {
+    const reply = deferred<string>();
+    const read = vi.fn(() => reply.promise);
+    const success = vi.fn();
+    desktop({ readWorkspaceGraph: read });
+    const never = new Promise<never>(() => {});
+    let renders = 0;
+    const abandonedValues: boolean[] = [];
+    function Viewer(props: { suspend: boolean }) {
+      renders++;
+      const load = useDesktopLoad([], "readWorkspaceGraph", { workspaceId: "w", includeChatMentions: false }, { success: success as never, failure: ok });
+      if (props.suspend) { abandonedValues.push(load.pending); use(never); }
+      return <p>committed</p>;
+    }
+    const view = render(<Suspense fallback={<p>fallback</p>}><Viewer suspend={false} /></Suspense>);
+    expect(renders).toBe(1);
+    await act(async () => { startTransition(() => { view.rerender(<Suspense fallback={<p>fallback</p>}><Viewer suspend /></Suspense>); }); });
+    expect(abandonedValues.length).toBeGreaterThan(0);
+    expect(abandonedValues.every(value => value === true)).toBe(true);
+    expect(screen.getByText("committed")).toBeTruthy();
+    expect(screen.queryByText("fallback")).toBeNull();
+    const beforeSettlement = renders;
+    await act(async () => { reply.resolve("graph"); await reply.promise; });
+    expect(success).toHaveBeenCalledExactlyOnceWith("graph");
+    expect(renders).toBe(beforeSettlement);
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it("an unused pending result stays unobserved through StrictMode replay", async () => {
+    const replies = [deferred<string>(), deferred<string>()];
+    const read = vi.fn().mockReturnValueOnce(replies[0]!.promise).mockReturnValueOnce(replies[1]!.promise);
+    const success = vi.fn();
+    desktop({ readWorkspaceGraph: read });
+    let renders = 0;
+    function Viewer() {
+      renders++;
+      useDesktopLoad([], "readWorkspaceGraph", { workspaceId: "w", includeChatMentions: false }, { success: success as never, failure: ok });
+      return null;
+    }
+    render(<StrictMode><Viewer /></StrictMode>);
+    expect(renders).toBe(2);
+    expect(read).toHaveBeenCalledTimes(2);
+    await act(async () => { replies[0]!.resolve("replayed"); replies[1]!.resolve("live"); await Promise.all(replies.map(reply => reply.promise)); });
+    expect(success).toHaveBeenCalledExactlyOnceWith("live");
+    expect(renders).toBe(2);
+  });
+
+  it("a new observer catches a settlement between its render and layout publication", () => {
+    const reply = immediateResponse<string>();
+    desktop({ readWorkspaceGraph: () => reply.promise });
+    let renders = 0;
+    const values: boolean[] = [];
+    function Settle(props: { settle: boolean }) {
+      useLayoutEffect(() => { if (props.settle) reply.resolve("graph"); }, [props.settle]);
+      return null;
+    }
+    function Viewer(props: { observe: boolean }) {
+      renders++;
+      const load = useDesktopLoad([], "readWorkspaceGraph", { workspaceId: "w", includeChatMentions: false }, { success: ok, failure: ok });
+      if (props.observe) values.push(load.pending);
+      return null;
+    }
+    const view = render(<><Settle settle={false} /><Viewer observe={false} /></>);
+    expect(renders).toBe(1);
+    view.rerender(<><Settle settle /><Viewer observe /></>);
+    expect(values).toEqual([true, false]);
+    expect(renders).toBe(3);
+  });
+});
