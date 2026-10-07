@@ -153,10 +153,12 @@ function parseSelector(
 export async function fetchShareViewInfo(input: {
   relay: SyncRelayConnection;
   shareId: string;
+  signal?: AbortSignal;
 }): Promise<ShareViewInfo> {
   const response = await shareFetch(
     input.relay,
     `/sync/shares/${encodeURIComponent(input.shareId)}`,
+    { signal: input.signal },
   );
   const body = (await response.json()) as Record<string, unknown>;
   if (typeof body.genericChatWritable !== "boolean") {
@@ -172,6 +174,31 @@ export async function fetchShareViewInfo(input: {
     selector: parseSelector(body.selector, body.access, input.shareId),
     createdAtMs: Number(body.createdAtMs ?? 0),
   };
+}
+
+export async function fetchShareViewAccess(input: {
+  relay: SyncRelayConnection;
+  shareId: string;
+  signal?: AbortSignal;
+}): Promise<ShareAccess> {
+  const response = await (input.relay.fetch ?? relayApiFetch())(
+    shareUrl(input.relay, `/sync/shares/${encodeURIComponent(input.shareId)}/access`),
+    { headers: { authorization: `Bearer ${input.relay.token}` }, signal: input.signal },
+  );
+  if (response.status === 401) throw new RelayUnauthorizedError();
+  if (response.status === 404) {
+    const body: unknown = await response.json();
+    if (body && typeof body === "object" && "code" in body && body.code === "share_access_removed") {
+      throw new ShareUnavailableError();
+    }
+  }
+  if (!response.ok) throw new Error(`Share access request failed (${response.status})`);
+  const body: unknown = await response.json();
+  if (!body || typeof body !== "object" || !("status" in body) || body.status !== "current" ||
+    !("access" in body) || !isShareAccessValue(body.access)) {
+    throw new ShareSelectorInvalidError(input.shareId);
+  }
+  return body.access;
 }
 
 export async function fetchShareAutomationSwitchable(input: {

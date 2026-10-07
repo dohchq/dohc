@@ -124,6 +124,7 @@ import { preloadMarkdownEditor } from "./editor/LazyMarkdownEditor";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import { type ShareViewRefresh, useShareDirectWrites } from "./shell/useShareDirectWrites";
+import { useSharedViewAccess } from "./shell/useSharedViewAccess";
 import { disposeAutomationButtons } from "./collections/useAutomationButtons";
 import { ConnectedCollectionRecoveryRestore } from "./ConnectedCollectionRecoveryRestore";
 import {
@@ -780,6 +781,7 @@ export function DesktopWorkspaceShell(props: {
     hideShellError,
     reportShellError,
     reportShellFailure,
+    reportShareCapture,
     clearKind,
     reportLaneFailure,
     reportSearchError,
@@ -1428,12 +1430,15 @@ export function DesktopWorkspaceShell(props: {
   // main's registry summary. This gates the versions surface and collections,
   // and restore, from the same fact.
   const shareView = props.workspace.shareView ?? null;
-  const shareViewDamaged = !!shareView?.damaged;
+  const [needsReopenFor, setNeedsReopenFor] = useState<NonNullable<Workspace["shareView"]> | null>(null);
+  const shareViewDamaged = !!shareView?.damaged || (!!shareView && needsReopenFor === shareView);
   // A registry update replaces this snapshot, including when access returns.
   const [endedFor, setEndedFor] = useState<NonNullable<Workspace["shareView"]> | null>(null);
   const shareViewEnded = !!shareView && (shareView.ended || endedFor === shareView);
+  const [accessFor, setAccessFor] = useState<{ view: NonNullable<Workspace["shareView"]>; access: "view" | "comment" | "edit" } | null>(null);
+  const shareAccess = accessFor?.view === shareView ? accessFor.access : shareView?.access;
   const shareViewWritable =
-    !shareViewDamaged && !shareViewEnded && shareView?.access === "edit";
+    !shareViewDamaged && !shareViewEnded && shareAccess === "edit";
   const shareViewWritableRef = useRef(shareViewWritable);
   shareViewWritableRef.current = shareViewWritable;
   // History reads are separate. A shared view reads the history its share
@@ -1495,6 +1500,21 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
+  const checkShareAccess = useSharedViewAccess({
+    workspaceId,
+    enabled: workspaceIsReady && !!shareView && !shareViewDamaged && !shareViewEnded,
+    admission: workspaceAdmission,
+    relayFailed: captureDecidedFor !== workspaceId || syncStatus === null ? undefined : !!syncStatus.syncFailure,
+    onVerified: result => {
+      if (!shareView) return;
+      if (result.status === "needs-reopen") setNeedsReopenFor(shareView);
+      else if (result.status === "ended") setEndedFor(shareView);
+      else if (result.access && result.access !== shareAccess) setAccessFor({ view: shareView, access: result.access });
+    },
+  });
+  useEffect(() => {
+    if (shareView) reportShareCapture(shareView.shareId ?? "damaged", shareView.unsavedPaths);
+  }, [shareView?.shareId, shareView?.unsavedPaths, reportShareCapture]);
   const liveSessionsGenerationRef = useRef<{
     workspaceId: string;
     generation: number | null;
@@ -3786,7 +3806,9 @@ export function DesktopWorkspaceShell(props: {
     : shareViewEnded
       ? `This share was ended${shareView.granterEmail ? ` by ${shareView.granterEmail}` : ""}. Your copy stays readable but won't update anymore.`
       : shareViewDamaged
-        ? "dohc can't read what this share grants. Open the share again to restore it."
+        ? !shareView.recipientUserId || needsReopenFor === shareView
+          ? "This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files."
+          : "dohc can't read what this share grants. Open the share again to restore it."
         : shareViewWritable
           ? `Shared view from ${shareGranterName}. Markdown edits save to the live host. Other file changes need their acceptance.`
           : shareViewHasIndependentChat
@@ -3869,6 +3891,7 @@ export function DesktopWorkspaceShell(props: {
     try {
       const outcome = await bridge().refreshSharedView({ workspaceId });
       if (!isCurrent()) return "stale";
+      if (!outcome.ok || outcome.refusedOps > 0) void checkShareAccess();
       if (!outcome.ok) {
         if (outcome.changedPaths > 0) await bestEffortRepaint();
         if (!isCurrent()) return "stale";
@@ -3897,6 +3920,7 @@ export function DesktopWorkspaceShell(props: {
       return outcome.status === "ended" ? "ended" : "current";
     } catch (error) {
       if (!isCurrent()) return "stale";
+      void checkShareAccess();
       // A store only a newer dohc opens stops the whole workspace, and the
       // stop state already says so. A toast would repeat it.
       const status = await bridge()
@@ -4027,6 +4051,7 @@ export function DesktopWorkspaceShell(props: {
       );
       owned = await reloadMyShareChanges();
     } catch (error) {
+      if (!workspaceAdmission.superseded) void checkShareAccess();
       reportShellError("Couldn't send your changes.", error);
     } finally {
       if (owned === myShareChangeToken.current) setShareChangesSubmitting(false);
@@ -4039,6 +4064,12 @@ export function DesktopWorkspaceShell(props: {
     ready: workspaceIsReady,
     ownerName: shareGranterName,
     refreshShareView,
+    checkShareAccess: async () => {
+      if (shareViewEnded) return "ended";
+      if (shareAccess && shareAccess !== "edit") return "changed";
+      const result = await checkShareAccess();
+      return result.status === "unverified" || result.status === "needs-reopen" ? "stale" : result.status === "current" && result.access !== "edit" ? "changed" : result.status;
+    },
     sendShareChanges,
     showNotice: showDirectWriteNotice,
   });
@@ -4645,6 +4676,7 @@ export function DesktopWorkspaceShell(props: {
           <Eye size={12} aria-hidden className="shrink-0" />
           {shareView.subjectName && <span className="max-w-64 truncate font-medium">{shareView.subjectName}</span>}
           {shareView.granterEmail && <span className="shrink-0 font-mono text-[11px]">{shareView.granterEmail}</span>}
+          {" "}
           <span className="min-w-0 flex-1 truncate" title={shareBannerText}>
             {shareBannerText}
           </span>

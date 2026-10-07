@@ -246,6 +246,11 @@ export interface ShareViewIdentity {
   // rather than misreading a 404 as "the share ended".
   // Optional for views registered before this field existed.
   relayUrl?: string;
+  // The account that opened this copy. A missing pin cannot verify revocation.
+  recipientUserId?: string;
+  // Paths capture could not save before a restriction. Null protects the whole
+  // copy when capture failed before it could enumerate paths. Reopen to resume.
+  unsavedPaths?: string[] | null;
 }
 
 // A shared CHANNEL this workspace joined through a chat grant

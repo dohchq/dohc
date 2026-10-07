@@ -10,7 +10,7 @@ export type DirectWriteNoticeKind =
 
 // How a shared-view refresh left the view: refreshed (or not a shared view),
 // found the share ended, or failed, was damaged, or was overtaken.
-export type ShareViewRefresh = "current" | "ended" | "stale";
+export type ShareViewRefresh = "current" | "ended" | "changed" | "stale";
 
 export interface DirectWriteNotice {
   kind: DirectWriteNoticeKind;
@@ -35,6 +35,7 @@ export function useShareDirectWrites(input: {
   ready: boolean;
   ownerName: string;
   refreshShareView(): Promise<ShareViewRefresh>;
+  checkShareAccess(): Promise<ShareViewRefresh>;
   sendShareChanges(): Promise<void>;
   showNotice(notice: DirectWriteNotice): void;
 }): void {
@@ -67,25 +68,36 @@ export function useShareDirectWrites(input: {
       if (!isCurrent()) return;
       if (result.status === "unavailable" && !latest.current.ready) return;
       const { ownerName, showNotice, refreshShareView, sendShareChanges } = latest.current;
+      const reportAccess = (access: ShareViewRefresh): boolean => {
+        if (!isCurrent() || (access !== "ended" && access !== "changed")) return false;
+        latest.current.showNotice({
+          kind: "direct-write-unavailable",
+          message: access === "ended"
+            ? `Your access to this share ended. Your unsent Collection changes stay in this workspace. Ask ${ownerName} to share it again.`
+            : `Your access to this share changed. Your unsent Collection changes stay in this workspace. Ask ${ownerName} for Edit access, then reopen the share.`,
+          retry: null,
+          send: null,
+        });
+        return true;
+      };
+      const needsCheck = result.status === "unavailable" || result.status === "failed" ||
+        result.writes.some(write => write.result === "refused");
+      if (needsCheck && result.status !== "unavailable" && latest.current.enabled) {
+        void latest.current.checkShareAccess().catch((): ShareViewRefresh => "stale").then(reportAccess);
+      }
       const sendAsProposal = { label: "Send as proposal", run: () => { if (isCurrent()) void sendShareChanges(); } };
-      if (result.status === "unavailable") {
+      if (needsCheck && (result.status === "unavailable" || !latest.current.enabled)) {
         // Any 404 on the way to the relay reads as unavailable, so only the
-        // view's own refresh can say the share ended. It then shows it ended.
-        void refreshShareView().catch((): ShareViewRefresh => "stale").then((refresh) => {
+        // access check can say the share ended. It then shows it ended.
+        void latest.current.checkShareAccess().catch((): ShareViewRefresh => "stale").then((refresh) => {
           if (!isCurrent()) return;
-          latest.current.showNotice(refresh === "ended"
-            ? {
-                kind: "direct-write-unavailable",
-                message: `Your access to this share ended, so your Collection changes didn't reach ${ownerName}. Ask ${ownerName} to share it again.`,
-                retry: null,
-                send: null,
-              }
-            : {
-                kind: "direct-write-failed",
-                message: `dohc could not send your Collection changes to ${ownerName}.`,
-                retry: () => void push(),
-                send: null,
-              });
+          if (reportAccess(refresh)) return;
+          latest.current.showNotice({
+            kind: "direct-write-failed",
+            message: `dohc could not send your Collection changes to ${ownerName}.`,
+            retry: latest.current.enabled ? () => void push() : null,
+            send: null,
+          });
         });
         return;
       }
