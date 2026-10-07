@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import * as contract from "./bridgeContract";
 import { CHANNELS, MENU_COMMANDS, WORKBENCH_MENU_COMMANDS } from "./channels";
 import launchOpenIpc from "./ipcExposure.pr1701.json";
-import restartCaptureIpc from "./ipcExposure.restartCapture.json";
+import restartCaptureIpc from "./ipcExposure.pr1719.json";
 
 describe("editor-group menu command channels", () => {
   it("routes split through the application menu and both group actions through tab menus", () => {

@@ -1,11 +1,13 @@
 {
+  "sourceCommit": "4e4e03180ae75239473329f080dd2497520cf350",
   "reason": "Expose owner-local capture recovery status and persisted dismissal for PR 2.",
   "guard": "trusted-sender",
   "scope": "workspace",
   "handlerCheck": "withRendererWorkspaceOperation",
+  "capabilityIdAdditions": ["capture.recovery.read", "capture.recovery.clear"],
   "nameAdditions": [
     "desktop:get-capture-recovery-status",
     "desktop:clear-capture-recovery"
   ],
-  "channelKeyAdditions": ["getCaptureRecoveryStatus", "clearCaptureRecovery"]
+  "channelKeyAdditions": []
 }

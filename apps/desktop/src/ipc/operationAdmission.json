@@ -1,4 +1,6 @@
 {
+  "desktop:get-capture-recovery-status": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
+  "desktop:clear-capture-recovery": { "guard": "trusted-sender", "scope": "workspace", "handlerCheck": { "check": "withRendererWorkspaceOperation" } },
   "desktop:list-workspace-versions": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:create-workspace-version": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },
   "desktop:switch-workspace-version": { "guard": "active-workspace", "scope": "workspace", "handlerCheck": null },

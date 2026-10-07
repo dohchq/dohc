@@ -312,8 +312,6 @@ export const CHANNELS = {
   presencePoll: "desktop:presence-poll",
   presenceCancel: "desktop:presence-cancel",
   getSyncStatus: "desktop:get-sync-status",
-  getCaptureRecoveryStatus: "desktop:get-capture-recovery-status",
-  clearCaptureRecovery: "desktop:clear-capture-recovery",
   retryOwnerLiveDelivery: "desktop:retry-owner-live-delivery",
   retryFileRecovery: "desktop:retry-file-recovery",
   retryCloudSync: "desktop:retry-cloud-sync",

@@ -14,7 +14,7 @@ import { OPERATION_TABLES } from "./operationTables";
 import mainIpc from "./ipcExposure.main.json";
 import clipboardIpc from "./ipcExposure.pr1639.json";
 import launchOpenIpc from "./ipcExposure.pr1701.json";
-import restartCaptureIpc from "./ipcExposure.restartCapture.json";
+import restartCaptureIpc from "./ipcExposure.pr1719.json";
 import mainCli from "./cliExposure.main.json";
 import publicationCli from "./cliExposure.pr1659.json";
 import commentsCli from "./cliExposure.pr1700.json";

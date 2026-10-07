@@ -1413,6 +1413,26 @@ export type CaptureRecoveryStatusResult = z.infer<typeof CaptureRecoveryStatusRe
 export const ClearCaptureRecoveryPayload = WorkspaceIdPayload.extend({ momentId: z.string() });
 export type ClearCaptureRecoveryPayload = z.infer<typeof ClearCaptureRecoveryPayload>;
 
+export const captureRecoveryOperations = {
+  getCaptureRecoveryStatus: {
+    capabilityId: "capture.recovery.read",
+    channel: "desktop:get-capture-recovery-status",
+    payload: WorkspaceIdPayload,
+    result: CaptureRecoveryStatusResult,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The handler reads only the sending window's active workspace." },
+  },
+  clearCaptureRecovery: {
+    capabilityId: "capture.recovery.clear",
+    channel: "desktop:clear-capture-recovery",
+    payload: ClearCaptureRecoveryPayload,
+    guard: "trusted-sender",
+    scope: "workspace",
+    handlerCheck: { check: "withRendererWorkspaceOperation", reason: "The handler clears recovery only in the sending window's active workspace." },
+  },
+} satisfies OperationTable;
+
 export const ENGINE_STORE_BACKUP_DIR = ".dohc/engine/pre-v2-backup";
 
 export function engineStoreRefusalSentence(cause: EngineStoreRefusal): string {
@@ -6274,6 +6294,7 @@ export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
 
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
+    OperationBridge<typeof captureRecoveryOperations>,
     OperationBridge<typeof workspaceSearchOperations>,
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof noticeOperations>,
@@ -6652,8 +6673,6 @@ export interface DohcDesktopBridge
   presencePoll(payload: PresencePollPayload): Promise<PresenceResult>;
   presenceCancel(payload: PresenceCancelPayload): Promise<void>;
   getSyncStatus(payload: WorkspaceIdPayload): Promise<SyncStatusResult>;
-  getCaptureRecoveryStatus(payload: WorkspaceIdPayload): Promise<CaptureRecoveryStatusResult>;
-  clearCaptureRecovery(payload: ClearCaptureRecoveryPayload): Promise<void>;
   retryOwnerLiveDelivery(payload: WorkspaceIdPayload): Promise<void>;
   retryFileRecovery(payload: WorkspaceIdPayload): Promise<void>;
   // Runs a cloud sync pass now and answers with the status after it.
