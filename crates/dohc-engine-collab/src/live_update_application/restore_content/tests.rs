@@ -1069,6 +1069,116 @@ impl Fixture {
 }
 
 #[test]
+fn desktop_automation_draft_without_server_declaration_can_stop_and_restore() {
+    use crate::owner_outbox::draft::{ObservedOwnerBinding, OwnerDraftAppendInput};
+    let mut f = Fixture::new("# Before automation\n");
+    let checkpoint = f.doc.encode_full_state();
+    let observed = ObservedOwnerBinding {
+        binding: f.binding.clone(),
+        relay_database_namespace: "namespace".into(),
+        revision: 1,
+        accepted_cursor: 0,
+        native_head_sequence: 0,
+        checkpoint_digest: hex_sha256(&checkpoint),
+        limits: crate::owner_outbox::OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 1_000_000,
+        },
+    };
+    f.store
+        .write_with(&NoFaults, |tx| {
+            crate::owner_outbox::draft::install_observed_binding_in_tx(
+                tx,
+                "workspace",
+                &observed,
+                &checkpoint,
+            )
+        })
+        .unwrap();
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(
+            ContentKind::Richdoc,
+            "# Automation wrote this\n",
+        )
+        .unwrap();
+    let append = crate::owner_outbox::draft::append_draft_cached(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        "workspace",
+        OwnerDraftAppendInput {
+            binding: f.binding.clone(),
+            expected_revision: 1,
+            append_key: "desktop-automation".into(),
+            update: update.clone(),
+            now_ms: 10,
+            agent_declaration: None,
+            automation_declaration: None,
+        },
+        &NoFaults,
+    )
+    .unwrap();
+    let receipt = LiveUpdateReceipt {
+        delivery_id: append.delivery_id,
+        update_digest: append.update_digest,
+        journal_cursor: 1,
+        accepting_host_epoch: 1,
+    };
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: receipt.clone(),
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Owner {
+                    principal_id: "owner".into(),
+                },
+                received_at_ms: 11,
+            },
+            first_seen: vec![],
+            canonical_version: Some(2),
+            author_snapshot: Some(vec![
+                crate::live_update_application::LiveAuthorEntry::Human {
+                    human_id: "owner".into(),
+                    human_name: "Owner".into(),
+                },
+            ]),
+            first_seen_deletes: Some(vec![]),
+            checkpoint_coverage: None,
+        },
+        update_bytes: update,
+    };
+    let applied = apply_committed(
+        &mut f.store,
+        &mut WriterDocCache::new(),
+        &f.handle,
+        event,
+        &NoFaults,
+        100_000_000,
+        |_, _, _, _| Ok(()),
+    )
+    .unwrap();
+    let ApplicationResult::Applied(ack, _) = applied else {
+        panic!("desktop automation refused")
+    };
+    f.sequence = ack.local_ydoc_sequence;
+    f.terminal = Some(receipt);
+    let input = f.freeze(f.baseline_point.clone());
+    let proposal = f.prepare(input).unwrap();
+    assert_eq!(proposal.receipt().native_sources.len(), 1);
+    assert!(proposal.receipt().native_sources[0]
+        .accepted_receipt
+        .is_some());
+    let restored = Ydoc::wire();
+    restored.apply(proposal.frozen_state_bytes()).unwrap();
+    restored.apply(proposal.candidate_bytes()).unwrap();
+    let projection = restored.project(ContentKind::Richdoc).unwrap().content;
+    assert_eq!(
+        restored.preserved_markdown_source(&projection).unwrap(),
+        "# Before automation\n"
+    );
+}
+
+#[test]
 fn prepares_one_forward_restore_of_an_exact_source_point_and_replays_after_restart() {
     let mut f = Fixture::new("# Baseline\n");
     let chosen = "---\ntitle: 'été 😀'\n---\n\n# Chosen 🐱\n\n**Keep** this.\n";

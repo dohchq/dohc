@@ -73,6 +73,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
     ["pr", null, null, "services/workspace-api/src/index.ts"],
     ["pr", null, null, "apps/site/src/index.ts"],
     ["pr", null, null, "apps/desktop/src/renderer/Widget.tsx"],
+    ["pr", "js", "onboarding-missing", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", "js", "desktop-skipped", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", "js", "smoke-missing", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", null, null, "apps/desktop/src/renderer/Widget.tsx", true],
@@ -93,7 +94,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
       : siteOnly ? siteFiles : changed === "services/workspace-api/src/index.ts" ? serviceFiles : undefined;
     const desktopScripts = js && selected.includes("@dohc/desktop") && !selectedDesktopFiles;
     const desktop = mode !== "pr" || desktopScripts || js && (changed === "services/workspace-api/src/index.ts" || rendererOnly);
-    const desktopProof = desktop && !rendererOnly;
+    const desktopProof = desktop;
     const smoke = js && rendererOnly;
     const nativeProof = js && selected.includes("@dohc/share-web");
     const accounts = js && selected.includes("@dohc/workspace-api");
@@ -116,6 +117,10 @@ test("verification selects packages and proofs and prepares before parallel jobs
     { cwd: root, encoding: "utf8" }).trim();
     try {
       createPrepareFixture(root, new URL("./build.mjs", import.meta.url), { commit: false });
+      if (siteOnly) {
+        put("node_modules/installed.txt", readFileSync(join(root, "pnpm-lock.yaml")));
+        put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>true;export const verificationAdmission=()=>({lightweight:true,reason:'fixture warm light lane'});");
+      }
       git(["config", "core.logAllRefUpdates", "true"]);
       mkdirSync(join(root, ".dohc-dev"), { recursive: true });
       for (const path of ["scripts/verification/verify.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs", "scripts/verification/timing.mjs", "tools/rust-engine-program/tree-provenance.mjs",
@@ -124,6 +129,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
         put(path, readFileSync(join(repoRoot, path)));
       }
       put("scripts/verification/js-tests-real.mjs", readFileSync(join(root, "scripts/verification/js-tests.mjs")));
+      put("scripts/verification/rust-reuse.mjs", "export const rustIdentity=()=>({incremental:process.env.CARGO_INCREMENTAL});export const finishRustEvidence=(_report,initial,final)=>{if(JSON.stringify(initial)!==JSON.stringify(final))throw Error('Rust identity changed');return {kind:'fixture'};};export const refreshRustReuse=()=>{throw Error('unexpected reuse');};");
       put("scripts/verification/js-tests.mjs", `
         import assert from 'node:assert/strict';
         import {testWorkspace as realTests} from './js-tests-real.mjs';
@@ -143,6 +149,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
       for (const file of [...siteFiles, ...serviceFiles]) put(`apps/desktop/${file}`, "// fixture compatibility test\n");
       put("apps/desktop/src/renderer/Widget.tsx", "export const value = 1;\n");
       put("apps/desktop/src/renderer/Widget.test.tsx", 'import "./Widget.js";\n');
+      put("apps/desktop/e2e/self-host-onboarding.spec.ts", 'page.getByTestId("onboarding-control");\n');
       for (const name of ["fixture", "mcp", "share-web", "site", "unrelated", "workspace-api"]) {
         const path = `${name === "workspace-api" ? "services" : name === "site" ? "apps" : "packages"}/${name}`;
         put(`${path}/package.json`, JSON.stringify({name:`@dohc/${name}`,scripts:{test:"vitest run"}}));
@@ -191,6 +198,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
           if(command==='cargo' && !${rust || prepare})throw Error('Native tools unavailable for this JavaScript change');
           if(command==='pnpm' && args[1]==='@dohc/desktop' && args.includes('build') && !${desktop})throw Error('Electron unavailable for this change');
           if(command==='pnpm' && args[1]==='@dohc/app-backend-runtime') {
+            assert.equal(${siteOnly}, false, 'Light verification built an unused backend');
             assert.deepEqual(args,['--filter','@dohc/app-backend-runtime','build']);
             runtimeBuilt = true;
             return {stdout:'compiled runtime'};
@@ -250,6 +258,11 @@ test("verification selects packages and proofs and prepares before parallel jobs
             if(args[1]!=='typecheck')repositoryFinished = true;
             return {stdout:''};
           }
+          if(command==='pnpm' && args[0]==='-r' && args.at(-1)==='typecheck') {
+            assert.ok(${siteOnly}, 'Unselected bounded typecheck');
+            assert.deepEqual(args,['-r','--workspace-concurrency=1','--if-present','typecheck']);
+            return {stdout:''};
+          }
           if(command==='pnpm' && args.includes('list')) {
             return {stdout:JSON.stringify([
               {name:'@dohc/desktop',path:join(repoRoot,'apps/desktop')},
@@ -270,7 +283,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
             return {stdout:''};
           }
           if(command==='pnpm' && args[2]==='run' && ['test','test:unit'].includes(args[3])) {
-            assert.deepEqual(args,['--filter',args[1],'run',args[1]==='@dohc/desktop'?'test:unit':'test',args[1]==='@dohc/desktop'?args[4]:'--maxWorkers=4',
+            assert.deepEqual(args,['--filter',args[1],'run',args[1]==='@dohc/desktop'?'test:unit':'test',${siteOnly}?'--maxWorkers=1':args[1]==='@dohc/desktop'?args[4]:'--maxWorkers=4',
               ...(args[1]==='@dohc/desktop' ? ${JSON.stringify(selectedDesktopFiles ?? [])} : [])]);
             assert.ok(${JSON.stringify(selected)}.includes(args[1]),'Unselected package executed: '+args[1]);
             assert.equal(options.env.POSTGRES_URL,${JSON.stringify(database ? "postgres://dohc:dohc@127.0.0.1:1234/dohc" : "")});
@@ -414,9 +427,9 @@ test("verification selects packages and proofs and prepares before parallel jobs
       } else {
         assert.equal(result.status, 0, result.stderr);
         assert.deepEqual(report.steps.map(({name})=>name).sort(), [
-          ...(mode === "pr" ? ["install"] : []),
+          ...(mode === "pr" && !siteOnly ? ["install"] : []),
           ...(desktop ? ["electron-install"] : []),
-          "app-backend-runtime",
+          ...(!siteOnly ? ["app-backend-runtime"] : []),
           ...(rust ? ["cargo-deny-version", "cargo-audit-version", "cargo-nextest-version", "rust", "rust-verdict"] : []),
           ...(js ? ["typecheck", "tests"] : []),
           ...(nativeProof ? ["self-host-native"] : []), ...(browser ? ["browser-install"] : []),
@@ -449,6 +462,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
           assert.equal(tests.proofs, proofsSelected);
           assert.equal(tests.steps.filter(step => step.name === "proofs").length, proofsSelected ? 1 : 0);
           assert.equal(tests.desktopScripts, desktopScripts);
+          assert.equal(tests.bounded, siteOnly);
           assert.deepEqual(tests.selectedPackages,selected);
           assert.deepEqual(tests.packages.map(pkg=>pkg.name).sort(),selected);
           const calls=readFileSync(join(root,".dohc-dev/all-calls.jsonl"),"utf8").trim().split("\n").map(JSON.parse);

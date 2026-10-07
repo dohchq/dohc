@@ -1,4 +1,5 @@
 import {createHash} from "node:crypto";
+import {parseAutomationDeclaration} from "@dohc/live-session-contract/live-authorship";
 import {isDeepStrictEqual} from "node:util";
 import {parseLiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import {parseCanonicalAdmittedLiveUpdateMetadata, parseAgentDeclaration, parseLiveUpdateDigest, parseLiveUpdateIdentifier,
@@ -27,13 +28,15 @@ function array<T>(value: unknown, maximum: number, parse: (value: unknown) => T)
  */
 function ownerDraftSource(row: Record<string, unknown>, binding: ReturnType<typeof parseLiveObjectBinding>) {
   const source = configRecord(row.source, ["binding", "updateDigest", "origin"]);
-  const origin = configRecord(source.origin, ["kind"], ["agentDeclaration"]);
+  const origin = configRecord(source.origin, ["kind"], ["agentDeclaration", "automationDeclaration"]);
   require(origin.kind === "ownerDraft");
   const sourceBinding = parseLiveObjectBinding(source.binding), updateDigest = parseLiveUpdateDigest(row.updateDigest);
   require(isDeepStrictEqual(binding, sourceBinding) && isDeepStrictEqual(source.binding, sourceBinding) && source.updateDigest === updateDigest);
   const agentDeclaration = Object.hasOwn(origin, "agentDeclaration") ? parseAgentDeclaration(origin.agentDeclaration) : undefined;
+  const automationDeclaration = Object.hasOwn(origin, "automationDeclaration") ? parseAutomationDeclaration(origin.automationDeclaration) : undefined;
+  require(!agentDeclaration || !automationDeclaration);
   return {appendKey: parseLiveUpdateIdentifier(row.appendKey), updateDigest,
-    source: {binding: sourceBinding, updateDigest, origin: {kind: "ownerDraft" as const, ...(agentDeclaration ? {agentDeclaration} : {})}}};
+    source: {binding: sourceBinding, updateDigest, origin: {kind: "ownerDraft" as const, ...(agentDeclaration ? {agentDeclaration} : {}), ...(automationDeclaration ? {automationDeclaration} : {})}}};
 }
 
 function nativeSource(value: unknown) {

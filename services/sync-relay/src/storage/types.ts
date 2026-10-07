@@ -568,6 +568,9 @@ export type LiveJournalValidation =
       readonly source: "call" | "admitted-cut" | "candidate" | "final" };
 export interface LiveUpdateJournalCommitInput {
   readonly trustedAccount?: {readonly accountId: string; readonly name: string};
+  readonly trustedAutomation?: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
+  readonly trustedAutomationPress?: {readonly hostPressId: string; readonly automationId: string};
+  readonly trustedAutomationGrant?: {readonly grantId: string; readonly grantGeneration: number};
   readonly host: LiveHostConnectionCoordinate;
   readonly actor: CurrentLiveBindingRequest["actor"];
   readonly expectedAuthority: ServerDerivedLiveUpdateAuthority;
@@ -674,6 +677,11 @@ export interface SyncRelayStorage {
 
   close(): void;
   resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest, activation?: ServiceActivationAccess): CurrentLiveBindingResult;
+  automationRecordWriteAllowed(input: {workspaceId: string; ownerUserId: string; currentPath: string;
+    declaration: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration;
+    authority: {readonly hostPressId: string; readonly automationId: string} | {readonly grantId: string; readonly grantGeneration: number}}): boolean;
+  automationRecordBinding(workspaceId: string, ownerUserId: string, path: string): {binding: LiveObjectBinding; shareId: string} | null;
+  automationRecordJournalCursor(binding: LiveObjectBinding): number;
   /** Groups synchronous authority checks in one current read snapshot. */
   readLiveAuthority<T>(run: () => T): T;
   resolveLiveObjectHostBinding(scope: LiveBrowserContext, objectId: string): import("./liveDocumentAuthority").LiveObjectHostBindingResult;

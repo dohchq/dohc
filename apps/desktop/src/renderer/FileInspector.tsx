@@ -3,7 +3,6 @@ import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 import { filenameStem, MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
 import { DrawingView } from "./DrawingView";
 import {
-  AffordanceCard,
   DocumentControls,
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
@@ -12,6 +11,7 @@ import {
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
   OPENING_TITLE,
+  OpenExternallyButton,
 } from "./fileInspectorUi";
 import { TextEditorView } from "./TextEditorView";
 import type { PendingFileUndo } from "./fileEditorUndo";
@@ -37,7 +37,8 @@ import { bridge } from "./bridge";
 import { useEngineDoc } from "./collab/useEngineDoc";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
-import { SecondaryButton } from "./ui/controls";
+import { Layers, TriangleAlert } from "lucide-react";
+import { EmptyState, SecondaryButton } from "./ui/controls";
 import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import type { ExcalidrawPresenceFactory } from "./collab/excalidrawPresence";
 import {
@@ -239,14 +240,6 @@ function useTextContent(
     refreshAfterConflict,
     markReadInitialized,
   };
-}
-
-function Empty({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex flex-1 items-center justify-center text-sm text-subtle">
-      {children}
-    </div>
-  );
 }
 
 function TruncatedNotice(props: { workspaceId: string; path: string }) {
@@ -637,18 +630,21 @@ export const FileInspector = memo(function FileInspector(
             module store — recovery stays visible right here, not behind a
             version switch. */}
         {recoveryNotices}
-        <div
+        <EmptyState
           data-testid="file-not-in-version"
-          className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-subtle"
-        >
-          <span>This version doesn&apos;t have this file.</span>
-          {pendingDraft ? (
-            <span data-testid="file-not-in-version-discarded">
-              dohc discarded your unsaved edit.
-            </span>
-          ) : null}
-          <span>Switch to the version that has it.</span>
-        </div>
+          icon={Layers}
+          title={
+            <>
+              This version doesn&apos;t have this file.{" "}
+              {pendingDraft ? (
+                <span data-testid="file-not-in-version-discarded">
+                  dohc discarded your unsaved edit.{" "}
+                </span>
+              ) : null}
+              Switch to the version that has it.
+            </>
+          }
+        />
       </div>
     );
   }
@@ -662,15 +658,9 @@ export const FileInspector = memo(function FileInspector(
           actions={closedDocumentControls(false)}
         />
         {recoveryNotices}
-        <div
-          data-testid="file-unavailable"
-          className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center text-sm text-muted"
-        >
-          <span>This file is no longer available at this path.</span>
-          <SecondaryButton className="mt-1" onClick={retryEngineOpen}>
-            Try again
-          </SecondaryButton>
-        </div>
+        <EmptyState data-testid="file-unavailable" title="This file is no longer available at this path.">
+          <SecondaryButton onClick={retryEngineOpen}>Try again</SecondaryButton>
+        </EmptyState>
       </div>
     );
   }
@@ -709,7 +699,7 @@ export const FileInspector = memo(function FileInspector(
             branch withholds. */}
         {recoveryNotices}
         {error ? (
-          <Empty>Couldn't read this file.</Empty>
+          <EmptyState icon={TriangleAlert} tone="danger" title="Couldn't read this file." />
         ) : kind === "markdown" ? (
           // Where the title and the first lines land when the document opens:
           // in a pane that keeps its scrollbar's room, as the document's does.
@@ -901,12 +891,9 @@ export const FileInspector = memo(function FileInspector(
             onShare={onShareCurrentPath}
           />
           {recoveryNotices}
-          <AffordanceCard
-            testId="view-pdf"
-            title="PDF document"
-            body="Open this PDF in your system viewer."
-            openExternally={{ workspaceId: props.workspaceId, path: props.path }}
-          />
+          <EmptyState data-testid="view-pdf" title="dohc can't preview PDF files.">
+            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />
+          </EmptyState>
         </div>
       );
     case "database":
@@ -947,12 +934,9 @@ export const FileInspector = memo(function FileInspector(
             onShare={onShareCurrentPath}
           />
           {recoveryNotices}
-          <AffordanceCard
-            testId="view-binary"
-            title="File"
-            body="This file type doesn't have a preview yet."
-            openExternally={{ workspaceId: props.workspaceId, path: props.path }}
-          />
+          <EmptyState data-testid="view-binary" title="dohc can't preview this type of file.">
+            <OpenExternallyButton workspaceId={props.workspaceId} path={props.path} />
+          </EmptyState>
         </div>
       );
   }

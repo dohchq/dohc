@@ -30,19 +30,20 @@ test("desktop proof gets an isolated display only on headless Linux", () => {
   assert.deepEqual(desktopProofCommand(args, {platform: "linux", env: {WAYLAND_DISPLAY: "wayland-0"}}), direct);
 });
 
-test("focused smoke runs on every platform and gallery retains Windows baselines", () => {
-  assert.deepEqual(desktopProofTags({statesPage: true}, {platform: "win32"}), {selected: ["@states-page"], required: ["@states-baselines"]});
-  assert.deepEqual(desktopProofTags({statesPage: true}, {platform: "linux"}), {selected: [], required: []});
-  assert.deepEqual(desktopProofTags({smoke: true, statesPage: true}, {platform: "win32"}), {
+test("renderer proofs require persistence smoke and the Windows pixel baseline without onboarding", () => {
+  const proofs = {smoke: true, statesPage: true};
+  assert.deepEqual(desktopProofTags(proofs, {platform: "win32"}), {
     selected: ["@verification-smoke", "@states-page"], required: ["@verification-smoke", "@states-baselines"],
   });
-  assert.deepEqual(desktopProofTags({smoke: true, statesPage: true}, {platform: "linux"}), {
-    selected: ["@verification-smoke"], required: ["@verification-smoke"],
+  for (const platform of ["linux", "darwin"]) {
+    assert.deepEqual(desktopProofTags(proofs, {platform}), {
+      selected: ["@verification-smoke"], required: ["@verification-smoke"],
+    });
+  }
+  assert.deepEqual(desktopProofTags({desktop: true}, {platform: "win32"}), {
+    selected: ["@verification-smoke", "@self-host-onboarding"], required: ["@verification-smoke", "@self-host-onboarding"],
   });
-  assert.deepEqual(desktopProofTags({desktop: true, statesPage: true}, {platform: "win32"}), {
-    selected: ["@verification-smoke", "@self-host-onboarding", "@states-page"],
-    required: ["@verification-smoke", "@self-host-onboarding", "@states-baselines"],
-  });
+  assert.deepEqual(desktopProofTags({}, {platform: "win32"}), {selected: [], required: []});
 });
 
 test("native proof evidence rejects skips, wrong binaries, and incomplete delivery", () => {
@@ -380,7 +381,6 @@ test("vendored native edits invalidate preparation and rebuild the engine", () =
       assert.equal(result.status, 0, result.stderr);
       return JSON.parse(result.stdout.trim().split(/\r?\n/).at(-1));
     };
-    // This fixture has no POSIX CLI launchers.
     const options = { platform: "win32" };
     assert.equal(run(options).enginePrepared, true);
     const original = JSON.parse(readFileSync(join(root, ".dohc-dev/verification/build.json"), "utf8")).engine.source;
@@ -828,15 +828,15 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   try {
     for (const file of [
       "scripts/verification/verify.mjs", "scripts/verification/timing.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
-      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs",
+      "scripts/verification/cancellation.mjs", "scripts/verification/js-tests.mjs", "scripts/verification/selection.mjs", "scripts/verification/renderer-selection.mjs", "scripts/verification/admission.mjs", "scripts/verification/rust-reuse.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
-      "tools/rust-engine-program/git-read.mjs",
+      "tools/rust-engine-program/git-read.mjs", "tools/rust-engine-program/require-ci-pass-verdict.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", ".github/workflows/pr-checks.yml",
     ]) {
       mkdirSync(dirname(join(root, file)), { recursive: true });
       copyFileSync(join(repoRoot, file), join(root, file));
     }
-    writeFileSync(join(root, ".gitignore"), ".agent-artifacts/\n");
+    writeFileSync(join(root, ".gitignore"), ".agent-artifacts/\n.dohc-dev/\n");
     writeFileSync(join(root, "package.json"), '{"type":"module"}\n');
     writeFileSync(join(root, "apps/desktop/package.json"), '{}\n');
     git(["init"]); git(["config", "core.logAllRefUpdates", "true"]);
@@ -923,7 +923,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     assert.deepEqual(report.gates, { rust: false, js: false });
     assert.deepEqual(report.steps, []);
     assert.ok(report.seconds >= 0 && report.startedAt && report.finishedAt);
-    assert.deepEqual(report.timings.map(phase => phase.name), ["selection", "source-check:finish"]);
+    assert.deepEqual(report.timings.map(phase => phase.name), ["selection", "checkout", "source-check:finish"]);
     assert.equal(report.doctor, undefined);
     assert.equal(report.build, undefined);
     assert.match(report.reason, /No code gate applies/);
@@ -959,7 +959,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
     writeFileSync(document, "Documentation only.\n");
     const forced = invoke(["--job", "rust"]);
     assert.notEqual(forced.status, 0);
-    assert.match(forced.stderr, /Unavailable code tool: rustc/);
+    assert.match(forced.stderr, process.platform === "win32" ? /Unavailable code tool: pwsh\.exe/ : /Unavailable code tool: rustc/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

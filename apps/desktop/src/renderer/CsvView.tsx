@@ -1,4 +1,5 @@
 import { Plus, Table, Trash2 } from "lucide-react";
+import { EmptyState, SecondaryButton } from "./ui/controls";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
 import { extensionOf } from "./path";
@@ -451,38 +452,32 @@ export function CsvView({
           className="dohc-csv-raw-editor min-h-0 flex-1 resize-none bg-bg p-4 font-mono text-[13px] leading-relaxed text-ink outline-none read-only:text-muted"
         />
       ) : !header ? (
-        <div
+        <EmptyState
           data-testid="csv-empty-table"
-          className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+          icon={Table}
+          title={locked ? "This table is empty." : "This table is empty. Add a row or a column to start."}
         >
-          <Table size={22} aria-hidden className="text-subtle" />
-          <div className="flex flex-col gap-1">
-            <span className="text-sm text-ink">Empty table</span>
-            <span className="text-xs text-subtle">No rows or columns</span>
-          </div>
           {!locked ? (
             <div className="flex items-center gap-2">
-              <button
-                type="button"
+              <SecondaryButton
                 onClick={addRow}
-                className="inline-flex h-7 items-center gap-1 rounded border border-line px-2 text-[11px] text-subtle hover:bg-hover hover:text-ink"
+                className="inline-flex items-center gap-1"
                 data-testid="csv-empty-add-row"
               >
                 <Plus size={12} aria-hidden />
                 Row
-              </button>
-              <button
-                type="button"
+              </SecondaryButton>
+              <SecondaryButton
                 onClick={addColumn}
-                className="inline-flex h-7 items-center gap-1 rounded border border-line px-2 text-[11px] text-subtle hover:bg-hover hover:text-ink"
+                className="inline-flex items-center gap-1"
                 data-testid="csv-empty-add-column"
               >
                 <Plus size={12} aria-hidden />
                 Column
-              </button>
+              </SecondaryButton>
             </div>
           ) : null}
-        </div>
+        </EmptyState>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto p-4">
           {/* Same table voice as the document editor: rounded frame, tinted

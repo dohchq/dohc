@@ -3026,3 +3026,31 @@ fn a_take_over_this_computer_never_watched_after_still_starts_from_now() {
         vec![(ALL.to_owned(), 100, false), (TASK.to_owned(), 100, false)]
     );
 }
+
+#[test]
+fn a_record_change_claim_keeps_its_parent_after_reopening() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    subscribe(&mut store, "collection:date", "tasks");
+    let mut change = facts(
+        "tasks",
+        Some(("origin-parent", 1)),
+        &[1],
+        Some("collection:button"),
+        Some(1),
+    );
+    change.attribution.as_mut().expect("attribution").run =
+        Some(dohc_engine_domain::AutomationRunAttribution {
+            claim_id: "button-claim".to_owned(),
+            automation_name: "Mark done".to_owned(),
+        });
+    let inserted = claim_for(&mut store, WS, &change, 20);
+    assert_eq!(inserted[0].parent_claim_id.as_deref(), Some("button-claim"));
+    let claim_id = inserted[0].claim_id.clone();
+    drop(store);
+    let store = open_store(&scratch);
+    let claim = get_automation_claim(&store, WS, &AutomationClaimLookup::Id(claim_id))
+        .expect("read claim")
+        .expect("claim");
+    assert_eq!(claim.parent_claim_id.as_deref(), Some("button-claim"));
+}

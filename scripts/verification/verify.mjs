@@ -11,8 +11,10 @@ import { testWorkspace } from "./js-tests.mjs";
 import { readWorkspacePackages, selectJavaScript, selectedGates, workflowFilters } from "./selection.mjs";
 import { readFocusedRendererSelection } from "./renderer-selection.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
-import { acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
+import { acquireExclusiveSlot, acquireVerificationSlot } from "../../tools/rust-engine-program/build-slot.mjs";
+import { admissionPreflight, installedDependenciesMatch, verificationAdmission } from "./admission.mjs";
 import { readGit } from "../../tools/rust-engine-program/git-read.mjs";
+import { finishRustEvidence, refreshRustReuse, rustIdentity } from "./rust-reuse.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 export function desktopProofCommand(args, { platform = process.platform, env = process.env } = {}) {
@@ -140,6 +142,11 @@ export async function verify(args) {
   const jobIndex = args.indexOf("--job");
   const job = jobIndex < 0 ? null : args[jobIndex + 1];
   const full = args.includes("--full");
+  const reuseIndex = args.indexOf("--reuse-rust");
+  const reuseRust = reuseIndex < 0 ? null : args[reuseIndex + 1];
+  if (reuseIndex >= 0 && (mode !== "pr" || !reuseRust || reuseRust.startsWith("--") || job === "js")) {
+    throw new Error("Use --reuse-rust <canonical-result.json> with a PR run that includes Rust.");
+  }
   if (full && !["pr", "plan"].includes(mode)) throw new Error("--full is available only for PR verification and planning.");
   if (jobIndex >= 0 && (mode !== "pr" || !["rust", "js"].includes(job))) throw new Error("--job rust|js is available only for PR verification.");
   if (["pr", "plan"].includes(mode) && (!base || base.startsWith("--"))) throw new Error("Supply --base <ref> for PR gate selection.");
@@ -158,7 +165,12 @@ export async function verify(args) {
       || selectJavaScript(jsFiles, readWorkspacePackages(repoRoot), { full: forceFull })) : null;
     return { baseCommit, files, workflow, requiredGates, gates, javascript };
   }
-  if (mode === "plan") { const {baseCommit, files, gates, javascript} = selection(); console.log(JSON.stringify({base, baseCommit, files, gates, javascript}, null, 2)); return; }
+  if (mode === "plan") {
+    const {baseCommit, files, gates, javascript} = selection();
+    const admission = verificationAdmission({gates, javascript}, gates.js ? readWorkspacePackages(repoRoot) : [], installedDependenciesMatch(repoRoot));
+    console.log(JSON.stringify({base, baseCommit, files, gates, javascript, admission}, null, 2));
+    return;
+  }
   let treeState;
   const output = join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
@@ -166,6 +178,8 @@ export async function verify(args) {
   const reportPath = join(output, "result.json");
   const save = () => writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
   const measure = (name, action) => {
+    lane?.update?.({phase: name});
+    checkoutOwner?.update?.({phase: name});
     const row = {name};
     report.timings.push(row);
     return timed(row, action, save);
@@ -190,10 +204,15 @@ export async function verify(args) {
   }
   let database;
   let lane;
+  let checkoutOwner;
   const previousIncremental = process.env.CARGO_INCREMENTAL;
   let desktopEnvironment;
+  let originalRustIdentity;
+  let rustTools;
   async function checkedStep(row, action, checkpoint = () => cancellation.checkpoint()) {
     await checkpoint();
+    lane?.update?.({phase: row.name});
+    checkoutOwner?.update?.({phase: row.name});
     report.steps.push(row); save();
     const result = await timed(row, action, save);
     await checkTree(row.name);
@@ -216,26 +235,44 @@ export async function verify(args) {
       recordTree("start");
       return selected;
     });
+    if (mode === "pr") checkoutOwner = await measure("checkout", () => acquireExclusiveSlot({
+      root: join(repoRoot, ".dohc-dev/verification"), kind: "verification-checkout",
+      metadata: {purpose: `PR verification (${report.scope})`, checkout: repoRoot, commit: report.commit, phase: "selection"},
+    }));
     if (mode === "pr" && report.dirty) throw new Error("Commit the worktree before running the PR gate.");
+    if (reuseRust && !gates.rust) throw new Error("--reuse-rust requires a selected Rust job. Use --job rust when needed.");
     if (mode === "pr" && !gates.js && !gates.rust) {
       report.reason = "No code gate applies to the changed files.";
       await checkTree("finish");
       report.verdict = "PASS";
       return report;
     }
-    // One PR gate at a time per host; the wait is recorded as `queue`.
-    if (mode === "pr") lane = await measure("queue", () => acquireVerificationSlot());
     const needs = mode === "pr" ? (javascript?.needs ?? {engine: false, desktop: false, postgres: false}) : {engine: true, desktop: true};
     const proofs = mode === "pr" ? (javascript?.proofs ?? {}) : {desktop: true};
     const native = gates.rust || needs.engine || needs.desktop;
+    if (mode === "pr") {
+      const preflight = () => admissionPreflight({rust: gates.rust, native, root: repoRoot, pins: require("js-yaml").load(workflow).env});
+      await measure("preflight", preflight);
+      report.admission = verificationAdmission({gates, javascript}, readWorkspacePackages(repoRoot), installedDependenciesMatch(repoRoot));
+      lane = await measure("queue", () => acquireVerificationSlot(process.env, {
+        lightweight: report.admission.lightweight,
+        metadata: {purpose: report.admission.lightweight ? "light PR verification" : "full PR verification", checkout: repoRoot, commit: report.commit, phase: "admission"},
+      }));
+      await checkTree("admission");
+      await measure("preflight:admission", preflight);
+    }
     startSource = await measure("source-fingerprints:start", () => ({ ...(native ? {engine: sourceFingerprint("engine")} : {}), desktop: sourceFingerprint("desktop") }));
     await cancellation.checkpoint();
-    if (mode === "pr" && (gates.js || gates.rust)) await step("install", ...pnpm(["install", "--frozen-lockfile"]));
+    if (mode === "pr" && (gates.js || gates.rust)) {
+      if (report.admission.lightweight) {
+        if (!installedDependenciesMatch(repoRoot)) throw new Error("Installed dependencies changed while waiting. Rerun verification for full-lane admission.");
+      } else await step("install", ...pnpm(["install", "--frozen-lockfile"]));
+    }
     if (needs.desktop) await step("electron-install", process.execPath, ["apps/desktop/scripts/ensure-electron-installed.mjs"]);
     report.doctor = await measure("doctor", () => doctor({engine: native, desktop: needs.desktop, browser: Boolean(proofs.accounts || desktopProofTags(proofs).selected.length)})); save();
     await cancellation.checkpoint();
     if (report.doctor.checks.some((check) => check.state === "FAIL")) throw new Error("Preflight failed. Read result.json and run pnpm setup:worktree.");
-    await step("app-backend-runtime", ...pnpm(["--filter", "@dohc/app-backend-runtime", "build"]));
+    if (!report.admission?.lightweight) await step("app-backend-runtime", ...pnpm(["--filter", "@dohc/app-backend-runtime", "build"]));
     const preparedOptions = {engineOnly: !needs.desktop, engineBinary: stagedEnginePath};
     if (needs.engine || needs.desktop) {
       await measure("prepare", () => prepare({ ...preparedOptions, output, install: mode !== "pr" }));
@@ -247,9 +284,21 @@ export async function verify(args) {
       if (mode !== "pr" || !gates.rust) return;
       try {
         const pins = require("js-yaml").load(workflow).env;
+        rustTools = Object.fromEntries(report.doctor.checks.filter(check => ["rustc", "cargo"].includes(check.name) && check.state === "PASS")
+          .map(check => [check.name, check.detail]));
         for (const [tool, variable] of [["deny", "CARGO_DENY_VERSION"], ["audit", "CARGO_AUDIT_VERSION"], ["nextest", "CARGO_NEXTEST_VERSION"]]) {
           const result = await step(`cargo-${tool}-version`, "cargo", [tool, "--version"]);
           if (result.stdout.split(/\r?\n/)[0].split(/\s+/)[1] !== pins[variable]) throw new Error(`Install cargo-${tool} ${pins[variable]} to match the workflow.`);
+          rustTools[tool] = result.stdout.trim();
+        }
+        const identity = rustIdentity({root: repoRoot, engine: sourceFingerprint("engine"), tools: rustTools});
+        originalRustIdentity = identity;
+        if (reuseRust) {
+          report.rustEvidence = await checkedStep({name: "rust-reuse", reused: true, report: resolve(reuseRust)},
+            () => refreshRustReuse(reuseRust, {root: repoRoot, identity,
+              step: (name, command, args) => step(name, command, args, buildEnvironment())}));
+          save();
+          return;
         }
         await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs", "--prepared-runtime"], buildEnvironment());
         await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
@@ -307,12 +356,13 @@ export async function verify(args) {
           report.postgres = { id: database.id }; save();
         }
         const env = { ...process.env, POSTGRES_URL: database?.url ?? "", DOHC_REQUIRE_POSTGRES: "1", DOHC_REQUIRE_ENGINE_E2E: "1", DOHC_TEST_ENGINE_BINARY: stagedEnginePath };
-        await step("typecheck", ...pnpm(["run", "typecheck"]), env);
+        await step("typecheck", ...pnpm(report.admission?.lightweight ? ["-r", "--workspace-concurrency=1", "--if-present", "typecheck"] : ["run", "typecheck"]), env);
         report.jsTests = join(output, "js-tests", "result.json");
         // Keep package groups under this owner so cancellation finishes their
         // escalation before database cleanup, without a competing parent timer.
         await checkedStep({ name: "tests", runner: "testWorkspace", report: report.jsTests },
           () => testWorkspace({ prepared: true, output: join(output, "js-tests"), env, selectedPackages: javascript.packages, testFiles: javascript.testFiles, repository: javascript.repository, desktopScripts: javascript.desktopScripts,
+            bounded: report.admission?.lightweight ?? false,
             beforeDesktopScripts: () => measure("packaging-wait", () => rustSettled),
             ...(Object.values(proofs).some(Boolean) ? {runProofs: checkpoint => selectedProofs(env, checkpoint)} : {}) }));
       } else if (mode !== "pr") {
@@ -334,17 +384,33 @@ export async function verify(args) {
     throw error;
   }
   finally {
-    try { await database?.stop(); }
-    catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
-    const interrupted = await cancellation.dispose();
-    lane?.release();
-    if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
-    if (mode === "pr") {
-      if (previousIncremental === undefined) delete process.env.CARGO_INCREMENTAL;
-      else process.env.CARGO_INCREMENTAL = previousIncremental;
-    }
-    finishTiming(); Object.assign(report, total);
-    save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
+    try {
+      lane?.update?.({phase: "cleanup"});
+      checkoutOwner?.update?.({phase: "cleanup"});
+      try { await database?.stop(); }
+      catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
+      const interrupted = await cancellation.dispose();
+      lane?.release();
+      if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
+      finishTiming(); Object.assign(report, total);
+      if (originalRustIdentity && !interrupted && !report.rustError && !report.cleanupError) {
+        try {
+          recordTree("rust-receipt:finish");
+          report.provenance = classifyTreeProvenance(report.treeReadings);
+          const finalIdentity = rustIdentity({root: repoRoot, engine: sourceFingerprint("engine"), tools: rustTools});
+          report.rustEvidence = finishRustEvidence(report, originalRustIdentity, finalIdentity);
+        } catch (error) {
+          report.rustEvidence = {kind: "unavailable", reason: error.message};
+          report.verdict = "FAIL"; report.error ??= error.message; process.exitCode = 1;
+        }
+      }
+      if (mode === "pr") {
+        if (previousIncremental === undefined) delete process.env.CARGO_INCREMENTAL;
+        else process.env.CARGO_INCREMENTAL = previousIncremental;
+      }
+      finishTiming(); Object.assign(report, total);
+      save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
+    } finally { checkoutOwner?.release(); }
   }
 }
 

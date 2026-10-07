@@ -34,6 +34,20 @@ const passVerdict =
   "test --workspace=PASS doctests=PASS build daemon=PASS " +
   "cargo-deny=PASS cargo-audit=PASS scratch leak=PASS";
 
+test("CI verdict helper can be imported from Node eval without a script path", () => {
+  const helper = new URL("../tools/rust-engine-program/require-ci-pass-verdict.mjs", import.meta.url).href;
+  const source = `
+    import assert from 'node:assert/strict';
+    assert.equal(process.argv[1], undefined);
+    const {requireCiPassVerdict} = await import(${JSON.stringify(helper)});
+    assert.equal(typeof requireCiPassVerdict, 'function');
+  `;
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", source], {encoding: "utf8", timeout: 10_000});
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "");
+});
+
 test("canonical CI verdict requires every mandatory gate step to report PASS", () => {
   assert.doesNotThrow(() => check(passVerdict));
   assert.throws(

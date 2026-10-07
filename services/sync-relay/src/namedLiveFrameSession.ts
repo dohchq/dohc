@@ -1,4 +1,4 @@
-import type { LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
+import type { AutomationDeclaration, LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { createHash } from "node:crypto";
 import {
   createLiveFrameSession, encodeLiveFrame, encodeLiveFrameSync, LiveFrameError,
@@ -26,7 +26,7 @@ export interface NamedFrameHostSession {
   assertCurrent(): void;
   openSync(clientVector: Uint8Array, signal: AbortSignal): Promise<NamedFrameSync>;
   /** Recording context is checked against the authenticated route by admission. */
-  submit(input: { deliveryId: string; updateDigest: string; updateBytes: Uint8Array; authorContext?: LiveAuthorContext }, signal: AbortSignal): Promise<NamedFrameSubmissionResult>;
+  submit(input: { deliveryId: string; updateDigest: string; updateBytes: Uint8Array; authorContext?: LiveAuthorContext; trustedAutomation?: AutomationDeclaration; trustedAutomationPress?: {readonly hostPressId: string; readonly automationId: string}; readonly trustedAutomationGrant?: {readonly grantId: string; readonly grantGeneration: number} }, signal: AbortSignal): Promise<NamedFrameSubmissionResult>;
   close(): void;
 }
 export interface NamedFrameTransport {

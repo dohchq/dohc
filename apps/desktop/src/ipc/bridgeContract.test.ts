@@ -3551,7 +3551,7 @@ describe("engine history and linked Chats IPC contract", () => {
     ).toBe("text");
   });
 
-  it("rejects empty paths, bad limits, and oversized chat bodies", () => {
+  it("rejects empty paths, bad limits, and empty chat bodies", () => {
     // Path CONTAINMENT is enforced main-side (validateUserWritePath and the
     // engine's own path normalization); the wire schema only bounds shape.
     expect(
@@ -3590,9 +3590,9 @@ describe("engine history and linked Chats IPC contract", () => {
       SendChatMessagePayload.safeParse({
         workspaceId: "ws-engine",
         threadId: "thread-1",
-        body: "x".repeat(65_537),
+        body: "x".repeat(65_536) + "\r\n\uFEFF ",
       }).success,
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("round-trips a sent chat message with main-derived authorship", () => {
