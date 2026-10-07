@@ -7,6 +7,7 @@ import { readError, withErrorWords } from "../../ipc/errorWords";
 import { DocumentMenu } from "../DocumentMenu";
 import { DocumentControls, OPENING_TITLE, ViewHeader } from "../fileInspectorUi";
 import { BlockMenu } from "../editor/blockControls";
+import { SlashCommandMenu, type SlashCommandState } from "../editor/slashCommands";
 import { buildTableMenu, type TableMenuRow } from "../editor/tableControls";
 import { OverlayFrame } from "../Overlay";
 import { ColorControl, HueControl, SwitchControl, TextControl } from "../settings/SettingRow";
@@ -449,6 +450,19 @@ const BLOCK_MENU_OPEN = {
   placement: "below",
   trigger: null,
 } as const;
+
+const SLASH_MENU_OPEN: SlashCommandState = {
+  open: true,
+  from: 1,
+  to: 1,
+  query: "",
+  selected: 2,
+  x: 0,
+  y: 0,
+  bottom: null,
+  maxHeight: 260,
+  placement: "below",
+};
 
 const TABLE_MENU_ROWS: readonly TableMenuRow[] = [
   { label: "Insert column left" },
@@ -982,6 +996,19 @@ function Pane(props: { theme: "light" | "dark" }) {
                 />
               }
             />
+          </div>
+        </Specimen>
+      </Section>
+
+      {/* The editor's listboxes share these rows, after History so no part
+          above them moves. The editor keeps focus, and the option Enter acts
+          on draws the outline. The page link and emoji pickers are not here:
+          an open picker takes Enter from the whole window, which would take
+          it from this page's other parts. */}
+      <Section part="slash-menu" title="Slash menu">
+        <Specimen label="third option active; the list scrolls">
+          <div className={`${EDITOR_MENU_BOX} h-[272px] w-[330px]`}>
+            <SlashCommandMenu state={SLASH_MENU_OPEN} onSelect={noop} onHover={noop} />
           </div>
         </Specimen>
       </Section>

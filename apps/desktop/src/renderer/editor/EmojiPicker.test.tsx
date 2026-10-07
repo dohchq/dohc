@@ -10,6 +10,7 @@ import { dohcMarkdownExtensions } from "./extensions";
 import { applyEmojiPick, EmojiPicker, rankEmoji, type EmojiPickerState } from "./EmojiPicker";
 import { EMOJI_DATA } from "./emojiData";
 import { makeEmojiPlugin } from "./emojiTrigger";
+import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
 
 // Same ResizeObserver / Range stubs WikilinkPicker.test.tsx uses — needed
 // because the picker calls `view.coordsAtPos`, which under real
@@ -23,7 +24,6 @@ beforeEach(() => {
       disconnect() {}
     },
   );
-  Element.prototype.scrollIntoView = vi.fn();
   Object.defineProperty(Range.prototype, "getClientRects", {
     configurable: true,
     value: () => [],
@@ -213,5 +213,28 @@ describe("EmojiPicker — dismiss leaves text intact", () => {
 
     expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
     editor.destroy();
+  });
+});
+
+describe("EmojiPicker on the Menu part's recipe", () => {
+  it("keeps the active option in the list's view as the arrows move it, scrolling only the list", () => {
+    const restore = mockListLayout(200);
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const editor = makeEditor(":");
+    try {
+      render(createElement(EmojiPicker, { state: { open: true, from: 1, query: "" }, view: editor.view, onDismiss: vi.fn() }));
+      const list = screen.getByRole("listbox", { name: "emoji" });
+      const options = screen.getAllByRole("option");
+      expect(options.length).toBeGreaterThan(8);
+      fireEvent.keyDown(window, { key: "ArrowUp" });
+      const last = options.at(-1)!;
+      expect(last.hasAttribute("data-active")).toBe(true);
+      expect(inListView(list, last)).toBe(true);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      restore();
+      editor.destroy();
+    }
   });
 });

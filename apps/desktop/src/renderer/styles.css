@@ -1060,16 +1060,13 @@ body {
   color: var(--dohc-ink);
 }
 
-/* Shared popover box treatment. `overflow` is deliberately NOT shared: the
- * scrolling menus (slash menu, wikilink picker) own it individually, because
- * the bubble menu must stay overflow-visible — it hosts the anchored
+/* The bubble menu shares the Menu part's frame: border, 8px radius, panel
+ * and shadow. `overflow` is deliberately not set: it hosts the anchored
  * turn-into dropdown (.dohc-turn-into-menu), which an overflow rule here
  * would clip to the toolbar's own height. */
-.dohc-slash-menu,
-.dohc-wikilink-picker,
 .dohc-bubble-menu {
   border: 1px solid var(--dohc-line);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--dohc-panel);
   box-shadow:
     0 1px 2px rgba(28, 27, 24, 0.05),
@@ -1077,95 +1074,22 @@ body {
   animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
 }
 
-[data-theme='dark'] .dohc-slash-menu,
-[data-theme='dark'] .dohc-wikilink-picker,
 [data-theme='dark'] .dohc-bubble-menu {
   box-shadow:
     0 1px 2px rgba(0, 0, 0, 0.3),
     0 10px 28px rgba(0, 0, 0, 0.45);
 }
 
+/* Where the slash menu and the wikilink picker sit. Their frames, options and
+ * entrance are the Menu part's recipe (slashCommands.tsx, WikilinkPicker.tsx). */
 .dohc-slash-menu {
   position: fixed;
   z-index: 70;
   width: 320px;
-  padding: 5px;
-  overflow: auto;
-}
-
-.dohc-slash-menu__item,
-.dohc-wikilink-picker__item {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dohc-ink);
-  text-align: left;
-}
-
-.dohc-slash-menu__item {
-  padding: 6px 7px;
-}
-
-/* Ink-alpha fills keep menu states visible on panel surfaces in both themes. */
-.dohc-slash-menu__item.is-selected,
-.dohc-wikilink-picker__item.is-active {
-  @apply bg-selected;
-}
-
-.dohc-slash-menu__glyph {
-  display: inline-grid;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 auto;
-  place-items: center;
-  border: 1px solid var(--dohc-line);
-  border-radius: 6px;
-  background: var(--dohc-bg);
-  color: var(--dohc-muted);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-}
-
-.dohc-slash-menu__copy,
-.dohc-wikilink-picker__item-title {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-}
-
-.dohc-slash-menu__label,
-.dohc-wikilink-picker__item-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 500;
-}
-
-.dohc-slash-menu__hint,
-.dohc-wikilink-picker__item-path,
-.dohc-slash-menu__empty,
-.dohc-wikilink-picker__empty {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--dohc-subtle);
-  font-size: 11px;
 }
 
 .dohc-wikilink-picker {
   width: 360px;
-  padding: 4px;
-  overflow: auto;
-}
-
-.dohc-wikilink-picker__item {
-  padding: 6px 7px;
 }
 
 .dohc-wikilink-hidden {
@@ -1376,7 +1300,7 @@ body {
   width: 340px;
   padding: 6px;
   border: 1px solid var(--dohc-line);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--dohc-panel);
   box-shadow:
     0 1px 2px rgba(28, 27, 24, 0.05),
@@ -2027,8 +1951,8 @@ body {
 }
 
 /* ── bubble menu turn-into dropdown ──
- * Sits at the left of .dohc-bubble-menu (MarkdownEditor.tsx); the dropdown
- * itself gets the same box treatment as .dohc-block-menu/.dohc-slash-menu. */
+ * Sits at the left of .dohc-bubble-menu (MarkdownEditor.tsx); the dropdown's
+ * frame and options are the Menu part's recipe (blockControls.tsx). */
 
 .dohc-turn-into {
   position: relative;
@@ -2072,15 +1996,6 @@ body {
   left: 0;
   z-index: 71;
   width: 190px;
-  overflow: auto;
-  border: 1px solid var(--dohc-line);
-  border-radius: 10px;
-  background: var(--dohc-panel);
-  padding: 5px;
-  box-shadow:
-    0 1px 2px rgba(28, 27, 24, 0.05),
-    0 8px 24px rgba(28, 27, 24, 0.12);
-  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
 }
 
 /* Flipped above the trigger when the viewport has more room there — the
@@ -2093,56 +2008,6 @@ body {
 .dohc-turn-into-menu[data-placement='above'] {
   top: auto;
   bottom: calc(100% + 6px);
-}
-
-.dohc-turn-into-menu:focus {
-  outline: none;
-}
-
-[data-theme='dark'] .dohc-turn-into-menu {
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.3),
-    0 10px 28px rgba(0, 0, 0, 0.45);
-}
-
-.dohc-turn-into-menu__item {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 7px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dohc-ink);
-  text-align: left;
-}
-
-.dohc-turn-into-menu__item.is-selected {
-  @apply bg-selected;
-}
-
-.dohc-turn-into-menu__glyph {
-  display: inline-grid;
-  width: 24px;
-  height: 24px;
-  flex: 0 0 auto;
-  place-items: center;
-  border: 1px solid var(--dohc-line);
-  border-radius: 6px;
-  background: var(--dohc-bg);
-  color: var(--dohc-muted);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-}
-
-.dohc-turn-into-menu__label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 500;
 }
 
 /*
@@ -3234,69 +3099,10 @@ mark.dohc-highlight,
   font-weight: 600;
 }
 
-/* `:shortcode:` emoji autocomplete picker — same floating-popover
- * conventions as .dohc-wikilink-picker (border/shadow/pop-in shared via
- * that rule's selector group; this file only adds emoji-specific layout). */
+/* Where the `:shortcode:` emoji picker sits. Its frame and options are the
+ * Menu part's recipe (EmojiPicker.tsx). */
 .dohc-emoji-picker {
-  overflow: auto;
-  border: 1px solid var(--dohc-line);
-  border-radius: 10px;
-  background: var(--dohc-panel);
-  box-shadow:
-    0 1px 2px rgba(28, 27, 24, 0.05),
-    0 8px 24px rgba(28, 27, 24, 0.12);
-  animation: dohc-pop-in 130ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
   width: 220px;
-  padding: 4px;
-}
-
-[data-theme='dark'] .dohc-emoji-picker {
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.3),
-    0 10px 28px rgba(0, 0, 0, 0.45);
-}
-
-.dohc-emoji-picker__item {
-  display: flex;
-  width: 100%;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dohc-ink);
-  text-align: left;
-  padding: 5px 7px;
-}
-
-.dohc-emoji-picker__item.is-active {
-  @apply bg-selected;
-}
-
-.dohc-emoji-picker__item-glyph {
-  flex: 0 0 auto;
-  font-size: 16px;
-  line-height: 1;
-}
-
-.dohc-emoji-picker__item-shortcode {
-  overflow: hidden;
-  min-width: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--dohc-subtle);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-}
-
-.dohc-emoji-picker__empty {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--dohc-subtle);
-  font-size: 11px;
-  padding: 6px 7px;
 }
 
 /* TeX math (KaTeX). The `.katex` typesetting itself comes from the bundled
