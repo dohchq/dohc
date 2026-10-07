@@ -240,7 +240,7 @@ type SharingDeclined = NonNullable<SyncStatusResult["sharingDeclined"]>[number];
 const SHARING_DECLINED_TITLE = "Too large to edit live with others";
 function sharingDeclinedBody(declined: SharingDeclined): string {
   const fileName = declined.path.split("/").pop() ?? declined.path;
-  return `People you share ${fileName} with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Make it smaller, then open it again.`;
+  return `People you share ${fileName} with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close ${fileName} and open it again to fix this.`;
 }
 function sharingDeclinedDetails(workspaceId: string, declined: SharingDeclined): string {
   return errorDetails([

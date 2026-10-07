@@ -401,7 +401,7 @@ describe("notice center", () => {
     const notice = screen.getByTestId("notice-sharing-declined-main:object-1");
     expect(notice.textContent).toContain("Too large to edit live with others");
     expect(notice.textContent).toContain(
-      "People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Make it smaller, then open it again.",
+      "People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
     );
     expect(within(notice).queryByRole("button", { name: "Try again" })).toBeNull();
 
@@ -409,7 +409,7 @@ describe("notice center", () => {
     const copied = await navigator.clipboard.readText();
     expect(copied).toContain("Notice: Too large to edit live with others");
     expect(copied).toContain(
-      "Detail: People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Make it smaller, then open it again.",
+      "Detail: People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
     );
     expect(copied).toContain("File: notes/large.md");
     expect(copied).toContain("Size: 280001 bytes");
@@ -429,7 +429,7 @@ describe("notice center", () => {
 
     const toast = screen.getByTestId("sharing-declined-toast");
     expect(toast.textContent).toContain(
-      "Too large to edit live with others. People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Make it smaller, then open it again.",
+      "Too large to edit live with others. People you share large.md with get your saved edits when dohc syncs. If they have it open in dohc, they see your edits after they close it. Close large.md and open it again to fix this.",
     );
   });
 
