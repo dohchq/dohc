@@ -45,6 +45,10 @@ const schema: Record<string, string> = {
       UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes-144
       WHERE workspace_id=(SELECT workspace_id FROM sync_relay_live_update_journal WHERE journal_cursor=OLD.journal_cursor);
     END`,
+  settlement_cut_journal_delete: `CREATE TRIGGER settlement_cut_journal_delete BEFORE DELETE ON sync_relay_live_update_journal
+    BEGIN
+      DELETE FROM ${SETTLEMENT_CUTS} WHERE journal_cursor=OLD.journal_cursor;
+    END`,
   settlement_binding_usage_insert: `CREATE TRIGGER settlement_binding_usage_insert AFTER INSERT ON ${SETTLEMENT_BINDINGS}
     BEGIN
       UPDATE sync_relay_workspace_usage SET usage_bytes=usage_bytes+NEW.storage_bytes WHERE workspace_id=NEW.workspace_id;
