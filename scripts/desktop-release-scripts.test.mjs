@@ -34,6 +34,7 @@ import {
   writeGithubOutput,
 } from "./resolve-desktop-release.mjs";
 import { updateDesktopPackageVersion } from "./update-desktop-package-version.mjs";
+import { checkDesktopReleasePlatforms } from "./check-desktop-release-platforms.mjs";
 import {
   mergeUpdateManifests,
   parseUpdateManifest,
@@ -96,6 +97,42 @@ test("release platform selection defaults to Windows and keeps every native targ
   ]);
   for (const target of all) assert.equal(target.runner[0], "self-hosted");
   assert.throws(() => desktopReleaseTargets("linux"), /Invalid release platforms/);
+});
+
+test("publication preserves every platform previously published on its channel", () => {
+  const release = (names, draft = false) => ({ draft, assets: names.map((name) => ({ name })) });
+  for (const channel of ["nightly", "latest"]) {
+    for (const platform of ["mac", "linux"]) {
+      const releases = [release([`${channel}.yml`]), release([`${channel}-${platform}.yml`])];
+      assert.throws(() => checkDesktopReleasePlatforms({ channel, platforms: "windows", releases }), /Select platforms=all/);
+      assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "all", releases }));
+    }
+    const other = channel === "nightly" ? "latest" : "nightly";
+    for (const releases of [[], [release([`${channel}.yml`])], [release([`${channel}-mac.yml`, `${channel}-linux.yml`], true)], [release([`${other}-mac.yml`, `${other}-linux.yml`])]]) {
+      assert.doesNotThrow(() => checkDesktopReleasePlatforms({ channel, platforms: "windows", releases }));
+    }
+  }
+});
+
+test("publication platform history fails closed on incomplete input", () => {
+  for (const releases of [null, {}, [{}], [{ draft: false, assets: [{}] }], [[[]]]]) {
+    assert.throws(() => checkDesktopReleasePlatforms({ channel: "nightly", platforms: "windows", releases }), /Release history/);
+  }
+});
+
+test("publication platform check exits unsuccessfully when a channel would lose updates", async () => {
+  const root = await fixtureRoot();
+  const history = join(root, "releases.jsonl");
+  await writeFile(history, [
+    { draft: false, assets: [{ name: "nightly.yml" }] },
+    { draft: false, assets: [{ name: "nightly-mac.yml" }] },
+  ].map((release) => JSON.stringify(release)).join("\n") + "\n");
+  const script = fileURLToPath(new URL("./check-desktop-release-platforms.mjs", import.meta.url));
+  const args = [script, "--channel", "nightly", "--platforms", "windows", "--releases", history];
+  await assert.rejects(promisify(execFile)(process.execPath, args), (error) => error.code === 1 && /Select platforms=all/.test(error.stderr));
+  args[4] = "all";
+  const { stdout } = await promisify(execFile)(process.execPath, args);
+  assert.match(stdout, /keeps every previously published platform/);
 });
 
 test("release metadata requires a real commit sha", async () => {
@@ -502,6 +539,14 @@ test("desktop releases start only by dispatch, run on self-hosted runners, and p
   assert.match(unusedVersion, /^ {4}needs: preflight$/m);
   assert.match(unusedVersion, /^ {6}contents: write$/m, "only push access lists draft releases");
   const refuseUsedVersion = stepBlock(unusedVersion, "Refuse a version that has a tag or release");
+  const keepPlatforms = stepBlock(unusedVersion, "Keep published update platforms");
+  assert.match(keepPlatforms, /if: needs\.preflight\.outputs\.dry_run != 'true'/);
+  assert.match(keepPlatforms, /set -euo pipefail/);
+  assert.match(keepPlatforms, /gh api --paginate/);
+  assert.match(keepPlatforms, /RELEASE_CHANNEL: \$\{\{ needs\.preflight\.outputs\.release_channel \}\}/);
+  assert.match(keepPlatforms, /RELEASE_PLATFORMS: \$\{\{ inputs\.platforms \}\}/);
+  assert.match(keepPlatforms, /node scripts\/check-desktop-release-platforms\.mjs/);
+  assert.match(keepPlatforms, /--releases release-history\.jsonl/);
   assert.match(refuseUsedVersion, /repos\/\$\{GITHUB_REPOSITORY\}\/releases\?per_page=100/);
   assert.match(refuseUsedVersion, /select\(\.tag_name == env\.TAG\)/);
   assert.match(refuseUsedVersion, /git\/matching-refs\/tags\/\$\{TAG\}/);

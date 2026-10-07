@@ -84,6 +84,9 @@ Only the selected platforms receive installers and update packages.
 Choose `all` when the release must update existing installations on every supported platform.
 If previous releases on this channel included macOS or Linux, continue selecting `all`.
 Their updaters cannot find a platform manifest in a Windows-only release.
+Before packaging a published release, the workflow checks every previous published release on that channel.
+It rejects a selection that omits an existing platform manifest.
+Windows-only dry runs remain available because they publish no update feed.
 
 Private repository downloads require repository access.
 The packaged updater also needs an authenticated private feed or a public download host.

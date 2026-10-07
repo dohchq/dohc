@@ -123,13 +123,39 @@ jobs:
   # because only a token with push access lists draft releases, and preflight
   # runs pnpm install.
   unused-version:
-    name: Refuse a used version
+    name: Check release publication
     needs: preflight
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 5
     permissions:
       contents: write
     steps:
+      - name: Checkout release scripts
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.14.0
+
+      - name: Keep published update platforms
+        if: needs.preflight.outputs.dry_run != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_CHANNEL: ${{ needs.preflight.outputs.release_channel }}
+          RELEASE_PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | {draft, assets: [.assets[] | {name}]}' > release-history.jsonl
+          node scripts/check-desktop-release-platforms.mjs \
+            --channel "$RELEASE_CHANNEL" \
+            --platforms "$RELEASE_PLATFORMS" \
+            --releases release-history.jsonl
+
       - name: Refuse a version that has a tag or release
         shell: bash
         env:
