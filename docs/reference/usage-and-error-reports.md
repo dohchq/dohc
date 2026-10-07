@@ -2,8 +2,10 @@
 
 Official dohc releases send two kinds of reports to dohc's developers: usage
 reports and error reports. Each has its own switch in **Settings > Privacy**,
-and both start on. The first time a release could send a report, dohc shows a
-notice, and nothing leaves before that notice appears.
+and both start on. The first time a release could send a report, a workspace
+window shows a notice. It names the reports that release sends and stays
+until you close it. Nothing leaves before a window shows that notice. If both
+switches are off, no notice appears until you turn one on.
 
 ## Usage reports
 

@@ -1,4 +1,4 @@
-import { DIAGNOSTICS_MAX_CHARS } from "../ipc/bridgeContract";
+import { DIAGNOSTICS_MAX_CHARS, type ReportKinds } from "../ipc/bridgeContract";
 import type { CrashFacts } from "../crashReports/crashReport";
 import type { PrivacySettings } from "../settings/userSettings";
 
@@ -10,14 +10,14 @@ import type { PrivacySettings } from "../settings/userSettings";
  */
 export function diagnosticsText(input: {
   facts: CrashFacts;
-  // Whether this build names a report service.
-  reports: boolean;
+  // The services this launch can send to.
+  available: ReportKinds;
   privacy: PrivacySettings;
   // The crash report's text, or null when nothing is waiting.
   crashReport: string | null;
 }): string {
   const { facts } = input;
-  const switchState = (on: boolean) => !input.reports ? "off (this build sends no reports)" : on ? "on" : "off";
+  const state = (available: boolean, on: boolean) => !available ? "unavailable for this launch" : on ? "on" : "off";
   const text = [
     "dohc diagnostics",
     `Created: ${new Date(facts.atMs).toISOString()}`,
@@ -25,8 +25,8 @@ export function diagnosticsText(input: {
     `System: ${facts.system} ${facts.arch}`,
     `Electron: ${facts.electron}`,
     `Running for: ${facts.uptimeSeconds} s`,
-    `Usage reports: ${switchState(input.privacy.usageReports)}`,
-    `Error reports: ${switchState(input.privacy.errorReports)}`,
+    `Usage reports: ${state(input.available.usage, input.privacy.usageReports)}`,
+    `Error reports: ${state(input.available.errors, input.privacy.errorReports)}`,
     "",
     input.crashReport ?? "Recent problems: none",
   ].join("\n");

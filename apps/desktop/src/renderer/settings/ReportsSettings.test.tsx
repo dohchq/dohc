@@ -4,7 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReportsSettings } from "./ReportsSettings";
 
 const bridge = {
-  readDiagnostics: vi.fn(async () => ({ text: "dohc diagnostics\nUsage reports: on", reports: true })),
+  readDiagnostics: vi.fn(async () => ({
+    text: "dohc diagnostics\nUsage reports: on",
+    available: { usage: true, errors: true },
+  })),
   saveDiagnostics: vi.fn(async () => ({ saved: true })),
 };
 
@@ -48,10 +51,21 @@ describe("report settings", () => {
     await waitFor(() => expect(bridge.saveDiagnostics).toHaveBeenCalledWith({}));
   });
 
-  it("says when this build sends no reports", async () => {
-    bridge.readDiagnostics.mockResolvedValueOnce({ text: "dohc diagnostics", reports: false });
+  it("says which reports this launch cannot send", async () => {
+    const rows = () => ["settings-row-usage-reports", "settings-row-error-reports"]
+      .map((id) => screen.getByTestId(id).textContent?.includes("Unavailable for this launch.") ?? false);
+    for (const [usage, errors] of [[false, false], [true, false], [false, true], [true, true]] as const) {
+      bridge.readDiagnostics.mockResolvedValueOnce({ text: "dohc diagnostics", available: { usage, errors } });
+      const view = render(<ReportsSettings privacy={{ usageReports: true, errorReports: true }} onChange={vi.fn()} />);
+      await waitFor(() => expect(rows()).toEqual([!usage, !errors]));
+      view.unmount();
+    }
+  });
+
+  it("says that usage reports carry an ID for this installation", () => {
     render(<ReportsSettings privacy={{ usageReports: true, errorReports: true }} onChange={vi.fn()} />);
-    await waitFor(() => expect(screen.getAllByText(/This build sends none\./)).toHaveLength(2));
+    expect(screen.getByTestId("settings-row-usage-reports").textContent).toContain("random ID for this installation");
+    expect(screen.getByTestId("settings-row-error-reports").textContent).not.toContain("ID");
   });
 
   it("reports a save that failed", async () => {

@@ -55,6 +55,8 @@ export type Notice = {
 // Notices remains.
 export interface WorkspaceErrorNotice {
   tone?: "success";
+  // A success toast that stays until it is closed, rather than fading.
+  stays?: boolean;
   id: string;
   title?: string;
   message: string;
@@ -1219,10 +1221,10 @@ export function NoticeCenter(props: {
     [props.workspaceErrors],
   );
   useEffect(() => {
-    if (errorToast?.tone !== "success" || !props.onHideWorkspaceError) return;
+    if (errorToast?.tone !== "success" || errorToast.stays || !props.onHideWorkspaceError) return;
     const timer = setTimeout(() => props.onHideWorkspaceError?.(errorToast.id), FADING_TOAST_MS);
     return () => clearTimeout(timer);
-  }, [errorToast?.id, errorToast?.tone, props.onHideWorkspaceError]);
+  }, [errorToast?.id, errorToast?.tone, errorToast?.stays, props.onHideWorkspaceError]);
   const sentToast = props.sentNoticeToast ?? null;
   const sentToastKey = sentToast ? sentKey(sentAccount, sentToast.notice) : null;
   const { onHideSentNoticeToast } = props;

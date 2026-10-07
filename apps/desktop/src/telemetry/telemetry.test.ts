@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { EngineDaemonUnavailableError } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCodeLocations } from "../crashReports/crashReport";
@@ -41,15 +42,21 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function telemetry(reporting: Reporting | null = REPORTING) {
+const FACTS = () => ({
+  atMs: nowMs, version: "1.2.3", channel: "latest", os: "Windows_NT", osVersion: "10.0.22631",
+  arch: "x64", electron: "43.3.0",
+});
+
+function telemetry(
+  reporting: Reporting | null = REPORTING,
+  overrides: Partial<Pick<Parameters<typeof createTelemetry>[0], "facts" | "locate">> = {},
+) {
   return createTelemetry({
     reporting,
     statePath: join(dir, "reporting.json"),
-    facts: () => ({
-      atMs: nowMs, version: "1.2.3", channel: "latest", os: "Windows_NT", osVersion: "10.0.22631",
-      arch: "x64", electron: "43.3.0",
-    }),
+    facts: FACTS,
     locate: createCodeLocations([INSTALL], process.platform),
+    ...overrides,
     fetch: (async (url: URL | RequestInfo, init?: RequestInit) => {
       const call = { url: String(url), init: init ?? {} };
       calls.push(call);
@@ -60,9 +67,9 @@ function telemetry(reporting: Reporting | null = REPORTING) {
 }
 
 // A telemetry whose person already saw the notice on an earlier launch.
-function shown(reporting: Reporting | null = REPORTING) {
+function shown(reporting: Reporting | null = REPORTING, overrides: Parameters<typeof telemetry>[1] = {}) {
   writeFileSync(join(dir, "reporting.json"), JSON.stringify({ installId: "6f1c1c55-6a52-4a40-8d38-1b2d2e1c1f10" }));
-  return telemetry(reporting);
+  return telemetry(reporting, overrides);
 }
 
 const usageCalls = () => calls.filter((call) => call.url.startsWith("https://ph.example.test/"));
@@ -83,15 +90,23 @@ function privateError(): Error {
 }
 
 describe("reports wait for the notice and the switches", () => {
-  it("sends nothing until the notice was shown, then sends what waited", async () => {
+  it("sends nothing until a window showed the notice, then sends what waited", async () => {
     const reports = telemetry();
     reports.track({ name: "app_launched" });
     reports.setPrivacy(ON);
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs * 2);
     expect(calls).toEqual([]);
 
-    expect(reports.takeNotice()).toBe(true);
-    expect(reports.takeNotice()).toBe(false);
+    // Asking changes nothing: a window may close before it shows the notice.
+    expect(reports.noticeDue(ON)).toEqual({ usage: true, errors: true });
+    expect(reports.noticeDue(ON)).toEqual({ usage: true, errors: true });
+    expect(existsSync(join(dir, "reporting.json"))).toBe(false);
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs * 2);
+    expect(calls).toEqual([]);
+
+    reports.acknowledgeNotice();
+    expect(existsSync(join(dir, "reporting.json"))).toBe(true);
+    expect(reports.noticeDue(ON)).toEqual({ usage: false, errors: false });
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.usageFlushMs);
     expect(usageCalls()).toHaveLength(1);
     const body = JSON.parse(String(usageCalls()[0]!.init.body)) as {
@@ -131,11 +146,43 @@ describe("reports wait for the notice and the switches", () => {
     expect(calls).toEqual([]);
   });
 
-  it("does not show the notice when both switches are already off", () => {
+  it("keeps the notice due on the next launch when no window showed it", async () => {
+    const first = telemetry();
+    first.setPrivacy(ON);
+    expect(first.noticeDue(ON)).toEqual({ usage: true, errors: true });
+    first.track({ name: "app_launched" });
+    await first.flush();
+
+    const next = telemetry();
+    next.setPrivacy(ON);
+    expect(next.noticeDue(ON)).toEqual({ usage: true, errors: true });
+    await next.flush();
+    expect(calls).toEqual([]);
+  });
+
+  it("names no report while both switches are off, and the ones turned on later", async () => {
     const reports = telemetry();
     reports.setPrivacy(OFF);
-    expect(reports.takeNotice()).toBe(false);
+    expect(reports.noticeDue(OFF)).toEqual({ usage: false, errors: false });
     expect(existsSync(join(dir, "reporting.json"))).toBe(false);
+
+    const errorsOnly = { usageReports: false, errorReports: true };
+    reports.setPrivacy(errorsOnly);
+    expect(reports.noticeDue(errorsOnly)).toEqual({ usage: false, errors: true });
+    reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: "" } });
+    await reports.flush();
+    expect(calls).toEqual([]);
+    reports.acknowledgeNotice();
+    await vi.advanceTimersByTimeAsync(REPORT_LIMITS.errorFlushMs);
+    expect(errorCalls()).toHaveLength(1);
+  });
+
+  it("names only the reports this launch can send", () => {
+    expect(telemetry({ ...REPORTING, usage: null }).noticeDue(ON)).toEqual({ usage: false, errors: true });
+    expect(telemetry({ ...REPORTING, errors: null }).noticeDue(ON)).toEqual({ usage: true, errors: false });
+    expect(telemetry({ ...REPORTING, usage: null }).available).toEqual({ usage: false, errors: true });
+    expect(telemetry({ ...REPORTING, errors: null }).available).toEqual({ usage: true, errors: false });
+    expect(telemetry(REPORTING).available).toEqual({ usage: true, errors: true });
   });
 
   it("keeps the two switches independent", async () => {
@@ -180,8 +227,9 @@ describe("reports wait for the notice and the switches", () => {
   it("sends nothing from a build that names no service", async () => {
     const reports = telemetry(null);
     reports.setPrivacy(ON);
-    expect(reports.active).toBe(false);
-    expect(reports.takeNotice()).toBe(false);
+    expect(reports.available).toEqual({ usage: false, errors: false });
+    expect(reports.noticeDue(ON)).toEqual({ usage: false, errors: false });
+    reports.acknowledgeNotice();
     reports.track({ name: "app_launched" });
     reports.reportError({ kind: "renderer", origin: "boundary", error: { type: "string" } });
     await reports.flush();
@@ -245,6 +293,25 @@ describe("what an error report holds", () => {
       [{ type: "ProcessGone", value: "gpu crashed (exit code 5)" }],
     ]);
   });
+
+  it("names a window's file the way the uploaded source maps do, from an installation path with spaces", async () => {
+    const install = resolve("dohc install", "My Programs", "dohc");
+    const asset = join(install, "resources", "app.asar", "dist", "renderer", "assets", "Index-AbC9.js");
+    const reports = shown(REPORTING, { locate: createCodeLocations([install], process.platform) });
+    reports.setPrivacy(ON);
+    const url = pathToFileURL(asset).href;
+    expect(url).toContain("%20");
+    reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: `    at render (${url}:7:8)` } });
+    await reports.flush();
+    const values = (envelopeEvent(errorCalls()[0]!).exception as { values: Array<{ stacktrace: { frames: unknown[] } }> }).values;
+    expect(values[0]!.stacktrace.frames).toEqual([{
+      filename: "app:///dist/renderer/assets/Index-AbC9.js",
+      abs_path: "app:///dist/renderer/assets/Index-AbC9.js",
+      lineno: 7,
+      colno: 8,
+      in_app: true,
+    }]);
+  });
 });
 
 describe("limits", () => {
@@ -255,6 +322,18 @@ describe("limits", () => {
       reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: `at x (${BUNDLE}:1:2)` } });
     }
     await vi.advanceTimersByTimeAsync(REPORT_LIMITS.errorFlushMs * 10);
+    expect(errorCalls()).toHaveLength(1);
+  });
+
+  it("stops preparing errors once a loop has repeated one too often", async () => {
+    const facts = vi.fn(FACTS);
+    const reports = shown(REPORTING, { facts });
+    reports.setPrivacy(ON);
+    for (let index = 0; index < 1_000; index += 1) {
+      reports.reportError({ kind: "renderer", origin: "uncaught", error: { name: "TypeError", stack: `at x (${BUNDLE}:1:2)` } });
+    }
+    expect(facts).toHaveBeenCalledTimes(REPORT_LIMITS.errorsPrepared);
+    await reports.flush();
     expect(errorCalls()).toHaveLength(1);
   });
 

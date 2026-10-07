@@ -121,6 +121,7 @@ The app limits what it sends:
 | Waiting at once | 100 | 10 |
 | Sent | 60 s after the first waits, or at once when 50 wait | 1 s after the problem |
 | Repeats | Each action counts | Each distinct problem once per launch |
+| Prepared per launch | Same as sent | 100, repeats included. Each window hands main at most 25 distinct errors. |
 
 A request times out after 10 s and is never retried. The app honors
 `Retry-After` and `X-Sentry-Rate-Limits` for up to one hour, and drops reports
@@ -134,7 +135,8 @@ then update the reports reference.
 ### Upload source maps
 
 A production build writes hidden source maps beside its files. The installer
-leaves them out. To let Sentry show original source lines, add these:
+leaves them out. When `DOHC_SENTRY_DSN` is set, add these so Sentry can show
+original source lines:
 
 | Name | Kind | Value |
 | --- | --- | --- |
@@ -143,10 +145,13 @@ leaves them out. To let Sentry show original source lines, add these:
 | `SENTRY_PROJECT` | Variable | The project slug. |
 | `SENTRY_URL` | Variable | Set only for self-hosted Sentry. |
 
-The **Upload source maps** step then runs `@sentry/cli` 3.8.0 for each package.
-It uploads `apps/desktop/dist` with that package's release and dist, under
-the URL prefix `app:///dist`. Error reports name frames the same way. Without
-the token, the step skips the upload.
+The **Upload source maps** step runs `scripts/upload-desktop-source-maps.mjs`
+for each package. The script runs `@sentry/cli` 3.8.0 to upload
+`apps/desktop/dist` with that package's release and dist, under the URL prefix
+`app:///dist`. Error reports name frames the same way. Without
+`DOHC_SENTRY_DSN`, the step uploads nothing. With the DSN but without
+`SENTRY_AUTH_TOKEN`, the step fails. To fix it, add the token or clear the DSN.
+A dry run skips the step.
 
 ## What the release workflow proves
 

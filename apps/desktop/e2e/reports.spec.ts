@@ -37,7 +37,7 @@ test("@telemetry-smoke report switches persist, and diagnostics show, copy, and 
     await page.emulateMedia({ reducedMotion: "reduce" });
     await expect(usageSwitch(page)).toHaveAttribute("aria-checked", "true");
     await expect(errorSwitch(page)).toHaveAttribute("aria-checked", "true");
-    await expect(page.getByTestId("settings-row-usage-reports")).toContainText("This build sends none.");
+    await expect(page.getByTestId("settings-row-usage-reports")).toContainText("Unavailable for this launch.");
 
     // Keyboard: the switch takes focus and Space changes only that switch.
     await usageSwitch(page).focus();
@@ -51,7 +51,7 @@ test("@telemetry-smoke report switches persist, and diagnostics show, copy, and 
     await page.getByTestId("diagnostics-show").click();
     const text = page.getByTestId("diagnostics-text");
     await expect(text).toContainText("dohc diagnostics");
-    await expect(text).toContainText("Usage reports: off (this build sends no reports)");
+    await expect(text).toContainText("Usage reports: unavailable for this launch");
     await expect(text).not.toContainText(temp.rootPath);
 
     for (const colorScheme of ["light", "dark"] as const) {

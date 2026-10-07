@@ -42,6 +42,7 @@ import {
   createMockUpdateServer,
   resolveServablePath,
 } from "./mock-update-server.mjs";
+import { sourceMapUpload } from "./upload-desktop-source-maps.mjs";
 
 async function fixtureRoot(version = "0.1.0") {
   const root = await mkdtemp(join(tmpdir(), "dohc-release-"));
@@ -724,6 +725,64 @@ test("desktop release workflow uploads only distributable release assets", async
     prepareReleaseUpload,
     /if ! is_release_upload_file "\$file"; then\s+continue\s+fi/,
     "release upload step must skip non-release files before the basename conflict guard",
+  );
+});
+
+const SOURCE_MAP_ENV = {
+  DOHC_SENTRY_DSN: "https://abcdef0123456789abcdef0123456789@sentry.example.test/42",
+  SENTRY_AUTH_TOKEN: "sntrys_fixture",
+  DESKTOP_VERSION: "0.1.1-nightly.20260621.2.1",
+  DOHC_SENTRY_DIST: "win-x64",
+};
+
+test("a build with a Sentry DSN uploads its source maps under the names its reports carry", () => {
+  assert.deepEqual(sourceMapUpload(SOURCE_MAP_ENV).args, [
+    "dlx", "@sentry/cli@3.8.0", "sourcemaps", "upload",
+    "--release", "dohc-desktop@0.1.1-nightly.20260621.2.1",
+    "--dist", "win-x64",
+    "--url-prefix", "app:///dist",
+    "apps/desktop/dist",
+  ]);
+  assert.match(sourceMapUpload({ ...SOURCE_MAP_ENV, DOHC_SENTRY_DSN: " " }).skip, /DOHC_SENTRY_DSN is not set/);
+  assert.match(sourceMapUpload({ DOHC_SENTRY_DSN: "" }).skip, /needs no source maps/);
+  for (const missing of [{ SENTRY_AUTH_TOKEN: "" }, { SENTRY_AUTH_TOKEN: undefined }]) {
+    assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, ...missing }), /Add the SENTRY_AUTH_TOKEN secret/);
+  }
+  assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, DESKTOP_VERSION: "" }), /DESKTOP_VERSION/);
+  assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, DOHC_SENTRY_DIST: "win x64" }), /DOHC_SENTRY_DIST/);
+});
+
+test("upload-desktop-source-maps skips without a DSN and fails without a token when run as a command", async () => {
+  const skipped = await runReleaseScript("upload-desktop-source-maps.mjs", [], {
+    ...SOURCE_MAP_ENV,
+    DOHC_SENTRY_DSN: "",
+    SENTRY_AUTH_TOKEN: "",
+  });
+  assert.match(skipped.stdout, /needs no source maps/);
+
+  await assert.rejects(
+    runReleaseScript("upload-desktop-source-maps.mjs", [], { ...SOURCE_MAP_ENV, SENTRY_AUTH_TOKEN: "" }),
+    (error) => error.code === 1 && /Add the SENTRY_AUTH_TOKEN secret/.test(error.stderr),
+  );
+});
+
+test("the release uploads source maps for every build that names Sentry, and never in a dry run", async () => {
+  const workflow = await readFile(join(process.cwd(), ".github/workflows/desktop-release.yml"), "utf8");
+  const build = stepBlock(workflow, "Build desktop");
+  const upload = stepBlock(workflow, "Upload source maps");
+  assert.match(upload, /^ {8}if: needs\.preflight\.outputs\.dry_run != 'true'$/m);
+  assert.match(upload, /^ {8}run: node scripts\/upload-desktop-source-maps\.mjs$/m);
+  // The upload sees the DSN and dist the build compiled in.
+  const envLine = (step, name) => step.match(new RegExp(`^ {10}${name}: (.+)$`, "m"))?.[1];
+  for (const name of ["DOHC_SENTRY_DSN", "DOHC_SENTRY_DIST"]) {
+    assert.ok(envLine(build, name), `the build sets ${name}`);
+    assert.equal(envLine(upload, name), envLine(build, name), `the upload reads the build's ${name}`);
+  }
+  assert.equal(envLine(upload, "DESKTOP_VERSION"), "${{ needs.preflight.outputs.version }}");
+  assert.match(envLine(upload, "SENTRY_AUTH_TOKEN"), /needs\.preflight\.outputs\.dry_run != 'true' && secrets\.SENTRY_AUTH_TOKEN/);
+  assert.ok(
+    stepBlocks(workflow).indexOf(upload) > stepBlocks(workflow).indexOf(build),
+    "the upload runs after the build writes the source maps",
   );
 });
 

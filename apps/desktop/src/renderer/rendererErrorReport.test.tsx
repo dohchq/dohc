@@ -7,10 +7,13 @@ import { reportRendererError } from "./rendererErrorReport";
 
 const SECRET = "Secret Trip Plans";
 let reportRendererErrorCall: ReturnType<typeof vi.fn>;
+// A window hands each distinct error once, so each error here has its own line.
+let line = 0;
 
 function secretError(): Error {
+  line += 1;
   const error = new RangeError(`${SECRET} failed`);
-  error.stack = `RangeError: ${SECRET} failed\n    at open (file:///C:/dohc/resources/app.asar/dist/renderer/index.js:1:2)`;
+  error.stack = `RangeError: ${SECRET} failed\n    at open (file:///C:/dohc/resources/app.asar/dist/renderer/index.js:${line}:2)`;
   return error;
 }
 
@@ -35,7 +38,7 @@ describe("renderer error reports", () => {
     reportRendererError("uncaught", secretError());
     expect(reportRendererErrorCall).toHaveBeenCalledWith({
       origin: "uncaught",
-      error: { name: "RangeError", stack: "    at open (file:///C:/dohc/resources/app.asar/dist/renderer/index.js:1:2)" },
+      error: { name: "RangeError", stack: `    at open (file:///C:/dohc/resources/app.asar/dist/renderer/index.js:${line}:2)` },
     });
     expect(JSON.stringify(reportRendererErrorCall.mock.calls)).not.toContain(SECRET);
   });
@@ -60,7 +63,7 @@ describe("renderer error reports", () => {
     const target = new EventTarget();
     installGlobalErrorReporters(target as unknown as Window);
     target.dispatchEvent(Object.assign(new Event("error"), { error: secretError(), message: SECRET }));
-    target.dispatchEvent(Object.assign(new Event("unhandledrejection"), { reason: SECRET }));
+    target.dispatchEvent(Object.assign(new Event("unhandledrejection"), { reason: secretError() }));
     expect(reportRendererErrorCall.mock.calls.map(([payload]) => (payload as { origin: string }).origin))
       .toEqual(["uncaught", "rejection"]);
     expect(JSON.stringify(reportRendererErrorCall.mock.calls)).not.toContain(SECRET);

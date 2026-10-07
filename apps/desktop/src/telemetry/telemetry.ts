@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
 import type { CodeLocation } from "../crashReports/crashReport";
+import type { ReportKinds } from "../ipc/bridgeContract";
 import { CHANNELS } from "../ipc/channels";
 import type { PrivacySettings } from "../settings/userSettings";
 import { sentryEnvelope, sentryEvent, type ErrorFacts, type ReportedError, type SentryEvent } from "./errorReport";
@@ -46,6 +47,9 @@ export const REPORT_LIMITS = {
   usageFlushMs: 60_000,
   errorQueue: 10,
   errorsPerLaunch: 25,
+  // Errors prepared per launch, repeats included, so a loop that keeps
+  // failing stops costing work.
+  errorsPrepared: 100,
   // Distinct problems remembered, so a repeat is not sent again.
   errorKeys: 200,
   errorFlushMs: 1_000,
@@ -69,11 +73,15 @@ export interface Telemetry {
   // The person's switches. Until main first reads them, reports wait. A
   // switch that turns off drops what waits and stops a send under way.
   setPrivacy(privacy: PrivacySettings): void;
-  // True once, the first time this build reports, so the person learns
-  // about reports before any leaves.
-  takeNotice(): boolean;
-  // Whether this build names a report service at all.
-  readonly active: boolean;
+  // The reports the notice must name: those this launch can send and
+  // `privacy` allows, until a window has shown the notice. None means no
+  // notice is due. Asking changes nothing.
+  noticeDue(privacy: PrivacySettings): ReportKinds;
+  // A window shows the notice. Main saves the install ID, and reports may
+  // leave from now on.
+  acknowledgeNotice(): void;
+  // The services this launch can send to.
+  readonly available: ReportKinds;
   // Sends what waits, within the shutdown budget.
   flush(): Promise<void>;
 }
@@ -93,7 +101,7 @@ interface Lane<Item> {
  */
 export function createTelemetry(deps: {
   reporting: Reporting | null;
-  // Holds the install ID. It exists once the notice was shown.
+  // Holds the install ID. It exists once a window showed the notice.
   statePath: string;
   facts(): ErrorFacts & { channel: string };
   locate(frame: string): CodeLocation | null;
@@ -107,6 +115,7 @@ export function createTelemetry(deps: {
   let installId = reporting ? readInstallId(deps.statePath) : null;
   let usageCount = 0;
   let errorCount = 0;
+  let errorsPrepared = 0;
   const errorKeys = new Set<string>();
   const usage: Lane<{ event: string; properties: Record<string, unknown>; timestamp: string }> = lane();
   const errors: Lane<SentryEvent> = lane();
@@ -190,7 +199,7 @@ export function createTelemetry(deps: {
   }
 
   return {
-    active: reporting !== null,
+    available: { usage: Boolean(reporting?.usage), errors: Boolean(reporting?.errors) },
 
     track(event) {
       if (!usageMayQueue() || usageCount >= REPORT_LIMITS.usagePerLaunch) return;
@@ -220,7 +229,8 @@ export function createTelemetry(deps: {
     reportError(reported) {
       try {
         if (!reporting || !errorsMayQueue() || errorCount >= REPORT_LIMITS.errorsPerLaunch) return;
-        if (errors.queue.length >= REPORT_LIMITS.errorQueue) return;
+        if (errors.queue.length >= REPORT_LIMITS.errorQueue || errorsPrepared >= REPORT_LIMITS.errorsPrepared) return;
+        errorsPrepared += 1;
         const { event, key } = sentryEvent(reported, deps.facts(), reporting, deps.locate);
         if (errorKeys.has(key)) return;
         if (errorKeys.size < REPORT_LIMITS.errorKeys) errorKeys.add(key);
@@ -240,19 +250,25 @@ export function createTelemetry(deps: {
       schedule(errors, errorsOn, REPORT_LIMITS.errorFlushMs, sendErrors);
     },
 
-    takeNotice() {
-      if (!reporting || installId) return false;
-      if (privacy && !privacy.usageReports && !privacy.errorReports) return false;
+    noticeDue(next) {
+      if (installId) return { usage: false, errors: false };
+      return {
+        usage: Boolean(reporting?.usage) && next.usageReports,
+        errors: Boolean(reporting?.errors) && next.errorReports,
+      };
+    },
+
+    acknowledgeNotice() {
+      if (!reporting || installId) return;
       try {
         installId = writeInstallId(deps.statePath);
       } catch (error) {
-        // Without the file the notice shows again next launch, and nothing is sent.
+        // Without the file the notice shows again, and nothing is sent.
         console.error("[reports] could not save the report state", error);
-        return true;
+        return;
       }
       schedule(usage, usageOn, REPORT_LIMITS.usageFlushMs, sendUsage);
       schedule(errors, errorsOn, REPORT_LIMITS.errorFlushMs, sendErrors);
-      return true;
     },
 
     async flush() {

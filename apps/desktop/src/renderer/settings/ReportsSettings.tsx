@@ -11,8 +11,8 @@ const BUTTON =
 
 /**
  * The report switches, which apply to this computer, and the diagnostics a
- * person can read, copy, or save. Main sends reports only from a build that
- * names a report service, and only while a switch is on.
+ * person can read, copy, or save. Main sends a kind of report only when this
+ * launch can reach its service, and only while its switch is on.
  */
 export function ReportsSettings(props: {
   privacy: PrivacySettings;
@@ -41,7 +41,7 @@ export function ReportsSettings(props: {
     };
   }, [props.privacy]);
 
-  const none = diagnostics?.reports === false ? " This build sends none." : "";
+  const unavailable = (available: boolean | undefined) => available === false ? " Unavailable for this launch." : "";
   const save = async () => {
     try {
       await bridge().saveDiagnostics({});
@@ -54,7 +54,7 @@ export function ReportsSettings(props: {
     <>
       <SettingRow
         title="Send usage reports"
-        description={`Counts when you open dohc, create or open a workspace, share, publish an app, or send a chat message. No names, content, or links.${none}`}
+        description={`Counts when you open dohc, create or open a workspace, share, publish an app, or send a chat message. Includes a random ID for this installation. No names, content, or links.${unavailable(diagnostics?.available.usage)}`}
         modified={props.privacy.usageReports !== DEFAULT_PRIVACY_SETTINGS.usageReports}
         onReset={() => props.onChange({ ...props.privacy, usageReports: DEFAULT_PRIVACY_SETTINGS.usageReports })}
         testId="settings-row-usage-reports"
@@ -67,7 +67,7 @@ export function ReportsSettings(props: {
       </SettingRow>
       <SettingRow
         title="Send error reports"
-        description={`Sends an error's type and where in dohc's code it happened. No messages, file names, or other paths.${none}`}
+        description={`Sends an error's type and where in dohc's code it happened. No messages, file names, or other paths.${unavailable(diagnostics?.available.errors)}`}
         modified={props.privacy.errorReports !== DEFAULT_PRIVACY_SETTINGS.errorReports}
         onReset={() => props.onChange({ ...props.privacy, errorReports: DEFAULT_PRIVACY_SETTINGS.errorReports })}
         testId="settings-row-error-reports"

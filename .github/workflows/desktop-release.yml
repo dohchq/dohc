@@ -224,26 +224,18 @@ jobs:
 
       # Error reports name frames in the minified files. These source maps,
       # which the installer leaves out, let Sentry show the original lines.
+      # A build with a DSN fails here if the upload cannot run.
       - name: Upload source maps
         if: needs.preflight.outputs.dry_run != 'true'
-        shell: bash
         env:
+          DOHC_SENTRY_DSN: ${{ needs.preflight.outputs.dry_run != 'true' && vars.DOHC_SENTRY_DSN || '' }}
+          DOHC_SENTRY_DIST: ${{ matrix.artifact_platform }}-${{ matrix.arch }}
+          DESKTOP_VERSION: ${{ needs.preflight.outputs.version }}
           SENTRY_AUTH_TOKEN: ${{ needs.preflight.outputs.dry_run != 'true' && secrets.SENTRY_AUTH_TOKEN || '' }}
           SENTRY_URL: ${{ vars.SENTRY_URL }}
           SENTRY_ORG: ${{ vars.SENTRY_ORG }}
           SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
-          SENTRY_DSN_SET: ${{ vars.DOHC_SENTRY_DSN != '' }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$SENTRY_AUTH_TOKEN" || "$SENTRY_DSN_SET" != "true" ]]; then
-            echo "Sentry is not configured; skipping the source map upload."
-            exit 0
-          fi
-          pnpm dlx @sentry/cli@3.8.0 sourcemaps upload \
-            --release "dohc-desktop@${{ needs.preflight.outputs.version }}" \
-            --dist "${{ matrix.artifact_platform }}-${{ matrix.arch }}" \
-            --url-prefix "app:///dist" \
-            apps/desktop/dist
+        run: node scripts/upload-desktop-source-maps.mjs
 
       - name: Build workspace engine
         shell: bash

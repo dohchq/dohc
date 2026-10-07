@@ -13,12 +13,13 @@ const FACTS: CrashFacts = {
   electron: "43.3.0",
   uptimeSeconds: 42,
 };
+const BOTH = { usage: true, errors: true };
 
 describe("diagnostics", () => {
   it("names the build, the system, the switches, and the crash report", () => {
     expect(diagnosticsText({
       facts: FACTS,
-      reports: true,
+      available: BOTH,
       privacy: { usageReports: true, errorReports: false },
       crashReport: "dohc crash report\n\nTime: 2026-10-07T08:00:00.000Z",
     })).toBe([
@@ -37,20 +38,26 @@ describe("diagnostics", () => {
     ].join("\n"));
   });
 
-  it("says when this build sends no reports, and when nothing went wrong", () => {
-    const text = diagnosticsText({
+  it("says which reports this launch cannot send, and when nothing went wrong", () => {
+    const text = (available: { usage: boolean; errors: boolean }) => diagnosticsText({
       facts: { ...FACTS, packaged: false },
-      reports: false,
+      available,
       privacy: { usageReports: true, errorReports: true },
       crashReport: null,
     });
-    expect(text).toContain("Version: 1.2.3 (latest, development build)");
-    expect(text).toContain("Usage reports: off (this build sends no reports)");
-    expect(text).toContain("Recent problems: none");
+    const switches = (value: string) => value.split("\n").filter((line) => line.includes(" reports: "));
+    expect(text({ usage: false, errors: false })).toContain("Version: 1.2.3 (latest, development build)");
+    expect(text({ usage: false, errors: false })).toContain("Recent problems: none");
+    expect(switches(text({ usage: false, errors: false })))
+      .toEqual(["Usage reports: unavailable for this launch", "Error reports: unavailable for this launch"]);
+    expect(switches(text({ usage: true, errors: false })))
+      .toEqual(["Usage reports: on", "Error reports: unavailable for this launch"]);
+    expect(switches(text({ usage: false, errors: true })))
+      .toEqual(["Usage reports: unavailable for this launch", "Error reports: on"]);
   });
 
   it("stays within its bound", () => {
-    const text = diagnosticsText({ facts: FACTS, reports: true, privacy: { usageReports: true, errorReports: true }, crashReport: "x".repeat(DIAGNOSTICS_MAX_CHARS) });
+    const text = diagnosticsText({ facts: FACTS, available: BOTH, privacy: { usageReports: true, errorReports: true }, crashReport: "x".repeat(DIAGNOSTICS_MAX_CHARS) });
     expect(text.length).toBe(DIAGNOSTICS_MAX_CHARS);
   });
 

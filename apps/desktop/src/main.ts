@@ -546,11 +546,14 @@ const telemetry = createTelemetry({
   }),
   locate: createCodeLocations(codeRoots, process.platform),
 });
-if (telemetry.active) {
-  void readCachedUserSettingsFile(stateDir()).then(
-    (result) => telemetry.setPrivacy(privacyInEffect(result)),
-    () => telemetry.setPrivacy({ usageReports: false, errorReports: false }),
-  );
+// The report switches as the settings file sets them. A file main cannot
+// read turns both off.
+const readPrivacy = () => readCachedUserSettingsFile(stateDir()).then(
+  privacyInEffect,
+  () => ({ usageReports: false, errorReports: false }),
+);
+if (telemetry.available.usage || telemetry.available.errors) {
+  void readPrivacy().then((privacy) => telemetry.setPrivacy(privacy));
 }
 telemetry.track({ name: "app_launched" });
 function recordCrash(event: CrashEvent): void {
@@ -5427,8 +5430,9 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
   applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
   chatDispatchService, withRendererWorkspaceOperation, notifyRenderer,
   broadcastUserSettings: (settings) => {
-    broadcastUserSettings(settings);
+    // Reports follow the switches before any window learns of them.
     telemetry.setPrivacy(privacyInEffect(settings));
+    broadcastUserSettings(settings);
     void automationWakeConsumer.resume();
   },
   openPath: (path) => shell.openPath(path),
@@ -5438,7 +5442,7 @@ const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRe
 async function currentDiagnostics(): Promise<string> {
   return diagnosticsText({
     facts: crashFacts(),
-    reports: telemetry.active,
+    available: telemetry.available,
     privacy: privacyInEffect(await readCachedUserSettingsFile(stateDir())),
     crashReport: crashReports.read().report?.text ?? null,
   });
@@ -6273,7 +6277,7 @@ function registerIpcHandlers(): void {
   });
 
   registerOperations(operationBoundary, reportingOperations, {
-    readDiagnostics: async () => ({ text: await currentDiagnostics(), reports: telemetry.active }),
+    readDiagnostics: async () => ({ text: await currentDiagnostics(), available: telemetry.available }),
     // Main asks where, and writes the text it builds itself.
     saveDiagnostics: async (_input, { event }) => ({
       saved: await saveDiagnostics({
@@ -6285,7 +6289,10 @@ function registerIpcHandlers(): void {
         defaultPath: join(app.getPath("documents"), "dohc-diagnostics.txt"),
       }, await currentDiagnostics()),
     }),
-    takeReportsNotice: () => ({ show: telemetry.takeNotice() }),
+    // The settings file decides, not the window, and is read here so a
+    // window that asks early still gets the saved switches.
+    readReportsNotice: async () => telemetry.noticeDue(await readPrivacy()),
+    acknowledgeReportsNotice: () => telemetry.acknowledgeNotice(),
     reportRendererError: ({ origin, error }) => {
       telemetry.reportError({ kind: "renderer", origin, error });
     },

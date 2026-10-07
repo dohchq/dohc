@@ -1,8 +1,10 @@
 import { createContext, useCallback, useEffect, useRef, useState } from "react";
 import { CreationPartialError, creationPartialNotice } from "@dohc/cli/creation";
+import type { ReportKinds } from "../../ipc/bridgeContract";
 import { readError, UNKNOWN_ERROR_WORDS, withErrorWords } from "../../ipc/errorWords";
 import { MAX_OPEN_TABS } from "../workbench/workbenchState";
 import type { ErrorDetailField } from "./copyDetails";
+import { reportsNoticeText } from "./useReportsNotice";
 import type { DirectWriteNotice, DirectWriteNoticeKind } from "./useShareDirectWrites";
 
 // A file dohc kept while it saved, as its Notices row reads, and the step
@@ -46,6 +48,8 @@ export const SHELL_ERROR_MAX_CHARS = 500;
 // retry rides with it; errors that are already over carry none.
 export interface ShellError {
   tone?: "success";
+  // A success toast that stays until it is closed, rather than fading.
+  stays?: boolean;
   id: string;
   title?: string;
   message: string;
@@ -399,13 +403,14 @@ export function useShellError(workspaceId: string) {
     },
     [push],
   );
-  // The one-time notice that this build sends reports, with the way to
-  // turn them off.
-  const showReportsNotice = useCallback((openPrivacy: () => void) => {
+  // The one-time notice about the reports this launch sends, with the way
+  // to turn them off. It stays until the person closes it.
+  const showReportsNotice = useCallback((reports: ReportKinds, openPrivacy: () => void) => {
     push({
-      message: "dohc sends usage and error reports to its developers. They hold no file names, content, chats, or links.",
+      message: reportsNoticeText(reports),
       retry: null,
       tone: "success",
+      stays: true,
       kind: "reports",
       action: { label: "Privacy settings", run: openPrivacy },
     });

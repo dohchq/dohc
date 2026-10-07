@@ -88,6 +88,7 @@ import { useEditorRegistry } from "./shell/useEditorRegistry";
 import { useSettingsFileNotices } from "./shell/useSettingsFileNotices";
 import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
+import { useReportsNotice } from "./shell/useReportsNotice";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
 import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
@@ -3844,17 +3845,14 @@ export function DesktopWorkspaceShell(props: {
     reportError: reportShellError,
     showSuccess: showSuccessNotice,
   });
-  // Main answers true once per installation, the first time this build
-  // reports, so the person learns about reports before any leaves. The notice
-  // is about this computer, not the workspace, so any open window shows it.
-  useEffect(() => {
-    void bridge()
-      .takeReportsNotice({})
-      .then(({ show }) => {
-        if (show) showReportsNotice(() => openSettings("privacy"));
-      })
-      .catch(() => undefined);
-  }, [openSettings, showReportsNotice]);
+  // The person learns about reports before any leaves. The notice is about
+  // this computer, not the workspace, so any open window shows it.
+  useReportsNotice({
+    workspaceId,
+    privacy: props.userSettings?.settings.privacy ?? null,
+    shown: shellErrors.some((error) => error.kind === "reports"),
+    show: (reports) => showReportsNotice(reports, () => openSettings("privacy")),
+  });
 
   const refreshShareView = useCallback(async (): Promise<ShareViewRefresh> => {
     if (!shareView) return "current";
@@ -4439,6 +4437,7 @@ export function DesktopWorkspaceShell(props: {
       shellErrors.map((error) => ({
         id: error.id,
         ...(error.tone ? { tone: error.tone } : {}),
+        ...(error.stays ? { stays: true } : {}),
         message: error.message,
         ...(error.title ? { title: error.title } : {}),
         details: errorDetails([

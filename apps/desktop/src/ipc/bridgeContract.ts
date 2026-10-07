@@ -5751,10 +5751,13 @@ export const crashReportOperations = {
 // Privacy allow it. Diagnostics stay on this computer unless the person
 // copies them or saves them to a file.
 export const DIAGNOSTICS_MAX_CHARS = 40_000;
+// One flag for each kind of report.
+export const ReportKinds = z.object({ usage: z.boolean(), errors: z.boolean() });
+export type ReportKinds = z.infer<typeof ReportKinds>;
 export const ReadDiagnosticsResult = z.object({
   text: z.string().min(1).max(DIAGNOSTICS_MAX_CHARS),
-  // Whether this build sends reports at all.
-  reports: z.boolean(),
+  // The report services this launch can send to.
+  available: ReportKinds,
 });
 export type ReadDiagnosticsResult = z.infer<typeof ReadDiagnosticsResult>;
 // An error a dohc window caught or did not catch. Main keeps the class only
@@ -5786,13 +5789,20 @@ export const reportingOperations = {
     channel: "desktop:save-diagnostics",
     payload: z.object({}), result: z.object({ saved: z.boolean() }), guard: "trusted-sender",
   },
-  // True once, the first time this build reports, so the window tells the
-  // person before any report leaves.
-  takeReportsNotice: {
-    capabilityId: "reports.notice.take",
+  // The reports a window must name in the notice before any leaves. None
+  // means no notice is due. Asking changes nothing.
+  readReportsNotice: {
+    capabilityId: "reports.notice.read",
     scope: "device",
-    channel: "desktop:take-reports-notice",
-    payload: z.object({}), result: z.object({ show: z.boolean() }), guard: "trusted-sender",
+    channel: "desktop:read-reports-notice",
+    payload: z.object({}), result: ReportKinds, guard: "trusted-sender",
+  },
+  // The window shows the notice, so reports may leave from now on.
+  acknowledgeReportsNotice: {
+    capabilityId: "reports.notice.acknowledge",
+    scope: "device",
+    channel: "desktop:acknowledge-reports-notice",
+    payload: z.object({}), guard: "trusted-sender",
   },
   reportRendererError: {
     capabilityId: "reports.error.send",

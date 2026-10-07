@@ -118,6 +118,7 @@
   "workspace.open.failures.take",
   "diagnostics.read",
   "diagnostics.save",
-  "reports.notice.take",
+  "reports.notice.read",
+  "reports.notice.acknowledge",
   "reports.error.send"
 ]
