@@ -850,7 +850,7 @@ describe("mcp tools operate on allowed paths", () => {
     await withWorkspace(async (ctx) => {
       await mkdir(join(ctx.root, "versioned"));
       await writeFile(join(ctx.root, "versioned/index.html"), "<p>App</p>");
-      await writeFile(join(ctx.root, "versioned/dohc.json"), JSON.stringify({ version, type: "site", title: "Declared title" }));
+      await writeFile(join(ctx.root, "versioned/dohc.json"), JSON.stringify({ version, type: "app", title: "Declared title" }));
       const result = await detectApps(ctx);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
@@ -904,7 +904,7 @@ describe("mcp tools operate on allowed paths", () => {
           serve: "14.2.6",
         },
       });
-      expect(config).toMatchObject({ version: 1, type: "site", title: "Ledger", build: { output: "dist" } });
+      expect(config).toMatchObject({ version: 1, type: "app", title: "Ledger", build: { output: "dist" } });
       // The scaffold reports the engine as recorder; no change set.
       await expect(listChanges(ctx, { includeFiles: true })).resolves.toMatchObject({
         count: 0,
@@ -925,6 +925,53 @@ describe("mcp tools operate on allowed paths", () => {
       });
       expect(result).toMatchObject({ ok: true, appRoot: "plain-site" });
       await expect(readFile(join(ctx.root, "plain-site/dohc.json"), "utf8")).rejects.toThrow();
+    });
+  });
+
+  it("dohc_detect_apps agrees with core on app manifests, other types, and build confidence", async () => {
+    await withWorkspace(async ctx => {
+      const sources = [
+        { path: "declared/dohc.json", body: '{"version":1,"type":"app"}' },
+        { path: "publication/app.publish.json", body: '{"version":1,"entryPath":"main.ts","inputs":["main.ts"]}' },
+        { path: "workflow/dohc.json", body: '{"type":"workflow","build":{"output":"dist"}}' },
+        { path: "retired/dohc.json", body: '{"type":"site","build":{"output":"dist"}}' },
+        { path: "claimed/dohc.json", body: '{"type":"app","build":{"output":"dist"}}' },
+        { path: "empty/dohc.json", body: '{}' },
+        { path: "build-only/dist/index.html", body: '<h1>Built</h1>' },
+        { path: "other-build/dohc.json", body: '{"type":"workflow"}' },
+        { path: "other-build/dist/index.html", body: '<h1>Built</h1>' },
+        { path: "conflict/dohc.json", body: '{"type":"workflow"}' },
+        { path: "conflict/index.html", body: '<h1>Independent</h1>' },
+        { path: "published-other/dohc.json", body: '{"type":"workflow"}' },
+        { path: "published-other/app.publish.json", body: '{}' },
+        { path: "malformed/dohc.json", body: '{"type":"app",' },
+        { path: "newer/dohc.json", body: '{"version":2,"type":"app"}' },
+        { path: "invalid-version/dohc.json", body: '{"version":"1","type":"app"}' },
+        { path: "invalid-type/dohc.json", body: '{"type":42}' },
+      ];
+      for (const source of sources) {
+        await mkdir(dirname(join(ctx.root, source.path)), { recursive: true });
+        await writeFile(join(ctx.root, source.path), source.body);
+      }
+      const result = await detectApps(ctx);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const facts = (apps: ReadonlyArray<Pick<ReturnType<typeof discoverSites>[number], "root" | "kind" | "confidence">>) => apps.map(app => ({
+        root: app.root, kind: app.kind, confidence: app.confidence,
+      })).sort((a, b) => a.root.localeCompare(b.root));
+      expect(facts(result.apps)).toEqual(facts(discoverSites(sources)));
+      for (const root of ["workflow", "retired"]) expect(result.apps.map(app => app.root)).not.toContain(root);
+      for (const root of ["declared", "publication", "claimed", "published-other"]) {
+        expect(result.apps.find(app => app.root === root)?.confidence).toBe("high");
+      }
+      expect(result.apps.find(app => app.root === "build-only")?.confidence).toBe("medium");
+      expect(result.apps.find(app => app.root === "empty")?.confidence).toBe("low");
+      expect(result.apps.find(app => app.root === "conflict")?.diagnostics).toContainEqual(
+        expect.objectContaining({ code: "unexpected_dohc_type", message: 'dohc.json has website signals but its type is not "app".' }),
+      );
+      expect(result.apps.find(app => app.root === "invalid-type")?.diagnostics).toContainEqual(
+        expect.objectContaining({ code: "invalid-type", message: 'dohc.json type should be "app".' }),
+      );
     });
   });
 
@@ -996,7 +1043,7 @@ describe("mcp tools operate on allowed paths", () => {
       );
       await writeFile(
         join(ctx.root, "nested-output/dohc.json"),
-        JSON.stringify({ type: "site", build: { output: "public/dist" } }),
+        JSON.stringify({ type: "app", build: { output: "public/dist" } }),
       );
 
       const result = await detectApps(ctx);
@@ -1026,7 +1073,7 @@ describe("mcp tools operate on allowed paths", () => {
       );
       await writeFile(
         join(ctx.root, "dual-output/dohc.json"),
-        JSON.stringify({ type: "site", build: { output: "public/dist" } }),
+        JSON.stringify({ type: "app", build: { output: "public/dist" } }),
       );
 
       const result = await detectApps(ctx);
@@ -1043,7 +1090,7 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "bad-preview-mode/index.html"), "<h1>Site</h1>");
       await writeFile(
         join(ctx.root, "bad-preview-mode/dohc.json"),
-        JSON.stringify({ type: "site", preview: { mode: "invalid" } }),
+        JSON.stringify({ type: "app", preview: { mode: "invalid" } }),
       );
 
       const result = await detectApps(ctx);
@@ -1082,7 +1129,7 @@ describe("mcp tools operate on allowed paths", () => {
       // {} parses cleanly (configPath set, no error diagnostic) but
       // declares no type at all — workspace-core's siteConfidence only
       // returns "high" for a config reason when it explicitly declares
-      // type: "site"; a valid-but-empty config isn't itself a
+      // type: "app"; a valid-but-empty config isn't itself a
       // high-confidence website signal. Both detectors have to agree on
       // the same dohc.json.
       await mkdir(join(ctx.root, "empty-config"), { recursive: true });
@@ -1118,7 +1165,7 @@ describe("mcp tools operate on allowed paths", () => {
       const result = await detectApps(ctx);
       expect(result).toMatchObject({ ok: true, count: 1 });
       if (!result.ok) return;
-      // A genuinely valid dohc.json ({"type":"site"}) reads kind "configured"
+      // A genuinely valid dohc.json ({"type":"app"}) reads kind "configured"
       // and confidence "high" here (see the "finds configured, package, and
       // static sites" test above); an array parses without throwing, so
       // without the shape check this folder would misclassify the same way.
@@ -1233,7 +1280,7 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "portal/index.html"), "<h1>Portal</h1>");
       await writeFile(
         join(ctx.root, "portal/dohc.json"),
-        JSON.stringify({ type: "site", build: { output: "dist" } }),
+        JSON.stringify({ type: "app", build: { output: "dist" } }),
       );
       // A genuinely separate, independently detectable web project happens
       // to live at that exact claimed (but unbuilt) path — the claim alone
@@ -1264,7 +1311,7 @@ describe("mcp tools operate on allowed paths", () => {
       const padding = "x".repeat(1024 * 1024 + 1);
       await writeFile(
         join(ctx.root, "oversized-config/dohc.json"),
-        JSON.stringify({ type: "site", title: padding }),
+        JSON.stringify({ type: "app", title: padding }),
       );
 
       const result = await detectApps(ctx);
@@ -1286,7 +1333,7 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "site-unsafe-output/index.html"), "<h1>Site</h1>");
       await writeFile(
         join(ctx.root, "site-unsafe-output/dohc.json"),
-        JSON.stringify({ type: "site", build: { output: "../../outside" } }),
+        JSON.stringify({ type: "app", build: { output: "../../outside" } }),
       );
 
       const result = await detectApps(ctx);
@@ -1376,7 +1423,7 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "docs/public/index.html"), "<h1>Configured entry</h1>");
       await writeFile(
         join(ctx.root, "docs/dohc.json"),
-        JSON.stringify({ type: "site", preview: { mode: "static", entry: "public/index.html" } }),
+        JSON.stringify({ type: "app", preview: { mode: "static", entry: "public/index.html" } }),
       );
 
       const result = await detectApps(ctx);
@@ -1405,7 +1452,7 @@ describe("mcp tools operate on allowed paths", () => {
       await writeFile(join(ctx.root, "escape/index.html"), "<h1>Fallback</h1>");
       await writeFile(
         join(ctx.root, "escape/dohc.json"),
-        JSON.stringify({ type: "site", preview: { entry: "../outside/index.html" } }),
+        JSON.stringify({ type: "app", preview: { entry: "../outside/index.html" } }),
       );
 
       const result = await detectApps(ctx);
