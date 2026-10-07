@@ -111,6 +111,7 @@ export function EngineMayHoldDocumentNotice(props: {
   // not — and "It is read-only for now" would promise read access to
   // content the user cannot see.
   contentShown: boolean;
+  message?: string;
 }) {
   return (
     <div
@@ -127,8 +128,8 @@ export function EngineMayHoldDocumentNotice(props: {
           codex r20). What is true of all of them is the sentence below, and
           the retry is the same either way. */}
       <span>
-        dohc could not open this document for editing.
-        {props.contentShown ? " It is read-only for now." : ""}
+        {props.message ?? "dohc could not open this document for editing."}
+        {!props.message && props.contentShown ? " It is read-only for now." : ""}
       </span>
       <button
         type="button"

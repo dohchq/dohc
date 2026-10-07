@@ -2645,6 +2645,7 @@ fn interval_keeps_declared_agents_through_dedupe_compaction_and_reopen() {
     let expected = json!([
         {"kind":"agent","agentId":"review-agent","onBehalfOf":"owner","depth":2},
         {"kind":"agent","agentId":"trip-agent","onBehalfOf":"owner","depth":0},
+        {"kind":"unattributed"},
     ]);
     assert_eq!(declared(&f), expected);
     let key = DocKey::new("workspace", "main", "object").unwrap();

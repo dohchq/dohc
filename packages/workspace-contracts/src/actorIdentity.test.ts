@@ -130,6 +130,16 @@ describe("ActorKey derivation", () => {
       .toEqual(actorHueInput(link.key));
   });
 
+  it("keeps a live link's public identity without inventing a grant or internal participant", () => {
+    const actor = deriveMomentActor({ kind: "link", publicPrincipalId: "public-ana", label: "Ana" }, received, "Ana");
+    expect(actor.key).toEqual({ kind: "link", publicPrincipalId: "public-ana" });
+    expect(parseActorKey(serializeActorKey(actor.key))).toEqual(actor.key);
+    expect(actor.assurance).toBe("owner-asserted");
+    const other = deriveMomentActor({ kind: "link", publicPrincipalId: "public-bea", label: "Ana" }, received, "Ana");
+    expect(actorKeysEqual(actor.key, other.key)).toBe(false);
+    expect(actorHueInput(actor.key)).not.toEqual(actorHueInput(other.key));
+  });
+
   it("projects legacy human IDs without an issuer or verified self assurance", () => {
     for (const [humanId, identityKind] of [["alice", "account"], ["local:installation", "installation"]] as const) {
       const actor = deriveMomentActor({ kind: "human", humanId }, { source: "legacy" }, "Alice");
@@ -166,11 +176,19 @@ describe("ActorKey derivation", () => {
       .toBe("owner-asserted");
   });
 
-  it("leaves a live snapshot's link holder unknown, with no grant to key it by", () => {
+  it("keys a live snapshot's link holder by its public principal, with no grant", () => {
     const author = { kind: "link", publicPrincipalId: "public_1", label: "Anonymous" } as const;
-    for (const context of [received, { ...local, source: "own-store" } as const]) {
-      expect(deriveMomentActor(author, context, "Link holder Anonymous")).toMatchObject({ key: { kind: "unknown" }, assurance: "unknown" });
+    for (const [context, assurance] of [
+      [received, "owner-asserted"],
+      [{ ...local, source: "own-store" } as const, "relay-verified"],
+    ] as const) {
+      const actor = deriveMomentActor(author, context, "Link holder Anonymous");
+      expect(actor.key).toEqual({ kind: "link", publicPrincipalId: "public_1" });
+      expect(actor.assurance).toBe(assurance);
     }
+    // The same identifier as a grant's link participant is another identity.
+    const grantLink = deriveMomentActor({ kind: "link", grantId: "grant", grantGeneration: 1, principalId: "public_1" }, received, "Link holder");
+    expect(actorKeysEqual(deriveMomentActor(author, received, "Link holder Anonymous").key, grantLink.key)).toBe(false);
   });
 
   it("retains only the existing grant-scoped public pseudonym", () => {
@@ -294,6 +312,7 @@ it("normalizes issuer scheme, host, trailing slashes and default ports in every 
 
 describe("ActorKey storage", () => {
   const moments: readonly MomentAuthor[] = [
+    { kind: "unattributed" },
     { kind: "human", humanId: "alice" },
     { kind: "human", humanId: identity.installationId },
     { kind: "agent", agentId: "Opus", onBehalfOf: "alice" },

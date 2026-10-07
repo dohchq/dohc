@@ -654,6 +654,11 @@ const LinkAuthorSchema = mutableStruct({
   grantGeneration: Schema.Int,
   principalId: Schema.String,
 });
+const LiveLinkAuthorSchema = mutableStruct({
+  kind: Schema.Literal("link"),
+  publicPrincipalId: Schema.String,
+  label: Schema.String,
+});
 const AutomationAuthorSchema = mutableStruct({
   kind: Schema.Literal("automation"),
   automationId: Schema.String,
@@ -665,17 +670,12 @@ const HumanAuthorSchema = mutableStruct({
   humanId: Schema.String,
   onBehalfOf: Schema.optionalKey(Schema.String),
 });
-// A relay-admitted live author snapshot names the account holder or the
-// link's public principal with the name the relay stored for them.
+// A relay-admitted live author snapshot names the account holder with the
+// name the relay stored for them. Its link holder is LiveLinkAuthorSchema.
 const SnapshotHumanAuthorSchema = mutableStruct({
   kind: Schema.Literal("human"),
   humanId: Schema.String,
   humanName: Schema.String,
-});
-const SnapshotLinkAuthorSchema = mutableStruct({
-  kind: Schema.Literal("link"),
-  publicPrincipalId: Schema.String,
-  label: Schema.String,
 });
 const CorruptAuthorSchema = mutableStruct({ corrupt: Schema.Literal(true) });
 const MomentAuthorsSchema = Schema.NullOr(
@@ -686,10 +686,11 @@ const MomentAuthorsSchema = Schema.NullOr(
       PublicAuthorSchema,
       NamedAuthorSchema,
       LinkAuthorSchema,
+      LiveLinkAuthorSchema,
       AutomationAuthorSchema,
       SnapshotHumanAuthorSchema,
-      SnapshotLinkAuthorSchema,
       CorruptAuthorSchema,
+      mutableStruct({ kind: Schema.Literal("unattributed") }),
     ]),
   )),
 );

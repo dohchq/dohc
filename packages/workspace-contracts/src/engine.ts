@@ -137,6 +137,7 @@ interface AgentMomentAuthor {
 interface HumanMomentAuthor {
   kind: "human";
   humanId: string;
+  humanName?: string;
   onBehalfOf?: string;
 }
 
@@ -161,15 +162,9 @@ interface LinkMomentAuthor {
 }
 
 // A live edit's relay-admitted author snapshot names the signed-in account
-// holder, or the Edit link's public principal, with the name the relay
-// stored for them.
-interface SnapshotHumanMomentAuthor {
-  kind: "human";
-  humanId: string;
-  humanName: string;
-}
-
-interface SnapshotLinkMomentAuthor {
+// holder as a human with the name the relay stored for them, or the Edit
+// link's public principal with its label.
+interface LiveLinkMomentAuthor {
   kind: "link";
   publicPrincipalId: string;
   label: string;
@@ -188,21 +183,21 @@ interface AutomationMomentAuthor {
 }
 
 export type MomentAuthor =
+  | { kind: "unattributed" }
   | AgentMomentAuthor
   | HumanMomentAuthor
   | PublicMomentAuthor
   | NamedMomentAuthor
   | LinkMomentAuthor
-  | AutomationMomentAuthor
-  | SnapshotHumanMomentAuthor
-  | SnapshotLinkMomentAuthor;
+  | LiveLinkMomentAuthor
+  | AutomationMomentAuthor;
 
 // A person's own write names them, as desktop main reads them. A local agent
 // write names the person the agent works for. An automation names its run's
 // person, and none when its run has none.
 export type MomentWriteAuthor =
   | (Omit<AgentMomentAuthor, "agentName"> & { onBehalfOf: string })
-  | Omit<HumanMomentAuthor, "onBehalfOf">
+  | Omit<HumanMomentAuthor, "onBehalfOf" | "humanName">
   | AutomationMomentAuthor;
 
 type VersionedFileContentKind = "text" | "binary";

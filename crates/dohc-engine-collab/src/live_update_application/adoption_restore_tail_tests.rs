@@ -1,3 +1,170 @@
+#[test]
+fn owner_adoption_keeps_unattributed_accepted_prefix_coverage() {
+    let mut f = Fixture::new();
+    f.edit(true);
+    f.adopt().unwrap();
+    let authors = f
+        .store
+        .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+        .unwrap();
+    assert_eq!(
+        authors.moment_json().unwrap(),
+        r#"[{"kind":"unattributed"}]"#
+    );
+}
+
+#[test]
+fn adopted_settlement_preserves_unattributed_owner_and_recipient_contributions() {
+    for contributor in ["owner", "recipient", "recipient-only"] {
+        let mut f = Fixture::new();
+        f.adopt().unwrap();
+        assert!(
+            f.store
+                .read_with(|conn| crate::author_coverage::accepted_only_in(conn, &f.key))
+                .unwrap()
+        );
+        let mut terminal = None;
+        for cursor in 1..=if contributor == "recipient-only" {
+            1
+        } else {
+            2
+        } {
+            let text = if cursor == 1 {
+                "Recipient text"
+            } else {
+                contributor
+            };
+            let bytes = f.doc.richdoc_append_paragraph(text);
+            let event = AdmittedLiveUpdate {
+                metadata: AdmittedLiveUpdateMetadata {
+                    accepted: RelayAcceptedLiveUpdate {
+                        receipt: LiveUpdateReceipt {
+                            delivery_id: format!("edit-{cursor}"),
+                            update_digest: hex_sha256(&bytes),
+                            journal_cursor: cursor,
+                            accepting_host_epoch: 1,
+                        },
+                        binding: f.binding.clone(),
+                        authority: if cursor == 2 && contributor == "owner" {
+                            ServerDerivedLiveUpdateAuthority::Owner {
+                                principal_id: "owner".into(),
+                            }
+                        } else {
+                            ServerDerivedLiveUpdateAuthority::Named {
+                                principal_id: "recipient".into(),
+                                grant_id: "grant".into(),
+                                grant_generation: 1,
+                            }
+                        },
+                        received_at_ms: cursor,
+                    },
+                    first_seen: vec![],
+                    canonical_version: Some(2),
+                    author_snapshot: Some(if cursor == 1 {
+                        vec![LiveAuthorEntry::Human {
+                            human_id: "recipient".into(),
+                            human_name: "Recipient".into(),
+                        }]
+                    } else {
+                        vec![]
+                    }),
+                    first_seen_deletes: Some(vec![]),
+                    checkpoint_coverage: None,
+                },
+                update_bytes: bytes,
+            };
+            terminal = Some(event.metadata.accepted.receipt.clone());
+            assert!(matches!(
+                apply_committed(
+                    &mut f.store,
+                    &mut WriterDocCache::new(),
+                    &f.handle,
+                    event,
+                    &NoFaults,
+                    100_000_000,
+                    |_, _, _, _| Ok(())
+                )
+                .unwrap(),
+                ApplicationResult::Applied(..)
+            ));
+        }
+        crate::maybe_compact(&mut f.store, &f.key, 0, &NoFaults, 20).unwrap();
+        drop(f.store);
+        f.store = EngineStore::open(&f._scratch.join("engine.db"), 21).unwrap();
+        let settlement = with_settlement(
+            &mut f.store,
+            &f.handle,
+            terminal,
+            128,
+            NativeHistoryReconstruction {
+                working_reserve_bytes: 8 * 1024 * 1024,
+            },
+            |store, audit| {
+                let doc = store.read_with(|conn| durable::load_doc_in(conn, &f.key))?;
+                let text = doc.project(ContentKind::Richdoc)?.content;
+                let vector = hex_sha256(&doc.encode_state_vector());
+                let result = store.write_with(&NoFaults, |tx| -> Result<_, ApplicationError> {
+                    let authors =
+                        crate::author_coverage::interval_in(tx, &f.key, i64::MAX)?.moment_json();
+                    let written = dohc_engine_domain::write_projected_text_in_tx(
+                        tx,
+                        dohc_engine_domain::ProjectedWriteText {
+                            workspace_id: "workspace",
+                            version_id: "main",
+                            object_id: "object",
+                            path: std::borrow::Cow::Borrowed("owner.md"),
+                            text: std::borrow::Cow::Borrowed(&text),
+                            moment_id: "settled",
+                            metadata_origin: "ydoc",
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            author_json: authors.as_deref(),
+                            now_ms: 30,
+                            request_id: None,
+                        },
+                    )
+                    .map_err(|_| ApplicationError::Corrupt)?;
+                    tx.execute("UPDATE ydoc_docs SET last_settled_sha=?1 WHERE workspace_id='workspace' AND version_id='main' AND object_id='object'", [&written.snapshot.blob_sha256]).map_err(write_sql)?;
+                    let id = audit.record_in_tx(
+                        tx,
+                        "settled",
+                        &written.snapshot.blob_sha256,
+                        &vector,
+                        30,
+                    )?;
+                    crate::author_coverage::advance_in(tx, &f.key, false)?;
+                    Ok(audit.result(id, "settled".into(), written.snapshot.blob_sha256, false))
+                })?;
+                let TxnOutcome::Committed(result) = result else {
+                    return Err(ApplicationError::Interrupted);
+                };
+                Ok(result)
+            },
+        )
+        .unwrap();
+        let (authors, text): (String, String) = f.store.read_with(|conn| conn.query_row("SELECT m.author_json,b.text FROM moments m JOIN blobs b ON b.sha256=m.after_blob_sha256 WHERE m.moment_id=?1", [&settlement.moment_id], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
+        let authors: Value = serde_json::from_str(&authors).unwrap();
+        assert_eq!(authors[0]["humanId"], "recipient");
+        // The relay's authority names the recipient beside their snapshot.
+        let mut expected = vec![
+            serde_json::json!({"kind":"human","humanId":"recipient","humanName":"Recipient"}),
+            serde_json::json!({"kind":"named","userId":"recipient","grantId":"grant","grantGeneration":1}),
+        ];
+        if contributor != "recipient-only" {
+            // The second edit carried no recording context, so its gap stays.
+            expected.push(serde_json::json!({"kind":"unattributed"}));
+            assert!(text.contains(contributor));
+        }
+        assert_eq!(authors, Value::Array(expected));
+        assert!(text.contains("Recipient text"));
+        assert!(
+            f.store
+                .read_with(|conn| crate::author_coverage::interval_in(conn, &f.key, i64::MAX))
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
 fn native_tail_edit(f: &mut Fixture, source: &str, now: i64) -> owner_outbox::OwnerOutboxEntry {
     let update = f
         .doc

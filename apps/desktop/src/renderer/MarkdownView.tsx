@@ -2164,7 +2164,7 @@ export function MarkdownView(props: {
           timeout aside — where the user can copy it — instead of letting it
           reach disk over the artifact the engine is binding. */}
       {engine.engineMayHoldDocument || engine.liveHostUnavailable ? (
-        <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown />
+        <EngineMayHoldDocumentNotice onRetry={props.onRetryEngineOpen} contentShown message={engine.sharedWaiting?.message} />
       ) : null}
       {engine.removalInProgress ? (
         <EngineRemovalInProgressNotice

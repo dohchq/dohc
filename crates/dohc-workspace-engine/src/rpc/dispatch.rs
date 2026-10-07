@@ -362,6 +362,10 @@ impl EngineService {
                 self.share_direct_status(&ctx, request.workspace, request.params)
                     .await?
             }
+            "share.records.status" => {
+                self.share_record_creation_statuses(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "versionedText.writeBlob" => {
                 self.versioned_text_write_blob(&ctx, &request, request.params.clone())
                     .await?
@@ -1378,6 +1382,7 @@ mod tests {
             "share.channel.push",
             "share.direct.push",
             "share.direct.status",
+            "share.records.status",
             "share.proposal.submit",
             "share.view.pull",
             "share.view.recordIdentity",

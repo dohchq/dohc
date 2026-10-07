@@ -66,8 +66,9 @@ function isSnapshotPerson(author: MomentAuthor): boolean {
 // declared and the relay stored for its account or link holder.
 function authorLabel(author: MomentAuthor, names: EngineMomentAuthorNames): string {
   switch (author.kind) {
+    case "unattributed": return "An unrecorded author";
     case "agent": return author.agentName ?? names.agent(author) ?? "Agent";
-    case "human": return "humanName" in author ? author.humanName : names.person(author) ?? "Another person";
+    case "human": return author.humanName ?? names.person(author) ?? "Another person";
     case "named": return names.named(author);
     case "link": return "publicPrincipalId" in author ? `Link holder ${author.label}` : `Edit link · holder ${author.principalId.slice(0, 8)}`;
     case "public": return `Link holder ${author.principalId}`;

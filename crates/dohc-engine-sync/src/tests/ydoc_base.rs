@@ -6627,6 +6627,75 @@ fn incomplete_preserved_local_side_credits_authors_before_choice_or_noop_complet
 }
 
 #[test]
+fn plain_owner_drain_keeps_declared_agent() {
+    use dohc_engine_collab::{ContentKind, DocKey, WriterDocCache, Ydoc};
+    let (_scratch, _db, mut engine) = open_store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_000, &NoFaults)
+        .unwrap();
+    let path = "notes/agent.md";
+    let key = DocKey::new("ws", "main", "agent-drain").unwrap();
+    seed_text_head(&mut engine, &key.object_id, path, "seed");
+    let source = Ydoc::wire();
+    source.plaintext_insert(0, "seed");
+    let base = source.encode_full_state();
+    let claim = dohc_engine_storage::hex_sha256(&base);
+    dohc_engine_collab::claim_base_at_relay(
+        &mut engine,
+        &key,
+        ContentKind::Plaintext,
+        &base,
+        &dohc_engine_collab::BaseRelayCoordinate::new("source", 0, 0).unwrap(),
+        &NoFaults,
+        1_100,
+    )
+    .unwrap();
+    for seq in 0..2 {
+        let update = source.plaintext_insert(0, "x");
+        let sha = engine.put_binary_blob(&update).unwrap();
+        let mut op = envelope(
+            "computer-a",
+            seq,
+            "ydoc.update",
+            json!({
+                "versionId":"main", "objectId":key.object_id, "path":path,
+                "contentKind":"plaintext", "updateBlobSha256":sha,
+                "lineageClaimId":claim, "isBaseState":false,
+                "actorOriginId":"agent-x", "attribution":{"actorKind":"agent","depth":0},
+                "authors":[{"kind":"human","humanId":"forged-recipient"}],
+            }),
+        );
+        op.relay_seq = Some(seq + 1);
+        let parked = apply_ydoc_envelope(
+            &mut engine,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .unwrap();
+        assert!(matches!(parked.primary, ApplyDisposition::Applied(result) if result.deferred));
+    }
+    let drained =
+        drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
+            .unwrap();
+    assert_eq!(drained.drained, 2);
+    let head = VersionedTextStore::new(&mut engine)
+        .read_text("ws", "main", path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(head.text, "xxseed");
+    let moment = VersionedTextStore::new(&mut engine)
+        .get_moment("ws", &head.latest_moment_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(moment.author_json.as_deref().unwrap()).unwrap(),
+        json!([{"kind":"agent","agentId":"agent-x"}])
+    );
+}
+
+#[test]
 fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
     use dohc_engine_collab::{
         ContentKind, DocKey, WriterDocCache, Ydoc, author_coverage::MAX_INTERVAL_AUTHORS,
@@ -6687,7 +6756,9 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
         &NoFaults,
     )
     .unwrap();
-    assert_eq!(first.drained, MAX_INTERVAL_AUTHORS);
+    let prefix_count = MAX_INTERVAL_AUTHORS;
+    let suffix_count = total - prefix_count;
+    assert_eq!(first.drained, prefix_count);
     let pending_count = |engine: &EngineStore| {
         engine
             .read_with(|conn| {
@@ -6699,15 +6770,12 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
             })
             .unwrap()
     };
-    assert_eq!(pending_count(&engine), 2);
+    assert_eq!(pending_count(&engine), suffix_count as i64);
     let prefix = VersionedTextStore::new(&mut engine)
         .read_text("ws", "main", path)
         .unwrap()
         .unwrap();
-    assert_eq!(
-        prefix.text,
-        format!("{}seed", "x".repeat(MAX_INTERVAL_AUTHORS))
-    );
+    assert_eq!(prefix.text, format!("{}seed", "x".repeat(prefix_count)));
     let prefix_authors: String = engine
         .read_with(|conn| {
             conn.query_row(
@@ -6723,6 +6791,11 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
             .len(),
         MAX_INTERVAL_AUTHORS
     );
+    assert!(
+        !serde_json::from_str::<Vec<serde_json::Value>>(&prefix_authors)
+            .unwrap()
+            .contains(&json!({"kind":"unattributed"}))
+    );
     drop(engine);
     let mut engine = EngineStore::open(&db, 3_000).unwrap();
     let job = format!("ydoc-mat_{}", prefix.latest_moment_id);
@@ -6737,7 +6810,7 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
     let resumed =
         drain_deferred_ydoc_for_key(&mut engine, &mut WriterDocCache::new(), &key, &NoFaults)
             .unwrap();
-    assert_eq!(resumed.drained, 2);
+    assert_eq!(resumed.drained, suffix_count);
     assert_eq!(pending_count(&engine), 0);
     let final_head = VersionedTextStore::new(&mut engine)
         .read_text("ws", "main", path)
@@ -6757,6 +6830,11 @@ fn deferred_author_capacity_projects_a_prefix_without_waiting_for_disk() {
         serde_json::from_str::<Vec<serde_json::Value>>(&suffix_authors)
             .unwrap()
             .len(),
-        2
+        suffix_count
+    );
+    assert!(
+        !serde_json::from_str::<Vec<serde_json::Value>>(&suffix_authors)
+            .unwrap()
+            .contains(&json!({"kind":"unattributed"}))
     );
 }

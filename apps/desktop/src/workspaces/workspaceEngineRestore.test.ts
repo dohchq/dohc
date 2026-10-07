@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   VERSIONED_METHOD,
   type Request,
@@ -287,6 +287,45 @@ describe("engine restore", () => {
     const restore = await engine.restoreFileToBeforeMoment(edit.id, RESTORER, { expectedHeadMomentId: after[0]! });
     expect(await readText(root, "doc.md")).toBe("original\n");
     await expect(engine.listObjectMomentsAfter(objectId, edit.id)).resolves.toEqual([restore.restoredMomentId, after[0]]);
+    await engine.stop();
+  });
+
+  it("checks the History head even when an exported settlement leaves the snapshot unchanged", async () => {
+    const root = await createTestScratch("dohc-engine-restore-");
+    await write(root, "doc.md", "original\n");
+    const loopback = new VersionedLoopbackEngine();
+    const engine = capture(root, loopback);
+    engine.start();
+    await engine.flush();
+    await write(root, "doc.md", "edited\n");
+    engine.observeFileEvents([{ path: "doc.md", operation: "update" }]);
+    await engine.flush();
+    const edit = (await engine.listMoments()).moments[0]!;
+
+    const send = loopback.sendRequest.bind(loopback);
+    let exportId = "exported-settlement";
+    vi.spyOn(loopback, "sendRequest").mockImplementation(async request => {
+      const response = await send(request);
+      if (request.method !== VERSIONED_METHOD.momentsList) return response;
+      const page = response.result;
+      if (!page || typeof page !== "object" || Array.isArray(page) || !Array.isArray(page.moments)) {
+        throw new Error("Expected a moments page");
+      }
+      const newest = page.moments[0];
+      if (!newest || typeof newest !== "object" || Array.isArray(newest)) {
+        throw new Error("Expected a History moment");
+      }
+      return { ...response, result: { ...page, moments: [{ ...newest, momentId: exportId, syncRecordOnly: true }] } };
+    });
+
+    await expect(engine.restoreFileToBeforeMoment(edit.id, RESTORER, { expectedHeadMomentId: edit.id }))
+      .rejects.toBeInstanceOf(RestoreHeadChangedError);
+    expect(await readText(root, "doc.md")).toBe("edited\n");
+    exportId = "later-persons-settlement";
+    await expect(engine.restoreFileToBeforeMoment(edit.id, RESTORER, { expectedHeadMomentId: "exported-settlement" }))
+      .rejects.toBeInstanceOf(RestoreHeadChangedError);
+    await engine.restoreFileToBeforeMoment(edit.id, RESTORER, { expectedHeadMomentId: exportId });
+    expect(await readText(root, "doc.md")).toBe("original\n");
     await engine.stop();
   });
 

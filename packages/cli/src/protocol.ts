@@ -721,6 +721,7 @@ const exportResultSchema = z
   .strict();
 
 const rawMomentAuthorSchema = z.union([
+  z.object({ kind: z.literal("unattributed") }).strict(),
   z.object({
     kind: z.literal("agent"),
     agentId: z.string().min(1),

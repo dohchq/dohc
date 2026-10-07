@@ -20,7 +20,17 @@ fn queued_author_repair_omits_people_and_shared_authors() {
     let local_agent = json!({"kind":"agent","agentId":"agent","onBehalfOf":"local:123","agentRunId":"run","depth":3});
     let local_automation =
         json!({"kind":"automation","automationId":"rule","onBehalfOf":"local:456","depth":4});
+    let unattributed = json!({"kind":"unattributed"});
+    let recipient = json!({"kind":"human","humanId":"recipient","humanName":"Recipient"});
     for (authors, expected) in [
+        (json!([unattributed]), Some(json!([unattributed]))),
+        (json!([human, unattributed]), Some(json!([unattributed]))),
+        (
+            json!([unattributed, agent]),
+            Some(json!([unattributed, agent])),
+        ),
+        // A relay-admitted snapshot's person stays local; the marker travels.
+        (json!([recipient, unattributed]), Some(json!([unattributed]))),
         (json!([human]), None),
         (json!([named]), None),
         (json!([human, named, link, public]), None),

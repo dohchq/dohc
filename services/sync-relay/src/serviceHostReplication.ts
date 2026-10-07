@@ -12,10 +12,12 @@ import {errorResponse, notFound} from "./errors";
 export function createServiceHostReplication(options: {
   storage: SyncRelayStorage;
   prefix: string;
+  // Only the self-hosted native live replica records these public authors.
+  provenance?: "native-settlements";
   authorize(input: {workspaceId: string; bearer: string; method: string; pathname: string}): string | null;
 }) {
   // It passes no session reauthentication, so a held log read answers at once.
-  const replication = createWorkspaceReplicationRoutes(options.storage, Date.now, {wakeLog() {}, wait: async () => {}});
+  const replication = createWorkspaceReplicationRoutes(options.storage, Date.now, {wakeLog() {}, wait: async () => {}}, undefined, options.provenance);
   const blobs = createWorkspaceBlobRoutes(options.storage, Date.now);
   return async (request: Request): Promise<Response> => {
     try {

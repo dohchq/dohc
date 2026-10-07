@@ -69,14 +69,14 @@ describe("share background work readiness", () => {
         status: "pushed",
         writes: [result === "refused"
           ? { result, paths: ["trip/packing/automations.yaml"], reason: "" }
-          : { result, paths: ["trip/packing/collection.yaml"], stalePath: "trip/packing/collection.yaml" }],
+          : { result, paths: ["trip/packing/collection.yaml"], stalePath: "trip/packing/collection.yaml", recoveredDraftPath: null }],
       },
     }));
     await act(async () => { readiness.resolve(SHARE_STATUS); });
     await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
 
     const message = result === "refused"
-      ? "granter@dohc.test's server didn't take your change to packing/automations.yaml. Send it as a proposal."
+      ? "The sync relay did not accept your change to packing/automations.yaml. Send it as a proposal."
       : "packing/collection.yaml changed before your change reached granter@dohc.test. Check the new version, or send yours as a proposal.";
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(message);
@@ -687,7 +687,7 @@ describe("shared view send changes", () => {
     }));
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(
-      "sam@dohc.test's server didn't take your change to packing/automations.yaml. Send it as a proposal.",
+      "The sync relay did not accept your change to packing/automations.yaml. Send it as a proposal.",
     );
     await user.click(screen.getByTestId("workspace-shell-error-action"));
     await waitFor(() => expect(bridge.submitShareChanges).toHaveBeenCalledWith({ workspaceId: SHARE_VIEW.workspaceId }));

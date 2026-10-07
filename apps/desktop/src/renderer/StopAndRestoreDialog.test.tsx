@@ -97,6 +97,15 @@ function fixture(results: Array<StopAndRestoreResult | Error>, first: typeof ANA
   return { props, release, stopAndRestore, undoStopAndRestore, shell: () => shell };
 }
 
+it("states that restoring a recipient creation removes its file and offers Undo", async () => {
+  fixture([{ status: "restored", restored: [{ path: "trip/Tasks/Socks.md", restoredMomentId: "removed", removed: true }],
+    review: [], runsUndone: 0, runsLeft: 0, keptFields: [], fieldsMissing: 0, runChangesKept: 0,
+    wroteAutomations: false, sendsMessages: false, unfinished: null }]);
+  fireEvent.click(await screen.findByTestId("stop-and-restore-confirm"));
+  expect(await screen.findByText("Removed 1 created file.")).toBeTruthy();
+  expect(screen.getByTestId("stop-and-restore-undo")).toBeTruthy();
+});
+
 afterEach(() => {
   cleanup();
   delete window.dohcDesktop;
@@ -128,7 +137,7 @@ it("stops the chosen person after one confirm, lists files to check with why, an
   expect(screen.getByText("Undid 2 runs of automations ana@example.com changed.")).toBeTruthy();
   fireEvent.click(screen.getByText("trip/packing/automations.yaml"));
   expect(f.props.onOpenFile).toHaveBeenCalledWith("trip/packing/automations.yaml");
-  expect(screen.getByText("Someone changed it after ana@example.com.")).toBeTruthy();
+  expect(screen.getByText("Another author changed it after ana@example.com.")).toBeTruthy();
   expect(screen.getByText("This Collection holds files someone else added.")).toBeTruthy();
   expect(screen.getByText("dohc could not restore it. This action is unavailable for shared live files.")).toBeTruthy();
 
@@ -292,7 +301,7 @@ it("ends a whole Edit link, says it stops for everyone, and never claims its aut
   expect(screen.getByText("Undo left 2 changes from those runs. Check each Collection's run history.")).toBeTruthy();
   expect(screen.getByText("Messages and notices from automations changed through Edit link to trip stay sent.")).toBeTruthy();
   expect(screen.getByText("Runs on your other computers are not undone here. Undo them from the run history on each computer.")).toBeTruthy();
-  expect(screen.getByText("Someone changed it after the link.")).toBeTruthy();
+  expect(screen.getByText("Another author changed it after the link.")).toBeTruthy();
 
   fireEvent.click(screen.getByTestId("stop-and-restore-undo"));
   expect(await screen.findByText("Put back 1 file as Edit link to trip left them. The link stays ended.")).toBeTruthy();

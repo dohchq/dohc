@@ -1,3 +1,4 @@
+import { SharedDocumentOpenState } from "./sharedDocumentOpenState";
 import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
@@ -607,6 +608,9 @@ export const CollectionRecordSchema: z.ZodType<CollectionRecord> = z.object({
   path: PATH_STRING,
   conflicted: z.boolean(),
   values: z.array(CollectionIndexedValueSchema).max(MAX_SCHEMA_COLLECTION_ITEMS),
+  creationDelivery: z.enum(["pending", "offline", "accepted", "refused"]).optional(),
+  creationRefusal: z.string().optional(),
+  creationCanDiscard: z.boolean().optional(),
 });
 
 const CollectionRecordGroupSchema = z.object({
@@ -1487,6 +1491,7 @@ export const AUTOMATION_AUTHOR_TEXT_MAX = 4096;
 const AUTOMATION_AUTHOR_TEXT = z.string().min(1).max(AUTOMATION_AUTHOR_TEXT_MAX);
 
 const EngineMomentAuthor = z.union([
+  z.object({ kind: z.literal("unattributed") }).strict(),
   z.object({
     kind: z.literal("agent"),
     agentId: z.string().min(1),
@@ -4459,7 +4464,7 @@ const DirectWritePaths = z.array(z.string().min(1)).min(1).max(502);
 // or refused write stays for Send changes.
 export const DirectWriteRow = z.discriminatedUnion("result", [
   z.object({ result: z.literal("written"), paths: DirectWritePaths }),
-  z.object({ result: z.literal("stale"), paths: DirectWritePaths, stalePath: z.string().min(1) }),
+  z.object({ result: z.literal("stale"), paths: DirectWritePaths, stalePath: z.string().min(1), recoveredDraftPath: z.string().min(1).nullable() }),
   z.object({ result: z.literal("refused"), paths: DirectWritePaths, reason: z.string() }),
 ]);
 export type DirectWriteRow = z.infer<typeof DirectWriteRow>;
@@ -4934,10 +4939,10 @@ export const StopAndRestoreResult = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("restored"),
     // Each file put back, with the forward moment its Undo restores before.
-    restored: z.array(z.object({ path: PATH_STRING, restoredMomentId: OPAQUE_ID })),
+    restored: z.array(z.object({ path: PATH_STRING, restoredMomentId: OPAQUE_ID, removed: z.boolean().optional() })),
     // Files left for the owner to check, each with why.
     review: z.array(z.discriminatedUnion("reason", [
-      z.object({ path: PATH_STRING, reason: z.literal("changed-since") }).strict(),
+      z.object({ path: PATH_STRING, reason: z.literal("changed-since"), changedBy: z.string().optional() }).strict(),
       z.object({ path: PATH_STRING, reason: z.literal("folder-in-use") }).strict(),
       z.object({ path: PATH_STRING, reason: z.literal("restore-refused"), detail: z.string().max(2_000) }).strict(),
       // History's rules could not be read, so restoring the file was refused.
@@ -6128,6 +6133,21 @@ export const OpenEngineYDocSessionPayload = z.object({
 });
 export type OpenEngineYDocSessionPayload = z.infer<typeof OpenEngineYDocSessionPayload>;
 
+export const engineYDocAdmissionOperations = {
+  waitForEngineYDocAdmission: {
+    capabilityId: "document.shared.admission.wait",
+    scope: "workspace",
+    handlerCheck: {
+      check: "engineYDocSessionIpc.waitForAdmission",
+      reason: "Owns the shared admission wait and checks the renderer generation and workspace attachment before and after readiness.",
+    },
+    channel: "desktop:engine-ydoc-wait-admission",
+    payload: OpenEngineYDocSessionPayload,
+    result: z.boolean(),
+    guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 export const OpenEngineYDocSessionResult = z.object({
   available: z.boolean(),
   initialUpdate: ENGINE_YDOC_INITIAL_UPDATE.optional(),
@@ -6144,6 +6164,7 @@ export const OpenEngineYDocSessionResult = z.object({
   // The caller must not recreate it through the writable plain editor.
   documentUnavailable: z.boolean().optional(),
   liveHostUnavailable: z.boolean().optional(),
+  sharedWaiting: SharedDocumentOpenState.optional(),
   // The open did not land, and a session for this document may still be the
   // engine's. It is raised by an open that hit its retry deadline while the
   // engine was unreachable, an open whose refusal could not release its
@@ -6330,7 +6351,8 @@ export interface DohcDesktopBridge
     OperationBridge<typeof noticeOperations>,
     OperationBridge<typeof scheduleHostOperations>,
     OperationBridge<typeof chatDispatchNoticeOperations>,
-    OperationBridge<typeof sharedViewAccessOperations> {
+    OperationBridge<typeof sharedViewAccessOperations>,
+    OperationBridge<typeof engineYDocAdmissionOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
@@ -6376,7 +6398,7 @@ export interface DohcDesktopBridge
   listWorkspaceFiles(
     payload: ListWorkspaceFilesPayload,
   ): Promise<ListWorkspaceFilesResult>;
-  createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<{ path: string; recordId: string; kept?: Record<string, unknown> } | import("@dohc/cli/creation").CreationPartial>;
+  createCollectionRecord(payload: CreateCollectionRecordPayload): Promise<{ path: string; recordId: string; kept?: Record<string, unknown>; delivery?: "pending" | "accepted" | "refused"; reason?: string } | import("@dohc/cli/creation").CreationPartial>;
   createWorkspaceFile(
     payload: CreateWorkspaceFilePayload,
   ): Promise<CreateWorkspaceFileResult>;

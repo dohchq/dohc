@@ -44,6 +44,7 @@ export type ActorKey = ActorOwnerKey | (ActorKeyBrand & (
   | { readonly kind: "automation"; readonly ownerKey: ActorOwnerKey | null; readonly workspaceId: string; readonly automationId: string }
   | { readonly kind: "remote-automation"; readonly ownerKey: ActorOwnerKey }
   | { readonly kind: "link"; readonly grantId: string; readonly principalId: string }
+  | { readonly kind: "link"; readonly publicPrincipalId: string }
   | { readonly kind: "public"; readonly grantId: string; readonly principalId: string }
   | { readonly kind: "unknown" }
 ));
@@ -191,6 +192,7 @@ type MomentActorContext = {
  */
 export function deriveMomentActor(author: MomentAuthor, context: MomentActorContext, displayName: string): ActorRef {
   const origin = context.origin ?? "unknown";
+  if (author.kind === "unattributed") return unknownActor(displayName, origin);
   if (author.kind === "named") {
     if (!context.relayIssuer) return unknownActor(displayName, origin);
     return {
@@ -198,11 +200,13 @@ export function deriveMomentActor(author: MomentAuthor, context: MomentActorCont
       displayName, origin, assurance: context.source === "received" ? "owner-asserted" : "relay-verified",
     };
   }
-  // A live author snapshot's link holder names no grant, and link keys are grant-scoped.
-  if (author.kind === "link" && !("grantId" in author)) return unknownActor(displayName, origin);
   if (author.kind === "link" || author.kind === "public") {
     return {
-      key: branded({ kind: author.kind, grantId: author.grantId, principalId: author.principalId }),
+      key: "publicPrincipalId" in author
+        ? branded({ kind: "link" as const, publicPrincipalId: author.publicPrincipalId })
+        : author.kind === "link"
+          ? branded({ kind: "link" as const, grantId: author.grantId, principalId: author.principalId })
+          : branded({ kind: "public" as const, grantId: author.grantId, principalId: author.principalId }),
       displayName, origin, assurance: context.source === "received" ? "owner-asserted" : "relay-verified",
     };
   }
@@ -299,6 +303,12 @@ function decodeActorKey(value: unknown): ActorKey | null {
       return ownerKey ? branded({ kind: "remote-automation" as const, ownerKey }) : null;
     }
     case "link":
+      if (hasFields(row, ["kind", "publicPrincipalId"]) && nonempty(row.publicPrincipalId)) {
+        return branded({ kind: "link" as const, publicPrincipalId: row.publicPrincipalId });
+      }
+      // A direct link write names its grant and internal participant.
+      if (!hasFields(row, ["kind", "grantId", "principalId"]) || !nonempty(row.grantId) || !nonempty(row.principalId)) return null;
+      return branded({ kind: "link" as const, grantId: row.grantId, principalId: row.principalId });
     case "public":
       if (!hasFields(row, ["kind", "grantId", "principalId"]) || !nonempty(row.grantId) || !nonempty(row.principalId)) return null;
       return branded({ kind: row.kind, grantId: row.grantId, principalId: row.principalId });
@@ -311,7 +321,7 @@ function decodeActorKey(value: unknown): ActorKey | null {
 // The property list fixes field order for every variant, including nested owner objects.
 const actorKeyFields = [
   "kind", "issuer", "userId", "installationId", "identityKind", "humanId",
-  "ownerKey", "claimedName", "workspaceId", "automationId", "grantId", "principalId",
+  "ownerKey", "claimedName", "workspaceId", "automationId", "grantId", "principalId", "publicPrincipalId",
 ];
 
 /** Local storage only. Branded keys already carry normalized issuers; serialization does not parse them again. */
@@ -351,7 +361,7 @@ export function actorHueInput(key: ActorKey): ActorHueInput | null {
     case "automation": return hueInput(JSON.stringify(["automation", key.ownerKey ? actorHueInput(key.ownerKey)?.value : null, key.workspaceId, key.automationId]));
     case "remote-automation": return hueInput(JSON.stringify(["remote-automation", actorHueInput(key.ownerKey)?.value]));
     // Link sessions remain distinct; their hues share the grant input.
-    case "link": return hueInput(JSON.stringify(["link", key.grantId]));
+    case "link": return hueInput(JSON.stringify(["link", "publicPrincipalId" in key ? key.publicPrincipalId : key.grantId]));
     case "public": return hueInput(JSON.stringify(["public", key.grantId, key.principalId]));
     case "unknown": return null;
   }

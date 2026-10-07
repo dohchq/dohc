@@ -660,6 +660,353 @@ fn import_source(f: &Fixture) -> (ScratchDir, std::path::PathBuf, EngineStore) {
 }
 
 #[test]
+fn imported_authored_live_update_annotates_only_its_changed_projection() {
+    import_authored_projection(false, false, None, false);
+}
+
+#[test]
+fn audited_authors_reach_a_deferred_projection_after_reopen() {
+    import_authored_projection(true, false, None, false);
+}
+
+#[test]
+fn audited_projection_preserves_existing_and_checkpoint_authors() {
+    import_authored_projection(false, true, None, false);
+}
+
+#[test]
+fn drained_projection_keeps_authorless_coordinate_coverage() {
+    import_authored_projection(true, false, Some(FirstDrainCoordinate::Unattributed), false);
+}
+
+#[test]
+fn drained_projection_unions_verified_recipient_coordinates() {
+    import_authored_projection(true, false, Some(FirstDrainCoordinate::Verified), false);
+}
+
+#[test]
+fn late_drain_audit_cannot_remove_unattributed_coverage() {
+    import_authored_projection(true, false, Some(FirstDrainCoordinate::Verified), true);
+}
+
+#[test]
+fn drained_projection_keeps_declared_and_verified_authors_without_attestation() {
+    import_authored_projection(true, false, Some(FirstDrainCoordinate::Declared), false);
+}
+
+#[test]
+fn late_audit_cannot_attest_a_declared_drain_without_a_coverage_marker() {
+    import_authored_projection(true, false, Some(FirstDrainCoordinate::Declared), true);
+}
+
+#[test]
+fn drained_projection_covers_bytes_from_a_refused_path() {
+    import_authored_projection(true, false, Some(FirstDrainCoordinate::RefusedPath), false);
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FirstDrainCoordinate {
+    Unattributed,
+    Verified,
+    RefusedPath,
+    Declared,
+}
+
+fn import_authored_projection(
+    deferred: bool,
+    mixed: bool,
+    first_coordinate: Option<FirstDrainCoordinate>,
+    late: bool,
+) {
+    use dohc_engine_collab::live_update_application::{
+        AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, LiveUpdateReceipt, RelayAcceptedLiveUpdate,
+        ServerDerivedLiveUpdateAuthority, apply_committed,
+    };
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&f.bytes).unwrap();
+    let first_update = first_coordinate.map(|_| doc.richdoc_append_paragraph("First coordinate."));
+    let update = doc.richdoc_append_paragraph("Recipient changed this paragraph.");
+    let authors = json!([{"kind":"human","humanId":"recipient","humanName":"Recipient"}]);
+    let other = json!({"kind":"link","publicPrincipalId":"other-link","label":"Link editor"});
+    let prior = json!([{"kind":"human","humanId":"owner","humanName":"Owner"}]);
+    let event = AdmittedLiveUpdate {
+        metadata: AdmittedLiveUpdateMetadata {
+            accepted: RelayAcceptedLiveUpdate {
+                receipt: LiveUpdateReceipt {
+                    delivery_id: "changed-delivery".into(),
+                    update_digest: hex_sha256(&update),
+                    journal_cursor: if first_coordinate.is_some() { 2 } else { 1 },
+                    accepting_host_epoch: 1,
+                },
+                binding: f.binding.clone(),
+                authority: ServerDerivedLiveUpdateAuthority::Named {
+                    principal_id: "recipient".into(),
+                    grant_id: "edit-grant".into(),
+                    grant_generation: 1,
+                },
+                received_at_ms: 200,
+            },
+            first_seen: Vec::new(),
+            canonical_version: Some(2),
+            author_snapshot: Some(serde_json::from_value(authors.clone()).unwrap()),
+            first_seen_deletes: Some(Vec::new()),
+            checkpoint_coverage: mixed.then(|| {
+                serde_json::from_value(json!([
+                    {"author":other,"structRanges":[],"deletionRanges":[]}
+                ]))
+                .unwrap()
+            }),
+        },
+        update_bytes: update,
+    };
+    let mut events = Vec::new();
+    if let Some(bytes) = first_update {
+        let mut first = event.clone();
+        first.update_bytes = bytes;
+        first.metadata.accepted.receipt.delivery_id = "first-delivery".into();
+        first.metadata.accepted.receipt.update_digest = hex_sha256(&first.update_bytes);
+        first.metadata.accepted.receipt.journal_cursor = 1;
+        first.metadata.author_snapshot = (first_coordinate == Some(FirstDrainCoordinate::Verified))
+            .then(|| serde_json::from_value(authors.clone()).unwrap());
+        if first.metadata.author_snapshot.is_none() {
+            first.metadata.canonical_version = None;
+            first.metadata.first_seen_deletes = None;
+        }
+        events.push(first);
+    }
+    events.push(event);
+    for event in events {
+        apply_committed(
+            &mut f.store,
+            &mut WriterDocCache::new(),
+            &f.handle,
+            event,
+            &NoFaults,
+            100_000_000,
+            |tx, namespace, binding, count| {
+                journal_live_event_in_tx(tx, namespace, binding, count, 200)
+                    .map(|_| ())
+                    .map_err(|error| {
+                        dohc_engine_collab::live_update_application::ApplicationError::Storage(
+                            dohc_engine_storage::StorageError::persist_public(error),
+                        )
+                    })
+            },
+        )
+        .unwrap();
+    }
+    let (_scratch, path, mut receiver) = open_store();
+    let blobs: Vec<Vec<u8>> = f
+        .store
+        .read_with(|conn| {
+            conn.prepare("SELECT bytes FROM binary_blobs")?
+                .query_map([], |row| row.get(0))?
+                .collect()
+        })
+        .unwrap();
+    receiver
+        .write_with(&NoFaults, |tx| {
+            for bytes in &blobs {
+                put_binary_blob(tx, bytes)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let mut cache = WriterDocCache::new();
+    let mut projection = None;
+    let mut late_ops = Vec::new();
+    let ops = operations(&f.store);
+    let last_audit_seq = ops
+        .iter()
+        .rev()
+        .find(|op| op.op_kind == application_record::EVENT_OP)
+        .unwrap()
+        .origin_seq;
+    let first_delta_seq = ops
+        .iter()
+        .find(|op| op.op_kind == "ydoc.update" && op.payload["isBaseState"] != true)
+        .unwrap()
+        .origin_seq;
+    for mut op in ops {
+        op.relay_seq = Some(op.origin_seq + 1);
+        if first_coordinate == Some(FirstDrainCoordinate::Declared)
+            && op.op_kind == "ydoc.update"
+            && op.payload["isBaseState"] != true
+            && (op.origin_seq == first_delta_seq || late)
+        {
+            op.payload["actorOriginId"] = json!("agent-x");
+            op.payload["attribution"] = json!({"actorKind":"agent","depth":0});
+        }
+        if late && op.op_kind == application_record::EVENT_OP && op.origin_seq == last_audit_seq {
+            late_ops.push(op);
+            continue;
+        }
+        let live = deferred && op.op_kind == "ydoc.update" && op.payload["isBaseState"] != true;
+        if op.op_kind == application_record::EVENT_OP && !deferred {
+            // A canonical record naming a different content coordinate may not stamp any projection.
+            let manifest: chunks::Manifest =
+                serde_json::from_value(op.payload["manifest"].clone()).unwrap();
+            let bad = receiver
+                .read_with(|conn| {
+                    use std::io::{Read, Write};
+                    let mut reader = chunks::ChunkReader::new(conn, &manifest).unwrap();
+                    let mut text = String::new();
+                    reader.read_to_string(&mut text).unwrap();
+                    reader.finish().unwrap();
+                    let coordinate = format!(
+                        "\"contentCoordinate\":{{\"originId\":\"owner-origin\",\"originSeq\":{}}}",
+                        op.origin_seq - 1
+                    );
+                    assert!(text.contains(&coordinate));
+                    let text = text.replace(
+                        &coordinate,
+                        "\"contentCoordinate\":{\"originId\":\"owner-origin\",\"originSeq\":1}",
+                    );
+                    let mut writer = chunks::ChunkWriter::new(conn);
+                    writer.write_all(text.as_bytes()).unwrap();
+                    writer.finish()
+                })
+                .unwrap();
+            let mut forged = op.clone();
+            forged.origin_id = "forged-audit".into();
+            forged.origin_seq = 0;
+            forged.payload["manifest"] = serde_json::to_value(bad).unwrap();
+            let refused = apply_audit_envelope(&mut receiver, &forged, &NoFaults);
+            assert!(
+                refused.is_err()
+                    || matches!(refused.unwrap().primary, ApplyDisposition::Refused(_))
+            );
+            assert_eq!(count(&receiver, "live_audit_projection_authors"), 0);
+            if mixed {
+                receiver
+                    .read_with(|conn| {
+                        conn.execute(
+                            "UPDATE moments SET author_json=?2 WHERE moment_id=?1",
+                            params![projection.as_ref().unwrap(), prior.to_string()],
+                        )
+                    })
+                    .unwrap();
+            }
+        }
+        let leases: &dyn crate::LeaseProbe = if live {
+            &crate::AlwaysLive
+        } else {
+            &NoLiveLeases
+        };
+        let result =
+            crate::apply_replication_envelope(&mut receiver, &mut cache, &op, &NoFaults, leases)
+                .unwrap();
+        assert!(
+            matches!(result.primary, ApplyDisposition::Applied(_)),
+            "{}: {:?}",
+            op.op_kind,
+            result.primary
+        );
+        if op.op_kind == "ydoc.update" && op.payload["isBaseState"] != true {
+            let key = DocKey::new("ws", "main", "object").unwrap();
+            let id = crate::ydoc_apply::ydoc_apply_moment_id(
+                &key,
+                "note.md",
+                &op.origin_id,
+                op.origin_seq,
+            );
+            let moment = VersionedTextStore::new(&mut receiver)
+                .get_moment("ws", &id)
+                .unwrap();
+            if deferred {
+                assert!(moment.is_none());
+            } else {
+                let moment = moment.unwrap();
+                assert!(moment.author_json.is_none());
+            }
+            projection = Some(id);
+        }
+    }
+    let id = projection.expect("changed projection");
+    if deferred {
+        if first_coordinate == Some(FirstDrainCoordinate::RefusedPath) {
+            // Exercise the drain's path refusal after importing the audit chain.
+            receiver.read_with(|conn| conn.execute(
+                "UPDATE replication_log SET payload_json=json_set(payload_json,'$.path','wrong.md') WHERE workspace_id='ws' AND origin_id='owner-origin' AND origin_seq=?1",
+                [first_delta_seq],
+            )).unwrap();
+        }
+        assert_eq!(
+            count(&receiver, "live_audit_projection_authors"),
+            i64::from(first_coordinate == Some(FirstDrainCoordinate::Verified)) + i64::from(!late)
+        );
+        drop(receiver);
+        receiver = EngineStore::open(&path, 250).unwrap();
+        let drained = crate::drain_deferred_ydoc_for_key(
+            &mut receiver,
+            &mut WriterDocCache::new(),
+            &DocKey::new("ws", "main", "object").unwrap(),
+            &NoFaults,
+        )
+        .unwrap();
+        assert_eq!(
+            drained.drained,
+            if first_coordinate.is_some() { 2 } else { 1 }
+        );
+        if first_coordinate == Some(FirstDrainCoordinate::RefusedPath) {
+            assert_eq!(drained.refusals.len(), 1);
+        }
+    }
+    for op in late_ops {
+        let result = crate::apply_replication_envelope(
+            &mut receiver,
+            &mut cache,
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(matches!(result.primary, ApplyDisposition::Applied(_)));
+    }
+    let moment = VersionedTextStore::new(&mut receiver)
+        .get_moment("ws", &id)
+        .unwrap()
+        .unwrap();
+    let stored: serde_json::Value = serde_json::from_str(
+        moment
+            .author_json
+            .as_deref()
+            .expect("verified public authors"),
+    )
+    .unwrap();
+    if mixed {
+        assert_eq!(stored.as_array().unwrap().len(), 3);
+        for author in [authors[0].clone(), prior[0].clone(), other] {
+            assert!(stored.as_array().unwrap().contains(&author));
+        }
+    } else if first_coordinate == Some(FirstDrainCoordinate::Declared) {
+        assert_eq!(
+            stored,
+            json!([{"kind":"agent","agentId":"agent-x"}, authors[0].clone()])
+        );
+    } else if matches!(
+        first_coordinate,
+        Some(FirstDrainCoordinate::Unattributed | FirstDrainCoordinate::RefusedPath)
+    ) || late
+    {
+        assert_eq!(stored, json!([authors[0].clone(), {"kind":"unattributed"}]));
+    } else {
+        assert_eq!(stored, authors);
+    }
+    assert_eq!(count(&receiver, "live_device_update_applications"), 0);
+    assert_eq!(count(&receiver, "live_device_application_bindings"), 0);
+    drop(receiver);
+    let mut receiver = EngineStore::open(&path, 300).unwrap();
+    let reopened = VersionedTextStore::new(&mut receiver)
+        .get_moment("ws", &id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(reopened.author_json, moment.author_json);
+}
+
+#[test]
 fn declared_owner_history_exports_and_imports_with_its_agent() {
     use dohc_engine_collab::live_update_application::{
         AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationResult, LiveUpdateReceipt,
@@ -1615,14 +1962,17 @@ fn imported_settlement_credits_every_relay_accepted_author_of_its_interval() {
         kinds.sort();
         kinds
     };
-    assert_eq!(kinds(&host), ["agent", "human", "named"]);
+    // The recipient's delivery without recording context keeps its gap
+    // beside the relay's credit for the recipient.
+    assert_eq!(kinds(&host), ["agent", "human", "named", "unattributed"]);
     let ops = operations(&f.store);
     let moment = ops
         .iter()
         .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == "moment-mixed")
         .unwrap();
-    // The relay refuses a client-minted person, so only the agent travels.
-    assert_eq!(kinds(&moment.payload["authors"]), ["agent"]);
+    // The relay refuses a client-minted person, so only the agent and the
+    // exact unattributed marker travel.
+    assert_eq!(kinds(&moment.payload["authors"]), ["agent", "unattributed"]);
 
     let (_scratch, path, mut receiver) = receiver_with_blobs(&f);
     for (kind, applied) in import_all(&mut receiver, &ops) {

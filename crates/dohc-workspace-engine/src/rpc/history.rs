@@ -188,6 +188,9 @@ fn parsed_moment_author(value: Value) -> Value {
     let Some(object) = value.as_object() else {
         return corrupt();
     };
+    if object.get("kind").and_then(Value::as_str) == Some("unattributed") {
+        return if object.len() == 1 { value } else { corrupt() };
+    }
     let bounded_ids = |keys: &[&str]| {
         keys.iter().all(|key| {
             object
@@ -702,6 +705,23 @@ mod relay_author_tests {
                 parsed_moment_author(&oversized.to_string()),
                 json!({"corrupt":true}),
                 "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_live_authors_and_refuses_mixed_shapes() {
+        for author in [
+            json!({"kind":"human", "humanId":"ana", "humanName":"Ana"}),
+            json!({"kind":"unattributed"}),
+            json!({"kind":"link", "publicPrincipalId":"public-ana", "label":"Ana"}),
+        ] {
+            assert_eq!(parsed_moment_author(&author.to_string()), author);
+            let mut mixed = author.clone();
+            mixed["principalId"] = json!("private");
+            assert_eq!(
+                parsed_moment_author(&mixed.to_string()),
+                json!({"corrupt":true})
             );
         }
     }

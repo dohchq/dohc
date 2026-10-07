@@ -1632,6 +1632,9 @@ describe("createCaptureLiveStores", () => {
     { method, author: { kind: "human", humanId: LONGEST_LIVE_ID, humanName: LONGEST_LIVE_ID } as const },
     { method, author: { kind: "link", publicPrincipalId: LONGEST_LIVE_ID, label: LONGEST_LIVE_ID } as const },
     { method, author: { kind: "agent", agentId: "writer", agentName: "Writer", onBehalfOf: "owner", depth: 1 } as const },
+    { method, author: { kind: "link", publicPrincipalId: "public-holder", label: "Ana" } as const },
+    { method, author: { kind: "human", humanId: "ada", humanName: "Ada" } as const },
+    { method, author: { kind: "unattributed" } as const },
   ]))(
     "keeps $author.kind authorship returned by $method",
     async ({ method, author }) => {
@@ -1660,6 +1663,24 @@ describe("createCaptureLiveStores", () => {
       expect(read?.authors).toEqual(authors);
     },
   );
+
+  it.each([VERSIONED_METHOD.momentsGet, VERSIONED_METHOD.momentsList] as const)("keeps unattributed authors returned by %s", async method => {
+    const authors = [{ kind: "human", humanId: "ana" }, { kind: "unattributed" }];
+    const gapMoment = { ...moment, authors };
+    const client = clientFor(async request => ({
+      id: request.id,
+      result: method === VERSIONED_METHOD.momentsGet ? gapMoment : {
+        moments: [gapMoment], nextBeforeMomentOrder: null, latestMomentOrder: 1,
+      },
+    }));
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" }, sessionsFor(client),
+    );
+    const read = method === VERSIONED_METHOD.momentsGet
+      ? await store.getMoment({ workspaceId: WORKSPACE_ID, momentId: "resolved-moment" })
+      : (await store.listMoments({ workspaceId: WORKSPACE_ID })).moments[0];
+    expect(read?.authors).toEqual(authors);
+  });
 
   it("hydrates a delete preimage from the atomic mutation result", async () => {
     const requests: Request[] = [];

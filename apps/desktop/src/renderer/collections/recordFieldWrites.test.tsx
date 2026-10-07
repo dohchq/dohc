@@ -28,6 +28,7 @@ import {
   remapCollectionFieldWritePaths,
   retryCollectionFieldWrite,
   settleCollectionFieldWrites,
+  setCollectionFieldWriteAccess,
   useCollectionWritesBlockingAdmission,
   useCollectionWriteStatus,
 } from "./recordFieldWrites";
@@ -47,7 +48,7 @@ vi.mock("../collab/useEngineDoc", () => ({
 
 function engineDocState(
   partial: Partial<
-    Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError" | "readOnlyWhileEditing" | "deletedWhileEditing">
+    Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError" | "sharedWaiting" | "readOnlyWhileEditing" | "deletedWhileEditing">
   >,
 ): UseEngineDoc {
   return {
@@ -94,6 +95,89 @@ function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {
 }
 
 describe("retained failures", () => {
+  it("keeps an earlier failure reason through access refusal and reopening", () => {
+    docMock.current = engineDocState({ opening: true });
+    render(<CollectionFieldWriteHost />);
+    enqueue();
+    const original = "This field changed. Copy your value, or retry after restoring the field.";
+    act(() => abandonPendingCollectionFieldWrites(original));
+    enqueue({ ...CHANGE, field: "priority", value: "high" });
+    const refusal = "This share must be reopened.";
+    act(() => setCollectionFieldWriteAccess("ws-1", refusal));
+    expect(collectionWriteFailures().map(failure => failure.message)).toEqual([original, refusal]);
+    const rows = screen.getAllByTestId("collection-write-failure");
+    expect(rows[0]!.textContent).toContain(refusal);
+    expect(rows[1]!.textContent).toContain(refusal);
+    expect(screen.getAllByTestId("collection-write-retry").every(button => button.hasAttribute("disabled"))).toBe(true);
+    act(() => setCollectionFieldWriteAccess("ws-1", null));
+    expect(collectionWriteFailures().map(failure => failure.message)).toEqual([original, refusal]);
+    expect(rows[0]!.textContent).toContain(original);
+    expect(rows[0]!.textContent).not.toContain(refusal);
+    expect(rows[1]!.textContent).toContain(refusal);
+    expect(screen.getAllByTestId("collection-write-retry").every(button => !button.hasAttribute("disabled"))).toBe(true);
+  });
+
+  it("keeps an applied but refused field value with the confirmed access explanation", () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", CHANGE.recordId);
+    docMock.current = engineDocState({ available: true, doc });
+    const host = render(<CollectionFieldWriteHost />);
+    try {
+      enqueue();
+      const message = "Your access to this share ended.";
+      act(() => setCollectionFieldWriteAccess("ws-1", message));
+      expect(collectionWriteFailures()).toHaveLength(0);
+      docMock.current = engineDocState({ available: true, doc, saveState: { kind: "unknown" }, readOnlyWhileEditing: true, saveError: "forbidden" });
+      host.rerender(<CollectionFieldWriteHost />);
+      expect(collectionWriteFailures()[0]).toMatchObject({ message, change: CHANGE });
+      expect(screen.getByTestId("collection-write-retry").hasAttribute("disabled")).toBe(true);
+    } finally { host.unmount(); doc.destroy(); }
+  });
+  it.each(["ended", "changed"])("retains waiting edits and refuses retries after access %s", access => {
+    docMock.current = engineDocState({ sharedWaiting: { state: "pending", message: "Waiting to send" } });
+    const host = render(<CollectionFieldWriteHost />);
+    enqueue();
+    const message = `Your access to this share ${access}.`;
+    act(() => setCollectionFieldWriteAccess("ws-1", message));
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    const failure = collectionWriteFailures()[0]!;
+    expect(failure.change).toEqual(CHANGE);
+    expect(failure.message).toBe(message);
+    expect(screen.getByTestId("collection-write-retry").hasAttribute("disabled")).toBe(true);
+    const doc = new Y.Doc();
+    try {
+      doc.getMap("frontmatter").set("id", CHANGE.recordId);
+      docMock.current = engineDocState({ available: true, doc });
+      act(() => retryCollectionFieldWrite(failure.id));
+      host.rerender(<CollectionFieldWriteHost />);
+      expect(doc.getMap("frontmatter").get("status")).toBeUndefined();
+      expect(enqueue()).toBe(false);
+      expect(collectionWriteFailures()).toHaveLength(2);
+      // The restriction belongs only to the received workspace.
+      expect(enqueueCollectionFieldWrite("other", "tasks", CHANGE)).toBe(true);
+    } finally { host.unmount(); doc.destroy(); }
+  });
+
+  it("keeps a field edit waiting and applies it when this record becomes editable", () => {
+    const message = "Record saved on this device. Waiting to send.";
+    docMock.current = engineDocState({ sharedWaiting: {state: "pending", message} });
+    const host = render(<CollectionFieldWriteHost />);
+    const status = renderHook(() => useCollectionWriteStatus("ws-1", "tasks"));
+    enqueue();
+    expect(collectionWriteFailures()).toEqual([]);
+    expect(hasPendingCollectionFieldWrites()).toBe(true);
+    expect(status.result.current.waiting).toBe(message);
+    const doc = new Y.Doc();
+    try {
+      doc.getMap("frontmatter").set("id", CHANGE.recordId);
+      docMock.current = engineDocState({available: true, doc});
+      host.rerender(<CollectionFieldWriteHost />);
+      expect(doc.getMap("frontmatter").get("status")).toBe("done");
+      expect(status.result.current.waiting).toBeNull();
+      settleHead(host, doc);
+      expect(hasPendingCollectionFieldWrites()).toBe(false);
+    } finally { host.unmount(); doc.destroy(); }
+  });
   it.each([
     '&root {id: rec-1, status: draft, score: .nan}',
     '!!map &root {id: rec-1, status: draft, score: .nan}',

@@ -49,6 +49,35 @@ fn text_sha(text: &str) -> String {
 }
 
 #[test]
+fn imported_live_moment_preserves_public_author_snapshots() {
+    for author in [
+        json!({"kind":"unattributed"}),
+        json!({"kind":"human", "humanId":"recipient", "humanName":"Recipient"}),
+        json!({"kind":"link", "publicPrincipalId":"public-recipient", "label":"Edit link participant"}),
+    ] {
+        let (_scratch, mut store) = test_store();
+        hydrate_texts(&mut store, &["record fields"]);
+        let payload = with_author(
+            absent_text_payload("live-settlement", "record", "record.md", "record fields"),
+            author.clone(),
+        );
+        let op = envelope("native-service", 0, "ws", payload);
+        assert!(matches!(
+            apply_moment_envelope(&mut store, &op, &NoFaults)
+                .unwrap()
+                .primary,
+            ApplyDisposition::Applied(_)
+        ));
+        let actual: String = store.read_with(|conn| conn.query_row(
+            "SELECT author_json FROM moments WHERE workspace_id='ws' AND moment_id='live-settlement'", [], |row| row.get(0))).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&actual).unwrap(),
+            json!([author])
+        );
+    }
+}
+
+#[test]
 fn maximum_live_author_summary_journals_with_payload_headroom() {
     let (_scratch, mut store) = test_store();
     crate::adopt_join_identity(&mut store, "ws", "source", "epoch", "stream", 1, &NoFaults)
@@ -2505,7 +2534,11 @@ fn direct_write_author_is_refused_with_any_field_beyond_its_own() {
         .expect("refusal is recorded");
         assert_eq!(
             refusal_reason(outcome),
-            "direct-write author carries only its own fields",
+            if author["kind"] == "link" {
+                "moment.append payload is malformed"
+            } else {
+                "direct-write author carries only its own fields"
+            },
             "{author}"
         );
     }

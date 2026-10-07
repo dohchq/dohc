@@ -1152,6 +1152,11 @@ pub fn apply_committed(
                 }).collect::<Result<Vec<_>, _>>())
                 .transpose().map_err(|_| ApplicationError::Corrupt)?
                 .unwrap_or_default();
+            // A delivery without recording context keeps that gap in coverage,
+            // even when the relay's authority below names who sent it.
+            if authors.is_empty() {
+                authors.push(r#"[{"kind":"unattributed"}]"#.to_owned());
+            }
             // A person the owner shared with, or an Edit share link, is named
             // from the relay's authority, never the frame, whether or not
             // their client sent a recording context. A full interval refuses
@@ -3726,13 +3731,15 @@ mod tests {
         );
         // The moment that settles these frames names the collaborator and the
         // link from the same authority, so History says who changed the file,
-        // beside any author an admitted snapshot named.
+        // beside any author an admitted snapshot named. Frames without
+        // recording context also keep the unattributed gap.
         let interval = store
             .read_with(|conn| crate::author_coverage::interval_in(conn, &key(), i64::MAX))
             .unwrap()
             .json();
         let snapshot_author = capped_agent
             .then(|| serde_json::json!({"kind":"human","humanId":"owner-1","humanName":"Owner"}));
+        let missing_context = (!capped_agent).then(|| serde_json::json!({"kind":"unattributed"}));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&interval).unwrap(),
             serde_json::Value::Array(
@@ -3742,6 +3749,7 @@ mod tests {
                         serde_json::json!({"kind":"link","grantId":"grant-link","grantGeneration":2,"principalId":"holder-1"}),
                         serde_json::json!({"kind":"named","userId":"guest-1","grantId":"grant-1","grantGeneration":1}),
                     ])
+                    .chain(missing_context)
                     .collect()
             ),
         );

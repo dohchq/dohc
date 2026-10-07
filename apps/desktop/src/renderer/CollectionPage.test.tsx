@@ -292,6 +292,8 @@ function pageWithHost(
   onOpenRecord: (recordPath: string) => void = () => undefined,
   view?: {
     readOnly?: boolean;
+    accessEnded?: boolean;
+    writeRefusal?: string;
     activeViewName?: string | null;
     onActiveViewChange?: (viewName: string | null) => void;
     onError?: CollectionPageProps["onError"];
@@ -304,6 +306,8 @@ function pageWithHost(
         workspaceId="ws-1"
         collectionPath="tasks"
         readOnly={view?.readOnly}
+        accessEnded={view?.accessEnded}
+        writeRefusal={view?.writeRefusal}
         activeViewName={view?.activeViewName ?? null}
         onActiveViewChange={view?.onActiveViewChange ?? (() => undefined)}
         onNewRecord={onNewRecord}
@@ -323,6 +327,8 @@ function renderPage(
   onOpenRecord: (recordPath: string) => void = () => undefined,
   view?: {
     readOnly?: boolean;
+    accessEnded?: boolean;
+    writeRefusal?: string;
     activeViewName?: string | null;
     onActiveViewChange?: (viewName: string | null) => void;
     onError?: CollectionPageProps["onError"];
@@ -333,6 +339,106 @@ function renderPage(
 }
 
 describe("CollectionPage", () => {
+  it("keeps draft delivery separate from owner application, retries, and reverses local discard", async () => {
+    const draft = { ...record("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa", "Socks"), creationDelivery: "pending" as const, creationCanDiscard: true };
+    const records = [draft];
+    const api = { ...makeBridge(records), pushShareDirectWrites: vi.fn(async () => undefined),
+      deleteWorkspacePath: vi.fn(async () => { records.splice(0); }), createWorkspaceFile: vi.fn(async () => { records.push(draft); }) };
+    const text = `---\nid: ${draft.id}\nTitle: Socks\n---\nKeep the entire draft.\n`;
+    api.readWorkspaceText.mockResolvedValue({ text, truncated: false, contentHash: hashFor(0) });
+    const onNotice = vi.fn();
+    vi.stubGlobal("dohcDesktop", api);
+    render(pageWithHost(undefined, undefined, { onNotice }));
+    await screen.findByText("Saved on this computer. Waiting to send");
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(api.pushShareDirectWrites).toHaveBeenCalledWith({ workspaceId: "ws-1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalled());
+    expect(api.deleteWorkspacePath).toHaveBeenCalledWith({ workspaceId: "ws-1", relativePath: draft.path });
+    act(() => onNotice.mock.calls[0]![1]());
+    await waitFor(() => expect(api.createWorkspaceFile).toHaveBeenCalledWith({ workspaceId: "ws-1", relativePath: draft.path, initialText: text }));
+  });
+
+  it("drops accepted creations from the attention strip", async () => {
+    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "accepted" }]));
+    await screen.findByText("Socks");
+    expect(screen.queryByTestId("collection-record-drafts")).toBeNull();
+  });
+
+  it("shows the relay refusal reason", async () => {
+    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "refused", creationRefusal: "This record name is taken." }]));
+    expect(await screen.findByText("This record name is taken.")).toBeTruthy();
+  });
+
+  it("does not offer Discard while the submission outcome is unknown", async () => {
+    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending", creationCanDiscard: false }]));
+    await screen.findByText("Saved on this computer. Waiting to send");
+    expect(screen.queryByRole("button", { name: "Discard draft" })).toBeNull();
+  });
+
+  it("shows the race winner without a creation strip when creation status clears", async () => {
+    const records: CollectionRecord[] = [{ ...record("loser", "Socks"), creationDelivery: "refused", creationRefusal: "This record name is taken." }];
+    const api = makeBridge(records);
+    const onOpenRecord = vi.fn();
+    renderPage(api, undefined, onOpenRecord);
+    await screen.findByText("This record name is taken.");
+    records.splice(0, 1, record("winner", "Socks"));
+    act(() => api.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Socks.md"] }));
+    await waitFor(() => expect(screen.queryByTestId("collection-record-drafts")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Open Socks" }));
+    expect(onOpenRecord).toHaveBeenCalledWith("tasks/Socks.md");
+    expect(screen.queryByTestId("collection-record-drafts")).toBeNull();
+  });
+
+  it("keeps ended drafts visible and discards a retry response after unmount", async () => {
+    const api = { ...makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" as const }]),
+      pushShareDirectWrites: vi.fn() };
+    const pending = deferred<void>();
+    api.pushShareDirectWrites.mockReturnValue(pending.promise);
+    const onError = vi.fn();
+    const view = renderPage(api, undefined, undefined, { onError });
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    view.unmount();
+    await act(async () => pending.reject(new Error("old workspace")));
+    expect(onError).not.toHaveBeenCalled();
+    renderPage(api, undefined, undefined, { readOnly: true, accessEnded: true });
+    expect(await screen.findByText("Access ended. This draft cannot be sent. It is kept on this computer.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it.each(["offline", "refused"] as const)("explains that an ended %s draft cannot be sent", async creationDelivery => {
+    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery }]), undefined, undefined, { readOnly: true, accessEnded: true });
+    await screen.findByText("Access ended. This draft cannot be sent. It is kept on this computer.");
+    expect(screen.queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it.each([
+    { accessEnded: true, writeRefusal: undefined },
+    { accessEnded: false, writeRefusal: undefined },
+    { accessEnded: false, writeRefusal: "This share must be reopened." },
+  ])("refuses an old draft retry after read-only access: $accessEnded, $writeRefusal", async ({ accessEnded, writeRefusal }) => {
+    const api = { ...makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" as const }]),
+      pushShareDirectWrites: vi.fn().mockRejectedValueOnce(new Error("offline")) };
+    const onError = vi.fn();
+    const view = renderPage(api, undefined, undefined, { onError });
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(onError).toHaveBeenCalledOnce());
+    const retry = onError.mock.calls[0]![2];
+    view.rerender(pageWithHost(undefined, undefined, { onError, readOnly: true, accessEnded, writeRefusal }));
+    await act(async () => retry());
+    expect(api.pushShareDirectWrites).toHaveBeenCalledOnce();
+    const message = writeRefusal ?? (accessEnded ? "Your access to this share ended."
+      : "Your access to this share changed. Ask for Edit access, then reopen the share.");
+    expect(onError).toHaveBeenLastCalledWith(message, expect.any(Error));
+  });
+
+  it.each(["View access", "damaged share"])("does not call %s ended access", async () => {
+    renderPage(makeBridge([{ ...record("rec-1", "Socks"), creationDelivery: "pending" }]), undefined, undefined, {readOnly: true});
+    await screen.findByText("This draft cannot be sent with the current share access. It is kept on this computer.");
+    expect(screen.queryByText(/Access ended/)).toBeNull();
+    expect(screen.queryByRole("button", {name: "Try again"})).toBeNull();
+  });
+
   it("keeps View tables readable without record or definition writes", async () => {
     const bridge = makeBridge([record("rec-1", "Shared task")]);
     renderPage(bridge, undefined, undefined, { readOnly: true });

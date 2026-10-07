@@ -760,3 +760,136 @@ it.skipIf(engine.missing)("finds one filtered record among 5000 without refreshi
   console.log("FIND_5000 " + JSON.stringify(measurement));
   if (process.env.DOHC_AUTOMATION_FIND_MEASUREMENT) await writeFile(process.env.DOHC_AUTOMATION_FIND_MEASUREMENT, JSON.stringify(measurement));
 }, 180_000);
+
+it.skipIf(engine.missing)("pushes an owner device settlement marker intact and reproduces the recipient human refusal", async () => {
+  const root = await tempRoot("device-settlement"), storage = await testStorage({liveTickets: {retainedTicketsPerPrincipalGrant: 32, expiredTicketCleanupBatchSize: 32, now: Date.now}});
+  const namespace = "device-settlement", key = new Uint8Array(32).fill(7);
+  const history = createLiveJournalHistoryAuthority({namespace, reconciled: true});
+  attachLiveJournalHistory(storage as StorageContext, history);
+  const serverHost = {label: "Test server"};
+  const relay = createSyncRelayHandler({storage, resolveActor: testActor, automationServer: serverHost});
+  const http = serveFetchHandler({handler: relay,
+    streamBody: streamsRequestBody, maxBodyBytes: () => 21 * 1024 * 1024, oversized: () => new Response(null, {status: 413}), failure: () => new Response(null, {status: 500})});
+  await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
+  cleanup.push(async () => {http.closeAllConnections(); await new Promise<void>(resolve => http.close(() => resolve()));});
+  const relayUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+  const owner = await computer({root: join(root, "owner"), relayUrl, bearerToken: "test:owner", identity: {kind: "claim"}});
+  await owner.request("versionedText.write", {versionId: "main", path: "Tasks/collection.yaml", text: "fields: {}\n", origin: "api", publish: true}, owner.workspace);
+  await owner.request("versionedText.write", {versionId: "main", path: "Tasks/one.md", text: `---\nid: ${ONE}\nStatus: Doing\n---\n\nPack the car.\n`, origin: "api", publish: true}, owner.workspace);
+  const ownerEngine = replicaRecordEngine({...owner, workspaceId: WORKSPACE});
+  await owner.sync();
+  const session = await ownerEngine.openSession({versionId: "main", path: "Tasks/one.md"});
+  cleanup.push(() => session.close({settle: false}));
+  const seed = new Y.Doc();
+  try {
+    Y.applyUpdate(seed, session.initialUpdate);
+    const vector = Y.encodeStateVector(seed);
+    seed.getMap("frontmatter").set("Status", "Doing");
+    await session.applyLocalUpdate(Y.encodeStateAsUpdate(seed, vector), {actorOriginId: "owner", attribution: {actorKind: "human"}, armSettle: false});
+  } finally {seed.destroy();}
+  await session.settleNow();
+  await owner.sync();
+  const profile = selfHostLiveProfile(), validate = liveValidation.validator(profile.validation);
+  const host = {mode: "device" as const, hostId: "native-owner", hostEpoch: parseHostEpoch(1), instanceId: "instance", connectionId: "connection"};
+  storage.provisionLiveHostControl({mode: host.mode, hostId: host.hostId, updatedAtMs: 1, guard() {}});
+  storage.registerLiveHost({...host, updatedAtMs: 2, guard() {}});
+  const document = {workspaceId: WORKSPACE, mainVersionId: "main", objectId: session.objectId!, lineageClaimId: session.lineageClaimId!};
+  const database = new DatabaseSync(join(owner.root, ".dohc/engine/engine.db"), {readOnly: true});
+  let baselineBytes: Uint8Array;
+  try {
+    const blob = database.prepare("SELECT bytes FROM binary_blobs WHERE sha256 = ?").get(document.lineageClaimId);
+    baselineBytes = blob!.bytes as Uint8Array;
+  } finally {database.close();}
+  const validated = createLiveMarkdownRegistrationValidator(profile.validation)({document, currentPath: session.path, checkpoint: baselineBytes});
+  if (validated.kind !== "accepted") throw new Error(JSON.stringify(validated));
+  const registrationResult = storage.registerLiveDocumentBaseline({host, baselineBytes, evidence: validated.evidence, registeredAtMs: 3});
+  expect(registrationResult, JSON.stringify(registrationResult)).toMatchObject({kind: "registered"});
+  storage.createShare({share: {shareId: "native-share", workspaceId: WORKSPACE, granterUserId: "owner", selectorJson: JSON.stringify({paths: ["Tasks"], versionId: null}), createdAtMs: 0},
+    grant: {grantId: "native-grant", shareId: "native-share", principalKind: "user", principalUserId: "reader", principalEmail: null, access: "edit", generation: 1, status: "active", createdAtMs: 0, revokedAtMs: null, parentGrantId: null}});
+  await owner.request("liveApplication.provisionOwner", {relayNamespace: namespace, host: {hostId: host.hostId, hostEpoch: host.hostEpoch, instanceId: host.instanceId, connectionId: host.connectionId}}, owner.workspace);
+  const current = storage.resolveCurrentLiveDocumentBinding({document, actor: {kind: "owner", userId: "owner", shareId: "native-share"}});
+  if (current.kind !== "current") throw new Error(JSON.stringify(current));
+  const {binding} = current;
+  const nativeSession = session.nativeOwner!.sessionId;
+  // The desktop bridge holds this exact native session and forwards only its private methods.
+  const native = {
+    sendRequest: async (request, signal) => {
+      if (request.method === "liveApplication.ownerState") {
+        const result = (await owner.client.sendRequest({...request, params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {adoptionId: string; expectedLocalSequence: number; throughCursor: number | null};
+        return {id: request.id, result: {adoptionId: result.adoptionId, expectedLocalSequence: result.expectedLocalSequence, throughCursor: result.throughCursor ?? 0, sessionId: nativeSession}};
+      }
+      if (request.method === "liveApplication.ownerOutbox") {
+        const result = (await owner.client.sendRequest({...request, method: "liveApplication.ownerState", params: {...(request.params as {[key: string]: JsonValue}), sessionId: nativeSession}}, signal)).result as {outboxId: string | null; pendingBytes: number; outboxState: string | null};
+        return {id: request.id, result: {outboxId: result.outboxId, pendingBytes: result.pendingBytes, state: result.outboxState}};
+      }
+      if (request.method === "liveApplication.readOwnerOutbox" || request.method === "liveApplication.acknowledgeOwnerOutbox") {
+        const params = request.params as {[key: string]: JsonValue};
+        const state = (await owner.client.sendRequest({...request, id: owner.nextRequestId(), method: "liveApplication.ownerState", params: {registrationId: params.registrationId!, sessionId: nativeSession}}, signal)).result as {outboxId: string};
+        const {registrationId: _registration, ...rest} = params;
+        return owner.client.sendRequest({...request, method: request.method === "liveApplication.readOwnerOutbox" ? "ydoc.ownerOutbox.readPending" : "ydoc.ownerOutbox.acknowledge", params: {outboxId: state.outboxId, ...rest}}, signal);
+      }
+      return owner.client.sendRequest(request, signal);
+    },
+    sendLiveOwnerAdoption: (request, cut, bounds, signal) => owner.client.sendLiveOwnerAdoption({...request, sessionId: nativeSession}, cut, bounds, signal),
+    sendLiveApplication: async (request, admitted, signal) => {
+      const result = await owner.client.sendLiveApplication(request, admitted, signal);
+      await session.nativeOwner!.applyRemoteUpdate(admitted.updateBytes);
+      return result;
+    },
+    readLiveApplicationAck: (request, receipt, signal) => owner.client.readLiveApplicationAck(request, receipt, signal),
+    openLiveAppliedSync: (request, vector, bounds, signal) => owner.client.openLiveAppliedSync(request, vector, bounds, signal),
+    readNextLiveApplied: (request, after, maximum, signal) => owner.client.readNextLiveApplied(request, after, maximum, signal),
+  } satisfies Pick<EngineClient, "sendRequest" | "sendLiveOwnerAdoption" | "sendLiveApplication" | "readLiveApplicationAck" | "openLiveAppliedSync" | "readNextLiveApplied">;
+  const consumer = new OwnerCommittedDelivery(storage, history, {client: native as EngineClient, workspace: owner.workspace, host, deadlineMs: DEADLINE_MS, nextRequestId: owner.nextRequestId,
+    bounds: {maxBytes: profile.nativeIngress.maxAdoptionBytes, maxEvents: profile.nativeIngress.maxAdoptionEvents},
+    ownerAdmission: {shares: new Map([[WORKSPACE, "native-share"]]), maxEntriesPerDrain: 128, maxBytesPerDrain: profile.nativeIngress.maxAdoptionBytes, validate}});
+  await consumer.drain(document);
+  const nativeRegistration = consumer.captureRegistration(binding);
+  const common = {storage, bounds: profile.namedLive.host, validate,
+    native: {client: native, workspace: owner.workspace, registrationId: nativeRegistration.id, coordinate: host, binding,
+      invalidated: nativeRegistration.invalidated, changes: createNamedFrameChanges(16), deadlineMs: DEADLINE_MS,
+      nextRequestId: owner.nextRequestId, drain: (doc: typeof document, signal: AbortSignal) => consumer.drain(doc, signal)}};
+  const ownerHost = captureOwnerLiveFrameHost({...common, authenticatedUserId: "owner", shareId: "native-share",
+    trustedAccount: {accountId: "owner", name: "Owner"}});
+  const edit = async (host: ReturnType<typeof captureOwnerLiveFrameHost>, field: string, authorContext?: {kind: "account"; accountId: string}) => {
+    const doc = new Y.Doc();
+    try {
+      const sync = await host.openSync(Uint8Array.of(0), owner.lifetime);
+      try {Y.applyUpdate(doc, sync.missingStateUpdate);} finally {sync.close();}
+      const vector = Y.encodeStateVector(doc);
+      doc.getMap("frontmatter").set(field, "Keep this text");
+      const updateBytes = Y.encodeStateAsUpdate(doc, vector);
+      expect(await host.submit({deliveryId: `edit-${field}`, updateDigest: createHash("sha256").update(updateBytes).digest("hex"), updateBytes,
+        ...(authorContext ? {authorContext} : {})}, owner.lifetime)).toMatchObject({result: "success"});
+    } finally {doc.destroy(); host.close();}
+    await consumer.settle(document);
+  };
+  await edit(ownerHost, "OwnerNote");
+  const moments = async () => (await owner.request("moments.list", {limit: 100}, owner.workspace)).moments as unknown as Array<{momentId: string; authors?: unknown}>;
+  const markerMoment = (await moments())[0]!;
+  expect(markerMoment.authors).toEqual([{kind: "unattributed"}]);
+  // An operation after the settlement must also reach the relay.
+  await owner.request("versionedText.write", {versionId: "main", path: "after.txt", text: "After settlement", origin: "api", publish: true}, owner.workspace);
+  await owner.sync();
+  expect(storage.fetchLogPage({workspaceId: WORKSPACE, sinceRelaySeq: 0, limit: 1000}).rows.some(row =>
+    JSON.parse(row.payloadJson).path === "after.txt")).toBe(true);
+  const identity = storage.getWorkspaceIdentity(WORKSPACE)!;
+  const peer = await computer({root: join(root, "peer"), relayUrl, bearerToken: "test:owner",
+    identity: {kind: "join", replicationEpoch: identity.replicationEpoch, streamIdentity: identity.streamIdentity}});
+  await peer.sync();
+  const imported = (await peer.request("moments.list", {limit: 100}, peer.workspace)).moments as unknown as Array<{momentId: string; authors?: unknown}>;
+  expect(imported.find(moment => moment.momentId === markerMoment.momentId)?.authors).toEqual([{kind: "unattributed"}]);
+  expect(await readFile(join(peer.root, "Tasks/one.md"), "utf8")).toContain("OwnerNote: Keep this text");
+  const viewer = {kind: "named" as const, workspaceId: WORKSPACE, userId: "reader", shareId: "native-share", grantId: "native-grant"};
+  const tickets = createLiveTickets({storage, audience: "https://relay.example.test", key,
+    hostReports: {currentBinding: async () => ({connection: host, binding})}});
+  const minted = await tickets.mint({objectId: document.objectId}, viewer);
+  const ticket = await tickets.redeem(minted!.token, viewer);
+  const recipientHost = captureNamedLiveFrameHost({...common, ticket: ticket!, actor: liveBrowserActor(viewer), trustedAccount: {accountId: "reader", name: "Reader"}});
+  await edit(recipientHost, "RecipientNote", {kind: "account", accountId: "reader"});
+  const recipientMoment = (await moments())[0]!;
+  expect(recipientMoment.authors).toEqual([{kind: "human", humanId: "reader", humanName: "Reader"}]);
+  await expect(owner.sync()).rejects.toMatchObject({cause: {wireError: {code: "AUTHORSHIP_MISMATCH"}}});
+  expect(storage.fetchLogPage({workspaceId: WORKSPACE, sinceRelaySeq: 0, limit: 1000}).rows.some(row =>
+    JSON.parse(row.payloadJson).momentId === recipientMoment.momentId)).toBe(false);
+}, 120_000);

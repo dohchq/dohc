@@ -1,4 +1,6 @@
 import { createNamedDesktopLive } from "./namedDesktopLive";
+import { notifyRelayWrite } from "./relayWriteChanges";
+import { notifyDesktopReadiness } from "./desktopReadinessChanges";
 import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
 import { once } from "node:events";
 import { request as httpRequest } from "node:http";
@@ -95,9 +97,199 @@ it("releases a desktop session reservation when ticket minting refuses", async (
   const f = await fixture(limits, false, undefined, false, true);
   const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue(null);
   const body = {shareId: scope.shareId, path: binding.currentPath};
-  for (let i = 0; i < 10; i++) expect((await f.post("/sync/live/desktop-open", body)).status).toBe(404);
+  const cancel = new AbortController();
+  const waiting = f.desktopAdmission!.handle(new Request(`https://${relayHost}/sync/live/desktop-open`, {
+    method: "POST", headers: {host: relayHost, authorization: "Bearer reader-token", "content-type": "application/json"},
+    body: JSON.stringify(body), signal: cancel.signal,
+  }));
+  await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(1));
+  cancel.abort();
+  expect((await waiting).status).toBe(404);
   mint.mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
   expect((await f.post("/sync/live/desktop-open", body)).status).toBe(200);
+});
+
+it("waits for host readiness on a subscription without another desktop open", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue(null);
+  const waiting = f.post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath});
+  await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(1));
+  mint.mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
+  f.changes.notify(binding);
+  expect((await waiting).status).toBe(200);
+  expect(mint).toHaveBeenCalledTimes(2);
+});
+
+it("finishes a desktop open started during reconnect after one host readiness wake", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  f.captureNative.mockRejectedValue(new Error("Host reconnecting."));
+  const mint = vi.spyOn(f.tickets, "mint");
+  const waiting = f.post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath});
+  await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(1));
+  f.captureNative.mockResolvedValue(f.native);
+  f.changes.notifyHost([binding.workspaceId]);
+  const response = await waiting;
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({objectId: binding.objectId, path: binding.currentPath, ticket: {token: expect.any(String)}});
+  expect(mint).toHaveBeenCalledTimes(2);
+  expect(f.changes.listenerCount()).toBe(0);
+});
+
+it("resolves waiting readiness after one host readiness wake", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  f.captureNative.mockRejectedValue(new Error("Host reconnecting."));
+  const mint = vi.spyOn(f.tickets, "mint");
+  const reader = (await f.desktopAdmission!.handle(readinessRequest())).body!.getReader();
+  try {
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("waiting\n");
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(1));
+    f.captureNative.mockResolvedValue(f.native);
+    f.changes.notifyHost([binding.workspaceId]);
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("ready\n");
+    expect((await reader.read()).done).toBe(true);
+    expect(mint).toHaveBeenCalledTimes(2);
+    expect(f.changes.listenerCount()).toBe(0);
+  } finally { await reader.cancel(); }
+});
+
+it("keeps readiness past the admission deadline and ignores unrelated document, host, and relay writes", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue(null);
+  vi.useFakeTimers();
+  try {
+    const response = await f.desktopAdmission!.handle(new Request(`https://${relayHost}/sync/live/desktop-ready`, {
+      method: "POST", headers: {host: relayHost, authorization: "Bearer reader-token", "content-type": "application/json"},
+      body: JSON.stringify({shareId: scope.shareId, path: binding.currentPath}),
+    }));
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("waiting\n");
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(1));
+    f.changes.notify({...binding, objectId: "other-object"});
+    f.changes.notify({...binding, workspaceId: "other-workspace"});
+    f.changes.notifyHost(["other-workspace"]);
+    f.changes.notify();
+    notifyRelayWrite(f.storage);
+    notifyDesktopReadiness(f.storage, {shareId: "other-share"});
+    notifyDesktopReadiness(f.storage, {workspaceId: binding.workspaceId, path: "docs/other.md"});
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mint).toHaveBeenCalledTimes(1);
+    mint.mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
+    f.changes.notify(binding);
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("ready\n");
+    expect((await reader.read()).done).toBe(true);
+    expect(mint).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); }
+});
+
+function readinessRequest(user = "reader", path = binding.currentPath) {
+  return new Request(`https://${relayHost}/sync/live/desktop-ready`, {
+    method: "POST", headers: {host: relayHost, authorization: `Bearer ${user}-token`, "content-type": "application/json"},
+    body: JSON.stringify({shareId: scope.shareId, path}),
+  });
+}
+
+it("keeps desktop admission available with a full readiness pool across users", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  f.raw.prepare(`INSERT INTO sync_relay_share_grants
+    (grant_id,share_id,principal_kind,principal_user_id,principal_email,access,generation,status,created_at_ms,revoked_at_ms,parent_grant_id)
+    VALUES ('other-edit',?,'user','other-user',NULL,'edit',1,'active',0,NULL,NULL)`).run(scope.shareId);
+  const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue(null);
+  const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+  try {
+    for (const user of ["reader", "other"]) for (let index = 0; index < 4; index++) {
+      const reader = (await f.desktopAdmission!.handle(readinessRequest(user))).body!.getReader();
+      readers.push(reader);
+      await reader.read();
+    }
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(8));
+    expect((await f.desktopAdmission!.handle(readinessRequest())).status).toBe(404);
+    mint.mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
+    expect((await f.post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath})).status).toBe(200);
+  } finally { await Promise.all(readers.map(reader => reader.cancel())); }
+});
+
+it("caps readiness per authenticated user and frees that user's slot on cancel", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue(null);
+  const readers: ReadableStreamDefaultReader<Uint8Array>[] = [];
+  try {
+    for (let index = 0; index < 4; index++) {
+      const reader = (await f.desktopAdmission!.handle(readinessRequest())).body!.getReader();
+      readers.push(reader); await reader.read();
+    }
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(4));
+    expect(await (await f.desktopAdmission!.handle(readinessRequest())).text()).toBe("waiting\nunavailable\n");
+    expect(mint).toHaveBeenCalledTimes(4);
+    await readers.shift()!.cancel();
+    const replacement = (await f.desktopAdmission!.handle(readinessRequest())).body!.getReader();
+    readers.push(replacement); await replacement.read();
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(5));
+  } finally { await Promise.all(readers.map(reader => reader.cancel())); }
+});
+
+it("ends readiness with unavailable at its deadline and releases its slot", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue(null);
+  vi.useFakeTimers();
+  try {
+    const response = await f.desktopAdmission!.handle(readinessRequest());
+    const text = response.text();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(await text).toBe("waiting\nunavailable\n");
+    expect(f.changes.listenerCount()).toBe(0);
+    mint.mockResolvedValue({token: "ab".repeat(32), expiresAtMs: 61_000});
+    expect(await (await f.desktopAdmission!.handle(readinessRequest())).text()).toBe("waiting\nready\n");
+  } finally { vi.useRealTimers(); }
+});
+
+it("wakes only the caller's share when that share's access changes", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue(null);
+  const grants = vi.spyOn(f.storage, "listActiveShareGrantsForRecipient");
+  const reader = (await f.desktopAdmission!.handle(readinessRequest())).body!.getReader();
+  try {
+    await reader.read();
+    await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(1));
+    f.storage.revokeShare("other-share", 2000);
+    await new Promise<void>(queueMicrotask);
+    expect(grants).toHaveBeenCalledTimes(1);
+    f.storage.revokeShare(scope.shareId, 2000);
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("unavailable\n");
+    expect(grants).toHaveBeenCalledTimes(2);
+    expect(mint).toHaveBeenCalledTimes(1);
+  } finally { await reader.cancel(); }
+});
+
+it("rechecks access and releases a waiting readiness subscription on cancellation", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue(null);
+  const request = () => new Request(`https://${relayHost}/sync/live/desktop-ready`, {
+    method: "POST", headers: {host: relayHost, authorization: "Bearer reader-token", "content-type": "application/json"},
+    body: JSON.stringify({shareId: scope.shareId, path: binding.currentPath}),
+  });
+  const cancelled = (await f.desktopAdmission!.handle(request())).body!.getReader();
+  await cancelled.read();
+  await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(1));
+  await cancelled.cancel();
+  const reader = (await f.desktopAdmission!.handle(request())).body!.getReader();
+  await reader.read();
+  await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(2));
+  f.raw.prepare("UPDATE sync_relay_share_grants SET access='view'").run();
+  f.changes.notify(binding);
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe("unavailable\n");
+  expect((await reader.read()).done).toBe(true);
+  expect(mint).toHaveBeenCalledTimes(2);
+});
+
+it("rechecks Edit access when a waiting desktop admission wakes", async () => {
+  const f = await fixture(limits, false, undefined, false, true);
+  const mint = vi.spyOn(f.tickets, "mint").mockResolvedValue(null);
+  const waiting = f.post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath});
+  await vi.waitFor(() => expect(mint).toHaveBeenCalledTimes(1));
+  f.raw.prepare("UPDATE sync_relay_share_grants SET access='view'").run();
+  f.changes.notify(binding);
+  expect((await waiting).status).toBe(404);
+  expect(mint).toHaveBeenCalledTimes(1);
 });
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); vi.restoreAllMocks(); });
 function deferred<T>() {
@@ -143,7 +335,8 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     namedBrowserSessionLimits: { maxSessions: 8, retentionMs: 30000, maxPendingRequests: 4, maxRequestBytes: 16384, maxResponseBytes: 16384, timeoutMs: 1000 } });
   const tickets = createLiveTickets({ storage: state.storage, audience, key, hostReports: createLiveHostReports({ storage: state.storage, captureNative }) });
   const desktopAdmission = desktop ? createNamedDesktopLive({ storage: state.storage, resolveActor: actor,
-    publicOrigin: audience, hosts: new Set([relayHost]), tickets,
+    readinessLimits: {maxPendingRequests: 8, maxPendingPerUser: 4, timeoutMs: 5000},
+    publicOrigin: audience, hosts: new Set([relayHost]), tickets, changes,
     limits: {maxSessions: 10, retentionMs: 60000, maxPendingRequests: 4, maxRequestBytes: 16384, maxResponseBytes: 16384, timeoutMs: 1000},
     editorLimits: {provider: {frames, maxPendingUpdateBytes: 8192, maxPendingUpdates: 4, maxDeliveryAttempts: 3},
       maxHttpResponseBytes: 4096, maxSocketBufferedBytes: 4096, connectTimeoutMs: 1000, sendTimeoutMs: 1000, drainPollMs: 10} }) : undefined;
@@ -171,7 +364,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
   const bootstrap = desktop ? await post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath}) : link || owner ? Response.json({ discriminator: "abcdefghijkl" }) : await post("/sync/live/named-sessions", { grantId: scope.grantId });
   expect(bootstrap.status).toBe(200);
   let { discriminator } = await bootstrap.json() as { discriminator: string };
-  async function mint() {
+  async function mint(): Promise<{token: string; expiresAtMs: number; publicPrincipalId?: string}> {
     if (desktop) {
       const response = await post("/sync/live/desktop-open", {shareId: scope.shareId, path: binding.currentPath});
       expect(response.status).toBe(200);
@@ -182,7 +375,7 @@ async function fixture(routeLimits = limits, link = false, membershipPolicy: Liv
     if (!link && !desktop) expect(await application.resolveNamedBrowserSession(new Request("https://relay.example.test", { headers: { cookie: "account=reader" } }), discriminator)).toEqual(scope);
     expect(state.storage.resolveLiveObjectHostBinding(currentScope, binding.objectId)).toMatchObject({ kind: "current", binding });
     const response = await post(`/sync/live/${routeKind}-tickets`, { discriminator, objectId: binding.objectId });
-    expect(response.status).toBe(200); return await response.json() as { token: string; expiresAtMs: number };
+    expect(response.status).toBe(200); return await response.json() as { token: string; expiresAtMs: number; publicPrincipalId?: string };
   }
   function connect(token: string, cookie = "account=reader", extra: Record<string, string> = {}, ownerQuery = "") {
     const target = owner ? `/sync/workspaces/${binding.workspaceId}/live/owner?shareId=${scope.shareId}&objectId=${binding.objectId}&lineageClaimId=${binding.lineageClaimId}${ownerQuery}` : `/sync/live/${routeKind}?session=${discriminator}`;
@@ -231,7 +424,13 @@ it.each(["link", "desktop", "owner"])("shares total connection capacity with the
 
 it.each([false, true])("mints through actual HTTP auth and redeems once before exposing only live frames; link=%s", async link => {
   const f = await fixture(limits, link), minted = await f.mint();
-  expect(Object.keys(minted).sort()).toEqual(["expiresAtMs", "token"]);
+  expect(Object.keys(minted).sort()).toEqual(link ? ["expiresAtMs", "publicPrincipalId", "token"] : ["expiresAtMs", "token"]);
+  if (link) {
+    const publicId = minted.publicPrincipalId;
+    expect(publicId).toMatch(/^public_/);
+    expect(f.raw.prepare("SELECT public_principal_id FROM sync_relay_app_public_principals").get()).toEqual({public_principal_id: publicId});
+    expect((await f.mint()) as Record<string, unknown>).toMatchObject({publicPrincipalId: publicId});
+  }
   const browser = f.connect(minted.token); expect(await browser.status).toBe(101);
   await browser.until(() => browser.received.some(frame => frame.kind === "welcome"));
   expect(browser.ws.protocol).toBe("dohc-live-v1");
@@ -311,6 +510,9 @@ it("rejects missing provisioning budgets and uses the promoted journal validator
     const missing = { ...config } as Record<string, unknown>; delete missing[field]; expect(() => parseNamedLiveConfig(missing)).toThrow();
   }
   expect(() => parseNamedLiveConfig({ ...config, maxListeners: 1 })).toThrow();
+  const desktopLimits = {maxPendingAdmissionRequests: 4, maxPendingReadinessRequests: 13};
+  expect(() => parseNamedLiveConfig(config, desktopLimits)).toThrow(/desktop admission and readiness/);
+  expect(() => parseNamedLiveConfig({...config, maxListeners: 17}, desktopLimits)).not.toThrow();
   for (const field of ["maxSyncOutputBytes", "maxAppliedUpdateBytes"]) {
     expect(() => parseNamedLiveConfig({...config, host: {...bounds, [field]: 1}})).toThrow();
     expect(() => parseNamedLiveConfig({...config, host: {...bounds, [field]: 2}})).not.toThrow();
