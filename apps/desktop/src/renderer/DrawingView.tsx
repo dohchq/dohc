@@ -1,5 +1,4 @@
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
-import { Shapes } from "lucide-react";
 import {
   Suspense,
   lazy,
@@ -294,13 +293,12 @@ export function DrawingView({
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
       <ViewHeader
-        icon={<Shapes size={13} aria-hidden />}
         path={path}
-        label="drawing"
         onShare={onShare}
-        actions={
+        status={
           <StateMark
             testId="drawing-save-state"
+            truncate
             state={drawingChipState}
             shown={drawingShown}
             title={drawingChipState === "error" && engine.saveError ? engine.saveError : undefined}

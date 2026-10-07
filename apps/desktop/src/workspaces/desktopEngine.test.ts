@@ -138,13 +138,13 @@ describe("desktop engine construction", () => {
     const f = fixture();
     const opened = vi.fn();
     f.dependencies.onWorkspaceOpened = opened;
-    const workspace = { workspaceId: "notices", rootPath: await createTestScratch("notice-open-") };
+    const workspace = { workspaceId: "notice-test-workspace", rootPath: await createTestScratch("notice-open-") };
     try {
       await f.engine.start();
       expect(opened).not.toHaveBeenCalled();
       const sessions = f.engine.sessions!;
       await sessions.run(workspace, async () => undefined);
-      expect(opened).toHaveBeenCalledExactlyOnceWith("notices");
+      expect(opened).toHaveBeenCalledExactlyOnceWith("notice-test-workspace");
       await sessions.run(workspace, async () => undefined);
       expect(opened).toHaveBeenCalledTimes(1);
       await sessions.closeWorkspace(workspace);

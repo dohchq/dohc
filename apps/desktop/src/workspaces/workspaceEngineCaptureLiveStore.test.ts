@@ -18,9 +18,12 @@ import {
 } from "@dohc/workspace-engine-client";
 import type { VersionedTextMoment } from "@dohc/workspace-contracts/engine";
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createCaptureLiveStores as createAttachedCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
+
+vi.mock("node:timers/promises", { spy: true });
 
 const WORKSPACE_ID = "workspace";
 const WORKSPACE_HANDLE = "workspace-handle";
@@ -39,6 +42,7 @@ const OVER_CAP_SHA256 = createHash("sha256")
 function createCaptureLiveStores(
   workspace: EngineWorkspace,
   sessions: EngineWorkspaceSessions,
+  signal?: AbortSignal,
 ) {
   return createAttachedCaptureLiveStores(
     {
@@ -48,6 +52,7 @@ function createCaptureLiveStores(
         Symbol(`test-workspace-attachment:${workspace.workspaceId}`),
     },
     sessions,
+    signal,
   );
 }
 
@@ -372,6 +377,89 @@ describe("createCaptureLiveStores", () => {
     );
 
     await expect(store.flushCapture?.()).rejects.toThrow("did not settle");
+  });
+
+  it("abandons an in-flight capture flush when shutdown aborts", async () => {
+    const controller = new AbortController();
+    let entered!: () => void;
+    let finish!: () => void;
+    const started = new Promise<void>(resolve => {entered = resolve;});
+    const pending = new Promise<void>(resolve => {finish = resolve;});
+    const client = clientFor(async request => {
+      entered();
+      await pending;
+      return {id: request.id, result: {settled: true, running: true, degraded: false}};
+    });
+    const {store} = createCaptureLiveStores({workspaceId: WORKSPACE_ID, rootPath: "C:/workspace"}, sessionsFor(client), controller.signal);
+    const flushing = store.flushCapture!();
+    const outcome = flushing.catch((error: unknown) => error);
+    await started;
+    controller.abort();
+    try {
+      expect(await Promise.race([outcome, pending.then(() => "flush was not abandoned")])).toMatchObject({name: "AbortError"});
+    } finally {finish();}
+  });
+
+  it("cancels capture polling between attempts and rejects a flush after shutdown", async () => {
+    const controller = new AbortController();
+    const requests: Request[] = [];
+    const client = clientFor(async request => {
+      requests.push(request);
+      if (request.method === WORKSPACE_METHOD.watcherStatus) {
+        controller.abort();
+        return { id: request.id, result: {
+          running: true, degraded: false, terminal: false, phase: "ready",
+          noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
+        } };
+      }
+      return { id: request.id, result: { settled: false, running: true, degraded: false } };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client), controller.signal,
+    );
+    await expect(store.flushCapture?.()).rejects.toMatchObject({ name: "AbortError" });
+    await expect(store.flushCapture?.()).rejects.toBe(controller.signal.reason);
+    expect(requests.map(request => request.method)).toEqual([
+      WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
+    ]);
+  });
+
+  it("preserves the shutdown reason when capture polling aborts during sleep", async () => {
+    const timers = await vi.importActual<typeof import("node:timers/promises")>("node:timers/promises");
+    const controller = new AbortController();
+    const requests: Request[] = [];
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    vi.mocked(delay).mockImplementationOnce((...args) => {
+      const sleeping = timers.setTimeout(...args);
+      entered();
+      return sleeping;
+    });
+    const client = clientFor(async request => {
+      requests.push(request);
+      return {
+        id: request.id,
+        result: request.method === WORKSPACE_METHOD.watcherStatus
+          ? {
+              running: true, degraded: false, terminal: false, phase: "ready",
+              noAtomicPlacement: false, recoveryUnavailable: false, keptFiles: [],
+            }
+          : { settled: false, running: true, degraded: false },
+      };
+    });
+    const { store } = createCaptureLiveStores(
+      { workspaceId: WORKSPACE_ID, rootPath: "C:/workspace" },
+      sessionsFor(client), controller.signal,
+    );
+    const outcome = store.flushCapture!().catch((error: unknown) => error);
+    await started;
+    controller.abort(SENTINEL);
+
+    expect(await outcome).toBe(SENTINEL);
+    expect(requests.map(request => request.method)).toEqual([
+      WORKSPACE_METHOD.captureFlush, WORKSPACE_METHOD.watcherStatus,
+    ]);
   });
 
   it("classifies an unsettled initial capture before bounded settle polling", async () => {
@@ -1771,7 +1859,7 @@ describe("createCaptureLiveStores", () => {
     );
 
     await expect(
-      store.listHistoryPage({ workspaceId: WORKSPACE_ID, limit: 200 }),
+      store.listHistoryPage({ workspaceId: WORKSPACE_ID, objectId: "object-1", limit: 200 }),
     ).resolves.toMatchObject({
       activeVersion: { id: "main" },
       textMomentPage: { moments: [], nextBeforeMomentOrder: null },
@@ -1793,6 +1881,7 @@ describe("createCaptureLiveStores", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.params).toEqual({
       workspaceId: WORKSPACE_ID,
+      objectId: "object-1",
       limit: 200,
     });
   });

@@ -461,6 +461,9 @@ describe("EngineRelayClient", () => {
         sharingDeclined: [
           {
             path: pulls === 1 ? "notes/first.md" : "notes/second.md",
+            objectId: pulls === 1 ? "notes/first.md" : "notes/second.md",
+            versionId: "main",
+            lineagePruned: false, headBlobSha256: null,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 20,
             observedBytes: 20 + pulls,
@@ -478,12 +481,78 @@ describe("EngineRelayClient", () => {
     ).toEqual([
       {
         path: "notes/first.md",
+        objectId: "notes/first.md",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 21,
       },
       {
         path: "notes/second.md",
+        objectId: "notes/second.md",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 22,
+      },
+    ]);
+    await sessions.closeAll();
+  });
+
+  it("keeps the same object in distinct versions across pull pages", async () => {
+    let pulls = 0;
+    const daemon = new MockDaemon((request) => {
+      if (request.method !== "sync.pull") return undefined;
+      pulls += 1;
+      return {
+        status: "complete", refused: 0,
+        pushed: 0, ownerAdmissionPending: [],
+        fetched: 1,
+        applied: 1,
+        skipped: 0,
+        conflictsOpened: 0,
+        hasMore: pulls === 1,
+        nextCursor: pulls,
+        pendingCursor: { kind: "relay", token: `cursor-${pulls}` },
+        changedPaths: [],
+        refusals: [],
+        sharingDeclined: [
+          {
+            path: pulls === 1 ? "notes/first.md" : "notes/second.md",
+            objectId: "same-object",
+            versionId: pulls === 1 ? "main" : "draft",
+            lineagePruned: false, headBlobSha256: null,
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limitBytes: 20,
+            observedBytes: 20 + pulls,
+          },
+        ],
+      };
+    });
+    const { sessions, client } = await harness(daemon);
+
+    const pull = await client.pull(async () => undefined);
+
+    expect(
+      pull.sharingDeclined,
+      "the desktop client must not discard the engine's actionable declines",
+    ).toEqual([
+      {
+        path: "notes/first.md",
+        objectId: "same-object",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
+        constraint: "MAX_YDOC_UPDATE_BYTES",
+        limitBytes: 20,
+        observedBytes: 21,
+      },
+      {
+        path: "notes/second.md",
+        objectId: "same-object",
+        versionId: "draft",
+        lineagePruned: false, headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 22,
@@ -613,6 +682,9 @@ describe("EngineRelayClient", () => {
         sharingDeclined: [
           {
             path: "notes/oversized.md",
+            objectId: "notes/oversized.md",
+            versionId: "main",
+            lineagePruned: false, headBlobSha256: null,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 20,
             observedBytes: 21,
@@ -628,6 +700,9 @@ describe("EngineRelayClient", () => {
       sharingDeclined: [
         {
           path: "notes/oversized.md",
+          objectId: "notes/oversized.md",
+          versionId: "main",
+          lineagePruned: false, headBlobSha256: null,
           constraint: "MAX_YDOC_UPDATE_BYTES",
           limitBytes: 20,
           observedBytes: 21,
@@ -645,6 +720,10 @@ describe("EngineRelayClient", () => {
         pushed: 0, ownerAdmissionPending: [], hasMore: false,
         sharingDeclined: [
           {
+            objectId: "missing-path",
+            versionId: "main",
+            lineagePruned: false,
+            headBlobSha256: null,
             constraint: "MAX_YDOC_UPDATE_BYTES",
             limitBytes: 20,
             observedBytes: 21,
@@ -683,6 +762,9 @@ describe("EngineRelayClient", () => {
           sharingDeclined: [
             {
               path: "notes/commit.md",
+              objectId: "notes/commit.md",
+              versionId: "main",
+              lineagePruned: false, headBlobSha256: null,
               constraint: "MAX_YDOC_UPDATE_BYTES",
               limitBytes: 20,
               observedBytes: 22,
@@ -699,6 +781,9 @@ describe("EngineRelayClient", () => {
     expect(pull.sharingDeclined).toEqual([
       {
         path: "notes/commit.md",
+        objectId: "notes/commit.md",
+        versionId: "main",
+        lineagePruned: false, headBlobSha256: null,
         constraint: "MAX_YDOC_UPDATE_BYTES",
         limitBytes: 20,
         observedBytes: 22,

@@ -74,7 +74,7 @@ function relay(pages: Record<string, Page>) {
 // The listing for one /sync/shares body and one page of links.
 async function listed(shares: unknown, links: unknown[] = []): Promise<RosterListing> {
   const answer = await listRosterGrants(WORKSPACE, relay({
-    "/sync/shares": { status: 200, body: shares },
+    "/sync/shares?workspaceId=ws-trip": { status: 200, body: shares },
     "/sync/ws-trip/shares/links": { status: 200, body: { ok: true, links } },
   }));
   if (answer.kind !== "answered") throw new Error("the relay answered every request");
@@ -88,12 +88,11 @@ describe("roster from the relay's listings", () => {
       ok: true,
       granted: [
         row({ grantId: "g-5" }),
-        row({ grantId: "g-other", workspaceId: "ws-other" }),
         row({ grantId: "g-revoked", revokedAtMs: 9 }),
         row({ grantId: "g-link", principalKind: "link", recipientUserId: null, recipientEmail: null }),
         row({ grantId: "g-4", principalKind: "email", recipientUserId: null, recipientEmail: "cai@dohc.test", access: "view" }),
-        row({ grantId: "g-3", selector: group, access: "read-write" }),
-        row({ grantId: "g-2", selector: group, access: "read-only" }),
+        row({ grantId: "g-3", selector: group, access: "read-write", fileScope: "served" }),
+        row({ grantId: "g-2", selector: group, access: "read-only", fileScope: "served" }),
         row({ grantId: "g-1", selector: { kind: "chat", channelWireId: "wire-family" }, access: "read-write" }),
         row({ grantId: "g-6", selector: { paths: [], versionId: "v-1" }, access: "edit" }),
       ],
@@ -162,15 +161,14 @@ describe("roster from the relay's listings", () => {
       .toEqual({ grants: null, problem: { kind: "damaged-share", recipientEmail: damaged.recipientEmail } });
   });
 
-  it("ignores another workspace's damaged row, and calls a row with no workspace unusable", async () => {
+  it("refuses a row with another workspace or no workspace", async () => {
     expect(await listed({
       granted: [
         row({ grantId: "g-2", selector: null, damaged: true, revokedAtMs: 5 }),
         row({ grantId: "g-3", workspaceId: "ws-other", selector: null, damaged: true, access: 7, principalKind: 3, revokedAtMs: "no" }),
         row(),
       ],
-      // A revoked row past its use for reach still names its person for History.
-    })).toEqual({ grants: [ana], links: [], formerGrants: [], endedGrants: [{ grantId: "g-2", recipientUserId: "u-ana", recipientEmail: "ana@dohc.test" }] });
+    })).toEqual({ grants: null, problem: { kind: "unusable-listing" } });
     expect(await listed({ granted: [row({ workspaceId: undefined })] }))
       .toEqual({ grants: null, problem: { kind: "unusable-listing" } });
   });
@@ -247,7 +245,7 @@ describe("roster from the relay's listings", () => {
     const { automationsGeneration: _left, ...older } = row();
     expect(await listed({ granted: [older] })).toEqual({ grants: null, problem: { kind: "outdated-server" } });
     const { automationsGeneration: _other, ...elsewhere } = row({ workspaceId: "ws-other" });
-    expect(await listed({ granted: [elsewhere, row()] })).toEqual({ grants: [ana], links: [], formerGrants: [], endedGrants: [] });
+    expect(await listed({ granted: [elsewhere, row()] })).toEqual({ grants: null, problem: { kind: "unusable-listing" } });
   });
 
   it("finds the evidence to hold a step after the owner revoked, from another computer, a recipient who wrote it", async () => {

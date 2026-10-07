@@ -139,8 +139,10 @@ async function claimWorkspace(baseUrl: string, userId: string, workspaceId: stri
 }
 
 interface Peer {
-  userId: string;
-  clientId: string;
+  faceToken: string;
+  sessionToken: string;
+  isSelf: boolean;
+  displayName: string | null;
   state: unknown;
 }
 
@@ -308,7 +310,8 @@ describe("two-client presence over a real relay child", () => {
       clientId: "A",
       state: { displayName: "Sam", typing: false },
     });
-    expect(afterA.map((p) => p.clientId)).toEqual(["A"]);
+    expect(afterA).toHaveLength(1);
+    expect(afterA[0]?.isSelf).toBe(true);
 
     // A long-polls (parked); B appears typing -> A wakes and sees B typing.
     // Seed the poll `since` correctly: read the current version first.
@@ -319,8 +322,8 @@ describe("two-client presence over a real relay child", () => {
       state: { displayName: "Bee", typing: true },
     });
     const woke = await wake;
-    const bee = woke.peers.find((p) => p.clientId === "B");
-    expect(bee?.state).toMatchObject({ displayName: "Bee", typing: true });
+    const bee = woke.peers.find((p) => (p.state as { typing?: boolean }).typing === true);
+    expect(bee?.state).toMatchObject({ typing: true });
 
     // B leaves -> A's next read no longer shows B.
     await fetch(`${baseUrl}/sync/${ws}/presence?topic=general`, {
@@ -329,7 +332,7 @@ describe("two-client presence over a real relay child", () => {
       body: JSON.stringify({ clientId: "B", leave: true }),
     });
     const afterLeave = await poll(baseUrl, "owner", ws, "general", 0, 0);
-    expect(afterLeave.peers.map((p) => p.clientId)).toEqual(["A"]);
+    expect(afterLeave.peers.map((p) => p.sessionToken)).toEqual(afterA.map((p) => p.sessionToken));
   }, 90_000);
 
   it("converges an OWNER (workspace scope) and a PARTICIPANT (share scope) on one shared-channel presence scope via the wireId topic", async () => {
@@ -351,7 +354,8 @@ describe("two-client presence over a real relay child", () => {
       clientId: "owner-1",
       state: { displayName: "Owner", typing: false },
     });
-    expect(ownerView.map((p) => p.clientId)).toEqual(["owner-1"]);
+    expect(ownerView).toHaveLength(1);
+    expect(ownerView[0]?.isSelf).toBe(true);
 
     // PARTICIPANT publishes via the SHARE route on the same wireId topic. The
     // relay maps the share to the granter's workspace, so this lands in the
@@ -360,14 +364,16 @@ describe("two-client presence over a real relay child", () => {
       clientId: "member-1",
       state: { displayName: "Member", typing: true },
     });
-    expect(memberView.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
+    expect(memberView).toHaveLength(2);
+    expect(memberView.filter(p => p.isSelf)).toHaveLength(1);
+    expect(memberView.every(p => !Object.hasOwn(p, "userId") && !Object.hasOwn(p, "clientId"))).toBe(true);
 
     // …and the OWNER, reading its workspace scope, now sees the PARTICIPANT —
     // proving workspace-scope and share-scope resolved to the one relay scope.
     const ownerRead = await poll(baseUrl, "owner", ownerWs, wireId, 0, 0);
-    const member = ownerRead.peers.find((p) => p.clientId === "member-1");
-    expect(member?.userId).toBe("member");
-    expect(member?.state).toMatchObject({ displayName: "Member", typing: true });
+    const member = ownerRead.peers.find((p) => (p.state as { typing?: boolean }).typing === true);
+    expect(member?.displayName).toBe("member");
+    expect(member?.state).toMatchObject({ typing: true });
 
     // Stranger denial: a fully-authenticated non-participant is refused share
     // presence byte-identically to a share that never existed (no oracle).
@@ -380,7 +386,8 @@ describe("two-client presence over a real relay child", () => {
     // The stranger's rejected probe left the shared scope untouched: still just
     // the owner + the member.
     const afterProbe = await poll(baseUrl, "owner", ownerWs, wireId, 0, 0);
-    expect(afterProbe.peers.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
+    expect(afterProbe.peers).toHaveLength(2);
+    expect(afterProbe.peers.every(p => !Object.hasOwn(p, "userId"))).toBe(true);
   }, 90_000);
 
   it("converges owner + participant on a thread topic bound to the granted channel, and isolates other/unknown threads", async () => {
@@ -407,7 +414,8 @@ describe("two-client presence over a real relay child", () => {
       clientId: "owner-1",
       state: { displayName: "Owner", typing: false },
     });
-    expect(ownerView.map((p) => p.clientId)).toEqual(["owner-1"]);
+    expect(ownerView).toHaveLength(1);
+    expect(ownerView[0]?.isSelf).toBe(true);
 
     // PARTICIPANT publishes via the SHARE route on the same thread topic. The
     // gate admits it because thread-in binds to the granted channel; the relay
@@ -416,13 +424,15 @@ describe("two-client presence over a real relay child", () => {
       clientId: "member-1",
       state: { displayName: "Member", typing: true },
     });
-    expect(memberView.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
+    expect(memberView).toHaveLength(2);
+    expect(memberView.filter(p => p.isSelf)).toHaveLength(1);
+    expect(memberView.every(p => !Object.hasOwn(p, "userId") && !Object.hasOwn(p, "clientId"))).toBe(true);
 
     // …and the OWNER, reading its workspace scope, now sees the PARTICIPANT.
     const ownerRead = await poll(baseUrl, "owner", ownerWs, threadTopic, 0, 0);
-    const member = ownerRead.peers.find((p) => p.clientId === "member-1");
-    expect(member?.userId).toBe("member");
-    expect(member?.state).toMatchObject({ displayName: "Member", typing: true });
+    const member = ownerRead.peers.find((p) => (p.state as { typing?: boolean }).typing === true);
+    expect(member?.displayName).toBe("member");
+    expect(member?.state).toMatchObject({ typing: true });
 
     // ISOLATION — a thread bound to a different channel is refused byte-identical
     // to a share that never existed (no oracle that the thread even exists).
@@ -453,11 +463,13 @@ describe("two-client presence over a real relay child", () => {
     const channelView = await sharePublish(baseUrl, "member", shareId, grantedWire, {
       clientId: "member-ch",
     });
-    expect(channelView.map((p) => p.userId)).toEqual(["member"]);
+    expect(channelView).toHaveLength(1);
+    expect(channelView[0]?.isSelf).toBe(true);
 
     // The rejected thread probes left the shared thread scope untouched.
     const afterProbe = await poll(baseUrl, "owner", ownerWs, threadTopic, 0, 0);
-    expect(afterProbe.peers.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
+    expect(afterProbe.peers).toHaveLength(2);
+    expect(afterProbe.peers.every(p => !Object.hasOwn(p, "userId"))).toBe(true);
   }, 90_000);
 
   it("a non-owner cannot read another workspace's presence (isolation)", async () => {

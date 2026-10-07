@@ -1,3 +1,4 @@
+import { editorTabTestId } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -28,8 +29,8 @@ test("editor groups keep mixed surfaces visible, resize, and collapse", async ()
     const leftGroup = page.getByRole("region", { name: "Editor group 1" });
     const rightGroup = page.getByRole("region", { name: "Editor group 2" });
     await expect(rightGroup).toBeVisible();
-    await expect(leftGroup.getByTestId("tab-brief.md")).toBeVisible();
-    await expect(rightGroup.getByTestId("tab-brief.md")).toBeVisible();
+    await expect(leftGroup.getByTestId(editorTabTestId("brief.md"))).toBeVisible();
+    await expect(rightGroup.getByTestId(editorTabTestId("brief.md"))).toBeVisible();
     await expect(leftGroup.getByTestId("view-markdown")).toBeVisible();
     await expect(rightGroup.getByTestId("view-markdown")).toBeVisible();
 
@@ -53,7 +54,7 @@ test("editor groups keep mixed surfaces visible, resize, and collapse", async ()
       .poll(async () => Number(await separator.getAttribute("aria-valuenow")))
       .toBeGreaterThan(before);
 
-    const csvTabBox = await rightGroup.getByTestId("tab-data.csv").boundingBox();
+    const csvTabBox = await rightGroup.getByTestId(editorTabTestId("data.csv")).boundingBox();
     const leftBox = await leftGroup.boundingBox();
     expect(csvTabBox).not.toBeNull();
     expect(leftBox).not.toBeNull();
@@ -66,15 +67,15 @@ test("editor groups keep mixed surfaces visible, resize, and collapse", async ()
       steps: 8,
     });
     await page.mouse.up();
-    await expect(leftGroup.getByTestId("tab-data.csv")).toBeVisible();
-    await expect(rightGroup.getByTestId("tab-data.csv")).toHaveCount(0);
+    await expect(leftGroup.getByTestId(editorTabTestId("data.csv"))).toBeVisible();
+    await expect(rightGroup.getByTestId(editorTabTestId("data.csv"))).toHaveCount(0);
 
-    const lastTab = rightGroup.getByTestId("tab-brief.md");
+    const lastTab = rightGroup.getByTestId(editorTabTestId("brief.md"));
     await lastTab.focus();
     await page.keyboard.press(process.platform === "darwin" ? "Meta+w" : "Control+w");
     await expect(rightGroup).toHaveCount(0);
     await expect(leftGroup).toBeFocused();
-    await expect(page.getByTestId("tab-brief.md")).toBeVisible();
+    await expect(page.getByTestId(editorTabTestId("brief.md"))).toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

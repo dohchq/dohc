@@ -12,6 +12,21 @@ beforeEach(async () => {
 });
 
 describe("createWorkspaceFolder", () => {
+  it.each(["link", "shares", "notices"])("refuses a manifest with reserved id %s without changing it", async (workspaceId) => {
+    const root = join(base, workspaceId);
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    const manifestPath = join(root, ".dohc", "manifest.json");
+    const manifest = JSON.stringify({ version: 1, workspaceId, kind: "personal", mode: "local-first" });
+    await writeFile(manifestPath, manifest);
+
+    await expect(createWorkspaceFolder({ rootPath: root, kind: "personal" })).rejects.toMatchObject({
+      name: "ReservedWorkspaceIdError",
+      message: `Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
+    });
+    expect(await readFile(manifestPath, "utf8")).toBe(manifest);
+    expect(await readdir(join(root, ".dohc"))).toEqual(["manifest.json"]);
+  });
+
   it.each([false, true])("refuses linked metadata before creating or adopting a manifest (manifest present: %s)", async (hasManifest) => {
     const root = join(base, "linked-workspace");
     const outside = join(base, "outside");

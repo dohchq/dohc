@@ -30,7 +30,8 @@
     "./workspace-paths": "./src/workspacePaths.ts",
     "./dataset-path": "./src/datasetPath.ts",
     "./workspace-settings": "./src/workspaceSettings.ts",
-    "./workspace-settings-values": "./src/workspaceSettingsValues.ts"
+    "./workspace-settings-values": "./src/workspaceSettingsValues.ts",
+    "./capabilities": "./src/capabilities.ts"
   },
   "scripts": {
     "test": "vitest run",

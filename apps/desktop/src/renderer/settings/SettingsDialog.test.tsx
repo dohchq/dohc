@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { desktopPins, settingsSectionPin } from "../../testPins";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,6 +20,7 @@ import { SettingsDialog } from "./SettingsDialog";
 import { applyLookSettings } from "../theme";
 import { CUSTOMIZE_TARGETS } from "./customize";
 import { deferred } from "../../testing/deferred";
+import { ShellErrorReporter, type ReportShellFailure } from "../shell/useShellError";
 
 const config = {
   command: "dohc-mcp",
@@ -131,7 +133,6 @@ const bridge = {
   getWorkspaceSettings: vi.fn(readWorkspaceSettings),
   setWorkspaceSettings: vi.fn(writeWorkspaceSettings),
   resetWorkspaceSettings: vi.fn(resetWorkspaceSettings),
-  writeClipboardText: vi.fn(async (_payload: { text: string }) => undefined),
   setTitlebarTheme: vi.fn(async () => undefined),
   onUserSettingsChanged: vi.fn(
     (_listener: (result: DesktopUserSettingsResult) => void) => () => undefined,
@@ -186,7 +187,7 @@ describe("SettingsDialog", () => {
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
     expect(screen.getByTestId("settings-section-general")).toBeTruthy();
     await user.type(screen.getByTestId("settings-search"), "theme");
-    expect(screen.getByTestId("settings-section-appearance")).toBeTruthy();
+    expect(screen.getByTestId(settingsSectionPin("appearance"))).toBeTruthy();
     await user.clear(screen.getByTestId("settings-search"));
     await user.type(screen.getByTestId("settings-search"), "launch");
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
@@ -222,7 +223,7 @@ describe("SettingsDialog", () => {
       </>,
     );
 
-    await screen.findByTestId("settings-dialog");
+    await screen.findByTestId(desktopPins.settingsDialog);
     const higherOverlayAction = screen.getByTestId("higher-overlay-action");
     higherOverlayAction.focus();
     const higherOverlay = Symbol("higher-overlay-test");
@@ -632,10 +633,9 @@ describe("SettingsDialog", () => {
     const mcpState = await screen.findByTestId("agent-setup-mcp-state");
     expect(mcpState.textContent).toBe("Server running");
     expect(mcpState.getAttribute("data-state")).toBe("running");
-    const action = screen.getByTestId("agent-setup-mcp-action");
-    expect(action.textContent).toBe("Copy config");
-    await userEvent.setup().click(action);
-    await waitFor(() => expect(action.textContent).toBe("Copied"));
+    // The guide only enables the server. The one copy sits beside the MCP config.
+    expect(screen.queryByTestId("agent-setup-mcp-action")).toBeNull();
+    expect(screen.getAllByRole("button", { name: /^Copy/ })).toHaveLength(1);
     expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running");
     expect(screen.getByTestId("agent-setup-runner-state").getAttribute("data-state")).toBe("missing");
     expect(screen.getByTestId("agent-setup-runner-state").textContent).toBe("No runner command");
@@ -659,15 +659,35 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("agent-setup-mcp-action").textContent).toBe("Enable MCP");
   });
 
-  it("keeps focus on the guide's MCP action when enabling the server", async () => {
+  it("moves focus to the config's Copy once the guide enables the server", async () => {
     render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
     const action = await screen.findByTestId("agent-setup-mcp-action");
     await screen.findByTestId("mcp-config-snippet");
     await userEvent.setup().click(action);
-    await waitFor(() => expect(action.textContent).toBe("Copy config"));
-    expect(screen.getByTestId("agent-setup-mcp-action")).toBe(action);
-    expect(document.activeElement).toBe(action);
-    expect(screen.getByTestId("agent-setup-mcp-state").textContent).toBe("Server running");
+    await waitFor(() => expect(screen.getByTestId("agent-setup-mcp-state").textContent).toBe("Server running"));
+    expect(screen.queryByTestId("agent-setup-mcp-action")).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Copy" })));
+  });
+
+  it("does not move focus to Copy when the guide's enable fails", async () => {
+    bridge.startAgentRun.mockRejectedValueOnce(new Error("MCP server did not start"));
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    const action = await screen.findByTestId<HTMLButtonElement>("agent-setup-mcp-action");
+    await screen.findByTestId("mcp-config-snippet");
+    await userEvent.setup().click(action);
+    expect((await screen.findByTestId("mcp-load-error")).textContent).toContain("Could not update MCP server.");
+    await waitFor(() => expect(action.disabled).toBe(false));
+    expect(screen.getByTestId("agent-setup-mcp-state").textContent).toBe("Server stopped");
+    expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "Copy" }));
+  });
+
+  it("does not move focus to Copy when the server row enables the server", async () => {
+    const user = userEvent.setup();
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" initialSection="agents" onClose={() => {}} />);
+    await screen.findByTestId("mcp-config-snippet");
+    await user.click(screen.getByTestId("mcp-enable-toggle"));
+    await waitFor(() => expect(screen.getByTestId("mcp-status").getAttribute("data-state")).toBe("running"));
+    expect(document.activeElement).not.toBe(screen.getByRole("button", { name: "Copy" }));
   });
 
   it("does not call an enabled runner ready without an agent name to post as", async () => {
@@ -976,27 +996,33 @@ describe("SettingsDialog", () => {
     );
     await screen.findByTestId("mcp-config-snippet");
     await user.click(screen.getByText("Copy"));
-    expect(bridge.writeClipboardText).toHaveBeenCalledWith({
-      text: expect.stringContaining('"mcpServers"'),
-    });
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining('"mcpServers"')));
   });
 
-  it("reports a copy failure without claiming success", async () => {
+  it("reports a copy failure to the shell without claiming success", async () => {
     const user = userEvent.setup();
-    bridge.writeClipboardText.mockRejectedValueOnce(new Error("Clipboard denied"));
+    stubClipboard();
+    const denied = new Error("Clipboard denied");
+    writeText.mockRejectedValueOnce(denied);
+    const report = vi.fn<ReportShellFailure>();
     render(
-      <SettingsDialog
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="agents"
-        onClose={() => {}}
-      />,
+      <ShellErrorReporter.Provider value={report}>
+        <SettingsDialog
+          workspaceId="ws-1"
+          workspacePath="/x"
+          initialSection="agents"
+          onClose={() => {}}
+        />
+      </ShellErrorReporter.Provider>,
     );
     await screen.findByTestId("mcp-config-snippet");
     await user.click(screen.getByText("Copy"));
-    expect((await screen.findByTestId("mcp-copy-error")).textContent).toBe(
-      "Could not copy MCP config.",
-    );
+    expect(await screen.findByRole("button", { name: "Couldn't copy" })).toBeTruthy();
+    expect(report).toHaveBeenCalledWith({
+      message: "dohc could not copy to the clipboard. Clipboard denied",
+      cause: denied,
+      retry: expect.any(Function),
+    });
     expect(screen.queryByText("Copied")).toBeNull();
   });
 

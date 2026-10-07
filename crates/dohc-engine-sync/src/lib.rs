@@ -40,6 +40,8 @@ mod share;
 mod share_grant;
 mod version_apply;
 mod ydoc_apply;
+mod ydoc_projection;
+pub use ydoc_projection::{UpdateProjectionError, project_ydoc_updates};
 mod ydoc_origination;
 mod ydoc_recovery;
 

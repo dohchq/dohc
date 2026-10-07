@@ -1,0 +1,1585 @@
+{
+  "view/current/without-live": [
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
+  "view/current/live": [
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
+  "view/pinned/without-live": [
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
+  "view/pinned/live": [
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
+  "comment/current/without-live": [
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_post_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Nonempty text, at most 2,000 normalized code points and 8,000 UTF-8 input bytes; no NUL characters."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          },
+          "claimedName": {
+            "type": "string",
+            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
+          }
+        },
+        "required": [
+          "body",
+          "idempotencyKey"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
+  "comment/current/live": [
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_post_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Nonempty text, at most 2,000 normalized code points and 8,000 UTF-8 input bytes; no NUL characters."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          },
+          "claimedName": {
+            "type": "string",
+            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
+          }
+        },
+        "required": [
+          "body",
+          "idempotencyKey"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
+  "comment/pinned/without-live": [
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_post_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Nonempty text, at most 2,000 normalized code points and 8,000 UTF-8 input bytes; no NUL characters."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          },
+          "claimedName": {
+            "type": "string",
+            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
+          }
+        },
+        "required": [
+          "body",
+          "idempotencyKey"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
+  "comment/pinned/live": [
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_post_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Nonempty text, at most 2,000 normalized code points and 8,000 UTF-8 input bytes; no NUL characters."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          },
+          "claimedName": {
+            "type": "string",
+            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
+          }
+        },
+        "required": [
+          "body",
+          "idempotencyKey"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
+  "edit/current/without-live": [
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_post_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Nonempty text, at most 2,000 normalized code points and 8,000 UTF-8 input bytes; no NUL characters."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          },
+          "claimedName": {
+            "type": "string",
+            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
+          }
+        },
+        "required": [
+          "body",
+          "idempotencyKey"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_switch_automation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "automation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "expectedContentHash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "reformat": {
+            "default": false,
+            "type": "boolean"
+          },
+          "submitId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          }
+        },
+        "required": [
+          "collectionPath",
+          "automation",
+          "enabled",
+          "expectedContentHash",
+          "submitId"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_write_collection_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "submitId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[\\x20-\\x7e]+$",
+            "description": "Names this write. Send the same id to retry after an unknown outcome; use a new id for any other write."
+          },
+          "files": {
+            "minItems": 1,
+            "maxItems": 502,
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024,
+                      "description": "The file's path exactly as dohc_list_files lists paths."
+                    },
+                    "basedOnBlobSha256": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The blobSha256 of the file this replaces, from dohc_list_files, or null to create the file."
+                    },
+                    "text": {
+                      "type": "string",
+                      "description": "The file's complete new text."
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "basedOnBlobSha256",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024,
+                      "description": "The file's path exactly as dohc_list_files lists paths."
+                    },
+                    "basedOnBlobSha256": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The blobSha256 of the file this replaces, from dohc_list_files, or null to create the file."
+                    },
+                    "base64": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+                      "description": "The file's complete new UTF-8 content as base64, for text whose JSON would not fit in 9 MiB."
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "basedOnBlobSha256",
+                    "base64"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "submitId",
+          "files"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
+  "edit/current/live": [
+    {
+      "name": "dohc_edit_document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": "\\.md$"
+          },
+          "find": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8000
+          },
+          "replacement": {
+            "type": "string",
+            "maxLength": 8000
+          }
+        },
+        "required": [
+          "path",
+          "find",
+          "replacement"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_post_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Nonempty text, at most 2,000 normalized code points and 8,000 UTF-8 input bytes; no NUL characters."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          },
+          "claimedName": {
+            "type": "string",
+            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
+          }
+        },
+        "required": [
+          "body",
+          "idempotencyKey"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_document",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "maxLength": 1024,
+            "pattern": "\\.md$"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_switch_automation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "automation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "expectedContentHash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "reformat": {
+            "default": false,
+            "type": "boolean"
+          },
+          "submitId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          }
+        },
+        "required": [
+          "collectionPath",
+          "automation",
+          "enabled",
+          "expectedContentHash",
+          "submitId"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_write_collection_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "submitId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[\\x20-\\x7e]+$",
+            "description": "Names this write. Send the same id to retry after an unknown outcome; use a new id for any other write."
+          },
+          "files": {
+            "minItems": 1,
+            "maxItems": 502,
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024,
+                      "description": "The file's path exactly as dohc_list_files lists paths."
+                    },
+                    "basedOnBlobSha256": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The blobSha256 of the file this replaces, from dohc_list_files, or null to create the file."
+                    },
+                    "text": {
+                      "type": "string",
+                      "description": "The file's complete new text."
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "basedOnBlobSha256",
+                    "text"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1024,
+                      "description": "The file's path exactly as dohc_list_files lists paths."
+                    },
+                    "basedOnBlobSha256": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "description": "The blobSha256 of the file this replaces, from dohc_list_files, or null to create the file."
+                    },
+                    "base64": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+                      "description": "The file's complete new UTF-8 content as base64, for text whose JSON would not fit in 9 MiB."
+                    }
+                  },
+                  "required": [
+                    "path",
+                    "basedOnBlobSha256",
+                    "base64"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "submitId",
+          "files"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
+  "edit/pinned/without-live": [
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_post_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Nonempty text, at most 2,000 normalized code points and 8,000 UTF-8 input bytes; no NUL characters."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          },
+          "claimedName": {
+            "type": "string",
+            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
+          }
+        },
+        "required": [
+          "body",
+          "idempotencyKey"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ],
+  "edit/pinned/live": [
+    {
+      "name": "dohc_list_automations",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "collectionPath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "collectionPath"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_changes",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 500
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_list_files",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_post_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": "string",
+            "description": "Nonempty text, at most 2,000 normalized code points and 8,000 UTF-8 input bytes; no NUL characters."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[\\x20-\\x7e]+$"
+          },
+          "claimedName": {
+            "type": "string",
+            "description": "A nonempty display name, at most 40 normalized code points and 160 UTF-8 bytes."
+          }
+        },
+        "required": [
+          "body",
+          "idempotencyKey"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_read_file",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "blobSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "required": [
+          "blobSha256"
+        ],
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "name": "dohc_share_status",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    }
+  ]
+}

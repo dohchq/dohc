@@ -1,8 +1,11 @@
+import { ReservedWorkspaceIdError } from "@dohc/workspace-core";
 import { readFileSync } from "node:fs";
 import { PersistentRuntimeError } from "@dohc/app-backend-runtime/persistent";
 import { DaemonRefusalError, type DaemonErrorCode } from "@dohc/workspace-engine-client";
 import { describe, expect, it } from "vitest";
 import { CompilerProcessError } from "../workspaces/compilerProcessSupervisor";
+import { RestorePolicyRefusalError } from "../workspaces/workspaceEngineCapture";
+import type { WorkspacePolicyPath } from "./bridgeContract";
 import { ERROR_WORDS, ipcWireError, isWorkspaceUpdatingError, readError, withErrorWords } from "./errorWords";
 
 // What the renderer receives when a main-process handler rejects: Electron
@@ -22,6 +25,18 @@ const engineCodes = [
 ].map((match) => match[1]!);
 
 describe("error words", () => {
+  it.each(["link", "shares", "notices"])("keeps the reserved-ID refusal title and body across IPC for %s", (workspaceId) => {
+    const error = new ReservedWorkspaceIdError(workspaceId);
+    const expected = {
+      title: "dohc can't open this folder",
+      words: `Its workspace ID, ${workspaceId}, is reserved. Change workspaceId in .dohc/manifest.json, then open the folder again.`,
+      mapped: false,
+      cause: error.toString(),
+    };
+    expect(readError(error)).toEqual(expected);
+    expect(readError(acrossIpc(error, "desktop:attach-workspace-folder"))).toEqual(expected);
+  });
+
   it("has words, or the caller's words by decision, for every code the engine refuses with", () => {
     expect(engineCodes.length).toBeGreaterThan(30);
     const refusals = ERROR_WORDS.DaemonRefusalError!;
@@ -147,6 +162,29 @@ describe("error words", () => {
       .toBe("This copy of dohc is missing a file it needs. Reinstall dohc.");
     expect(unavailable("Electron resources path is unavailable for the packaged Rust engine."))
       .toBe("This copy of dohc is missing a file it needs. Reinstall dohc.");
+  });
+
+  it("names the rules file a refused restore could not read, and keeps the parser's text for Copy only", () => {
+    const parser = "visibility.toml: TOML parse error at line 3, column 9";
+    const refused = (unreadable: WorkspacePolicyPath[]) => acrossIpc(
+      new RestorePolicyRefusalError({ reason: "policy-unreadable", unreadable, detail: parser }),
+      "desktop:restore-engine-moment-file",
+    );
+    expect(readError(refused([".dohc/visibility.toml"]))).toEqual({
+      words: "It can't read .dohc/visibility.toml. Fix the file, then try again.",
+      mapped: true,
+      cause: `RestorePolicyRefusalError [policy-unreadable]: .dohc/visibility.toml: ${parser}`,
+    });
+    expect(withErrorWords("dohc could not restore notes/plan.md.", refused([".dohc/visibility.toml"]))).toBe(
+      "dohc could not restore notes/plan.md. It can't read .dohc/visibility.toml. Fix the file, then try again.",
+    );
+    expect(readError(refused([".dohc/files.toml"])).words).toBe("It can't read .dohc/files.toml. Fix the file, then try again.");
+    expect(readError(refused([".dohc/files.toml", ".dohc/visibility.toml"])).words)
+      .toBe("It can't read .dohc/files.toml and .dohc/visibility.toml. Fix the files, then try again.");
+    expect(readError(refused([".dohc"])).words).toBe("It can't read this workspace's .dohc folder. Fix the folder, then try again.");
+    // Main reads the class itself for Stop and restore's review rows.
+    expect(readError(new RestorePolicyRefusalError({ reason: "path-not-admitted" })).words)
+      .toBe("History no longer tracks this file. Track it in .dohc/files.toml, then try again.");
   });
 
   it("puts the caller's sentence before the words the map adds", () => {

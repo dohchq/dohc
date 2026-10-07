@@ -32,8 +32,8 @@ function sharedRelay() {
     async publish({ clientId, state }) {
       publishes += 1;
       entries.set(clientId, {
-        userId: `user-${clientId}`,
-        clientId,
+        faceToken: `user-${clientId}`,
+        sessionToken: clientId, isSelf: false, displayName: clientId === "bob" ? "Bob" : clientId === "alice" ? "Alice" : "Someone", paletteSlot: 0,
         state,
         updatedAtMs: 0,
       });
@@ -190,7 +190,7 @@ describe("Excalidraw presence", () => {
       }>;
     };
     const collaborator = [...latest.collaborators.values()][0]!;
-    expect(collaborator.username).toBe("R".repeat(64));
+    expect(collaborator.username).toBe("Someone");
     expect(collaborator.pointer).toEqual({
       x: 10_000_000,
       y: -10_000_000,

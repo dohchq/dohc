@@ -1,3 +1,4 @@
+import { editorTabTestId } from "../src/testPins";
 import { expect, test } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -123,8 +124,8 @@ test("@dataset-shared-form desktop publishes its Collection, a guest submits, an
     await form.getByRole("button", { name: "Submit", exact: true }).click();
     await expect(form.getByRole("status")).toHaveText("Response received.");
     await guest.screenshot({ path: info.outputPath("shared-generated-form.png") });
-    const path = `dohc://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
-    await page.getByTestId(`tab-${path}`).click();
+    const path = `tab://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
+    await page.getByTestId(editorTabTestId(path)).click();
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
     const names = collection.getByRole("button", { name: /^Edit Name for record / });
     await expect(names).toHaveCount(2);

@@ -13,6 +13,7 @@
     "./app-publication": "./src/appPublication.ts",
     ".": "./src/index.ts",
     "./args": "./src/args.ts",
+    "./help": "./src/help.ts",
     "./client": "./src/client.ts",
     "./errors": "./src/errors.ts",
     "./protocol": "./src/protocol.ts",

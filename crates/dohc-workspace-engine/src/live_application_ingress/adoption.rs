@@ -89,18 +89,21 @@ mod tests {
     use dohc_engine_storage::hex_sha256;
     use serde_json::{Value, json};
 
-    fn cut(first_seen: Value) -> Vec<u8> {
-        let update = b"update".to_vec();
-        let metadata = json!({
+    fn metadata(first_seen: Value) -> Value {
+        json!({
             "accepted": {
-                "receipt": {"deliveryId": "delivery", "updateDigest": hex_sha256(&update), "journalCursor": 1, "acceptingHostEpoch": 1},
+                "receipt": {"deliveryId": "delivery", "updateDigest": hex_sha256(b"update"), "journalCursor": 1, "acceptingHostEpoch": 1},
                 "binding": {"workspaceId": "w", "mainVersionId": "main", "objectId": "o", "lineageClaimId": "l",
                     "currentPath": "a.md", "selectorPaths": ["a.md"], "restoreFenceGeneration": 0},
                 "authority": {"principalKind": "owner", "principalId": "owner", "grantId": null, "grantGeneration": null},
                 "receivedAtMs": 0,
             },
             "firstSeen": first_seen,
-        });
+        })
+    }
+
+    fn cut(metadata: Value) -> Vec<u8> {
+        let update = b"update".to_vec();
         let header = json!({
             "relayDatabaseNamespace": "relay", "adoptionId": "adoption", "sourceMomentId": "moment",
             "sourceDigest": "0".repeat(64), "sourceByteLength": 0, "baselineMomentRelaySequence": 0,
@@ -126,20 +129,52 @@ mod tests {
             max_pending_age_ms: 60_000,
         };
         let canonical = json!([{"clientId": 7, "startClock": 0, "endClock": 3}, {"clientId": 7, "startClock": 5, "endClock": 10}]);
-        let decoded = decode(&cut(canonical.clone()), 1, limits.clone()).unwrap();
+        let canonical_metadata = metadata(canonical.clone());
+        let decoded = decode(&cut(canonical_metadata.clone()), 1, limits.clone()).unwrap();
         assert_eq!(
             serde_json::to_value(&decoded.events[0].metadata.first_seen).unwrap(),
             canonical
         );
-        for ranges in [
-            json!([{"clientId": 7, "startClock": 0, "endClock": 3}, {"clientId": 7, "startClock": 3, "endClock": 10}]),
-            json!([{"clientId": 7, "startClock": 0, "endClock": 6}, {"clientId": 7, "startClock": 5, "endClock": 10}]),
-            json!([{"clientId": 7, "startClock": 5, "endClock": 10}, {"clientId": 7, "startClock": 0, "endClock": 3}]),
+        let adjacent = json!([{"clientId": 7, "startClock": 0, "endClock": 3}, {"clientId": 7, "startClock": 3, "endClock": 10}]);
+        let overlapping = json!([{"clientId": 7, "startClock": 0, "endClock": 6}, {"clientId": 7, "startClock": 5, "endClock": 10}]);
+        let unsorted = json!([{"clientId": 7, "startClock": 5, "endClock": 10}, {"clientId": 7, "startClock": 0, "endClock": 3}]);
+        let mut binding = canonical_metadata.clone();
+        binding["accepted"]["binding"]["selectorPaths"] = json!(["b.md", "a.md"]);
+        let mut current_path = canonical_metadata.clone();
+        current_path["accepted"]["binding"]["currentPath"] = json!("./a.md");
+        let mut v2 = canonical_metadata;
+        v2["canonicalVersion"] = json!(2);
+        v2["authorSnapshot"] = json!([]);
+        v2["firstSeenDeletes"] = canonical.clone();
+        v2["checkpointCoverage"] = json!([{
+            "author": {"kind": "human", "humanId": "owner", "humanName": "Owner"},
+            "structRanges": canonical, "deletionRanges": canonical,
+        }]);
+        let decoded = decode(&cut(v2.clone()), 1, limits.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&decoded.events[0].metadata).unwrap(),
+            v2
+        );
+        let mut deletes = v2.clone();
+        deletes["firstSeenDeletes"] = unsorted.clone();
+        let mut struct_coverage = v2.clone();
+        struct_coverage["checkpointCoverage"][0]["structRanges"] = adjacent.clone();
+        let mut deletion_coverage = v2;
+        deletion_coverage["checkpointCoverage"][0]["deletionRanges"] = overlapping.clone();
+        for (case, event) in [
+            ("adjacent firstSeen", metadata(adjacent)),
+            ("overlapping firstSeen", metadata(overlapping)),
+            ("unsorted firstSeen", metadata(unsorted)),
+            ("unsorted selectorPaths", binding),
+            ("non-canonical currentPath", current_path),
+            ("unsorted firstSeenDeletes", deletes),
+            ("adjacent checkpoint structRanges", struct_coverage),
+            ("overlapping checkpoint deletionRanges", deletion_coverage),
         ] {
-            let Err(error) = decode(&cut(ranges), 1, limits.clone()) else {
-                panic!("non-canonical ranges decoded");
+            let Err(error) = decode(&cut(event), 1, limits.clone()) else {
+                panic!("{case} decoded");
             };
-            assert_eq!(error.message, "invalid-owner-adoption-event");
+            assert_eq!(error.message, "invalid-owner-adoption-event", "{case}");
         }
     }
 }

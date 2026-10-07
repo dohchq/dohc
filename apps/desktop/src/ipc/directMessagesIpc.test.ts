@@ -135,7 +135,7 @@ async function harness() {
     relayClientForWorkspace: () => ({ pullSharedChannel: pull, push: async () => undefined, claim: async () => undefined }), projectPendingChatBookmarksAfterPull: project,
     normalizeServerUrl: url => url, peekedReceivedGrantKinds: kinds, peekReceivedGrantKindForShare,
     acknowledgeWorkspaceShareSkips: () => undefined, notifyRenderer: () => undefined,
-    sharesChanged: () => undefined, reconcileReceivedShares: () => undefined,
+    sharesChanged: () => undefined, reconcileReceivedShares: async () => undefined,
   });
   const chatScope = createChatScopeCapability({
     workspaceAuthorities: authorities,

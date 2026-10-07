@@ -1,3 +1,4 @@
+import { desktopPins, activityPin } from "../src/testPins";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { runDohcCli, waitForCliEndpoint } from "./helpers/dohcCli";
 import { launchDesktopApp } from "./helpers/desktopApp";
@@ -82,8 +83,8 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     let page = desktop.page;
     let view = editorArea(page);
 
-    await page.getByTestId("titlebar-chats-sidebar").click();
-    await expect(page.getByTestId("chats-panel")).toBeVisible();
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
+    await expect(page.getByTestId(desktopPins.chatsPanel)).toBeVisible();
 
     // Channels remain a human/UI action. Creating one opens its feed
     // immediately, where the post composer accepts a multiline body and the
@@ -96,8 +97,8 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     // Creating a channel opens it in the Chats tab. Collapse the navigator
     // so this spec asserts on one surface.
     await expect(view.getByTestId("chats-channel-view")).toBeVisible();
-    await page.getByTestId("chats-panel-collapse").click();
-    await expect(page.getByTestId("chats-panel")).toHaveCount(0);
+    await page.getByTestId(desktopPins.chatsPanelCollapse).click();
+    await expect(page.getByTestId(desktopPins.chatsPanel)).toHaveCount(0);
     await expect(view.getByTestId("chats-channel-title")).toHaveText(channelName);
 
     await view.getByTestId("chats-new-thread-composer").fill(postBody);
@@ -239,7 +240,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     expect(matchingLine).toContain(cliMessageId);
 
     // Park outside Chats so the relaunch reveal is deterministic.
-    await page.getByTestId("activity-explorer").click();
+    await page.getByTestId(activityPin("explorer")).click();
     await desktop.close();
     desktop = null;
 
@@ -248,10 +249,10 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     page = desktop.page;
     view = editorArea(page);
     if (!(await page.getByTestId("chats-view").isVisible())) {
-      await page.getByTestId("titlebar-chats-sidebar").click();
+      await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     }
 
-    const persistedChannel = page.getByTestId("chats-panel")
+    const persistedChannel = page.getByTestId(desktopPins.chatsPanel)
       .getByTestId("chats-channel")
       .filter({ hasText: channelName });
     await expect(persistedChannel).toBeVisible();
@@ -328,14 +329,14 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
     // Open #general in the editor and stay there. The panel stays a navigator,
     // so both surfaces render chats markup from here on; scope every locator
     // to the one being asserted.
-    const panel = page.getByTestId("chats-panel");
+    const panel = page.getByTestId(desktopPins.chatsPanel);
     const channelView = page.locator(
       '[data-testid="chats-channel-view"][data-variant="page"]',
     );
     const threadView = page.locator(
       '[data-testid="chats-thread-view"][data-variant="page"]',
     );
-    await page.getByTestId("titlebar-chats-sidebar").click();
+    await page.getByTestId(desktopPins.titlebarChatsSidebar).click();
     await expect(panel).toBeVisible();
     await expect(panel.getByTestId("chats-channel-name")).toHaveText("general");
     await panel.getByTestId("chats-channel").click();

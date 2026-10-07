@@ -29,6 +29,7 @@ import {
   YDocSessionUnreleasedError,
   YDocUncapturedArtifactError,
   type WorkspaceEngineCapture,
+  type WorkspaceEngineCaptureOptions,
   type WorkspaceEngineCaptureFailure,
 } from "./workspaceEngineCapture";
 import {
@@ -90,6 +91,7 @@ const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 const itNonRoot = process.getuid?.() === 0 ? it.skip : it;
 
 interface CaptureOptions {
+  preserveUnsentState?: WorkspaceEngineCaptureOptions["preserveUnsentState"];
   store?: CaptureVersionedTextStore;
   now?: () => number;
   createId?: () => string;
@@ -393,11 +395,15 @@ describe("workspaceEngineCapture batch capture", () => {
       ["plan.md", "object-plan", false],
     ]);
     expect(page.activeVersionId).toBe("main");
+    expect(requests.filter((request) => request.method === VERSIONED_METHOD.historyPage)).toEqual([expect.objectContaining({ params: { workspaceId: WORKSPACE_ID, objectId: "object-plan", limit: 10 } })]);
+    expect(requests.some((request) => request.method === VERSIONED_METHOD.momentsList)).toBe(false);
     expect((await engine.listMoments({ limit: 10 })).moments).toHaveLength(3);
     await engine.stop();
   });
 
-  it.each(["ownerPending", "declined", "mismatch"] as const)(
+  it.each([
+    "ownerPending", "declined", "mismatch", "engine-store-busy", "live-settlement-capacity",
+  ] as const)(
     "defers an open adoption (%s) while another record proceeds", async (status) => {
     const root = await createTestScratch("dohc-engine-capture-");
     const path = "tasks/pending.md";
@@ -408,6 +414,8 @@ describe("workspaceEngineCapture batch capture", () => {
     const liveStore = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root,
       attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
     let pending = true;
+    const transient = status === "engine-store-busy" || status === "live-settlement-capacity";
+    let blocked = true;
     let healthyPending = true;
     const reconcile = vi.fn(async () => {
       healthyPending = false;
@@ -441,6 +449,14 @@ describe("workspaceEngineCapture batch capture", () => {
       unsettled: false, close, evict,
       applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); },
       adoptCollectionRecord: async () => {
+        if (transient && blocked) {
+          throw new DaemonRefusalError({ code: "OVERLOADED", message: status, retry: "afterBackoff" }, undefined);
+        }
+        if (transient) {
+          pending = false;
+          doc.getMap("frontmatter").set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
+          return "settled" as const;
+        }
         if (status === "ownerPending") doc.getMap("frontmatter").set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
         return status === "declined" ? "declined" as const : "ownerPending" as const;
       },
@@ -470,9 +486,13 @@ describe("workspaceEngineCapture batch capture", () => {
     }, undefined));
     await expect(engine.flush()).rejects.toThrow("collection-reconciliation-lease-held");
     healthyPending = false;
-    // The configured owner host completes adoption with its audited settlement.
-    pending = false;
+    // Retry after capacity clears, or observe adoption completed by the owner host.
+    if (transient) blocked = false;
+    else pending = false;
     await engine.flush();
+    expect(pending).toBe(false);
+    if (transient) expect(session.doc.getMap("frontmatter").get("id")).toBe("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(errors).toEqual([]);
     await session.close({ settle: false });
     await engine.stop();
     expect(close).toHaveBeenCalledTimes(1);
@@ -1518,7 +1538,36 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it("closes both daemon stores when the final capture flush rejects", async () => {
+  it("cancels an unsettled flush before queued session retirement and refuses later flushes", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    const requests: Request[] = [];
+    const polling = deferred<void>();
+    let settled = true;
+    const sessions = mockLiveSessions(loopback, requests, () => {
+      if (!settled) polling.resolve();
+      return { settled, running: true, degraded: !settled };
+    });
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace");
+    const engine = capture(root, { rustEngineSessions: sessions });
+    await engine.createVersion("Draft");
+    requests.length = 0;
+    settled = false;
+    const flushing = engine.flush().catch((error: unknown) => error);
+    await polling.promise;
+    engine.beginShutdown();
+    const lateFlush = engine.flush().catch((error: unknown) => error);
+    expect(await lateFlush).toMatchObject({ name: "AbortError" });
+    const retiring = engine.settleAndCloseAllLiveSessions();
+    expect(await flushing).toMatchObject({ name: "AbortError" });
+    expect(await lateFlush).toMatchObject({ name: "AbortError" });
+    await retiring;
+    await engine.stop();
+    expect(requests.filter(request => request.method === "capture.flush")).toHaveLength(1);
+    expect(closeWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes both daemon stores without restarting convergence after shutdown begins", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     let settled = true;
@@ -1535,14 +1584,12 @@ describe("workspaceEngineCapture batch capture", () => {
     // createVersion opens both the text and secret daemon adapters.
     await engine.createVersion("Draft");
     settled = false;
-    const outcome = await engine.stop().catch((error: unknown) => error);
-
-    expect(outcome).toBeInstanceOf(Error);
-    expect((outcome as Error).message).toContain("did not settle");
-    expect(closeWorkspace, "await the final flush outside try/finally. Its rejection skips both adapter closes, so this count is zero.").toHaveBeenCalledTimes(2);
+    engine.beginShutdown();
+    await expect(engine.stop()).resolves.toBeUndefined();
+    expect(closeWorkspace).toHaveBeenCalledTimes(2);
   });
 
-  it("flushes daemon capture before closing production workspace stores", async () => {
+  it("does not start a final capture flush after shutdown begins", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
     const loopback = new VersionedLoopbackEngine();
@@ -1553,6 +1600,7 @@ describe("workspaceEngineCapture batch capture", () => {
     // createVersion opens both the text and secret daemon adapters.
     await engine.createVersion("Draft");
     requests.length = 0;
+    engine.beginShutdown();
     await engine.stop();
 
     expect(
@@ -1561,8 +1609,76 @@ describe("workspaceEngineCapture batch capture", () => {
         .filter(
           (method) => method === "capture.flush" || method === "workspace.close",
         ),
-    ).toEqual(["capture.flush", "workspace.close"]);
+    ).toEqual(["workspace.close"]);
   });
+
+  it("can cancel normal stop's final capture flush when shutdown begins", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const entered = deferred<void>();
+    const finish = deferred<void>();
+    let stopping = false;
+    const sessions = mockLiveSessions(new VersionedLoopbackEngine(), undefined, undefined, async request => {
+      if (stopping && request.method === "capture.flush") {
+        entered.resolve();
+        await finish.promise;
+      }
+    });
+    const close = sessions.closeWorkspace.bind(sessions);
+    const closeWorkspace = vi.spyOn(sessions, "closeWorkspace").mockImplementation(async workspace => {
+      // Closure must begin before the admitted RPC finishes.
+      finish.resolve();
+      await close(workspace);
+    });
+    const engine = capture(root, { rustEngineSessions: sessions });
+    await engine.createVersion("Draft");
+    stopping = true;
+    const stopped = engine.stop();
+    try {
+      await entered.promise;
+      engine.beginShutdown();
+      await expect(stopped).resolves.toBeUndefined();
+      expect(closeWorkspace).toHaveBeenCalledTimes(2);
+    } finally {
+      finish.resolve();
+      await stopped;
+    }
+  });
+
+  it.each(["cancelled", "failed"] as const)(
+    "releases Collection providers when shutdown reconciliation is %s", async outcome => {
+      const root = await createTestScratch("dohc-engine-capture-");
+      const failure = new Error("Collection reconciliation failed.");
+      let pending = false;
+      const evict = vi.fn(async () => { pending = false; });
+      const store = {
+        ensureMainVersion: async () => undefined,
+        listPendingCollectionAdoptions: async () => ({
+          adoptions: pending ? [{
+            versionId: "main", recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
+            collectionPath: "tasks", filePath: "tasks/record.md", objectId: "record-object",
+          }] : [],
+          nextCursor: null,
+        }),
+        // Reconciliation can start a convergence flush after evicting a provider.
+        reconcileCapture: async () => {
+          if (outcome === "failed") throw failure;
+          await engine.flush();
+        },
+      } as unknown as CaptureVersionedTextStore;
+      const engine = capture(root, {
+        store,
+        openRustYDocProviderSession: async input => ({ path: input.path, evict }) as unknown as EngineYdocProviderSession,
+      });
+      await engine.flush();
+      pending = true;
+      engine.beginShutdown();
+      const stopped = engine.stop();
+      if (outcome === "cancelled") await expect(stopped).resolves.toBeUndefined();
+      else await expect(stopped).rejects.toBe(failure);
+      expect(evict).toHaveBeenCalledTimes(1);
+      expect(pending).toBe(false);
+    },
+  );
 
   it("mutation proof: installs remote updates buffered during the initial Y.Doc open", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
@@ -1618,6 +1734,35 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(rendererDoc.getText("content").toString()).toBe("base+remote");
     expect(forwarded).toEqual([bufferedUpdate]);
     await session.close({ settle: false });
+    await engine.stop();
+  });
+
+  it("reports failed draft preservation through the existing edit error hook and refuses release", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({workspace: WORKSPACE_ID, versionId: "main", path: "notes/a.md", text: "seed"});
+    const draftError = new Error("Draft storage refused.");
+    const notices = vi.fn();
+    const errors = vi.fn();
+    const released = vi.fn();
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback), onError: errors,
+      preserveUnsentState: async () => {throw draftError;},
+      openRustYDocProviderSession: async options => {
+        const doc = new Y.Doc();
+        return {doc, initialUpdate: Y.encodeStateAsUpdate(doc), objectId: "object-note", contentKind: "richdoc",
+          path: options.path, head: "present", lineage: "existing", unsettled: false,
+          applyLocalUpdate: async () => undefined, evict: async () => undefined,
+          settleNow: async () => ({sha256: "a".repeat(64), content: "seed"}) as never,
+          close: async () => { await options.preserveUnsentState!(doc); released(); },
+        } as EngineYdocProviderSession;
+      },
+    });
+    const session = await engine.openYDocSession({path: "notes/a.md", onRemoteUpdate: () => undefined, onEditRefused: notices});
+    await expect(session.close({settle: false})).rejects.toBe(draftError);
+    expect(released).not.toHaveBeenCalled();
+    expect(notices).toHaveBeenCalledWith("draft-preservation", "Unsent changes to a.md are not saved. Draft storage refused. Copy them from the open document before you quit dohc.");
+    expect(errors).toHaveBeenCalledWith("draft preservation of notes/a.md", draftError);
     await engine.stop();
   });
 

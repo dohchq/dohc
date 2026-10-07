@@ -78,7 +78,7 @@ List workspace history, newest first: workspace-engine moments (the recorder for
 - `includeFiles`: `boolean`
 - `path`: `string`
 
-Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs }`.
+Returns `{ changes: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files? }[], count, totalAvailable, hasMore, cursorMs } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_kept_copies`
 
@@ -106,7 +106,7 @@ Read one history entry by id: a workspace-engine moment with its full before/aft
 
 - `id`: `string`. Required.
 
-Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } } | { ok: false, reason }`.
+Returns `{ ok: true, change: { id, recordedAtMs, source: "workspace-engine", operation, path, versionId, authors?, fileCount: 1, files, before, after } } | { ok: false, reason } | { ok: false, status: "untracked", reason } | { ok: false, status: "policy-unreadable", unreadable, reason }`.
 
 ### `dohc_list_files`
 

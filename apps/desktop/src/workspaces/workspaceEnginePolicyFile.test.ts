@@ -45,7 +45,7 @@ describe("historyExcludesSubtree", () => {
 function snapshot(
   overrides: Partial<WorkspaceEnginePolicySnapshot> = {},
 ): WorkspaceEnginePolicySnapshot {
-  return { filesPolicy: null, visibilityPolicy: null, errors: [], ...overrides };
+  return { filesPolicy: null, visibilityPolicy: null, errors: [], unreadable: [], ...overrides };
 }
 
 function fileSnapshot(path: string): TextFileSnapshot {
@@ -144,7 +144,24 @@ describe("readWorkspaceEnginePolicy + resolveEngineSearchPolicy (fail closed end
     await writeFile(join(root, ".dohc", "files.toml"), "this is [[ not toml");
     const policy = await readWorkspaceEnginePolicy(root);
     expect(policy.errors.length).toBeGreaterThan(0);
+    expect(policy.unreadable).toEqual([".dohc/files.toml"]);
     expect(resolveEngineSearchPolicy(policy).kind).toBe("blocked");
+  });
+
+  it("names each policy file it could not read, and none when both read", async () => {
+    await readWorkspaceEnginePolicy(root); // bootstraps .dohc
+    expect((await readWorkspaceEnginePolicy(root)).unreadable).toEqual([]);
+    await writeFile(join(root, ".dohc", "visibility.toml"), "this is [[ not toml");
+    expect((await readWorkspaceEnginePolicy(root)).unreadable).toEqual([".dohc/visibility.toml"]);
+    await writeFile(join(root, ".dohc", "files.toml"), "this is [[ not toml");
+    expect((await readWorkspaceEnginePolicy(root)).unreadable).toEqual([".dohc/files.toml", ".dohc/visibility.toml"]);
+  });
+
+  it("names the .dohc folder when it is not a real folder", async () => {
+    await writeFile(join(root, ".dohc"), "not a folder");
+    const policy = await readWorkspaceEnginePolicy(root);
+    expect(policy.errors).toHaveLength(1);
+    expect(policy.unreadable).toEqual([".dohc"]);
   });
 
   it("a clean files.toml on disk resolves to a searching decision", async () => {

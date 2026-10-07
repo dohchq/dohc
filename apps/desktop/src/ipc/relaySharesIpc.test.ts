@@ -79,7 +79,7 @@ function harness() {
   });
   const warm = vi.fn(async () => undefined);
   const sharesChanged = vi.fn<(workspaceId: string | null) => void>();
-  const reconcileReceivedShares = vi.fn<(listing: unknown) => void>();
+  const reconcileReceivedShares = vi.fn<(listing: unknown) => Promise<void>>(async () => undefined);
   registerRelaySharesIpcHandlers<Sender, Event, Workspace, Operation>({
     registerHandler: (channel, handler) => {
       expect(handlers.has(channel)).toBe(false);
@@ -597,6 +597,28 @@ describe("registered account share handlers", () => {
     h.accountRequest.mockResolvedValue(listing);
     await h.invoke(CHANNELS.listRelayShares);
     expect(h.reconcileReceivedShares).toHaveBeenCalledWith(listing);
+  });
+
+  it("waits for reconciliation before returning the received inventory", async () => {
+    const h = harness(), started = deferred(), reconciled = deferred();
+    h.reconcileReceivedShares.mockImplementation(() => { started.resolve(); return reconciled.promise; });
+    let answered = false;
+    const pending = h.invoke(CHANNELS.listRelayShares).then(result => { answered = true; return result; });
+    await started.promise;
+    expect(answered).toBe(false);
+    reconciled.resolve();
+    await pending;
+    expect(answered).toBe(true);
+  });
+
+  it("rejects a credential switch during exact-share reconciliation", async () => {
+    const h = harness(), started = deferred(), reconciled = deferred();
+    h.reconcileReceivedShares.mockImplementation(() => { started.resolve(); return reconciled.promise; });
+    const pending = h.invoke(CHANNELS.listRelayShares);
+    await started.promise;
+    h.rotateCredentials();
+    reconciled.resolve();
+    await expect(pending).rejects.toThrow("session changed");
   });
 
   it("keeps the verified removal explanation without depending on the capped account listing", async () => {

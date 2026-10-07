@@ -67,6 +67,8 @@ struct MomentsListParams {
 struct HistoryPageParams {
     workspace_id: String,
     #[serde(default)]
+    object_id: Option<String>,
+    #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
     before_moment_order: Option<i64>,
@@ -365,6 +367,12 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: HistoryPageParams = parse(params)?;
+        if params.object_id.as_deref() == Some("") {
+            return Err(WireError::new(
+                ErrorCode::InvalidParams,
+                "objectId must not be empty",
+            ));
+        }
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
 
@@ -402,6 +410,7 @@ impl EngineService {
             "history.page",
             open.actor.history_page(
                 open.workspace_id.clone(),
+                params.object_id,
                 params.limit.unwrap_or(200).min(500),
                 params.before_moment_order,
                 HISTORY_PROTECTED_MOMENT_LIMIT + 1,

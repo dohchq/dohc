@@ -1,8 +1,10 @@
+import type { CapabilityId } from "@dohc/workspace-contracts/capabilities";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
 } from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
+import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
 import type { AutomationDefinitionList, AutomationSwitchResult } from "@dohc/workspace-contracts/automation-controls";
 import { CreationPartial } from "./creation";
 import { DatasetRequest, DatasetResult } from "./dataset";
@@ -437,6 +439,104 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
 
 export type CliRequest = z.infer<typeof cliRequestSchema>;
 export type CliVerb = CliRequest["verb"];
+
+// Local metadata only. These ids never enter a request or its authorship.
+export const DATASET_CAPABILITIES = {
+  list: "dataset.list",
+  describe: "dataset.describe",
+  history: "dataset.history.list",
+  historyRevision: "dataset.history.revision",
+  prepareHistoryRestore: "dataset.history.restore.prepare",
+  lifecycle: "dataset.lifecycle.read",
+  deletePreview: "dataset.delete.preview",
+  delete: "dataset.delete",
+  archive: "dataset.archive",
+  restore: "dataset.restore",
+  pendingAttempts: "dataset.attempts.list",
+  reconcileAttempt: "dataset.attempt.reconcile",
+  cancelAttempt: "dataset.attempt.cancel",
+  permissions: "dataset.permissions.read",
+  setGrant: "dataset.grant.set",
+  removeGrant: "dataset.grant.remove",
+  export: "dataset.export",
+  prepareRecovery: "dataset.recovery.prepare",
+  claimRecovery: "dataset.recovery.claim",
+  discardRecovery: "dataset.recovery.discard",
+  upload: "dataset.file.upload",
+  file: "dataset.file.read",
+  createForm: "dataset.form.create",
+  prepareRelationChoices: "dataset.relation.choices.prepare",
+  create: "dataset.create",
+  prepare: "dataset.prepare",
+  approve: "dataset.approve",
+  discard: "dataset.discard",
+  prepareMigration: "dataset.migration.prepare",
+  migrationPreviewPage: "dataset.migration.preview",
+  prepareSchemaChange: "dataset.schema.change.prepare",
+  approveMigration: "dataset.migration.approve",
+  discardMigration: "dataset.migration.discard",
+  invoke: "dataset.operation.invoke",
+} as const satisfies Record<DatasetRequest["action"], CapabilityId>;
+
+export const APP_PUBLICATION_CAPABILITIES = {
+  createLink: "app.link.create",
+  listLocal: "app.local.list",
+  prepareLocal: "app.local.prepare",
+  launchLocal: "app.local.launch",
+  list: "app.publication.list",
+  prepare: "app.publication.prepare",
+  approve: "app.publication.approve",
+  cancel: "app.publication.cancel",
+  withdraw: "app.publication.withdraw",
+  revokeCollection: "app.collection.revoke",
+  reviewReactivation: "app.publication.reactivation.review",
+} as const satisfies Record<OwnerAppPublicationRequest["action"], CapabilityId>;
+
+export const APP_RESPONSE_CAPABILITIES = {
+  list: "app.responses.list",
+  undo: "app.responses.undo",
+} as const satisfies Record<OwnerAppResponsesRequest["action"], CapabilityId>;
+
+export const CLI_CAPABILITIES = {
+  groups: ["group.list"],
+  threads: ["chat.threads.list"],
+  inbox: ["chat.inbox.read"],
+  show: ["chat.show"],
+  post: ["chat.post"],
+  reply: ["chat.reply"],
+  react: ["chat.react"],
+  grep: ["chat.search"],
+  export: ["chat.export"],
+  moments: ["history.list"],
+  moment: ["history.read"],
+  fileChats: ["file.chats.list"],
+  chat: ["chat.read"],
+  groupsFull: ["group.list"],
+  collectionQuery: ["collection.query"],
+  collectionRecord: ["collection.record.read"],
+  collectionSetFields: ["collection.record.edit"],
+  collectionCreateRecord: ["collection.record.create"],
+  fileWrite: ["file.write"],
+  fileMove: ["file.move"],
+  fileDelete: ["file.delete"],
+  documentRead: ["document.read"],
+  keptCopies: ["file.kept.list"],
+  saveKeptCopy: ["file.kept.save"],
+  documentEdit: ["document.edit"],
+  documentCreate: ["document.create"],
+  fileChatStart: ["file.chat.start"],
+  automationRuns: ["automation.runs.list"],
+  automationList: ["automation.list"],
+  automationSwitch: ["automation.switch"],
+  automationRun: ["automation.run.read"],
+  automationRetry: ["automation.run.retry"],
+  automationPress: ["automation.button.press"],
+  automationButtons: ["automation.buttons.inspect"],
+  dataset: Object.values(DATASET_CAPABILITIES),
+  appPublication: Object.values(APP_PUBLICATION_CAPABILITIES),
+  ownerAppResponses: Object.values(APP_RESPONSE_CAPABILITIES),
+} as const satisfies Record<CliVerb, readonly CapabilityId[]>;
+
 export type CliRequestWithoutToken = CliRequest extends infer Request
   ? Request extends CliRequest
     ? Omit<Request, "token">
@@ -700,16 +800,29 @@ const rawMomentPayloadSnapshotSchema = z
   })
   .strict();
 
-const momentsResultSchema = z
-  .object({
-    changes: z.array(rawMomentSummarySchema),
-    count: z.number().int().nonnegative(),
-    totalAvailable: z.number().int().nonnegative(),
-    hasMore: z.boolean(),
-    cursorMs: z.number(),
-  })
-  .strict();
-const momentResultSchema = z.discriminatedUnion("ok", [
+// dohc can't read the workspace's History rules, so History hides every
+// change. `unreadable` names what to fix; no change's id, path or contents
+// are sent.
+const historyPolicyUnreadableSchema = z.object({
+  ok: z.literal(false),
+  status: z.literal("policy-unreadable"),
+  unreadable: z.array(z.enum(WORKSPACE_POLICY_PATHS)).min(1),
+  reason: z.string().min(1),
+}).strict();
+
+const momentsResultSchema = z.union([
+  z
+    .object({
+      changes: z.array(rawMomentSummarySchema),
+      count: z.number().int().nonnegative(),
+      totalAvailable: z.number().int().nonnegative(),
+      hasMore: z.boolean(),
+      cursorMs: z.number(),
+    })
+    .strict(),
+  historyPolicyUnreadableSchema,
+]);
+const momentResultSchema = z.union([
   z
     .object({
       ok: z.literal(true),
@@ -721,6 +834,10 @@ const momentResultSchema = z.discriminatedUnion("ok", [
     })
     .strict(),
   z.object({ ok: z.literal(false), reason: z.string().min(1) }).strict(),
+  // History has the change, but its rules no longer track a file it touched.
+  // No path or contents are sent.
+  z.object({ ok: z.literal(false), status: z.literal("untracked"), reason: z.string().min(1) }).strict(),
+  historyPolicyUnreadableSchema,
 ]);
 
 const rawChannelIdSchema = z.string().regex(/^channel-/u);

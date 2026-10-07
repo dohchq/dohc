@@ -1,3 +1,4 @@
+import { activityPin } from "../src/testPins";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -48,7 +49,7 @@ test("@self-host-onboarding a real account connects two fresh desktops and keeps
     left = await launchDesktopApp({ workspace: first });
     const workspace = await openWorkspaceFromFirstRun(left.page, first);
     // Sync and sharing lives on the activity bar; the connect form is inside it.
-    await left.page.getByTestId("activity-cloud").click();
+    await left.page.getByTestId(activityPin("cloud")).click();
     await expect(left.page.getByTestId("cloud-sync-panel")).toBeVisible();
     ownerBrowser = await browser.newContext();
     const ownerPage = await ownerBrowser.newPage();

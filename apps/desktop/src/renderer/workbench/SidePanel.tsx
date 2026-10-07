@@ -1,3 +1,4 @@
+import { desktopPins } from "../../testPins";
 import { useRef } from "react";
 import { SectionLabel } from "../ui/controls";
 import {
@@ -35,7 +36,7 @@ export function SidePanel(props: {
       ref={asideRef}
       tabIndex={-1}
       data-focus-surface="panel"
-      data-testid="side-panel"
+      data-testid={desktopPins.sidePanel}
       className="relative flex shrink-0 flex-col border-r border-line bg-panel"
       style={{ width }}
     >

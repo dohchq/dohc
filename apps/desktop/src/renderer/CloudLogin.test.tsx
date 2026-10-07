@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CloudStatusResult } from "../ipc/bridgeContract";
 import { CloudLogin } from "./CloudLogin";
+import { ShellErrorReporter, type ReportShellFailure } from "./shell/useShellError";
 
 import { deferred } from "../testing/deferred";
 const bridgeMock = {
@@ -666,6 +667,39 @@ describe("CloudLogin", () => {
     fireEvent.click(screen.getByTestId("cloud-copy-sync-code"));
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith("dohc-sync:ws-1:http://localhost:1788"),
+    );
+  });
+
+  // The code is a secret: its failure names it as the join screen does, the
+  // workspace code, and offers Try again while its field is on screen.
+  it("names the workspace code when its copy is refused", async () => {
+    bridgeMock.cloudStatus.mockResolvedValue({
+      connected: true,
+      email: "ice@dohc.dev",
+      workspaceSynced: true,
+      workspaceSyncConnected: true,
+      serverUrl: "http://localhost:1786",
+      relayUrl: "http://localhost:1788",
+    });
+    const refusal = new Error("Document is not focused.");
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(refusal) },
+    });
+    const report = vi.fn<ReportShellFailure>();
+
+    render(
+      <ShellErrorReporter.Provider value={report}>
+        <CloudLogin workspaceId="ws-1" />
+      </ShellErrorReporter.Provider>,
+    );
+    fireEvent.click(await screen.findByTestId("cloud-copy-sync-code"));
+    await waitFor(() =>
+      expect(report).toHaveBeenCalledWith({
+        message: "dohc could not copy the workspace code. Document is not focused.",
+        cause: refusal,
+        retry: expect.any(Function),
+      }),
     );
   });
 

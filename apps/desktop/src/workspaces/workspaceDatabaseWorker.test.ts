@@ -368,13 +368,21 @@ describe("workspace database worker", () => {
 
   it("surfaces a crash for the active request and lazily restarts on the next request", async () => {
     const root = await createTestScratch("dohc-db-worker-crash-");
-    const databasePath = join(root, "large.sqlite");
-    await copyWideDatabaseSeed(databasePath);
+    const databasePath = join(root, "data.sqlite");
+    seedDatabase(databasePath);
     const workers: Worker[] = [];
     const started = Promise.withResolvers<void>();
     const databaseWorker = owner({
       workerFactory(url) {
-        const worker = new Worker(url);
+        // The crash fixture starts the request but cannot finish before termination.
+        const worker = workers.length === 0
+          ? new Worker(`
+              const { parentPort } = require("node:worker_threads");
+              parentPort.on("message", ({ id }) => {
+                parentPort.postMessage({ id, kind: "started" });
+              });
+            `, { eval: true })
+          : new Worker(url);
         workers.push(worker);
         return worker;
       },
@@ -384,18 +392,20 @@ describe("workspace database worker", () => {
     });
     const pending = databaseWorker.readPath({
       absolutePath: databasePath,
-      path: "large.sqlite",
+      path: "data.sqlite",
     });
+    const rejected = expect(pending).rejects.toThrow(/worker stopped unexpectedly/i);
     await started.promise;
     await workers[0]!.terminate();
 
-    await expect(pending).rejects.toThrow(/worker stopped unexpectedly/i);
+    await rejected;
+    expect(workers).toHaveLength(1);
     await expect(
       databaseWorker.readPath({
         absolutePath: databasePath,
-        path: "large.sqlite",
+        path: "data.sqlite",
       }),
-    ).resolves.toMatchObject({ path: "large.sqlite" });
+    ).resolves.toMatchObject({ path: "data.sqlite" });
     expect(workers).toHaveLength(2);
   });
 

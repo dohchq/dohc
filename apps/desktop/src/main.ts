@@ -5,7 +5,8 @@ import {ownerShareLabels, refreshOwnerShareLabels, createOwnerShareLabelRefresh}
 import { describeAutomationDataset } from "./workspaces/automationDatasetDescription";
 import { invalidateDatasetAddresses } from "./workspaces/datasetAddress";
 import { createChatDispatchNotices } from "./agents/chatDispatchNotices";
-import { preserveNamedLiveDraft } from "./workspaces/namedLiveDraftRecovery";
+import { preserveLiveDraft, preserveUnsentLiveDraft, removeWorkspaceLiveDrafts } from "./workspaces/liveDraftRecovery";
+import { createPhysicalWorkspaceRemoval, createWorkspaceForget } from "./workspaces/physicalWorkspaceRemoval";
 import { createNamedDesktopLiveCapture } from "./workspaces/namedDesktopLive";
 import {
   createDesktopWorkspaceCallbacks,
@@ -91,7 +92,6 @@ import {
 import {
   app,
   BrowserWindow,
-  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -219,6 +219,7 @@ import {
 import {
   recipientShareNeedsRecheck,
   readReceivedShareListing,
+  reconcileRecipientSharesAfterLookup,
 } from "./workspaces/recipientShareReconciliation";
 import { createShareRosters, rosterAuthorLabel, rosterPersonLabel } from "./automations/shareRoster";
 import { listRosterGrants, readStoredRoster } from "@dohc/automation-executor/roster-listing";
@@ -1301,22 +1302,30 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
   return relayShareJsonWithCredentials(credentials, path, init);
 }
 
-// Every authenticated `/sync/shares` listing this app reads is applied to the
-// received-share records of every registered workspace it speaks for: an
-// ended record whose share is active again resumes, and the owner's confirmed
-// removals are recorded. See recipientShareReconciliation.ts.
-function reconcileReceivedShares(listing: unknown): void {
+// Live account listings record removals; an exact-share read confirms resumptions.
+async function reconcileReceivedShares(listing: unknown): Promise<void> {
   const parsed = readReceivedShareListing(listing);
   const credentials = cachedCredentials;
+  const generation = credentialCacheGeneration;
   if (!parsed || !credentials?.relayUrl) return;
   for (const entry of listWorkspaces()) {
-    let changed = false;
     try {
-      changed = reconcileWorkspaceRecipientShares(entry.workspaceId, parsed, credentials);
+      const changed = await reconcileRecipientSharesAfterLookup({
+        listing: parsed,
+        credentials,
+        currentEntry: () => findWorkspace(entry.workspaceId),
+        updateEntry: (reconcile) => reconcileWorkspaceRecipientShares(entry.workspaceId, reconcile),
+        isCurrent: () => generation === credentialCacheGeneration,
+        lookupShare: (shareId) => relayShareJsonWithCredentials<unknown>(
+          credentials, `/sync/shares/${encodeURIComponent(shareId)}`,
+        ),
+        onLookupError: (shareId, error) =>
+          console.warn(`[desktop] received share lookup for ${shareId}:`, error),
+      });
+      if (changed) notifyRenderer({ workspaceId: entry.workspaceId });
     } catch (error) {
       console.warn(`[desktop] received share reconciliation for ${entry.workspaceId}:`, error);
     }
-    if (changed) notifyRenderer({ workspaceId: entry.workspaceId });
   }
 }
 
@@ -1339,7 +1348,7 @@ async function recheckRemovedShares(workspaceId: string): Promise<void> {
         currentGeneration: () => credentialCacheGeneration,
         run: () => relayShareJsonWithCredentials<unknown>(credentials, "/sync/shares"),
       });
-      reconcileReceivedShares(listing);
+      await reconcileReceivedShares(listing);
     } catch (error) {
       console.warn(`[desktop] share removal recheck for ${workspaceId}:`, error);
     }
@@ -1751,32 +1760,22 @@ function registerReservedPhysicalWorkspace(
   return binding;
 }
 
+const removePhysicalWorkspace = createPhysicalWorkspaceRemoval({
+  retireBinding: (binding, retirement) => workspaceAuthorities.retireBinding(binding, retirement),
+  findWorkspace,
+  removeWorkspace,
+  removeDrafts: workspaceId => removeWorkspaceLiveDrafts(join(stateDir(), "live-draft-recovery"), workspaceId),
+  onError: (workspaceId, error) => console.warn(`[desktop] Could not remove recovery records for workspace "${workspaceId}":`, error),
+});
+
 // Forget: close every handle the app holds on the workspace and drop its
 // registry row. The folder is untouched; opening it again re-adopts the
 // manifest and its identity.
-async function forgetWorkspace(workspaceId: string): Promise<void> {
-  await removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId));
-  chatDispatchNotices.clearWorkspace(workspaceId);
-  notifyRenderer();
-}
-
-function removePhysicalWorkspace(
-  binding: DesktopWorkspaceAuthorityBinding,
-  beforeRegistryRemoval: () => void | Promise<void> = () => undefined,
-): Promise<void> {
-  return workspaceAuthorities.retireBinding(binding, {
-    finalize: beforeRegistryRemoval,
-    removeBinding: () => {
-      const current = findWorkspace(binding.workspaceId);
-      if (!current || current.rootPath !== binding.registeredRootPath) {
-        throw new Error(
-          "The workspace registry binding changed before removal completed.",
-        );
-      }
-      removeWorkspace(binding.workspaceId);
-    },
-  });
-}
+const forgetWorkspace = createWorkspaceForget({
+  remove: workspaceId => removePhysicalWorkspace(workspaceAuthorities.currentBinding(workspaceId)),
+  clearNotices: workspaceId => chatDispatchNotices.clearWorkspace(workspaceId),
+  notifyRenderer,
+});
 
 const createJoinedWorkspace = createJoinedWorkspaceRunner({
   reserve: (input) => workspaceAuthorities.reserveBinding(input),
@@ -2088,7 +2087,12 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
       },
       hooks,
       requireEngineSessions(),
-      testCaptureSeams(),
+      {
+        ...testCaptureSeams(),
+        preserveUnsentState: draft => preserveUnsentLiveDraft(
+          join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft,
+        ),
+      },
     ),
   onWatcherBatch,
   onObservationResync,
@@ -4395,7 +4399,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       selector: value?.grantedSelector, ended: value?.ended === true});
     const pinned = identity(marker);
     return createNamedDesktopLiveCapture({ shareId: marker.shareId, selector: marker.grantedSelector,
-      preserveDraft: draft => preserveNamedLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft),
+      preserveDraft: draft => preserveLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft),
       credentials: {relayUrl: credentials.relayUrl, token: credentials.token, userId: credentials.userId,
         signal: ownerDeliveryCredentialLifetime.signal},
       // The attachment, not the root's spelling: the registry keeps the root
@@ -4964,6 +4968,15 @@ async function syncStatusWithOwnedProjection(
   };
 }
 
+// Main and the test runner share the OS monotonic clock, including across processes.
+if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) {
+  app.prependOnceListener("will-quit", () => {
+    if (process.env.DOHC_TEST_QUIT_TIMING === "1") {
+      console.log(`DOHC_TEST_WILL_QUIT:${process.hrtime.bigint()}`);
+    }
+  });
+}
+
 const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, DesktopUserSettingsResult>({
   app,
   runtime: process,
@@ -5100,6 +5113,9 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     }),
     beginEngineShutdown: () => {
       automationScheduler.dispose();
+      for (const workspaceId of workspaceAuthorities.workspaceIds()) {
+        activity.engineCaptureFor(workspaceId)?.beginShutdown();
+      }
       desktopEngine.sessions?.beginShutdown();
       desktopChatBookmarks.stop();
     },
@@ -5343,7 +5359,7 @@ function registerIpcHandlers(): void {
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
     registerHandler: handleIpc,
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),
-    assertTrustedSender, prepareForRendererReload, shell, clipboard, BrowserWindow,
+    assertTrustedSender, prepareForRendererReload, shell, BrowserWindow,
     rememberChromeTheme, titleBarOverlayOptions,
     stepWindowZoom: (step) => settingsIpc.stepWindowZoom(step), exitRounds,
     quitGuard, isTrustedFrame, launchMarks, desktopMarks, logLaunchMarksOnce, app,

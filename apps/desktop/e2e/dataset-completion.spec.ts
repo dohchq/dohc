@@ -1,3 +1,4 @@
+import { activityPin, settingsNavPin, editorTabTestId } from "../src/testPins";
 import { expect, test, type Page, type Locator } from "@playwright/test";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -137,7 +138,7 @@ test("@dataset-completion field rename preserves custom rules and an already pub
     await expect(form.getByRole("status")).toHaveText("Response received.");
     await guest.screenshot({ path: info.outputPath("shared-generated-form.png") });
     const path = `tab://data-collection/${encodeURIComponent(dataset.datasetPath!)}/${table.tableId}`;
-    await page.getByTestId(`tab-${path}`).click();
+    await page.getByTestId(editorTabTestId(path)).click();
     await collection.getByRole("button", { name: "Refresh", exact: true }).click();
     const names = collection.getByRole("button", { name: /^Edit Name for record / });
     await expect(names).toHaveCount(2);
@@ -329,8 +330,8 @@ test("@dataset-completion board and calendar page all records and save governed 
       idempotencyKey: `verify-${randomUUID()}`, input: { limit: 1, filters: [{ fieldId: field("Name"), value: name }] } });
     await expect.poll(async () => JSON.stringify(await readTask("Task 051"))).toContain(`"${field("Status")}":"Done"`);
     for (const theme of ["light", "dark"] as const) {
-      await page.getByTestId("activity-settings").click();
-      await page.getByTestId("settings-nav-appearance").click();
+      await page.getByTestId(activityPin("settings")).click();
+      await page.getByTestId(settingsNavPin("appearance")).click();
       await page.getByRole("radiogroup", { name: "Theme" }).getByRole("radio", { name: theme === "light" ? "Light" : "Dark", exact: true }).click();
       await page.getByRole("button", { name: "Close settings", exact: true }).click();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);

@@ -59,6 +59,8 @@ import type {
   LinkHandoffRedeemResult,
   SyncRelayShareWithGrantRow,
   SyncRelayGrantedShareRow,
+  SyncRelayGrantedInventoryCursor,
+  SyncRelayGrantedInventoryPage,
   SyncRelayLinkInventoryCursor,
   SyncRelayLinkInventoryPage,
   SyncRelayIndependentGrantInventoryCursor,
@@ -117,6 +119,7 @@ import * as handoffStorage from "./storage/handoff";
 import * as objectIndexStorage from "./storage/objectIndex";
 import * as proposalsStorage from "./storage/proposals";
 import * as currentFilesStorage from "./storage/currentFiles";
+import { captureSqliteReadRevisionMatches } from "./storage/readRevision";
 import * as liveDocumentAuthorityStorage from "./storage/liveDocumentAuthority";
 import type { RedeemedLiveTicket } from "@dohc/live-session-contract/live-ticket";
 import type { DeviceHostCredential } from "./deviceHostCredential";
@@ -174,6 +177,8 @@ export {
   type LinkGrantTransitionResult,
   type SyncRelayShareWithGrantRow,
   type SyncRelayGrantedShareRow,
+  type SyncRelayGrantedInventoryCursor,
+  type SyncRelayGrantedInventoryPage,
   type SyncRelayLinkInventoryRow,
   type SyncRelayLinkInventoryCursor,
   type SyncRelayLinkInventoryPage,
@@ -1052,6 +1057,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return sharesStorage.listSharesGrantedBy(this, granterUserId);
   }
 
+  listSharesGrantedPage(granterUserId: string, workspaceId: string, cursor?: SyncRelayGrantedInventoryCursor): SyncRelayGrantedInventoryPage {
+    return sharesStorage.listSharesGrantedPage(this, granterUserId, workspaceId, cursor);
+  }
+
   listLinkGrantsByWorkspace(
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,
@@ -1291,6 +1300,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     epochLogFloor: number;
   }): SyncRelayLogRow[] {
     return currentFilesStorage.listLinkRevisionLogRows(this, input);
+  }
+
+  captureReadRevisionMatches(): () => boolean {
+    return captureSqliteReadRevisionMatches(this.db);
+  }
+
+  currentObjectPath(input: { workspaceId: string; versionId: string; objectId: string }): string | null {
+    return currentFilesStorage.currentObjectPath(this, input);
   }
 
   currentObjectBlobByteLength(input: {

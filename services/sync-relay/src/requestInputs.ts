@@ -1,7 +1,9 @@
-import { asRecord } from "@dohc/workspace-core";
+import { asRecord, RESERVED_WORKSPACE_IDS } from "@dohc/workspace-core";
 import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { MAX_LOG_PAGE_SIZE, MAX_SHARE_ID_CHARS } from "./wireLimits";
 import { badRequest, notFound } from "./errors";
+
+export { RESERVED_WORKSPACE_IDS };
 
 // A request path's segments as the relay routes them: empty segments
 // dropped and each one decoded. Throws a URIError for a malformed escape.
@@ -115,10 +117,9 @@ export function cursorCodec<Cursor extends object>(
 
 export function parseWorkspaceId(value: unknown): string {
   const workspaceId = parseString(value, "workspaceId", MAX_WORKSPACE_ID_CHARS);
-  // Reserved: "/sync/shares/..." and "/sync/notices/..." are account-level
-  // namespaces. A workspace with either id could never be addressed, so
-  // refuse the claim rather than strand it.
-  if (workspaceId === "shares" || workspaceId === "notices") throw badRequest("workspaceId is reserved");
+  // The shares, notices, and link route namespaces take precedence over
+  // workspace routes. Refuse those IDs before accepting a workspace claim.
+  if (RESERVED_WORKSPACE_IDS.includes(workspaceId)) throw badRequest("workspaceId is reserved");
   return workspaceId;
 }
 

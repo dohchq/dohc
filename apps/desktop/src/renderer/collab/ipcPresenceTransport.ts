@@ -34,8 +34,11 @@ function toSnapshot(snapshot: Extract<PresenceResult, { ok: true }>["snapshot"])
   return {
     version: snapshot.version,
     peers: snapshot.peers.map((peer) => ({
-      userId: peer.userId,
-      clientId: peer.clientId,
+      faceToken: peer.faceToken,
+      sessionToken: peer.sessionToken,
+      isSelf: peer.isSelf,
+      displayName: peer.displayName,
+      paletteSlot: peer.paletteSlot,
       state: peer.state ?? null,
       updatedAtMs: peer.updatedAtMs,
     })),
@@ -69,7 +72,7 @@ export function createIpcPresenceTransport(
         })
         .catch(() => undefined);
     },
-    async poll({ topic, since, signal }): Promise<PresenceSnapshot> {
+    async poll({ topic, clientId, since, signal }): Promise<PresenceSnapshot> {
       if (signal.aborted) throw new DOMException("Aborted", "AbortError");
       const pollId = nextPollId();
       const onAbort = () => {
@@ -78,7 +81,7 @@ export function createIpcPresenceTransport(
       };
       signal.addEventListener("abort", onAbort, { once: true });
       try {
-        const result = await bridge().presencePoll({ scope, topic, since, pollId });
+        const result = await bridge().presencePoll({ scope, topic, clientId, since, pollId });
         if (!result.ok) throw new Error(`presence poll ${result.reason}`);
         return toSnapshot(result.snapshot);
       } finally {

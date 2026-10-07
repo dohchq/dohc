@@ -22,6 +22,10 @@ export type MaterializeRelayPullPage = (
 ) => Promise<void>;
 
 export interface SharingDeclined {
+  objectId: string;
+  versionId: string;
+  lineagePruned: boolean;
+  headBlobSha256: string | null;
   path: string;
   constraint: string;
   limitBytes: number;

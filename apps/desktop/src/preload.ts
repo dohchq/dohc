@@ -16,7 +16,6 @@ import type {
   StopSitePreviewPayload,
   WorkspaceSettingsPayload,
   WorkspaceActivityEvent,
-  WriteClipboardTextPayload,
 } from "./ipc/bridgeContract";
 import {
   SitePreviewReplacedEvent,
@@ -564,8 +563,6 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.setWorkspaceSettings, payload),
   resetWorkspaceSettings: (payload: WorkspaceSettingsPayload) =>
     ipcRenderer.invoke(CHANNELS.resetWorkspaceSettings, payload),
-  writeClipboardText: (payload: WriteClipboardTextPayload) =>
-    ipcRenderer.invoke(CHANNELS.writeClipboardText, payload),
   setTitlebarTheme: (payload) =>
     ipcRenderer.invoke(CHANNELS.setTitlebarTheme, payload),
   onUserSettingsChanged: (listener) =>
