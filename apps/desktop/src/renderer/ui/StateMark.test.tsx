@@ -2,10 +2,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { EngineDocSaveState } from "../collab/engineDocLease";
-import type { FileSaveState } from "../fileInspectorUi";
 import type { SettingsSaveState } from "../settings/SettingsDialog";
-import type { SaveState as DraftSaveState } from "../useAutosavedTextDraft";
 import { SAVE_STATE, StateMark, type SaveStateKey, type StatePresentation } from "./StateMark";
 
 afterEach(cleanup);
@@ -16,11 +13,8 @@ describe("StateMark", () => {
   it("has a row for every member of every save-state union", () => {
     // Each assignment narrows the map to one storage union. A member the map
     // has no row for fails here at compile time, before any test runs.
-    const engine: Record<EngineDocSaveState, StatePresentation> = SAVE_STATE;
-    const draft: Record<DraftSaveState, StatePresentation> = SAVE_STATE;
-    const file: Record<FileSaveState, StatePresentation> = SAVE_STATE;
     const settings: Record<Exclude<SettingsSaveState, "idle">, StatePresentation> = SAVE_STATE;
-    for (const rows of [engine, draft, file, settings]) expect(rows).toBe(SAVE_STATE);
+    for (const rows of [settings]) expect(rows).toBe(SAVE_STATE);
     for (const key of KEYS) expect(SAVE_STATE[key].label).not.toBe("");
   });
 

@@ -1,3 +1,4 @@
+import { SAVED_HERE, SAVING, UNKNOWN_SAVE_STATE, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
 import * as Y from "yjs";
 import { authorCapacityMessage } from "./authorCapacityMessage";
 import type { LiveDocumentKind } from "@dohc/workspace-contracts/live-documents";
@@ -109,30 +110,6 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
   }
   return true;
 }
-
-// "error" = a settle failed, so the file on disk is behind what the editor
-// shows. "file-locked" = the same stale disk, but transient by contract:
-// another program holds the file's handle and the engine retries until it
-// releases, so the copy names the blocker instead of advising an edit.
-// "read-only" = the workspace is a read-only shared view and the edit
-// was discarded outright; retrying cannot help, so it gets its own copy.
-// "changed-on-disk" = the file was edited outside dohc while this document was
-// open, and dohc kept that edit instead of overwriting it.
-// "deleted" and "object-changed" = this document is gone from its path: the
-// file was deleted, or another file now holds the path. Both set the text
-// aside and refuse further writes.
-// None is ever inferred — main pushes all of them from real outcomes.
-export type EngineDocSaveState =
-  | "saved-to-host"
-  | "saved"
-  | "saving"
-  | "error"
-  | "file-locked"
-  | "pending-share"
-  | "read-only"
-  | "changed-on-disk"
-  | "deleted"
-  | "object-changed";
 
 // Why a document left its path while it was open.
 export type DocumentGoneCause = "deleted" | "object-changed";
@@ -324,7 +301,7 @@ export type EngineDocInput = {
 export type EngineDocLeaseSnapshot = {
   key: string;
   outcome: EngineDocOpenOutcome | null;
-  saveState: EngineDocSaveState;
+  saveState: SaveState;
   saveError: string | null;
   authorCapacity: boolean;
   deletion: {
@@ -366,7 +343,7 @@ function emptyLeaseSnapshot(requestKey: string): EngineDocLeaseSnapshot {
   return {
     key: requestKey,
     outcome: null,
-    saveState: "saved",
+    saveState: UNKNOWN_SAVE_STATE,
     saveError: null,
     authorCapacity: false,
     deletion: null,
@@ -415,7 +392,7 @@ function createEngineDocSession(
   const token = ++engineDocLeaseCounter;
   const sessionId = nextSessionId();
   const listeners = new Set<() => void>();
-  const saveStateRef = { current: "saved" as EngineDocSaveState };
+  const saveStateRef = { current: UNKNOWN_SAVE_STATE as SaveState };
   const writesRefused = { current: false };
   const localSeq = { current: 0 };
   const transport = makeTransport(
@@ -439,7 +416,7 @@ function createEngineDocSession(
   let deletionCause: DocumentGoneCause = "deleted";
   let deliveryPending = false;
   let pendingSavedSeq: number | null = null;
-  let pendingSavedState: "saved" | "saved-to-host" = "saved";
+  let pendingSavedState: SaveState = SAVED_HERE;
   const retiredDraftObservers = new Map<Y.Doc, () => void>();
   let lifecycle: Promise<void> = Promise.resolve();
   let disposePromise: Promise<void> | null = null;
@@ -501,10 +478,12 @@ function createEngineDocSession(
   });
 
   const reportSaveState = (
-    state: EngineDocSaveState,
+    state: SaveState,
     error: string | null = null,
     authorCapacity = false,
   ): void => {
+    if (state.kind === "error" && error) state = saveProblem("error", error, "issueId" in state ? state.issueId : null);
+    if (saveStateEqual(snapshot.saveState, state) && snapshot.saveError === error && snapshot.authorCapacity === authorCapacity) return;
     saveStateRef.current = state;
     publish((current) => ({ ...current, saveState: state, saveError: error, authorCapacity }));
   };
@@ -725,6 +704,7 @@ function createEngineDocSession(
   const captureDeletion = (
     doc: Y.Doc,
     cause: DocumentGoneCause = "deleted",
+    edited = false,
   ): void => {
     writesRefused.current = true;
     // The PATH is gone whichever lineage wins: deletion outlives any later
@@ -737,7 +717,7 @@ function createEngineDocSession(
     // serializer would otherwise get to read it.
     const bytes = Y.encodeStateAsUpdate(doc);
     recovery.snapshotBytes = bytes;
-    const forceCreate = saveStateRef.current !== "saved";
+    const forceCreate = edited || (saveStateRef.current.kind !== "saved-here" && saveStateRef.current.kind !== "unknown");
     const sceneRecovery =
       forceCreate && documentKind === "scene" && binding
         ? prepareSceneRecovery(bytes, binding)
@@ -759,7 +739,7 @@ function createEngineDocSession(
       ...current,
       deletion: { token, draftId: recovery.draftId, cause },
     }));
-    reportSaveState(cause);
+    reportSaveState(UNKNOWN_SAVE_STATE);
     enqueueRecoverySnapshot(
       bytes,
       forceCreate,
@@ -788,7 +768,7 @@ function createEngineDocSession(
       ...current,
       readOnlyTransition: { token },
     }));
-    reportSaveState("read-only");
+    reportSaveState(UNKNOWN_SAVE_STATE);
     enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
   };
 
@@ -839,7 +819,7 @@ function createEngineDocSession(
         ...current,
         permanentFailure: { token },
       }));
-      reportSaveState("error", readError(error).words);
+      reportSaveState(saveProblem("error", "dohc could not confirm the file was saved."), readError(error).words);
     }
     enqueueRecoverySnapshot(bytes, true, recovery.transition, sceneRecovery);
   };
@@ -908,16 +888,16 @@ function createEngineDocSession(
       setOutcome(boundOutcome(retired, bound, [...bound.artifactAssets]));
     }
     reportSaveState(
-      "error",
+      saveProblem("error", "dohc could not finish replacing this document."),
       withErrorWords("dohc could not finish replacing this document.", error),
     );
   };
 
   const onSaveState = (event: EngineYDocSaveStateEvent): void => {
     if (disposed || event.sessionId !== sessionId) return;
-    if (event.state === "deleted" || event.state === "object-changed") {
+    if (event.access === "deleted" || event.access === "object-changed") {
       pendingSavedSeq = null;
-      const cause = event.state;
+      const cause = event.access;
       const doc = binding?.doc;
       if (!doc) {
         deletionPending = true;
@@ -933,7 +913,7 @@ function createEngineDocSession(
           ...current,
           deletion: { token, draftId: recovery.draftId, cause },
         }));
-        reportSaveState(cause);
+        reportSaveState(UNKNOWN_SAVE_STATE);
         refreshRecoveryDraft(doc);
         return;
       }
@@ -944,7 +924,7 @@ function createEngineDocSession(
     // flight can report after main's deletion notice, but it no longer
     // describes a path that exists and must not repaint this state.
     if (writesRefused.current) return;
-    if (event.state === "read-only") {
+    if (event.access === "read-only") {
       pendingSavedSeq = null;
       const doc = binding?.doc;
       // Unlike deletion, this report answers a local update, so it cannot
@@ -954,7 +934,7 @@ function createEngineDocSession(
       releaseBinding();
       return;
     }
-    if (event.state === "saved" || event.state === "saved-to-host") {
+    if (event.state.kind === "saved-here" || event.state.kind === "saved-to-host") {
       if (deliveryPending) {
         // Batches or unacknowledged deliveries are still outstanding — a
         // settle that raced ahead of them must not vouch for the mirror.
@@ -968,16 +948,16 @@ function createEngineDocSession(
       return;
     }
     pendingSavedSeq = null;
-    if (event.state === "file-locked" || event.state === "pending-share") {
+    if (event.state.kind === "file-locked" || event.state.kind === "pending-share") {
       if (event.seq >= localSeq.current) reportSaveState(event.state);
       return;
     }
-    if (event.state === "error" || event.state === "changed-on-disk") {
-      reportSaveState(event.state, event.editRefusal?.message ?? (event.authorCapacity ? authorCapacityMessage(input.path) : null), event.authorCapacity);
+    if (event.state.kind === "error" || event.state.kind === "changed-on-disk") {
+      reportSaveState(event.state, event.authorCapacity ? authorCapacityMessage(input.path) : event.state.reason, event.authorCapacity);
       return;
     }
-    if (event.state === "settling") {
-      reportSaveState("saving");
+    if (event.state.kind === "saving") {
+      reportSaveState(SAVING);
       return;
     }
   };
@@ -991,13 +971,13 @@ function createEngineDocSession(
           // A replacement installed a fresh recovery slot while the path
           // stayed deleted. The first edit on the winner starts its own
           // draft instead of vanishing.
-          captureDeletion(doc, deletionCause);
+          captureDeletion(doc, deletionCause, true);
           return;
         }
         refreshRecoveryDraft(doc);
         return;
       }
-      reportSaveState("saving");
+      reportSaveState(SAVING);
     };
     doc.on("update", onUpdate);
     detachSaveObserver = () => doc.off("update", onUpdate);
@@ -1155,7 +1135,7 @@ function createEngineDocSession(
     // began. Persist it synchronously before acknowledging. If a transaction
     // already in the editor lands before React unmounts the retired doc, the
     // observer refreshes that same durable draft.
-    if (saveStateRef.current !== "saved" || deliveryPending) persist();
+    if ((saveStateRef.current.kind !== "saved-here" && saveStateRef.current.kind !== "unknown") || deliveryPending) persist();
     const onRetiredUpdate = () => persist();
     retired.on("update", onRetiredUpdate);
     retiredDraftObservers.set(retired, () => retired.off("update", onRetiredUpdate));
@@ -1252,7 +1232,7 @@ function createEngineDocSession(
               ...(deletionPending ? {} : { deletion: null }),
             }));
             if (!writesRefused.current && !deliveryPending) {
-              reportSaveState("saved");
+              reportSaveState(UNKNOWN_SAVE_STATE);
             }
             observeSaveState(replacement);
             setOutcome(boundOutcome(replacement, bound, bound.artifactAssets));

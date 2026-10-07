@@ -1,3 +1,4 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
 import { filenameStem, MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
@@ -8,7 +9,6 @@ import {
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
   ViewHeader,
-  type FileSaveState,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
   OPENING_TITLE,
@@ -298,7 +298,7 @@ type FileInspectorProps = {
   onScrollConsumed?: (nonce: number) => void;
   // Editor save-state seam for the tab strip's dirty indicator. Editable
   // source/table/document views all report through the same small contract.
-  onSaveStateChange?: (state: FileSaveState) => void;
+  onSaveStateChange?: (state: SaveState) => void;
   // Registers the active editor's draft flush with the shell: explorer ops
   // await it before re-pathing files.
   registerDraftFlush?: (flush: DraftFlush | null) => void;

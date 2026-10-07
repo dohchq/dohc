@@ -1,11 +1,12 @@
-export type LocalDocumentSaveState = "saved" | "saving" | "error";
+import { SAVED_HERE, SAVING, UNKNOWN_SAVE_STATE, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
+
 
 export type LocalDocumentSnapshot = {
   initialized: boolean;
   body: string;
   contentHash: string | null;
   dirty: boolean;
-  saveState: LocalDocumentSaveState;
+  saveState: SaveState;
   revision: number;
   source: object | null;
 };
@@ -60,7 +61,7 @@ export class SharedLocalDocument {
     body: "",
     contentHash: null,
     dirty: false,
-    saveState: "saved",
+    saveState: UNKNOWN_SAVE_STATE,
     revision: 0,
     source: null,
   };
@@ -145,7 +146,7 @@ export class SharedLocalDocument {
         { body: this.snapshot.body, contentHash: this.snapshot.contentHash },
         source,
         false,
-        "error",
+        saveProblem("error", "dohc could not confirm the file was saved."),
       );
     } else {
       this.notify();
@@ -178,13 +179,13 @@ export class SharedLocalDocument {
       return false;
     }
     this.initialized = true;
-    this.replace({ body, contentHash }, null, false, "saved");
+    this.replace({ body, contentHash }, null, false, SAVED_HERE);
     return true;
   }
 
   reset(body: string, contentHash: string | null, source: object): void {
     this.initialized = true;
-    this.replace({ body, contentHash }, source, false, "saved");
+    this.replace({ body, contentHash }, source, false, SAVED_HERE);
   }
 
   publishDraft(body: string, source: object): void {
@@ -193,7 +194,7 @@ export class SharedLocalDocument {
       { body, contentHash: this.snapshot.contentHash },
       source,
       true,
-      "saving",
+      SAVING,
     );
   }
 
@@ -228,18 +229,18 @@ export class SharedLocalDocument {
       { body, contentHash },
       source,
       false,
-      "saved",
+      SAVED_HERE,
     );
     this.deleteWhenUnused();
     return true;
   }
 
-  markError(): void {
+  markError(reason = "dohc could not confirm the file was saved.", kind: "error" | "changed-on-disk" = "error"): void {
     this.replace(
       { body: this.snapshot.body, contentHash: this.snapshot.contentHash },
       this.snapshot.source,
       this.snapshot.dirty,
-      "error",
+      saveProblem(kind, reason),
     );
   }
 
@@ -269,14 +270,14 @@ export class SharedLocalDocument {
         { body: candidate.body, contentHash: candidate.contentHash },
         source,
         true,
-        "saving",
+        SAVING,
       );
       const body = candidate.body;
       const expectedContentHash = candidate.contentHash;
       try {
         const written = await writer(body, expectedContentHash);
         if (written.status === "conflict") {
-          this.markError();
+          this.markError("The file changed on disk.", "changed-on-disk");
           return { ...written, body, expectedContentHash };
         }
         // A read that started before this write still carries the old body and
@@ -296,11 +297,11 @@ export class SharedLocalDocument {
           { body: this.snapshot.body, contentHash: written.contentHash },
           newerBody ? this.snapshot.source : (pending?.source ?? source),
           newerDraft,
-          newerDraft ? "saving" : "saved",
+          newerDraft ? SAVING : SAVED_HERE,
         );
         return { ...written, body, expectedContentHash };
       } catch (error: unknown) {
-        this.markError();
+        this.markError(error instanceof Error ? error.message : String(error));
         throw error;
       }
     };
@@ -325,7 +326,7 @@ export class SharedLocalDocument {
     value: { body: string; contentHash: string | null },
     source: object | null,
     dirty: boolean,
-    saveState: LocalDocumentSaveState,
+    saveState: SaveState,
   ): void {
     const current = this.snapshot;
     if (
@@ -333,7 +334,7 @@ export class SharedLocalDocument {
       current.body === value.body &&
       current.contentHash === value.contentHash &&
       current.dirty === dirty &&
-      current.saveState === saveState &&
+      saveStateEqual(current.saveState, saveState) &&
       current.source === source
     ) {
       return;

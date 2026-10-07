@@ -46,7 +46,7 @@ const engineDocState: UseEngineDoc = {
   doc: null,
   objectId: null,
   versionId: null,
-  saveState: "saved",
+  saveState: { kind: "saved-here" },
   saveError: null,
     authorCapacity: false,
   notInVersion: false,

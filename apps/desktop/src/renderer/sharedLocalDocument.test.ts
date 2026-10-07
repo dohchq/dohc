@@ -98,7 +98,7 @@ describe("SharedLocalDocument", () => {
     expect(parent.buffer.getSnapshot()).toMatchObject({
       body: "during-switch draft",
       dirty: false,
-      saveState: "error",
+      saveState: { kind: "error" },
     });
     expect(
       parent.buffer.acceptRead(
@@ -113,7 +113,7 @@ describe("SharedLocalDocument", () => {
       body: "version body",
       contentHash: "hash-v2",
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
     parent.release();
   });
@@ -135,7 +135,7 @@ describe("SharedLocalDocument", () => {
     expect(buffer.getSnapshot()).toMatchObject({
       body: "peer draft",
       dirty: true,
-      saveState: "saving",
+      saveState: { kind: "saving" },
       source: peerSource,
     });
     expect(buffer.getPendingDraftSource()).toBe(peerSource);
@@ -161,7 +161,7 @@ describe("SharedLocalDocument", () => {
     expect(buffer.getSnapshot()).toMatchObject({
       body: "captured draft",
       dirty: true,
-      saveState: "saving",
+      saveState: { kind: "saving" },
       source,
     });
     finishWrite();
@@ -216,7 +216,7 @@ describe("SharedLocalDocument", () => {
       body: "after",
       contentHash: "hash-2",
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
     await first.settled();
     releaseFirst();
@@ -287,7 +287,7 @@ describe("SharedLocalDocument", () => {
       body: "peer",
       contentHash: "hash-1",
       dirty: true,
-      saveState: "saving",
+      saveState: { kind: "saving" },
     });
     expect(buffer.getSnapshot().source).toBe(peerSource);
     release();
@@ -325,7 +325,7 @@ describe("SharedLocalDocument", () => {
       body: "writer",
       contentHash: "hash-1",
       dirty: true,
-      saveState: "saving",
+      saveState: { kind: "saving" },
     });
     expect(buffer.getSnapshot().source).toBe(peerSource);
     release();
@@ -353,7 +353,7 @@ describe("SharedLocalDocument", () => {
       body: "after",
       contentHash: "hash-1",
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
     const freshRead = buffer.beginRead();
     expect(buffer.acceptRead("fresh", "hash-2", {}, false, freshRead)).toBe(
@@ -379,7 +379,7 @@ describe("SharedLocalDocument", () => {
       body: "after",
       contentHash: "hash-1",
       dirty: true,
-      saveState: "error",
+      saveState: { kind: "error" },
       source,
     });
 
@@ -399,7 +399,7 @@ describe("SharedLocalDocument", () => {
       body: "after",
       contentHash: "hash-2",
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
     release();
   });
@@ -422,7 +422,7 @@ describe("SharedLocalDocument", () => {
     expect(writer).not.toHaveBeenCalled();
     expect(buffer.getSnapshot()).toMatchObject({
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
     expect(listener).not.toHaveBeenCalled();
     unsubscribe();
@@ -545,7 +545,7 @@ describe("SharedLocalDocument", () => {
       body: "reconciled",
       contentHash: "hash-2",
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
       source,
     });
     expect(listener).toHaveBeenCalledTimes(1);
@@ -581,7 +581,7 @@ describe("SharedLocalDocument", () => {
       body: "peer draft",
       contentHash: "hash-1",
       dirty: true,
-      saveState: "error",
+      saveState: { kind: "error" },
       source: peerSource,
     });
 
@@ -606,7 +606,7 @@ describe("SharedLocalDocument", () => {
       body: "unsaved",
       contentHash: null,
       dirty: true,
-      saveState: "error",
+      saveState: { kind: "error" },
     });
     release();
   });
@@ -644,7 +644,7 @@ describe("SharedLocalDocument", () => {
       body: "peer draft",
       contentHash: "hash-1",
       dirty: true,
-      saveState: "error",
+      saveState: { kind: "error" },
     });
     release();
   });
@@ -680,7 +680,7 @@ describe("SharedLocalDocument", () => {
       body: "newer",
       contentHash: "hash-2",
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
     release();
   });
@@ -706,7 +706,7 @@ describe("SharedLocalDocument", () => {
       body: "local draft",
       contentHash: "hash-written",
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
     release();
   });
@@ -737,7 +737,7 @@ describe("SharedLocalDocument", () => {
       body: "written draft",
       contentHash: "hash-written",
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
     release();
   });
@@ -795,7 +795,7 @@ describe("SharedLocalDocument", () => {
       body: "new version",
       contentHash: "hash-new",
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
     release();
   });

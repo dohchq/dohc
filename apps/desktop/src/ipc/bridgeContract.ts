@@ -1,3 +1,4 @@
+import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
@@ -99,7 +100,6 @@ import {
   SEARCH_EVENT_MAX_NOTICE_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
   WORKBENCH_MENU_COMMANDS,
-  ENGINE_YDOC_SAVE_STATES,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
 import type { OperationBridge, OperationTable } from "./operationTable";
@@ -6179,7 +6179,8 @@ export const EngineYDocSaveStateEvent = z.object({
     message: z.string(),
   }).optional(),
   sessionId: ENGINE_YDOC_SESSION_ID,
-  state: z.enum(ENGINE_YDOC_SAVE_STATES),
+  state: SaveStateSchema,
+  access: z.enum(["read-only", "deleted", "object-changed"]).optional(),
   seq: z.number().int().nonnegative(),
 });
 export type EngineYDocSaveStateEvent = z.infer<typeof EngineYDocSaveStateEvent>;

@@ -1,3 +1,4 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import {
   Suspense,
@@ -26,7 +27,6 @@ import {
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
   ViewHeader,
-  type FileSaveState,
 } from "./fileInspectorUi";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { StateMark } from "./ui/StateMark";
@@ -82,7 +82,7 @@ export function DrawingView({
   engine: UseEngineDoc;
   onRetryEngineOpen: () => void;
   presenceFactory?: ExcalidrawPresenceFactory | null;
-  onSaveStateChange?: (state: FileSaveState) => void;
+  onSaveStateChange?: (state: SaveState) => void;
   localBuffer: SharedLocalDocument;
 }) {
   const engineMode = engine.available && engine.doc !== null;
@@ -155,15 +155,7 @@ export function DrawingView({
 
   useEffect(() => {
     if (!engineMode) return;
-    onSaveStateChange?.(
-      engine.saveState === "saved" ||
-        engine.saveState === "saving" ||
-        engine.saveState === "deleted"
-        ? engine.saveState
-        : engine.saveState === "object-changed"
-          ? "deleted"
-          : "error",
-    );
+    onSaveStateChange?.(engine.saveState);
   }, [engineMode, engine.saveState, onSaveStateChange]);
 
   const canvasReadOnly = readOnly || engineReadOnly;
@@ -267,8 +259,8 @@ export function DrawingView({
   }, [assetHydrationAttempt, hydrationSession]);
   const drawingChipState =
     engineMode &&
-    (engine.saveState === "deleted" || engine.saveState === "object-changed")
-      ? engine.saveState
+    (engine.deletedWhileEditing)
+      ? engine.goneCause!
       : readOnly || (truncated && !engineMode) || engineReadOnly
         ? "read-only"
         : engineMode
@@ -298,7 +290,7 @@ export function DrawingView({
             truncate
             state={drawingChipState}
             shown={drawingShown}
-            title={drawingChipState === "error" && engine.saveError ? engine.saveError : undefined}
+            title={typeof drawingChipState !== "string" && drawingChipState.kind === "error" && engine.saveError ? engine.saveError : undefined}
           />
         }
       />

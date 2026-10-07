@@ -52,6 +52,7 @@ describe("markdown document opening state", () => {
   function makeHeldOpenBridge() {
     const serverDoc = markdownToYDoc(DOC_MARKDOWN);
     let settle: ((available: boolean) => void) | null = null;
+    const saveListeners = new Set<Parameters<DohcDesktopBridge["onEngineYDocSaveState"]>[0]>();
     const bridgeMock = {
       platform: "linux" as const,
       readWorkspaceText: vi.fn<DohcDesktopBridge["readWorkspaceText"]>(
@@ -74,7 +75,7 @@ describe("markdown document opening state", () => {
         source: "default" as const,
       })),
       openEngineYDocSession: vi.fn(
-        () =>
+        (_payload: { sessionId: string }) =>
           new Promise<{
             available: boolean;
             initialUpdate?: Uint8Array;
@@ -101,11 +102,18 @@ describe("markdown document opening state", () => {
       onEngineYDocOwnerHandoff: () => () => undefined,
       prepareEngineYDocOwnerHandoff: async () => undefined,
       onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
-      onEngineYDocSaveState: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn((listener: Parameters<DohcDesktopBridge["onEngineYDocSaveState"]>[0]) => {
+        saveListeners.add(listener);
+        return () => saveListeners.delete(listener);
+      }),
     };
     return {
       bridgeMock,
-      bind: () => act(() => settle?.(true)),
+      bind: () => act(() => {
+        settle?.(true);
+        const sessionId = bridgeMock.openEngineYDocSession.mock.calls.at(-1)![0].sessionId;
+        for (const listener of saveListeners) listener({ sessionId, state: { kind: "saved-here" }, seq: 0 });
+      }),
       answerNotEngineBacked: () => act(() => settle?.(false)),
     };
   }
@@ -632,13 +640,13 @@ describe("markdown document opening state", () => {
     vi.stubGlobal("dohcDesktop", bridge.bridgeMock);
     const states: string[] = [];
     await armDraftThenReopen(user, bridge, {
-      onSaveStateChange: (state) => states.push(state),
+      onSaveStateChange: (state) => states.push(state.kind),
     });
     await screen.findByTestId("orphaned-draft-notice");
     expect(
       screen.getByTestId("markdown-save-state").getAttribute("data-state"),
     ).toBe("recovery");
-    await waitFor(() => expect(states.at(-1), "lift: report the recovery-derived state through onSaveStateChange (the round-1 behavior). The shell then marks the tab savable-dirty and the version switch prompts to save a draft that no longer exists in the pipeline.").toBe("saved"));
+    await waitFor(() => expect(states.at(-1), "lift: report the recovery-derived state through onSaveStateChange (the round-1 behavior). The shell then marks the tab savable-dirty and the version switch prompts to save a draft that no longer exists in the pipeline.").toBe("saved-here"));
     expect(states).not.toContain("error");
 
     await user.click(screen.getByTestId("recovery-dismiss"));
@@ -647,7 +655,7 @@ describe("markdown document opening state", () => {
       expect(screen.queryByTestId("orphaned-draft-notice"), "chip: collapse chipState to the plain saveState. The chip then reads nothing while the notice says an edit is not saved.").toBeNull(),
     );
     expect(screen.queryByTestId("markdown-save-state")).toBeNull();
-    expect(states.at(-1)).toBe("saved");
+    expect(states.at(-1)).toBe("saved-here");
   });
 
   it("shares concurrent legacy Markdown flushes until their held write lands", async () => {
@@ -2262,7 +2270,7 @@ describe("markdown document opening state", () => {
       body: newBody,
       contentHash: newHash,
       dirty: false,
-      saveState: "saved",
+      saveState: { kind: "saved-here" },
     });
 
     const title = screen.getByTestId("page-title");

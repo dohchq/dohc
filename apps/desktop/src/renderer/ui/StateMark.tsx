@@ -1,11 +1,8 @@
 import { Lock, TriangleAlert } from "lucide-react";
 import { useId, useLayoutEffect, useRef, useState } from "react";
-import type { EngineDocSaveState } from "../collab/engineDocLease";
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 
-// One mark and one label map for every save state a person can see: the
-// engine lease's ten states, the plain-text draft's three, the file
-// inspector's `deleted`, and Settings' saving/saved/error. The storage unions
-// stay where they are; this file only decides how each member is shown.
+// Save facts and access/view facts share this presentation map.
 //
 // The shape says what kind of state it is before the word is read. Filled
 // means settled, a ring means dohc is still working, a lock means the file
@@ -39,7 +36,8 @@ export const REPLACED_WITHOUT_SET_ASIDE_EDIT_NOTICE =
 // take edits for a reason its own notice states, and a file the bounded read
 // cut short so the editor is disabled.
 export type SaveStateKey =
-  | EngineDocSaveState
+  | "saved" | "saving" | "error" | "saved-to-host" | "pending-share" | "file-locked" | "changed-on-disk"
+  | "deleted" | "object-changed" | "read-only"
   | "recovery"
   | "read-only-transition"
   | "read-only-unavailable"
@@ -110,6 +108,14 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
   },
 };
 
+export function saveStatePresentationKey(state: SaveState): SaveStateKey {
+  switch (state.kind) {
+    case "saved-here": return "saved";
+    case "unknown": return "read-only-unavailable";
+    default: return state.kind;
+  }
+}
+
 const MARK_TONE: Record<StateMarkKind, string> = {
   settled: "text-subtle",
   working: "text-subtle",
@@ -141,14 +147,15 @@ function Mark(props: { kind: StateMarkKind }) {
  * a tooltip, on focus or hover, in place of the title; with room to spare it
  * is not a tab stop and keeps its title. */
 export function StateMark(props: {
-  state: string;
-  shown: SaveStateKey;
+  state: string | SaveState;
+  shown: SaveStateKey | SaveState;
   title?: string;
   testId: string;
   className?: string;
   truncate?: boolean;
 }) {
-  const presentation = SAVE_STATE[props.shown];
+  const shownKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
+  const presentation = SAVE_STATE[shownKey];
   const title = props.title ?? presentation.title;
   const { label, cut } = useCutShort(presentation.label, props.truncate === true);
   const [open, setOpen] = useState(false);
@@ -189,7 +196,7 @@ export function StateMark(props: {
     <span
       ref={chipRef}
       data-testid={props.testId}
-      data-state={props.state}
+      data-state={typeof props.state === "string" ? props.state : props.state.kind === "unknown" ? "unknown" : saveStatePresentationKey(props.state)}
       // Cut short, the tooltip says what the title would, so the browser's
       // own tooltip does not repeat it a moment later.
       title={cut ? undefined : title}
@@ -227,6 +234,8 @@ export function StateMark(props: {
   if (!props.truncate) return chip;
   // The tooltip sits beside the chip, not in it, so the chip's text stays its
   // label while the tooltip is open.
+  if (typeof props.shown !== "string" && props.shown.kind === "unknown") return null;
+
   return (
     <span
       className="inline-flex min-w-0 max-w-full"

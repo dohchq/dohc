@@ -1,3 +1,4 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { Plus, Table, Trash2 } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
@@ -7,7 +8,6 @@ import { StateMark } from "./ui/StateMark";
 import {
   useAutosavedTextDraft,
   type DraftFlush,
-  type SaveState,
 } from "./useAutosavedTextDraft";
 
 // Derives where a CSV/JSON import materializes: a sibling .sqlite, table named

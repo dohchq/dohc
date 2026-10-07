@@ -2762,8 +2762,8 @@ describe("engine Y.Doc event boundaries", () => {
 
   it("accept the deleted state that turns a live editor read-only", () => {
     expect(
-      EngineYDocSaveStateEvent.parse({ sessionId: "session-1", state: "deleted", seq: 4 }),
-    ).toEqual({ sessionId: "session-1", state: "deleted", seq: 4 });
+      EngineYDocSaveStateEvent.parse({ sessionId: "session-1", state: { kind: "unknown" }, access: "deleted", seq: 4 }),
+    ).toEqual({ sessionId: "session-1", state: { kind: "unknown" }, access: "deleted", seq: 4 });
   });
 });
 
