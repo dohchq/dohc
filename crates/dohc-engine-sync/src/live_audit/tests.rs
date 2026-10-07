@@ -1483,3 +1483,209 @@ fn owner_settlement_lookup_accepts_both_binding_key_orders() {
         }
     }
 }
+
+#[test]
+fn first_bootstrap_settlement_publishes_admitted_baseline_then_chains() {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    let baseline = f.input.projected_markdown_digest.clone();
+    let baseline_bytes = f.input.projected_markdown_byte_length;
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&f.bytes).unwrap();
+    let first_text = "Accepted first edit.";
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, first_text)
+        .unwrap();
+    f.bytes = doc.encode_full_state();
+    accept_enrollment_event(&mut f, 1);
+    VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "object".into(),
+                path: "note.md".into(),
+                text: first_text.into(),
+                moment_id: "private-pre-live-head".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 250,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    settle_bootstrap_publication(&mut f, 1, "first-settlement").unwrap();
+    let first = operations(&f.store)
+        .into_iter()
+        .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == "first-settlement")
+        .unwrap();
+    assert_eq!(first.payload["payloadBeforeBlobSha256"], baseline);
+    assert_eq!(first.payload["payloadBeforeByteLength"], baseline_bytes);
+    assert_eq!(first.payload["payloadBeforePath"], "note.md");
+    assert_eq!(first.payload["payloadBeforeContentKind"], "text");
+    assert_eq!(first.payload["beforeBlobSha256"], baseline);
+    assert_eq!(first.payload["beforeByteLength"], baseline_bytes);
+    assert_eq!(first.payload["beforeLatestMomentId"], "bootstrap-moment");
+    assert_eq!(first.payload["beforePresent"], "present");
+    assert_eq!(first.payload["beforeObjectId"], "object");
+    assert_eq!(first.payload["beforeVersionId"], "main");
+    assert_eq!(
+        first.payload["settlementReference"]["record"]["previousCursor"],
+        0
+    );
+    assert_eq!(
+        first.payload["payloadAfterBlobSha256"],
+        hex_sha256(first_text.as_bytes())
+    );
+    let local_before: (String, String) = f.store.read_with(|conn| {
+        conn.query_row("SELECT payload_before_blob_sha256,before_latest_moment_id FROM moments WHERE workspace_id='ws' AND moment_id='first-settlement'", [], |r| Ok((r.get(0)?, r.get(1)?))).map_err(SyncError::corrupt)
+    }).unwrap();
+    assert_eq!(
+        local_before,
+        (
+            hex_sha256(first_text.as_bytes()),
+            "private-pre-live-head".into()
+        )
+    );
+    assert_ne!(local_before.0, baseline);
+    let second_text = "Accepted second edit.";
+    doc.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, second_text)
+        .unwrap();
+    f.bytes = doc.encode_full_state();
+    accept_enrollment_event(&mut f, 2);
+    settle_bootstrap_publication(&mut f, 2, "second-settlement").unwrap();
+    let second = operations(&f.store)
+        .into_iter()
+        .find(|op| op.op_kind == "moment.append" && op.payload["momentId"] == "second-settlement")
+        .unwrap();
+    assert_eq!(
+        second.payload["payloadBeforeBlobSha256"],
+        first.payload["payloadAfterBlobSha256"]
+    );
+    assert_eq!(
+        second.payload["payloadBeforeByteLength"],
+        first.payload["payloadAfterByteLength"]
+    );
+    assert_eq!(second.payload["beforeLatestMomentId"], "first-settlement");
+    assert_eq!(
+        second.payload["settlementReference"]["record"]["previousCursor"],
+        1
+    );
+    assert_eq!(
+        second.payload["payloadAfterBlobSha256"],
+        hex_sha256(second_text.as_bytes())
+    );
+}
+
+#[test]
+fn first_bootstrap_settlement_rejects_another_objects_baseline() {
+    let mut f = fixture(true);
+    bootstrap(&mut f, false).unwrap();
+    accept_enrollment_event(&mut f, 1);
+    let foreign = VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "ws".into(),
+                version_id: "main".into(),
+                object_id: "other-object".into(),
+                path: "other.md".into(),
+                text: "A different document".into(),
+                moment_id: "other-baseline".into(),
+                metadata_origin: "sync".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 100,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    f.store.write_with(&NoFaults, |tx| {
+        tx.execute(
+            "UPDATE live_device_bootstraps SET bootstrap_moment_id='other-baseline',projected_markdown_digest=?1,projected_markdown_byte_length=?2 WHERE workspace_id='ws'",
+            params![foreign.snapshot.blob_sha256, foreign.snapshot.text.len() as i64],
+        ).map_err(SyncError::persist)?;
+        Ok::<_, SyncError>(())
+    }).unwrap();
+    assert!(settle_bootstrap_publication(&mut f, 1, "invalid-baseline-settlement").is_err());
+    assert_eq!(count(&f.store, "live_audit_settlement_publications"), 0);
+    assert_eq!(count(&f.store, "live_device_settlements"), 0);
+    assert_eq!(count(&f.store, "live_settlement_publication_states"), 0);
+    assert!(
+        !operations(&f.store)
+            .iter()
+            .any(|op| op.payload["momentId"] == "invalid-baseline-settlement")
+    );
+}
+
+fn settle_bootstrap_publication(
+    f: &mut Fixture,
+    cursor: i64,
+    moment: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use dohc_engine_collab::live_update_application::{
+        LiveUpdateReceipt, NativeHistoryReconstruction, with_settlement,
+    };
+    let receipt = LiveUpdateReceipt {
+        delivery_id: format!("enrollment-{cursor}"),
+        update_digest: hex_sha256(&f.bytes),
+        journal_cursor: cursor,
+        accepting_host_epoch: 1,
+    };
+    with_settlement::<Box<dyn std::error::Error>, _>(
+        &mut f.store,
+        &f.handle,
+        Some(receipt),
+        8,
+        NativeHistoryReconstruction {
+            working_reserve_bytes: 8 * 1024 * 1024,
+        },
+        |store, audit| {
+            let b = audit.binding();
+            let key = DocKey::new(&b.workspace_id, &b.main_version_id, &b.object_id)?;
+            let doc =
+                store.read_with(|conn| dohc_engine_collab::durable::load_doc_in(conn, &key))?;
+            let projected = doc.project(ContentKind::Richdoc)?.content;
+            let content = doc
+                .preserved_markdown_source(&projected)
+                .unwrap_or(projected);
+            store.write_with(&NoFaults, |tx| -> Result<(), Box<dyn std::error::Error>> {
+                let written = dohc_engine_domain::write_projected_text_in_tx(
+                    tx,
+                    dohc_engine_domain::ProjectedWriteText {
+                        workspace_id: &b.workspace_id,
+                        version_id: &b.main_version_id,
+                        object_id: &b.object_id,
+                        path: std::borrow::Cow::Borrowed(&b.current_path),
+                        text: std::borrow::Cow::Borrowed(&content),
+                        moment_id: moment,
+                        metadata_origin: "ydoc",
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
+                        now_ms: 300 + cursor,
+                        request_id: None,
+                    },
+                )?;
+                tx.execute(
+                    "UPDATE ydoc_docs SET last_settled_sha=?4 WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                    params![b.workspace_id,b.main_version_id,b.object_id,written.snapshot.blob_sha256],
+                )?;
+                let id = audit.record_in_tx(
+                    tx,
+                    moment,
+                    &written.snapshot.blob_sha256,
+                    &hex_sha256(&doc.encode_state_vector()),
+                    300 + cursor,
+                )?;
+                audit.record_publication_state_in_tx(tx, &id, &doc.encode_full_state())?;
+                assert!(journal_live_settlement_in_tx(tx, "ws", &id, 300 + cursor)?.is_some());
+                Ok(())
+            })?;
+            Ok(())
+        },
+    )
+}

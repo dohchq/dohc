@@ -356,7 +356,7 @@ pub(super) fn journal_ready_in_tx(
         params![workspace, record.moment_id], |row| row.get(0),
     ).map_err(SyncError::corrupt)?;
     if !published {
-        match adopted_source_before_in_tx(tx, &record)? {
+        match publication_source_before_in_tx(tx, &record)? {
             Some(before) => crate::outbound::journal_moment_append_from_in_tx(
                 tx,
                 workspace,
@@ -373,10 +373,9 @@ pub(super) fn journal_ready_in_tx(
     Ok(Some(sequence))
 }
 
-/// The first ordinary settlement after an owner adoption publishes the adopted
-/// source as its before-image. Its local moment keeps the actual prior file,
-/// which may be a head settled before adoption that the relay never accepted.
-fn adopted_source_before_in_tx(
+/// First publication starts at the admitted source. The local moment keeps
+/// the actual prior file for rollback.
+fn publication_source_before_in_tx(
     tx: &Transaction<'_>,
     record: &SettlementRecord,
 ) -> Result<Option<crate::outbound::PortableBefore>, SyncError> {
@@ -384,6 +383,34 @@ fn adopted_source_before_in_tx(
         return Ok(None);
     }
     let b = &record.binding;
+    if record.previous_cursor == 0
+        && let origin_record::OriginRecord::Bootstrap { source, .. } =
+            origin_record::read(tx, &record.relay_database_namespace, b)?
+    {
+        source.validate().map_err(SyncError::corrupt)?;
+        return tx.query_row(
+            "SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+             FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
+             WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
+               AND m.moment_id=?5 AND m.after_content_kind='text' AND m.after_blob_sha256=?6
+               AND t.byte_length=?7 AND m.recorded_at_ms=?8 AND m.metadata_origin='sync'",
+            params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,
+                source.bootstrap_moment_id,source.projected_markdown_digest,
+                source.projected_markdown_byte_length,source.baseline_registered_at_ms],
+            |row| Ok(crate::outbound::PortableBefore {
+                moment_id: row.get(0)?,
+                version_id: row.get(1)?,
+                object_id: row.get(2)?,
+                path: row.get(3)?,
+                blob_sha256: row.get(4)?,
+                byte_length: row.get(5)?,
+                recorded_at_ms: row.get(6)?,
+                metadata_origin: row.get(7)?,
+                metadata_summary: row.get(8)?,
+                metadata_correlation_id: row.get(9)?,
+            }),
+        ).map(Some).map_err(SyncError::corrupt);
+    }
     tx.query_row(
         "SELECT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
          FROM live_owner_adoptions a
