@@ -34,6 +34,7 @@ import type {
   ImportWorkspaceFilesResult,
   ListEngineMomentsResponse,
   ListFileChatsResult,
+  ListKeptCopiesResult,
   ListMyShareChangesResult,
   ListShareProposalsResult,
   GetCollectionResult,
@@ -625,7 +626,7 @@ function makeBaseBridge(
         menuCallback = null;
       };
     }),
-    listKeptCopies: vi.fn(async () => ({ keptCopies: [], more: false })),
+    listKeptCopies: vi.fn(async (): Promise<ListKeptCopiesResult> => ({ keptCopies: [], more: false })),
     saveKeptCopy: vi.fn(async () => ({ status: "gone" as const })),
     retryAutomationNotice: vi.fn(
       async (): Promise<RetryCollectionAutomationResult> => ({ status: "queued", press: false }),

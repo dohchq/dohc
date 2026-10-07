@@ -463,6 +463,8 @@ export function NoticeCenter(props: {
   onWorkspaceErrorAction?: (id: string) => void;
   onHideWorkspaceError?: (id: string) => void;
   onDismissWorkspaceError?: (id: string) => void;
+  // Told each time an error's toast comes on screen.
+  onWorkspaceErrorShown?: (id: string) => void;
   // Owner live delivery: the shell's trusted retry command, and the way into
   // the live-document list. Both are derived from the status, so a snapshot
   // that repeats itself changes nothing here.
@@ -1225,6 +1227,12 @@ export function NoticeCenter(props: {
     const timer = setTimeout(() => props.onHideWorkspaceError?.(errorToast.id), FADING_TOAST_MS);
     return () => clearTimeout(timer);
   }, [errorToast?.id, errorToast?.tone, errorToast?.stays, props.onHideWorkspaceError]);
+  // Open Notices hides the toasts.
+  const shownErrorToastId = open ? null : (errorToast?.id ?? null);
+  const { onWorkspaceErrorShown } = props;
+  useEffect(() => {
+    if (shownErrorToastId !== null) onWorkspaceErrorShown?.(shownErrorToastId);
+  }, [shownErrorToastId, onWorkspaceErrorShown]);
   const sentToast = props.sentNoticeToast ?? null;
   const sentToastKey = sentToast ? sentKey(sentAccount, sentToast.notice) : null;
   const { onHideSentNoticeToast } = props;

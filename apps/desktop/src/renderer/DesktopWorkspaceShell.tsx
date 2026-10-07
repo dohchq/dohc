@@ -3847,10 +3847,10 @@ export function DesktopWorkspaceShell(props: {
   });
   // The person learns about reports before any leaves. The notice is about
   // this computer, not the workspace, so any open window shows it.
-  useReportsNotice({
+  const reportsNoticeShown = useReportsNotice({
     workspaceId,
     privacy: props.userSettings?.settings.privacy ?? null,
-    shown: shellErrors.some((error) => error.kind === "reports"),
+    noticeId: shellErrors.find((error) => error.kind === "reports")?.id ?? null,
     show: (reports) => showReportsNotice(reports, () => openSettings("privacy")),
   });
 
@@ -4868,6 +4868,7 @@ export function DesktopWorkspaceShell(props: {
               onWorkspaceErrorAction={runShellErrorAction}
               onHideWorkspaceError={hideWorkspaceError}
               onDismissWorkspaceError={dismissWorkspaceError}
+              onWorkspaceErrorShown={reportsNoticeShown}
               onRetryLiveDelivery={retryLiveDelivery}
               onOpenSharingDeclined={openSharingDeclined}
               {...(shareView

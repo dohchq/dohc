@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { ReportKinds } from "../../ipc/bridgeContract";
 import type { PrivacySettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
@@ -11,25 +11,28 @@ export function reportsNoticeText(reports: ReportKinds): string {
 }
 
 /**
- * Shows the notice about reports when main says one is due, and tells main
- * once the notice is on screen. Until then no report leaves. A window that
- * closes or changes workspace while it asks shows nothing and tells main
- * nothing, so the next ask shows the notice again. A switch turned on later
- * asks again.
+ * Shows the notice about reports when main says one is due. Returns what the
+ * notice center calls when a toast comes on screen: the notice's own toast
+ * tells main, and until then no report leaves. A notice waiting behind a
+ * newer toast tells main nothing yet. A window that closes or changes
+ * workspace while it asks shows nothing and tells main nothing, so the next
+ * ask shows the notice again. A switch turned on later asks again.
  */
 export function useReportsNotice(input: {
   workspaceId: string;
   // The saved switches, or null until the window has read them.
   privacy: PrivacySettings | null;
-  // Whether the notice is on screen.
-  shown: boolean;
+  // The notice's row, while the window holds one.
+  noticeId: string | null;
   show(reports: ReportKinds): void;
-}): void {
-  const { workspaceId, shown } = input;
+}): (toastId: string) => void {
+  const { workspaceId } = input;
   const usageReports = input.privacy?.usageReports ?? false;
   const errorReports = input.privacy?.errorReports ?? false;
   const show = useRef(input.show);
   show.current = input.show;
+  const noticeId = useRef(input.noticeId);
+  noticeId.current = input.noticeId;
 
   useEffect(() => {
     if (!usageReports && !errorReports) return;
@@ -45,7 +48,7 @@ export function useReportsNotice(input: {
     };
   }, [workspaceId, usageReports, errorReports]);
 
-  useEffect(() => {
-    if (shown) void bridge().acknowledgeReportsNotice({}).catch(() => undefined);
-  }, [shown]);
+  return useCallback((toastId: string) => {
+    if (toastId === noticeId.current) void bridge().acknowledgeReportsNotice({}).catch(() => undefined);
+  }, []);
 }

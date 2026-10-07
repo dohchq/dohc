@@ -3,10 +3,11 @@ import "./DesktopWorkspaceShell.testSupport";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ReportKinds } from "../ipc/bridgeContract";
+import type { ListKeptCopiesResult, ReportKinds } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS, type PrivacySettings } from "../settings/userSettings";
 import { settingsSectionPin } from "../testPins";
 import { deferred, type Deferred } from "../testing/deferred";
+import { keptCopyMessage } from "./shell/useKeptCopyNotices";
 import { reportsNoticeText } from "./shell/useReportsNotice";
 import type { Workspace } from "./DesktopWorkspaceShell";
 import { DesktopWorkspaceShell, OTHER_WORKSPACE, WORKSPACE, makeBridge, shellBootstrapProps } from "./DesktopWorkspaceShell.testHarness";
@@ -68,6 +69,32 @@ describe("the notice about reports", () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     await user.click(screen.getByRole("button", { name: "Privacy settings" }));
     expect(await screen.findByTestId(settingsSectionPin("privacy"))).toBeTruthy();
+    expect(bridge.acknowledgeReportsNotice).toHaveBeenCalledOnce();
+  });
+
+  it("tells main nothing while a newer toast covers the notice, and tells it once the notice shows", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    const answers = heldAnswers(bridge);
+    const kept = deferred<ListKeptCopiesResult>();
+    bridge.listKeptCopies = vi.fn(() => kept.promise);
+    render(shell(bridge, ON));
+    await waitFor(() => expect(answers).toHaveLength(1));
+    await waitFor(() => expect(bridge.listKeptCopies).toHaveBeenCalled());
+
+    // The kept copy arrives in the same update, after the notice, so its toast wins.
+    await act(async () => {
+      answers[0]!.resolve(BOTH);
+      await answers[0]!.promise;
+      kept.resolve({ keptCopies: [{ id: 1, path: "notes.md", keptAtMs: 1 }], more: false });
+      await kept.promise;
+    });
+    const covering = await screen.findByTestId("workspace-shell-error");
+    expect(covering.textContent).toContain(keptCopyMessage("notes.md"));
+    expect(screen.queryByTestId("workspace-shell-notice")).toBeNull();
+    expect(bridge.acknowledgeReportsNotice).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss workspace error" }));
+    expect((await screen.findByTestId("workspace-shell-notice")).textContent).toContain(reportsNoticeText(BOTH));
     expect(bridge.acknowledgeReportsNotice).toHaveBeenCalledOnce();
   });
 

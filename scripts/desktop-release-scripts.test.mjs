@@ -44,7 +44,7 @@ import {
   createMockUpdateServer,
   resolveServablePath,
 } from "./mock-update-server.mjs";
-import { sourceMapUpload } from "./upload-desktop-source-maps.mjs";
+import { sourceMapUpload, uploadSourceMaps } from "./upload-desktop-source-maps.mjs";
 
 async function fixtureRoot(version = "0.1.0") {
   const root = await mkdtemp(join(tmpdir(), "dohc-release-"));
@@ -806,6 +806,37 @@ test("a build with a Sentry DSN uploads its source maps under the names its repo
   }
   assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, DESKTOP_VERSION: "" }), /DESKTOP_VERSION/);
   assert.throws(() => sourceMapUpload({ ...SOURCE_MAP_ENV, DOHC_SENTRY_DIST: "win x64" }), /DOHC_SENTRY_DIST/);
+});
+
+test("the source map upload leaves Sentry settings the release did not set unset, and keeps the ones it did", () => {
+  const calls = [];
+  const spawn = (command, args, options) => {
+    calls.push({ command, args, env: options.env });
+    return { status: 0 };
+  };
+  // A repository variable that is not set reaches the step as an empty string.
+  uploadSourceMaps({ ...SOURCE_MAP_ENV, PATH: "/bin", SENTRY_URL: "", SENTRY_ORG: " ", SENTRY_PROJECT: "" }, spawn);
+  uploadSourceMaps({
+    ...SOURCE_MAP_ENV,
+    SENTRY_URL: "https://sentry.example.test/",
+    SENTRY_ORG: "dohc",
+    SENTRY_PROJECT: "desktop",
+  }, spawn);
+
+  const [unset, configured] = calls;
+  assert.equal(unset.command, "pnpm");
+  assert.deepEqual(unset.args, sourceMapUpload(SOURCE_MAP_ENV).args);
+  for (const name of ["SENTRY_URL", "SENTRY_ORG", "SENTRY_PROJECT"]) assert.equal(name in unset.env, false, name);
+  assert.equal(unset.env.SENTRY_AUTH_TOKEN, SOURCE_MAP_ENV.SENTRY_AUTH_TOKEN);
+  assert.equal(unset.env.PATH, "/bin");
+  assert.equal(configured.env.SENTRY_URL, "https://sentry.example.test/");
+  assert.equal(configured.env.SENTRY_ORG, "dohc");
+  assert.equal(configured.env.SENTRY_PROJECT, "desktop");
+
+  assert.throws(
+    () => uploadSourceMaps(SOURCE_MAP_ENV, () => ({ status: 1 })),
+    /The source map upload failed with exit code 1/,
+  );
 });
 
 test("upload-desktop-source-maps skips without a DSN and fails without a token when run as a command", async () => {
