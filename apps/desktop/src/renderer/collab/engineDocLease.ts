@@ -989,11 +989,15 @@ function createEngineDocSession(
       if (event.seq >= localSeq.current) reportSaveState(event.state);
       return;
     }
-    pendingSavedSeq = null;
     if (event.state === "file-locked" || event.state === "pending-share") {
-      if (event.seq >= localSeq.current) reportSaveState(event.state);
+      // An older report covers no staged edit, so it must not drop a current
+      // save that is waiting for delivery to finish.
+      if (event.seq < localSeq.current) return;
+      pendingSavedSeq = null;
+      reportSaveState(event.state);
       return;
     }
+    pendingSavedSeq = null;
     if (event.state === "error" || event.state === "changed-on-disk") {
       reportSaveState(event.state, event.editRefusal?.message ?? (event.authorCapacity ? authorCapacityMessage(input.path) : null), event.authorCapacity);
       return;

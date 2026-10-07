@@ -1,5 +1,12 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { useRef, useState } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type * as Y from "yjs";
@@ -156,6 +163,7 @@ function Harness(props: {
 }
 
 let harness: ReturnType<typeof harnessBridge>;
+let releaseDeferredDelivery: (() => void) | null = null;
 
 beforeEach(() => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -166,6 +174,10 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  // Teardown waits for every acknowledgement, including one a failed test
+  // left in flight.
+  releaseDeferredDelivery?.();
+  releaseDeferredDelivery = null;
   cleanup();
   await disposeEngineDocLeasesForTests();
   vi.useRealTimers();
@@ -198,6 +210,67 @@ it("reports host acceptance only for the current local edit", async () => {
   expect(screen.getByTestId("state").textContent).toBe("pending-share");
   act(() => harness.emitNow("saved-to-host", 2));
   expect(screen.getByTestId("state").textContent).toBe("saved-to-host");
+});
+
+// Main accepts edit 1 and reports it pending, then saved to host, while the
+// bridge response to that edit is still in flight. The host save waits for
+// the response, and no later event follows it.
+async function bufferHostSaveBehindDeferredResponse() {
+  const response = new Promise<void>((resolve) => {
+    releaseDeferredDelivery = resolve;
+  });
+  const apply = harness.api.applyEngineYDocUpdate;
+  harness.api.applyEngineYDocUpdate = async (payload) => {
+    const accepted = await apply(payload);
+    await response;
+    return accepted;
+  };
+  const hook = renderHook(() =>
+    useEngineDoc({ workspaceId: "ws-1", path: "notes/a.md", enabled: true }),
+  );
+  await waitFor(() => expect(hook.result.current.available).toBe(true));
+  let delivered!: Promise<void>;
+  act(() => {
+    const text = hook.result.current.doc!.getText("plainText");
+    text.insert(text.length, "!");
+    delivered = hook.result.current.flushPendingLocalUpdates();
+  });
+  await waitFor(() =>
+    expect(harness.applied).toEqual([{ sessionId: harness.sessionId(), seq: 1 }]),
+  );
+  act(() => harness.emitNow("pending-share", 1));
+  act(() => harness.emitNow("saved-to-host", 1));
+  expect(hook.result.current.saveState).toBe("pending-share");
+  return {
+    hook,
+    finishDelivery: () =>
+      act(async () => {
+        releaseDeferredDelivery!();
+        await delivered;
+      }),
+  };
+}
+
+it.each(["pending-share", "file-locked"] as const)(
+  "keeps a waiting host save when an older %s report arrives",
+  async (olderState) => {
+    const { hook, finishDelivery } = await bufferHostSaveBehindDeferredResponse();
+
+    act(() => harness.emitNow(olderState, 0));
+    expect(hook.result.current.saveState).toBe("pending-share");
+
+    await finishDelivery();
+    expect(hook.result.current.saveState).toBe("saved-to-host");
+  },
+);
+
+it("lets a current pending-share replace a waiting host save", async () => {
+  const { hook, finishDelivery } = await bufferHostSaveBehindDeferredResponse();
+
+  act(() => harness.emitNow("pending-share", 1));
+
+  await finishDelivery();
+  expect(hook.result.current.saveState).toBe("pending-share");
 });
 
 it("keeps a failed lineage handoff visible and read-only", async () => {
