@@ -34,6 +34,8 @@ import {
   COLLECTION_VALUE_MAX_DEPTH,
   DesktopMarksResult,
   CreateWorkspaceFilePayload,
+  CreateWorkspaceFolderPayload,
+  DeleteWorkspacePathPayload,
   CreateFileChatPayload,
   CreateWorkspaceVersionPayload,
   EngineMomentDetailRecord,
@@ -4482,5 +4484,25 @@ describe("launch path failure event", () => {
   ])("rejects malformed failure packets %j", (change) => {
     expect(WorkspacePathOpenFailure.safeParse({ attemptId: "attempt-1", path: "attempted", cause: "refused",
       workspaceId: null, ...change }).success).toBe(false);
+  });
+});
+
+
+describe("exclusive app creation IPC contract", () => {
+  const path = { workspaceId: "workspace", relativePath: "app" };
+  it("retains optional exclusive file and folder admission and rejects non-booleans", () => {
+    for (const [schema, base] of [
+      [CreateWorkspaceFilePayload, { ...path, initialText: "source" }],
+      [CreateWorkspaceFolderPayload, path],
+    ] as const) {
+      expect(schema.parse(base)).toEqual(base);
+      expect(schema.parse({ ...base, exclusive: true })).toEqual({ ...base, exclusive: true });
+      expect(schema.safeParse({ ...base, exclusive: "true" }).success).toBe(false);
+    }
+  });
+  it("retains the empty-only folder rollback constraint and rejects non-booleans", () => {
+    expect(DeleteWorkspacePathPayload.parse({ ...path, emptyFolderOnly: true }))
+      .toEqual({ ...path, emptyFolderOnly: true });
+    expect(DeleteWorkspacePathPayload.safeParse({ ...path, emptyFolderOnly: "true" }).success).toBe(false);
   });
 });
