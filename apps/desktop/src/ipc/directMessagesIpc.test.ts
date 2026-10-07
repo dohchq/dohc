@@ -406,6 +406,39 @@ describe("registered direct message boundaries", () => {
     expect(h.relayJson).not.toHaveBeenCalled();
   });
 
+  it.each(["x".repeat(70_000), "界".repeat(30_000)])("refuses an oversized first DM before creating a conversation or grants", async body => {
+    const h = await harness();
+    await expect(h.invoke(CHANNELS.startDm, { ...startPayload, body })).rejects.toThrow("The message is longer than 64 KiB. Shorten it, then try again.");
+    expect(h.storeMethods.createChannel).not.toHaveBeenCalled();
+    expect(h.storeMethods.startChannelThread).not.toHaveBeenCalled();
+    expect(h.storeMethods.sendMessage).not.toHaveBeenCalled();
+    expect(h.relayJson).not.toHaveBeenCalled();
+    expect(h.requireEngineCapture).not.toHaveBeenCalled();
+    expect(h.activity.queueCloudSync).not.toHaveBeenCalled();
+    expect(h.dispatch.scanWorkspace).not.toHaveBeenCalled();
+    expect(h.events).toEqual([]);
+  });
+
+  it("refuses a blank first DM before creating a conversation or grants", async () => {
+    const h = await harness();
+    await expect(h.invoke(CHANNELS.startDm, { ...startPayload, body: " \r\n\uFEFF" }))
+      .rejects.toThrow("The message is empty. Enter a message.");
+    expect(h.storeMethods.createChannel).not.toHaveBeenCalled();
+    expect(h.relayJson).not.toHaveBeenCalled();
+    expect(h.events).toEqual([]);
+  });
+
+  it.each([false, true])("commits the normalized 64 KiB DM body for an existing conversation: %s", async existing => {
+    const h = await harness();
+    if (existing) h.seedConversation();
+    const body = "界".repeat(21_844) + "\r\nx\r\ny\uFEFF ";
+    const normalized = "界".repeat(21_844) + "\nx\ny";
+    expect(new TextEncoder().encode(normalized)).toHaveLength(65_536);
+    await h.invoke(CHANNELS.startDm, { ...startPayload, body });
+    const commit = existing ? h.storeMethods.sendMessage : h.storeMethods.startChannelThread;
+    expect(commit).toHaveBeenCalledWith(expect.objectContaining({ body: normalized }));
+  });
+
   it("resolves mentions before grants and rejects retirement during resolution", async () => {
     const h = await harness();
     const entered = deferred();

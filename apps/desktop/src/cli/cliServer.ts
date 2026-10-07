@@ -97,7 +97,7 @@ import { z } from "zod";
 import { DatasetSchemaChangeError } from "../workspaces/datasetSchemaChanges";
 import { isInside } from "../security/pathContainment";
 import type { ChatWrites } from "../workspaces/chatWrites";
-import { normalizeChatMessageBody } from "../workspaces/chatMessageBody";
+import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
 import type { AutomationRunRetry } from "../automations/automationNotices";
 import type { LocalDatasetAgent } from "../workspaces/localDatasetHost";
 import {

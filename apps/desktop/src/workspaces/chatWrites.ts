@@ -2,7 +2,7 @@ import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import type { ChatThreadLane, LinkedChatStore } from "@dohc/workspace-contracts/engine";
 import type { CloudCredentials } from "./cloudCredentialStore";
 import type { RegistryEntry } from "./registryStore";
-import { normalizeChatMessageBody } from "./chatMessageBody";
+import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
 import { assertJoinedChannelWritable, joinedSharedChannelForWireId } from "./sharedChannels";
 import { shareViewIsPresent } from "./shareViewMarker";
 import { AutomationChatSessionWait } from "@dohc/automation-executor/automation-chat";

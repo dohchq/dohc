@@ -142,12 +142,15 @@ function expectNothingWritten(test: ReturnType<typeof fixture>) {
 
 describe("chat writes", () => {
   it.each([PERSON, AGENT])("refuses invalid message bodies before any write for %j", async writer => {
-    for (const body of ["界".repeat(30_000), " \r\n\uFEFF"]) {
+    for (const [body, reason] of [
+      ["界".repeat(30_000), "The message is longer than 64 KiB. Shorten it, then try again."],
+      [" \r\n\uFEFF", "The message is empty. Enter a message."],
+    ] as const) {
       const test = fixture();
       await expect(test.writes.sendMessage(test.place, { writer, threadId: "thread", body, resolveAttachments: test.attachments }))
-        .rejects.toThrow("Message body is required.");
+        .rejects.toThrow(reason);
       await expect(test.writes.startThread(test.place, { writer, channelId: "channel", body, resolveAttachments: test.attachments }))
-        .rejects.toThrow("Message body is required.");
+        .rejects.toThrow(reason);
       expect(test.attachments).not.toHaveBeenCalled();
       expectNothingWritten(test);
     }

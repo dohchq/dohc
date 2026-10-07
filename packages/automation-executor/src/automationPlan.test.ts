@@ -741,8 +741,21 @@ describe("messages", () => {
     expect(planAt(ctx, 0, inputsOf(), ok("Hi Done  \r\n"))).toMatchObject({ step: { ordinal: 0, effects: [{
       kind: "message", effectId: "atc_1/h/0/post", to: { kind: "group", channelId: "trip", lane: "posts" }, body: "Hi Done",
     }] } });
-    expect(planAt(ctx, 0, inputsOf(), ok(" \n"))).toEqual({ problem: "The message in step 1 is empty." });
+    expect(planAt(ctx, 0, inputsOf(), ok(" \n"))).toEqual({ problem: "Step 1: The message is empty. Enter a message." });
     expect(planAt(ctx, 0, inputsOf(), ok(5))).toEqual({ problem: "The message in step 1 is not text." });
+  });
+
+  it("uses the shared byte limit and normalization for planned messages", () => {
+    const ctx = context(tell, { chat: directory });
+    expect(planAt(ctx, 0, inputsOf(), ok("界".repeat(30_000)))).toEqual({
+      problem: "Step 1: The message is longer than 64 KiB. Shorten it, then try again.",
+    });
+    const body = "界".repeat(21_844) + "\r\nx\r\ny\uFEFF ";
+    const normalized = "界".repeat(21_844) + "\nx\ny";
+    expect(new TextEncoder().encode(normalized)).toHaveLength(65_536);
+    expect(planAt(ctx, 0, inputsOf(), ok(body))).toMatchObject({
+      step: { effects: [{ kind: "message", body: normalized }] },
+    });
   });
 
   it("refuses to post in a Group this computer may only read", () => {

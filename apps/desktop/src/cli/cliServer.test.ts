@@ -2316,18 +2316,21 @@ describe("CLI socket server", () => {
     const create = vi.spyOn(store!, "createThread");
     const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
     expect(await startFileChat(ctx, { path: "tracked.md", title: "Too large", body: "界".repeat(30_000) }, undefined))
-      .toEqual({ ok: false, reason: "Message body is required." });
+      .toEqual({ ok: false, reason: "The message is longer than 64 KiB. Shorten it, then try again." });
     expect(create).not.toHaveBeenCalled();
     expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
       .toMatchObject({ ok: true, threads: [] });
     expect(calls.writes).toBe(0);
   });
 
-  it.each(["x".repeat(65_537), " \r\n\t\uFEFF"])("refuses an invalid raw socket first message before creating its chat", async body => {
+  it.each([
+    ["x".repeat(65_537), "The message is longer than 64 KiB. Shorten it, then try again."],
+    [" \r\n\t\uFEFF", "The message is empty. Enter a message."],
+  ])("refuses an invalid raw socket first message before creating its chat", async (body, reason) => {
     const create = vi.spyOn(store!, "createThread");
     expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileChatStart",
       args: { cwd: workspaceRoot, actor: "agent", path: "tracked.md", title: "Refused", body },
-    })).toMatchObject({ ok: true, result: { ok: false, reason: "Message body is required." } });
+    })).toMatchObject({ ok: true, result: { ok: false, reason } });
     expect(create).not.toHaveBeenCalled();
     expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
       .toMatchObject({ ok: true, threads: [] });
@@ -2336,7 +2339,7 @@ describe("CLI socket server", () => {
 
   it("lets a refused file-chat request id be retried and corrected before creating exactly one chat", async () => {
     const args = { cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md", title: "Retry", body: "界".repeat(30_000), requestId: "refused-body" };
-    const refusal = { ok: false, reason: "Message body is required." };
+    const refusal = { ok: false, reason: "The message is longer than 64 KiB. Shorten it, then try again." };
     expect(await invoke("fileChatStart", args)).toEqual(refusal);
     expect(await invoke("fileChatStart", args)).toEqual(refusal);
     expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
