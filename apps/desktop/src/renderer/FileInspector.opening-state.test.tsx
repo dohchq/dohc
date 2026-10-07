@@ -109,8 +109,8 @@ describe("markdown document opening state", () => {
     };
     return {
       bridgeMock,
-      bind: () => act(() => {
-        settle?.(true);
+      bind: () => act(() => settle?.(true)),
+      reportSavedOutcome: () => act(() => {
         const sessionId = bridgeMock.openEngineYDocSession.mock.calls.at(-1)![0].sessionId;
         for (const listener of saveListeners) listener({ sessionId, state: { kind: "saved-here" }, seq: 0 });
       }),
@@ -203,7 +203,7 @@ describe("markdown document opening state", () => {
 
   it("draws the document's header controls in their places from the click frame to ready", async () => {
     const read = Promise.withResolvers<Awaited<ReturnType<DohcDesktopBridge["readWorkspaceText"]>>>();
-    const { bridgeMock, bind } = makeHeldOpenBridge();
+    const { bridgeMock, bind, reportSavedOutcome } = makeHeldOpenBridge();
     bridgeMock.readWorkspaceText.mockReturnValueOnce(read.promise);
     vi.stubGlobal("dohcDesktop", bridgeMock);
     render(<FileInspector workspaceId="ws-1" path="a.md" onSharePath={() => undefined} />);
@@ -223,6 +223,7 @@ describe("markdown document opening state", () => {
 
     // The session bound: the ready view.
     bind();
+    reportSavedOutcome();
     await waitFor(() => expect(screen.getByTestId("markdown-source-toggle")).toBeTruthy());
     expect(headerGroup(), "a save state among the controls moves Share whenever its words change").toEqual({
       status: ["markdown-save-state"], controls: CONTROLS, disabled: [false, false, false],
@@ -2390,6 +2391,7 @@ describe("markdown document opening state", () => {
 
     // The reopen resolves BOUND: the engine branch renders with the notice.
     bridge.bind();
+    bridge.reportSavedOutcome();
     await screen.findByTestId("markdown-source-toggle");
     await screen.findByTestId("orphaned-draft-notice");
 

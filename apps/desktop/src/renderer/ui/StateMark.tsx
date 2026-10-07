@@ -108,10 +108,10 @@ export const SAVE_STATE: Record<SaveStateKey, StatePresentation> = {
   },
 };
 
-export function saveStatePresentationKey(state: SaveState): SaveStateKey {
+export function saveStatePresentationKey(state: SaveState): SaveStateKey | null {
   switch (state.kind) {
     case "saved-here": return "saved";
-    case "unknown": return "read-only-unavailable";
+    case "unknown": return null;
     default: return state.kind;
   }
 }
@@ -155,9 +155,9 @@ export function StateMark(props: {
   truncate?: boolean;
 }) {
   const shownKey = typeof props.shown === "string" ? props.shown : saveStatePresentationKey(props.shown);
-  const presentation = SAVE_STATE[shownKey];
-  const title = props.title ?? presentation.title;
-  const { label, cut } = useCutShort(presentation.label, props.truncate === true);
+  const presentation = shownKey === null ? null : SAVE_STATE[shownKey];
+  const title = props.title ?? presentation?.title;
+  const { label, cut } = useCutShort(presentation?.label ?? "", props.truncate === true);
   const [open, setOpen] = useState(false);
   // A focused chip keeps its tab stop when its label stops being cut, so
   // focus never falls to the page; it gives the stop up on blur.
@@ -192,6 +192,7 @@ export function StateMark(props: {
       setPlace(null);
     };
   }, [shown]);
+  if (!presentation) return null;
   const chip = (
     <span
       ref={chipRef}
@@ -234,8 +235,6 @@ export function StateMark(props: {
   if (!props.truncate) return chip;
   // The tooltip sits beside the chip, not in it, so the chip's text stays its
   // label while the tooltip is open.
-  if (typeof props.shown !== "string" && props.shown.kind === "unknown") return null;
-
   return (
     <span
       className="inline-flex min-w-0 max-w-full"

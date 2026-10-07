@@ -6,6 +6,17 @@ import {
 import { documentVersionKey } from "./documentVersionKey";
 
 describe("SharedLocalDocument", () => {
+  it("keeps a plain-file write conflict in the existing error state", async () => {
+    const buffer = getSharedLocalDocument(documentVersionKey("ws", "save-state-conflict.txt", 1));
+    const source = {};
+    buffer.initializeRead("before", "hash-1", buffer.beginRead());
+    buffer.publishDraft("draft", source);
+    const result = await buffer.write(source, async () => ({ status: "conflict", currentContentHash: "hash-2" }));
+    expect(result.status).toBe("conflict");
+    expect(buffer.getSnapshot().saveState).toEqual({ kind: "error", reason: "The file changed on disk.", issueId: null });
+    expect(buffer.getSnapshot().body).toBe("draft");
+  });
+
   it("keeps one mapped identity until an unused lazy draft finishes writing", async () => {
     const key = documentVersionKey("ws", "pending-unmount.md", 1);
     const buffer = getSharedLocalDocument(key);

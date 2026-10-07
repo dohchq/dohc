@@ -1450,7 +1450,7 @@ export function MarkdownView(props: {
           unsavedDraft.current = false;
           captureLatestConflictDraft();
           if (!unmounted.current) {
-            setSaveState(saveProblem("changed-on-disk", "The file changed on disk."));
+            setSaveState(saveProblem("error", "The file changed on disk."));
             reconcileConflictSnapshot();
           }
           if (options.rejectOnError) {
@@ -1907,7 +1907,7 @@ export function MarkdownView(props: {
             <StateMark
               testId="markdown-save-state"
               truncate
-              state={engineChipState}
+              state={engine.readOnlyWhileEditing ? "read-only" : engineChipState}
               shown={engine.readOnlyWhileEditing ? "read-only-transition" : engineChipState}
               title={
                 (engineChipState === "deleted" ||

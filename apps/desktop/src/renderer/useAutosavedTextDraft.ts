@@ -510,7 +510,7 @@ export function useAutosavedTextDraft(props: {
           unsavedDraft.current = false;
           captureLatestConflictDraft();
           if (!unmounted.current) {
-            setSaveState(saveProblem("changed-on-disk", "The file changed on disk."));
+            setSaveState(saveProblem("error", "The file changed on disk."));
             reconcileConflictSnapshot();
           }
           if (options.rejectOnError) {

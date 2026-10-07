@@ -21,6 +21,8 @@ const engineDocStore = vi.hoisted(() => {
     available: false,
     doc: null as Y.Doc | null,
     saveState: { kind: "saved-here" } as SaveState,
+    readOnlyWhileEditing: false,
+    saveError: null as string | null,
   };
   const listeners = new Set<() => void>();
   return {
@@ -53,7 +55,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
   };
 
   beforeEach(() => {
-    engineDocStore.set({ available: true, doc: new Y.Doc(), saveState: { kind: "saved-here" } });
+    engineDocStore.set({ available: true, doc: new Y.Doc(), saveState: { kind: "saved-here" }, readOnlyWhileEditing: false, saveError: null });
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -70,6 +72,22 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
     engineDocStore.set({ available: false, doc: null, saveState: { kind: "saved-here" } });
+  });
+
+  it("keeps the read-only data-state after an edit is refused", async () => {
+    engineDocStore.set({ saveState: { kind: "unknown" }, readOnlyWhileEditing: true });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    const chip = await screen.findByTestId("markdown-save-state");
+    expect(chip.getAttribute("data-state")).toBe("read-only");
+    expect(chip.textContent).toBe("Read-only");
+  });
+
+  it("keeps the existing unexplained error tooltip", async () => {
+    engineDocStore.set({ saveState: { kind: "error", reason: "generic reason", issueId: null } });
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    const chip = await screen.findByTestId("markdown-save-state");
+    expect(chip.getAttribute("data-state")).toBe("error");
+    expect(chip.getAttribute("title")).toBe("Your edits are still here, but dohc can't confirm the file on disk matches them. Keep this document open and try another edit.");
   });
 
   it("lifts the engine's in-flight settle state to onSaveStateChange, returning to saved after settle", async () => {

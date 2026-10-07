@@ -416,6 +416,8 @@ function createEngineDocSession(
   let deletionCause: DocumentGoneCause = "deleted";
   let deliveryPending = false;
   let pendingSavedSeq: number | null = null;
+  let replacementPending = false;
+  let replacementSaveState: EngineYDocSaveStateEvent | null = null;
   let pendingSavedState: SaveState = SAVED_HERE;
   const retiredDraftObservers = new Map<Y.Doc, () => void>();
   let lifecycle: Promise<void> = Promise.resolve();
@@ -923,6 +925,10 @@ function createEngineDocSession(
     // Deletion is terminal for this session. A settle/update already in
     // flight can report after main's deletion notice, but it no longer
     // describes a path that exists and must not repaint this state.
+    if (replacementPending && !event.access) {
+      replacementSaveState = event;
+      return;
+    }
     if (writesRefused.current) return;
     if (event.access === "read-only") {
       pendingSavedSeq = null;
@@ -953,7 +959,7 @@ function createEngineDocSession(
       return;
     }
     if (event.state.kind === "error" || event.state.kind === "changed-on-disk") {
-      reportSaveState(event.state, event.authorCapacity ? authorCapacityMessage(input.path) : event.state.reason, event.authorCapacity);
+      reportSaveState(event.state, event.editRefusal?.message ?? (event.authorCapacity ? authorCapacityMessage(input.path) : null), event.authorCapacity);
       return;
     }
     if (event.state.kind === "saving") {
@@ -1169,6 +1175,10 @@ function createEngineDocSession(
           const bound = await bindEngineYDoc(transport, undefined, {
             onDeliveryFailure: captureDeliveryFailure,
             onDeliveryPendingChange,
+            onDocumentReplacementStarted: () => {
+              replacementPending = true;
+              replacementSaveState = null;
+            },
             onDocumentReplacing: preserveRetiredDocument,
             onLineageReplacementFailure: captureLineageReplacementFailure,
           });
@@ -1234,6 +1244,10 @@ function createEngineDocSession(
             if (!writesRefused.current && !deliveryPending) {
               reportSaveState(UNKNOWN_SAVE_STATE);
             }
+            replacementPending = false;
+            const checkedState = replacementSaveState;
+            replacementSaveState = null;
+            if (checkedState) onSaveState(checkedState);
             observeSaveState(replacement);
             setOutcome(boundOutcome(replacement, bound, bound.artifactAssets));
           });

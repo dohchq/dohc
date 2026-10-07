@@ -235,12 +235,12 @@ export class SharedLocalDocument {
     return true;
   }
 
-  markError(reason = "dohc could not confirm the file was saved.", kind: "error" | "changed-on-disk" = "error"): void {
+  markError(reason = "dohc could not confirm the file was saved."): void {
     this.replace(
       { body: this.snapshot.body, contentHash: this.snapshot.contentHash },
       this.snapshot.source,
       this.snapshot.dirty,
-      saveProblem(kind, reason),
+      saveProblem("error", reason),
     );
   }
 
@@ -277,7 +277,7 @@ export class SharedLocalDocument {
       try {
         const written = await writer(body, expectedContentHash);
         if (written.status === "conflict") {
-          this.markError("The file changed on disk.", "changed-on-disk");
+          this.markError("The file changed on disk.");
           return { ...written, body, expectedContentHash };
         }
         // A read that started before this write still carries the old body and

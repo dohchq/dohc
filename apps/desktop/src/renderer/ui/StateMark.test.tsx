@@ -18,6 +18,14 @@ describe("StateMark", () => {
     for (const key of KEYS) expect(SAVE_STATE[key].label).not.toBe("");
   });
 
+  it.each([false, true])("shows no chip for unknown, truncated=%s, and can later show Saved", truncate => {
+    const { rerender } = render(<StateMark testId="mark" state={{ kind: "unknown" }} shown={{ kind: "unknown" }} truncate={truncate} />);
+    expect(screen.queryByTestId("mark")).toBeNull();
+    rerender(<StateMark testId="mark" state={{ kind: "saved-here" }} shown={{ kind: "saved-here" }} truncate={truncate} />);
+    expect(screen.getByTestId("mark").textContent).toBe("Saved");
+    expect(screen.getByTestId("mark").getAttribute("data-state")).toBe("saved");
+  });
+
   it("fills the mark only for a state the file on disk has settled", () => {
     // "saved" is reported by the engine lease only after the settle that
     // covers the newest local edit, and by the draft hook and Settings only

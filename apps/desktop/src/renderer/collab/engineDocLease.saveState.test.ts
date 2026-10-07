@@ -708,3 +708,25 @@ it("publishes no additional save snapshots during repeated dirty keystrokes", as
   expect(notified).not.toHaveBeenCalled();
   unsubscribe();
 });
+
+it("keeps generic reasons out of saveError and gives refusal text precedence over capacity", async () => {
+  const subscribe = vi.spyOn(harness.api, "onEngineYDocSaveState");
+  await retainBound();
+  const listener = subscribe.mock.calls[0]![0];
+  const sessionId = harness.sessionId()!;
+  act(() => listener({ sessionId, state: { kind: "error", reason: "generic reason", issueId: null }, seq: 0 }));
+  expect(retained.snapshot.saveError).toBeNull();
+  act(() => listener({ sessionId, state: { kind: "changed-on-disk", reason: "The file changed on disk.", issueId: null }, seq: 0 }));
+  expect(retained.snapshot.saveError).toBeNull();
+  act(() => listener({ sessionId, state: { kind: "error", reason: "generic reason", issueId: "refusal" }, seq: 0,
+    authorCapacity: true, editRefusal: { workspaceId: "ws-1", path: "notes/big.md", requestId: "refusal", message: "refusal message" } }));
+  expect(retained.snapshot.saveError).toBe("refusal message");
+});
+
+it("keeps main's checked save state across a delayed replacement acknowledgement", async () => {
+  await retainBound();
+  harness.emitLineageReplacement("winner");
+  harness.emit("saved", 0);
+  await waitFor(() => expect(harness.acknowledgedGenerations).toEqual([2]));
+  await waitFor(() => expect(retained.snapshot.saveState.kind).toBe("saved-here"));
+});
