@@ -49,6 +49,7 @@ const PARTS = [
   "kind-glyph",
   "block-menu", "table-menu",
   "history",
+  "file-header",
 ];
 // A fixed instant for the page's clock. The capture pauses the clock an
 // hour past it, so the real time that passes between installing and
@@ -282,8 +283,9 @@ test("@states-page @states-baselines every shared part matches its baseline in b
     await cdp.send("DOM.enable");
     await cdp.send("CSS.enable");
     // A menu's rows exist only while it is open, so a part with a menu is
-    // marked after it opens its menu.
-    await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:not(:has([aria-haspopup="menu"]))`);
+    // marked after it opens its menu. A part marked data-menus="rest" holds
+    // menus without being about them, and is captured with them closed.
+    await forceMarkedStates(cdp, `[data-testid="states-page"] [data-part]:is([data-menus="rest"], :not(:has([aria-haspopup="menu"])))`);
     await waitForStillPage(page);
 
     const seen = new Set<string>();
@@ -310,7 +312,7 @@ test("@states-page @states-baselines every shared part matches its baseline in b
         }
         if (seen.has(`${name}-${theme}`)) throw new Error(`two parts are named ${name}`);
         seen.add(`${name}-${theme}`);
-        const menus = await part.locator("[aria-haspopup='menu']").count();
+        const menus = (await part.getAttribute("data-menus")) === "rest" ? 0 : await part.locator("[aria-haspopup='menu']").count();
         if (menus > 1) throw new Error(`${name} (${theme}) has ${menus} menus; a part opens one`);
         if (menus === 1) menuParts.push({ name, theme, part, box });
         else await capture(name, theme, box);
@@ -327,6 +329,31 @@ test("@states-page @states-baselines every shared part matches its baseline in b
       await waitForStillPage(page);
       await capture(name, theme, box);
       await closeMenu(page, trigger, menu);
+    }
+    // A file header keeps Share and the document's controls inside itself at
+    // any width, and its save state gives way before its file name: the path
+    // is cut only once the save state shows no more than one character and an
+    // ellipsis (13px of 11px mono). The narrow specimen must really have cut
+    // its save state short, or the check proves nothing.
+    for (const theme of THEMES) {
+      const part = page.getByTestId(`states-${theme}`).locator('[data-part="file-header"]');
+      for (const header of await part.locator("header").all()) {
+        const edge = await header.evaluate((el) => el.getBoundingClientRect().right - parseFloat(getComputedStyle(el).paddingRight));
+        const rights = await header.locator("button").evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
+        if (rights.some((right) => right > edge + 0.5)) failures.push(`a file header control (${theme}) runs past its header`);
+        const order = await header.evaluate((el) => {
+          const path = el.querySelector(":scope > span");
+          const label = el.querySelector(":scope > div .truncate");
+          return { pathCut: !!path && path.scrollWidth > path.clientWidth, statusWidth: label?.clientWidth ?? 0 };
+        });
+        if (order.pathCut && order.statusWidth >= 13) {
+          failures.push(`a file header (${theme}) cut its file name while its save state still had ${order.statusWidth}px of words`);
+        }
+      }
+      const label = page.getByTestId(`states-file-header-pending-${theme}`).locator(".truncate");
+      if (!(await label.evaluate((el) => el.scrollWidth > el.clientWidth))) {
+        failures.push(`the narrow file header's save state (${theme}) is not cut short`);
+      }
     }
     expect(failures, "every part must equal its baseline").toEqual([]);
     expect([...seen].sort()).toEqual(PARTS.flatMap((part) => THEMES.map((theme) => `${part}-${theme}`)).sort());

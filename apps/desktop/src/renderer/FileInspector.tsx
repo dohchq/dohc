@@ -1,15 +1,17 @@
 import type { ReportButtonError } from "./collections/useAutomationButtons";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
-import { MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
+import { filenameStem, MarkdownView, type HeadingTarget, type ScrollTarget } from "./MarkdownView";
 import { DrawingView } from "./DrawingView";
 import {
   AffordanceCard,
+  DocumentControls,
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
   ViewHeader,
   type FileSaveState,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
+  OPENING_TITLE,
 } from "./fileInspectorUi";
 import { TextEditorView } from "./TextEditorView";
 import type { PendingFileUndo } from "./fileEditorUndo";
@@ -19,12 +21,6 @@ import { extensionOf } from "./path";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import type { DraftFlush } from "./useAutosavedTextDraft";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
-import {
-  FileText,
-  Image as ImageIcon,
-  Music,
-  Table,
-} from "lucide-react";
 import {
   Suspense,
   lazy,
@@ -42,7 +38,7 @@ import { useEngineDoc } from "./collab/useEngineDoc";
 import { useAuthorCapacityNotice } from "./collab/useAuthorCapacityNotice";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { SecondaryButton } from "./ui/controls";
-import { SkeletonRows } from "./ui/SkeletonRows";
+import { SkeletonRows, SkeletonSlot } from "./ui/SkeletonRows";
 import type { ExcalidrawPresenceFactory } from "./collab/excalidrawPresence";
 import {
   acquireSharedLocalDocument,
@@ -611,14 +607,31 @@ export const FileInspector = memo(function FileInspector(
     />
   );
 
+  // A document's controls stand where they will be when it opens, from the
+  // click frame: disabled as the opening view's are while it loads, and
+  // disabled when it cannot open, so nothing in the header moves between
+  // loading, ready and failed.
+  const closedDocumentControls = (opening: boolean) =>
+    kind === "markdown" ? (
+      <DocumentControls
+        toggle={{ label: "Edit", disabled: true, title: opening ? OPENING_TITLE : undefined }}
+        menu={{
+          workspaceId: props.workspaceId,
+          reportError: props.onButtonError,
+          suggestedName: filenameStem(props.path),
+          getMarkdown: () => null,
+          disabled: !opening,
+        }}
+      />
+    ) : undefined;
+
   if (notInVersion) {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
         <ViewHeader
-          icon={<FileText size={13} aria-hidden />}
           path={props.path}
-          label="file"
           onShare={onShareCurrentPath}
+          actions={closedDocumentControls(false)}
         />
         {/* A reopen's set-aside drafts survive this refusal in the
             module store — recovery stays visible right here, not behind a
@@ -644,10 +657,9 @@ export const FileInspector = memo(function FileInspector(
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
         <ViewHeader
-          icon={<FileText size={13} aria-hidden />}
           path={props.path}
-          label="file"
           onShare={onShareCurrentPath}
+          actions={closedDocumentControls(false)}
         />
         {recoveryNotices}
         <div
@@ -669,10 +681,9 @@ export const FileInspector = memo(function FileInspector(
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
         <ViewHeader
-          icon={<FileText size={13} aria-hidden />}
           path={props.path}
-          label="file"
           onShare={onShareCurrentPath}
+          actions={closedDocumentControls(!error)}
         />
         {engine.engineMayHoldDocument ? (
           // A failed read returns here, before
@@ -792,9 +803,7 @@ export const FileInspector = memo(function FileInspector(
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader
-            icon={<Table size={13} aria-hidden />}
             path={props.path}
-            label="data"
             onShare={onShareCurrentPath}
           />
           {truncatedNotice}
@@ -826,9 +835,7 @@ export const FileInspector = memo(function FileInspector(
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader
-            icon={<FileText size={13} aria-hidden />}
             path={props.path}
-            label={kind === "json" ? "json" : "text"}
             onShare={onShareCurrentPath}
           />
           {truncatedNotice}
@@ -866,9 +873,7 @@ export const FileInspector = memo(function FileInspector(
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader
-            icon={<ImageIcon size={13} aria-hidden />}
             path={props.path}
-            label="image"
             onShare={onShareCurrentPath}
           />
           {recoveryNotices}
@@ -879,9 +884,7 @@ export const FileInspector = memo(function FileInspector(
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader
-            icon={<Music size={13} aria-hidden />}
             path={props.path}
-            label="audio"
             onShare={onShareCurrentPath}
           />
           {recoveryNotices}
@@ -894,9 +897,7 @@ export const FileInspector = memo(function FileInspector(
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader
-            icon={<FileText size={13} aria-hidden />}
             path={props.path}
-            label="pdf"
             onShare={onShareCurrentPath}
           />
           {recoveryNotices}
@@ -912,16 +913,17 @@ export const FileInspector = memo(function FileInspector(
       return (
         <>
           {recoveryNotices}
+          {/* The view opens its database under the same header, in the
+              place these lines stand, so its own lines take over. */}
+          <SkeletonSlot>
           <Suspense
             fallback={
               <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
                 <ViewHeader
-                  icon={<FileText size={13} aria-hidden />}
                   path={props.path}
-                  label="database"
                   onShare={onShareCurrentPath}
                 />
-                <SkeletonRows layout="panel" label="Loading database…" />
+                <SkeletonRows inSlot layout="panel" label="Loading database…" />
               </div>
             }
           >
@@ -934,15 +936,14 @@ export const FileInspector = memo(function FileInspector(
               readOnly={props.readOnly}
             />
           </Suspense>
+          </SkeletonSlot>
         </>
       );
     default:
       return (
         <div className="flex min-h-0 flex-1 flex-col bg-bg" data-testid="file-inspector">
           <ViewHeader
-            icon={<FileText size={13} aria-hidden />}
             path={props.path}
-            label="file"
             onShare={onShareCurrentPath}
           />
           {recoveryNotices}

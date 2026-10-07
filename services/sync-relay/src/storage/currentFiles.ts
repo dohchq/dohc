@@ -611,3 +611,17 @@ export function currentFileBlobByteLength(storage: StorageContext, input: {
       ? Number(row.byte_length)
       : null;
   }
+
+export function currentObjectPath(storage: StorageContext, input: { workspaceId: string; versionId: string; objectId: string }): string | null {
+  const row = storage.db.prepare(
+    `SELECT current.path FROM sync_relay_current_files current
+     JOIN sync_relay_object_moments moment
+       ON moment.workspace_id = current.workspace_id AND moment.version_id = current.version_id
+      AND moment.path = current.path AND moment.relay_seq = current.state_relay_seq
+     WHERE moment.workspace_id = ? AND moment.version_id = ? AND moment.object_id = ?
+       AND moment.relay_seq = (SELECT MAX(latest.relay_seq) FROM sync_relay_object_moments latest
+         WHERE latest.workspace_id = moment.workspace_id AND latest.version_id = moment.version_id AND latest.object_id = moment.object_id)
+       AND current.state_relay_seq > ?`,
+  ).get(input.workspaceId, input.versionId, input.objectId, storage.getEpochLogFloor(input.workspaceId));
+  return typeof row?.path === "string" ? row.path : null;
+}

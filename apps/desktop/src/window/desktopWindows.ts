@@ -372,6 +372,12 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     return window;
   }
 
+  // A window whose renderer shows Notices: a live workspace window, or the
+  // manager. Never the hidden export window.
+  function showsNotices(window: BrowserWindow): boolean {
+    return workspaceWindows.allLive().includes(window) || (window === managerWindow && !window.isDestroyed());
+  }
+
   function createWorkspaceWindow(workspaceId: string | null = lastActivatedWorkspaceId): BrowserWindow {
     const window = trackWorkspaceWindow(
       createMainWindow({
@@ -509,6 +515,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     prepareAfterRendererCrash,
     showOrCreateMainWindow,
     showOrCreateManagerWindow,
+    showsNotices,
     openWorkspaceInWindow,
     get applicationMenuCanInstallUpdate(): boolean | null { return applicationMenuCanInstallUpdate; },
     setPreferredWorkspaceId,
