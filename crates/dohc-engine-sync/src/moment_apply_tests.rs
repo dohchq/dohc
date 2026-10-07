@@ -1863,7 +1863,7 @@ fn enroll_restore(
         OwnerEnrollmentInput, OwnerEnrollmentPreparation, enroll_in_tx, prepare_in,
     };
     let captured = match store
-        .read_with(|conn| prepare_in(conn, binding, "relay"))
+        .read_with(|conn| prepare_in(conn, binding, "relay", false))
         .unwrap()
     {
         OwnerEnrollmentPreparation::Capture { captured } => captured,
@@ -1876,6 +1876,7 @@ fn enroll_restore(
         journal_cursor: cursor,
         checkpoint: host.encode_full_state(),
         host_vector: host.encode_state_vector(),
+        recovery: false,
     };
     let advanced = store
         .write_with(&NoFaults, |tx| enroll_in_tx(tx, "ws", &input, limits, 3))

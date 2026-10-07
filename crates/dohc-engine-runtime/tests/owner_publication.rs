@@ -1361,6 +1361,7 @@ async fn enrolled_owner_keeps_its_lineage_when_an_old_conflict_is_resolved_after
         journal_cursor: 0,
         checkpoint: f.doc.encode_full_state(),
         host_vector: f.doc.encode_state_vector(),
+        recovery: false,
     };
     f.store
         .write_with(&NoFaults, |tx| {

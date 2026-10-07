@@ -78,6 +78,8 @@ export interface EngineYdocProviderSessionOptions {
   path: string;
   expectedObjectId?: string;
   contentKind?: YdocContentKind;
+  /** Server drafts deliver their automation declaration with the admitted frame. */
+  trustedAutomationDraft?: boolean;
   // Forwarded to the adapter: false when the caller already holds the
   // document's canonical state and will replay it into this generation.
   seedAbsentLineage?: boolean;
@@ -459,7 +461,7 @@ export async function openEngineYdocProviderSession(
       const { armSettle = true, ...recordOptions } = applyOptions ?? {};
       let operation: Promise<unknown>;
       try {
-        operation = session.applyLocalUpdate(update, recordOptions);
+        operation = session.applyLocalUpdate(update, {...recordOptions, ...(options.trustedAutomationDraft ? {trustedAutomationDraft: true} : {})});
       } catch (error) {
         rememberLocalEditError(error);
         throw error;
@@ -470,7 +472,7 @@ export async function openEngineYdocProviderSession(
     async replayLocalUpdate(update, applyOptions) {
       if (closed) throw new Error(`Y.Doc provider session for ${options.path} is closing.`);
       const { armSettle = false, ...recordOptions } = applyOptions ?? {};
-      return trackLocalOperation(session.replayLocalUpdate(update, recordOptions), armSettle);
+      return trackLocalOperation(session.replayLocalUpdate(update, {...recordOptions, ...(options.trustedAutomationDraft ? {trustedAutomationDraft: true} : {})}), armSettle);
     },
 
     async reestablishAcknowledgedState(update) {
