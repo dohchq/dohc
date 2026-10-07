@@ -1036,6 +1036,97 @@ it.each([
   } finally {await reopened.close();}
 });
 
+async function unsavedTailFixture(mode:"busy"|"blocked") {
+  const pids:number[]=[];
+  cleanups.push(async()=>{for(const pid of pids)expect(()=>process.kill(pid,0)).toThrow();});
+  const f=await fixture({launch:launcher((_request,controls)=>controls.deliver(),undefined,pids)});
+  await f.invoke({id:'one',value:'saved'});
+  f.initialize('other');
+  await f.supervisor.close();
+  const time=vi.spyOn(performance,'now').mockReturnValue(0);
+  cleanups.push(async()=>{time.mockRestore();});
+  const state={clock:0,applied:[] as number[]};
+  let faults=mode==='blocked',release=()=>{},entered=()=>{},held=Promise.resolve(),occupations=0;
+  const onMaintenanceError=vi.fn();
+  const journal={...f.journal,
+    async sealMaterializationCheckpoint(input:Parameters<DatasetJournal['sealMaterializationCheckpoint']>[0]){
+      if(input.stage.scope.datasetId==='other'){entered();await held;}
+      else if(faults)throw Error('seal failed');
+      return f.journal.sealMaterializationCheckpoint(input);
+    },
+    discardCheckpoint(input:Parameters<DatasetJournal['discardCheckpoint']>[0]){
+      if(faults&&input.stage.scope.datasetId===f.scope.datasetId)throw Error('cleanup blocked');
+      return f.journal.discardCheckpoint(input);
+    },
+  };
+  const launch:AppRuntimeLauncher=options=>{
+    let directory='';
+    return launcher((request,controls)=>{
+      if(request.command.kind==='open')directory=request.command.input.directory;
+      if(request.command.kind==='applyBatch')state.applied.push(...request.command.input.map((event:{revision:number})=>event.revision));
+      if(request.command.kind==='prepare'&&JSON.parse(request.command.guest.inputJson).killWorker){
+        void writeFile(join(directory,'cpu-budget-exceeded'),'app 5000').then(controls.stop);return;
+      }
+      controls.deliver();
+    },undefined,pids)(options);
+  };
+  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},maxWorkers:1,
+    replayCacheMs:0,materializationEvents:1,nowMs:()=>state.clock,maintenanceStorage:{authorize(){},account(){}},onMaintenanceError});
+  cleanups.push(async()=>{release();await supervisor.close();});
+  const readInput={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
+  const read=()=>supervisor.invoke(readInput);
+  const kill=()=>supervisor.invoke({...readInput,input:{killWorker:true},payloadSha256:hash('{"killWorker":true}')});
+  async function occupy(){
+    const ready=new Promise<void>(resolve=>entered=resolve);
+    held=new Promise<void>(resolve=>release=resolve);
+    const id=String(++occupations),input={id,value:'busy'};
+    await supervisor.invoke({...readInput,scope:{...f.scope,datasetId:'other'},input,readOnly:false,idempotencyKey:id,payloadSha256:hash(JSON.stringify(input))});
+    await ready;
+  }
+  if(mode==='busy')await occupy();
+  else {
+    await expect(read()).rejects.toMatchObject({code:'replay_not_saved',retryAfterMs:5000});
+    expect(onMaintenanceError).toHaveBeenCalledTimes(1);
+    faults=false;state.clock=5000;
+  }
+  return {...f,supervisor,state,read,kill,occupy,release:()=>release(),readInput};
+}
+
+it.each(['busy','blocked'] as const)("backs off repeated unsaved replay tails when maintenance is %s",async(mode)=>{
+  const f=await unsavedTailFixture(mode);
+  expect(await f.read()).toMatchObject({revision:1,result:[{id:'one',value:'saved'}]});
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
+  await expect(f.kill()).rejects.toMatchObject({code:'worker_budget'});
+  await expect(f.read()).rejects.toMatchObject({code:'replay_not_saved',retryAfterMs:5000});
+  const applied=[...f.state.applied];
+  await expect(f.read()).rejects.toMatchObject({code:'dataset_reopen_wait',retryAfterMs:5000});
+  expect(f.state.applied).toEqual(applied);
+  f.state.clock+=5000;
+  await expect(f.read()).rejects.toMatchObject({code:'replay_not_saved',retryAfterMs:10000});
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
+});
+
+it("allows another unsaved replay tail after a successful cache save",async()=>{
+  const f=await unsavedTailFixture('busy');
+  expect((await f.read()).revision).toBe(1);
+  f.release();
+  await vi.waitFor(()=>expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toEqual([]),workerWait);
+  const input={id:'two',value:'saved'};
+  await f.supervisor.invoke({...f.readInput,input,readOnly:false,idempotencyKey:'two',payloadSha256:hash(JSON.stringify(input))});
+  await vi.waitFor(()=>{
+    expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor.revision).toBe(2);
+    expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toEqual([]);
+  },workerWait);
+  await f.occupy();
+  const tail={id:'three',value:'saved'};
+  await f.supervisor.invoke({...f.readInput,input:tail,readOnly:false,idempotencyKey:'three',payloadSha256:hash(JSON.stringify(tail))});
+  await expect(f.kill()).rejects.toMatchObject({code:'worker_budget'});
+  expect(await f.read()).toMatchObject({revision:3,result:[{id:'one',value:'saved'},{id:'three',value:'saved'},{id:'two',value:'saved'}]});
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})?.cursor.revision).toBe(2);
+  await expect(f.kill()).rejects.toMatchObject({code:'worker_budget'});
+  await expect(f.read()).rejects.toMatchObject({code:'replay_not_saved',retryAfterMs:5000});
+});
+
 it("rejects a completed replay when its admitted final checkpoint cannot be sealed",async()=>{
   const f=await fixture();
   await f.invoke({id:'1',value:'saved'});

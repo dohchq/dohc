@@ -117,7 +117,7 @@ export interface DatasetSupervisorOptions {
 }
 type Worker = { runtime: PersistentAppBackend; directory: string; cursor: DatasetCursor; tables: string[] };
 type Job = { bytes: number; deadline: number; work(): Promise<unknown>; resolve(result: unknown): void; reject(error: unknown): void; timeout: ReturnType<typeof setTimeout>; abort(): void; signal?: AbortSignal };
-type Lane = { scope: DatasetScope; lifecycle: AbortController; admission?: {bytes:number;deadline:number}; idleWork?: Promise<void>; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void>; nextMaterializationRevision?: number;
+type Lane = { scope: DatasetScope; lifecycle: AbortController; admission?: {bytes:number;deadline:number}; idleWork?: Promise<void>; queue: Job[]; active: boolean; worker?: Worker; stopping?: Promise<void>; idle?: ReturnType<typeof setTimeout>; done?: Promise<void>; nextMaterializationRevision?: number; unsavedTail?: boolean;
   /** A cache that failed validation at reopen. It counts as no cache, so a replay replaces it. */
   rejectedCacheId?: string };
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -206,8 +206,11 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     if(!storage||!worker||closed)return;
     const notSaved=(cause?:unknown)=>Object.assign(new PersistentRuntimeError("replay_not_saved","dohc could not save this Collection's records. Try again."),{cause});
     if(afterCostlyReplay)await maintenance.get(key)?.done;
-    if(blockedMaintenance.has(key)){if(afterCostlyReplay)throw notSaved();return;}
-    if(maintenance.has(key)||maintenance.size>=maxWorkers){if(reason==="replay-checkpoint")throw notSaved();return;}
+    if(blockedMaintenance.has(key)||maintenance.has(key)||maintenance.size>=maxWorkers){
+      if(reason==="replay-checkpoint"||(reason==="replay-tail"&&lane.unsavedTail))throw notSaved();
+      if(reason==="replay-tail")lane.unsavedTail=true;
+      return;
+    }
     const expected={...worker.cursor},cancel=new AbortController();
     const reservations:CheckpointStage[]=[];
     let path:string|undefined,directory:string|undefined,captured=false,failure:unknown;
@@ -259,6 +262,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
         stage=await options.journal.sealMaterializationCheckpoint({stage,authorize});
         options.journal.cacheMaterialization({expected,checkpoint:stage,authorize,account:allocation=>storage.account({
           scope:lane.scope,stage,bytes:allocation.bytes-allocation.stagedCreditBytes-allocation.releasedBytes})});
+        lane.unsavedTail=false;
         maintenanceWarnings.delete(JSON.stringify(lane.scope));
         reservations.pop();
       } finally {await file.close();}
@@ -723,7 +727,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
           void lane.done.catch(() => {});
         }, idleMs);
         lane.idle.unref();
-      } else if (!lane.stopping) lanes.delete(JSON.stringify(lane.scope));
+      } else if (!lane.stopping && !lane.unsavedTail) lanes.delete(JSON.stringify(lane.scope));
       return;
     }
     clearTimeout(job.timeout);
