@@ -1,5 +1,5 @@
-import { presenceColorHash } from "./presenceColorHash";
 import { useMemo } from "react";
+import { presencePalette } from "./presencePalette";
 import { resolvePeerDisplayName, type PresencePeer } from "./presenceChannel";
 
 // MU-C1 — calm presence UI. Small initials for who's here and a subtle typing
@@ -17,15 +17,12 @@ function initials(name: string): string {
 
 const MAX_FACES = 3;
 
-export function PresenceFaces(props: {
-  others: PresencePeer[];
-  className?: string;
-}) {
+export function PresenceFaces(props: { others: PresencePeer[]; className?: string }) {
   // Collapse a user's multiple devices/tabs into one face.
   const unique = useMemo(() => {
     const byUser = new Map<string, PresencePeer>();
     for (const peer of props.others) {
-      if (!byUser.has(peer.userId)) byUser.set(peer.userId, peer);
+      if (!byUser.has(peer.faceToken)) byUser.set(peer.faceToken, peer);
     }
     return [...byUser.values()];
   }, [props.others]);
@@ -35,8 +32,7 @@ export function PresenceFaces(props: {
   const shown = unique.slice(0, MAX_FACES);
   const overflow = unique.length - shown.length;
   const names = unique.map(resolvePeerDisplayName);
-  const label =
-    unique.length === 1 ? `${names[0]} is here` : `${unique.length} people here`;
+  const label = unique.length === 1 ? `${names[0]} is here` : `${unique.length} people here`;
 
   return (
     <div
@@ -48,14 +44,14 @@ export function PresenceFaces(props: {
     >
       {shown.map((peer) => {
         const name = resolvePeerDisplayName(peer);
-        const hue = presenceColorHash(peer.userId) % 360;
+        const color = presencePalette(peer.paletteSlot);
         return (
           <span
-            key={peer.userId}
+            key={peer.faceToken}
             className="-ml-1 flex h-5 w-5 items-center justify-center rounded-full border border-bg text-[10px] font-semibold first:ml-0"
             style={{
-              backgroundColor: `hsl(${hue} 45% 88%)`,
-              color: `hsl(${hue} 45% 30%)`,
+              backgroundColor: color.background,
+              color: color.stroke,
             }}
             aria-hidden="true"
           >

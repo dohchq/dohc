@@ -1,4 +1,5 @@
 import { presenceColorHash } from "./presenceColorHash";
+import { presencePalette } from "./presencePalette";
 import type {
   Collaborator,
   ExcalidrawImperativeAPI,
@@ -38,15 +39,6 @@ const SELECTION_ENTRY_OVERHEAD_BYTES = 8;
 const UNSAFE_ELEMENT_ID = /[\u0000-\u001f\u007f-\u009f]/;
 
 type CleanSelection = Record<string, true>;
-
-const COLORS = [
-  { background: "#dbeafe", stroke: "#2563eb" },
-  { background: "#dcfce7", stroke: "#16a34a" },
-  { background: "#fef3c7", stroke: "#d97706" },
-  { background: "#fce7f3", stroke: "#db2777" },
-  { background: "#ede9fe", stroke: "#7c3aed" },
-  { background: "#cffafe", stroke: "#0891b2" },
-] as const;
 
 export type ExcalidrawPointerUpdate = {
   pointer: { x: number; y: number; tool: "pointer" | "laser" };
@@ -98,8 +90,8 @@ export function excalidrawPresenceTopic(input: {
   ])}`;
 }
 
-function colorFor(value: string | number): (typeof COLORS)[number] {
-  return COLORS[presenceColorHash(value) % COLORS.length]!;
+function colorFor(value: string | number) {
+  return presencePalette(presenceColorHash(value) % 7);
 }
 
 function cleanName(value: unknown): string {
@@ -187,14 +179,14 @@ function collaboratorsFromAwareness(
       state.user && typeof state.user === "object"
         ? (state.user as Record<string, unknown>)
         : {};
-    const socketId = `awareness-${awarenessClientId}` as SocketId;
+    const socketId = (typeof rawUser.sessionToken === "string" ? rawUser.sessionToken : `awareness-${awarenessClientId}`) as SocketId;
     const pointer = cleanPointer(state.pointer);
     const button =
       state.button === "down" || state.button === "up"
         ? state.button
         : undefined;
     const selectedElementIds = cleanSelection(state.selectedElementIds);
-    const color = colorFor(awarenessClientId);
+    const color = presencePalette(typeof rawUser.paletteSlot === "number" ? rawUser.paletteSlot : 3);
     collaborators.set(socketId, {
       socketId,
       id: socketId,

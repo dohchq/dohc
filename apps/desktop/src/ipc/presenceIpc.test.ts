@@ -18,7 +18,7 @@ const publishPayload = {
   scope, topic: "chat:thread:one", clientId: "client", incarnationId: OLD_INCARNATION,
   rendererDocumentId: DOCUMENT, state: { typing: true },
 };
-const pollPayload = { scope, topic: publishPayload.topic, since: 0, pollId: "poll" };
+const pollPayload = { clientId: "client", scope, topic: publishPayload.topic, since: 0, pollId: "poll" };
 const snapshot = { version: 1, peers: [] };
 const success = { ok: true, snapshot };
 const unavailable = { ok: false, reason: "unavailable" };
