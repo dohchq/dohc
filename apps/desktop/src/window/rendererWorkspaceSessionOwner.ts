@@ -54,6 +54,8 @@ interface SenderState<Sender extends RendererWorkspaceSender> {
   rendererDocumentId: string | undefined;
   readonly retiredRendererDocumentIds: Set<string>;
   destroyed: boolean;
+  // Sessions this renderer has been admitted, so a caller can tell its first.
+  admitted: number;
 }
 
 interface SenderRetirement {
@@ -156,6 +158,11 @@ export class RendererWorkspaceSessionOwner<
     return session?.isCurrent() ? session : undefined;
   }
 
+  /** How many sessions this renderer has been admitted. Read-only. */
+  admittedCount(sender: Sender): number {
+    return this.#statesBySender.get(sender)?.admitted ?? 0;
+  }
+
   currentForDocument(
     sender: Sender,
     rendererDocumentId: string,
@@ -237,6 +244,7 @@ export class RendererWorkspaceSessionOwner<
       rendererDocumentId: undefined,
       retiredRendererDocumentIds: new Set(),
       destroyed: false,
+      admitted: 0,
     };
     this.#statesBySender.set(sender, state);
 
@@ -280,6 +288,7 @@ export class RendererWorkspaceSessionOwner<
     rendererDocumentId: string,
   ): RendererWorkspaceSession<Sender> {
     const generation = ++this.#nextGeneration;
+    state.admitted += 1;
     let session!: RendererWorkspaceSession<Sender>;
     session = Object.freeze({
       sender: state.sender,

@@ -13,6 +13,7 @@ import type { OperationDefinition } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import mainIpc from "./ipcExposure.main.json";
 import clipboardIpc from "./ipcExposure.pr1639.json";
+import launchOpenIpc from "./ipcExposure.pr1701.json";
 import mainCli from "./cliExposure.main.json";
 import publicationCli from "./cliExposure.pr1659.json";
 import commentsCli from "./cliExposure.pr1700.json";
@@ -44,13 +45,18 @@ function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "s
 
 describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
-    // Hand-reviewed #1639 removals, separate from the hashed main baseline.
+    // Hand-reviewed #1639 removals and #1701 additions, separate from the
+    // hashed main baseline.
     const expectedNames = [...mainIpc.names];
     for (const name of clipboardIpc.nameRemovals) {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    expect([...Object.values(CHANNELS), ...rows.map(row => row.channel)].sort()).toEqual(expectedNames);
+    for (const name of launchOpenIpc.nameAdditions) {
+      expect(expectedNames).not.toContain(name);
+      expectedNames.push(name);
+    }
+    expect([...Object.values(CHANNELS), ...rows.map(row => row.channel)].sort()).toEqual(expectedNames.sort());
     // B5 retains these guards while adding rows to the hand-edited admission record.
     const guards = Object.fromEntries(rows.map(row => [row.channel, row.guard]));
     expect(Object.fromEntries(Object.keys(mainIpc.guards).map(channel => [channel, guards[channel]]))).toEqual(mainIpc.guards);
