@@ -411,6 +411,11 @@ fn publication_source_before_in_tx(
             }),
         ).map(Some).map_err(SyncError::corrupt);
     }
+    if record.previous_cursor == 0
+        && let Some(before) = imported_event_zero_before_in_tx(tx, record)?
+    {
+        return Ok(Some(before));
+    }
     tx.query_row(
         "SELECT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
          FROM live_owner_adoptions a
@@ -437,6 +442,76 @@ fn publication_source_before_in_tx(
     )
     .optional()
     .map_err(SyncError::corrupt)
+}
+
+/// Ordinary activation can adopt an edited replica. Event zero still names
+/// its original imported base, so the first portable moment starts there.
+fn imported_event_zero_before_in_tx(
+    tx: &Transaction<'_>,
+    record: &SettlementRecord,
+) -> Result<Option<crate::outbound::PortableBefore>, SyncError> {
+    let b = &record.binding;
+    let json: String = tx
+        .query_row(
+            &format!("SELECT record_json FROM live_audit_base_publications WHERE {SCOPE}"),
+            scope(&record.relay_database_namespace, b),
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let base: BaseRecord = serde_json::from_str(&json).map_err(SyncError::corrupt)?;
+    base.validate(&b.workspace_id)?;
+    if base.relay_database_namespace != record.relay_database_namespace
+        || base.checkpoint.binding != *b
+    {
+        return Err(invalid("settlement event zero binding differs"));
+    }
+    require_base_coordinate(tx, &base)?;
+    let (imported, disposition, path): (bool, String, String) = tx.query_row(
+        "SELECT imported,apply_disposition,json_extract(payload_json,'$.path') FROM replication_log
+         WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+        params![b.workspace_id,base.base_coordinate.origin_id,base.base_coordinate.origin_seq],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).map_err(SyncError::corrupt)?;
+    if !imported {
+        return Ok(None);
+    }
+    if disposition != "applied" || path != b.current_path {
+        return Err(invalid("settlement event zero was not applied at its path"));
+    }
+    require_base_blob(tx, &base)?;
+    let bytes: Vec<u8> = tx
+        .query_row(
+            "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+            [&base.checkpoint.state_digest],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&bytes).map_err(SyncError::corrupt)?;
+    let projected = doc
+        .project(ContentKind::Richdoc)
+        .map_err(SyncError::corrupt)?
+        .content;
+    let markdown = doc
+        .preserved_markdown_source(&projected)
+        .unwrap_or(projected);
+    let digest = hex_sha256(markdown.as_bytes());
+    // Base import may reuse an already matching file head rather than create
+    // a projection moment. Find that artifact within this exact object.
+    tx.query_row(
+        "SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
+         FROM moments m JOIN blobs t ON t.sha256=m.after_blob_sha256
+         WHERE m.workspace_id=?1 AND m.version_id=?2 AND m.object_id=?3 AND m.path=?4
+           AND m.after_content_kind='text' AND m.after_blob_sha256=?5 AND t.byte_length=?6
+         ORDER BY m.moment_order LIMIT 1",
+        params![b.workspace_id,b.main_version_id,b.object_id,b.current_path,digest,markdown.len() as i64],
+        |row| Ok(crate::outbound::PortableBefore {
+            moment_id: row.get(0)?, version_id: row.get(1)?, object_id: row.get(2)?,
+            path: row.get(3)?, blob_sha256: row.get(4)?, byte_length: row.get(5)?,
+            recorded_at_ms: row.get(6)?, metadata_origin: row.get(7)?,
+            metadata_summary: row.get(8)?, metadata_correlation_id: row.get(9)?,
+        }),
+    ).map(Some).map_err(SyncError::corrupt)
 }
 
 pub(super) fn apply_settlement_envelope(

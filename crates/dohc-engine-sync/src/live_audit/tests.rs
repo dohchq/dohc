@@ -344,6 +344,10 @@ fn identity_alone_does_not_publish_and_later_publication_uses_event_zero() {
 }
 
 fn accept_enrollment_event(f: &mut Fixture, cursor: i64) {
+    accept_named_event(f, cursor, format!("enrollment-{cursor}"));
+}
+
+fn accept_named_event(f: &mut Fixture, cursor: i64, delivery: String) {
     use dohc_engine_collab::live_update_application::{
         AdmittedLiveUpdate, AdmittedLiveUpdateMetadata, ApplicationError, LiveUpdateReceipt,
         RelayAcceptedLiveUpdate, ServerDerivedLiveUpdateAuthority, apply_committed,
@@ -352,7 +356,7 @@ fn accept_enrollment_event(f: &mut Fixture, cursor: i64) {
         metadata: AdmittedLiveUpdateMetadata {
             accepted: RelayAcceptedLiveUpdate {
                 receipt: LiveUpdateReceipt {
-                    delivery_id: format!("enrollment-{cursor}"),
+                    delivery_id: delivery,
                     update_digest: hex_sha256(&f.bytes),
                     journal_cursor: cursor,
                     accepting_host_epoch: 1,
@@ -1629,8 +1633,11 @@ fn settle_bootstrap_publication(
     use dohc_engine_collab::live_update_application::{
         LiveUpdateReceipt, NativeHistoryReconstruction, with_settlement,
     };
+    let delivery: String = f.store.read_with(|conn| {
+        conn.query_row("SELECT delivery_id FROM live_device_update_applications WHERE workspace_id='ws' AND journal_cursor=?1", [cursor], |r| r.get(0)).map_err(SyncError::corrupt)
+    })?;
     let receipt = LiveUpdateReceipt {
-        delivery_id: format!("enrollment-{cursor}"),
+        delivery_id: delivery,
         update_digest: hex_sha256(&f.bytes),
         journal_cursor: cursor,
         accepting_host_epoch: 1,
@@ -1688,4 +1695,321 @@ fn settle_bootstrap_publication(
             Ok(())
         },
     )
+}
+
+#[test]
+fn first_imported_activation_settlement_starts_at_native_event_zero() {
+    imported_activation_publication(false);
+}
+
+#[test]
+fn first_imported_activation_settlement_rejects_another_objects_baseline() {
+    imported_activation_publication(true);
+}
+
+fn imported_activation_publication(foreign_baseline: bool) {
+    use dohc_engine_collab::live_update_application::{
+        OwnerAdoptionCut, adopt_owner_committed, capture_imported_owner_activation,
+    };
+    let mut source = fixture(true);
+    bootstrap_committed::<Box<dyn std::error::Error>>(
+        &mut source.store,
+        &mut WriterDocCache::new(),
+        &source.handle,
+        source.input.clone(),
+        source.bytes.clone(),
+        &NoFaults,
+        |tx, _, namespace, binding| {
+            crate::journal_moment_append_in_tx(tx, "ws", "bootstrap-moment")?;
+            journal_live_base_in_tx(tx, namespace, binding, 100)?;
+            Ok(())
+        },
+    )
+    .unwrap();
+    let baseline = source.input.projected_markdown_digest.clone();
+    let baseline_bytes = source.bytes.clone();
+    let key = DocKey::new("ws", "main", "object").unwrap();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    doc.apply(&baseline_bytes).unwrap();
+    doc.rewrite_content_to_markdown_preserving_source(
+        ContentKind::Richdoc,
+        "Pre-live ordinary edits.",
+    )
+    .unwrap();
+    let full = doc.encode_full_state();
+    source
+        .store
+        .write_with(&NoFaults, |tx| {
+            let digest = put_binary_blob(tx, &full)?;
+            journal_local_op_in_tx(
+                tx,
+                "ws",
+                "ydoc.update",
+                &crate::ydoc_update_payload(
+                    &key,
+                    "note.md",
+                    ContentKind::Richdoc,
+                    &digest,
+                    &source.binding.lineage_claim_id,
+                    Some("owner-origin"),
+                    None,
+                    false,
+                ),
+                200,
+            )?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    let ops = operations(&source.store);
+    let baseline_relay_sequence = ops
+        .iter()
+        .find(|op| op.payload["momentId"] == "bootstrap-moment")
+        .unwrap()
+        .origin_seq
+        + 1;
+    let (scratch, path, mut store) = open_store();
+    let (binary, text): (Vec<Vec<u8>>, Vec<(String, i64, String)>) = source
+        .store
+        .read_with(|conn| {
+            let binary = conn
+                .prepare("SELECT bytes FROM binary_blobs")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let text = conn
+                .prepare("SELECT sha256,byte_length,text FROM blobs")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            Ok::<_, SyncError>((binary, text))
+        })
+        .unwrap();
+    store
+        .write_with(&NoFaults, |tx| {
+            for bytes in &binary {
+                put_binary_blob(tx, bytes)?;
+            }
+            for (digest, length, body) in &text {
+                tx.execute(
+                    "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,?2,?3)",
+                    params![digest, length, body],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+    crate::adopt_join_identity(
+        &mut store,
+        "ws",
+        "service-origin",
+        "epoch",
+        "stream",
+        250,
+        &NoFaults,
+    )
+    .unwrap();
+    for mut op in ops.clone() {
+        op.relay_seq = Some(op.origin_seq + 1);
+        let applied = crate::apply_replication_envelope(
+            &mut store,
+            &mut WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .unwrap();
+        assert!(
+            matches!(applied.primary, ApplyDisposition::Applied(_)),
+            "{}: {:?}",
+            op.op_kind,
+            applied.primary
+        );
+    }
+    crate::commit_relay_cursor(
+        &mut store,
+        "ws",
+        &RelayCursor {
+            bootstrap_complete: true,
+            cursor: ops.last().unwrap().origin_seq + 1,
+            replication_epoch: "epoch".into(),
+            stream_identity: "stream".into(),
+            settlement_report_id: None,
+        },
+        &NoFaults,
+        &NoLiveLeases,
+        250,
+    )
+    .unwrap();
+    let activation = capture_imported_owner_activation(
+        &mut store, "relay", &key, "note.md", 1_000_000, &NoFaults,
+    )
+    .unwrap();
+    assert_ne!(activation.source.source_digest, baseline);
+    let mut owner = ApplicationOwner::new("ws".into()).unwrap();
+    let handle = owner
+        .register(
+            &mut store,
+            "relay".into(),
+            ApplicationHostCoordinate {
+                host_id: "service-host".into(),
+                host_epoch: 1,
+                instance_id: "self-host-service".into(),
+                connection_id: "connection".into(),
+            },
+            source.binding.clone(),
+        )
+        .unwrap();
+    let cut = OwnerAdoptionCut {
+        relay_database_namespace: "relay".into(),
+        adoption_id: activation.activation_id,
+        source_moment_id: activation.source.source_moment_id,
+        source_digest: activation.source.source_digest.clone(),
+        source_byte_length: activation.source.source_byte_length,
+        baseline_moment_relay_sequence: baseline_relay_sequence,
+        baseline_registered_at_ms: 100,
+        baseline_bytes,
+        expected_local_sequence: activation.source.native_head_sequence,
+        events: vec![],
+        terminal_receipt: None,
+        outbox_limits: dohc_engine_collab::OwnerOutboxLimits {
+            max_pending_bytes: 1_000_000,
+            max_pending_age_ms: 100_000,
+        },
+    };
+    adopt_owner_committed(
+        &mut store,
+        &handle,
+        cut,
+        1_000_000,
+        10,
+        260,
+        &NoFaults,
+        |tx, namespace, binding, _| {
+            journal_live_base_in_tx(tx, namespace, binding, 260)
+                .map(|_| ())
+                .map_err(|e| {
+                    dohc_engine_collab::live_update_application::ApplicationError::Storage(
+                        dohc_engine_storage::StorageError::persist_public(e),
+                    )
+                })
+        },
+    )
+    .unwrap();
+    let (delivery, bytes): (String, Vec<u8>) = store.read_with(|conn| {
+        conn.query_row("SELECT e.delivery_id,b.bytes FROM owner_ydoc_outbox_entries e JOIN binary_blobs b ON b.sha256=e.update_blob_digest WHERE e.pending=1 ORDER BY e.sequence LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).map_err(SyncError::corrupt)
+    }).unwrap();
+    let mut f = Fixture {
+        path,
+        store,
+        _owner: owner,
+        handle,
+        binding: source.binding.clone(),
+        input: source.input.clone(),
+        bytes,
+        _scratch: scratch,
+    };
+    accept_named_event(&mut f, 1, delivery);
+    if foreign_baseline {
+        VersionedTextStore::new(&mut f.store)
+            .write_text(
+                &dohc_engine_domain::WriteText {
+                    workspace_id: "ws".into(),
+                    version_id: "main".into(),
+                    object_id: "foreign-object".into(),
+                    path: "foreign.md".into(),
+                    text: "".into(),
+                    moment_id: "foreign-baseline".into(),
+                    metadata_origin: "sync".into(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    author_json: None,
+                    now_ms: 100,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .unwrap();
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE moments SET object_id='foreign-object',path='foreign.md'
+                 WHERE workspace_id='ws' AND version_id='main' AND object_id='object'
+                   AND after_blob_sha256=?1",
+                    [&baseline],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        assert!(settle_bootstrap_publication(&mut f, 1, "service-first-settlement").is_err());
+        assert_eq!(count(&f.store, "live_audit_settlement_publications"), 0);
+        assert_eq!(count(&f.store, "live_device_settlements"), 0);
+        assert_eq!(count(&f.store, "live_settlement_publication_states"), 0);
+        assert!(
+            !crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500)
+                .unwrap()
+                .iter()
+                .any(|op| op.payload["momentId"] == "service-first-settlement")
+        );
+        return;
+    }
+    settle_bootstrap_publication(&mut f, 1, "service-first-settlement").unwrap();
+    let first = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500)
+        .unwrap()
+        .into_iter()
+        .find(|op| {
+            op.op_kind == "moment.append" && op.payload["momentId"] == "service-first-settlement"
+        })
+        .unwrap();
+    assert_eq!(first.payload["payloadBeforeBlobSha256"], baseline);
+    assert_eq!(first.payload["beforeBlobSha256"], baseline);
+    assert_eq!(
+        first.payload["payloadBeforeByteLength"],
+        source.input.projected_markdown_byte_length
+    );
+    assert_eq!(
+        first.payload["payloadAfterBlobSha256"],
+        activation.source.source_digest
+    );
+    let local_before: String = f.store.read_with(|conn| conn.query_row("SELECT payload_before_blob_sha256 FROM moments WHERE workspace_id='ws' AND moment_id='service-first-settlement'", [], |r| r.get(0)).map_err(SyncError::corrupt)).unwrap();
+    assert_eq!(local_before, activation.source.source_digest);
+    let next = dohc_engine_collab::Ydoc::wire();
+    next.apply(&f.bytes).unwrap();
+    next.rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "Next accepted edit.")
+        .unwrap();
+    f.bytes = next.encode_full_state();
+    accept_enrollment_event(&mut f, 2);
+    settle_bootstrap_publication(&mut f, 2, "service-second-settlement").unwrap();
+    let second = crate::list_replication_ops(&f.store, "ws", "service-origin", -1, 500)
+        .unwrap()
+        .into_iter()
+        .find(|op| {
+            op.op_kind == "moment.append" && op.payload["momentId"] == "service-second-settlement"
+        })
+        .unwrap();
+    assert_eq!(
+        second.payload["payloadBeforeBlobSha256"],
+        first.payload["payloadAfterBlobSha256"]
+    );
+    assert_eq!(
+        second.payload["payloadBeforeByteLength"],
+        first.payload["payloadAfterByteLength"]
+    );
+    assert_eq!(
+        second.payload["beforeLatestMomentId"],
+        "service-first-settlement"
+    );
+    assert_eq!(
+        second.payload["settlementReference"]["record"]["previousCursor"],
+        1
+    );
+    assert_eq!(
+        second.payload["payloadAfterBlobSha256"],
+        hex_sha256(b"Next accepted edit.")
+    );
 }
