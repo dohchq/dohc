@@ -5,7 +5,7 @@ export function normalizeChatMessageBody(body: string): string {
     throw new Error("The message is empty. Enter a message.");
   }
   if (new TextEncoder().encode(normalized).byteLength > 64 * 1024) {
-    throw new Error("The message is longer than 64 KiB. Shorten it, then try again.");
+    throw new Error("The message is longer than 64 KiB. Shorten it.");
   }
   return normalized;
 }

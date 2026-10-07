@@ -143,7 +143,7 @@ function expectNothingWritten(test: ReturnType<typeof fixture>) {
 describe("chat writes", () => {
   it.each([PERSON, AGENT])("refuses invalid message bodies before any write for %j", async writer => {
     for (const [body, reason] of [
-      ["界".repeat(30_000), "The message is longer than 64 KiB. Shorten it, then try again."],
+      ["界".repeat(30_000), "The message is longer than 64 KiB. Shorten it."],
       [" \r\n\uFEFF", "The message is empty. Enter a message."],
     ] as const) {
       const test = fixture();

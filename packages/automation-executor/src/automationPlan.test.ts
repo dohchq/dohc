@@ -748,7 +748,7 @@ describe("messages", () => {
   it("uses the shared byte limit and normalization for planned messages", () => {
     const ctx = context(tell, { chat: directory });
     expect(planAt(ctx, 0, inputsOf(), ok("界".repeat(30_000)))).toEqual({
-      problem: "Step 1: The message is longer than 64 KiB. Shorten it, then try again.",
+      problem: "Step 1: The message is longer than 64 KiB. Shorten it.",
     });
     const body = "界".repeat(21_844) + "\r\nx\r\ny\uFEFF ";
     const normalized = "界".repeat(21_844) + "\nx\ny";

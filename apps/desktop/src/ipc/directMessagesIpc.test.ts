@@ -408,7 +408,7 @@ describe("registered direct message boundaries", () => {
 
   it.each(["x".repeat(70_000), "界".repeat(30_000)])("refuses an oversized first DM before creating a conversation or grants", async body => {
     const h = await harness();
-    await expect(h.invoke(CHANNELS.startDm, { ...startPayload, body })).rejects.toThrow("The message is longer than 64 KiB. Shorten it, then try again.");
+    await expect(h.invoke(CHANNELS.startDm, { ...startPayload, body })).rejects.toThrow("The message is longer than 64 KiB. Shorten it.");
     expect(h.storeMethods.createChannel).not.toHaveBeenCalled();
     expect(h.storeMethods.startChannelThread).not.toHaveBeenCalled();
     expect(h.storeMethods.sendMessage).not.toHaveBeenCalled();
