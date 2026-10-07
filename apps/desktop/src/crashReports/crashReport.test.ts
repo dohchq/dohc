@@ -249,6 +249,30 @@ describe("crash report messages", () => {
     }
   });
 
+  it("keeps the no-progress diagnostic and withholds an unknown method", () => {
+    for (const [method, expected] of [["engine.ping", "engine.ping"], ["private.plan", "<withheld>"]]) {
+      const message = `Rust engine ${method} made no progress while the daemon was responding.`;
+      expect(mainError(new EngineDaemonUnavailableError(message)))
+        .toContain(`EngineDaemonUnavailableError: Rust engine ${expected} made no progress while the daemon was responding.`);
+      if (method !== expected) expect(mainError(new EngineDaemonUnavailableError(message))).not.toContain(method);
+      for (const suffix of [" private plan", "\n"]) {
+        expect(mainError(new EngineDaemonUnavailableError(message + suffix)))
+          .toContain("EngineDaemonUnavailableError: <message withheld>");
+      }
+      expect(mainError(new Error(message))).toContain("Error: Error: <message withheld>");
+    }
+  });
+
+  it("keeps the retired-generation diagnostic only as an exact supervisor sentence", () => {
+    const message = "Rust engine request generation was retired.";
+    expect(mainError(new EngineDaemonUnavailableError(message))).toContain(`EngineDaemonUnavailableError: ${message}`);
+    for (const suffix of [" private plan", "\n"]) {
+      expect(mainError(new EngineDaemonUnavailableError(message + suffix)))
+        .toContain("EngineDaemonUnavailableError: <message withheld>");
+    }
+    expect(mainError(new Error(message))).toContain("Error: Error: <message withheld>");
+  });
+
   it("withholds a template with a trailing newline", () => {
     const message = "Rust engine workspace.open timed out after 5000ms.";
     const text = formatCrashEvent({

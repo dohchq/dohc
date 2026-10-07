@@ -73,6 +73,8 @@ const ENGINE_MESSAGES: ReadonlyArray<readonly [RegExp, (match: RegExpExecArray) 
     }.`;
   }],
   [/^Rust engine (\S+) returned an invalid result\.$/, (m) => rpcMessage(m[1]!, "returned an invalid result.")],
+  [/^Rust engine (\S+) made no progress while the daemon was responding\.$/, (m) =>
+    rpcMessage(m[1]!, "made no progress while the daemon was responding.")],
   [/^Rust engine (\S+) timed out after ([1-9]\d{0,5})ms\.$/, (m) => {
     const capMs = Number(m[2]);
     return capMs <= 120_000 ? rpcMessage(m[1]!, `timed out after ${capMs}ms.`) : null;
@@ -94,6 +96,7 @@ const ENGINE_MESSAGES: ReadonlyArray<readonly [RegExp, (match: RegExpExecArray) 
     "Rust engine exited while retiring the previous generation's work.",
     "Rust engine daemon is not available.",
     "Rust engine lifecycle is already stopping.",
+    "Rust engine request generation was retired.",
     "Rust engine workspace.open returned no workspace handle.",
     "Electron resources path is unavailable for the packaged Rust engine.",
   ].map((sentence) => [new RegExp(`^${sentence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), () => sentence] as const),
