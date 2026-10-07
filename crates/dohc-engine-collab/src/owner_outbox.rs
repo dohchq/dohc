@@ -6,7 +6,7 @@
 //! durable receipt for each ordered update.
 
 use crate::live_object_binding::LiveObjectBinding;
-use dohc_engine_domain::AgentDeclaration;
+use dohc_engine_domain::{AgentDeclaration, AutomationDeclaration};
 use dohc_engine_storage::{
     get_binary_blob, hex_sha256, put_binary_blob_with_sha, EngineStore, NoFaults, StorageError,
     TxnOutcome, MAX_IDENTIFIER_BYTES,
@@ -193,6 +193,7 @@ pub struct OwnerOutboxEntry {
     pub byte_length: i64,
     pub created_at_ms: i64,
     pub agent_declaration: Option<AgentDeclaration>,
+    pub automation_declaration: Option<AutomationDeclaration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +266,62 @@ pub struct OwnerOutboxQuarantineInput {
     pub observed_binding: Option<LiveObjectBinding>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerOutboxRefuseInput {
+    pub outbox_id: String,
+    pub delivery_id: String,
+    pub update_digest: String,
+    pub reason: String,
+}
+
+/// A terminal host refusal retires an entry and its causal dependents,
+/// preserving their bytes and provenance. Independent pending writes survive.
+pub fn refuse_entry_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace: &str,
+    input: &OwnerOutboxRefuseInput,
+) -> Result<LiveObjectBinding, OwnerOutboxError> {
+    validate_identifier(&input.outbox_id, "invalid outbox id")?;
+    validate_identifier(&input.delivery_id, "invalid delivery id")?;
+    validate_identifier(&input.reason, "invalid refusal reason")?;
+    if input.reason.len() > 256 {
+        return Err(OwnerOutboxError::InvalidInput("invalid refusal reason"));
+    }
+    validate_digest(&input.update_digest)?;
+    let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+    require_workspace(workspace, &parent.binding.workspace_id)?;
+    let observed =
+        draft::read_observed_in(tx, &parent.binding)?.ok_or(OwnerOutboxError::NotFound)?;
+    let entry: Option<(String, bool, Option<String>, Option<String>)> = tx.query_row(
+        "SELECT update_digest,pending,accepted_receipt_json,terminal_reason FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND delivery_id=?2",
+        params![input.outbox_id,input.delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).optional().map_err(read_sql)?;
+    let (digest, pending, receipt, reason) = entry.ok_or(OwnerOutboxError::NotFound)?;
+    if digest != input.update_digest || receipt.is_some() {
+        return Err(OwnerOutboxError::ReceiptMismatch);
+    }
+    if !pending {
+        return if reason.as_deref() == Some(input.reason.as_str()) {
+            Ok(parent.binding)
+        } else {
+            Err(OwnerOutboxError::ReceiptMismatch)
+        };
+    }
+    tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1", params![input.outbox_id,input.delivery_id,input.reason]).map_err(write_sql)?;
+    draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &observed.checkpoint_digest)?;
+    refresh_pending_in_tx(tx, &input.outbox_id)?;
+    Ok(parent.binding)
+}
+
+fn refresh_pending_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    outbox_id: &str,
+) -> Result<(), OwnerOutboxError> {
+    tx.execute("UPDATE owner_ydoc_outboxes SET pending_bytes=(SELECT COALESCE(SUM(byte_length),0) FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1),oldest_entry_at_ms=(SELECT MIN(created_at_ms) FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1),state=CASE WHEN state='sealed' AND NOT EXISTS (SELECT 1 FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1) THEN 'active' ELSE state END WHERE outbox_id=?1", [outbox_id]).map_err(write_sql)?;
+    Ok(())
+}
+
 #[derive(Debug)]
 struct ParentRow {
     outbox_id: String,
@@ -309,7 +366,7 @@ pub fn append_in_tx(
     {
         return Err(OwnerOutboxError::Frozen);
     };
-    append_with_retained_base(tx, workspace_id, input, None, None, None)
+    append_with_retained_base(tx, workspace_id, input, None, None, None, None)
 }
 
 /// An append key names one exact entry: its binding, base, bytes, whether it
@@ -326,6 +383,7 @@ fn append_with_retained_base(
     retained_base: Option<(String, i64)>,
     draft_revision: Option<i64>,
     agent_declaration: Option<&AgentDeclaration>,
+    automation_declaration: Option<&AutomationDeclaration>,
 ) -> Result<OwnerOutboxAppendResult, OwnerOutboxError> {
     let binding = input
         .binding
@@ -398,6 +456,17 @@ fn append_with_retained_base(
             serde_json::to_string(declaration).map_err(|_| OwnerOutboxError::Corrupt)
         })
         .transpose()?;
+    if agent_declaration.is_some() && automation_declaration.is_some() {
+        return Err(OwnerOutboxError::InvalidInput(
+            "a draft declares one author kind",
+        ));
+    }
+    let automation_json = automation_declaration
+        .map(|d| {
+            d.validate().map_err(OwnerOutboxError::InvalidInput)?;
+            serde_json::to_string(d).map_err(|_| OwnerOutboxError::Corrupt)
+        })
+        .transpose()?;
     let binding_json = binding_json(&binding)?;
     let outbox_id = outbox_id(&binding, &base_update_digest, &binding_json);
 
@@ -423,11 +492,13 @@ fn append_with_retained_base(
         result_state,
         existing_declaration_json,
         existing_draft_revision,
+        existing_automation_json,
+        terminal_reason,
     )) = tx
         .query_row(
             "SELECT outbox_id,sequence,delivery_id,update_digest,result_pending_bytes,\
                  result_oldest_entry_at_ms,result_state,agent_declaration_json,\
-                 draft_binding_revision \
+                 draft_binding_revision,automation_declaration_json,terminal_reason \
                  FROM owner_ydoc_outbox_entries WHERE append_key=?1",
             [&input.append_key],
             |row| {
@@ -441,6 +512,8 @@ fn append_with_retained_base(
                     row.get::<_, String>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
                 ))
             },
         )
@@ -454,9 +527,13 @@ fn append_with_retained_base(
             || parent.base_update_digest != base_update_digest
             || existing_update_digest != update_digest
             || existing_declaration_json != declaration_json
+            || existing_automation_json != automation_json
             || existing_draft_revision.is_some() != draft_revision.is_some()
         {
             return Err(OwnerOutboxError::AppendKeyMismatch);
+        }
+        if terminal_reason.is_some() {
+            return Err(OwnerOutboxError::Frozen);
         }
         return Ok(OwnerOutboxAppendResult {
             outbox_id: parent.outbox_id,
@@ -478,6 +555,13 @@ fn append_with_retained_base(
             parent
         }
         None => {
+            let conflicting: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND (?6=0 OR state!='quarantined' OR pending_bytes!=0))",
+                params![binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id,binding.restore_fence_generation,draft_revision.is_some()], |r| r.get(0),
+            ).map_err(read_sql)?;
+            if conflicting {
+                return Err(OwnerOutboxError::ParentMismatch);
+            }
             if retained_base.is_none() {
                 put_binary_blob_with_sha(tx, &input.base_update, &base_update_digest)?;
             }
@@ -536,8 +620,8 @@ fn append_with_retained_base(
              (outbox_id,sequence,append_key,delivery_id,update_digest,update_blob_digest,\
               byte_length,created_at_ms,pending,result_pending_bytes,\
               result_oldest_entry_at_ms,result_state,agent_declaration_json,\
-              draft_binding_revision) \
-             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11,?12)",
+              draft_binding_revision,automation_declaration_json) \
+             VALUES (?1,?2,?3,?4,?5,?5,?6,?7,1,?8,?9,?10,?11,?12,?13)",
         params![
             parent.outbox_id,
             parent.next_sequence,
@@ -551,6 +635,7 @@ fn append_with_retained_base(
             next_state.as_str(),
             declaration_json,
             draft_revision,
+            automation_json,
         ],
     )
     .map_err(write_sql)?;
@@ -673,6 +758,7 @@ pub fn append_adopted_local_update_in_tx(
         // Not a draft. The native source keeps this update's authors.
         None,
         agent_declaration.as_ref(),
+        None,
     )
     .map_err(map)?;
     retain_native_source(tx, &result, &source).map_err(map)?;
@@ -696,7 +782,7 @@ pub fn read_pending(
         let mut statement = conn
             .prepare(
                 "SELECT sequence,append_key,delivery_id,update_digest,update_blob_digest,\
-                 byte_length,created_at_ms,agent_declaration_json FROM owner_ydoc_outbox_entries \
+                 byte_length,created_at_ms,agent_declaration_json,automation_declaration_json FROM owner_ydoc_outbox_entries \
                  WHERE outbox_id=?1 AND pending=1 ORDER BY sequence",
             )
             .map_err(read_sql)?;
@@ -711,6 +797,7 @@ pub fn read_pending(
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             })
             .map_err(read_sql)?;
@@ -725,6 +812,7 @@ pub fn read_pending(
                 byte_length,
                 created_at_ms,
                 declaration_json,
+                automation_json,
             ) = row.map_err(read_sql)?;
             let update = get_binary_blob(conn, &blob_digest)?.ok_or(OwnerOutboxError::Corrupt)?;
             if update_digest != blob_digest
@@ -742,6 +830,7 @@ pub fn read_pending(
                 byte_length,
                 created_at_ms,
                 agent_declaration: stored_declaration(declaration_json)?,
+                automation_declaration: stored_automation_declaration(automation_json)?,
             });
         }
         Ok(OwnerOutboxPending {
@@ -858,16 +947,16 @@ pub fn read_pending_page(
             }
             EntryHeader | Update => {
                 let entry = tx.query_row(
-                    "SELECT append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,agent_declaration_json \
+                    "SELECT append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms,agent_declaration_json,automation_declaration_json \
                      FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2 AND pending=1",
                     params![outbox_id, cursor.sequence], |row| Ok((
                         row.get::<_, String>(0)?, row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?, row.get::<_, String>(3)?,
                         row.get::<_, i64>(4)?, row.get::<_, i64>(5)?,
-                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(6)?, row.get::<_, Option<String>>(7)?,
                     )),
                 ).optional().map_err(read_sql)?.ok_or(OwnerOutboxError::InvalidInput("invalid read entry"))?;
-                let (append_key, delivery_id, digest, blob_digest, byte_length, created_at_ms, declaration_json) = entry;
+                let (append_key, delivery_id, digest, blob_digest, byte_length, created_at_ms, declaration_json, automation_json) = entry;
                 if digest != blob_digest || byte_length <= 0 {
                     return Err(OwnerOutboxError::Corrupt);
                 }
@@ -881,6 +970,9 @@ pub fn read_pending_page(
                     if let Some(declaration) = stored_declaration(declaration_json)? {
                         header["agentDeclaration"] = serde_json::to_value(declaration)
                             .map_err(|_| OwnerOutboxError::Corrupt)?;
+                    }
+                    if let Some(declaration) = stored_automation_declaration(automation_json)? {
+                        header["automationDeclaration"] = serde_json::to_value(declaration).map_err(|_| OwnerOutboxError::Corrupt)?;
                     }
                     let bytes = page_json(&header)?;
                     let (total, digest, bytes) = slice_header(bytes, cursor.offset, max_bytes)?;
@@ -1138,13 +1230,15 @@ fn find_parent_for_binding(
          base_blob_digest,state,pending_bytes,oldest_entry_at_ms,next_sequence,\
          quarantine_reason,observed_binding_json \
          FROM owner_ydoc_outboxes WHERE workspace_id=?1 AND main_version_id=?2 \
-         AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5",
+         AND object_id=?3 AND lineage_claim_id=?4 AND restore_fence_generation=?5 AND current_path=?6 AND selector_paths_json=?7",
         params![
             binding.workspace_id,
             binding.main_version_id,
             binding.object_id,
             binding.lineage_claim_id,
             binding.restore_fence_generation,
+            binding.current_path,
+            serde_json::to_string(&binding.selector_paths).map_err(|_| OwnerOutboxError::Corrupt)?,
         ],
         parent_from_row,
     )
@@ -1292,6 +1386,21 @@ fn map_restore_error(error: crate::CollabError) -> OwnerOutboxError {
         crate::CollabError::Storage(error) => OwnerOutboxError::Storage(error),
         _ => OwnerOutboxError::Corrupt,
     }
+}
+
+pub(crate) fn stored_automation_declaration(
+    value: Option<String>,
+) -> Result<Option<AutomationDeclaration>, OwnerOutboxError> {
+    value
+        .map(|json| {
+            let declaration: AutomationDeclaration =
+                serde_json::from_str(&json).map_err(|_| OwnerOutboxError::Corrupt)?;
+            declaration
+                .validate()
+                .map_err(|_| OwnerOutboxError::Corrupt)?;
+            Ok(declaration)
+        })
+        .transpose()
 }
 
 #[cfg(test)]

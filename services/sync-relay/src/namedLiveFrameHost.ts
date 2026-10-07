@@ -1,5 +1,5 @@
 import type { StorageContext } from "./storage/context.js";
-import { parseLiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
+import { parseAutomationDeclaration, parseLiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { EngineClient, NativeAppliedPosition } from "@dohc/workspace-engine-client/daemon";
@@ -211,8 +211,17 @@ function captureLiveFrameHost(options: {
       try {
         const deliveryId = parseLiveUpdateIdentifier(input.deliveryId), updateDigest = parseLiveUpdateDigest(input.updateDigest);
         const updateBytes = input.updateBytes;
+        const trustedAutomation = input.trustedAutomation === undefined ? undefined : parseAutomationDeclaration(input.trustedAutomation);
+        const trustedAutomationPress = input.trustedAutomationPress === undefined ? undefined : {
+          hostPressId: parseLiveUpdateIdentifier(input.trustedAutomationPress.hostPressId),
+          automationId: parseLiveUpdateIdentifier(input.trustedAutomationPress.automationId),
+        };
+        if (trustedAutomation && actor.kind !== "owner") return {result: "refused", reason: "authority-refused"};
+        if (trustedAutomationPress && (!trustedAutomation || actor.kind !== "owner")) return {result: "refused", reason: "authority-refused"};
+        const trustedAutomationGrant = input.trustedAutomationGrant;
+        if (trustedAutomationGrant && (!trustedAutomation || actor.kind !== "owner" || trustedAutomationPress)) return {result: "refused", reason: "authority-refused"};
         const authorContext = input.authorContext === undefined ? undefined : parseLiveAuthorContext(input.authorContext);
-        if (updateBytes.length < 1 || updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "capacity-refused" };
+        if (updateBytes.length < 1 || updateBytes.length > bounds.maxSubmissionBytes) return { result: "refused", reason: "invalid-update" };
         if (createHash("sha256").update(updateBytes).digest("hex") !== updateDigest) return { result: "refused", reason: "invalid-update" };
         const read = storage.readLiveUpdateJournalCut({ document });
         if (read.kind !== "cut") return { result: "refused", reason: read.reason };
@@ -224,11 +233,14 @@ function captureLiveFrameHost(options: {
           suffix: cut.suffix.map(row => row.bytes), candidate: updateBytes,
           retainStateUpdate: liveAuthorCheckpointAnticipated(cut.suffix.map(row => row.metadata),
             limitLiveDeclaredAgents(cut.suffix.map(row => row.metadata), authority,
-              deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount))) }, signal);
+              trustedAutomation ? [{kind: "automation", ...trustedAutomation}] : deriveLiveAuthorSnapshot(storage as StorageContext, authority, authorContext, trustedAccount))) }, signal);
         check(signal);
         if (validation.kind === "retry") return {result: "retry", reason: validation.reason};
         const committed = storage.commitLiveUpdateJournal({ host: native.coordinate, actor, expectedAuthority: authority,
           ...(trustedAccount ? {trustedAccount} : {}),
+          ...(trustedAutomation ? {trustedAutomation} : {}),
+          ...(trustedAutomationPress ? {trustedAutomationPress} : {}),
+          ...(trustedAutomationGrant ? {trustedAutomationGrant} : {}),
           metadata: { deliveryId, updateDigest, binding, ...(authorContext ? {authorContext} : {}) }, cutToken: cut, validation, updateBytes, receivedAtMs: Date.now() });
         if (committed.result.kind === "refused") return { result: "refused", reason: committed.result.reason };
         if (committed.result.kind === "retry") return { result: "retry", reason: committed.result.reason };
