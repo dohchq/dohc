@@ -40,6 +40,7 @@ describe("first app creation", () => {
       workspaceId: "ws-apps",
       relativePath: "app/index.html",
       initialText: expect.stringContaining("<h1>My app</h1>"),
+      exclusive: true,
     });
   });
 
@@ -57,7 +58,7 @@ describe("first app creation", () => {
     ).resolves.toEqual({ root: "app-2" });
 
     expect(createWorkspaceFolder).toHaveBeenCalledWith({
-      workspaceId: "ws-apps", relativePath: "app-2",
+      workspaceId: "ws-apps", relativePath: "app-2", exclusive: true,
     });
     expect(createWorkspaceFile).toHaveBeenCalledWith(
       expect.objectContaining({ relativePath: "app-2/index.html" }),
@@ -90,14 +91,17 @@ describe("first app creation", () => {
       ),
     ).toBe("app-2");
   });
-  it("reuses an empty folder with its existing casing", async () => {
+  it("chooses a fresh root even when a listed folder is empty", async () => {
     const createWorkspaceFolder = vi.fn(async () => ({ path: "App/scripts" }));
     const createWorkspaceFile = vi.fn(async () => ({ path: "App/index.html" }));
     await expect(createFirstAppFiles({
       workspaceId: "ws-apps", files: [], folders: ["App"],
       mutations: { createWorkspaceFile, createWorkspaceFolder, deleteWorkspacePath: vi.fn(async () => ({ trashed: true })) },
-    })).resolves.toEqual({ root: "App" });
-    expect(createWorkspaceFolder.mock.calls).toEqual([[{ workspaceId: "ws-apps", relativePath: "App/scripts" }]]);
+    })).resolves.toEqual({ root: "app-2" });
+    expect(createWorkspaceFolder.mock.calls).toEqual([
+      [{ workspaceId: "ws-apps", relativePath: "app-2", exclusive: true }],
+      [{ workspaceId: "ws-apps", relativePath: "app-2/scripts", exclusive: true }],
+    ]);
   });
 
   it("refuses roots occupied by files or nested folders", () => {
@@ -155,7 +159,7 @@ describe("first app creation", () => {
   it.each([false, true])("rolls back a third-file failure and preserves a pre-existing root: %s", async (rootExists) => {
     const files = new Set<string>();
     const folders = new Set(rootExists ? ["App"] : []);
-    const initialRoot = rootExists ? "App" : "app";
+    const initialRoot = rootExists ? "app-2" : "app";
     const failure = new Error("third file failed");
     let failThirdFile = true;
     let writes = 0;
@@ -179,7 +183,7 @@ describe("first app creation", () => {
       workspaceId: "ws-apps", files: [], folders: [...folders], mutations,
     })).rejects.toBe(failure);
     expect(deleteWorkspacePath.mock.calls.map(([payload]) => payload.relativePath)).toEqual([
-      `${initialRoot}/styles.css`, `${initialRoot}/index.html`, ...(rootExists ? [] : [initialRoot]),
+      `${initialRoot}/styles.css`, `${initialRoot}/index.html`, initialRoot,
     ]);
     expect([...files]).toEqual([]);
     expect([...folders]).toEqual(rootExists ? ["App"] : []);
@@ -201,11 +205,12 @@ describe("first app creation", () => {
       mutations: { createWorkspaceFolder, createWorkspaceFile, deleteWorkspacePath },
     })).rejects.toThrow("package write failed");
     expect(deleteWorkspacePath.mock.calls).toEqual([
-      [{ workspaceId: "ws-apps", relativePath: "App/scripts/build-static.mjs" }],
-      [{ workspaceId: "ws-apps", relativePath: "App/scripts" }],
-      [{ workspaceId: "ws-apps", relativePath: "App/script.js" }],
-      [{ workspaceId: "ws-apps", relativePath: "App/styles.css" }],
-      [{ workspaceId: "ws-apps", relativePath: "App/index.html" }],
+      [{ workspaceId: "ws-apps", relativePath: "app-2/scripts/build-static.mjs" }],
+      [{ workspaceId: "ws-apps", relativePath: "app-2/scripts", emptyFolderOnly: true }],
+      [{ workspaceId: "ws-apps", relativePath: "app-2/script.js" }],
+      [{ workspaceId: "ws-apps", relativePath: "app-2/styles.css" }],
+      [{ workspaceId: "ws-apps", relativePath: "app-2/index.html" }],
+      [{ workspaceId: "ws-apps", relativePath: "app-2", emptyFolderOnly: true }],
     ]);
   });
 

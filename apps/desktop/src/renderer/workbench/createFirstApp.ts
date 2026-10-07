@@ -8,25 +8,14 @@ export function firstAppRoot(
   files: WorkspaceFileEntry[],
   folders: string[],
 ): string {
-  const filePaths = new Set(files.map((file) => file.path.toLowerCase()));
-  const nonemptyRoots = new Set(
+  const occupiedRoots = new Set(
     [...files.map((file) => file.path), ...folders]
-      .filter((path) => path.includes("/"))
       .map((path) => path.split("/")[0]!.toLowerCase()),
-  );
-  const existingFolderByLowerPath = new Map(
-    folders.map((folder) => [folder.toLowerCase(), folder]),
   );
   for (let index = 1; index < 10_000; index += 1) {
     const defaultRoot = index === 1 ? "app" : `app-${index}`;
     const normalizedRoot = defaultRoot.toLowerCase();
-    const root = existingFolderByLowerPath.get(normalizedRoot) ?? defaultRoot;
-    if (
-      !filePaths.has(normalizedRoot) &&
-      !nonemptyRoots.has(normalizedRoot)
-    ) {
-      return root;
-    }
+    if (!occupiedRoots.has(normalizedRoot)) return defaultRoot;
   }
   return `app-${Date.now()}`;
 }
@@ -41,24 +30,20 @@ export async function createFirstAppFiles(input: {
   >;
 }): Promise<{ root: string }> {
   const root = firstAppRoot(input.files, input.folders);
-  const rootExists = input.folders.some(
-    (folder) => folder.toLowerCase() === root.toLowerCase(),
-  );
   const files = generateAppSource({
     title: "My app",
     appRoot: root,
     withDohcJson: true,
   });
-  const createdPaths: string[] = [];
+  const createdPaths: Array<{ path: string; folder: boolean }> = [];
   const createdFolders = new Set([root]);
   try {
-    if (!rootExists) {
-      await input.mutations.createWorkspaceFolder({
-        workspaceId: input.workspaceId,
-        relativePath: root,
-      });
-      createdPaths.push(root);
-    }
+    await input.mutations.createWorkspaceFolder({
+      workspaceId: input.workspaceId,
+      relativePath: root,
+      exclusive: true,
+    });
+    createdPaths.push({ path: root, folder: true });
     for (const file of files) {
       const separator = file.path.lastIndexOf("/");
       if (separator !== -1) {
@@ -67,9 +52,10 @@ export async function createFirstAppFiles(input: {
           await input.mutations.createWorkspaceFolder({
             workspaceId: input.workspaceId,
             relativePath: folder,
+            exclusive: true,
           });
           createdFolders.add(folder);
-          createdPaths.push(folder);
+          createdPaths.push({ path: folder, folder: true });
         }
       }
       const path = `${root}/${file.path}`;
@@ -77,17 +63,19 @@ export async function createFirstAppFiles(input: {
         workspaceId: input.workspaceId,
         relativePath: path,
         initialText: file.content,
+        exclusive: true,
       });
-      createdPaths.push(path);
+      createdPaths.push({ path, folder: false });
     }
     return { root };
   } catch (error) {
     const cleanupErrors: unknown[] = [];
-    for (const path of createdPaths.reverse()) {
+    for (const { path, folder } of createdPaths.reverse()) {
       try {
         await input.mutations.deleteWorkspacePath({
           workspaceId: input.workspaceId,
           relativePath: path,
+          ...(folder ? { emptyFolderOnly: true } : {}),
         });
       } catch (cleanupError) {
         cleanupErrors.push(cleanupError);

@@ -726,6 +726,7 @@ export const CreateWorkspaceFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
   initialText: WORKSPACE_EDITOR_TEXT,
+  exclusive: z.boolean().optional(),
 });
 export type CreateWorkspaceFilePayload = z.infer<
   typeof CreateWorkspaceFilePayload
@@ -745,6 +746,7 @@ export type CreateWorkspaceFileResult = z.infer<
 export const CreateWorkspaceFolderPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
+  exclusive: z.boolean().optional(),
 });
 export type CreateWorkspaceFolderPayload = z.infer<
   typeof CreateWorkspaceFolderPayload
@@ -761,11 +763,14 @@ export type MoveWorkspacePathPayload = z.infer<typeof MoveWorkspacePathPayload>;
 export const DeleteWorkspacePathPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
+  emptyFolderOnly: z.boolean().optional(),
 });
 export type DeleteWorkspacePathPayload = z.infer<
   typeof DeleteWorkspacePathPayload
 >;
 
+// With emptyFolderOnly, false also means an empty folder was removed or a
+// nonempty folder was preserved. This mode never trashes descendants.
 // trashed: true = OS trash; false = the .dohc/trash fallback (cross-
 // filesystem mounts where g_file_trash rejects), which is recoverable too — or
 // a share view, whose delete removes the projection of a moment rather than a

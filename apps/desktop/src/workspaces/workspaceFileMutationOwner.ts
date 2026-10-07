@@ -262,6 +262,7 @@ export function createWorkspaceFileMutationOwner<
                 workspace.rootPath,
                 input.relativePath,
                 input.initialText,
+                { exclusive: input.exclusive },
               );
           if (typeof path !== "string") {
             throw new Error("Shared file create returned an invalid result.");
@@ -285,7 +286,7 @@ export function createWorkspaceFileMutationOwner<
         workspace.rootPath,
         async () =>
           CreateWorkspaceFileResult.parse({
-            path: await createFolder(workspace.rootPath, input.relativePath),
+            path: await createFolder(workspace.rootPath, input.relativePath, { exclusive: input.exclusive }),
           }),
       );
     },
@@ -393,10 +394,11 @@ export function createWorkspaceFileMutationOwner<
       const person = await dependencies.localPerson();
       return await runAdmittedMutation(event, request,
         async ({ input, workspace, receivedShare, authorityId, capture, yDocSessions, assertCurrent }) => {
+          if (receivedShare && input.emptyFolderOnly) throw new Error(SHARE_VIEW_EMPTY_FOLDER_REFUSAL);
           if (!receivedShare) {
             assertWritableWorkspace(workspace);
             return DeleteWorkspacePathResult.parse(await deleteWorkspacePathByHand({ workspace, assertCurrent },
-              input.relativePath, person, { capture, requestId: randomUUID(), trashItem: dependencies.trashItem,
+              input.relativePath, person, { capture, emptyFolderOnly: input.emptyFolderOnly, requestId: randomUUID(), trashItem: dependencies.trashItem,
                 markDeleted: path => yDocSessions.markDeletedUnderPath(authorityId, path) }));
           }
           return await withExclusiveWorkspaceOperation(workspace.rootPath, async (markWorkspaceChanged, lease) => {
