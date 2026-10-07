@@ -784,10 +784,14 @@ test("desktop release stages the Rust engine built for the packaged architecture
     join(process.cwd(), ".github/workflows/desktop-release.yml"),
     "utf8",
   );
-  assert.match(
-    stepBlock(workflow, "Build workspace engine"),
-    /build:engine -- --target "\$\{\{ matrix\.target \}\}"/,
+  const engineCommand = stepBlock(workflow, "Build workspace engine").match(
+    /^\s*pnpm --filter @dohc\/desktop run build:engine (.+)$/m,
   );
+  assert.ok(engineCommand, "the workflow builds the selected Rust target");
+  const engineArgs = engineCommand[1]
+    .replace('"${{ matrix.target }}"', target)
+    .trim().split(/\s+/);
+  assert.equal(buildModule.parseTargetArgument(engineArgs), target);
 });
 
 test("desktop release workflow uploads only distributable release assets", async () => {

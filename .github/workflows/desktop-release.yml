@@ -232,7 +232,7 @@ jobs:
         shell: bash
         run: |
           rustup target add "${{ matrix.target }}"
-          pnpm --filter @dohc/desktop run build:engine -- --target "${{ matrix.target }}"
+          pnpm --filter @dohc/desktop run build:engine --target "${{ matrix.target }}"
 
       - id: signing
         name: Resolve signing mode
