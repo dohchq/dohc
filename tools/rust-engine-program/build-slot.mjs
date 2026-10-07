@@ -20,9 +20,13 @@
 
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
+  readSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -31,7 +35,9 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import { availableParallelism, platform } from "node:os";
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -58,6 +64,20 @@ export function resolveBuildBudget(env = process.env, host = {}) {
     jobs: Math.max(1, Math.floor(cores / slots)),
     diskFloorGb: Number.isFinite(floor) ? floor : 40,
   };
+}
+
+/** Clamp inherited compiler and test settings to this lane's host budget. */
+export function capBuildParallelism(source, maxJobs) {
+  if (!Number.isInteger(maxJobs) || maxJobs < 1) throw new Error("Build parallelism must be a positive integer.");
+  const env = { ...source };
+  for (const name of ["CARGO_BUILD_JOBS", "RUST_TEST_THREADS", "NEXTEST_TEST_THREADS"]) {
+    const matching = Object.keys(env).filter(key => key.toUpperCase() === name);
+    const value = env[name] ?? env[matching[0]] ?? (name === "NEXTEST_TEST_THREADS" ? env.RUST_TEST_THREADS : undefined);
+    for (const key of matching) delete env[key];
+    const requested = Number(value);
+    env[name] = String(Number.isInteger(requested) && requested > 0 ? Math.min(requested, maxJobs) : maxJobs);
+  }
+  return env;
 }
 
 /** Free space on `path`'s volume in GB, or null where it cannot be read. */
@@ -127,12 +147,88 @@ function holders(root, slots, kind) {
     const dir = slotDir(root, i, kind);
     try {
       const owner = JSON.parse(readFileSync(join(dir, "owner.json"), "utf8"));
-      held.push(`${kind}-${i}: pid ${owner.pid} since ${owner.start}`);
+      const status = readStatus(dir, owner);
+      const detail = [status.purpose, status.checkout, status.commit?.slice(0, 12), status.phase].filter(Boolean).join(", ");
+      const elapsed = Math.max(0, Date.now() - Date.parse(owner.start));
+      held.push(`${kind}-${i}: pid ${owner.pid} since ${owner.start}, elapsed ${Math.round(elapsed / 1000)}s${detail ? ` (${detail})` : ""}`);
     } catch {
       if (existsSync(dir)) held.push(`${kind}-${i}: owner unreadable`);
     }
   }
   return held.join("; ");
+}
+
+function metadataFields(metadata = {}) {
+  return Object.fromEntries(["purpose", "checkout", "commit", "phase"].flatMap(name =>
+    typeof metadata[name] === "string" ? [[name, metadata[name].replace(/[\r\n]/gu, " ").slice(0, 300)]] : []));
+}
+
+function readStatus(dir, owner) {
+  try {
+    const status = JSON.parse(readFileSync(join(dir, "status.json"), "utf8"));
+    return status.owner === JSON.stringify(owner) ? metadataFields(status) : {};
+  } catch { return metadataFields(owner); }
+}
+
+function historyEvent(root, event) {
+  try { appendFileSync(join(root, "admission-history.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n"); }
+  catch { /* History informs estimates; it never controls admission. */ }
+}
+
+function serviceHistory(root, kind) {
+  let fd;
+  try {
+    const path = join(root, "admission-history.jsonl");
+    const bytes = statSync(path).size;
+    fd = openSync(path, "r");
+    const start = Math.max(0, bytes - 64 * 1024);
+    const buffer = Buffer.alloc(bytes - start);
+    readSync(fd, buffer, 0, buffer.length, start);
+    const lines = buffer.toString("utf8").split("\n");
+    if (start) lines.shift();
+    return lines.flatMap(line => {
+      try {
+        const event = JSON.parse(line);
+        return event.kind === kind && event.event === "release" && Number.isFinite(event.elapsedMs) && event.elapsedMs > 0 ? [event.elapsedMs] : [];
+      } catch { return []; }
+    }).slice(-20);
+  } catch { return []; }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
+
+/** Read-only status. An estimate is based on completed runs, never an admission rule. */
+export function buildQueueStatus({ root, slots, kind = "build-slot", ticketName, now = Date.now() }) {
+  const queue = queueTickets(root, kind);
+  const position = ticketName ? queue.indexOf(ticketName) + 1 : null;
+  const owners = [];
+  for (let i = 1; i <= slots; i += 1) {
+    const dir = slotDir(root, i, kind);
+    if (!existsSync(dir)) continue;
+    try {
+      const owner = JSON.parse(readFileSync(join(dir, "owner.json"), "utf8"));
+      owners.push({ name: `${kind}-${i}`, purpose: "unknown", ...owner, ...readStatus(dir, owner), elapsedMs: Math.max(0, now - Date.parse(owner.start)) });
+    } catch { owners.push({ name: `${kind}-${i}`, phase: "owner unreadable" }); }
+  }
+  const samples = serviceHistory(root, kind).sort((a, b) => a - b);
+  const serviceMs = samples.length ? samples[Math.floor(samples.length / 2)] : null;
+  const estimateWait = position => {
+    if (serviceMs === null || position < 1 || !owners.every(owner => Number.isFinite(owner.elapsedMs))) return null;
+    const remaining = owners.map(owner => Math.max(0, serviceMs - owner.elapsedMs));
+    while (remaining.length < slots) remaining.push(0);
+    for (let i = 1; i < position; i += 1) {
+      remaining.sort((a, b) => a - b);
+      remaining[0] += serviceMs;
+    }
+    return Math.min(...remaining);
+  };
+  const estimatedWaitMs = position ? estimateWait(position) : null;
+  const waiters = queue.map((name, index) => {
+    try {
+      const record = JSON.parse(readFileSync(join(root, `${kind}-queue`, name), "utf8"));
+      return { ticket: name, position: index + 1, pid: record.pid, purpose: "unknown", ...metadataFields(record), elapsedMs: Math.max(0, now - Date.parse(record.start)), estimatedWaitMs: estimateWait(index + 1) };
+    } catch { return { ticket: name, position: index + 1, purpose: "unknown", phase: "ticket unreadable" }; }
+  });
+  return { root, kind, slots, owners, waiters, queued: queue.length, position, estimate: { waitMs: estimatedWaitMs, serviceMs, samples: samples.length } };
 }
 
 function withSweepLock(root, sweep) {
@@ -357,7 +453,7 @@ function reclaimStaleTickets({ root, kind }) {
   }
 }
 
-function createTicket(root, kind, heartbeatMs) {
+function createTicket(root, kind, heartbeatMs, metadata) {
   const queueDir = join(root, `${kind}-queue`);
   mkdirSync(queueDir, { recursive: true });
   // hrtime uses the host's monotonic clock, shared across its processes.
@@ -366,7 +462,7 @@ function createTicket(root, kind, heartbeatMs) {
   const path = join(queueDir, name);
   const temporary = `${path}.tmp`;
   try {
-    writeFileSync(temporary, JSON.stringify({ pid: process.pid, start: new Date().toISOString(), heartbeatMs }), { flag: "wx" });
+    writeFileSync(temporary, JSON.stringify({ pid: process.pid, start: new Date().toISOString(), heartbeatMs, ...metadataFields(metadata) }), { flag: "wx" });
     renameSync(temporary, path);
   } finally {
     try {
@@ -397,11 +493,12 @@ function createTicket(root, kind, heartbeatMs) {
   return { name, path, remove };
 }
 
-function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket) {
+function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata) {
   const ownerPath = join(dir, "owner.json");
   const ownerRecord = JSON.stringify({
     pid: process.pid,
     start: new Date().toISOString(),
+    ...metadataFields(metadata),
   });
   try {
     writeFileSync(ownerPath, ownerRecord);
@@ -422,6 +519,17 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
   }, heartbeatMs);
   beat.unref();
   let released = false;
+  const startedAt = Date.now();
+  const update = fields => {
+    if (released) return;
+    try {
+      if (readFileSync(ownerPath, "utf8") !== ownerRecord) return;
+      metadata = { ...metadataFields(metadata), ...metadataFields(fields) };
+      writeFileSync(join(dir, "status.json"), JSON.stringify({ owner: ownerRecord, ...metadata, updatedAt: new Date().toISOString() }));
+    } catch { /* Status writes must not lose an acquired slot or its release handle. */ }
+  };
+  update(metadata);
+  historyEvent(root, { event: "admit", kind, name, pid: process.pid, ...metadataFields(metadata) });
   const release = () => {
     if (released) return;
     released = true;
@@ -437,6 +545,7 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
       // lane's slot and re-free its name.
       if (readFileSync(ownerPath, "utf8") !== ownerRecord) return;
       rmSync(dir, { recursive: true, force: true });
+      historyEvent(root, { event: "release", kind, name, pid: process.pid, elapsedMs: Date.now() - startedAt, ...metadataFields(metadata) });
     } catch {
       // Unreadable means nothing of ours is left at the path. A slot that
       // cannot be removed is reclaimed by the next waiter once this
@@ -462,7 +571,7 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation, removeTicket
   // slot until their child cleanup finishes and finally releases it.
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
-  return { name, dir, release };
+  return { name, dir, release, update };
 }
 
 /**
@@ -472,16 +581,59 @@ export function acquireBuildSlot(options) {
   return acquireSlot({ ...options, kind: "build-slot", lanes: "cargo lanes" });
 }
 
+/** Fail-fast ownership for mutable local resources; this creates no waiter queue. */
+export function acquireExclusiveSlot({ root, kind, metadata, cooperativeCancellation = true }) {
+  mkdirSync(root, { recursive: true });
+  const dir = slotDir(root, 1, kind);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try { mkdirSync(dir); }
+    catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      if (attempt) throw new Error(`Another run owns ${dir}: ${holders(root, 1, kind) || "owner unavailable"}.`);
+      let staleMs = 30 * 60_000;
+      try {
+        const { pid } = JSON.parse(readFileSync(join(dir, "owner.json"), "utf8"));
+        // Live PIDs remain protected by the existing reclaimer. Incomplete
+        // claims keep its grace period across the mkdir/write window.
+        if (Number.isInteger(pid) && pid > 0) staleMs = -1;
+      } catch { /* Preserve a recent incomplete claim. */ }
+      reclaimStaleSlots({ root, slots: 1, kind, staleMs });
+      continue;
+    }
+    return claimSlot(dir, `${kind}-1`, defaultHeartbeatMs, cooperativeCancellation, () => {}, root, kind, metadata);
+  }
+}
+
 /**
  * Hold the host's single verification lane for a whole PR gate, so two gates
  * never compete for the same cores and disk. Null on a single-tenant host.
  * A gate can wait behind several others, so this waits up to six hours.
  */
-export function acquireVerificationSlot(env = process.env) {
+export function verificationLanes(env = process.env) {
+  const requested = env.DOHC_VERIFICATION_LANES ?? "1";
+  if (!["1", "2"].includes(requested)) throw new Error("DOHC_VERIFICATION_LANES must be 1 or 2.");
+  const canonical = path => {
+    try { return realpathSync(path).toLowerCase(); }
+    catch { return resolve(path).toLowerCase(); }
+  };
+  const trialRoot = env.DOHC_VERIFICATION_SLOT_ROOT;
+  const cargoRoot = resolveBuildBudget(env)?.root;
+  if (trialRoot && (env.DOHC_VERIFICATION_TRIAL !== "1" || cargoRoot && canonical(trialRoot) === canonical(cargoRoot))) {
+    throw new Error("A verification trial requires DOHC_VERIFICATION_TRIAL=1 and an isolated DOHC_VERIFICATION_SLOT_ROOT; keep Cargo on its shared root.");
+  }
+  if (requested === "2" && !trialRoot) {
+    throw new Error("Two verification lanes require DOHC_VERIFICATION_TRIAL=1 and an isolated DOHC_VERIFICATION_SLOT_ROOT.");
+  }
+  return Number(requested);
+}
+
+export function acquireVerificationSlot(env = process.env, { lightweight = false, metadata, waitMs = 6 * 60 * 60_000 } = {}) {
+  const fullLanes = verificationLanes(env);
   const budget = resolveBuildBudget(env);
   if (!budget) return null;
-  return acquireSlot({ root: budget.root, slots: 1, kind: "verification-slot", lanes: "verification runs",
-    waitMs: 6 * 60 * 60_000, pollMs: 60_000, cooperativeCancellation: true });
+  return acquireSlot({ root: env.DOHC_VERIFICATION_SLOT_ROOT ?? budget.root, slots: lightweight ? 1 : fullLanes,
+    kind: lightweight ? "verification-light-slot" : "verification-slot", lanes: "verification runs", metadata,
+    waitMs, pollMs: 60_000, cooperativeCancellation: true });
 }
 
 /**
@@ -502,6 +654,7 @@ async function acquireSlot({
   staleMs = 30 * 60_000,
   heartbeatMs = defaultHeartbeatMs,
   cooperativeCancellation = false,
+  metadata,
 }) {
   mkdirSync(root, { recursive: true });
   const label = kind.replace("-", " ");
@@ -539,7 +692,7 @@ async function acquireSlot({
         ticket.remove();
         ticket = undefined;
       }
-      ticket ??= createTicket(root, kind, heartbeatMs);
+      ticket ??= createTicket(root, kind, heartbeatMs, metadata);
       refreshQueue();
       const reserved = ahead > 0 && free.length > 0 && ahead >= free.length;
       const sweepMs = reserved ? Math.min(pollMs, 1000) : pollMs;
@@ -564,7 +717,7 @@ async function acquireSlot({
         } catch (error) {
           if (error.code !== "EEXIST") throw error;
         }
-        if (created) return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket);
+        if (created) return claimSlot(dir, `${kind}-${i}`, heartbeatMs, cooperativeCancellation, removeTicket, root, kind, metadata);
       }
     } catch (error) {
       if (!transientFilesystemError(error, root, kind)) throw error;
@@ -589,7 +742,12 @@ async function acquireSlot({
     }
     if (Date.now() >= nextMessageAt) {
       const position = ahead < 0 ? "unavailable" : ahead + 1;
-      console.log(`  waiting for a ${label}: ${holders(root, slots, kind) || "no current holder"}; queue position ${position}`);
+      let status;
+      try { status = buildQueueStatus({ root, slots, kind, ticketName: ticket?.name }); }
+      catch { status = {estimate: {waitMs: null}}; }
+      const estimate = status.estimate.waitMs === null ? "wait estimate unavailable (no comparable completed runs)"
+        : `estimated wait ${Math.round(status.estimate.waitMs / 1000)}s from ${status.estimate.samples} completed runs`;
+      console.log(`  waiting for a ${label}: ${holders(root, slots, kind) || "no current holder"}; ${estimate}; queue position ${position}`);
       nextMessageAt = Date.now() + pollMs;
     }
     await sleep(Math.min(pollMs, 1000, Math.max(1, deadline - Date.now())), undefined, { signal: cancellation.signal });
@@ -599,4 +757,28 @@ async function acquireSlot({
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
   }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const {values} = parseArgs({ options: {status: {type: "boolean"}, root: {type: "string"}} });
+  if (!values.status) throw new Error("Use --status [--root <directory>] to inspect queues without acquiring a slot.");
+  const budget = resolveBuildBudget();
+  const cargoRoot = values.root ?? budget?.root;
+  const verificationRoot = values.root ?? process.env.DOHC_VERIFICATION_SLOT_ROOT ?? budget?.root;
+  let verificationSlots = 1;
+  let verificationConfigurationError = null;
+  try { verificationSlots = verificationLanes(); }
+  catch (error) { verificationConfigurationError = error.message; }
+  // Inspect any existing second lane even when this shell cannot admit one.
+  const inspectedVerificationSlots = verificationRoot && existsSync(join(verificationRoot, "verification-slot-2"))
+    ? Math.max(2, verificationSlots) : verificationSlots;
+  const lanes = [
+    ...(cargoRoot ? [buildQueueStatus({root: cargoRoot, slots: budget?.slots ?? 4})] : []),
+    ...(verificationRoot ? [
+      buildQueueStatus({root: verificationRoot, kind: "verification-slot", slots: inspectedVerificationSlots}),
+      buildQueueStatus({root: verificationRoot, kind: "verification-light-slot", slots: 1}),
+    ] : []),
+  ];
+  console.log(JSON.stringify({cargoRoot: cargoRoot ?? null, verificationRoot: verificationRoot ?? null,
+    verificationSlots: verificationConfigurationError ? null : verificationSlots, verificationConfigurationError, lanes}, null, 2));
 }
