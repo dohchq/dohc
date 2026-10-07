@@ -79,6 +79,8 @@ import {
   registerOpenWorkspaceIpcHandler,
 } from "./ipc/workspaceRegistryIpc";
 import { createAppLifecycle } from "./appLifecycle";
+import { captureOpenPathFailureTarget } from "./window/openPathFailureTarget";
+import { createOpenPathFailures } from "./window/openPathFailures";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
@@ -205,7 +207,6 @@ import {
   removeWorkspace,
   setWorkspaceRemote,
   acknowledgeWorkspaceShareSkips,
-  endWorkspaceShareView,
   setWorkspaceShareMounts,
   markWorkspaceShareRosterPulled,
   setWorkspaceShareRoster,
@@ -334,7 +335,7 @@ import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import { SharedChannelReadOnlyError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { type ShareAccess } from "@dohc/security-contract/share-selector";
 import {
-  fetchShareViewInfo, fetchShareAutomationSwitchable,
+  fetchShareViewInfo, fetchShareViewAccess, fetchShareAutomationSwitchable,
 } from "./workspaces/shareViewInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
@@ -4689,6 +4690,9 @@ function createShareViewFilesForOperation(
     resolveRelay: async (target) => {
       await warmCredentialCache().catch(() => undefined);
       const credentials = cachedCredentials;
+      if (target.kind === "standalone" && !target.recipientUserId) {
+        throw new Error("This share must be reopened. Choose Forget in the workspace menu, then open the share code again. Forget keeps your files.");
+      }
       if (!credentials?.relayUrl) {
         if (target.kind === "standalone") {
           throw new Error("Sign in to your server first.");
@@ -4698,6 +4702,7 @@ function createShareViewFilesForOperation(
       if (
         (target.relayUrl &&
           !relayUrlsMatch(credentials.relayUrl, target.relayUrl)) ||
+        (target.kind === "standalone" && target.recipientUserId !== credentials.userId) ||
         (target.kind === "mount" &&
           target.recipientEmail != null &&
           credentials.email != null &&
@@ -4753,10 +4758,19 @@ function createShareViewFilesForOperation(
             });
       await recorder([...refusals]);
     },
-    markEnded: async (target) => {
+    updateUnsavedPaths: async (target, paths) => {
+      assertCurrent();
+      const view = currentWorkspace().shareView;
+      if (target.kind !== "standalone" || !view) throw new Error("This shared view is no longer registered.");
+      setWorkspaceShareView(target.workspaceId, { ...view, unsavedPaths: paths });
+    },
+    markEnded: async (target, unsavedPaths) => {
       assertCurrent();
       if (target.kind === "standalone") {
-        endWorkspaceShareView(target.workspaceId);
+        const view = currentWorkspace().shareView;
+        if (!view) throw new Error("This shared view is no longer registered.");
+        setWorkspaceShareView(target.workspaceId, { ...view, ended: true,
+          ...(unsavedPaths !== undefined ? { unsavedPaths } : {}) });
         return;
       }
       const mounts = storedShareMounts(currentWorkspace());
@@ -4812,6 +4826,10 @@ function withShareViewFilesOperation<Result>(
 }
 
 shareViewFiles = {
+  narrow: (lease, target, assertCurrent, commit) =>
+    withShareViewFilesOperation(target, files => files.narrow(lease, target, assertCurrent, commit)),
+  end: (lease, target, assertCurrent) =>
+    withShareViewFilesOperation(target, (files) => files.end(lease, target, assertCurrent)),
   mount: (lease, target) =>
     withShareViewFilesOperation(target, (files) => files.mount(lease, target)),
   change: (lease, target, change) =>
@@ -5017,6 +5035,11 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       contents.on("did-finish-load", onLoad);
       contents.on("did-fail-load", onFail);
     }),
+    openFailureTarget: (window) => captureOpenPathFailureTarget(window, {
+      isLive: () => desktopWindows.showsNotices(window),
+      currentSession: () => rendererWorkspaceSessions.current(window.webContents),
+      admittedCount: () => rendererWorkspaceSessions.admittedCount(window.webContents),
+    }),
     current: () => targetWindow(undefined),
     hasWorkspace: () => liveWorkspaceWindow() !== undefined,
     hasAny: () => BrowserWindow.getAllWindows().length !== 0,
@@ -5029,6 +5052,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
   },
   workspaces: {
     openPath: openWorkspacePath,
+    recordOpenFailure: recordOpenPathFailure,
+    reportOpenFailure: (path, error, window) => openPathFailures.report(path, error, window.webContents),
     refreshNativeSurfaces: refreshNativeWorkspaceSurfaces,
   },
   bootstrap: {
@@ -5207,6 +5232,23 @@ async function openWorkspacePath(
   refreshNativeWorkspaceSurfaces();
   return workspace;
 }
+
+function recordOpenPathFailure(path: string, error: unknown): void {
+  console.error(`[desktop] could not open launch path ${path}:`, error);
+}
+
+// The window's renderer turns each failure into a toast and a Notices row.
+const openPathFailures = createOpenPathFailures<WebContents>({
+  workspaceIdOf: (contents) => rendererWorkspaceSessions.current(contents)?.workspaceId ?? null,
+  notify: (contents) => contents.send(CHANNELS.workspacePathOpenFailed),
+  reopen: async (path, contents) => {
+    if (await openWorkspacePath(path, BrowserWindow.fromWebContents(contents) ?? undefined)) return;
+    // Nothing opens there now. Stat's own error says why, such as ENOENT.
+    statSync(path);
+    throw new Error("dohc can open only a file or a folder.");
+  },
+  record: recordOpenPathFailure,
+});
 
 // The navigation policy is constant for the process lifetime (env var and
 // packaged bundle dir cannot change), so compute it once.
@@ -5735,7 +5777,12 @@ function registerIpcHandlers(): void {
       localPerson,
       withWorkspaceOperation: work => withRendererWorkspaceOperation(event.sender, input.workspaceId,
         "Record creation stopped because this window changed workspaces.", work),
-      editContext: (operation: DesktopWorkspaceOperation, person) => collectionEditContextFor(operation, person),
+      editContext: (operation: DesktopWorkspaceOperation, person) => {
+        if (shareViewIsPresent(operation.workspace.shareView)) {
+          throw new Error("New record is not available in received shares yet. Ask the owner to create the record.");
+        }
+        return collectionEditContextFor(operation, person);
+      },
     });
   });
   handleIpc(CHANNELS.dataset, async (event, raw: unknown) => {
@@ -6010,8 +6057,13 @@ function registerIpcHandlers(): void {
     registerHandler: handleIpc,
     assertTrustedSender, withRendererWorkspaceOperation, loadAndCacheCurrentCredentials,
     warmCredentialCache, currentCredentials: () => cachedCredentials,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    onSenderClosed: (sender, close) => {
+      sender.once("destroyed", close);
+      return () => { sender.removeListener("destroyed", close); };
+    },
     engineDaemonStartup: () => desktopEngine.startup,
-    fetchShareViewInfo, usableRoot, readdir, mkdir, createJoinedWorkspace,
+    fetchShareViewInfo, fetchShareViewAccess, usableRoot, readdir, mkdir, createJoinedWorkspace,
     setWorkspaceShareView, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
     canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
     receivedShareEngine, openWorkspaceActivity, requireWorkspace, notifyRenderer,
@@ -6246,6 +6298,8 @@ function registerIpcHandlers(): void {
     markNotices: (input) => noticeStore().mark(input.notices, input.mark, input.account),
     runSkippedScheduleNow: async (input) => ({ note: await runSkippedScheduleNow(input.notice, input.account) }),
     retryAutomationNotice: (input) => retryFromFailureNotice({ notices: noticeStore(), retry: retryAutomationFromNotice }, input),
+    takeWorkspacePathOpenFailures: (_input, { event }) => openPathFailures.take(event.sender),
+    retryWorkspacePathOpen: (input, { event }) => openPathFailures.retry(input.attemptId, event.sender),
   });
 
   workspaceEngineIpc.registerYDoc();

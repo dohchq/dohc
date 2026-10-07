@@ -1,3 +1,4 @@
+import {isDeepStrictEqual} from "node:util";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { AutomationScheduler, type SchedulerClock, type ScheduleRecord } from "@dohc/automation-executor/automation-scheduler";
@@ -13,7 +14,7 @@ import {
   type RunAdmission,
 } from "@dohc/automation-executor/collection-automations";
 import { claimPerson } from "@dohc/automation-executor/collection-automation-run";
-import { AutomationRunWait, SHARED_BUTTON_UNCHECKED } from "@dohc/automation-executor/button-presser";
+import { AutomationRunWait, SHARED_BUTTON_UNCHECKED, SHARED_BUTTON_DENIED, SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD } from "@dohc/automation-executor/button-presser";
 import { collectionRecordWrites } from "@dohc/automation-executor/collection-record-edits";
 import { groupMessagesNotice } from "@dohc/automation-executor/group-messages-notice";
 import { parseReachHandover } from "@dohc/automation-executor/reach-verdicts";
@@ -48,6 +49,11 @@ import {
 import { replicaAutomationChat, replicaChatStore, replicaNoticePoster } from "./automationChatWrites";
 import { ServerClaimEngine, type LiveClaimLedger } from "./automationLiveClaims";
 import { replicaRecordEditContext, replicaRecordEngine } from "./automationRecordEdits";
+import {automationRecordPresser} from "./automationRecordPresser";
+import {automationRecordDelivery, AutomationRecordBindingChanged} from "./automationRecordDelivery";
+import {createAutomationAcceptedRecords} from "./automationAcceptedRecords";
+import type {NamedFrameHostSession} from "./namedLiveFrameSession";
+import type {LiveObjectBinding} from "@dohc/live-session-contract/live-object-binding";
 import { startAutomationReplicas, type AutomationReplica } from "./automationReplicas";
 import type { OwnerScope, ServerRuns } from "./automationServerRoutes";
 import type { RelayDatasetHost } from "./datasetHost";
@@ -117,6 +123,10 @@ export type ServerExecutor = Pick<
 export interface AutomationServerOptions {
   storage: SyncRelayStorage;
   datasetHost?: RelayDatasetHost;
+  recordDelivery?: {
+    namespace: string;
+    capture(input: {binding: LiveObjectBinding; shareId: string; ownerUserId: string}, signal: AbortSignal): Promise<NamedFrameHostSession>;
+  };
   /** This server, as the owner's settings name it. */
   server: AutomationServer;
   replicas: Omit<Parameters<typeof startAutomationReplicas>[0], "storage" | "wanted" | "onChanged" | "onEngineEvent" | "onPulled" | "onReconciled" | "onError">;
@@ -145,6 +155,9 @@ export interface AutomationServerOptions {
 
 /** One workspace this server runs, before its executor and press loop exist. */
 interface WorkspaceState {
+  flushRecordDelivery?(): Promise<void>;
+  refreshRecord?(path: string): Promise<void>;
+  refreshAcceptedRecords?(): Promise<void>;
   readonly replica: AutomationReplica;
   /** The copy's engine, with the live host's claims beside its own. */
   readonly adapter: ServerClaimEngine;
@@ -490,7 +503,11 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     clearTimeout(ws.syncTimer);
     ws.syncTimer = undefined;
     let failed = false;
-    ws.syncing = ws.replica.sync().then(() => { ws.syncFailures = 0; }, (error: unknown) => {
+    ws.syncing = (async () => {
+      // Each lane finishes independently. A waiting draft never prevents sync.
+      const results = await Promise.allSettled([ws.flushRecordDelivery?.(), ws.replica.sync()]);
+      for (const result of results) if (result.status === "rejected") throw result.reason;
+    })().then(() => { ws.syncFailures = 0; }, (error: unknown) => {
       if (ws.replica.signal.aborted) return;
       failed = true;
       ws.syncFailures += 1;
@@ -525,11 +542,82 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     const { workspaceId, ownerUserId } = replica;
     const runStore = createAutomationRunStore(replica.root, metadataDirOf(replica.metadataDir));
     const chat = replicaAutomationChat({ runStore, replica, store: replicaChatStore(replica), storage, nowMs, ownerName: () => ownerName(ws) });
+    // A canonical sync changes the replica's draft revision. Keep it outside
+    // another write's preparation and settlement, including background retries.
+    const serializeRecords = <T>(work: () => Promise<T>) => replica.withRecordWork(work);
+    const recordEngine = replicaRecordEngine(replica);
+    recordEngine.onDeliveryError = (path, error) => options.onError(`deliver automation record "${path}" in workspace "${workspaceId}"`, error);
+    recordEngine.checkWriteAuthority = async (path, declaration, signal) => {
+      if (declaration.attribution.onBehalfOf === undefined || declaration.attribution.onBehalfOf === ownerUserId) return;
+      const authority = await automationRecordPresser(replica, declaration, signal);
+      if (!authority || !storage.automationRecordWriteAllowed({workspaceId, ownerUserId, currentPath: path, declaration, authority})) {
+        throw new Error("This automation cannot change this record with the access of the person who started it.");
+      }
+    };
+    const configured = options.recordDelivery;
+    if (configured) {
+      const delivery = automationRecordDelivery({replica, namespace: configured.namespace, ownerUserId,
+        capture: async (binding, signal) => {
+          let current;
+          try {current = storage.automationRecordBinding(workspaceId, ownerUserId, binding.currentPath);}
+          catch (error) {
+            if (error instanceof Error && error.message === "The shared file is unavailable. Restore access, then try again.") throw new AutomationRecordBindingChanged("stale-binding");
+            throw error;
+          }
+          if (!current || !isDeepStrictEqual(current.binding, binding)) throw new AutomationRecordBindingChanged(
+            current && current.binding.restoreFenceGeneration !== binding.restoreFenceGeneration ? "restore-fenced" : "binding-changed", current?.binding);
+          return configured.capture({...current, ownerUserId}, signal);
+        }});
+      const accepted = createAutomationAcceptedRecords({replica, namespace: configured.namespace, storage,
+        // Fresh accepted state starts new work; quarantined writes remain terminal.
+        synchronize: (binding, signal) => delivery.synchronize(binding, signal, true),
+        onError: (path, error) => options.onError(`refresh automation record "${path}" in workspace "${workspaceId}"`, error)});
+      ws.refreshAcceptedRecords = accepted.refreshChanged;
+      ws.refreshRecord = async path => {
+        try {await accepted.refresh(path);}
+        catch (error) {
+          options.onError(`refresh automation record "${path}" in workspace "${workspaceId}"`, error);
+          throw error;
+        }
+      };
+      recordEngine.prepareSharedRecord = async (path, signal) => {
+        const current = storage.automationRecordBinding(workspaceId, ownerUserId, path);
+        if (current) {
+          try {await delivery.synchronize(current.binding, signal, true); await accepted.track(current.binding);}
+          catch (error) {
+            options.onError(`prepare automation record "${path}" in workspace "${workspaceId}"`, error);
+            throw error;
+          }
+        }
+      };
+      recordEngine.deliverSharedRecord = async (path, signal) => {
+        const current = storage.automationRecordBinding(workspaceId, ownerUserId, path);
+        if (current) {await delivery.drain(current.binding, signal); await accepted.track(current.binding);}
+      };
+      let draining: Promise<void> | undefined;
+      ws.flushRecordDelivery = () => draining ??= (async () => {
+        let after = null;
+        const failures: unknown[] = [];
+        do {
+          const page = await replica.client.ownerYDocListDrafts({id: replica.nextRequestId(), workspace: replica.workspace, deadlineMs: 30_000}, {after, limit: 64, pendingOnly: true}, replica.signal);
+          for (const draft of page.drafts) if (draft.pendingBytes > 0 && draft.state !== "quarantined") {
+            try {await serializeRecords(() => delivery.drain(draft.binding, replica.signal, draft.outboxId ?? undefined));}
+            catch (error) {failures.push(error); options.onError(`deliver automation record "${draft.binding.currentPath}" in workspace "${workspaceId}"`, error);}
+          }
+          after = page.next;
+        } while (after !== null);
+        if (failures.length) throw failures[0];
+      })().finally(() => {draining = undefined;});
+    } else {
+      recordEngine.prepareSharedRecord = async path => {
+        if (storage.automationRecordBinding(workspaceId, ownerUserId, path)) throw new AutomationRunWait("Waiting for the shared file host");
+      };
+    }
     return {
       withEngine: async (work) => replica.signal.aborted ? null : await work(adapter),
       withRecordWrites: async (signal, work) => {
         try {
-          return await work(collectionRecordWrites(replicaRecordEditContext(replica, replicaRecordEngine(replica), signal)));
+          return await serializeRecords(() => work(collectionRecordWrites(replicaRecordEditContext(replica, recordEngine, signal))));
         } finally {
           syncSoon(ws);
         }
@@ -537,7 +625,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       // Only the owner's routes undo a run here, and Undo writes as that person.
       withUndoWrites: async (signal, work) => {
         try {
-          return await work(collectionRecordWrites(replicaRecordEditContext(replica, replicaRecordEngine(replica), signal, true)));
+          return await serializeRecords(() => work(collectionRecordWrites(replicaRecordEditContext(replica, recordEngine, signal, true))));
         } finally {
           syncSoon(ws);
         }
@@ -728,7 +816,14 @@ export async function startAutomationServer(options: AutomationServerOptions) {
         storage.settleAutomationPress({ workspaceId: scope.workspaceId, ownerUserId: scope.ownerUserId, ...input, nowMs: nowMs() });
       },
       inspections: () => storage.listButtonInspections(scope),
-      answerInspection: async (generation, inspectionId, result) => storage.answerButtonInspection({ ...scope, generation, inspectionId }, result),
+      answerInspection: async (generation, inspectionId, result) => {
+        if (result.kind !== "ready") {
+          options.onError(`inspect shared Button "${inspectionId}" in workspace "${scope.workspaceId}"`, new Error(result.reason));
+          result = {kind: result.kind, reason: result.kind === "unchecked" ? SHARED_BUTTON_UNCHECKED
+            : [SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_HELD].includes(result.reason) ? result.reason : SHARED_BUTTON_DENIED};
+        }
+        storage.answerButtonInspection({ ...scope, generation, inspectionId }, result);
+      },
     };
   }
 
@@ -736,6 +831,15 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     const state: WorkspaceState = {
       replica,
       adapter: new class extends ServerClaimEngine {
+        override async getCollectionRecord(input: Parameters<ServerClaimEngine["getCollectionRecord"]>[0]) {
+          const record = await super.getCollectionRecord(input);
+          if (state.refreshRecord) {await state.refreshRecord(record.record.path); return super.getCollectionRecord(input);}
+          return record;
+        }
+        override async queryCollectionRecords(input: Parameters<ServerClaimEngine["queryCollectionRecords"]>[0]) {
+          await state.refreshAcceptedRecords?.();
+          return super.queryCollectionRecords(input);
+        }
         override async claimNextAutomation(input: Parameters<ServerClaimEngine["claimNextAutomation"]>[0]) {
           const claim = await super.claimNextAutomation(input);
           const person = claim === null ? null : claimPerson(claim);
@@ -745,7 +849,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
       }([replica.client, replica.workspace, { workspaceId: replica.workspaceId }], {
         ledger: () => options.live?.ledger(replica.workspaceId) ?? null,
         storage,
-        sync: () => replica.sync(),
+        sync: () => ws.replica.sync(),
         onFailuresChanged: () => ws.executor.failuresChanged(),
         onError: (context, error) => options.onError(`live claims in workspace "${replica.workspaceId}": ${context}`, error),
       }),
@@ -777,6 +881,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     for (const check of [...copyWaiters]) check();
     // A write to the host record wakes the scheduler; it never asks on a timer.
     scheduler.add(replica.workspaceId, ws.executor, { ...hostSeam(state, () => ws), asksAgain: () => false });
+    if (ws.flushRecordDelivery) syncSoon(ws);
     void ws.executor.open().then(() => { follow(ws); reportHolds(ws); if (options.datasetHost) ws.executor.failuresChanged(); }, (error: unknown) =>
       options.onError(`open the automations of workspace "${replica.workspaceId}"`, error));
   }
@@ -809,6 +914,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     scheduler.remove(ws.replica.workspaceId);
     ws.presses.stop();
     await ws.executor.dispose();
+    await ws.syncing?.catch(() => undefined);
     await ws.adapter.close();
     await ws.reporting.catch(() => undefined);
   }
@@ -883,6 +989,7 @@ export async function startAutomationServer(options: AutomationServerOptions) {
     wanted: wantedWorkspaces,
     onChanged: replicaChanged,
     onEngineEvent: engineEvent,
+    onBeforeSync: workspaceId => hosted.get(workspaceId)?.refreshAcceptedRecords?.() ?? Promise.resolve(),
     onPulled: (workspaceId, paths) => {
       const ws = hosted.get(workspaceId);
       if (!ws) return;

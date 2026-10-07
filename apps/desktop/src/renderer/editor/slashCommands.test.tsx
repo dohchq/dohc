@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { createElement, useEffect, useRef, useState } from "react";
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
@@ -12,10 +12,9 @@ import {
   type SlashCommandState,
 } from "./slashCommands";
 
-// Same Range/scroll stubs the other picker tests use — the plugin calls
+// Same Range stubs the other picker tests use — the plugin calls
 // view.coordsAtPos, which reaches into DOM Range measurement under jsdom.
 beforeEach(() => {
-  Element.prototype.scrollIntoView = vi.fn();
   Object.defineProperty(Range.prototype, "getClientRects", {
     configurable: true,
     value: () => [],
@@ -40,6 +39,8 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
+
+import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
 
 const OPEN_STATE_BASE = {
   open: true as const,
@@ -186,5 +187,44 @@ describe("SlashCommandMenu placement anchoring", () => {
     // the edge next to the cursor stays put — no per-keystroke leaping.
     expect(menu.style.bottom).toBe("106px");
     expect(menu.style.top).toBe("");
+  });
+});
+
+// The menu is taller than its cap, and the editor keeps focus while its keys
+// move the active option.
+describe("SlashCommandMenu on the Menu part's recipe", () => {
+  it("marks the active option and scrolls only the list to show it", () => {
+    const restore = mockListLayout(200);
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      const props = { onSelect: () => {}, onHover: () => {} };
+      const { rerender } = render(createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE }, ...props }));
+      const list = screen.getByRole("listbox", { name: "slash commands" });
+      const options = screen.getAllByRole("option");
+      const last = options.at(-1)!;
+      expect(options[0]!.hasAttribute("data-active")).toBe(true);
+      expect(inListView(list, last)).toBe(false);
+
+      rerender(createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE, selected: options.length - 1 }, ...props }));
+      expect(last.hasAttribute("data-active")).toBe(true);
+      expect(options[0]!.hasAttribute("data-active")).toBe(false);
+      expect(inListView(list, last)).toBe(true);
+      rerender(createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE, selected: 0 }, ...props }));
+      expect(inListView(list, options[0]!)).toBe(true);
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("takes the active option only from a pointer that moves", () => {
+    const onHover = vi.fn();
+    render(createElement(SlashCommandMenu, { state: { ...OPEN_STATE_BASE }, onSelect: () => {}, onHover }));
+    const second = screen.getAllByRole("option")[1]!;
+    fireEvent.mouseMove(second, { movementX: 0, movementY: 0 });
+    expect(onHover).not.toHaveBeenCalled();
+    fireEvent.mouseMove(second, { movementX: 0, movementY: 3 });
+    expect(onHover).toHaveBeenCalledWith(1);
   });
 });

@@ -1,4 +1,4 @@
-import { AtSign, FileText, Send } from "lucide-react";
+import { AtSign, FileText, Hash, Send } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   activeMentionQuery,
@@ -10,6 +10,21 @@ import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
 import { ChatAvatar } from "./ChatAvatar";
 import { SkeletonRows } from "../ui/SkeletonRows";
+import {
+  MENU_ACTIVE_OPTION,
+  MENU_DETAIL,
+  MENU_ENTER,
+  MENU_FRAME,
+  MENU_ICON,
+  MENU_LABEL,
+  MENU_PATH,
+  MENU_ROW,
+  MENU_ROW_TONE,
+  MENU_TITLE,
+  menuEnterFrom,
+  movedPointer,
+  revealMenuRow,
+} from "../ui/Menu";
 
 export interface FileMentionCandidate {
   path: string;
@@ -102,7 +117,12 @@ export function MentionComposer(props: {
   const showMenu = fileStage !== null || (active !== null && menuLength > 0);
 
   const menuRef = useRef<HTMLUListElement | null>(null);
-  const [menuPosition, setMenuPosition] = useState({ left: 0, top: 0, maxHeight: 192 });
+  const [menuPosition, setMenuPosition] = useState<{
+    left: number;
+    top: number;
+    maxHeight: number;
+    placement: "above" | "below";
+  }>({ left: 0, top: 0, maxHeight: 192, placement: "below" });
   useLayoutEffect(() => {
     if (!showMenu) return;
     const menu = menuRef.current;
@@ -119,6 +139,7 @@ export function MentionComposer(props: {
         left: Math.max(8, Math.min(anchor.left, window.innerWidth - Math.min(256, window.innerWidth - 16) - 8)),
         top: down ? anchor.bottom + 6 : Math.max(8, anchor.top - Math.min(height, maxHeight) - 6),
         maxHeight,
+        placement: down ? "below" : "above",
       });
     };
     position();
@@ -286,6 +307,19 @@ export function MentionComposer(props: {
 
   const listboxId = `${props.composerId}-mentions`;
   const boundedHighlight = Math.min(highlight, Math.max(0, menuLength - 1));
+  // The textarea keeps focus, so only the list scrolls to show the option
+  // the keys moved to.
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (showMenu && menu) revealMenuRow(menu, menu.querySelector<HTMLElement>("[data-active]"));
+  }, [showMenu, boundedHighlight, fileStage]);
+  // Only a pointer that moves picks the active option, so a list that opens
+  // or scrolls under a still pointer keeps the keys' choice.
+  const hover = (index: number) => (event: { movementX: number; movementY: number }) => {
+    if (movedPointer(event) && index !== boundedHighlight) setHighlight(index);
+  };
+  const optionClass = `${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest} data-active:text-ink`;
+  const { placement: menuPlacement, ...menuBox } = menuPosition;
   const activeDescendant = !showMenu
     ? undefined
     : fileStage
@@ -347,12 +381,12 @@ export function MentionComposer(props: {
         <ul
           ref={menuRef}
           popover="manual"
-          style={{ margin: 0, inset: "auto", ...menuPosition }}
+          style={{ margin: 0, inset: "auto", ...menuBox, ...menuEnterFrom(menuPlacement) }}
           id={listboxId}
           data-testid={`${props.testIdPrefix}-mention-menu`}
           role="listbox"
           aria-label={fileStage ? `Mention ${fileStage.label}` : "Mention a person, agent, or file"}
-          className="dohc-popover dohc-pop-in fixed z-50 w-64 max-w-[calc(100vw-16px)] overflow-y-auto rounded-lg border border-line bg-panel py-1 text-xs"
+          className={`${MENU_FRAME} ${MENU_ENTER} fixed z-50 w-64 max-w-[calc(100vw-16px)]`}
         >
           {fileStage ? (
             <>
@@ -362,18 +396,21 @@ export function MentionComposer(props: {
                   role="option"
                   id={`${listboxId}-file-section-0`}
                   aria-selected={boundedHighlight === 0}
+                  data-active={boundedHighlight === 0 || undefined}
                   data-testid={`${props.testIdPrefix}-file-mention-whole`}
+                  tabIndex={-1}
                   onMouseDown={(event) => {
                     event.preventDefault();
                     completeFile({ path: fileStage.path });
                   }}
-                  onMouseEnter={() => setHighlight(0)}
-                  className={`flex w-full flex-col px-2 py-1 text-left ${
-                    boundedHighlight === 0 ? "bg-selected text-ink" : "text-muted hover:bg-hover"
-                  }`}
+                  onMouseMove={hover(0)}
+                  className={optionClass}
                 >
-                  <span className="font-medium text-ink">Whole file</span>
-                  <span className="truncate text-[10px] text-subtle">{fileStage.path}</span>
+                  <span className={`${MENU_ICON} text-subtle`}>
+                    <FileText size={14} aria-hidden />
+                  </span>
+                  <span className={MENU_TITLE}>Whole file</span>
+                  <span className={MENU_PATH}>{fileStage.path}</span>
                 </button>
               </li>
               {fileStage.loading ? (
@@ -390,19 +427,21 @@ export function MentionComposer(props: {
                       role="option"
                       id={`${listboxId}-file-section-${index}`}
                       aria-selected={boundedHighlight === index}
+                      data-active={boundedHighlight === index || undefined}
                       data-testid={`${props.testIdPrefix}-file-mention-heading`}
+                      tabIndex={-1}
                       onMouseDown={(event) => {
                         event.preventDefault();
                         completeFile({ path: fileStage.path, headingAnchor: heading.anchor });
                       }}
-                      onMouseEnter={() => setHighlight(index)}
-                      className={`flex w-full items-baseline gap-2 px-2 py-1 text-left ${
-                        boundedHighlight === index ? "bg-selected text-ink" : "text-muted hover:bg-hover"
-                      }`}
-                      style={{ paddingLeft: `${8 + (heading.level - 1) * 7}px` }}
+                      onMouseMove={hover(index)}
+                      className={optionClass}
+                      style={{ paddingLeft: `${8 + (heading.level - 1) * 8}px` }}
                     >
-                      <span className="text-subtle">#</span>
-                      <span className="min-w-0 flex-1 truncate text-ink">{heading.text}</span>
+                      <span className={`${MENU_ICON} text-subtle`}>
+                        <Hash size={14} aria-hidden />
+                      </span>
+                      <span className={MENU_LABEL}>{heading.text}</span>
                     </button>
                   </li>
                 );
@@ -417,23 +456,29 @@ export function MentionComposer(props: {
                 role="option"
                 id={`${listboxId}-${candidate.id}`}
                 aria-selected={index === boundedHighlight}
+                data-active={index === boundedHighlight || undefined}
                 data-testid={`${props.testIdPrefix}-mention-option`}
                 data-candidate-id={candidate.id}
+                tabIndex={-1}
                 // Mouse down (not click) so the textarea never loses focus
                 // before we reposition the caret.
                 onMouseDown={(event) => {
                   event.preventDefault();
                   complete(candidate);
                 }}
-                onMouseEnter={() => setHighlight(index)}
-                className={`flex w-full items-baseline gap-2 px-2 py-1 text-left ${
-                  index === boundedHighlight ? "bg-selected text-ink" : "text-muted hover:bg-hover"
-                }`}
+                onMouseMove={hover(index)}
+                className={optionClass}
               >
-                <span className="font-medium text-ink">@{candidate.handle}</span>
-                <span className="truncate text-[11px] text-subtle">
-                  {candidate.description ?? candidate.label}
+                <span className={`${MENU_ICON} text-subtle`}>
+                  <AtSign size={14} aria-hidden />
                 </span>
+                <span className={MENU_TITLE}>
+                  <span className="sr-only">@</span>
+                  {candidate.handle}
+                </span>
+                {(candidate.description ?? candidate.label).toLocaleLowerCase() === candidate.handle.toLocaleLowerCase() ? null : (
+                  <span className={MENU_DETAIL}>{candidate.description ?? candidate.label}</span>
+                )}
               </button>
             </li>
           ))}
@@ -446,19 +491,22 @@ export function MentionComposer(props: {
                   role="option"
                   id={`${listboxId}-file-${fileIndex}`}
                   aria-selected={index === boundedHighlight}
+                  data-active={index === boundedHighlight || undefined}
                   data-testid={`${props.testIdPrefix}-file-mention-option`}
                   data-path={candidate.path}
+                  tabIndex={-1}
                   onMouseDown={(event) => {
                     event.preventDefault();
                     chooseFile(candidate);
                   }}
-                  onMouseEnter={() => setHighlight(index)}
-                  className={`flex w-full flex-col px-2 py-1 text-left ${
-                    index === boundedHighlight ? "bg-selected text-ink" : "text-muted hover:bg-hover"
-                  }`}
+                  onMouseMove={hover(index)}
+                  className={optionClass}
                 >
-                  <span className="font-medium text-ink">{candidate.label}</span>
-                  <span className="truncate text-[10px] text-subtle">{candidate.path}</span>
+                  <span className={`${MENU_ICON} text-subtle`}>
+                    <FileText size={14} aria-hidden />
+                  </span>
+                  <span className={MENU_TITLE}>{candidate.label}</span>
+                  <span className={MENU_PATH}>{candidate.path}</span>
                 </button>
               </li>
             );

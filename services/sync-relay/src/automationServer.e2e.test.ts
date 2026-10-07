@@ -34,7 +34,7 @@ const HOUR = 3_600_000;
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
-  closeTestStorages();
+  await closeTestStorages();
 });
 
 // The relay's test seam: "Bearer test:<user>" is that user.
@@ -167,6 +167,7 @@ it.skipIf(engine.missing)("the server runs a schedule with the owner daemon stop
     workspaceId: WORKSPACE, ownerUserId: "owner", incarnation: row.incarnation, startedAtMs: row.startedAtMs,
     root: join(root, "server", "workspace"), metadataDir, client: copy.client, workspace: copy.workspace, signal: copy.lifetime,
     nextRequestId: copy.nextRequestId,
+    withRecordWork: work => work(),
     sync: async () => { hooks?.onPulled?.(WORKSPACE, await copy.sync()); },
   };
   const running = await startAutomationServer({

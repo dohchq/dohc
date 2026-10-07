@@ -168,6 +168,8 @@ interface EngineYDocBindOptions {
   // the batch queue or an unacknowledged delivery. Keep the owner informed
   // until every accepted local update has been acknowledged.
   onDeliveryPendingChange?: (pending: boolean) => void;
+  // Starts before delivery and recovery await the replacement acknowledgement.
+  onDocumentReplacementStarted?: () => void;
   // Runs after the losing mirror stops shipping updates and before main
   // accepts the winner generation. The desktop uses this boundary to persist
   // state that existed only in the losing renderer mirror.
@@ -553,6 +555,7 @@ export async function bindEngineYDoc(
       // It stays closed for the whole acknowledgement handoff.
       retired.off("update", onUpdate);
       replacementInProgress = true;
+      options.onDocumentReplacementStarted?.();
       if (scheduledFlush !== null) {
         batchScheduler.cancel(scheduledFlush);
         scheduledFlush = null;

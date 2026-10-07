@@ -67,10 +67,11 @@ export function displayFrontmatterValue(value: unknown): string {
   }
 }
 
-export function frontmatterEntriesFromMeta(
-  meta: Record<string, unknown>,
+/** Entries in the order of `pairs`. An object would list integer-like keys first. */
+export function frontmatterEntriesFromPairs(
+  pairs: Iterable<readonly [string, unknown]>,
 ): FrontmatterEntry[] {
-  return Object.entries(meta).map(([key, rawValue]) => {
+  return Array.from(pairs, ([key, rawValue]) => {
     const value = displayFrontmatterValue(rawValue);
     return {
       key,
@@ -82,8 +83,10 @@ export function frontmatterEntriesFromMeta(
   });
 }
 
+/** The document's properties in the order the file holds them. */
 export function frontmatterEntries(markdown: string): FrontmatterEntry[] {
-  return frontmatterEntriesFromMeta(parseFrontmatter(markdown).meta);
+  const loaded = loadMarkdownFrontmatter(markdown);
+  return loaded ? frontmatterEntriesFromPairs(loaded.keys.map((key) => [key, loaded.meta[key]])) : [];
 }
 
 /** Write frontmatter values into a document, keeping the text of every entry whose value did not change. */

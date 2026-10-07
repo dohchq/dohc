@@ -1,3 +1,4 @@
+import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { WORKSPACE_POLICY_PATHS } from "@dohc/security-contract/effective-policy";
@@ -99,7 +100,6 @@ import {
   SEARCH_EVENT_MAX_NOTICE_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
   WORKBENCH_MENU_COMMANDS,
-  ENGINE_YDOC_SAVE_STATES,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
 import type { OperationBridge, OperationTable } from "./operationTable";
@@ -286,6 +286,7 @@ export const WorkspaceSummary = z.object({
       // live-share action (refresh, dismiss) is addressed by share id, so a
       // marker that cannot name itself cannot be presented as a live share.
       shareId: OPAQUE_ID.optional(),
+      recipientUserId: OPAQUE_ID.optional(),
       subjectName: z.string().max(320).nullable().optional(),
       sharerName: z.string().max(320).nullable().optional(),
       granterEmail: z.string().min(3).max(320).nullable(),
@@ -300,6 +301,7 @@ export const WorkspaceSummary = z.object({
       // keeps the view read-only, keeps the share surfaces hidden, skips the
       // refresh it has no grant to pull with, and says so in the banner.
       damaged: z.literal(true).optional(),
+      unsavedPaths: z.array(z.string()).nullable().optional(),
       ended: z.boolean().optional(),
       skippedOps: ShareSkippedOpsSummary.optional(),
     })
@@ -726,6 +728,7 @@ export const CreateWorkspaceFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
   initialText: WORKSPACE_EDITOR_TEXT,
+  exclusive: z.boolean().optional(),
 });
 export type CreateWorkspaceFilePayload = z.infer<
   typeof CreateWorkspaceFilePayload
@@ -745,6 +748,7 @@ export type CreateWorkspaceFileResult = z.infer<
 export const CreateWorkspaceFolderPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
+  exclusive: z.boolean().optional(),
 });
 export type CreateWorkspaceFolderPayload = z.infer<
   typeof CreateWorkspaceFolderPayload
@@ -761,11 +765,14 @@ export type MoveWorkspacePathPayload = z.infer<typeof MoveWorkspacePathPayload>;
 export const DeleteWorkspacePathPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
+  emptyFolderOnly: z.boolean().optional(),
 });
 export type DeleteWorkspacePathPayload = z.infer<
   typeof DeleteWorkspacePathPayload
 >;
 
+// With emptyFolderOnly, false also means an empty folder was removed or a
+// nonempty folder was preserved. This mode never trashes descendants.
 // trashed: true = OS trash; false = the .dohc/trash fallback (cross-
 // filesystem mounts where g_file_trash rejects), which is recoverable too — or
 // a share view, whose delete removes the projection of a moment rather than a
@@ -1663,7 +1670,8 @@ export type RestoreEngineMomentFileResult = z.infer<
 // the engine, linked to the file's stable engine object id so the link
 // survives renames. The renderer never supplies identity — main derives the
 // author for every sent message.
-const CHAT_BODY = z.string().min(1).max(65_536);
+// Chat writes validate normalized UTF-8 bytes in the main process.
+const CHAT_BODY = z.string().min(1);
 const CHAT_HEADING_TEXT = z.string().trim().min(1).max(300);
 const CHAT_HEADING_ANCHOR = z.string().trim().min(1).max(400);
 
@@ -5164,6 +5172,25 @@ export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
 ]);
 export type RefreshSharedViewResult = z.infer<typeof RefreshSharedViewResult>;
 
+export const CheckSharedViewAccessPayload = WorkspaceIdPayload;
+export type CheckSharedViewAccessPayload = z.infer<typeof CheckSharedViewAccessPayload>;
+export const CheckSharedViewAccessResult = z.object({
+  status: z.enum(["current", "ended", "unverified", "needs-reopen"]),
+  access: z.enum(["view", "comment", "edit"]).optional(),
+});
+export type CheckSharedViewAccessResult = z.infer<typeof CheckSharedViewAccessResult>;
+
+// The handler owns its workspace operation so a stale check replies unverified.
+export const sharedViewAccessOperations = {
+  checkSharedViewAccess: {
+    capabilityId: "share.access.read",
+    scope: "workspace",
+    handlerCheck: { check: "sharedViewsIpc.withRendererWorkspaceOperation", reason: "The handler owns the workspace operation so stale checks reply unverified." },
+    channel: "desktop:check-shared-view-access",
+    payload: CheckSharedViewAccessPayload, result: CheckSharedViewAccessResult, guard: "trusted-sender",
+  },
+} satisfies OperationTable;
+
 // ---- Share mounts ----
 // The receive side of a relay share materialized inside a host workspace as
 // shared-with-me/<label>/ — ordinary read-only files (agent-readable through
@@ -5938,6 +5965,38 @@ export const scheduleHostOperations = {
   },
 } satisfies OperationTable;
 
+// A folder the command line or the OS asked dohc to open did not open. Main
+// keeps the error itself in its log; `cause` is its one-line form for Copy.
+// `workspaceId` is the workspace the window showed when the request came,
+// or null for none: the renderer drops a failure meant for another one.
+// `attemptId` lets that window ask once for the same folder again.
+//
+// Past WORKSPACE_PATH_OPEN_FAILURES_MAX waiting for one window, main
+// combines the rest into one failure: `count` folders, the first
+// WORKSPACE_PATH_OPEN_MORE_PATHS_MAX of them listed for Copy. Main's log
+// names every one.
+export const WORKSPACE_PATH_OPEN_FAILURES_MAX = 32;
+export const WORKSPACE_PATH_OPEN_MORE_PATHS_MAX = 256;
+export const WorkspacePathOpenFailure = z.union([
+  z.object({
+    attemptId: OPAQUE_ID,
+    path: z.string().min(1),
+    cause: z.string(),
+    workspaceId: z.string().min(1).nullable(),
+  }),
+  z.object({
+    attemptId: OPAQUE_ID,
+    paths: z.array(z.string().min(1)).min(1).max(WORKSPACE_PATH_OPEN_MORE_PATHS_MAX),
+    count: z.number().int().positive(),
+    workspaceId: z.string().min(1).nullable(),
+  }),
+]);
+export type WorkspacePathOpenFailure = z.infer<typeof WorkspacePathOpenFailure>;
+// Main holds each failure for its window until the renderer takes it. This
+// push only says there is one to take, so a push the renderer misses while
+// it loads loses nothing.
+export const WorkspacePathOpenFailedEvent = z.undefined();
+
 export const noticeOperations = {
   listNotices: {
     capabilityId: "notice.list",
@@ -5962,6 +6021,26 @@ export const noticeOperations = {
     scope: "device",
     channel: "desktop:retry-automation-notice",
     payload: RetryAutomationNoticePayload, result: RetryAutomationNoticeResult, guard: "trusted-sender",
+  },
+  // The failures main holds for the sending window. Each is given once.
+  // Main bounds the list as it holds it; a bound here could refuse a reply
+  // whose failures were already given, and lose them.
+  takeWorkspacePathOpenFailures: {
+    capabilityId: "workspace.open.failures.take",
+    scope: "device",
+    channel: "desktop:take-workspace-path-open-failures",
+    payload: z.object({}),
+    result: z.array(WorkspacePathOpenFailure),
+    guard: "trusted-sender",
+  },
+  // Opens the folder a launch failure names again. The renderer names the
+  // attempt, never a path, and main honors it once, for the window it holds
+  // it for. A failure comes back as a new one to take.
+  retryWorkspacePathOpen: {
+    capabilityId: "workspace.open.retry",
+    scope: "device",
+    channel: "desktop:retry-workspace-path-open",
+    payload: z.object({ attemptId: OPAQUE_ID }), guard: "trusted-sender",
   },
 } satisfies OperationTable;
 
@@ -6179,7 +6258,8 @@ export const EngineYDocSaveStateEvent = z.object({
     message: z.string(),
   }).optional(),
   sessionId: ENGINE_YDOC_SESSION_ID,
-  state: z.enum(ENGINE_YDOC_SAVE_STATES),
+  state: SaveStateSchema,
+  access: z.enum(["read-only", "deleted", "object-changed"]).optional(),
   seq: z.number().int().nonnegative(),
 });
 export type EngineYDocSaveStateEvent = z.infer<typeof EngineYDocSaveStateEvent>;
@@ -6217,7 +6297,8 @@ export interface DohcDesktopBridge
     OperationBridge<typeof crashReportOperations>,
     OperationBridge<typeof noticeOperations>,
     OperationBridge<typeof scheduleHostOperations>,
-    OperationBridge<typeof chatDispatchNoticeOperations> {
+    OperationBridge<typeof chatDispatchNoticeOperations>,
+    OperationBridge<typeof sharedViewAccessOperations> {
   listOwnerLiveDocuments(payload: ListOwnerLiveDocumentsPayload): Promise<OwnerLiveDocumentsResult>;
   listOwnerLiveRefusals(payload: ListOwnerLiveRefusalsPayload): Promise<OwnerLiveRefusalsResult>;
   retryOwnerLiveShare(payload: RetryOwnerLiveSharePayload): Promise<void>;
@@ -6704,6 +6785,8 @@ export interface DohcDesktopBridge
   // workspace summary; the preload strips and validates it before the root
   // swaps workspaces.
   onWorkspaceActivated(listener: (workspace: WorkspaceSummary) => void): () => void;
+  // A folder failure is waiting: take it with takeWorkspacePathOpenFailures.
+  onWorkspacePathOpenFailed(listener: () => void): () => void;
   // Auto-update state pushes from main, validated against UpdateStateEvent in
   // the preload before they reach renderer code. Returns an unsubscribe function.
   onUpdateState(listener: (state: UpdateStateEvent) => void): () => void;

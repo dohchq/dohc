@@ -324,6 +324,21 @@ export type LiveObjectHostBindingResult =
   | { readonly kind: "current"; readonly binding: LiveObjectBinding; readonly host: LiveHostConnectionCoordinate }
   | Extract<CurrentLiveBindingResult, { kind: "refused" }>;
 
+/** Server-owned automation writes use owner standing, never a caller-supplied binding. */
+export function automationRecordBinding(storage: StorageContext, workspaceId: string, ownerUserId: string, path: string) {
+  if (!storage.workspaceIsOwnedBy(workspaceId, ownerUserId)) throw new Error("Automation workspace ownership changed.");
+  const row = storage.db.prepare(`SELECT object_id,lineage_claim_id FROM sync_relay_live_documents
+    WHERE workspace_id=? AND main_version_id='main' AND current_path=? AND lineage_state='current'`).get(workspaceId, path);
+  if (!row) return null;
+  const document = {workspaceId, mainVersionId: "main", objectId: String(row.object_id), lineageClaimId: String(row.lineage_claim_id)};
+  for (const {share} of storage.listSharesGrantedBy(ownerUserId)) {
+    if (share.workspaceId !== workspaceId) continue;
+    const current = resolveCurrentLiveDocumentBinding(storage, {document, actor: {kind: "owner", userId: ownerUserId, shareId: share.shareId}});
+    if (current.kind === "current") return {binding: current.binding, shareId: share.shareId};
+  }
+  throw new Error("The shared file is unavailable. Restore access, then try again.");
+}
+
 export function resolveLiveObjectHostBinding(storage: StorageContext, value: LiveBrowserContext, requestedObjectId: string): LiveObjectHostBindingResult {
   const scope = snapshotLiveTicketScope(value), objectId = parseLiveUpdateIdentifier(requestedObjectId, "object ID");
   return storage.readLiveAuthority(() => {

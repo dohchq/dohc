@@ -47,15 +47,17 @@ vi.mock("../collab/useEngineDoc", () => ({
 
 function engineDocState(
   partial: Partial<
-    Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError">
+    Pick<UseEngineDoc, "available" | "opening" | "doc" | "saveState" | "saveError" | "readOnlyWhileEditing" | "deletedWhileEditing">
   >,
 ): UseEngineDoc {
   return {
     available: false,
     opening: false,
     doc: null,
-    saveState: "saved",
+    saveState: { kind: "saved-here" },
     saveError: null,
+    readOnlyWhileEditing: false,
+    deletedWhileEditing: false,
     ...partial,
   } as UseEngineDoc;
 }
@@ -85,9 +87,9 @@ function enqueue(change: Parameters<typeof enqueueCollectionFieldWrite>[2] = CHA
 
 /** Walks the mounted head writer through saving → saved so it settles. */
 function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {
-  docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+  docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saving" } });
   host.rerender(<CollectionFieldWriteHost />);
-  docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+  docMock.current = engineDocState({ available: true, doc, saveState: { kind: "saved-here" } });
   host.rerender(<CollectionFieldWriteHost />);
 }
 
@@ -380,7 +382,7 @@ describe("retained failures", () => {
     docMock.current = engineDocState({
       available: true,
       doc,
-      saveState: "file-locked",
+      saveState: { kind: "file-locked", reason: "test failure", issueId: null },
     });
     render(<CollectionFieldWriteHost />);
     enqueue();
@@ -432,7 +434,7 @@ describe("collection index acknowledgements", () => {
     vi.useFakeTimers();
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc, saveState: "file-locked" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "file-locked", reason: "test failure", issueId: null } });
     render(<CollectionFieldWriteHost />);
     const onIndexed = vi.fn();
     act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, undefined, undefined, onIndexed); });
@@ -473,7 +475,7 @@ describe("settleCollectionFieldWrites", () => {
     docMock.current = engineDocState({
       available: true,
       doc,
-      saveState: "read-only",
+      saveState: { kind: "unknown" }, readOnlyWhileEditing: true,
       saveError: "This workspace is read-only.",
     });
     act(() => host.rerender(<CollectionFieldWriteHost />));
@@ -849,7 +851,7 @@ describe("abandonPendingCollectionFieldWrites", () => {
     vi.useFakeTimers();
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
-    docMock.current = engineDocState({ available: true, doc, saveState: "file-locked" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "file-locked", reason: "test failure", issueId: null } });
     render(<CollectionFieldWriteHost />);
     const observer = renderHook(() => ({
       original: useCollectionWriteStatus("ws-1", "tasks"),
@@ -943,7 +945,7 @@ describe("abandonPendingCollectionFieldWrites", () => {
     enqueue();
     act(() => abandonPendingCollectionFieldWrites("stalled"));
     expect(collectionWriteFailures()).toHaveLength(0);
-    docMock.current = engineDocState({ available: true, doc, saveState: "error", saveError: "save failed" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "error", reason: "test failure", issueId: null }, saveError: "save failed" });
     host.rerender(<CollectionFieldWriteHost />);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
@@ -958,7 +960,7 @@ describe("abandonPendingCollectionFieldWrites", () => {
     enqueue();
     enqueue({ ...CHANGE, value: "newer" });
     act(() => abandonPendingCollectionFieldWrites("stalled"));
-    docMock.current = engineDocState({ available: true, doc, saveState: "error" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "error", reason: "test failure", issueId: null } });
     host.rerender(<CollectionFieldWriteHost />);
     const older = collectionWriteFailures().find((failure) => failure.change.value === "done")!;
     expect(older.superseded).toBe(true);
@@ -975,7 +977,7 @@ describe("abandonPendingCollectionFieldWrites", () => {
     enqueue();
     const draining = settleCollectionFieldWrites(undefined, { stallMs: 20_000 });
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-    docMock.current = engineDocState({ available: true, doc, saveState: "file-locked" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "file-locked", reason: "test failure", issueId: null } });
     host.rerender(<CollectionFieldWriteHost />);
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     await expect(draining).resolves.toEqual({ stalled: true, failed: 0 });
@@ -1006,7 +1008,7 @@ describe("abandonPendingCollectionFieldWrites", () => {
     enqueue();
     act(() => abandonPendingCollectionFieldWrites("stalled"));
     expect(hasPendingCollectionFieldWrites()).toBe(true);
-    docMock.current = engineDocState({ available: true, doc, saveState: "file-locked" });
+    docMock.current = engineDocState({ available: true, doc, saveState: { kind: "file-locked", reason: "test failure", issueId: null } });
     host.rerender(<CollectionFieldWriteHost />);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(collectionWriteFailures()).toHaveLength(0);

@@ -32,6 +32,7 @@ function capability(description: string, exposure: {
 }
 
 export const CAPABILITIES = {
+  "share.access.read": capability("Check the current user's received share access.", {ipc: ["checkSharedViewAccess"]}),
   "version.list": capability("List workspace versions.", {ipc: ["listWorkspaceVersions"]}),
   "version.create": capability("Create a workspace version.", {ipc: ["createWorkspaceVersion"]}),
   "version.switch": capability("Switch workspace versions.", {ipc: ["switchWorkspaceVersion"]}),
@@ -58,6 +59,8 @@ export const CAPABILITIES = {
   "notice.mark": capability("Mark Notices.", {ipc: ["markNotices"]}),
   "automation.schedule.run": capability("Run a skipped schedule.", {ipc: ["runSkippedScheduleNow"]}),
   "automation.notice.retry": capability("Retry an automation from a Notice.", {ipc: ["retryAutomationNotice"]}),
+  "workspace.open.failures.take": capability("Take the launch open failures held for this window.", {ipc: ["takeWorkspacePathOpenFailures"]}),
+  "workspace.open.retry": capability("Open a folder again after a launch could not open it.", {ipc: ["retryWorkspacePathOpen"]}),
   "group.list": capability("List the Groups in this workspace.", {socket: ["groups", "groupsFull"], public: ["chat groups"], mcp: {owner: ["dohc_list_groups"], view: ["dohc_list_groups"], comment: ["dohc_list_groups"], edit: ["dohc_list_groups"]}}),
   "chat.threads.list": capability("List the threads in a Group.", {socket: ["threads"], public: ["chat threads"]}),
   "chat.inbox.read": capability("List unread threads. For an agent, also list its unread mentions.", {socket: ["inbox"], public: ["chat inbox"]}),
@@ -81,7 +84,7 @@ export const CAPABILITIES = {
   "document.read": capability("Read the current Markdown, including edits in an open editor.", {socket: ["documentRead"], public: ["document read"], mcp: {owner: ["dohc_read_document"], view: ["dohc_read_document"], comment: ["dohc_read_document"], edit: ["dohc_read_document"]}}),
   "document.edit": capability("Replace matching text or append Markdown through the live document.", {socket: ["documentEdit"], public: ["document edit"], mcp: {owner: ["dohc_edit_document"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
   "document.create": capability("Create a Markdown document without overwriting an existing file.", {socket: ["documentCreate"], public: ["document create"], mcp: {owner: ["dohc_create_document"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
-  "file.chat.start": capability("Start a chat linked to a file.", {socket: ["fileChatStart"], mcp: {owner: ["dohc_start_file_chat"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
+  "file.chat.start": capability("Start a chat linked to a file.", {socket: ["fileChatStart"], public: ["document comment"], mcp: {owner: ["dohc_start_file_chat"]}, mcpReason: "Shared profiles omit this owner write. Socket read-only admission and per-verb checks remain the gates."}),
   "automation.runs.list": capability("List an automation's runs on this computer, newest first.", {socket: ["automationRuns"], public: ["automation runs"], mcp: {owner: ["dohc_list_automation_runs"]}, mcpReason: "Run records and retries belong to the host holding the runs. Shared profiles omit them."}),
   "automation.list": capability("Read a Collection's automation definitions and on/off file state.", {socket: ["automationList"], public: ["automation list"], mcp: {owner: ["dohc_list_automations"], view: ["dohc_list_automations"], comment: ["dohc_list_automations"], edit: ["dohc_list_automations"]}}),
   "automation.switch": capability("Switch one automation on or off in its file.", {socket: ["automationSwitch"], public: ["automation switch"], mcp: {edit: ["dohc_switch_automation"]}, mcpReason: "Only Edit advertises file-state switching. Owner, View, and Comment omit the tool; CLI availability remains independent."}),

@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./owner-ydoc-drainer": "./src/ydoc/ownerYDocOutboxDrainer.ts",
     "./daemon": "./src/daemon/index.ts",
     "./relay-wire": "./src/relay/ordinarySyncWireContract.ts",
     "./limits": "./src/versioned/engineTextLimits.ts",

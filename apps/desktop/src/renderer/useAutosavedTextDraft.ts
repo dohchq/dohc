@@ -1,3 +1,4 @@
+import { SAVED_HERE, SAVING, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { bridge } from "./bridge";
@@ -16,7 +17,7 @@ export function publishOwnedUnmountDraft(
   buffer.publishDraft(body, source);
 }
 
-export type SaveState = "saved" | "saving" | "error";
+
 
 export type DraftFlushOptions = { captureOnFailure?: boolean };
 
@@ -58,7 +59,10 @@ export function useAutosavedTextDraft(props: {
   localBuffer: SharedLocalDocument;
 }) {
   const [draft, setDraft] = useState(props.body);
-  const [saveState, setSaveState] = useState<SaveState>("saved");
+  const [saveState, setSaveStateValue] = useState<SaveState>(SAVED_HERE);
+  const setSaveState = (state: SaveState) => {
+    setSaveStateValue((current) => saveStateEqual(current, state) ? current : state);
+  };
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
   const localSource = useRef<object>({});
   const activeLocalBuffer = useRef(props.localBuffer);
@@ -150,7 +154,7 @@ export function useAutosavedTextDraft(props: {
     latestDraft.current = sharedSnapshot.body;
     setSaveState(sharedSnapshot.saveState);
     if (
-      sharedSnapshot.saveState === "saved" &&
+      sharedSnapshot.saveState.kind === "saved-here" &&
       !sharedSnapshot.dirty &&
       !bodyChanged
     ) {
@@ -191,7 +195,7 @@ export function useAutosavedTextDraft(props: {
       editGeneration.current,
     );
     captureLatestConflictDraft();
-    if (!unmounted.current) setSaveState("error");
+    if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
   }
 
   function acceptSnapshot(
@@ -208,7 +212,7 @@ export function useAutosavedTextDraft(props: {
         snapshot.body,
         snapshot.contentHash,
         localSource.current,
-        state === "error",
+        state.kind === "error",
         snapshot.readTicket,
       )
     ) {
@@ -272,7 +276,7 @@ export function useAutosavedTextDraft(props: {
     ) {
       return false;
     }
-    return acceptSnapshot(snapshot, "error");
+    return acceptSnapshot(snapshot, saveProblem("error", "dohc could not confirm the file was saved."));
   }
 
   function reconcileConflictSnapshot() {
@@ -301,7 +305,7 @@ export function useAutosavedTextDraft(props: {
     conflictDraftId.current = null;
     capturedConflictDraft.current = null;
     flushConflict.current = false;
-    setSaveState("saved");
+    setSaveState(SAVED_HERE);
   }, [orphanedDrafts, saveState, props.contentRequestId]);
 
   // Takes the read this surface renders as its baseline, unless a draft or a
@@ -316,7 +320,7 @@ export function useAutosavedTextDraft(props: {
     if (unsavedDraft.current) return;
     if (writersLive.current > 0) return;
     if (latestSnapshot.current.requestId <= acceptedRequestFloor.current) return;
-    acceptSnapshot(latestSnapshot.current, "saved");
+    acceptSnapshot(latestSnapshot.current, SAVED_HERE);
   }
 
   useEffect(() => {
@@ -364,7 +368,7 @@ export function useAutosavedTextDraft(props: {
       unsavedDraft.current = false;
       captureOrphanedDraft(props.workspaceId, props.path, latestDraft.current);
       let resyncBody = props.body;
-      let resyncSaveState: SaveState = "saved";
+      let resyncSaveState: SaveState = SAVED_HERE;
       if (refusalLifted) {
         // A duplicate pane whose read landed first can already have published
         // an edit built on this version. That draft owns the shared buffer,
@@ -450,7 +454,7 @@ export function useAutosavedTextDraft(props: {
       }
       const issuedBaseRequestId = baseContentRequestId.current;
       unsavedDraft.current = false;
-      if (!unmounted.current) setSaveState("saving");
+      if (!unmounted.current) setSaveState(SAVING);
       let issuedText: string | null = null;
       try {
         const writing = props.localBuffer.write(
@@ -476,7 +480,7 @@ export function useAutosavedTextDraft(props: {
         const text = result.body;
         latestDraft.current = props.localBuffer.getSnapshot().body;
         if (result.status === "skipped") {
-          if (!unmounted.current) setSaveState("saved");
+          if (!unmounted.current) setSaveState(SAVED_HERE);
           return;
         }
         if (result.status === "no-baseline") {
@@ -484,7 +488,7 @@ export function useAutosavedTextDraft(props: {
           if (options.captureOnFailure && options.textSnapshot !== undefined) {
             captureLatestConflictDraft(options.textSnapshot);
           }
-          if (!unmounted.current) setSaveState("error");
+          if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
           if (options.rejectOnError) {
             throw new Error("dohc cannot save this draft without a content hash.");
           }
@@ -506,7 +510,7 @@ export function useAutosavedTextDraft(props: {
           unsavedDraft.current = false;
           captureLatestConflictDraft();
           if (!unmounted.current) {
-            setSaveState("error");
+            setSaveState(saveProblem("error", "The file changed on disk."));
             reconcileConflictSnapshot();
           }
           if (options.rejectOnError) {
@@ -521,7 +525,7 @@ export function useAutosavedTextDraft(props: {
         if (latestContentRequestId.current > issuedBaseRequestId) {
           verifyAfterRequestId.current = latestContentRequestId.current;
           if (!unmounted.current) {
-            setSaveState("saving");
+            setSaveState(SAVING);
             props.refreshAfterConflict();
           }
           return;
@@ -530,7 +534,7 @@ export function useAutosavedTextDraft(props: {
         // that newer draft with the older text that just reached disk.
         if (!unmounted.current && latestDraft.current === text) {
           setDraft(text);
-          setSaveState("saved");
+          setSaveState(SAVED_HERE);
         }
       } catch (error) {
         if (activeLocalBuffer.current !== props.localBuffer) {
@@ -544,7 +548,7 @@ export function useAutosavedTextDraft(props: {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
-        if (!unmounted.current) setSaveState("error");
+        if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         if (options.rejectOnError) throw error;
       }
     };
@@ -602,7 +606,7 @@ export function useAutosavedTextDraft(props: {
     // below sets it aside when the refusal lifts.
     if (disabledRef.current === true) return;
     unsavedDraft.current = true;
-    setSaveState("saving");
+    setSaveState(SAVING);
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => void saveNow(), AUTOSAVE_DEBOUNCE_MS);
   }

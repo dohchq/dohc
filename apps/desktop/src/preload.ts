@@ -45,10 +45,12 @@ import {
   WorkbenchMenuCommand,
   WorkspaceIdPayload,
   WorkspaceSummary,
+  WorkspacePathOpenFailedEvent,
   crashReportOperations,
   noticeOperations,
   scheduleHostOperations,
   chatDispatchNoticeOperations,
+  sharedViewAccessOperations,
   ScheduleHostChangedEvent,
   ChatDispatchNoticesEvent,
   workspaceSearchOperations,
@@ -316,6 +318,7 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.leaveSharedChannel, payload),
   openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
   refreshSharedView: (payload) => ipcRenderer.invoke(CHANNELS.refreshSharedView, payload),
+  ...operationBridge(sharedViewAccessOperations, invoke),
   dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
   listCollectionAutomations: (payload) =>
     ipcRenderer.invoke(CHANNELS.listCollectionAutomations, payload),
@@ -608,6 +611,8 @@ const bridge: DohcDesktopBridge = {
   onMenuCommand: (listener) => onEvent(CHANNELS.menuCommand, MenuCommand, listener),
   onWorkspaceActivated: (listener) =>
     onEvent(CHANNELS.workspaceActivated, WorkspaceSummary, listener),
+  onWorkspacePathOpenFailed: (listener) =>
+    onEvent(CHANNELS.workspacePathOpenFailed, WorkspacePathOpenFailedEvent, () => listener()),
   onUpdateState: (listener) => onEvent(CHANNELS.updateState, UpdateStateEvent, listener),
   getUpdateState: () => invokeParsed(CHANNELS.getUpdateState, UpdateStateEvent),
   checkForUpdates: () => invokeParsed(CHANNELS.checkForUpdates, UpdateCheckResult),

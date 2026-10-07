@@ -16,6 +16,8 @@ const UNREADABLE_ANSWER = "The server sent an answer dohc could not read. Try ag
 const CONTENT_MISSING = "Some file contents are missing on the server.";
 const STOPPED = "It stopped before it finished. Try again.";
 const REINSTALL = "This copy of dohc is missing a file it needs. Reinstall dohc.";
+// Trying again cannot help with this one; updating dohc can.
+const NEWER_DOHC = "It needs a newer version of dohc. Update dohc to open it.";
 
 // Every code the engine refuses with: `ErrorCode` in dohc-engine-protocol.
 const ENGINE_CODE_WORDS = {
@@ -127,6 +129,14 @@ export const ERROR_WORDS: Readonly<Record<string, Readonly<Record<string, Words>
     "path-not-admitted": "History no longer tracks this file. Track it in .dohc/files.toml, then try again.",
     "*": null,
   },
+  // A .dohc/manifest.json dohc will not adopt. Its message names the
+  // parser's reason, for Copy details only. "Its" and "it" are the folder
+  // the caller's sentence names.
+  WorkspaceManifestError: {
+    unreadable: "dohc can't read its .dohc/manifest.json. Fix the file, then try again.",
+    "newer-version": NEWER_DOHC,
+    "*": null,
+  },
   // The file system's codes. A plain error with no listed code keeps its
   // message, because dohc writes those for people.
   Error: {
@@ -230,6 +240,11 @@ export function withErrorWords(sentence: string, error: unknown): string {
   return words && words !== sentence && !words.startsWith(`${sentence} `)
     ? `${sentence} ${words}`
     : words || sentence;
+}
+
+/** A refusal only a newer dohc can get past, so Try again would do nothing. */
+export function needsNewerDohc(error: unknown): boolean {
+  return readError(error).words === NEWER_DOHC;
 }
 
 /** The engine refuses reads this way while it reads a new workspace's files. */

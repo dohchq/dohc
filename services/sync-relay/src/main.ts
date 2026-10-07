@@ -51,7 +51,8 @@ import {createLiveMembershipRegistry} from "./liveMembership";
 import {createLiveConnectionAdmission} from "./liveConnectionAdmission";
 import {createNamedDesktopLive} from "./namedDesktopLive";
 import {parseNamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
-import type { NamedFrameNativeHost } from "./namedLiveFrameHost";
+import type {NamedFrameNativeHost} from "./namedLiveFrameHost";
+import {createAutomationRecordHost} from "./automationRecordHost";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import {selfHostLiveProfile} from "./selfHostLiveProfile";
 import {startSelfHostedLiveHost} from "./selfHostedLiveHost";
@@ -649,6 +650,10 @@ automations = automationServer && automationReplicaKey && automationRoot ? await
   readOwnerShares: relayApplication.readOwnerShares,
   lookupUserDisplayName: (userId) => lookupUserDisplayName(userId),
   noticeLimiter: noticePostRateLimiter,
+  ...(deployment && namedLiveConfig ? {recordDelivery: createAutomationRecordHost({
+    storage, namespace: deployment.history.namespace, serviceHost, ...(deviceControl ? {deviceHost: deviceControl} : {}),
+    lookupUserDisplayName, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,
+  })} : {}),
   ...(selfHost ? {live: {ledger: (workspaceId: string) => selfHost.automationLedger(workspaceId),
     workspaces: () => selfHost.automationWorkspaces(), onEvent: selfHost.onAutomationEvent}} : {}),
   onError: (context, error) => console.error(`[sync-relay] automations: ${context}:`, error),

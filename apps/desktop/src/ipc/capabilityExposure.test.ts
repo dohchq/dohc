@@ -13,8 +13,10 @@ import type { OperationDefinition } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import mainIpc from "./ipcExposure.main.json";
 import clipboardIpc from "./ipcExposure.pr1639.json";
+import launchOpenIpc from "./ipcExposure.pr1701.json";
 import mainCli from "./cliExposure.main.json";
 import publicationCli from "./cliExposure.pr1659.json";
+import commentsCli from "./cliExposure.pr1700.json";
 import admission from "./operationAdmission.json";
 
 const rows: OperationDefinition[] = OPERATION_TABLES.flatMap(table => Object.values(table));
@@ -43,13 +45,19 @@ function assertAdmission(row: Pick<OperationDefinition, "channel" | "guard" | "s
 
 describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves every IPC wire name and the 26 enforced table guards", () => {
-    // Hand-reviewed #1639 removals, separate from the hashed main baseline.
+    // Hand-reviewed #1639 removals and #1701 additions, separate from the
+    // hashed main baseline.
     const expectedNames = [...mainIpc.names];
+    expectedNames.push("desktop:check-shared-view-access");
     for (const name of clipboardIpc.nameRemovals) {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    expect([...Object.values(CHANNELS), ...rows.map(row => row.channel)].sort()).toEqual(expectedNames);
+    for (const name of launchOpenIpc.nameAdditions) {
+      expect(expectedNames).not.toContain(name);
+      expectedNames.push(name);
+    }
+    expect([...Object.values(CHANNELS), ...rows.map(row => row.channel)].sort()).toEqual(expectedNames.sort());
     // B5 retains these guards while adding rows to the hand-edited admission record.
     const guards = Object.fromEntries(rows.map(row => [row.channel, row.guard]));
     expect(Object.fromEntries(Object.keys(mainIpc.guards).map(channel => [channel, guards[channel]]))).toEqual(mainIpc.guards);
@@ -57,12 +65,12 @@ describe("B1 main inventories (a4be19d5b)", () => {
   it("preserves socket verbs, public verbs, and all public help", () => {
     expect(socketVerbs).toEqual(mainCli.socketVerbs);
     expect(Object.keys(CLI_COMMANDS)).toEqual(mainCli.publicGroups);
-    const internal = new Set(mainCli.internalVerbs);
-    expect(socketVerbs.filter(verb => internal.has(verb))).toEqual(mainCli.internalVerbs);
-    expect(socketVerbs.filter(verb => !internal.has(verb))).toEqual(mainCli.publicSocketVerbs);
+    const internal = new Set(mainCli.internalVerbs.filter(verb => !commentsCli.publicSocketPromotions.includes(verb)));
+    expect(socketVerbs.filter(verb => internal.has(verb))).toEqual([...internal]);
+    expect(socketVerbs.filter(verb => !internal.has(verb))).toEqual([...mainCli.publicSocketVerbs, ...commentsCli.publicSocketPromotions].sort());
     // Hand-reviewed #1659 additions, separate from the hashed main baseline.
     const expectedPublicVerbs = [...mainCli.publicVerbs];
-    for (const { verb, before } of publicationCli.publicVerbAdditions) {
+    for (const { verb, before } of [...publicationCli.publicVerbAdditions, ...commentsCli.publicVerbAdditions]) {
       expect(expectedPublicVerbs).not.toContain(verb);
       expect(expectedPublicVerbs).toContain(before);
       expectedPublicVerbs.splice(expectedPublicVerbs.indexOf(before), 0, verb);
@@ -73,7 +81,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       help[group] = renderCliHelp({ help: [group] });
       for (const verb of Object.keys(command.verbs)) help[`${group} ${verb}`] = renderCliHelp({ help: [group, verb] });
     }
-    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help });
+    expect(help).toEqual({ ...mainCli.help, ...publicationCli.help, ...commentsCli.help });
   });
   it("pins each row's guard, scope, and handler check to the hand-edited admission record", () => {
     expect(Object.fromEntries(rows.map(row => [row.channel, {

@@ -14,6 +14,36 @@ const strict = ({ children }: { children: ReactNode }) => (
 );
 
 describe("useShellError", () => {
+  it("keeps a dismissed capture Notice dismissed across remounts until the path set changes", () => {
+    const first = renderHook(() => useShellError("capture-notice-workspace"));
+    const paths = ["tasks/locked.md", "tasks/another.md"];
+    act(() => first.result.current.reportShareCapture("share-a", paths));
+    const notice = first.result.current.shellErrors[0]!;
+    expect(notice.identity).toBe("share-capture:capture-notice-workspace:share-a");
+    expect(notice.message).toBe("Your changes weren't sent and remain on this computer. Copy these files to another workspace.");
+    expect(notice.message).not.toContain(paths[0]);
+    expect(errorDetails(notice.details!)).toContain("File: tasks/another.md\nFile: tasks/locked.md");
+    act(() => first.result.current.hideShellError(notice.id));
+    act(() => first.result.current.reportShareCapture("share-a", [...paths].reverse()));
+    expect(first.result.current.shellErrors[0]).toMatchObject({ id: notice.id, seen: true });
+    act(() => first.result.current.dismissShellError(notice.id));
+    act(() => first.result.current.reportShareCapture("share-a", [...paths, paths[0]!]));
+    expect(first.result.current.shellErrors).toHaveLength(0);
+    first.unmount();
+    const reopened = renderHook(() => useShellError("capture-notice-workspace"));
+    act(() => reopened.result.current.reportShareCapture("share-a", paths));
+    expect(reopened.result.current.shellErrors).toHaveLength(0);
+    act(() => reopened.result.current.reportShareCapture("share-a", [paths[0]!]));
+    expect(reopened.result.current.shellErrors).toHaveLength(1);
+    expect(reopened.result.current.shellErrors[0]!.seen).toBe(false);
+    act(() => reopened.result.current.reportShareCapture("share-a", []));
+    expect(reopened.result.current.shellErrors).toHaveLength(0);
+    act(() => reopened.result.current.reportShareCapture("share-a", null));
+    expect(reopened.result.current.shellErrors).toHaveLength(1);
+    expect(reopened.result.current.shellErrors[0]!.message).toBe("dohc could not check this share's files. Your changes may not have been sent. Copy your changed files to another workspace.");
+    expect(reopened.result.current.shellErrors[0]!.details).toBeUndefined();
+  });
+
   it.each([true, false])("keeps separate partial creations and replaces only the retried creation (record: %s)", record => {
     const { result } = renderHook(() => useShellError("ws-a"));
     const firstRetry = vi.fn();

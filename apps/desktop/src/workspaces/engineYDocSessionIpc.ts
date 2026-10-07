@@ -1,3 +1,4 @@
+import { engineSaveState } from "./engineYDocSaveState";
 import { createHash } from "node:crypto";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
@@ -632,6 +633,16 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
       path: canonicalPath,
       openSession: async (signals) => {
         const saveSeq = createEngineYDocSaveSeqState();
+        let lastEvent: SessionEvent | null = null;
+        const emit = (event: SessionEvent): void => {
+          if (lastEvent?.state === event.state &&
+            (event.state === "settling" || lastEvent.seq === event.seq) &&
+            lastEvent.authorCapacity === event.authorCapacity &&
+            lastEvent.editRefusal?.requestId === event.editRefusal?.requestId &&
+            lastEvent.editRefusal?.message === event.editRefusal?.message) return;
+          signals.emit(event);
+          lastEvent = event;
+        };
         let delivery: "pending" | "active" | "discarded" = "pending";
         const pending: Array<() => void> = [];
         const publish = (send: () => void): void => {
@@ -649,7 +660,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
               if (recordWriteHeld()) throw new Error(`dohc is handing ${canonicalPath} to its live session, and nothing changed. Try again.`);
             },
             onEditRefused: (requestId, message) => {
-              publish(() => signals.emit({
+              publish(() => emit({
                 state: "error", seq: saveSeq.dirtySeq,
                 editRefusal: { workspaceId: workspace.workspaceId, path: canonicalPath, requestId, message },
               }));
@@ -661,12 +672,13 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                   : event === "outcome"
                     ? noteSettleOutcome(saveSeq, token)
                     : 0;
-              publish(() => signals.emit({ state, seq, ...(authorCapacity ? { authorCapacity: true } : {}) }));
+              publish(() => emit({ state, seq, ...(authorCapacity ? { authorCapacity: true } : {}) }));
             },
             onRemoteUpdate: (update) => {
               publish(() => signals.remoteUpdate(update));
             },
             onLineageReplaced: (update, recoveredPaths) => {
+              lastEvent = null;
               publish(() =>
                 signals.replaceLineage({
                   update,
@@ -699,7 +711,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           path: canonicalPath,
           deleted: false,
           objectChanged: false,
-          emit: signals.emit,
+          emit,
           show: (update) => publish(() => signals.remoteUpdate(update)),
           markDeleted() {
             owned.deleted = true;
@@ -1204,6 +1216,7 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
           EngineYDocSaveStateEvent.parse({
             sessionId: outbound.sessionId,
             ...message.event,
+            ...engineSaveState(message.event.state, message.event.editRefusal),
           }),
         );
         return;

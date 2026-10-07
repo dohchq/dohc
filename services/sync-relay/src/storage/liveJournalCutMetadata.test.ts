@@ -39,8 +39,9 @@ it("refuses corrupted stored snapshots, nonempty seed coverage and deletion rang
     const original = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal WHERE delivery_id='corrupt-1'").get()!;
     const document = f.input.evidence.document;
     for (const [column, damaged] of [
-      ["author_snapshot_json", JSON.stringify([{kind: "human", humanId: "owner", humanName: "Owner"},
-        {kind: "agent", agentId: '"'.repeat(512), agentName: '"'.repeat(512), onBehalfOf: '"'.repeat(512)}])],
+      ["author_snapshot_json", JSON.stringify([{kind: "automation", automationId: '"'.repeat(512),
+        attribution: {actorKind: "automation", depth: 1, onBehalfOf: '"'.repeat(512),
+          run: {claimId: '"'.repeat(512), automationName: '"'.repeat(1024)}}}])],
       ["author_snapshot_json", JSON.stringify([{kind: "agent", agentId: "agent"}, {kind: "human", humanId: "owner", humanName: "Owner"}])],
       ["seed_first_seen_json", JSON.stringify([{clientId: 999, startClock: 0, endClock: 1}])],
       ["first_seen_deletes_json", JSON.stringify([{clientId: 999, startClock: -1, endClock: 1}])],
