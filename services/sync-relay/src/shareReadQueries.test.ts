@@ -87,3 +87,21 @@ describe("authenticated selected moment declarations", () => {
     }
   });
 });
+it("serves only relay-admitted settlement authors, keeps owner bytes, and advances past refused rows",()=>{
+ const acceptedPayload={...moment(undefined),momentId:"accepted",settlementReference:{record:{settlementId:"accepted"}}};delete (acceptedPayload as Record<string,unknown>).authors;
+ const payloadJson=JSON.stringify(acceptedPayload);
+ const authors=[{kind:"human" as const,humanId:"reader",humanName:"Reader"},{kind:"agent" as const,agentId:"trip",agentName:"Trip",onBehalfOf:"reader",depth:2}];
+ const rows:import("./storage").SyncRelayLogRow[]=[
+ {workspaceId:"workspace",originId:"host",originSeq:0,relaySeq:1,opKind:"moment.append",payloadJson,recordedAtMs:1,admittedAuthorSnapshot:authors,settlementAdmission:{status:"accepted",settlementId:"accepted"}},
+ {workspaceId:"workspace",originId:"host",originSeq:1,relaySeq:2,opKind:"moment.append",payloadJson:JSON.stringify({...moment([{kind:"human",humanId:"forged"}]),momentId:"refused"}),recordedAtMs:1,settlementAdmission:{status:"refused",settlementId:"refused",reason:"authorship-mismatch"}},
+ {workspaceId:"workspace",originId:"host",originSeq:2,relaySeq:3,opKind:"moment.append",payloadJson:JSON.stringify({...moment(undefined),momentId:"fallback",attributionUnavailable:{settlementId:"refused",reason:"authorship-mismatch"}}),recordedAtMs:1}
+ ];
+ const storage={fetchLogPage:({sinceRelaySeq}:{sinceRelaySeq:number})=>({rows:rows.filter(row=>row.relaySeq>sinceRelaySeq),nextCursor:3,hasMore:false})};
+ const queries=createShareReadQueries(storage as unknown as Parameters<typeof createShareReadQueries>[0],500);
+ const served=queries.filteredLogPage("workspace",selector,0,10,"authenticated");
+ expect(served.ops.map(op=>op.relaySeq)).toEqual([1,3]);expect(served.nextCursor).toBe(3);
+ expect(served.ops[0]!.payload).toMatchObject({authors});expect(served.ops[0]).not.toHaveProperty("admittedAuthorSnapshot");expect(served.ops[0]).not.toHaveProperty("settlementAdmission");
+ expect(served.ops[0]!.payload).not.toHaveProperty("settlementReference");expect(served.ops[1]!.payload).not.toHaveProperty("authors");expect(served.ops[1]!.payload).toMatchObject({metadata:{origin:"sync",summary:"Attribution unavailable"}});
+ expect(rows[0]!.payloadJson).toBe(payloadJson);expect(JSON.parse(payloadJson)).not.toHaveProperty("authors");
+ const accountless=queries.filteredLogPage("workspace",selector,0,10,"accountless");expect(accountless.ops.map(op=>op.relaySeq)).toEqual([1,3]);expect(accountless.ops[0]!.payload).not.toHaveProperty("authors");
+});

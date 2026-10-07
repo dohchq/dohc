@@ -653,7 +653,7 @@ describe("round 1 of review", () => {
     expect(body).toMatchObject({ error: "trip/packing/collection.yaml uses a newer version. Update the sync service to read this file." });
     expect(await r.owner.directMoments()).toEqual([]);
   });
-  it("keeps the lane's origin and a named author out of the owner's own log", async () => {
+  it("rejects the lane's origin and consumes refused owner authors without projecting their moment", async () => {
     const r = await relay();
     const append = (originId: string, author: unknown) => r.h(request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({
       originId,
@@ -668,11 +668,13 @@ describe("round 1 of review", () => {
       }],
     })));
     await expectCode(await append(`relay:collection-file:${r.grantId}`, null), 400, "bad_request");
-    await expectCode(
-      await append("origin-owner", { kind: "named", userId: RECIPIENT, grantId: r.grantId, grantGeneration: 1 }),
-      403,
-      "authorship_mismatch",
-    );
+    const response = await append("owner-forgery", { kind: "named", userId: RECIPIENT, grantId: r.grantId, grantGeneration: 1 });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({currentMaxOriginSeq: 0,
+      settlementRefusals: [{originId: "owner-forgery", originSeq: 0, momentId: "forged", reason: "authorship-mismatch"}]});
+    expect(r.storage.fetchLogCoordinate({workspaceId: WORKSPACE, originId: "owner-forgery", originSeq: 0}))
+      .toMatchObject({settlementAdmission: {status: "refused", reason: "authorship-mismatch"}});
+    expect(await r.owner.directMoments()).toEqual([]);
   });
 
   it("refuses a batch whose files sum past the byte bound, before reading anything", async () => {

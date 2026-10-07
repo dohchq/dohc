@@ -87,6 +87,8 @@ enum MomentAuthor {
     Agent {
         #[serde(rename = "agentId")]
         agent_id: String,
+        #[serde(rename = "agentName", skip_serializing_if = "Option::is_none")]
+        agent_name: Option<String>,
         #[serde(
             rename = "onBehalfOf",
             default,
@@ -109,6 +111,8 @@ enum MomentAuthor {
     Human {
         #[serde(rename = "humanId")]
         human_id: String,
+        #[serde(rename = "humanName", skip_serializing_if = "Option::is_none")]
+        human_name: Option<String>,
         #[serde(
             rename = "onBehalfOf",
             default,
@@ -323,10 +327,25 @@ pub fn apply_moment_envelope_detailed(
     envelope.validate()?;
     let search_policy = search_policy_for_store(store);
     apply_envelope_with(store, envelope, faults, |tx, envelope| {
-        let payload: MomentAppendPayload =
-            Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
+        let mut payload: MomentAppendPayload = Deserialize::deserialize(&envelope.payload)
+            .map_err(|_| SyncError::InvalidInput {
                 reason: "moment.append payload is malformed",
             })?;
+        if matches!(
+            envelope.settlement_admission,
+            Some(crate::SettlementAdmission::Accepted { .. })
+        ) {
+            let authors: Vec<MomentAuthor> =
+                serde_json::from_value(envelope.admitted_author_snapshot.clone().ok_or(
+                    SyncError::InvalidInput {
+                        reason: "accepted settlement has no authors",
+                    },
+                )?)
+                .map_err(|_| SyncError::InvalidInput {
+                    reason: "accepted settlement authors are invalid",
+                })?;
+            payload.authors = (!authors.is_empty()).then_some(authors);
+        }
         validate_payload_bounds(&payload)?;
         validate_payload(&payload)?;
         if payload
@@ -1519,6 +1538,7 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
             MomentAuthor::Human {
                 human_id,
                 on_behalf_of,
+                ..
             } => human_id.is_empty() || on_behalf_of.as_ref().is_some_and(String::is_empty),
             MomentAuthor::Public {
                 principal_id,

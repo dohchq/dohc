@@ -86,6 +86,7 @@ struct SettlementRecord {
     moment_id: String,
     markdown_digest: String,
     source_state_vector_digest: String,
+    accepted_state_blob_sha256: String,
     recorded_at_ms: i64,
     restore_operation_id: Option<String>,
 }
@@ -134,6 +135,7 @@ impl SettlementRecord {
                 &self.accepted_interval_digest,
                 &self.markdown_digest,
                 &self.source_state_vector_digest,
+                &self.accepted_state_blob_sha256,
             ]
             .iter()
             .any(|value| !digest(value))
@@ -163,9 +165,9 @@ impl SettlementRecord {
         serde_json::to_value(SettlementPayload {
             format_version: 1,
             record_digest: hex_sha256(
-                serde_json::to_string(self)
+                serde_json::to_vec(&serde_json::to_value(self).map_err(SyncError::corrupt)?)
                     .map_err(SyncError::corrupt)?
-                    .as_bytes(),
+                    .as_slice(),
             ),
             record: self.clone(),
         })
@@ -274,7 +276,7 @@ fn read_native(
     let mut record=conn.query_row("SELECT relay_database_namespace,binding_json,host_coordinate_json,previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,markdown_digest,source_state_vector_digest,recorded_at_ms,restore_operation_id FROM live_device_settlements WHERE workspace_id=?1 AND settlement_id=?2",params![workspace,id],|row|{
         let binding=serde_json::from_str(&row.get::<_,String>(1)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(1,rusqlite::types::Type::Text,Box::new(error)))?;
         let host_coordinate=serde_json::from_str(&row.get::<_,String>(2)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(2,rusqlite::types::Type::Text,Box::new(error)))?;
-        Ok(SettlementRecord{settlement_id:id.into(),relay_database_namespace:row.get(0)?,binding,host_coordinate,previous_cursor:row.get(3)?,terminal_cursor:row.get(4)?,previous_ydoc_sequence:row.get(5)?,local_ydoc_sequence:row.get(6)?,application_count:row.get(7)?,native_interval_digest:row.get(8)?,accepted_event_count:0,accepted_interval_digest:String::new(),moment_id:row.get(9)?,markdown_digest:row.get(10)?,source_state_vector_digest:row.get(11)?,recorded_at_ms:row.get(12)?,restore_operation_id:row.get(13)?})
+        Ok(SettlementRecord{settlement_id:id.into(),relay_database_namespace:row.get(0)?,binding,host_coordinate,previous_cursor:row.get(3)?,terminal_cursor:row.get(4)?,previous_ydoc_sequence:row.get(5)?,local_ydoc_sequence:row.get(6)?,application_count:row.get(7)?,native_interval_digest:row.get(8)?,accepted_event_count:0,accepted_interval_digest:String::new(),moment_id:row.get(9)?,markdown_digest:row.get(10)?,source_state_vector_digest:row.get(11)?,accepted_state_blob_sha256:String::new(),recorded_at_ms:row.get(12)?,restore_operation_id:row.get(13)?})
     }).map_err(SyncError::corrupt)?;
     let (count, digest) = accepted_interval(
         conn,
@@ -283,6 +285,10 @@ fn read_native(
         record.previous_cursor,
         record.terminal_cursor,
     )?;
+    record.accepted_state_blob_sha256 = conn.query_row(
+        "SELECT state_blob_sha256 FROM live_settlement_publication_states WHERE settlement_id=?1",
+        [id], |row| row.get(0),
+    ).map_err(SyncError::corrupt)?;
     record.accepted_event_count = count;
     record.accepted_interval_digest = digest;
     record.validate(workspace)?;
@@ -316,6 +322,11 @@ pub(super) fn journal_ready_in_tx(
     if !crate::workspace_replicates_with_relay_in_tx(tx, workspace)? {
         return Ok(None);
     }
+    let unavailable:Option<String>=tx.query_row("SELECT moment_id FROM live_device_settlements s WHERE s.workspace_id=?1 AND s.settlement_id=?2 AND NOT EXISTS(SELECT 1 FROM live_settlement_publication_states p WHERE p.settlement_id=s.settlement_id)",params![workspace,id],|r|r.get(0)).optional().map_err(SyncError::corrupt)?;
+    if let Some(moment) = unavailable {
+        return crate::outbound::journal_saved_settlement_moment_in_tx(tx, workspace, &moment)
+            .map(Some);
+    }
     let record = read_native(tx, workspace, id)?;
     let payload = record.payload()?;
     let prior:Option<i64>=tx.query_row("SELECT origin_seq FROM live_audit_settlement_publications WHERE workspace_id=?1 AND settlement_id=?2",params![workspace,id],|row|row.get(0)).optional().map_err(SyncError::corrupt)?;
@@ -343,6 +354,10 @@ pub(super) fn journal_ready_in_tx(
             )?,
             None => crate::journal_moment_append_in_tx(tx, workspace, &record.moment_id)?,
         }
+        tx.execute(
+        "UPDATE replication_log SET payload_json=json_set(json_remove(payload_json,'$.authors','$.attributionUnavailable'),'$.settlementReference',json(?3)) WHERE workspace_id=?1 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?2 AND imported=0",
+        params![workspace,record.moment_id,serde_json::to_string(&payload).map_err(SyncError::corrupt)?],
+        ).map_err(SyncError::persist)?;
     }
     Ok(Some(sequence))
 }
@@ -401,7 +416,9 @@ pub(super) fn apply_settlement_envelope(
         }
         let record = payload.record;
         record.validate(&op.workspace_id)?;
-        let json = serde_json::to_string(&record).map_err(SyncError::corrupt)?;
+        let json =
+            serde_json::to_string(&serde_json::to_value(&record).map_err(SyncError::corrupt)?)
+                .map_err(SyncError::corrupt)?;
         if hex_sha256(json.as_bytes()) != payload.record_digest {
             return Err(invalid("historical settlement digest differs"));
         }

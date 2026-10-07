@@ -137,6 +137,7 @@ impl Relay {
                 self.inserted += inserted;
                 self.skipped += skipped;
                 RelayIoResponse::Push(PushResponse {
+                    settlement_refusals: Vec::new(),
                     accepted: request.ops.len(),
                     inserted,
                     skipped,
@@ -242,6 +243,40 @@ fn deferred_push_returns_one_acknowledged_prefix_and_resumes_without_reuploading
     assert_eq!(pump_pass(&mut store, &mut relay), (0, false));
     assert_eq!(relay.pushes.len(), FILES.div_ceil(PREFIX_OPS));
     assert_eq!(relay.inventories, FILES.div_ceil(PREFIX_OPS));
+}
+
+#[test]
+fn deferred_proof_budget_reduces_batches_and_acknowledges_each_prefix() {
+    let (_scratch, _path, mut store) = fixture_with_files(7);
+    let transport = DeferredRelayTransport::default();
+    let mut cache = WriterDocCache::new();
+    let mut relay = Relay::default();
+    let mut sizes = Vec::new();
+    for _ in 0..100 {
+        if let Some((pushed, has_more)) = step(&mut store, &mut cache, &transport) {
+            assert_eq!(pushed, 7);
+            assert!(!has_more);
+            assert_eq!(read_pushed_seq(&store, WORKSPACE, ORIGIN).unwrap(), 6);
+            assert_eq!(sizes, vec![7, 3, 1, 1, 1, 1, 1, 1, 1]);
+            assert_eq!(relay.ops.len(), 7);
+            assert!(relay.uploads.values().all(|count| *count == 1));
+            return;
+        }
+        let request = transport.take_pending().expect("deferred request");
+        let response = match &request {
+            RelayIoRequest::Push(push) => {
+                sizes.push(push.ops.len());
+                if push.ops.len() > 2 {
+                    Err(RelayError::SettlementProofBudget)
+                } else {
+                    Ok(relay.answer(&request))
+                }
+            }
+            _ => Ok(relay.answer(&request)),
+        };
+        transport.complete(request, response);
+    }
+    panic!("proof budget retry did not finish a bounded prefix");
 }
 
 #[test]

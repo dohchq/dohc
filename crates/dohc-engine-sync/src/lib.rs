@@ -25,6 +25,7 @@ mod model;
 mod moment_apply;
 mod outbound;
 mod owner_publication;
+mod settlement_publication;
 pub use owner_publication::{
     OwnerAdmissionPending, OwnerPublicationPrefix, owner_publication_prefix,
 };
@@ -78,7 +79,7 @@ pub use live_audit::{
 };
 pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PAYLOAD_JSON_BYTES, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH,
-    MAX_SHARE_PROPOSAL_OPS, MAX_WIRE_INTEGER, ReplicationEnvelope,
+    MAX_SHARE_PROPOSAL_OPS, MAX_WIRE_INTEGER, ReplicationEnvelope, SettlementAdmission,
 };
 pub use moment_apply::{
     MomentApplyResult, MomentMaterializationChange, apply_moment_envelope,
@@ -97,12 +98,12 @@ pub use relay::{
     KeyEnvelopeDownloadResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest,
     LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
     PullResponse, PushRequest, PushResponse, PushWorkspaceProgress, RecoverResponse,
-    RelaySyncClient, RelayTransport, ShareBlobRequest, ShareBlobUploadRequest,
-    ShareCollectionWriteRequest, ShareCollectionWriteResponse, ShareLogPushRequest,
-    ShareProposalChange, ShareProposalSubmitOutcome, ShareProposalSubmitRequest,
-    ShareProposalSubmitResponse, ShareReplicationEnvelope, ShareViewChangedPath,
-    ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest, ShareViewResponse,
-    SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
+    RelaySyncClient, RelayTransport, SettlementPublicationRefusal, ShareBlobRequest,
+    ShareBlobUploadRequest, ShareCollectionWriteRequest, ShareCollectionWriteResponse,
+    ShareLogPushRequest, ShareProposalChange, ShareProposalSubmitOutcome,
+    ShareProposalSubmitRequest, ShareProposalSubmitResponse, ShareReplicationEnvelope,
+    ShareViewChangedPath, ShareViewPullOutcome, ShareViewRefusal, ShareViewRequest,
+    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRejection,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome, collision_key,
     read_direct_write_status,
 };

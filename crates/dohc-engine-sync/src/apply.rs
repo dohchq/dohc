@@ -253,6 +253,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
     ) -> Result<MutationOutcome<T>, SyncError>,
 ) -> Result<ApplyOutcome<T>, SyncError> {
     envelope.validate()?;
+    crate::settlement_publication::validate(envelope)?;
     let payload_json = envelope.payload_json()?;
     let result = store.write_with(faults, |tx| {
         let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
@@ -274,6 +275,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                     return Err(SyncError::CoordinateDiverged);
                 }
             }
+            if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx,envelope)? { return Ok(Admission::Refused(refusal)); }
             return Ok(Admission::Skipped);
         }
         let expected = acked.checked_add(1).ok_or(SyncError::CoordinateDiverged)?;
@@ -295,6 +297,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
                 return Err(SyncError::CoordinateDiverged);
             }
             ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
+            if let Some(refusal) = crate::settlement_publication::refresh_in_tx(tx,envelope)? { return Ok(Admission::Refused(refusal)); }
             return Ok(Admission::Skipped);
         }
         tx.execute_batch("SAVEPOINT dohc_replication_mutation")
@@ -302,7 +305,12 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         // Whether this op changed the workspace: it applied, or its refusal
         // kept its mutation.
         let mut mutation_committed = true;
-        let admission = match mutation(tx, envelope) {
+        let server_refusal = crate::settlement_publication::refresh_in_tx(tx,envelope)?;
+        let mutation_result = match server_refusal {
+            Some(refusal) => Ok(MutationOutcome::RefusedRetainingMutation { reason: refusal.reason.message().to_owned() }),
+            None => mutation(tx,envelope),
+        };
+        let admission = match mutation_result {
             Ok(MutationOutcome::Applied(value)) => {
                 tx.execute_batch("RELEASE dohc_replication_mutation")
                     .map_err(SyncError::persist)?;
@@ -341,7 +349,8 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
             }
         };
         if let Admission::Refused(refusal) = &admission {
-            persist_refusal(tx, refusal)?;
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM replication_pending_refusals WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",params![refusal.workspace_id,refusal.origin_id,refusal.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
+            if !exists { persist_refusal(tx, refusal)?; }
         }
         let apply_disposition = if matches!(&admission, Admission::Refused(_)) {
             "refused"
@@ -386,6 +395,7 @@ pub(crate) fn apply_envelope_with_mutation_outcome<T>(
         {
             crate::ydoc_apply::retain_refused_ydoc_blob(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         }
+        crate::settlement_publication::refresh_in_tx(tx,envelope)?;
         ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
         if crashes(faults, FaultPoint::SyncBeforeApplyCommit) {
             return Err(SyncError::FaultCrash);

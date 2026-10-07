@@ -157,6 +157,15 @@ fn published(f: &Fixture) -> ReplicationEnvelope {
 
 #[test]
 fn deferred_settlement_exports_its_companion_moment_after_evidence_once() {
+    deferred_settlement_export(true);
+}
+
+#[test]
+fn uncaptured_historical_settlement_exports_saved_work_without_proof() {
+    deferred_settlement_export(false);
+}
+
+fn deferred_settlement_export(retain_capture: bool) {
     use dohc_engine_collab::live_update_application::{LiveUpdateReceipt, with_settlement};
     use dohc_engine_storage::TxnOutcome;
     let mut f = fixture(false);
@@ -207,6 +216,8 @@ fn deferred_settlement_exports_its_companion_moment_after_evidence_once() {
                     params![b.workspace_id,b.main_version_id,b.object_id,written.snapshot.blob_sha256],
                 )?;
                 let id = audit.record_in_tx(tx, moment_id, &written.snapshot.blob_sha256, &vector, 300)?;
+                if retain_capture {audit.record_publication_state_in_tx(tx,&id,&doc.encode_full_state())?;}
+                else {tx.execute("UPDATE moments SET author_json=?2 WHERE moment_id=?1",params![moment_id,json!([{"kind":"human","humanId":"person","humanName":"Alex"},{"kind":"agent","agentId":"writer"}]).to_string()])?;}
                 assert_eq!(journal_live_settlement_in_tx(tx, "ws", &id, 300)?, None);
                 Ok(id)
             })?;
@@ -228,10 +239,27 @@ fn deferred_settlement_exports_its_companion_moment_after_evidence_once() {
     assert!(paired(&f.store).is_empty());
     enrollment::prepare_exports(&mut f.store, "ws", &NoFaults, &crate::NoLiveLeases, 301).unwrap();
     let published = paired(&f.store);
-    assert_eq!(published.len(), 2);
-    assert_eq!(published[0].op_kind, settlement_record::SETTLEMENT_OP);
-    assert_eq!(published[1].op_kind, "moment.append");
-    assert!(published[0].origin_seq < published[1].origin_seq);
+    if retain_capture {
+        assert_eq!(published.len(), 2);
+        assert_eq!(published[0].op_kind, settlement_record::SETTLEMENT_OP);
+        assert_eq!(published[1].op_kind, "moment.append");
+        assert!(published[0].origin_seq < published[1].origin_seq);
+    } else {
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].op_kind, "moment.append");
+        assert!(published[0].payload.get("settlementReference").is_none());
+        assert!(published[0].payload.get("authors").is_none());
+        assert_eq!(
+            published[0].payload["attributionUnavailable"]["reason"],
+            "unproven-hosted-authors"
+        );
+        assert_eq!(count(&f.store, "live_settlement_publication_states"), 0);
+        assert_eq!(
+            crate::list_refusal_notices(&f.store, "ws").unwrap().len(),
+            1
+        );
+        assert_eq!(count(&f.store, "live_device_settlements"), 1);
+    }
     assert_eq!(count(&f.store, "live_audit_pending_exports"), 0);
     f.store
         .write_with(&NoFaults, |tx| {

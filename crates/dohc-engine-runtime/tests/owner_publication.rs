@@ -744,6 +744,8 @@ async fn ordinary_same_path_moment_on_adopted_owner_is_retained_and_acknowledged
         .encode_full_state();
     let before_moments = f.store.table_row_count("moments").unwrap();
     let op = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "workspace".into(),
         origin_id: "ordinary-peer".into(),
         origin_seq: 0,
@@ -999,6 +1001,8 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
     for (seq, update, is_base) in [(0, &base, true), (1, &human, false), (2, &agent, false)] {
         let digest = store.put_binary_blob(update).unwrap();
         let op = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "workspace".into(),
             origin_id: "owner-peer".into(),
             origin_seq: seq,
@@ -1217,6 +1221,8 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
         })
         .unwrap();
     let published = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "workspace".into(),
         origin_id,
         origin_seq,
@@ -1654,6 +1660,8 @@ async fn first_owner_settlement_publishes_the_adopted_source(replace_draft_befor
     );
 
     let published = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "workspace".into(),
         origin_id: moment_origin,
         origin_seq: moment_seq,

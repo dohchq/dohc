@@ -301,6 +301,7 @@ impl RelayError {
             | RelayError::IdentityRequired
             | RelayError::ClaimRefused(_)
             | RelayError::StreamIdentityMismatch
+            | RelayError::SettlementProofBudget
             | RelayError::AuthorshipMismatch
             | RelayError::UnknownChatOperation
             | RelayError::ShareReadOnly
@@ -406,6 +407,8 @@ pub enum RelayError {
     ClaimRefused(Box<RelayError>),
     #[error("replication stream identity does not match")]
     StreamIdentityMismatch,
+    #[error("settlement proof verification is temporarily over budget")]
+    SettlementProofBudget,
     #[error("relay authorship check failed")]
     AuthorshipMismatch,
     #[error("relay cannot verify this chat operation")]

@@ -2743,6 +2743,32 @@ BEGIN
 END;
 ";
 
+const V2_LIVE_SETTLEMENT_PUBLICATION_DDL: &str = "
+CREATE TABLE live_settlement_publication_states (
+    settlement_id TEXT NOT NULL PRIMARY KEY
+        REFERENCES live_device_settlements(settlement_id) ON DELETE CASCADE,
+    state_blob_sha256 TEXT NOT NULL
+        REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
+CREATE TABLE live_settlement_publication_admissions (
+    workspace_id TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    moment_id TEXT NOT NULL,
+    admission_json TEXT NOT NULL,
+    authors_json TEXT,
+    fallback_origin_seq INTEGER,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq)
+) STRICT;
+CREATE TABLE live_settlement_attribution_unavailable (
+    workspace_id TEXT NOT NULL,
+    moment_id TEXT NOT NULL,
+    settlement_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, moment_id)
+) STRICT;
+";
+
 /// The frozen, ordered list of migrations this build knows. No build may
 /// delete or rename the `v2-baseline` ledger row, because an older build
 /// recognizes a newer store only by that row and would otherwise offer
@@ -2943,6 +2969,12 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         ordinal: 31,
         id: "v2-ydoc-sharing-declined",
         sql: V2_YDOC_SHARING_DECLINED_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 32,
+        id: "v2-live-settlement-publication",
+        sql: V2_LIVE_SETTLEMENT_PUBLICATION_DDL,
         sets_user_version: None,
     },
 ];
@@ -3394,6 +3426,10 @@ mod tests {
             (
                 "v2-ydoc-sharing-declined",
                 "8a42bb97818cd2b4456555336bc1d2819b96e68b66280cf4366d2021bded0c02",
+            ),
+            (
+                "v2-live-settlement-publication",
+                "e37325b7a31bbba1c63cfd891cbecd6054809201002ac482c95ab41d54ad8458",
             ),
         ];
         assert_eq!(BASELINE_MIGRATIONS.len(), pinned.len());

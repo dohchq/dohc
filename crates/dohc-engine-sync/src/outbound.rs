@@ -38,6 +38,35 @@ pub(crate) fn omit_local_person_authors(payload: &mut serde_json::Value) -> bool
     true
 }
 
+pub(crate) fn mark_unproven_hosted_authors(payload: &mut serde_json::Value) -> bool {
+    if payload.get("settlementReference").is_some() {
+        return false;
+    }
+    let hosted = payload
+        .get("authors")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|authors| {
+            authors.iter().any(|author| {
+                author["kind"] == "human"
+                    && author["humanName"].is_string()
+                    && author["humanId"]
+                        .as_str()
+                        .is_some_and(|id| relay_person_id(id).is_some())
+            })
+        });
+    if !hosted {
+        return false;
+    }
+    payload
+        .as_object_mut()
+        .expect("moment payload is an object")
+        .remove("authors");
+    payload["attributionUnavailable"] =
+        serde_json::json!({"settlementId":"unavailable","reason":"unproven-hosted-authors"});
+    payload["metadata"]["summary"] = serde_json::Value::String("Attribution unavailable".into());
+    true
+}
+
 pub(crate) fn relay_person_id(id: &str) -> Option<&str> {
     (!id.starts_with("local:")).then_some(id)
 }
@@ -57,7 +86,9 @@ pub(crate) fn repair_queued_moment_authors(
                 return None;
             }
             let mut payload = op.payload.clone();
-            omit_local_person_authors(&mut payload).then_some((index, payload))
+            let marked = mark_unproven_hosted_authors(&mut payload);
+            let omitted = omit_local_person_authors(&mut payload);
+            (marked || omitted).then_some((index, payload))
         })
         .collect();
     if repairs.is_empty() {
@@ -77,6 +108,9 @@ pub(crate) fn repair_queued_moment_authors(
                 )
                 .map_err(SyncError::persist)?;
             if updated == 1 {
+                let mut marked = op.clone();
+                marked.payload = payload.clone();
+                crate::settlement_publication::refresh_in_tx(tx, &marked)?;
                 repaired.push((index, payload));
             }
         }
@@ -149,7 +183,9 @@ pub fn journal_moment_append_in_tx(
     moment_id: &str,
 ) -> Result<(), SyncError> {
     let (payload, recorded_at_ms) = moment_payload_in_tx(tx, workspace_id, moment_id, None)?;
-    journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
+    let sequence =
+        journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms)?;
+    mark_export_in_tx(tx, workspace_id, sequence, payload, recorded_at_ms)
 }
 
 /// [`journal_moment_append_in_tx`] with `before` as the whole public before group.
@@ -161,7 +197,25 @@ pub(crate) fn journal_moment_append_from_in_tx(
 ) -> Result<(), SyncError> {
     let (payload, recorded_at_ms) =
         moment_payload_in_tx(tx, workspace_id, moment_id, Some(before))?;
-    journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms).map(|_| ())
+    let sequence =
+        journal_local_op_in_tx(tx, workspace_id, "moment.append", &payload, recorded_at_ms)?;
+    mark_export_in_tx(tx, workspace_id, sequence, payload, recorded_at_ms)
+}
+
+pub(crate) fn journal_saved_settlement_moment_in_tx(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    moment: &str,
+) -> Result<i64, SyncError> {
+    use rusqlite::OptionalExtension;
+    let prior:Option<i64>=tx.query_row("SELECT origin_seq FROM replication_log WHERE workspace_id=?1 AND op_kind='moment.append' AND imported=0 AND json_extract(payload_json,'$.momentId')=?2 LIMIT 1",params![workspace,moment],|r|r.get(0)).optional().map_err(SyncError::corrupt)?;
+    if let Some(sequence) = prior {
+        return Ok(sequence);
+    }
+    let (payload, recorded) = moment_payload_in_tx(tx, workspace, moment, None)?;
+    let sequence = journal_local_op_in_tx(tx, workspace, "moment.append", &payload, recorded)?;
+    mark_export_in_tx(tx, workspace, sequence, payload, recorded)?;
+    Ok(sequence)
 }
 
 pub(crate) fn moment_append_payload_in_tx(
@@ -170,6 +224,38 @@ pub(crate) fn moment_append_payload_in_tx(
     moment_id: &str,
 ) -> Result<(serde_json::Value, i64), SyncError> {
     moment_payload_in_tx(tx, workspace_id, moment_id, None)
+}
+
+fn mark_export_in_tx(
+    tx: &Transaction<'_>,
+    workspace: &str,
+    sequence: i64,
+    payload: serde_json::Value,
+    recorded: i64,
+) -> Result<(), SyncError> {
+    if payload.get("attributionUnavailable").is_none() {
+        return Ok(());
+    }
+    let origin: String = tx
+        .query_row(
+            "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+            [workspace],
+            |r| r.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let envelope = crate::ReplicationEnvelope {
+        workspace_id: workspace.into(),
+        origin_id: origin,
+        origin_seq: sequence,
+        relay_seq: None,
+        op_kind: "moment.append".into(),
+        payload,
+        recorded_at_ms: recorded,
+        settlement_admission: None,
+        admitted_author_snapshot: None,
+    };
+    crate::settlement_publication::refresh_in_tx(tx, &envelope)?;
+    Ok(())
 }
 
 fn moment_payload_in_tx(
@@ -317,6 +403,10 @@ fn moment_payload_in_tx(
         for (field, value) in fields.as_object().expect("before group is an object") {
             object.insert(field.clone(), value.clone());
         }
+    }
+    let proof_ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) WHERE s.workspace_id=?1 AND s.moment_id=?2)",params![workspace_id,row.moment_id],|r|r.get(0)).map_err(SyncError::corrupt)?;
+    if !proof_ready {
+        mark_unproven_hosted_authors(&mut payload);
     }
     omit_local_person_authors(&mut payload);
     if let Some(authors) = payload

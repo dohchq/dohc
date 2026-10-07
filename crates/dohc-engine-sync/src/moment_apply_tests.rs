@@ -34,6 +34,8 @@ fn apply_moment_envelope(
 
 fn envelope(origin: &str, seq: i64, workspace_id: &str, payload: Value) -> ReplicationEnvelope {
     ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: workspace_id.to_owned(),
         origin_id: origin.to_owned(),
         origin_seq: seq,
@@ -182,6 +184,8 @@ fn outbound_moment_authors_keep_local_people_and_replicate_agents_and_automation
                         |row| {
                             let payload: String = row.get(4)?;
                             Ok(ReplicationEnvelope {
+                                settlement_admission: None,
+                                admitted_author_snapshot: None,
                                 workspace_id: row.get(0)?,
                                 origin_id: row.get(1)?,
                                 origin_seq: row.get(2)?,
@@ -2949,6 +2953,8 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
         .put_binary_blob(&doc.encode_full_state())
         .expect("Y.Doc base blob");
     let base = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "ydoc-origin".to_owned(),
         origin_seq: 0,
@@ -2994,6 +3000,8 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
     for (index, update) in rewrite.into_iter().enumerate() {
         let update_sha = peer.put_binary_blob(&update).expect("Y.Doc rewrite blob");
         let delta = ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "ydoc-origin".to_owned(),
             origin_seq: index as i64 + 1,
@@ -3405,6 +3413,8 @@ fn moment_delete_retires_the_receiver_ydoc_lineage() {
         &mut peer,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &ReplicationEnvelope {
+            settlement_admission: None,
+            admitted_author_snapshot: None,
             workspace_id: "ws".to_owned(),
             origin_id: "ydoc-origin".to_owned(),
             origin_seq: 0,
@@ -3813,6 +3823,8 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
     );
 
     let next = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "malformed-moment-peer".to_owned(),
         origin_seq: 1,
@@ -4187,6 +4199,8 @@ fn covered_artifact_is_history_only_with_live_edits_and_crash_replay() {
             doc.plaintext_insert(0, "artifact");
             let sha = store.put_binary_blob(&doc.encode_full_state()).unwrap();
             let base = ReplicationEnvelope {
+                settlement_admission: None,
+                admitted_author_snapshot: None,
                 workspace_id: "ws".into(),
                 origin_id: "peer".into(),
                 origin_seq: 0,
@@ -4908,6 +4922,8 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
     hydrate_texts(&mut store, &["shipped", "remote edit"]);
     let shipped_sha = text_sha("shipped");
     let version = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "version-peer".to_owned(),
         origin_seq: 0,
@@ -5362,6 +5378,8 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
     );
 
     let version = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "version-peer".to_owned(),
         origin_seq: 0,

@@ -22,7 +22,7 @@ export function namedShareOrigin(shareId: string, userId: string, originId: stri
 // so an author kind a client may not stamp is refused whatever it is.
 const CLIENT_MOMENT_AUTHOR_KINDS: ReadonlySet<unknown> = new Set(["agent", "automation"]);
 
-export function assertClientLogProvenance(originId: string, rawOps: unknown[]): void {
+export function assertClientLogProvenance(originId: string, rawOps: unknown[], deferMomentRefusal=false): void {
   if (originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for named share writes");
   }
@@ -37,12 +37,18 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[]): 
     const op = raw as Record<string, unknown>;
     if (op.opKind !== "moment.append") continue;
     const payload = op.payload as Record<string, unknown> | null;
+    if (deferMomentRefusal && payload && Object.hasOwn(payload,"settlementReference")) continue;
     const authors = payload?.authors;
     if (authors == null) continue;
-    if (!Array.isArray(authors) || authors.length === 0 || authors.some((author: unknown) =>
-      !author || typeof author !== "object" || !CLIENT_MOMENT_AUTHOR_KINDS.has((author as Record<string, unknown>).kind)
-    )) throw relayError("authorship_mismatch");
+    // A deterministic moment refusal is consumed by prepareHostedSettlements,
+    // so this coordinate cannot hold back the rest of the owner's log.
+    if (clientMomentAuthorsRefused(authors) && !deferMomentRefusal) throw relayError("authorship_mismatch");
   }
+}
+
+export function clientMomentAuthorsRefused(authors:unknown):boolean {
+  return authors != null && (!Array.isArray(authors) || authors.length === 0 || authors.some((author: unknown) =>
+    !author || typeof author !== "object" || !CLIENT_MOMENT_AUTHOR_KINDS.has((author as Record<string, unknown>).kind)));
 }
 
 export function parseLogOp(value: unknown): SyncRelayLogInput {

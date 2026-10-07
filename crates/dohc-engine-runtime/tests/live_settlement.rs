@@ -143,6 +143,43 @@ async fn settle_restore(
 }
 
 #[tokio::test]
+async fn uncaptured_historical_settlement_replay_keeps_saved_work_without_recapturing() {
+    let f = Fixture::new().await;
+    let update = f
+        .doc
+        .rewrite_content_to_markdown_preserving_source(ContentKind::Richdoc, "# Saved work\n")
+        .unwrap();
+    let terminal = f.apply(7, update).await;
+    let first = f
+        .settle(Some(terminal.clone()), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    let before = f.counts();
+    let text = std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap();
+    {
+        let db = rusqlite::Connection::open(&f.db).unwrap();
+        db.execute(
+            "DELETE FROM live_settlement_publication_states WHERE settlement_id=?1",
+            [&first.settlement_id],
+        )
+        .unwrap();
+    }
+    for _ in 0..2 {
+        let replay = f
+            .settle(Some(terminal.clone()), 100, Arc::new(NoFaults))
+            .await
+            .unwrap();
+        assert_eq!(replay.settlement_id, first.settlement_id);
+        assert_eq!(f.counts(), before);
+        assert_eq!(
+            std::fs::read(f.root.path().join(&f.binding.current_path)).unwrap(),
+            text
+        );
+        assert_eq!(f.read(|db|db.query_row("SELECT count(*) FROM live_settlement_publication_states WHERE settlement_id=?1",[&first.settlement_id],|r|r.get::<_,i64>(0)).unwrap()),0);
+    }
+}
+
+#[tokio::test]
 async fn restore_settlement_materializes_selected_point_and_preserves_old_anchor() {
     let f = Fixture::new().await;
     f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
@@ -3498,6 +3535,8 @@ async fn live_history_publication_and_settlement_benchmark() {
                 [&settled.moment_id],
                 |r| {
                     Ok(ReplicationEnvelope {
+                        settlement_admission: None,
+                        admitted_author_snapshot: None,
                         workspace_id: "workspace".into(),
                         origin_id: r.get(0)?,
                         origin_seq: r.get(1)?,

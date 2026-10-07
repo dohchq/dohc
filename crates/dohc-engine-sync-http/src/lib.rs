@@ -545,6 +545,7 @@ impl RelayTransport for HttpRelayTransport {
             RequestContext::Workspace,
         )?;
         Ok(PushResponse {
+            settlement_refusals: wire.settlement_refusals,
             accepted: wire.accepted,
             inserted: wire.inserted,
             skipped: wire.skipped,
@@ -854,6 +855,7 @@ impl RelayTransport for HttpRelayTransport {
             RequestContext::Share,
         )?;
         Ok(PushResponse {
+            settlement_refusals: wire.settlement_refusals,
             accepted: wire.accepted,
             inserted: wire.inserted,
             skipped: wire.skipped,
@@ -1175,6 +1177,7 @@ define_server_error_codes! {
     "epoch_superseded" => |_| RelayError::EpochSuperseded,
     "identity_not_recognized" => |_| RelayError::IdentityNotRecognized,
     "identity_required" => |_| RelayError::IdentityRequired,
+    "settlement_proof_budget" => |_| RelayError::SettlementProofBudget,
     "internal_error" => |_| RelayError::ServerInternal,
     "invalid_access" => |_| RelayError::BadRequest,
     "invalid_chat" => |_| RelayError::InvalidChannel,
@@ -1375,6 +1378,8 @@ struct WireCollectionWriteError {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WirePushResponse {
+    #[serde(default)]
+    settlement_refusals: Vec<dohc_engine_sync::SettlementPublicationRefusal>,
     accepted: usize,
     inserted: usize,
     skipped: usize,
@@ -1401,6 +1406,10 @@ enum WireLogCoordinateResponse {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WireLogRow {
+    #[serde(default)]
+    settlement_admission: Option<dohc_engine_sync::SettlementAdmission>,
+    #[serde(default)]
+    admitted_author_snapshot: Option<serde_json::Value>,
     #[serde(rename = "relaySeq", default)]
     relay_seq: Option<i64>,
     workspace_id: Option<String>,
@@ -1414,6 +1423,8 @@ struct WireLogRow {
 impl WireLogRow {
     fn into_workspace_envelope(self, workspace_id: String) -> ReplicationEnvelope {
         ReplicationEnvelope {
+            settlement_admission: self.settlement_admission,
+            admitted_author_snapshot: self.admitted_author_snapshot,
             workspace_id,
             origin_id: self.origin_id,
             origin_seq: self.origin_seq,
@@ -1588,7 +1599,8 @@ mod tests {
 
     /// Answers one request on loopback with a canned status and JSON body,
     /// and hands back the request it read.
-    fn answer_once(status: u16, body: &'static str) -> (String, thread::JoinHandle<String>) {
+    fn answer_once(status: u16, body: impl Into<String>) -> (String, thread::JoinHandle<String>) {
+        let body = body.into();
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let base = format!(
             "http://{}",
@@ -1632,6 +1644,142 @@ mod tests {
             String::from_utf8_lossy(&request).into_owned()
         });
         (base, handle)
+    }
+
+    #[test]
+    fn settlement_carriers_survive_pull_and_coordinate_lookup_without_changing_payloads() {
+        for (admission, authors, payload) in [
+            (
+                serde_json::json!({"status":"accepted","settlementId":"settlement"}),
+                Some(
+                    serde_json::json!([{"kind":"human","humanId":"contributor","humanName":"Alex"}]),
+                ),
+                serde_json::json!({"momentId":"moment","settlementReference":{"record":{"settlementId":"settlement"}}}),
+            ),
+            (
+                serde_json::json!({"status":"refused","settlementId":"unavailable","reason":"authorship-mismatch"}),
+                None,
+                serde_json::json!({"momentId":null,"settlementReference":"malformed","payloadAfterBlobSha256":"phantom"}),
+            ),
+        ] {
+            let row = serde_json::json!({"workspaceId":"ws","originId":"origin","originSeq":0,"relaySeq":1,
+                "opKind":"moment.append","recordedAtMs":7,"payload":payload,
+                "settlementAdmission":admission,"admittedAuthorSnapshot":authors});
+            let (base, server) = answer_once(
+                200,
+                serde_json::json!({"ops":[row.clone()],"nextCursor":1,"hasMore":false}).to_string(),
+            );
+            let transport =
+                HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
+            let pulled = transport
+                .pull(PullRequest {
+                    workspace_id: "ws".into(),
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    cursor: 0,
+                    limit: 10,
+                })
+                .unwrap();
+            server.join().unwrap();
+            let op = &pulled.ops[0];
+            assert_eq!(
+                serde_json::to_value(&op.settlement_admission).unwrap(),
+                admission
+            );
+            assert_eq!(op.admitted_author_snapshot, authors);
+            assert_eq!(op.payload, payload);
+            let (base, server) = answer_once(
+                200,
+                serde_json::json!({"status":"presentBelowEpochFloor","op":row}).to_string(),
+            );
+            let transport =
+                HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
+            let looked = transport
+                .lookup_log_coordinate(LogCoordinateRequest {
+                    workspace_id: "ws".into(),
+                    replication_epoch: "epoch".into(),
+                    stream_identity: "stream".into(),
+                    origin_id: "origin".into(),
+                    origin_seq: 0,
+                })
+                .unwrap();
+            assert_eq!(
+                looked,
+                LogCoordinateResponse::PresentBelowEpochFloor(op.clone())
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn settlement_push_sends_original_payload_without_server_metadata_and_reads_refusals() {
+        let payload = serde_json::json!({"momentId":null,"settlementReference":"malformed"});
+        let op = ReplicationEnvelope {
+            workspace_id: "ws".into(),
+            origin_id: "origin".into(),
+            origin_seq: 0,
+            relay_seq: Some(9),
+            op_kind: "moment.append".into(),
+            payload: payload.clone(),
+            recorded_at_ms: 7,
+            settlement_admission: Some(dohc_engine_sync::SettlementAdmission::Accepted {
+                settlement_id: "forged".into(),
+            }),
+            admitted_author_snapshot: Some(
+                serde_json::json!([{"kind":"human","humanId":"forged"}]),
+            ),
+        };
+        let (base, server) = answer_once(
+            200,
+            r#"{"accepted":1,"inserted":1,"skipped":0,"currentMaxOriginSeq":0,"settlementRefusals":[{"originId":"origin","originSeq":0,"momentId":"unavailable","settlementId":"unavailable","reason":"authorship-mismatch"}]}"#,
+        );
+        let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
+        let response = transport
+            .push(PushRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "origin".into(),
+                after_seq: -1,
+                ops: vec![op],
+            })
+            .unwrap();
+        assert_eq!(response.settlement_refusals.len(), 1);
+        assert_eq!(response.settlement_refusals[0].moment_id, "unavailable");
+        let sent = server.join().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&sent[sent.find('{').unwrap()..]).unwrap();
+        assert_eq!(body["ops"][0]["payload"], payload);
+        assert_eq!(
+            body["ops"][0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["originSeq", "opKind", "payload", "recordedAtMs"])
+        );
+    }
+
+    #[test]
+    fn settlement_proof_budget_503_is_retryable() {
+        let (base, server) = answer_once(
+            503,
+            r#"{"code":"settlement_proof_budget","error":"Publication proof exceeds this request's budget."}"#,
+        );
+        let transport = HttpRelayTransport::new_insecure_loopback_for_tests(base, "token").unwrap();
+        assert_eq!(
+            transport.push(PushRequest {
+                workspace_id: "ws".into(),
+                replication_epoch: "epoch".into(),
+                stream_identity: "stream".into(),
+                origin_id: "origin".into(),
+                after_seq: -1,
+                ops: vec![]
+            }),
+            Err(RelayError::SettlementProofBudget)
+        );
+        server.join().unwrap();
     }
 
     /// A stale base and a refusal come back as answers the recipient shows;

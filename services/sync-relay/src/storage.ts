@@ -1,3 +1,4 @@
+import {prepareHostedSettlements} from "./storage/hostedSettlement";
 import * as shareLabelsStorage from "./storage/shareLabels";
 import * as buttonInspections from "./automationButtonInspections";
 import type {ShareLabels} from "@dohc/security-contract/share-labels";
@@ -807,6 +808,8 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null {
     return keyEnvelopesStorage.getKeyEnvelope(this, workspaceId);
   }
+
+  prepareHostedSettlements(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>{return prepareHostedSettlements(this,input,undefined,signal);}
 
   appendLogBatch(input: {
     workspaceId: string;

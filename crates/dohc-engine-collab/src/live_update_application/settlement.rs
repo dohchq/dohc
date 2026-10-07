@@ -20,6 +20,13 @@ pub struct LiveSettlementResult {
     pub collection_reconcile_required: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveSettlementPublicationState {
+    New,
+    Retained(Vec<u8>),
+    Unavailable,
+}
+
 pub struct LiveSettlementAudit {
     namespace: String,
     binding: LiveObjectBinding,
@@ -259,6 +266,117 @@ impl LiveSettlementAudit {
             params![id,self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.previous_cursor,self.terminal_cursor,self.previous_sequence,self.sequence,self.receipts.len() as i64,self.interval_digest,moment,markdown,vector,
                 serde_json::to_string(b).map_err(StorageError::persist_public)?,serde_json::to_string(&self.coordinate).map_err(StorageError::persist_public)?,now_ms,if operation.is_some() {"restore"} else {"ordinary"},operation]).map_err(StorageError::persist_public)?;
         Ok(id)
+    }
+
+    /// Before recording, distinguish a new capture from a historical replay.
+    /// A historical settlement without retained state cannot capture today's doc.
+    pub fn prepare_publication_state_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+    ) -> Result<LiveSettlementPublicationState, StorageError> {
+        let settlement_id: Option<String> = tx
+            .query_row(
+                "SELECT settlement_id FROM live_device_settlements \
+                 WHERE relay_database_namespace=?1 AND workspace_id=?2 \
+                 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 \
+                 AND terminal_cursor=?6",
+                params![
+                    self.namespace,
+                    self.binding.workspace_id,
+                    self.binding.main_version_id,
+                    self.binding.object_id,
+                    self.binding.lineage_claim_id,
+                    self.terminal_cursor,
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::persist_public)?;
+        match settlement_id {
+            None => Ok(LiveSettlementPublicationState::New),
+            Some(id) => Ok(match self.retained_publication_state_in_tx(tx, &id)? {
+                Some(bytes) => LiveSettlementPublicationState::Retained(bytes),
+                None => LiveSettlementPublicationState::Unavailable,
+            }),
+        }
+    }
+
+    /// A replay keeps the exact accepted state captured by the original commit.
+    pub fn retained_publication_state_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        settlement_id: &str,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let digest: Option<String> = tx
+            .query_row(
+                "SELECT p.state_blob_sha256 FROM live_settlement_publication_states p \
+                 JOIN live_device_settlements s ON s.settlement_id=p.settlement_id \
+                 WHERE s.settlement_id=?1 AND s.relay_database_namespace=?2 \
+                 AND s.workspace_id=?3 AND s.main_version_id=?4 AND s.object_id=?5 \
+                 AND s.lineage_claim_id=?6 AND s.terminal_cursor=?7",
+                params![
+                    settlement_id,
+                    self.namespace,
+                    self.binding.workspace_id,
+                    self.binding.main_version_id,
+                    self.binding.object_id,
+                    self.binding.lineage_claim_id,
+                    self.terminal_cursor,
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::persist_public)?;
+        digest
+            .map(|digest| {
+                get_binary_blob(tx, &digest)?.ok_or(StorageError::StateCorrupt { source: None })
+            })
+            .transpose()
+    }
+
+    /// Retain the accepted full state in the settlement's own transaction.
+    /// Repeating a capture must name the identical bytes.
+    pub fn record_publication_state_in_tx(
+        &self,
+        tx: &Transaction<'_>,
+        settlement_id: &str,
+        full_state_bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        let matches_audit: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM live_device_settlements \
+                 WHERE settlement_id=?1 AND relay_database_namespace=?2 \
+                 AND workspace_id=?3 AND main_version_id=?4 AND object_id=?5 \
+                 AND lineage_claim_id=?6 AND terminal_cursor=?7)",
+                params![
+                    settlement_id,
+                    self.namespace,
+                    self.binding.workspace_id,
+                    self.binding.main_version_id,
+                    self.binding.object_id,
+                    self.binding.lineage_claim_id,
+                    self.terminal_cursor,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::persist_public)?;
+        if !matches_audit {
+            return Err(StorageError::StateCorrupt { source: None });
+        }
+        if let Some(saved) = self.retained_publication_state_in_tx(tx, settlement_id)? {
+            if saved != full_state_bytes {
+                return Err(StorageError::StateCorrupt { source: None });
+            }
+            return Ok(());
+        }
+        let digest = dohc_engine_storage::put_binary_blob(tx, full_state_bytes)?;
+        tx.execute(
+            "INSERT INTO live_settlement_publication_states(settlement_id,state_blob_sha256) \
+             VALUES (?1,?2)",
+            params![settlement_id, digest],
+        )
+        .map_err(StorageError::persist_public)?;
+        Ok(())
     }
 
     pub fn result(
@@ -584,4 +702,131 @@ fn read_interval(
         ));
     }
     Ok(receipts)
+}
+
+#[cfg(test)]
+mod publication_state_tests {
+    use super::*;
+    use dohc_test_scratch::ScratchDir;
+
+    fn fixture() -> (ScratchDir, EngineStore, LiveSettlementAudit) {
+        let dir = ScratchDir::new_named("live-settlement-publication-state").unwrap();
+        let mut store = EngineStore::open(&dir.join("engine.db"), 0).unwrap();
+        dohc_engine_domain::VersionedTextStore::new(&mut store)
+            .ensure_main_version("workspace", "main", 0, &NoFaults)
+            .unwrap();
+        let digest = hex_sha256(b"projection");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO live_device_settlements VALUES \
+                 ('settlement','relay','workspace','main','object','lineage', \
+                  0,1,0,1,1,?1,'moment',?1,?1,'{}','{}',0,'ordinary',NULL)",
+                    [&digest],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        let audit = LiveSettlementAudit {
+            namespace: "relay".into(),
+            binding: LiveObjectBinding {
+                workspace_id: "workspace".into(),
+                main_version_id: "main".into(),
+                object_id: "object".into(),
+                lineage_claim_id: "lineage".into(),
+                current_path: "notes/a.md".into(),
+                selector_paths: vec!["notes/a.md".into()],
+                restore_fence_generation: 0,
+            },
+            coordinate: ApplicationHostCoordinate {
+                host_id: "host".into(),
+                host_epoch: 1,
+                instance_id: "instance".into(),
+                connection_id: "connection".into(),
+            },
+            previous_cursor: 0,
+            terminal_cursor: 1,
+            previous_sequence: 0,
+            sequence: 1,
+            observed_head: 1,
+            accepted: None,
+            receipts: Vec::new(),
+            interval_digest: digest.clone(),
+            bootstrap_moment: "moment".into(),
+            bootstrap_digest: digest,
+            first: false,
+            restore: None,
+            replay_anchor: None,
+        };
+        (dir, store, audit)
+    }
+
+    #[test]
+    fn publication_state_is_immutable_and_replay_reads_the_prior_capture() {
+        let (_dir, mut store, mut audit) = fixture();
+        let state = crate::Ydoc::wire().encode_full_state();
+        store
+            .write_with(&NoFaults, |tx| {
+                assert_eq!(
+                    audit.prepare_publication_state_in_tx(tx)?,
+                    LiveSettlementPublicationState::Unavailable
+                );
+                audit.terminal_cursor = 2;
+                assert_eq!(
+                    audit.prepare_publication_state_in_tx(tx)?,
+                    LiveSettlementPublicationState::New
+                );
+                audit.terminal_cursor = 1;
+                audit.record_publication_state_in_tx(tx, "settlement", &state)?;
+                audit.record_publication_state_in_tx(tx, "settlement", &state)?;
+                assert!(matches!(
+                    audit.record_publication_state_in_tx(tx, "settlement", b"private tail"),
+                    Err(StorageError::StateCorrupt { .. })
+                ));
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+        audit.observed_head = 2;
+        store
+            .write_with(&NoFaults, |tx| {
+                assert_eq!(
+                    audit.prepare_publication_state_in_tx(tx)?,
+                    LiveSettlementPublicationState::Retained(state.clone())
+                );
+                audit.binding.workspace_id = "another-workspace".into();
+                assert!(matches!(
+                    audit.record_publication_state_in_tx(tx, "settlement", &state),
+                    Err(StorageError::StateCorrupt { .. })
+                ));
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn publication_state_and_blob_roll_back_with_the_transaction() {
+        let (_dir, mut store, audit) = fixture();
+        let state = crate::Ydoc::wire().encode_full_state();
+        let digest = hex_sha256(&state);
+        let result = store.write_with(&NoFaults, |tx| {
+            audit.record_publication_state_in_tx(tx, "settlement", &state)?;
+            Err::<(), StorageError>(StorageError::StateCorrupt { source: None })
+        });
+        assert!(result.is_err());
+        store
+            .read_with(|conn| {
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT count(*) FROM live_settlement_publication_states",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(StorageError::persist_public)?;
+                assert_eq!(count, 0);
+                assert!(get_binary_blob(conn, &digest)?.is_none());
+                Ok::<_, StorageError>(())
+            })
+            .unwrap();
+    }
 }

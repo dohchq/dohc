@@ -216,6 +216,7 @@ export function createShareReadQueries(
       for (const [index, row] of page.rows.entries()) {
         rawRowsConsumed += 1;
         nextCursor = row.relaySeq;
+        if (row.settlementAdmission?.status === "refused") continue;
         if (
           audience === "accountless" &&
           !ACCOUNTLESS_FILE_REPLAY_OP_KINDS.has(row.opKind)
@@ -243,8 +244,19 @@ export function createShareReadQueries(
             : null;
         if (payload === null) continue;
         if (audience === "authenticated" && row.opKind === "moment.append") {
-          const authors = admittedMomentAuthors(row.payloadJson);
+          const authors = row.settlementAdmission?.status === "accepted"
+            ? row.admittedAuthorSnapshot
+            : admittedMomentAuthors(row.payloadJson);
           if (authors) (payload as Record<string, unknown>).authors = authors;
+          const original = JSON.parse(row.payloadJson) as Record<string, unknown>;
+          const mark = original.attributionUnavailable;
+          if (mark && typeof mark === "object" && !Array.isArray(mark)) {
+            const unavailable = mark as Record<string, unknown>;
+            if (typeof unavailable.settlementId === "string" && unavailable.settlementId.length > 0 && unavailable.settlementId.length <= 512 &&
+              typeof unavailable.reason === "string" && unavailable.reason.length > 0 && unavailable.reason.length <= 4096) {
+              (payload as Record<string, unknown>).metadata = { origin: "sync", summary: "Attribution unavailable" };
+            }
+          }
         }
         ops.push({
           relaySeq: row.relaySeq,
@@ -253,7 +265,7 @@ export function createShareReadQueries(
           opKind: row.opKind,
           payload,
           recordedAtMs: row.recordedAtMs,
-          ...(row.admittedAuthorSnapshot === undefined ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
+          ...(row.admittedAuthorSnapshot === undefined || row.opKind === "moment.append" ? {} : {admittedAuthorSnapshot: row.admittedAuthorSnapshot}),
         });
         if (ops.length === limit) {
           return {
@@ -302,6 +314,7 @@ export function createShareReadQueries(
         limit: linkFreshnessPageSize,
       });
       for (const row of rows) {
+        if (row.settlementAdmission?.status === "refused") continue;
         if (row.relaySeq <= epochLogFloor) {
           return { lastSettledAtMs: null, lastSettledKnown: true };
         }

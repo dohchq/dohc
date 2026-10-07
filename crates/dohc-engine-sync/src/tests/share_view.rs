@@ -2386,6 +2386,8 @@ fn share_view_boundary_without_a_grant_admits_nothing() {
         granted: None,
     };
     let envelope = ReplicationEnvelope {
+        settlement_admission: None,
+        admitted_author_snapshot: None,
         workspace_id: "ws".to_owned(),
         origin_id: "peer".to_owned(),
         origin_seq: 0,

@@ -1,3 +1,4 @@
+import {SETTLEMENT_CUTS} from "./hostedSettlementSchema";
 import {readRestoreAdmission,verifyRestoreCheckpoint} from "./liveRestoreCheckpoint";
 import { liveJournalHistoryNamespace, requireLiveJournalHistory } from "./liveJournalHistory";
 import { liveJournalCheckpointDue } from "./liveJournalCheckpoint";
@@ -385,7 +386,7 @@ function snapshotJournalValidation(value: unknown, checkpointDue: boolean): Live
   const stateDescriptor = Object.getOwnPropertyDescriptor(accepted.evidence,"stateUpdate");
   const captureState = checkpointDue || (stateDescriptor !== undefined && Object.hasOwn(stateDescriptor,"value"));
   const evidence = baselineRecord(accepted.evidence, ["version", "document", "currentPath", "checkpointDigest", "checkpointRanges", "suffixDigests",
-    "candidate", "stateUpdateSha256", "stateUpdateByteLength", ...(captureState ? ["stateUpdate"] : [])], true);
+    "candidate", "stateUpdateSha256", "stateUpdateByteLength", "projectedMarkdownSha256", "projectedMarkdownByteLength", ...(captureState ? ["stateUpdate"] : [])], true);
   if (evidence.version !== 1 || typeof evidence.currentPath !== "string") throw new TypeError("Unknown journal evidence.");
   const candidate = baselineRecord(evidence.candidate, ["updateDigest", "ranges", "firstSeen", "firstSeenDeletes"]);
   const stateUpdateSha256 = parseLiveUpdateDigest(evidence.stateUpdateSha256);
@@ -401,7 +402,8 @@ function snapshotJournalValidation(value: unknown, checkpointDue: boolean): Live
     checkpointDigest: parseLiveUpdateDigest(evidence.checkpointDigest), checkpointRanges: journalRanges(evidence.checkpointRanges), suffixDigests: journalArray(evidence.suffixDigests, 4094, parseLiveUpdateDigest),
     candidate: { updateDigest: parseLiveUpdateDigest(candidate.updateDigest), ranges: journalRanges(candidate.ranges),
       firstSeen: journalRanges(candidate.firstSeen), firstSeenDeletes: journalRanges(candidate.firstSeenDeletes) },
-    ...(stateUpdate ? { stateUpdate } : {}), stateUpdateSha256, stateUpdateByteLength } };
+    ...(stateUpdate ? { stateUpdate } : {}), stateUpdateSha256, stateUpdateByteLength,
+    projectedMarkdownSha256:parseLiveUpdateDigest(evidence.projectedMarkdownSha256),projectedMarkdownByteLength:authorityInteger(evidence.projectedMarkdownByteLength) } };
 }
 function journalValidationRefusal(validation: Extract<LiveJournalValidation, { kind: "refused" }>): Exclude<RelayLiveUpdateJournalResult["result"], { kind: "accepted" }> {
   const { source, reason } = validation;
@@ -651,6 +653,10 @@ export function commitLiveUpdateJournal(storage: StorageContext, input: LiveUpda
           firstSeen,firstSeenDeletes,authorSnapshot,seedFirstSeen,authorContext:metadata.authorContext,
           ...(due ? {checkpointCoverage:window.coverage} : {}),checkpointBytes,checkpointDigest,priorMetadata: read.cut.suffix.at(-1)?.metadata ?? read.cut.checkpoint.metadata,
           onFirstWrite() {firstWriteAttempted = true;}});
+        assertWorkspaceQuota(storage,document.workspaceId,144);
+        storage.db.prepare(`INSERT INTO ${SETTLEMENT_CUTS}(journal_cursor,state_sha256,markdown_sha256,state_byte_length,markdown_byte_length) VALUES(?,?,?,?,?)`).run(
+          admitted.metadata.accepted.receipt.journalCursor,validation.evidence.stateUpdateSha256,validation.evidence.projectedMarkdownSha256,
+          validation.evidence.stateUpdateByteLength,validation.evidence.projectedMarkdownByteLength);
         for (const binding of bindings) {
           const storageBytes = Buffer.byteLength(JSON.stringify([...documentParams(document),binding.clientId,binding.snapshot]));
           assertWorkspaceQuota(storage,document.workspaceId,storageBytes);

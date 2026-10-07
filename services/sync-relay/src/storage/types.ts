@@ -117,6 +117,7 @@ export interface SyncRelayLogInput {
   payloadJson: string;
   recordedAtMs: number;
   admittedAuthorSnapshot?: LiveAuthorSnapshot;
+  settlementAdmission?: import("./hostedSettlement").SettlementAdmission;
 }
 
 export interface SyncRelayLogRow extends SyncRelayLogInput {
@@ -129,6 +130,7 @@ export interface AppendLogBatchResult {
   inserted: number;
   skipped: number;
   currentMaxOriginSeq: number;
+  settlementRefusals?: {originId:string;originSeq:number;momentId:string;settlementId:string;reason:string}[];
 }
 
 export interface FetchLogPageResult {
@@ -562,6 +564,8 @@ export type LiveJournalValidation =
       readonly stateUpdate?: Uint8Array;
       readonly stateUpdateSha256: string;
       readonly stateUpdateByteLength: number;
+      readonly projectedMarkdownSha256: string;
+      readonly projectedMarkdownByteLength: number;
   } }
   | { readonly kind: "refused";
       readonly reason: "invalid-input" | "invalid-update" | "invalid-schema" | "projection-mutated" | "capacity-refused";
@@ -768,6 +772,7 @@ export interface SyncRelayStorage {
     expectedSha256: string | null;
   }): { sha256: string };
   getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null;
+  prepareHostedSettlements(input:{workspaceId:string;originId:string;ops:SyncRelayLogInput[]},signal?:AbortSignal):Promise<void>;
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;

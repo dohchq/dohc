@@ -48,15 +48,22 @@ describe("client log provenance", () => {
     const share = await createShare(handler, "owner", "workspace", {recipientUserId: "recipient", paths: ["poll"], access: "edit"});
     const refusals = [
       ...RELAY_ORIGIN_PREFIXES.map(prefix => [{originId: `${prefix}grant`, ops: []}, 400, "bad_request"] as const),
-      ...RELAY_AUTHORS.map(author => [{originId: "device", ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload: {authors: [author]}}]}, 403, "authorship_mismatch"] as const),
+      ...RELAY_AUTHORS.map((author,index) => [{originId: `device-${index}`, ops: [{originSeq: 0, opKind: "moment.append", recordedAtMs: 1, payload: {authors: [author]}}]}, 403, "authorship_mismatch"] as const),
     ];
     for (const [user, url] of [["owner", "/sync/workspace/log"], ["recipient", `/sync/shares/${share}/log`]]) {
       for (const [body, status, code] of refusals) {
         const response = await handler(request(user!, url!, jsonBody(body)));
-        expect(response.status).toBe(status);
-        expect(await response.json()).toMatchObject({code});
+        if(user === "owner" && code === "authorship_mismatch"){
+          expect(response.status).toBe(200);
+          expect(await response.json()).toMatchObject({currentMaxOriginSeq:0,settlementRefusals:[{originSeq:0,reason:"authorship-mismatch"}]});
+        }else{
+          expect(response.status).toBe(status);
+          expect(await response.json()).toMatchObject({code});
+        }
       }
     }
-    expect(storage.fetchLogPage({workspaceId: "workspace", sinceRelaySeq: 0, limit: 100})).toEqual({rows: [], nextCursor: 0, hasMore: false});
+    const page=storage.fetchLogPage({workspaceId:"workspace",sinceRelaySeq:0,limit:100});
+    expect(page.rows).toHaveLength(RELAY_AUTHORS.length);
+    expect(page.rows.every(row=>row.settlementAdmission?.status === "refused")).toBe(true);
   });
 });

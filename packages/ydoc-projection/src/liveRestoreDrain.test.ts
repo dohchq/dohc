@@ -1,3 +1,9 @@
+import {prepareHostedSettlements} from "../../../services/sync-relay/src/storage/hostedSettlement.js";
+import {stableJsonStringify} from "../../../services/sync-relay/src/canonicalJson.js";
+import {initialAcceptedHistoryDigest} from "../../../services/sync-relay/src/liveAcceptedHistory.js";
+import {createLiveMarkdownRegistrationValidator} from "./liveDocumentValidation.js";
+import {liveValidation} from "../../../services/sync-relay/src/liveValidation.js";
+import {afterAll} from "vitest";
 import {createHash} from "node:crypto";
 import { afterEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
@@ -1879,3 +1885,74 @@ it("keeps admission and all lifecycle ACKs free of journal blob reads, byte comp
     f.store.acknowledgeStopRestoreSettlement(f.input,settlement);expect(f.store.acknowledgeStopRestoreResume(f.input,resume).phase).toBe("resumed");
   }finally{hashSpy.mockRestore();compareSpy.mockRestore();sqlSpy.mockRestore();txSpy.mockRestore();f.close();}
 });
+
+
+function restorePublication(f: ReturnType<typeof admittedRestoreFixture>, bytes: Uint8Array,
+  terminal: number, id: string, previous = 0, before = String(f.raw.prepare("SELECT baseline_projected_sha256 FROM sync_relay_live_documents").get()!.baseline_projected_sha256), originSeq = 0) {
+  const document = f.document, row = f.raw.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(terminal)!;
+  const binding = {...f.admitted.admitted.accepted.binding};
+  const normalized = createLiveMarkdownRegistrationValidator(policy)({document, currentPath: binding.currentPath, checkpoint: bytes});
+  if (normalized.kind !== "accepted") throw Error(normalized.reason);
+  const markdown = Buffer.from(normalized.evidence.projectedMarkdown), markdownDigest = hash(markdown), stateDigest = hash(bytes);
+  for (const [sha256, content] of [[stateDigest, bytes], [markdownDigest, markdown]] as const)
+    f.storage.putBlob({workspaceId: document.workspaceId, sha256, content, createdAtMs: 1});
+  const prior = previous === 0 ? null : f.raw.prepare("SELECT * FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(previous)!;
+  const namespace = String(row.relay_database_namespace), key = [namespace, document.workspaceId, document.mainVersionId, document.objectId, document.lineageClaimId];
+  const record = {settlementId: `hosted-${id}`, relayDatabaseNamespace: namespace, binding, previousCursor: previous, terminalCursor: terminal,
+    acceptedEventCount: Number(row.accepted_event_count) - Number(prior?.accepted_event_count ?? 0),
+    acceptedIntervalDigest: jsonHash(["live-settlement-accepted-interval-v1", key,
+      [Number(prior?.accepted_event_count ?? 0), previous, prior?.accepted_evidence_digest ?? initialAcceptedHistoryDigest(namespace, document)],
+      [Number(row.accepted_event_count), terminal, row.accepted_evidence_digest]]),
+    momentId: id, markdownDigest, acceptedStateBlobSha256: stateDigest};
+  const payload = {momentId: id, objectId: document.objectId, versionId: "main", path: binding.currentPath, operation: "write",
+    payloadBeforePath: binding.currentPath, payloadAfterPath: binding.currentPath, payloadBeforeContentKind: "text", payloadAfterContentKind: "text",
+    payloadBeforeBlobSha256: before, payloadAfterBlobSha256: markdownDigest, payloadAfterByteLength: markdown.byteLength, recordedAtMs: 1,
+    settlementReference: {formatVersion: 1, recordDigest: hash(Buffer.from(stableJsonStringify(record))), record}};
+  return {record, payload, markdownDigest, op: {originSeq, opKind: "moment.append", payloadJson: stableJsonStringify(payload), recordedAtMs: 1}};
+}
+
+it("publishes hosted settlement at a verified closed restore fence and chains the next ordinary settlement", async () => {
+  const f = admittedRestoreFixture(), doc = new Y.Doc({gc: false});
+  try {
+    const restoreCursor = f.admitted.admitted.accepted.receipt.journalCursor;
+    const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(restoreCursor)!.validation_checkpoint_bytes as Uint8Array;
+    const first = restorePublication(f, bytes, restoreCursor, "published-restore");
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [first.op]});
+    expect(first.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [first.op]})).toMatchObject({inserted: 1});
+    expect(first.op).toMatchObject({settlementAdmission: {status: "accepted"}});
+    expect(f.raw.prepare("SELECT admission_state FROM sync_relay_live_documents").get()!.admission_state).toBe("closed");
+    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "proof", originSeq: 0})!.admittedAuthorSnapshot).toEqual([]);
+    f.complete();
+    Y.applyUpdate(doc, bytes); doc.getMap("frontmatter").set("after", "continued work");
+    const captured = f.journalCapture(Y.encodeStateAsUpdate(doc), "post-restore");
+    const accepted = f.storage.commitLiveUpdateJournal({...captured, trustedAccount: {accountId: "owner", name: "Owner"},
+      metadata: {...captured.metadata, authorContext: {kind: "account", accountId: "owner"}}});
+    expect(accepted.result.kind).toBe("accepted");
+    const second = restorePublication(f, Y.encodeStateAsUpdate(doc), accepted.admitted!.metadata.accepted.receipt.journalCursor,
+      "published-next", restoreCursor, first.markdownDigest, 1);
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [second.op]});
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [second.op]}).settlementRefusals).toBeUndefined();
+    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "proof", originSeq: 1})!.admittedAuthorSnapshot)
+      .toEqual([{kind: "human", humanId: "owner", humanName: "Owner"}]);
+  } finally {doc.destroy(); f.close();}
+});
+
+it.each(["old-fence", "copied-fence", "changed-admission"])("consumes invalid hosted restore proof: %s", async damage => {
+  const f = admittedRestoreFixture();
+  try {
+    const terminal = f.admitted.admitted.accepted.receipt.journalCursor;
+    const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(terminal)!.validation_checkpoint_bytes as Uint8Array;
+    const publication = restorePublication(f, bytes, terminal, "bad-restore");
+    if (damage !== "changed-admission") {
+      publication.record.binding.restoreFenceGeneration = damage === "old-fence" ? publication.record.binding.restoreFenceGeneration - 1 : publication.record.binding.restoreFenceGeneration + 1;
+      publication.payload.settlementReference.recordDigest = hash(Buffer.from(stableJsonStringify(publication.record)));
+      publication.op.payloadJson = stableJsonStringify(publication.payload);
+    }
+    await prepareHostedSettlements(f.context, {workspaceId: "workspace", originId: "proof", ops: [publication.op]});
+    if (damage === "changed-admission") f.raw.prepare("UPDATE sync_relay_live_restore_lifecycles SET admission_sha256=?").run("a".repeat(64));
+    expect(f.storage.appendLogBatch({workspaceId: "workspace", originId: "proof", ops: [publication.op]}).settlementRefusals).toHaveLength(1);
+    expect(f.raw.prepare("SELECT COUNT(*) AS n FROM sync_relay_live_settlement_bindings").get()!.n).toBe(0);
+  } finally {f.close();}
+});
+afterAll(async () => {await liveValidation.close();});
