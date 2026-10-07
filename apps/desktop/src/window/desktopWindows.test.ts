@@ -81,7 +81,7 @@ function fixture(platform: NodeJS.Platform = "win32", workspaceSummaries?: Depen
       showErrorBox: vi.fn(),
       showMessageBox: vi.fn(async () => ({ response: 0, checkboxChecked: false })),
     },
-    process: { platform, execPath: "C:\\dohc\\dohc.exe" },
+    process: { platform, execPath: "C:\\dohc\\dohc.exe", argv: [] },
     workspaceSummaries: workspaceSummaries ?? vi.fn(() => rows),
     currentUpdateState: vi.fn(() => ({ canInstall })),
     stateDir: () => "state",
@@ -240,6 +240,18 @@ describe("desktop workspace windows", () => {
     expect(managerWindow.webContents.send).not.toHaveBeenCalled();
     expect(utility.webContents.send).not.toHaveBeenCalled();
     expect(created.focus).toHaveBeenCalledOnce();
+  });
+
+  it("lets a workspace window or the manager show a folder failure, never the utility window", () => {
+    const f = fixture();
+    const workspaceWindow = new Window(); f.windows.trackWorkspaceWindow(workspaceWindow.native); f.all.push(workspaceWindow);
+    const utility = new Window(); f.all.push(utility);
+    const manager = f.windows.showOrCreateManagerWindow();
+    expect(f.windows.showsNotices(workspaceWindow.native)).toBe(true);
+    expect(f.windows.showsNotices(manager)).toBe(true);
+    expect(f.windows.showsNotices(utility.native)).toBe(false);
+    f.all[2]!.destroy();
+    expect(f.windows.showsNotices(manager)).toBe(false);
   });
 
   it("reports a failed activation as a dialog, not silence", () => {
@@ -598,6 +610,18 @@ describe("desktop native menus", () => {
     first.destroy(); f.windows.trackWorkspaceWindow(second.native); click(command);
     expect(first.webContents.send).not.toHaveBeenCalled();
     expect(second.webContents.send).toHaveBeenCalledWith(CHANNELS.menuCommand, "settings");
+  });
+
+  it("keeps isolated test workspaces out of native recents while refreshing its own menu", () => {
+    const f = fixture();
+    f.dependencies.process.argv.push("--dohc-isolated-test");
+    f.windows.refreshNativeWorkspaceSurfaces();
+    f.setRows([workspace("c")]);
+    f.windows.refreshNativeWorkspaceSurfaces();
+    expect(f.dependencies.app.clearRecentDocuments).not.toHaveBeenCalled();
+    expect(f.dependencies.app.addRecentDocument).not.toHaveBeenCalled();
+    expect(f.dependencies.app.setUserTasks).not.toHaveBeenCalled();
+    expect(submenu(item(f, "File", "Open Recent"))).toHaveLength(1);
   });
 
   it("reuses native recents for cloned roots while rebuilding current menus", () => {

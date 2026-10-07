@@ -90,6 +90,7 @@ import { useKeptCopyNotices } from "./shell/useKeptCopyNotices";
 import { ShellErrorReporter, useShellError } from "./shell/useShellError";
 import { useShareRemovalNotices } from "./shell/useShareRemovalNotices";
 import { useChatDispatchNotices } from "./shell/useChatDispatchNotices";
+import { useWorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import { useSyncFailureNotice } from "./shell/useSyncFailureNotice";
 import { useKeptFilesNotice } from "./shell/useKeptFilesNotice";
 import { useDriveLimitNotice } from "./shell/useDriveLimitNotice";
@@ -804,6 +805,7 @@ export function DesktopWorkspaceShell(props: {
     clearIdentity,
   } = useShellError(workspaceId);
   useChatDispatchNotices(workspaceId, workspaceIsReady, reportShellFailure, clearKind);
+  useWorkspacePathOpenFailures(workspaceId, reportShellFailure);
   // Share removals from Chats, Settings and the share dialog: one notice
   // with Undo, held here so it outlives the surface that removed the access.
   const shareRemovals = useShareRemovalNotices({

@@ -80,6 +80,8 @@ import {
   registerOpenWorkspaceIpcHandler,
 } from "./ipc/workspaceRegistryIpc";
 import { createAppLifecycle } from "./appLifecycle";
+import { captureOpenPathFailureTarget } from "./window/openPathFailureTarget";
+import { createOpenPathFailures } from "./window/openPathFailures";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import { normalizeAbsolutePath } from "@dohc/workspace-core";
 import { randomUUID } from "node:crypto";
@@ -5008,6 +5010,11 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       contents.on("did-finish-load", onLoad);
       contents.on("did-fail-load", onFail);
     }),
+    openFailureTarget: (window) => captureOpenPathFailureTarget(window, {
+      isLive: () => desktopWindows.showsNotices(window),
+      currentSession: () => rendererWorkspaceSessions.current(window.webContents),
+      admittedCount: () => rendererWorkspaceSessions.admittedCount(window.webContents),
+    }),
     current: () => targetWindow(undefined),
     hasWorkspace: () => liveWorkspaceWindow() !== undefined,
     hasAny: () => BrowserWindow.getAllWindows().length !== 0,
@@ -5020,6 +5027,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
   },
   workspaces: {
     openPath: openWorkspacePath,
+    recordOpenFailure: recordOpenPathFailure,
+    reportOpenFailure: (path, error, window) => openPathFailures.report(path, error, window.webContents),
     refreshNativeSurfaces: refreshNativeWorkspaceSurfaces,
   },
   bootstrap: {
@@ -5198,6 +5207,23 @@ async function openWorkspacePath(
   refreshNativeWorkspaceSurfaces();
   return workspace;
 }
+
+function recordOpenPathFailure(path: string, error: unknown): void {
+  console.error(`[desktop] could not open launch path ${path}:`, error);
+}
+
+// The window's renderer turns each failure into a toast and a Notices row.
+const openPathFailures = createOpenPathFailures<WebContents>({
+  workspaceIdOf: (contents) => rendererWorkspaceSessions.current(contents)?.workspaceId ?? null,
+  notify: (contents) => contents.send(CHANNELS.workspacePathOpenFailed),
+  reopen: async (path, contents) => {
+    if (await openWorkspacePath(path, BrowserWindow.fromWebContents(contents) ?? undefined)) return;
+    // Nothing opens there now. Stat's own error says why, such as ENOENT.
+    statSync(path);
+    throw new Error("dohc can open only a file or a folder.");
+  },
+  record: recordOpenPathFailure,
+});
 
 // The navigation policy is constant for the process lifetime (env var and
 // packaged bundle dir cannot change), so compute it once.
@@ -6237,6 +6263,8 @@ function registerIpcHandlers(): void {
     markNotices: (input) => noticeStore().mark(input.notices, input.mark, input.account),
     runSkippedScheduleNow: async (input) => ({ note: await runSkippedScheduleNow(input.notice, input.account) }),
     retryAutomationNotice: (input) => retryFromFailureNotice({ notices: noticeStore(), retry: retryAutomationFromNotice }, input),
+    takeWorkspacePathOpenFailures: (_input, { event }) => openPathFailures.take(event.sender),
+    retryWorkspacePathOpen: (input, { event }) => openPathFailures.retry(input.attemptId, event.sender),
   });
 
   workspaceEngineIpc.registerYDoc();

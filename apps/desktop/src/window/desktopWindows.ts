@@ -18,7 +18,7 @@ interface DesktopWindowsDependencies {
   BrowserWindow: Pick<typeof BrowserWindow, "getAllWindows">;
   Menu: Pick<typeof Menu, "setApplicationMenu" | "buildFromTemplate">;
   dialog: Pick<Dialog, "showErrorBox" | "showMessageBox">;
-  process: Pick<NodeJS.Process, "platform" | "execPath">;
+  process: Pick<NodeJS.Process, "platform" | "execPath" | "argv">;
   workspaceSummaries(): WorkspaceSummary[];
   currentUpdateState(): { canInstall?: boolean };
   stateDir(): string;
@@ -281,6 +281,10 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
 
   function refreshNativeWorkspaceSurfaces(): void {
     if (!app.isReady()) return;
+    if (process.argv.includes("--dohc-isolated-test")) {
+      refreshApplicationMenu();
+      return;
+    }
     const roots = nativeWorkspaceSummaries().map((workspace) => workspace.rootPath);
     try {
       if (
@@ -370,6 +374,12 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     });
     managerWindow = window;
     return window;
+  }
+
+  // A window whose renderer shows Notices: a live workspace window, or the
+  // manager. Never the hidden export window.
+  function showsNotices(window: BrowserWindow): boolean {
+    return workspaceWindows.allLive().includes(window) || (window === managerWindow && !window.isDestroyed());
   }
 
   function createWorkspaceWindow(workspaceId: string | null = lastActivatedWorkspaceId): BrowserWindow {
@@ -509,6 +519,7 @@ export function createDesktopWindows(dependencies: DesktopWindowsDependencies) {
     prepareAfterRendererCrash,
     showOrCreateMainWindow,
     showOrCreateManagerWindow,
+    showsNotices,
     openWorkspaceInWindow,
     get applicationMenuCanInstallUpdate(): boolean | null { return applicationMenuCanInstallUpdate; },
     setPreferredWorkspaceId,

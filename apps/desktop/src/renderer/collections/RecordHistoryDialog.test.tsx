@@ -334,7 +334,7 @@ describe("RecordHistoryDialog", () => {
     await screen.findByText(/Owner:/);
     expect(bridge.getCollectionRecordHistory).toHaveBeenLastCalledWith({ workspaceId: "ws-1", collectionPath: "Tasks", recordId: "rec_a", beforeHistoryId: 9 });
     expect(screen.getAllByTestId("record-history-entry")).toHaveLength(2);
-    expect(document.activeElement).toBe(screen.getByTestId("record-history"));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("record-history")));
   });
 
   it("keeps focus on Older changes while it reads, and gives it to the dialog when no older change is left", async () => {

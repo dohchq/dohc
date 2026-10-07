@@ -199,6 +199,6 @@ describe("chats panel (right side)", () => {
     // No file open yet: the linked-chats surface says so honestly.
     expect(
       (await screen.findByTestId("linked-chats-empty")).textContent,
-    ).toContain("No file open");
+    ).toContain("Open a file to see its chats.");
   });
 });

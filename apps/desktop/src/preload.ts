@@ -45,6 +45,7 @@ import {
   WorkbenchMenuCommand,
   WorkspaceIdPayload,
   WorkspaceSummary,
+  WorkspacePathOpenFailedEvent,
   crashReportOperations,
   noticeOperations,
   scheduleHostOperations,
@@ -608,6 +609,8 @@ const bridge: DohcDesktopBridge = {
   onMenuCommand: (listener) => onEvent(CHANNELS.menuCommand, MenuCommand, listener),
   onWorkspaceActivated: (listener) =>
     onEvent(CHANNELS.workspaceActivated, WorkspaceSummary, listener),
+  onWorkspacePathOpenFailed: (listener) =>
+    onEvent(CHANNELS.workspacePathOpenFailed, WorkspacePathOpenFailedEvent, () => listener()),
   onUpdateState: (listener) => onEvent(CHANNELS.updateState, UpdateStateEvent, listener),
   getUpdateState: () => invokeParsed(CHANNELS.getUpdateState, UpdateStateEvent),
   checkForUpdates: () => invokeParsed(CHANNELS.checkForUpdates, UpdateCheckResult),

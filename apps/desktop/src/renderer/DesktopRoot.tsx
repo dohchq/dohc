@@ -18,6 +18,7 @@ import { errorDetails } from "./shell/copyDetails";
 import { StandaloneNotices } from "./shell/connectionNotices";
 import { CopyButton } from "./ui/CopyButton";
 import { useSentNotices } from "./shell/useSentNotices";
+import { useHeldWorkspacePathOpenFailures, WorkspacePathOpenFailures } from "./shell/workspacePathOpenFailures";
 import type { OpenOnSwitch } from "./shell/useSentNoticeProps";
 import { useStatesPageOpen } from "./dev/statesRoute";
 import { ReactionStoreProvider } from "./workbench/reactionStore";
@@ -46,6 +47,7 @@ export function DesktopRoot() {
   const userSettingsRequests = useRequestSequence();
   const shareHandoffRevision = useRef(0);
   const sentNotices = useSentNotices(!isManagerWindow);
+  const pathOpenFailures = useHeldWorkspacePathOpenFailures();
   // What to open once the workspace a notice's Open switched to is ready.
   const [openOnSwitch, setOpenOnSwitch] = useState<{
     workspaceId: string;
@@ -284,24 +286,27 @@ export function DesktopRoot() {
     // The manager window: pick a workspace and it opens in its own window,
     // then this one closes. Nothing else ever renders here.
     return (
-      <WorkspaceManager
-        workspaces={workspaces}
-        current={null}
-        handoffStatus={shareHandoffStatus}
-        onDismissShareHandoff={dismissShareHandoff}
-        onShareHandoffOpened={dismissShareHandoff}
-        onForgot={refreshWorkspaceRegistry}
-        onOpenWorkspace={(next) =>
-          bridge()
-            .openWorkspaceWindow({ workspaceId: next.workspaceId })
-            .then(() => bridge().closeThisWindow())
-        }
-      />
+      <WorkspacePathOpenFailures.Provider value={pathOpenFailures}>
+        <WorkspaceManager
+          workspaces={workspaces}
+          current={null}
+          handoffStatus={shareHandoffStatus}
+          onDismissShareHandoff={dismissShareHandoff}
+          onShareHandoffOpened={dismissShareHandoff}
+          onForgot={refreshWorkspaceRegistry}
+          onOpenWorkspace={(next) =>
+            bridge()
+              .openWorkspaceWindow({ workspaceId: next.workspaceId })
+              .then(() => bridge().closeThisWindow())
+          }
+        />
+      </WorkspacePathOpenFailures.Provider>
     );
   }
   // The reaction owner stays mounted across first run and every workspace
   // switch, so a return finds its writes still in order.
   return (
+    <WorkspacePathOpenFailures.Provider value={pathOpenFailures}>
     <ReactionStoreProvider workspaceId={workspace?.workspaceId ?? null}>
       {!workspace ? (
         <>
@@ -357,5 +362,6 @@ export function DesktopRoot() {
         </>
       )}
     </ReactionStoreProvider>
+    </WorkspacePathOpenFailures.Provider>
   );
 }

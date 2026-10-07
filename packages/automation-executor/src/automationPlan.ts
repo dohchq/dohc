@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { normalizeChatMessageBody } from "@dohc/workspace-contracts/chat-message-body";
 import { parse, parseExpressionAt, tokenizer, tokTypes, type Expression } from "acorn";
 import {
   AUTOMATION_LIMITS,
@@ -1482,16 +1483,15 @@ function peopleOf(
   return people;
 }
 
-// A chat message's largest body, as the engine bounds it.
-const MAX_MESSAGE_BODY_BYTES = 64 * 1024;
-
 /** A message's evaluated text as the body it posts, or why it cannot be one. */
-function messageBody(value: JsonValue): string | { problem: string } {
-  if (typeof value !== "string") return { problem: "is not text." };
-  const body = value.replace(/\r\n?/g, "\n").trimEnd();
-  if (body.trim().length === 0) return { problem: "is empty." };
-  if (Buffer.byteLength(body) > MAX_MESSAGE_BODY_BYTES) return { problem: "is longer than 64 KiB." };
-  return body;
+function messageBody(value: JsonValue, ordinal: number): string | { problem: string } {
+  if (typeof value !== "string") return { problem: `The message in step ${ordinal + 1} is not text.` };
+  try {
+    return normalizeChatMessageBody(value);
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    return { problem: `Step ${ordinal + 1}: ${error.message}` };
+  }
 }
 
 /** The people a step's formulas named for direct messages, so only their conversations are read. */
@@ -1608,8 +1608,8 @@ export function planStep(
       // Any change can wake the agent. The wake message carries the claim's
       // depth plus one, and the agent's writes one more, so the chain stops
       // at the cap like any other.
-      const body = messageBody(answers.get("text") ?? null);
-      if (typeof body !== "string") return { problem: `The message in step ${ordinal + 1} ${body.problem}` };
+      const body = messageBody(answers.get("text") ?? null, ordinal);
+      if (typeof body !== "string") return body;
       const effectId = `${seed}/wake`;
       return done([{
         kind: "wake",
@@ -1654,8 +1654,8 @@ export function planStep(
     }
     case "post":
     case "direct-message": {
-      const body = messageBody(answers.get("text") ?? null);
-      if (typeof body !== "string") return { problem: `The message in step ${ordinal + 1} ${body.problem}` };
+      const body = messageBody(answers.get("text") ?? null, ordinal);
+      if (typeof body !== "string") return body;
       if (chat === null) return { problem: "dohc could not read this workspace's chats." };
       if (step.kind === "post") {
         const group = chat.group(step.group);

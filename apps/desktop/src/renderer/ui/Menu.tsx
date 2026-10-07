@@ -91,6 +91,23 @@ export const MENU_ACTIVE_OPTION =
 /** The leading icon column; a destructive row keeps its own color here. */
 export const MENU_ICON = "grid size-3.5 shrink-0 place-items-center";
 export const MENU_LABEL = "min-w-0 flex-1 truncate";
+/** A row's label when a detail follows it on the same line, such as a path or a hint. */
+export const MENU_TITLE = "max-w-[65%] shrink-0 truncate";
+/** The detail after a row's title, in the rest of the row. */
+export const MENU_DETAIL = "min-w-0 flex-1 truncate text-[12px] text-subtle";
+/** A path as a row's detail, in the metadata voice. */
+export const MENU_PATH = "min-w-0 flex-1 truncate font-mono text-[11px] text-subtle";
+/** The line a list shows when nothing matches. */
+export const MENU_EMPTY = "px-2 py-1.5 text-[12px] text-subtle";
+
+/**
+ * Whether a mousemove came from a pointer that moved. A row that opens or
+ * scrolls under a still pointer gets mouse events too, and must not take the
+ * active row from the keyboard.
+ */
+export function movedPointer(event: { movementX: number; movementY: number }): boolean {
+  return event.movementX !== 0 || event.movementY !== 0;
+}
 /** A row's shortcut, after its label. Hidden from the row's name; the row says it with aria-keyshortcuts. */
 export const MENU_SHORTCUT = "shrink-0 rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle";
 
@@ -136,9 +153,16 @@ export function menuEnterFrom(side: "above" | "below" | "left" | "right"): CSSPr
 /**
  * Where a key moves a menu's active row among `labels`: the arrows wrap,
  * Home and End jump, and a typed letter finds the next row whose label
- * starts with it. Null for every other key, and for a letter no row starts with.
+ * starts with it. Null for every other key, for a letter no row starts with,
+ * and for a letter held with Ctrl, Meta or Alt, which is a shortcut the app
+ * answers, so the caller leaves it alone.
  */
-export function moveInMenu(key: string, current: number, labels: readonly string[]): number | null {
+export function moveInMenu(
+  event: Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey">,
+  current: number,
+  labels: readonly string[],
+): number | null {
+  const { key } = event;
   const count = labels.length;
   if (count === 0) return null;
   const wrap = (index: number) => ((index % count) + count) % count;
@@ -146,7 +170,7 @@ export function moveInMenu(key: string, current: number, labels: readonly string
   if (key === "ArrowUp") return wrap(current - 1);
   if (key === "Home") return 0;
   if (key === "End") return count - 1;
-  if (key.length !== 1 || key === " ") return null;
+  if (key.length !== 1 || key === " " || event.ctrlKey || event.metaKey || event.altKey) return null;
   const letter = key.toLocaleLowerCase();
   for (let step = 1; step <= count; step += 1) {
     const index = wrap(current + step);
@@ -281,7 +305,7 @@ export function Menu(props: {
     const letter = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
     // A field keeps Home, End and the typed letters; the arrows leave it.
     const next = arrow || (!inField && (letter || event.key === "Home" || event.key === "End"))
-      ? moveInMenu(event.key, current(), rowElements.current.slice(0, count).map((row) => row?.textContent ?? ""))
+      ? moveInMenu(event, current(), rowElements.current.slice(0, count).map((row) => row?.textContent ?? ""))
       : null;
     if (next !== null) {
       if (!letter) event.preventDefault();
@@ -335,7 +359,7 @@ export function Menu(props: {
             if (!(event.target instanceof HTMLInputElement)) event.preventDefault();
           }}
           onMouseMove={(event) => {
-            if (!pointerMoved && (event.movementX || event.movementY)) setPointerMoved(true);
+            if (!pointerMoved && movedPointer(event)) setPointerMoved(true);
           }}
           style={{
             width,
@@ -416,7 +440,7 @@ export function Menu(props: {
                 // still pointer leaves focus on the first row, and a field
                 // keeps focus while the pointer crosses the rows.
                 onMouseMove={(event) => {
-                  if ((event.movementX || event.movementY) && !typing() && document.activeElement !== event.currentTarget) {
+                  if (movedPointer(event) && !typing() && document.activeElement !== event.currentTarget) {
                     event.currentTarget.focus();
                   }
                 }}
