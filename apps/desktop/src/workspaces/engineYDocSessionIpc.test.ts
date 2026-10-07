@@ -373,6 +373,17 @@ describe("engine Y.Doc IPC adapter", () => {
     await h.ipc.shutdown();
   });
 
+  it.each(["access-ended", "reconnecting"] as const)("forwards the hosted read-only cause %s", async (cause) => {
+    const open = vi.fn<EngineYDocSessionCapture["openYDocSession"]>(async () => providerSession());
+    const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: open})});
+    h.setReadOnly(true);
+    const sender = new FakeSender(7);
+    await h.ipc.open(sender, openPayload);
+    open.mock.calls[0]![0].onSaveState?.("read-only", 0, "status", undefined, cause);
+    expect(sender.sent.at(-1)?.payload).toMatchObject({access: "read-only", seq: 0, readOnlyCause: cause});
+    await h.ipc.shutdown();
+  });
+
   it("keeps an unavailable named host read-only without opening a local proposal editor", async () => {
     const h = harness(providerSession(), {sharedCaptureFor: async () => ({openYDocSession: async () => {throw new Error("offline");}})});
     h.setReadOnly(true);

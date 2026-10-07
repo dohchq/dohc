@@ -17,6 +17,7 @@ afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn()
 function fixture() {
   const doc = new Y.Doc();
   cleanup.push(async () => doc.destroy());
+  let ended = false;
   let current = true, status = "disconnected", pendingUpdates = 0;
   const listeners = new Set<(value: ReturnType<typeof state>) => void>();
   function state() { return {status, pendingUpdates, binding: null}; }
@@ -41,8 +42,9 @@ function fixture() {
   const preserveDraft = vi.fn(async () => {});
   const capture = createNamedDesktopLiveCapture({shareId: "share", selector: {access: "edit", versionId: null, paths: ["docs"]},
     credentials: {relayUrl: "https://relay.test", token: "real-account-token", userId: "reader", signal: new AbortController().signal},
+    accessEnded: () => ended,
     assertCurrent() {if (!current) throw new Error("switched");}, fetch: request, preserveDraft});
-  return {capture, request, closed, preserveDraft, session, switchWorkspace() {current = false;},
+  return { stop(accessEnded: boolean) { ended = accessEnded; session.disconnect(); }, capture, request, closed, preserveDraft, session, switchWorkspace() {current = false;},
     quarantineEdit(change: () => void) {doc.transact(change); status = "quarantined"; notify(); return false;},
     ack() {pendingUpdates = 0; notify();}};
 }
@@ -115,4 +117,12 @@ it("writes exact recovery under its original local workspace without admitting s
   expect(Buffer.from(row.updateBase64, "base64")).toEqual(Buffer.from(draft.update));
   await expect(preserveLiveDraft(directory, "other-workspace", {...draft, path: ".env"})).rejects.toThrow("cannot enter draft recovery");
   expect(await readdir(directory)).toEqual(names);
+});
+
+it.each([false, true])("records whether non-live status means ended access: %s", async (ended) => {
+  const f = fixture(), onSaveState = vi.fn();
+  const provider = await f.capture.openYDocSession({path: "docs/a.md", contentKind: "richdoc", onRemoteUpdate: vi.fn(), onSaveState});
+  f.stop(ended);
+  expect(onSaveState).toHaveBeenLastCalledWith("read-only", 0, "status", undefined, ended ? "access-ended" : "reconnecting");
+  await provider.close();
 });

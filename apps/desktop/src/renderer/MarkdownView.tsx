@@ -676,7 +676,8 @@ export function MarkdownView(props: {
       ? saveState
       : orphanedDrafts.length > 0
         ? ("recovery" as const)
-        : props.forceReadOnly ? "read-only" : "saved";
+        : engine.readOnlyCause === "access-ended" ? "read-only"
+          : engine.readOnlyCause ? "read-only-unavailable" : "saved";
   // The engine branch has its own authoritative save state; the set-aside
   // draft still is not in the document it shows, so a settled engine must
   // not read "Saved" over an unresolved notice.
@@ -1909,10 +1910,12 @@ export function MarkdownView(props: {
               truncate
               state={engine.readOnlyWhileEditing ? "read-only" : engineChipState}
               shown={engine.readOnlyWhileEditing
-                ? orphanedDrafts.length > 0 ? "read-only-transition" : "read-only"
+                ? orphanedDrafts.length > 0 ? "read-only-transition" : engine.readOnlyCause === "access-ended" ? "read-only" : "read-only-unavailable"
                 : engineChipState}
               title={
-                (engineChipState === "deleted" ||
+                engine.readOnlyCause === "access-ended" && orphanedDrafts.length === 0
+                  ? "Your access to this document ended."
+                  : (engineChipState === "deleted" ||
                   engineChipState === "object-changed") &&
                 hasSetAsideEdit
                   ? goneNotice(engine.goneCause, true)
@@ -2080,7 +2083,7 @@ export function MarkdownView(props: {
                 opening, `editing` is always false, so the chip appears there
                 only when the state is not "saved". */}
             {editing || chipState !== "saved" ? (
-              <StateMark testId="markdown-save-state" truncate state={chipState} shown={chipState} />
+              <StateMark testId="markdown-save-state" truncate state={chipState} shown={chipState} title={chipState === "read-only" ? "Your access to this document ended." : undefined} />
             ) : null}
           </>
         }

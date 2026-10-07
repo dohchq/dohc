@@ -5338,6 +5338,7 @@ export function DesktopWorkspaceShell(props: {
                 onButtonError={reportShellError}
                 onButtonNotice={showSuccessNotice}
                 onOpenRecordHistory={recordHistory.open}
+                accessEnded={shareViewEnded}
                 readOnly={
                   (!!shareView && !shareViewWritable) ||
                   isMountedSharePath(tabPath)

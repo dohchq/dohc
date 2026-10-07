@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { insertElementRevision, putSceneAsset } from "@dohc/excalidraw-scene";
 import { resetOrphanedDrafts, useOrphanedDrafts } from "../orphanedDrafts";
-import { ORPHANED_DRAFT_STORAGE_KEY } from "../orphanedDraftStorage";
+import { ORPHANED_DRAFT_STORAGE_KEY, loadStoredDrafts } from "../orphanedDraftStorage";
 import { disposeEngineDocLeasesForTests } from "./engineDocLease";
 import { retainObservedEngineDocLease } from "./engineDocLeaseTestHarness";
 import { harnessBridge, IMAGE_DESCRIPTOR } from "./engineDocSaveStateTestHarness";
@@ -809,7 +809,16 @@ it("keeps edits made before the clean read-only render commits", async () => {
   await retainBound();
   harness.emit("saved-to-host", 0);
   harness.emit("read-only", 0);
-  act(() => editDocument());
+  let releaseProjection!: () => void;
+  projectionGate.pending = new Promise<void>((resolve) => { releaseProjection = resolve; });
+  try {
+    act(() => editDocument());
+    expect(loadStoredDrafts(Date.now()).at(-1)?.text).toBe("seed!");
+    expect(projectionGate.completed).toBe(0);
+  } finally {
+    releaseProjection();
+    projectionGate.pending = null;
+  }
 
   await waitFor(() => expect(drafts.result.current.at(-1)?.text).toBe("seed!"));
   expect(harness.mainText()).toBe("seed");

@@ -9,7 +9,7 @@ import {
 } from "@dohc/excalidraw-scene";
 import type { BinaryFileData } from "@excalidraw/excalidraw/types";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
-import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
+import type { EngineYDocSaveStateEvent, ReadOnlyTransitionCause } from "../../ipc/bridgeContract";
 import { readError, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { documentKey, documentVersionKey } from "../documentVersionKey";
@@ -280,6 +280,7 @@ function makeTransport(
 }
 
 export type EngineDocInput = {
+  accessEnded?: boolean;
   workspaceId: string;
   path: string;
   // The caller gates which supported live files open an engine session.
@@ -309,7 +310,7 @@ export type EngineDocLeaseSnapshot = {
     draftId: number | null;
     cause: DocumentGoneCause;
   } | null;
-  readOnlyTransition: { token: number } | null;
+  readOnlyTransition: { token: number; cause: ReadOnlyTransitionCause } | null;
   permanentFailure: { token: number } | null;
   sceneRecoveryAssets: {
     token: number;
@@ -752,7 +753,7 @@ function createEngineDocSession(
     );
   };
 
-  const captureReadOnlyTransition = (doc: Y.Doc, recoverEdits = true): void => {
+  const captureReadOnlyTransition = (doc: Y.Doc, recoverEdits = true, cause: ReadOnlyTransitionCause = "access-ended"): void => {
     writesRefused.current = true;
     recovery.transition = "read-only";
     const bytes = Y.encodeStateAsUpdate(doc);
@@ -770,7 +771,7 @@ function createEngineDocSession(
     }
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token },
+      readOnlyTransition: { token, cause },
     }));
     reportSaveState(UNKNOWN_SAVE_STATE);
     if (recoverEdits) {
@@ -796,6 +797,12 @@ function createEngineDocSession(
         recovery.draftId,
         sceneRecovery?.immediateText ??
           crudeRecoveryText(documentKind, doc, bytes),
+      );
+    } else {
+      recovery.draftId = captureOrphanedDraft(
+        workspaceId,
+        path,
+        sceneRecovery?.immediateText ?? crudeRecoveryText(documentKind, doc, bytes),
       );
     }
     enqueueRecoverySnapshot(
@@ -887,7 +894,7 @@ function createEngineDocSession(
     if (disposed) return;
     publish((current) => ({
       ...current,
-      readOnlyTransition: { token },
+      readOnlyTransition: { token, cause: "lineage-failure" },
     }));
     const bound = retiredBinding ?? binding;
     if (bound) {
@@ -942,6 +949,7 @@ function createEngineDocSession(
       // Remote updates can change saveState without staging a local edit.
       captureReadOnlyTransition(doc,
         event.seq > 0 || deliveryPending || localSeq.current > confirmedLocalSeq,
+        event.readOnlyCause ?? "access-ended",
       );
       releaseBinding();
       return;

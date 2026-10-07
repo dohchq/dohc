@@ -1,3 +1,4 @@
+import type { ReadOnlyTransitionCause } from "../../ipc/bridgeContract";
 import { UNKNOWN_SAVE_STATE, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { useEffect, useRef, useState } from "react";
 import type * as Y from "yjs";
@@ -110,6 +111,7 @@ export type UseEngineDoc = {
   // The live session became read-only after it opened. Unconfirmed local
   // edits are retained for recovery; a clean access stop creates no draft.
   readOnlyWhileEditing: boolean;
+  readOnlyCause: ReadOnlyTransitionCause | null;
   // An open lost to a delete or move interval. This is not a terminal outcome:
   // the operation can still fail, so the caller stays read-only and retries.
   removalInProgress: EngineRemovalInProgress | null;
@@ -141,9 +143,21 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     snapshot: EngineDocLeaseSnapshot;
   } | null>(null);
 
+  const [readOnlyHistory, setReadOnlyHistory] = useState<{
+    versionKey: string;
+    retryKey: number;
+    bound: boolean;
+    cause: UseEngineDoc["readOnlyCause"];
+  } | null>(null);
+
   useEffect(() => {
     const previousRequest = committedRequestRef.current;
     if (!input.enabled) {
+      setReadOnlyHistory((previous) =>
+        previous?.versionKey === versionKey && previous.retryKey === retryKey && previous.bound && input.accessEnded
+          ? { ...previous, cause: "access-ended" }
+          : previous,
+      );
       previousRequest?.lease?.disposeIfReleased();
       committedRequestRef.current = { versionKey, retryKey, lease: null };
       setLeaseState(null);
@@ -155,11 +169,18 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
       previousRequest.retryKey !== retryKey;
     const lease = retainEngineDocLease(input, requestKey, isRetry);
     committedRequestRef.current = { versionKey, retryKey, lease };
-    const update = () =>
-      setLeaseState({
-        requestKey,
-        snapshot: lease.getSnapshot(),
-      });
+    const update = () => {
+      const snapshot = lease.getSnapshot();
+      setLeaseState({ requestKey, snapshot });
+      const bound = snapshot.outcome?.kind === "bound";
+      const transition = snapshot.readOnlyTransition;
+      const cause = snapshot.outcome?.kind === "bound" && transition?.token === snapshot.outcome.token
+        ? transition.cause : null;
+      setReadOnlyHistory((previous) =>
+        previous?.versionKey === versionKey && previous.retryKey === retryKey && previous.bound === bound && previous.cause === cause
+          ? previous : { versionKey, retryKey, bound, cause },
+      );
+    };
     const unsubscribe = lease.subscribe(update);
     update();
     return () => {
@@ -176,6 +197,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     input.kind,
     input.reopenKey,
     input.retryKey,
+    input.accessEnded,
   ]);
 
   // Derive this during render. A result for an earlier request never grants
@@ -220,6 +242,11 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
   const readOnlyWhileEditing =
     outcome?.kind === "bound" &&
     settled?.readOnlyTransition?.token === outcome.token;
+  const history = readOnlyHistory?.versionKey === versionKey && readOnlyHistory.retryKey === retryKey
+    ? readOnlyHistory : null;
+  const readOnlyCause = !input.enabled
+    ? input.accessEnded && history?.bound ? "access-ended" : history?.cause ?? null
+    : readOnlyWhileEditing ? settled!.readOnlyTransition!.cause : null;
   const permanentFailureWhileEditing =
     outcome?.kind === "bound" &&
     settled?.permanentFailure?.token === outcome.token;
@@ -253,6 +280,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     recoveryAssets,
     permanentFailureWhileEditing,
     readOnlyWhileEditing,
+    readOnlyCause,
     removalInProgress,
     artifactAssets,
     readArtifactAsset,

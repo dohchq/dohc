@@ -60,6 +60,7 @@ const engineDocState: UseEngineDoc = {
   recoveryAssets: null,
   permanentFailureWhileEditing: false,
   readOnlyWhileEditing: false,
+  readOnlyCause: null,
   removalInProgress: null,
   artifactAssets: [],
   readArtifactAsset: async () => {

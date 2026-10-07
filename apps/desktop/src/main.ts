@@ -4415,6 +4415,7 @@ const engineYDocSessionIpc = createEngineYDocSessionIpc({
       selector: value?.grantedSelector, ended: value?.ended === true});
     const pinned = identity(marker);
     return createNamedDesktopLiveCapture({ shareId: marker.shareId, selector: marker.grantedSelector,
+      accessEnded: () => findWorkspace(workspace.workspaceId)?.shareView?.ended === true,
       preserveDraft: draft => preserveLiveDraft(join(stateDir(), "live-draft-recovery"), workspace.workspaceId, draft),
       credentials: {relayUrl: credentials.relayUrl, token: credentials.token, userId: credentials.userId,
         signal: ownerDeliveryCredentialLifetime.signal},

@@ -35,6 +35,7 @@ import {
   type OpenEngineYDocSessionResult as OpenResult,
   type ReadEngineYDocArtifactAssetPayload as ReadArtifactPayload,
   type ReadEngineYDocArtifactAssetResult as ReadArtifactResult,
+  type ReadOnlyTransitionCause,
 } from "../ipc/bridgeContract";
 import { CHANNELS, type EngineYDocSaveStateName } from "../ipc/channels";
 import {
@@ -82,7 +83,7 @@ export type EngineYDocSessionProvider = Omit<WorkspaceEngineYDocProviderSession,
   settleNow?: WorkspaceEngineYDocProviderSession["settleNow"];
 };
 export interface EngineYDocSessionCapture {
-  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean) => void}): Promise<EngineYDocSessionProvider>;
+  openYDocSession(input: Omit<Parameters<WorkspaceEngineCapture["openYDocSession"]>[0], "onSaveState"> & {onSaveState?: (state: EngineYDocSaveStateName, token: number, event: EngineYDocSaveEvent, authorCapacity?: boolean, readOnlyCause?: ReadOnlyTransitionCause) => void}): Promise<EngineYDocSessionProvider>;
 }
 
 interface EngineYDocWorkspace {
@@ -122,6 +123,7 @@ interface EngineYDocSessionIpcOptions {
 }
 
 interface SessionEvent {
+  readOnlyCause?: ReadOnlyTransitionCause;
   authorCapacity?: boolean;
   editRefusal?: import("../ipc/bridgeContract").EngineYDocSaveStateEvent["editRefusal"];
   state: EngineYDocSaveStateName;
@@ -665,14 +667,14 @@ class EngineYDocSessionIpc implements LiveDocumentSessions {
                 editRefusal: { workspaceId: workspace.workspaceId, path: canonicalPath, requestId, message },
               }));
             },
-            onSaveState: (state, token, event, authorCapacity) => {
+            onSaveState: (state, token, event, authorCapacity, readOnlyCause) => {
               const seq =
                 event === "start"
                   ? noteSettleStart(saveSeq, token)
                   : event === "outcome"
                     ? noteSettleOutcome(saveSeq, token)
                     : 0;
-              publish(() => emit({ state, seq, ...(authorCapacity ? { authorCapacity: true } : {}) }));
+              publish(() => emit({ state, seq, ...(authorCapacity ? { authorCapacity: true } : {}), ...(readOnlyCause ? { readOnlyCause } : {}) }));
             },
             onRemoteUpdate: (update) => {
               publish(() => signals.remoteUpdate(update));
