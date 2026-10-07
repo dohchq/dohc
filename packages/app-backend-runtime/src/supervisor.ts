@@ -199,13 +199,15 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     maintenanceWarnings.add(key);
     try {options.onMaintenanceError?.({...scope},error);} catch { /* Diagnostics cannot change a committed response. */ }
   }
-  async function maintainMaterialization(lane:Lane,afterCostlyReplay=false):Promise<void> {
+  async function maintainMaterialization(lane:Lane,reason:"ordinary"|"replay-checkpoint"|"replay-tail"="ordinary"):Promise<void> {
+    const afterCostlyReplay=reason!=="ordinary";
     const storage=options.maintenanceStorage,worker=lane.worker;
     const key=JSON.stringify(lane.scope);
     if(!storage||!worker||closed)return;
     const notSaved=(cause?:unknown)=>Object.assign(new PersistentRuntimeError("replay_not_saved","dohc could not save this Collection's records. Try again."),{cause});
     if(afterCostlyReplay)await maintenance.get(key)?.done;
-    if(maintenance.has(key)||maintenance.size>=maxWorkers||blockedMaintenance.has(key)){if(afterCostlyReplay)throw notSaved();return;}
+    if(blockedMaintenance.has(key)){if(afterCostlyReplay)throw notSaved();return;}
+    if(maintenance.has(key)||maintenance.size>=maxWorkers){if(reason==="replay-checkpoint")throw notSaved();return;}
     const expected={...worker.cursor},cancel=new AbortController();
     const reservations:CheckpointStage[]=[];
     let path:string|undefined,directory:string|undefined,captured=false,failure:unknown;
@@ -279,7 +281,7 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
     });
     maintenance.set(key,{cancel,done});
     // Ordinary maintenance lets foreground work continue once its snapshot is
-    // captured. A costly replay continues only once its cache is installed.
+    // captured. Admitted replay maintenance waits until its cache is installed.
     if(!afterCostlyReplay){await captureReady;return;}
     await done;
     if(failure!==undefined)throw notSaved(failure);
@@ -498,17 +500,17 @@ export async function createDatasetSupervisor(options: DatasetSupervisorOptions)
       replayedSinceCheckpoint = true;
       // Keep worker batches bounded while amortizing costly checkpoint copies
       // across completed batches. The journal certifies each saved prefix.
-      if (performance.now() - replayStart >= checkpointIntervalMs) {
+      if (!sameCursor(worker.cursor, target) && performance.now() - replayStart >= checkpointIntervalMs) {
         const checkpointStart=performance.now();
-        await maintainMaterialization(lane, true);
+        await maintainMaterialization(lane, "replay-checkpoint");
         replayedSinceCheckpoint = false;
         replayStart=performance.now();
         checkpointIntervalMs=Math.max(replayCacheMs,4*(replayStart-checkpointStart));
       }
     }
-    // Save a costly replay's final tail before this job can stop the worker.
+    // Cache a completed replay when capacity allows; its journal remains authoritative.
     if (replayedSinceCheckpoint && performance.now() - replayStarted >= replayCacheMs) {
-      await maintainMaterialization(lane, true);
+      await maintainMaterialization(lane, "replay-tail");
     }
     return worker;
   }

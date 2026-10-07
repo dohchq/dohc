@@ -103,11 +103,12 @@ it("refuses an expired preview and releases its reservation on explicit discard"
   await f.supervisor.discardMigration(access);expect(balance).toBe(0);
 });
 
-function launcher(hook: (command: any, controls: { stop(): void; deliver(): void }) => void, observe?: (message: unknown) => void): AppRuntimeLauncher {
+function launcher(hook: (command: any, controls: { stop(): void; deliver(): void }) => void, observe?: (message: unknown) => void, pids?: number[]): AppRuntimeLauncher {
   return options => {
     const child = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", options.entryPath], {
       cwd: options.cwd, env: options.env, stdio: ["ignore", "ignore", "ignore", "ipc"], serialization: "advanced", windowsHide: true,
     });
+    pids?.push(child.pid!);
     child.on("error", options.onError); child.on("close", options.onExit); child.on("message", message => { observe?.(message); options.onMessage(message); });
     return { postMessage(message) { hook(message, { stop: () => child.kill("SIGKILL"), deliver: () => child.send(message as object) }); }, kill() { child.kill("SIGKILL"); } };
   };
@@ -955,6 +956,101 @@ it("checkpoints a hostile 64-swap replay before each later worker failure and re
   for(const pid of pids)expect(()=>process.kill(pid,0)).toThrow();
 });
 
+it.each([
+  {events:1,interval:100,completed:true,afterCheckpoint:false},
+  {events:2,interval:200,completed:true,afterCheckpoint:false},
+  {events:2,interval:100,completed:false,afterCheckpoint:false},
+  {events:3,interval:100,completed:true,afterCheckpoint:true},
+])("handles occupied maintenance slots for $events events with a $interval ms interval afterCheckpoint=$afterCheckpoint",async({events,interval,completed,afterCheckpoint})=>{
+  const pids:number[]=[];
+  cleanups.push(async()=>{for(const pid of pids)expect(()=>process.kill(pid,0)).toThrow();});
+  const f=await fixture({launch:launcher((_request,controls)=>controls.deliver(),undefined,pids)});
+  for(let index=1;index<=events;index++)await f.invoke({id:String(index),value:'saved'},{idempotencyKey:String(index)});
+  f.initialize('second');f.initialize('third');
+  await f.supervisor.close();
+  let elapsed=0,release!:()=>void,occupied=0,entered!:()=>void;
+  const held=new Promise<void>(resolve=>release=resolve),ready=new Promise<void>(resolve=>entered=resolve);
+  const time=vi.spyOn(performance,'now').mockImplementation(()=>elapsed);
+  cleanups.push(async()=>{time.mockRestore();});
+  const applied:number[]=[];
+  let occupying:Promise<void>|undefined;
+  const launch:AppRuntimeLauncher=options=>{
+    const pending=new Set<number>();
+    return launcher((request,controls)=>{
+      if(request.command.kind==='applyBatch'){
+        pending.add(request.id);
+        if(afterCheckpoint&&request.command.input[0].revision===2){void ready.then(controls.deliver);return;}
+      }
+      controls.deliver();
+    },message=>{const reply=message as {id:number;ok?:boolean;result?:{revision:number}};
+      if(reply.ok&&pending.delete(reply.id)){applied.push(reply.result!.revision);elapsed+=100;}
+    },pids)(options);
+  };
+  const journal={...f.journal,
+    events(input:Parameters<DatasetJournal['events']>[0]){return f.journal.events({...input,limit:1});},
+    async sealMaterializationCheckpoint(input:Parameters<DatasetJournal['sealMaterializationCheckpoint']>[0]){
+      if(input.stage.scope.datasetId!==f.scope.datasetId){if(++occupied===2)entered();await held;}
+      else if(afterCheckpoint)elapsed+=200;
+      return f.journal.sealMaterializationCheckpoint(input);
+    },
+    cacheMaterialization(input:Parameters<DatasetJournal['cacheMaterialization']>[0]){
+      const cached=f.journal.cacheMaterialization(input);
+      if(afterCheckpoint&&input.expected.datasetId===f.scope.datasetId)occupying=occupySlots();
+      return cached;
+    },
+  };
+  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch},maxWorkers:2,replayCacheMs:interval,
+    materializationEvents:1,maintenanceStorage:{authorize(){},account(){}}});
+  cleanups.push(()=>supervisor.close());
+  const read={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
+  async function occupySlots(){
+    for(const datasetId of ['second','third']){
+      const input={id:datasetId,value:'other'};
+      await supervisor.invoke({...read,scope:{...f.scope,datasetId},input,readOnly:false,payloadSha256:hash(JSON.stringify(input))});
+    }
+    await ready;
+  }
+  try {
+    if(!afterCheckpoint)await occupySlots();
+    const target=f.journal.head(f.scope,f.authorize).cursor;
+    if(completed){
+      const result=await supervisor.invoke(read);
+      expect(result.revision).toBe(target.revision);
+      expect(result.result).toEqual(Array.from({length:events},(_,index)=>({id:String(index+1),value:'saved'})));
+      expect(applied).toEqual(Array.from({length:events},(_,index)=>index+1));
+    }else{
+      await expect(supervisor.invoke(read)).rejects.toMatchObject({code:'replay_not_saved',retryAfterMs:5000});
+      expect(applied).toEqual([1]);
+    }
+    expect(f.journal.head(f.scope,f.authorize).cursor).toEqual(target);
+    const cached=f.journal.materialization({scope:f.scope,authorize:f.authorize});
+    if(afterCheckpoint)expect(cached?.cursor.revision).toBe(1);else expect(cached).toBeNull();
+    expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize}).every(stage=>stage.scope.datasetId!==f.scope.datasetId)).toBe(true);
+  } finally {release();await occupying;await supervisor.close();time.mockRestore();}
+  const reopened=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),runtime:{launch}});
+  try {
+    const result=await reopened.invoke(read);
+    expect(result.revision).toBe(events);
+    expect(result.result).toEqual(Array.from({length:events},(_,index)=>({id:String(index+1),value:'saved'})));
+    expect(applied).toEqual([...(completed?Array.from({length:events},(_,index)=>index+1):[1]),...Array.from({length:events-(afterCheckpoint?1:0)},(_,index)=>index+1+(afterCheckpoint?1:0))]);
+  } finally {await reopened.close();}
+});
+
+it("rejects a completed replay when its admitted final checkpoint cannot be sealed",async()=>{
+  const f=await fixture();
+  await f.invoke({id:'1',value:'saved'});
+  await f.supervisor.close();
+  const time=vi.spyOn(performance,'now').mockReturnValue(0);
+  cleanups.push(async()=>{time.mockRestore();});
+  const journal={...f.journal,async sealMaterializationCheckpoint(){throw Error('disk full');}};
+  const supervisor=await createDatasetSupervisor({journal,directory:join(f.directory,'workers'),replayCacheMs:0,
+    maintenanceStorage:{authorize(){},account(){}}});
+  cleanups.push(()=>supervisor.close());
+  const read={scope:f.scope,tables:['items'],operation:'run',caller:{kind:'owner'},callerKey:'owner',input:{},idempotencyKey:'read',payloadSha256:hash('{}'),readOnly:true,authorize:f.authorize};
+  await expect(supervisor.invoke(read)).rejects.toMatchObject({code:'replay_not_saved',retryAfterMs:5000});
+  expect(f.journal.materialization({scope:f.scope,authorize:f.authorize})).toBeNull();
+  expect(f.journal.checkpointStages({workspaceId:f.scope.workspaceId,authorize:f.authorize})).toEqual([]);
+});
 
 it("retains an earlier recovery checkpoint when a later chunk cannot be sealed",async()=>{
   const f=await fixture();
