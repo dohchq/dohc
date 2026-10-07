@@ -1,3 +1,4 @@
+import { engineSaveState } from "../../workspaces/engineYDocSaveState";
 import * as Y from "yjs";
 import type { EngineYDocSaveStateEvent } from "../../ipc/bridgeContract";
 
@@ -47,7 +48,7 @@ export function harnessBridge(initialUpdate?: Uint8Array) {
   ): void {
     if (openedSessionId === null) throw new Error("session not open yet");
     for (const listener of [...saveStateListeners]) {
-      listener({ sessionId: openedSessionId, state, seq });
+      listener({ sessionId: openedSessionId, ...engineSaveState(state), seq });
     }
   }
 

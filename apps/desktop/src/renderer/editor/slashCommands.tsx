@@ -34,14 +34,18 @@ import {
   revealMenuRow,
 } from "../ui/Menu";
 import type { Editor } from "@tiptap/core";
-import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, PluginKey, type EditorState } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
+import type { ProsemirrorBinding } from "@tiptap/y-tiptap";
+import { compareRelativePositions, type RelativePosition, type XmlFragment } from "yjs";
 import {
   FLOATING_MENU_MAX_HEIGHT,
   resolveFloatingMenuPosition,
   type FloatingMenuPlacement,
 } from "./floatingMenuPosition";
 import { MERMAID_STARTER_SNIPPET } from "./mermaidRender";
+
+type YTiptap = typeof import("@tiptap/y-tiptap");
 
 export type SlashCommandId =
   | "wikilink"
@@ -229,7 +233,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
 ];
 
-const slashCommandKey = new PluginKey("dohc-slash-command");
+const slashCommandKey = new PluginKey<DismissedSlash | null>("dohc-slash-command");
 
 export function filterSlashCommands(query: string): SlashCommandItem[] {
   const normalized = query.trim().toLowerCase();
@@ -250,6 +254,28 @@ export function findSlashCommandMatch(
   return { slashOffset, query: match[1]?.toLowerCase() ?? "" };
 }
 
+// The trigger the caret is in: its "/" position and the query typed after it.
+function findSlashTrigger(state: EditorState): { from: number; query: string } | null {
+  const selection = state.selection;
+  if (!selection.empty) return null;
+  const $from = selection.$from;
+  if (!$from.parent.isTextblock) return null;
+  const match = findSlashCommandMatch($from.parent.textBetween(0, $from.parentOffset));
+  return match ? { from: $from.start() + match.slashOffset, query: match.query } : null;
+}
+
+// The "/" whose menu Escape closed, with a Y.js anchor on it when the editor
+// is bound to a Y.Doc.
+type DismissedSlash = { from: number; anchor: RelativePosition | null };
+
+type YSyncState = { type: XmlFragment; binding: ProsemirrorBinding };
+
+// y-tiptap anchors a position to the character before it, so the position
+// after the "/" anchors the "/" itself.
+function anchorSlash(yTiptap: YTiptap, sync: YSyncState, from: number): RelativePosition {
+  return yTiptap.absolutePositionToRelativePosition(from + 1, sync.type, sync.binding.mapping);
+}
+
 function readSlashCommandState(
   view: EditorView,
   previous: SlashCommandState,
@@ -258,18 +284,13 @@ function readSlashCommandState(
     return CLOSED_SLASH_COMMAND_STATE;
   }
 
-  const state = view.state;
-  const selection = state.selection;
-  if (!selection.empty) return CLOSED_SLASH_COMMAND_STATE;
+  const trigger = findSlashTrigger(view.state);
+  if (!trigger || slashCommandKey.getState(view.state)?.from === trigger.from) {
+    return CLOSED_SLASH_COMMAND_STATE;
+  }
 
-  const $from = selection.$from;
-  if (!$from.parent.isTextblock) return CLOSED_SLASH_COMMAND_STATE;
-  const textBeforeCursor = $from.parent.textBetween(0, $from.parentOffset);
-  const match = findSlashCommandMatch(textBeforeCursor);
-  if (!match) return CLOSED_SLASH_COMMAND_STATE;
-
-  const from = $from.start() + match.slashOffset;
-  const to = selection.from;
+  const from = trigger.from;
+  const to = view.state.selection.from;
   let x = 12;
   let y = 40;
   let bottom: number | null = null;
@@ -287,7 +308,7 @@ function readSlashCommandState(
     // Offscreen/jsdom editors cannot always resolve coordinates.
   }
 
-  const query = match.query;
+  const query = trigger.query;
   const selected = previous.open && previous.query === query ? previous.selected : 0;
   const itemCount = filterSlashCommands(query).length;
   return {
@@ -308,10 +329,13 @@ export function makeSlashCommandPlugin({
   stateRef,
   setState,
   runCommandRef,
+  yTiptap = null,
 }: {
   stateRef: RefObject<SlashCommandState>;
   setState: Dispatch<SetStateAction<SlashCommandState>>;
   runCommandRef: RefObject<(id: SlashCommandId) => void>;
+  // The lazily loaded y-tiptap module, when the editor is bound to a Y.Doc.
+  yTiptap?: YTiptap | null;
 }) {
   const publish = (next: SlashCommandState) => {
     if (slashCommandStatesEqual(stateRef.current, next)) return;
@@ -326,8 +350,36 @@ export function makeSlashCommandPlugin({
     publish(next);
   };
 
-  return new Plugin({
+  return new Plugin<DismissedSlash | null>({
     key: slashCommandKey,
+    // The menu stays closed while the caret is in the dismissed trigger.
+    // Leaving it and coming back, or a new "/", opens the menu.
+    state: {
+      init: () => null,
+      apply(tr, dismissed, oldState, state) {
+        const dismissing = tr.getMeta(slashCommandKey) === true;
+        if (!dismissed && !dismissing) return null;
+        const trigger = findSlashTrigger(state);
+        if (!trigger) return null;
+        // Read from the old state: this state's later plugins aren't built yet.
+        const sync: YSyncState | undefined = yTiptap?.ySyncPluginKey.getState(oldState);
+        const anchor = (from: number) => (yTiptap && sync ? anchorSlash(yTiptap, sync, from) : null);
+        if (dismissing || !dismissed) return { from: trigger.from, anchor: anchor(trigger.from) };
+
+        // Y.js applies a remote edit, or an undo, by replacing the whole
+        // document, which maps every position away. Its anchor still finds the
+        // "/" when the "/" survives.
+        const change: { isChangeOrigin?: boolean } | undefined = yTiptap
+          ? tr.getMeta(yTiptap.ySyncPluginKey)
+          : undefined;
+        const mapped = tr.mapping.mapResult(dismissed.from);
+        const same = change?.isChangeOrigin
+          ? dismissed.anchor !== null &&
+            compareRelativePositions(dismissed.anchor, anchor(trigger.from))
+          : !mapped.deleted && mapped.pos === trigger.from;
+        return same ? { from: trigger.from, anchor: dismissed.anchor } : null;
+      },
+    },
     view(view) {
       refresh(view);
       return {
@@ -375,7 +427,7 @@ export function makeSlashCommandPlugin({
 
         if (event.key === "Escape") {
           event.preventDefault();
-          close();
+          view.dispatch(view.state.tr.setMeta(slashCommandKey, true));
           view.focus();
           return true;
         }

@@ -1,3 +1,4 @@
+import { engineSaveState } from "../workspaces/engineYDocSaveState";
 // @vitest-environment jsdom
 import { setupFileInspectorTests } from "./FileInspector.environment-fixture";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -90,7 +91,8 @@ describe("engine markdown source view", () => {
     const saveStateListeners = new Set<
       (event: {
         sessionId: string;
-        state: "settling" | "saved" | "error" | "deleted" | "read-only";
+        state: import("@dohc/workspace-contracts/save-state").SaveState;
+        access?: "read-only" | "deleted" | "object-changed";
         seq: number;
       }) => void
     >();
@@ -157,7 +159,8 @@ describe("engine markdown source view", () => {
         (
           listener: (event: {
             sessionId: string;
-            state: "settling" | "saved" | "error" | "deleted" | "read-only";
+            state: import("@dohc/workspace-contracts/save-state").SaveState;
+        access?: "read-only" | "deleted" | "object-changed";
             seq: number;
           }) => void,
         ) => {
@@ -180,7 +183,7 @@ describe("engine markdown source view", () => {
       state: "settling" | "saved" | "error" | "deleted" | "read-only",
       seq: number,
     ) => {
-      for (const listener of saveStateListeners) listener({ sessionId, state, seq });
+      for (const listener of saveStateListeners) listener({ sessionId, ...engineSaveState(state), seq });
     };
     return {
       bridgeMock,
@@ -3382,7 +3385,7 @@ describe("engine markdown source view", () => {
         <FileInspector
           workspaceId="ws-1"
           path="a.md"
-          onSaveStateChange={(state) => states.push(state)}
+          onSaveStateChange={(state) => states.push(state.kind)}
         />,
       );
       await user.click(await findEnabledMarkdownEditToggle());
@@ -3396,7 +3399,7 @@ describe("engine markdown source view", () => {
           workspaceId="ws-1"
           path="a.md"
           readOnly
-          onSaveStateChange={(state) => states.push(state)}
+          onSaveStateChange={(state) => states.push(state.kind)}
         />,
       );
       await act(async () => {

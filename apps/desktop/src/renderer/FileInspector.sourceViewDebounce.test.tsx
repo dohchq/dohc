@@ -38,7 +38,7 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     doc,
     objectId: "object-1",
     versionId: "version-1",
-    saveState: "saved",
+    saveState: { kind: "saved-here" },
     saveError: null,
     authorCapacity: false,
     notInVersion: false,

@@ -1,3 +1,4 @@
+import { UNKNOWN_SAVE_STATE, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { useEffect, useRef, useState } from "react";
 import type * as Y from "yjs";
 import type { ArtifactAssetDescriptor } from "@dohc/workspace-engine-client";
@@ -12,7 +13,6 @@ import {
   type EngineDocInput,
   type EngineDocLease,
   type EngineDocLeaseSnapshot,
-  type EngineDocSaveState,
   type DocumentGoneCause,
 } from "./engineDocLease";
 
@@ -68,7 +68,7 @@ export type UseEngineDoc = {
   // committed and wrote the .md, "error" when a settle failed. This used to be
   // a 1s timer that flipped to "saved" regardless of what the engine did —
   // three dogfood journeys watched a doc read "Saved" over a zero-byte file.
-  saveState: EngineDocSaveState;
+  saveState: SaveState;
   // A known terminal save failure. The save-state chip uses this instead of
   // its generic error text so it can name the constraint and measured bytes.
   saveError: string | null;
@@ -244,7 +244,7 @@ export function useEngineDoc(input: EngineDocInput): UseEngineDoc {
     doc,
     objectId,
     versionId,
-    saveState: settled?.saveState ?? "saved",
+    saveState: settled?.saveState ?? UNKNOWN_SAVE_STATE,
     saveError: settled?.saveError ?? null,
     authorCapacity: settled?.authorCapacity ?? false,
     notInVersion,

@@ -1,3 +1,4 @@
+import { engineSaveState } from "./engineYDocSaveState";
 import {
   DaemonRefusalError,
   type ArtifactAssetDescriptor,
@@ -198,7 +199,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onEditRefused?.("request-1", message);
     expect(sender.sent).toContainEqual({
       channel: CHANNELS.engineYDocSaveState,
-      payload: { sessionId: openPayload.sessionId, state: "error", seq: 0,
+      payload: { sessionId: openPayload.sessionId, ...engineSaveState("error", { requestId: "request-1", message }), seq: 0,
         editRefusal: { workspaceId: "workspace-1", path: "notes/a.md", requestId: "request-1", message } },
     });
     await h.ipc.shutdown();
@@ -348,7 +349,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("error", 1, "outcome", true);
     expect(sender.sent).toContainEqual({
       channel: CHANNELS.engineYDocSaveState,
-      payload: {sessionId: openPayload.sessionId, state: "error", seq: 0, authorCapacity: true},
+      payload: {sessionId: openPayload.sessionId, ...engineSaveState("error"), seq: 0, authorCapacity: true},
     });
     await h.ipc.shutdown();
   });
@@ -557,8 +558,8 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("settling", 9, "start");
     h.capturedOpen()?.onSaveState?.("saved", 9, "outcome");
     expect(sender.sent.slice(-2).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
-      { sessionId: openPayload.sessionId, state: "saved", seq: 4 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("settling"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("saved"), seq: 4 },
     ]);
   });
 
@@ -580,12 +581,11 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("saved", 9, "outcome");
     h.capturedOpen()?.onSaveState?.("settling", 10, "start");
     h.capturedOpen()?.onSaveState?.("saved", 10, "outcome");
-    expect(sender.sent.slice(-5).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
-      { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
-      { sessionId: openPayload.sessionId, state: "saved", seq: 0 },
-      { sessionId: openPayload.sessionId, state: "settling", seq: 5 },
-      { sessionId: openPayload.sessionId, state: "saved", seq: 5 },
+    expect(sender.sent.slice(-4).map(({ payload }) => payload)).toEqual([
+      { sessionId: openPayload.sessionId, ...engineSaveState("settling"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("saved"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("settling"), seq: 5 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("saved"), seq: 5 },
     ]);
     await h.ipc.shutdown();
   });
@@ -606,13 +606,12 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onSaveState?.("changed-on-disk", 9, "status");
     h.capturedOpen()?.onSaveState?.("settling", 0, "status");
     h.capturedOpen()?.onSaveState?.("error", 0, "status");
-    expect(sender.sent.slice(-6).map(({ payload }) => payload)).toEqual([
-      { sessionId: openPayload.sessionId, state: "settling", seq: 0 },
-      { sessionId: openPayload.sessionId, state: "settling", seq: 4 },
-      { sessionId: openPayload.sessionId, state: "error", seq: 4 },
-      { sessionId: openPayload.sessionId, state: "changed-on-disk", seq: 0 },
-      { sessionId: openPayload.sessionId, state: "settling", seq: 0 },
-      { sessionId: openPayload.sessionId, state: "error", seq: 0 },
+    expect(sender.sent.slice(-5).map(({ payload }) => payload)).toEqual([
+      { sessionId: openPayload.sessionId, ...engineSaveState("settling"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("error"), seq: 4 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("changed-on-disk"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("settling"), seq: 0 },
+      { sessionId: openPayload.sessionId, ...engineSaveState("error"), seq: 0 },
     ]);
     await h.ipc.shutdown();
   });
@@ -785,7 +784,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.ipc
       .fileMutationPort()
       .markDeletedUnderPath(AUTHORITY_ID, "Notes/Folder");
-    expect(sender.sent.at(-1)?.payload).toMatchObject({ state: "deleted" });
+    expect(sender.sent.at(-1)?.payload).toMatchObject({ ...engineSaveState("deleted") });
   });
 
   it("opens the workspace activity when the renderer outruns daemon startup", async () => {
@@ -1167,7 +1166,7 @@ describe("engine Y.Doc IPC adapter", () => {
     ).toEqual({ accepted: false, reason: "read-only" });
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
-      state: "read-only",
+      ...engineSaveState("read-only"),
       seq: 5,
     });
 
@@ -1177,7 +1176,7 @@ describe("engine Y.Doc IPC adapter", () => {
       .markDeletedUnderPath(AUTHORITY_ID, "notes");
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
-      state: "deleted",
+      ...engineSaveState("deleted"),
       seq: 0,
     });
     expect(
@@ -1199,7 +1198,7 @@ describe("engine Y.Doc IPC adapter", () => {
     h.capturedOpen()?.onObjectChanged?.();
     expect(sender.sent.at(-1)?.payload).toEqual({
       sessionId: openPayload.sessionId,
-      state: "object-changed",
+      ...engineSaveState("object-changed"),
       seq: 0,
     });
     expect(

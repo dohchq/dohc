@@ -1,3 +1,4 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { fileKindForPath } from "@dohc/workspace-contracts/kinds";
 import { CopyButton } from "./ui/CopyButton";
 import { restoreRecoveryDraftText } from "./collab/recoverySnapshot";
@@ -10,7 +11,6 @@ import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
 import { IconButton, SecondaryButton } from "./ui/controls";
 import { KindGlyph } from "./ui/KindGlyph";
-import type { SaveState } from "./useAutosavedTextDraft";
 
 // The one header over every file view. It is final on the click frame: the
 // kind's glyph comes from the path, the same glyph Explorer draws, and it says
@@ -97,7 +97,7 @@ export function DocumentControls(props: {
   );
 }
 
-export type FileSaveState = SaveState | "deleted";
+
 
 // What each save state says and how it is marked lives in ui/StateMark.tsx,
 // one map over every union a chip can show.

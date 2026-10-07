@@ -1,3 +1,4 @@
+import { SaveStateSchema } from "@dohc/workspace-contracts/save-state-schema";
 import { nameByteLength } from "@dohc/workspace-contracts/names";
 import { LIVE_UPDATE_IDENTIFIER_MAX_BYTES } from "@dohc/live-session-contract/live-update-admission";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
@@ -100,7 +101,6 @@ import {
   SEARCH_EVENT_MAX_NOTICE_CHARS,
   SEARCH_EVENT_MAX_PREVIEW_CHARS,
   WORKBENCH_MENU_COMMANDS,
-  ENGINE_YDOC_SAVE_STATES,
 } from "./channels";
 import { UPDATE_CHANNELS, UPDATE_STATUSES } from "../updates/updateMachine";
 import type { OperationBridge, OperationTable } from "./operationTable";
@@ -729,6 +729,7 @@ export const CreateWorkspaceFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
   initialText: WORKSPACE_EDITOR_TEXT,
+  exclusive: z.boolean().optional(),
 });
 export type CreateWorkspaceFilePayload = z.infer<
   typeof CreateWorkspaceFilePayload
@@ -748,6 +749,7 @@ export type CreateWorkspaceFileResult = z.infer<
 export const CreateWorkspaceFolderPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
+  exclusive: z.boolean().optional(),
 });
 export type CreateWorkspaceFolderPayload = z.infer<
   typeof CreateWorkspaceFolderPayload
@@ -764,11 +766,14 @@ export type MoveWorkspacePathPayload = z.infer<typeof MoveWorkspacePathPayload>;
 export const DeleteWorkspacePathPayload = z.object({
   workspaceId: WORKSPACE_ID,
   relativePath: PATH_STRING,
+  emptyFolderOnly: z.boolean().optional(),
 });
 export type DeleteWorkspacePathPayload = z.infer<
   typeof DeleteWorkspacePathPayload
 >;
 
+// With emptyFolderOnly, false also means an empty folder was removed or a
+// nonempty folder was preserved. This mode never trashes descendants.
 // trashed: true = OS trash; false = the .dohc/trash fallback (cross-
 // filesystem mounts where g_file_trash rejects), which is recoverable too — or
 // a share view, whose delete removes the projection of a moment rather than a
@@ -6285,7 +6290,8 @@ export const EngineYDocSaveStateEvent = z.object({
     message: z.string(),
   }).optional(),
   sessionId: ENGINE_YDOC_SESSION_ID,
-  state: z.enum(ENGINE_YDOC_SAVE_STATES),
+  state: SaveStateSchema,
+  access: z.enum(["read-only", "deleted", "object-changed"]).optional(),
   seq: z.number().int().nonnegative(),
 });
 export type EngineYDocSaveStateEvent = z.infer<typeof EngineYDocSaveStateEvent>;

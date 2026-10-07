@@ -54,7 +54,7 @@ it("reports only host acknowledgement as saved and never settles a local file", 
   provider.applyLocalUpdate(Y.encodeStateAsUpdate(edit)); edit.destroy();
   expect(onSaveState).toHaveBeenLastCalledWith("settling", 1, "start");
   f.ack();
-  expect(onSaveState).toHaveBeenLastCalledWith("saved", 1, "outcome");
+  expect(onSaveState).toHaveBeenLastCalledWith("saved-to-host", 1, "outcome");
   await provider.close();
   expect(f.preserveDraft).not.toHaveBeenCalled();
 });

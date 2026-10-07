@@ -1,3 +1,4 @@
+import { SAVED_HERE, SAVING, saveProblem, saveStateEqual, type SaveState } from "@dohc/workspace-contracts/save-state";
 import { registerPendingEditorDraft } from "./pendingEditorDrafts";
 import { RecordButtonsRow } from "./collections/RecordButtonsRow";
 import type { RecordHistoryTarget } from "./collections/useRecordHistory";
@@ -7,7 +8,6 @@ import {
   EngineMayHoldDocumentNotice,
   OPENING_TITLE,
   ViewHeader,
-  type FileSaveState,
   OrphanedDraftNotices,
   EngineRemovalInProgressNotice,
 } from "./fileInspectorUi";
@@ -22,7 +22,6 @@ import {
   AUTOSAVE_DEBOUNCE_MS,
   publishOwnedUnmountDraft,
   type DraftFlush,
-  type SaveState,
 } from "./useAutosavedTextDraft";
 import { resolveWikilinkNavigation, resolveWorkspaceLinkNavigation } from "./wikilinkNavigation";
 import { CopyButton } from "./ui/CopyButton";
@@ -208,7 +207,7 @@ export function MarkdownView(props: {
   onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
   chatMentionsAvailable?: boolean;
   onSharePath?: (path: string) => void;
-  onSaveStateChange?: (state: FileSaveState) => void;
+  onSaveStateChange?: (state: SaveState) => void;
   // A live document became read-only while it was open.
   onLiveReadOnly?: () => void;
   registerDraftFlush?: (flush: DraftFlush | null) => void;
@@ -278,7 +277,10 @@ export function MarkdownView(props: {
   const [savedBody, setSavedBody] = useState(props.body);
   const [wysiwygResyncEpoch, setWysiwygResyncEpoch] = useState(0);
   const knownFiles = props.knownFiles ?? EMPTY_WIKILINK_FILES;
-  const [saveState, setSaveState] = useState<"saved" | "saving" | "error">("saved");
+  const [saveState, setSaveStateValue] = useState<SaveState>(SAVED_HERE);
+  const setSaveState = (state: SaveState) => {
+    setSaveStateValue((current) => saveStateEqual(current, state) ? current : state);
+  };
   const [writerSettledEpoch, setWriterSettledEpoch] = useState(0);
   const localSource = useRef<object>({});
   const activeLocalBuffer = useRef(props.localBuffer);
@@ -301,7 +303,7 @@ export function MarkdownView(props: {
   const engine = props.engine;
   useEffect(() => {
     if (!engine.available && pendingMarkdownOwner !== null) {
-      setSaveState("saving");
+      setSaveState(SAVING);
     }
   }, [engine.available, pendingMarkdownOwner]);
   // The engine open runs ON the capture chain, so a document opened
@@ -451,7 +453,7 @@ export function MarkdownView(props: {
     const newerInitialization =
       sharedSnapshot.source === null && baselineChanged;
     if (
-      sharedSnapshot.saveState === "saved" &&
+      sharedSnapshot.saveState.kind === "saved-here" &&
       !sharedSnapshot.dirty &&
       !bodyChanged
     ) {
@@ -506,7 +508,7 @@ export function MarkdownView(props: {
       draftRevision.current,
     );
     captureLatestConflictDraft();
-    if (!unmounted.current) setSaveState("error");
+    if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
   }
 
   function acceptSnapshot(
@@ -523,7 +525,7 @@ export function MarkdownView(props: {
         snapshot.body,
         snapshot.contentHash,
         localSource.current,
-        state === "error",
+        state.kind === "error",
         snapshot.readTicket,
       )
     ) {
@@ -580,7 +582,7 @@ export function MarkdownView(props: {
     ) {
       return false;
     }
-    return acceptSnapshot(snapshot, "error");
+    return acceptSnapshot(snapshot, saveProblem("error", "dohc could not confirm the file was saved."));
   }
 
   function reconcileConflictSnapshot() {
@@ -635,7 +637,7 @@ export function MarkdownView(props: {
       // set-aside edit's own signal is derived from the store below — that
       // way Dismiss retires it instead of stranding an
       // error chip on a draft that no longer exists.
-      setSaveState("saved");
+      setSaveState(SAVED_HERE);
       // The surface goes back to the document. Clearing the flag lets the
       // props.body sync effect take over when a dependency fires — but in
       // read mode `editing` never flips and the reopened body can be
@@ -663,7 +665,7 @@ export function MarkdownView(props: {
     conflictDraftId.current = null;
     capturedConflictDraft.current = null;
     flushConflict.current = false;
-    setSaveState("saved");
+    setSaveState(SAVED_HERE);
   }, [orphanedDrafts, saveState, props.contentRequestId]);
   // What the header chip shows: a real pending/failed save wins; otherwise an
   // unresolved set-aside draft gets its own state. The
@@ -672,7 +674,7 @@ export function MarkdownView(props: {
   // save-first prompt never promises to save a draft the pipeline cannot
   // write. The shell reads the store itself for the tab dot.
   const chipState =
-    saveState !== "saved"
+    saveState.kind !== "saved-here"
       ? saveState
       : orphanedDrafts.length > 0
         ? ("recovery" as const)
@@ -681,9 +683,9 @@ export function MarkdownView(props: {
   // draft still is not in the document it shows, so a settled engine must
   // not read "Saved" over an unresolved notice.
   const engineChipState =
-    engine.saveState === "saved" && orphanedDrafts.length > 0
+    engine.saveState.kind === "saved-here" && orphanedDrafts.length > 0
       ? ("recovery" as const)
-      : engine.saveState;
+      : engine.goneCause ?? engine.saveState;
 
   serializeDraftRef.current = () => {
     // WYSIWYG mode: the Tiptap editor owns the body while inline PageIdentity /
@@ -753,10 +755,9 @@ export function MarkdownView(props: {
   onLiveReadOnly.current = props.onLiveReadOnly;
   // Once each time the live document turns read-only, with or without an
   // edit waiting: the shell asks whether the share behind it ended.
-  const liveReadOnly = engine.readOnlyWhileEditing || engine.saveState === "read-only";
   useEffect(() => {
-    if (liveReadOnly) onLiveReadOnly.current?.();
-  }, [liveReadOnly]);
+    if (engine.readOnlyWhileEditing) onLiveReadOnly.current?.();
+  }, [engine.readOnlyWhileEditing]);
 
   // Parse-once + visible-first: the memo stops re-parses on
   // unrelated re-renders (collab status flips, save-state ticks), and the
@@ -1007,14 +1008,14 @@ export function MarkdownView(props: {
             acceptedRequestFloor.current,
             snapshot.requestId,
           );
-          setSaveState("saved");
+          setSaveState(SAVED_HERE);
           return;
         }
         flushConflict.current = true;
         conflictContentHash.current = snapshot.contentHash;
         conflictRequestId.current = snapshot.requestId;
         captureLatestConflictDraft();
-        acceptSnapshot(snapshot, "error");
+        acceptSnapshot(snapshot, saveProblem("error", "dohc could not confirm the file was saved."));
         return;
       }
     }
@@ -1024,7 +1025,7 @@ export function MarkdownView(props: {
       writersLive.current === 0 &&
       props.contentRequestId > acceptedRequestFloor.current
     ) {
-      acceptSnapshot(latestSnapshot.current, "saved");
+      acceptSnapshot(latestSnapshot.current, SAVED_HERE);
     }
     // The helpers read mutable writer state and the atomic snapshot above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1084,7 +1085,7 @@ export function MarkdownView(props: {
           props.path,
           serializeDraftRef.current(),
         );
-        setSaveState("saved");
+        setSaveState(SAVED_HERE);
       }
       const sharedBeforeResync = props.localBuffer.getSnapshot();
       const peerDraftPending =
@@ -1314,15 +1315,7 @@ export function MarkdownView(props: {
     }
     // Deletion is terminal: recovery owns any text worth keeping, and the
     // shell must not promise a flush to a path that no longer exists.
-    onSaveStateChange?.(
-      engine.saveState === "saved" ||
-        engine.saveState === "saving" ||
-        engine.saveState === "deleted"
-        ? engine.saveState
-        : engine.saveState === "object-changed"
-          ? "deleted"
-          : "error",
-    );
+    onSaveStateChange?.(engine.saveState);
   }, [saveState, engine.available, engine.saveState, onSaveStateChange]);
 
   useEffect(() => {
@@ -1389,7 +1382,7 @@ export function MarkdownView(props: {
           captureLatestConflictDraft(options.textSnapshot);
           if (options.releaseUnusedDraft) props.localBuffer.releaseUnusedDraft();
         }
-        if (!unmounted.current) setSaveState("error");
+        if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         return;
       }
       // Mounted edits publish when they happen. Re-reading this pane's editor
@@ -1409,7 +1402,7 @@ export function MarkdownView(props: {
       // newest text, so an older queued write can never land over a newer one.
       const issuedRevision = draftRevision.current;
       unsavedDraft.current = false;
-      if (!unmounted.current) setSaveState("saving");
+      if (!unmounted.current) setSaveState(SAVING);
       let issuedText: string | null = null;
       try {
         const writing = props.localBuffer.write(
@@ -1436,7 +1429,7 @@ export function MarkdownView(props: {
         latestDraft.current = props.localBuffer.getSnapshot().body;
         if (result.status === "skipped") {
           baseContentHash.current = result.contentHash;
-          if (!unmounted.current) setSaveState("saved");
+          if (!unmounted.current) setSaveState(SAVED_HERE);
           return;
         }
         if (result.status === "no-baseline") {
@@ -1444,7 +1437,7 @@ export function MarkdownView(props: {
           if (options.captureOnFailure && options.textSnapshot !== undefined) {
             captureLatestConflictDraft(options.textSnapshot);
           }
-          if (!unmounted.current) setSaveState("error");
+          if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
           if (options.rejectOnError) {
             throw new Error("dohc cannot save this draft without a content hash.");
           }
@@ -1466,7 +1459,7 @@ export function MarkdownView(props: {
           unsavedDraft.current = false;
           captureLatestConflictDraft();
           if (!unmounted.current) {
-            setSaveState("error");
+            setSaveState(saveProblem("error", "The file changed on disk."));
             reconcileConflictSnapshot();
           }
           if (options.rejectOnError) {
@@ -1482,7 +1475,7 @@ export function MarkdownView(props: {
         if (latestContentRequestId.current > issuedBaseRequestId) {
           verifyAfterRequestId.current = latestContentRequestId.current;
           if (!unmounted.current) {
-            setSaveState("saving");
+            setSaveState(SAVING);
             props.refreshAfterConflict();
           }
           return;
@@ -1490,11 +1483,11 @@ export function MarkdownView(props: {
         if (!unmounted.current && draftRevision.current === issuedRevision) {
           setDraft(text);
           setSavedBody(text);
-          setSaveState("saved");
+          setSaveState(SAVED_HERE);
         } else if (!unmounted.current && !unsavedDraft.current) {
           // The write queue cannot start a newer writer until this run returns.
           // A queued or pending local edit therefore keeps this flag set.
-          setSaveState("saved");
+          setSaveState(SAVED_HERE);
         }
       } catch (error) {
         if (activeLocalBuffer.current !== props.localBuffer) {
@@ -1510,7 +1503,7 @@ export function MarkdownView(props: {
         if (options.captureOnFailure && options.textSnapshot !== undefined) {
           captureLatestConflictDraft(options.textSnapshot);
         }
-        if (!unmounted.current) setSaveState("error");
+        if (!unmounted.current) setSaveState(saveProblem("error", "dohc could not confirm the file was saved."));
         if (options.rejectOnError) throw error;
       }
     };
@@ -1583,7 +1576,7 @@ export function MarkdownView(props: {
     }
     draftRevision.current += 1;
     unsavedDraft.current = true;
-    setSaveState("saving");
+    setSaveState(SAVING);
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => void saveNow(), AUTOSAVE_DEBOUNCE_MS);
   }
@@ -1932,11 +1925,13 @@ export function MarkdownView(props: {
             <StateMark
               testId="markdown-save-state"
               truncate
-              state={engineChipState}
+              state={engine.readOnlyWhileEditing ? "read-only" : engineChipState}
+              // A read-only status after every edit saved sets nothing aside.
               shown={
-                engine.readOnlyWhileEditing &&
-                !(engine.saveState === "read-only" && engine.readOnlyDraftId === null)
-                  ? "read-only-transition"
+                engine.readOnlyWhileEditing
+                  ? engine.saveState.kind === "unknown" && engine.readOnlyDraftId === null
+                    ? "read-only"
+                    : "read-only-transition"
                   : engineChipState
               }
               title={
@@ -1944,7 +1939,7 @@ export function MarkdownView(props: {
                   engineChipState === "object-changed") &&
                 hasSetAsideEdit
                   ? goneNotice(engine.goneCause, true)
-                  : engineChipState === "error" && engine.saveError
+                  : typeof engineChipState !== "string" && engineChipState.kind === "error" && engine.saveError
                     ? engine.saveError
                     : undefined
               }
@@ -2035,7 +2030,7 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel ydoc={engine.doc} fieldMarks={fieldMarks} />
               </Suspense>
             )}
-            <FrontmatterAsWritten ydoc={engine.doc} saved={engine.saveState === "saved"} propertiesShown={!readOnly} />
+            <FrontmatterAsWritten ydoc={engine.doc} saved={engine.saveState.kind === "saved-here"} propertiesShown={!readOnly} />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}
@@ -2085,7 +2080,7 @@ export function MarkdownView(props: {
                 saved one, and dohc has not decided about it yet. Read mode
                 hides the "Saved" idle chip, but PageIdentity stays editable
                 there and autosaves title/icon edits — so a pending or failed
-                save (saveState !== "saved") must surface even when not
+                save (saveState.kind !== "saved-here") must surface even when not
                 `editing`, or a failed title/icon save is invisible while the
                 optimistic value keeps showing. */}
             {opening ? (
