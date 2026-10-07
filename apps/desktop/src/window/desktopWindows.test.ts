@@ -242,6 +242,18 @@ describe("desktop workspace windows", () => {
     expect(created.focus).toHaveBeenCalledOnce();
   });
 
+  it("lets a workspace window or the manager show a folder failure, never the utility window", () => {
+    const f = fixture();
+    const workspaceWindow = new Window(); f.windows.trackWorkspaceWindow(workspaceWindow.native); f.all.push(workspaceWindow);
+    const utility = new Window(); f.all.push(utility);
+    const manager = f.windows.showOrCreateManagerWindow();
+    expect(f.windows.showsNotices(workspaceWindow.native)).toBe(true);
+    expect(f.windows.showsNotices(manager)).toBe(true);
+    expect(f.windows.showsNotices(utility.native)).toBe(false);
+    f.all[2]!.destroy();
+    expect(f.windows.showsNotices(manager)).toBe(false);
+  });
+
   it("reports a failed activation as a dialog, not silence", () => {
     const f = fixture();
     f.windows.reportActivationFailure(workspace("a"), new Error("load failed"));

@@ -338,6 +338,33 @@ describe("MCP tool results", () => {
     });
   });
 
+  it("passes bodies at the normalized UTF-8 limit to the server for every chat write", async () => {
+    // CRLF becomes LF and trailing JS whitespace is removed before the cap.
+    const body = "x".repeat(65_534) + "\r\ny\uFEFF ";
+    const sent: unknown[] = [];
+    const root = await workspaceRoot();
+    const { client } = await connectedToolNames({ root, home: "/home",
+      request: async request => {
+        if (!("body" in request.args)) throw new Error("Expected a chat write");
+        sent.push(request.args.body);
+        return request.verb === "fileChatStart"
+          ? { ok: true, path: "tracked.md", threadId: "thread-1", messageId: "message-1" }
+          : request.verb === "post"
+            ? { group: { id: "ch_1", name: "general", slug: "general", kind: "group" }, threadId: "th_1", messageId: "msg_1", title: "" }
+            : { threadId: "th_1", messageId: "msg_2" };
+      },
+    });
+    for (const [name, args] of [
+      ["dohc_start_file_chat", { path: "tracked.md", title: "Limit" }],
+      ["dohc_start_group_chat", { group: "general" }],
+      ["dohc_reply_to_chat", { threadId: "thread-1" }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: { ...args, body } });
+      expect(result, JSON.stringify(result)).not.toHaveProperty("isError", true);
+    }
+    expect(sent).toEqual([body, body, body]);
+  });
+
   it("turns poll options into a decision even without needsDecision", async () => {
     const { client } = await connectedToolNames({
       root: "/workspace", home: "/home",

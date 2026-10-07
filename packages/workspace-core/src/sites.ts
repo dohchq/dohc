@@ -91,7 +91,7 @@ export interface WorkspaceSiteSource {
 }
 
 export interface DohcSiteConfig {
-  type?: "site";
+  type?: "app";
   title?: string;
   preview?: {
     mode?: "static" | "dev" | "build";
@@ -107,8 +107,8 @@ export interface DohcSiteConfig {
 interface ParsedDohcSiteConfig {
   config?: DohcSiteConfig;
   diagnostics: SiteDiagnostic[];
-  // The raw `type` string as written, kept even when it isn't "site" (and so
-  // isn't carried onto `config.type`, which stays a strict "site" | undefined
+  // The raw `type` string as written, kept even when it isn't "app" (and so
+  // isn't carried onto `config.type`, which stays a strict "app" | undefined
   // literal for the invalid-type diagnostic path). A dohc.json can legitimately
   // declare a type for a different dohc feature (e.g. "workflow") — that is
   // not an invalid config, so this is tracked separately from the validation
@@ -495,18 +495,18 @@ export function parseDohcSiteConfig(json: string, path = "dohc.json"): ParsedDoh
   const config: DohcSiteConfig = {};
   let declaredType: string | undefined;
   if (parsed.type !== undefined) {
-    if (parsed.type === "site") {
-      config.type = "site";
-      declaredType = "site";
+    if (parsed.type === "app") {
+      config.type = "app";
+      declaredType = "app";
     } else if (typeof parsed.type === "string" && parsed.type.trim() !== "") {
-      // A non-"site" string names a different dohc feature (e.g. "workflow")
+      // A non-"app" string names a different dohc feature (e.g. "workflow")
       // and is a legitimate, well-formed value — not an invalid config.
       // discoverSites decides inclusion/diagnostics for this case on its own
       // independent-website-signal rule, not here.
       declaredType = parsed.type;
     } else {
       diagnostics.push(
-        diagnostic(path, "warning", "invalid-type", 'dohc.json type should be "site".'),
+        diagnostic(path, "warning", "invalid-type", 'dohc.json type should be "app".'),
       );
     }
   }
@@ -711,7 +711,7 @@ function siteKind(candidate: Candidate): SiteKind {
 }
 
 function siteConfidence(candidate: Candidate): SiteConfidence {
-  if (candidate.dohcConfig?.type === "site") return "high";
+  if (candidate.dohcConfig?.type === "app") return "high";
   if (candidate.hasIndexHtml || candidate.hasPublishManifest || candidate.hasFrameworkConfig) return "high";
   if (candidate.hasWebPackageSignal || candidate.hasBuildOutputSignal) return "medium";
   return "low";
@@ -732,13 +732,13 @@ function hasIndependentWebsiteSignal(candidate: Candidate): boolean {
   );
 }
 
-// A dohc.json whose `type` is present and not "site" declares the folder for
+// A dohc.json whose `type` is present and not "app" declares the folder for
 // a different dohc feature, not a website — packages/mcp/src/tools.ts's
 // detectSiteAt applies the same rule and this mirrors it so both detectors
 // agree on the same input.
 function isExplicitNonSite(candidate: Candidate): boolean {
   const type = candidate.dohcConfigDeclaredType;
-  return type !== undefined && type !== "site";
+  return type !== undefined && type !== "app";
 }
 
 function shouldIncludeCandidate(candidate: Candidate): boolean {
@@ -941,7 +941,7 @@ export function discoverSites(sources: readonly (string | WorkspaceSiteSource)[]
             (candidate.root === "." ? "dohc.json" : `${candidate.root}/dohc.json`),
           "warning",
           "unexpected_dohc_type",
-          'dohc.json has website signals but its type is not "site".',
+          'dohc.json has website signals but its type is not "app".',
         ),
       );
     }

@@ -355,6 +355,7 @@ export const CHANNELS = {
   engineYDocSaveState: "desktop:engine-ydoc-save-state",
   menuCommand: "desktop:menu-command",
   workspaceActivated: "desktop:workspace-activated",
+  workspacePathOpenFailed: "desktop:workspace-path-open-failed",
   updateState: "desktop:update-state",
   getUpdateState: "desktop:get-update-state",
   checkForUpdates: "desktop:check-for-updates",
