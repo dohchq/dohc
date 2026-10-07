@@ -364,6 +364,33 @@ describe("crash report messages", () => {
     ].join("\n"));
   });
 
+  it("still writes the report when an error's stack is not text", () => {
+    for (const stack of [42, { toString: () => `    at x (C:\\Users\\sam\\Trip plans.js:1:1)` }]) {
+      const cause = Object.assign(new Error("open C:\\Users\\sam\\Trip plans.md"), { code: "ENOENT", stack });
+      const error = Object.assign(new TypeError("the title of Trip plans", { cause }), { stack });
+      const main = mainError(error);
+      expect(main.split("\n").slice(-2)).toEqual([
+        "Error: TypeError: <message withheld>",
+        "Caused by: Error: <message withheld> (code ENOENT)",
+      ]);
+      const engine = formatCrashEvent({
+        kind: "engine",
+        stage: "stopped",
+        error: Object.assign(new EngineDaemonUnavailableError("Rust engine restart limit exceeded after 3 attempts.", {
+          cause: Object.assign(new EngineDaemonUnavailableError("Rust engine daemon exited unexpectedly with code 101."), { stack }),
+        }), { stack }),
+      }, FACTS, codeFrame);
+      expect(engine.split("\n").slice(-2)).toEqual([
+        "Error: EngineDaemonUnavailableError: Rust engine restart limit exceeded after 3 attempts.",
+        "Caused by: EngineDaemonUnavailableError: Rust engine daemon exited unexpectedly with code 101.",
+      ]);
+      for (const text of [main, engine]) {
+        expect(text).not.toContain("Trip plans");
+        expect(text).not.toContain("sam");
+      }
+    }
+  });
+
   it("never spells out a thrown value, and keeps only a known class name", () => {
     expect(mainError("lost C:\\Users\\sam\\notes.md")).toContain("Error: a value of type string");
     expect(mainError({ secret: "x" })).toContain("Error: a value of type object");

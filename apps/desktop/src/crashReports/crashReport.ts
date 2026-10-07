@@ -198,7 +198,9 @@ export function errorChain(error: unknown): ErrorLink[] {
       chain.push({ kind: "value", type: current === null ? "null" : typeof current });
       break;
     }
-    const stack = (current.stack ?? "").split("\n")
+    // Any code can set a stack, so one that is not text has no frames.
+    const raw: unknown = current.stack;
+    const stack = (typeof raw === "string" ? raw : "").split("\n")
       .filter((line) => /^\s*at\s/.test(line))
       .slice(0, STACK_LINES)
       .map((line) => line.trim());

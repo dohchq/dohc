@@ -571,6 +571,31 @@ describe("what an error report holds", () => {
     ]);
   });
 
+  it("still sends a short report when an error's stack is not text", async () => {
+    const reports = shown();
+    reports.setPrivacy(ON);
+    const error = privateError();
+    for (const link of [error, error.cause as Error]) Object.assign(link, { stack: { toString: () => `at x (C:\\Users\\sam\\${SECRET}.js:1:1)` } });
+    reports.reportError({ kind: "crash", event: { kind: "main-exception", error, origin: "uncaughtException" } });
+    reports.reportError({
+      kind: "crash",
+      event: {
+        kind: "engine",
+        stage: "restarting",
+        error: Object.assign(new EngineDaemonUnavailableError("Rust engine daemon exited unexpectedly with code 3."), { stack: 42 }),
+      },
+    });
+    await reports.flush();
+    expect(errorCalls().map((call) => (envelopeEvent(call).exception as { values: unknown[] }).values)).toEqual([
+      [
+        { type: "Error", value: "<message withheld> (code ENOENT)", stacktrace: { frames: [] } },
+        { type: "TypeError", value: "<message withheld>", stacktrace: { frames: [] } },
+      ],
+      [{ type: "EngineDaemonUnavailableError", value: "Rust engine daemon exited unexpectedly with code 3." }],
+    ]);
+    for (const call of errorCalls()) expect(String(call.init.body)).not.toContain(SECRET);
+  });
+
   it("names a window's file the way the uploaded source maps do, from an installation path with spaces", async () => {
     const install = resolve("dohc install", "My Programs", "dohc");
     const asset = join(install, "resources", "app.asar", "dist", "renderer", "assets", "Index-AbC9.js");
