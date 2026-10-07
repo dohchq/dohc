@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WatcherStatusResult } from "@dohc/workspace-engine-client";
 import { RelayUnauthorizedError, ShareUnavailableError } from "@dohc/workspace-contracts/relay";
+import { claimWorkspace, closeTestStorages, createShare, inspectDatabase, storagePath, testHandler, testStorage, request } from "@dohc/sync-relay/testing";
 import { CHANNELS } from "./channels";
 import { sharedViewAccessOperations } from "./bridgeContract";
-import { ShareSelectorInvalidError, type ShareViewInfo } from "../workspaces/shareViewInfo";
+import { fetchShareViewAccess, ShareSelectorInvalidError, type ShareViewInfo } from "../workspaces/shareViewInfo";
 import { SharePinInvalidError } from "../workspaces/shareViewRecords";
 import { buildShareCode } from "../workspaces/syncCode";
 import { deferred } from "../testing/deferred";
@@ -12,6 +13,37 @@ import { createSharedViewsIpcHarness as harness, credentials, info, outcome, rea
 afterEach(() => vi.restoreAllMocks());
 
 describe("metadata-only access checks", () => {
+  it("discovers a real relay's Edit-to-View downgrade and revocation", async () => {
+    const storage = await testStorage();
+    try {
+      const relay = testHandler(storage);
+      await claimWorkspace(relay, "granter", "owner");
+      const shareId = await createShare(relay, "granter", "owner", { recipientUserId: "recipient", paths: ["tasks"], access: "edit" });
+      const h = await harness();
+      h.workspace.shareView!.shareId = shareId;
+      h.workspace.shareView!.grantedSelector.paths = ["tasks"];
+      h.workspace.shareView!.relayUrl = "http://relay.test";
+      h.cache.set({ ...credentials, relayUrl: "http://relay.test", token: "user:recipient" });
+      h.fetchAccess.mockImplementation(input => fetchShareViewAccess({ ...input,
+        relay: { ...input.relay, fetch: async (url, init) => relay(new Request(url, init)) },
+      }));
+      const checkAccess = () => h.invoke(sharedViewAccessOperations.checkSharedViewAccess.channel, { workspaceId: "existing" });
+      expect(await checkAccess()).toEqual({ status: "current", access: "edit" });
+      const db = inspectDatabase(storagePath(storage));
+      // Named-grant retuning has no public route yet. Seed its current View
+      // state in the real relay store; the authenticated GET remains real.
+      db.prepare("UPDATE sync_relay_share_grants SET access = 'view' WHERE share_id = ?").run(shareId);
+      expect(await checkAccess()).toEqual({ status: "current", access: "view" });
+      expect(h.workspace.shareView!.grantedSelector.access).toBe("view");
+      expect(h.end).not.toHaveBeenCalled();
+      const removed = await relay(request("granter", `/sync/shares/${shareId}/revoke`, { method: "POST" }));
+      expect(removed.status).toBe(200);
+      expect(await checkAccess()).toEqual({ status: "ended" });
+      expect(h.end).toHaveBeenCalledOnce();
+      expect(h.workspace.shareView!.ended).toBe(true);
+    } finally { await closeTestStorages(); }
+  });
+
   it.each(["missing", "different", "signed out", "relay"])("keeps %s recipient credentials unverified", async change => {
     const h = await harness();
     if (change === "missing") delete h.workspace.shareView!.recipientUserId;

@@ -214,8 +214,7 @@ export async function createLocalDatasetHost(options: LocalDatasetHostOptions) {
     const workerStat = await lstat(workerDirectory);
     if (!workerStat.isDirectory() || workerStat.isSymbolicLink() || resolve(await realpath(workerDirectory)) !== resolve(workerDirectory)) throw new Error("dohc cannot use the folder that holds this workspace's Collections. It must be a folder, not a link.");
     let resources:Resources|undefined;
-    // The owner's own datasets: waiting after a failed reopen would protect nobody and lock the owner out.
-    supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 0,
+    supervisor = await createDatasetSupervisor({ journal, directory: workerDirectory, runtime: options.persistentRuntime, maxWorkers: options.maxWorkers, reopenWaitCapMs: 60_000,
       onMaintenanceError(scope){console.warn("dataset_materialization_deferred",scope);},
       maintenanceStorage:{authorize(){if(!db.isOpen)throw new Error("Collection storage is closed.");},account(allocation){charge(allocation.scope.datasetId,allocation.bytes);return resources?.accountCheckpointStage?.(owner,allocation);}} });
     resources = options.resources?.({ db, transaction });

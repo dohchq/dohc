@@ -148,6 +148,8 @@ import { createRecordByHand, desktopRecordEditContext, type DesktopRecordEditHos
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { workspaceSearchHandlers } from "./ipc/workspaceSearchIpc";
 import { registerOperations, type OperationBoundary } from "./ipc/operationTable";
+import { createUsageStore } from "./usage/usageStore";
+import { createRendererUsage, RENDERER_USAGE_COVERAGE } from "./usage/rendererUsage";
 
 import { createPresencePollRegistry } from "./collab/presencePollRegistry";
 
@@ -485,6 +487,10 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 // logging in the imports above is still unguarded, which is why this stays a
 // top-level statement rather than moving inside app.whenReady.
 makeProcessDiagnosticsNonFatal();
+
+let usageStore: ReturnType<typeof createUsageStore> | undefined;
+let usageLoad: ReturnType<typeof setImmediate> | undefined;
+const rendererUsage = createRendererUsage<IpcMainInvokeEvent>(invocation => usageStore?.recordSuccess(invocation));
 
 // Crashes are recorded on this computer before anything else can crash. A
 // report leaves only when the person confirms in main's own dialog, and
@@ -5051,6 +5057,17 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     markReady: () => {
       launchMarks.appReady();
       desktopMarks.markOnce("app-ready");
+      // Start retention even when Off. Never wait for measurement on startup.
+      usageLoad = setImmediate(() => {
+        usageLoad = undefined;
+        try {
+          usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: RENDERER_USAGE_COVERAGE });
+        } catch {
+          usageStore = undefined;
+          return;
+        }
+        void usageStore.load().catch(() => {});
+      });
     },
     startEngine: () => desktopEngine.start(),
     loadSettings: () => readCachedUserSettingsFile(stateDir()),
@@ -5159,7 +5176,12 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       await ownerDatasetCopies.closeAll();
       await namedDatasetPages.close();
     },
-    disposeDatabase: async () => { await workspaceFilesWorker.dispose(); await workspaceDatabaseWorker.dispose(); },
+    disposeDatabase: async () => {
+      if (usageLoad) clearImmediate(usageLoad);
+      await usageStore?.close().catch(() => {});
+      await workspaceFilesWorker.dispose();
+      await workspaceDatabaseWorker.dispose();
+    },
     closeRelay: closeAllRelayTransportWorkspaces,
     stopEngine: async () => { await desktopEngine.daemon?.stop(); },
   },
@@ -6158,7 +6180,7 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, workspaceVersionOperations, workspaceVersionHandlers({
     requireEngineCapture, notifyRenderer, activity, tryInVersionSessions, desktopMarks,
     onRefusalsChanged: notifyNoticesChanged,
-  }));
+  }), rendererUsage.version);
 
   workspaceEngineIpc.registerHistory();
 
@@ -6233,7 +6255,7 @@ function registerIpcHandlers(): void {
         }
       }),
     }),
-  });
+  }, rendererUsage.crash);
 
   registerOperations(operationBoundary, workspaceSearchOperations, workspaceSearchHandlers<
     IpcMainInvokeEvent,
@@ -6291,7 +6313,7 @@ function registerIpcHandlers(): void {
     retryAutomationNotice: (input) => retryFromFailureNotice({ notices: noticeStore(), retry: retryAutomationFromNotice }, input),
     takeWorkspacePathOpenFailures: (_input, { event }) => openPathFailures.take(event.sender),
     retryWorkspacePathOpen: (input, { event }) => openPathFailures.retry(input.attemptId, event.sender),
-  });
+  }, rendererUsage.notice);
 
   workspaceEngineIpc.registerYDoc();
 

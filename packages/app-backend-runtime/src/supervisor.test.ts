@@ -6,11 +6,17 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vitest";
 import { createDatasetJournal, type DatasetJournal } from "./journal.ts";
-import { createDatasetSupervisor, type DatasetInvocation, type DatasetMigration, type DatasetSupervisorOptions } from "./supervisor.ts";
+import { createDatasetSupervisor, DatasetReopenWaitError, type DatasetInvocation, type DatasetMigration, type DatasetSupervisorOptions } from "./supervisor.ts";
 import { DEFAULT_LIMITS, type AppRuntimeLauncher } from "./protocol.ts";
 
 // These waits cover one worker command at the product deadline plus durable journal writes around it.
 const workerWait = { timeout: 2 * DEFAULT_LIMITS.deadlineMs };
+it.each([
+  [1, "1 second"], [5000, "5 seconds"], [59999, "60 seconds"],
+  [60000, "1 minute"], [60001, "2 minutes"], [1800000, "30 minutes"],
+] as const)("describes a reopen wait of %i ms without claiming recovery failed", (milliseconds, duration) => {
+  expect(new DatasetReopenWaitError(milliseconds).message).toBe(`This Collection is waiting to reopen. Try again in ${duration}.`);
+});
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -499,7 +505,7 @@ it("waits longer before each reopen of a dataset whose replay ran out of CPU",as
   const {state,read}=await failingReopens({reopenWaitCapMs:20_000});
   await expect(read()).rejects.toMatchObject({code:"worker_budget",retryAfterMs:5_000});
   await expect(read()).rejects.toMatchObject({code:"dataset_reopen_wait",retryAfterMs:5_000,
-    message:"dohc's work on this Collection stopped before it finished. Try again in 5 s."});
+    message:"This Collection is waiting to reopen. Try again in 5 seconds."});
   expect(state.replayed).toEqual([1]);
   // Each failure right after a wait ends doubles the wait, up to its cap.
   for(const [elapsed,wait] of [[5_000,10_000],[10_000,20_000],[20_000,20_000]]) {
@@ -901,7 +907,8 @@ it.each(["abort","deadline"])("settles %s promptly when its own old worker is be
 });
 
 
-it("checkpoints a hostile 64-swap replay before each later worker failure and resumes without repeating saved work",{timeout: 8 * DEFAULT_LIMITS.deadlineMs},async()=>{
+// Test allowance for 128 seed/replay steps and six worker lifetimes (seed, four replay workers, reopen).
+it("checkpoints a hostile 64-swap replay before each later worker failure and resumes without repeating saved work",{timeout: 2*64*DEFAULT_LIMITS.evaluationMs+6*DEFAULT_LIMITS.deadlineMs},async()=>{
   const swapSchema="CREATE TABLE items(id INTEGER PRIMARY KEY,value TEXT NOT NULL UNIQUE); INSERT INTO items VALUES(1,'left'),(2,'right');";
   const swapSource=`globalThis.operations={run(ctx,input){
     if(input.swap){const rows=ctx.db.query('SELECT value FROM items ORDER BY id');
@@ -963,8 +970,7 @@ it("checkpoints a hostile 64-swap replay before each later worker failure and re
   try{expect((await reopened.invoke(read)).revision).toBe(64);expect(applied).toHaveLength(64);}
   finally{await reopened.close();}
   expect(closedPids.sort()).toEqual(pids.sort());
-  // Test allowance for 128 seed/replay steps and six worker lifetimes (seed, four replay workers, reopen).
-},2*64*DEFAULT_LIMITS.evaluationMs+6*DEFAULT_LIMITS.deadlineMs);
+});
 
 it.each([
   {events:1,interval:100,completed:true,afterCheckpoint:false},

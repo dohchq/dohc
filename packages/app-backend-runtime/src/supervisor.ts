@@ -126,7 +126,9 @@ const REOPEN_WAIT_MS = 5_000;
 export class DatasetReopenWaitError extends Error {
   readonly code = "dataset_reopen_wait";
   constructor(readonly retryAfterMs: number) {
-    super(`dohc's work on this Collection stopped before it finished. Try again in ${Math.ceil(retryAfterMs / 1000)} s.`);
+    const unit = retryAfterMs >= 60_000 ? "minute" : "second";
+    const count = Math.ceil(retryAfterMs / (unit === "minute" ? 60_000 : 1000));
+    super(`This Collection is waiting to reopen. Try again in ${count} ${unit}${count === 1 ? "" : "s"}.`);
     this.name = "DatasetReopenWaitError";
   }
 }
