@@ -8,15 +8,16 @@ import { startTiming, timed } from "./timing.mjs";
 const databasePackages = new Set(["@dohc/workspace-postgres", "@dohc/workspace-auth", "@dohc/workspace-api", "@dohc/share-web"]);
 const longestFirst = ["@dohc/ydoc-projection", "@dohc/desktop", "@dohc/sync-relay", "@dohc/app-backend-runtime"];
 
-export function testPlan(packages, testFiles = {}) {
+export function testPlan(packages, testFiles = {}, { maxWorkers } = {}) {
   for (const name of Object.keys(testFiles)) {
     if (!packages.some(pkg => pkg.name === name && pkg.manifest.scripts?.test)) throw new Error(`No selected test package owns file selection: ${name}.`);
   }
   return packages.filter(({ manifest }) => manifest.scripts?.test).map(({ name, manifest }) => {
     const script = name === "@dohc/desktop" ? "test:unit" : name === "@dohc/app-backend-runtime" ? "test:prepared" : "test";
     if (!manifest.scripts[script]) throw new Error(`Missing ${script} in ${name}.`);
-    const workers = name === "@dohc/app-backend-runtime" ? 2
-      : name === "@dohc/desktop" ? Math.min(4, Math.max(2, Math.floor(availableParallelism() / 4))) : 4;
+    const workers = maxWorkers ?? (name === "@dohc/app-backend-runtime" ? 2
+      : name === "@dohc/desktop" ? Math.min(4, Math.max(2, Math.floor(availableParallelism() / 4))) : 4);
+    if (!Number.isInteger(workers) || workers < 1 || workers > 4) throw new Error("Test workers must be between 1 and 4.");
     const vitest = /^vitest run(?: |$)/u.test(manifest.scripts[script]);
     const files = testFiles[name];
     if (files && (!vitest || !files.length)) {
@@ -53,12 +54,13 @@ export async function runBounded(tasks, execute, concurrency = 2) {
   if (failure) throw failure;
 }
 
-export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {}, repository = "full", desktopScripts = true, beforeDesktopScripts, runProofs } = {}) {
+export async function testWorkspace({ prepared = false, output = join(repoRoot, ".agent-artifacts/js-tests", new Date().toISOString().replaceAll(":", "-")), env = process.env, selectedPackages, testFiles = {}, repository = "full", desktopScripts = true, beforeDesktopScripts, runProofs, bounded = false } = {}) {
   if (!["full", "source"].includes(repository)) throw new Error("Unknown repository test scope.");
   if (typeof desktopScripts !== "boolean") throw new Error("Desktop script selection must be a boolean.");
   if (runProofs !== undefined && typeof runProofs !== "function") throw new Error("Proof selection must provide a function.");
+  if (bounded && (!prepared || repository !== "source" || desktopScripts || runProofs || !selectedPackages?.length || selectedPackages.length > 2)) throw new Error("Bounded tests require prepared inputs, source guards, at most two packages, and no desktop scripts or proofs.");
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, concurrency: 2, repository, desktopScripts, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
+  const report = { version: 1, concurrency: bounded ? 1 : 2, bounded, repository, desktopScripts, proofs: Boolean(runProofs), steps: [], verdict: "RUNNING" };
   const finish = startTiming(report);
   const save = () => writeFileSync(join(output, "result.json"), JSON.stringify(report, null, 2) + "\n");
   const cancellation = cancellationScope("Workspace tests");
@@ -89,7 +91,8 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
     if (selectedPackages && selectedPackages.some(name => !packages.some(pkg => pkg.name === name))) {
       throw new Error("A selected workspace package is missing from the installed inventory.");
     }
-    const tasks = testPlan(packages.filter(pkg => !selectedPackages || selectedPackages.includes(pkg.name)), testFiles);
+    const tasks = testPlan(packages.filter(pkg => !selectedPackages || selectedPackages.includes(pkg.name)), testFiles, bounded ? {maxWorkers: 1} : {});
+    if (bounded && tasks.some(task => task.resource || !task.args.includes("--maxWorkers=1"))) throw new Error("Bounded tests cannot run services or custom test commands.");
     for (const task of tasks) for (const file of task.files ?? []) {
       const pkg = packages.find(pkg => pkg.name === task.name);
       if (!existsSync(join(pkg.path, file))) throw new Error(`Selected test file is missing: ${task.name}/${file}.`);
@@ -105,6 +108,7 @@ export async function testWorkspace({ prepared = false, output = join(repoRoot, 
       await command("runtime-build", ["--filter", "@dohc/app-backend-runtime", "build"]);
     }
     const repositoryChecks = command("repository", ["run", repository === "full" ? "test:repo" : "test:repo:source"]);
+    if (bounded) await repositoryChecks;
     const plan = planPackages().catch(fail);
     const databasePending = new Set();
     const packages = plan.then(async tasks => {

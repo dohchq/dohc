@@ -436,6 +436,15 @@ impl dohc_engine_storage::FaultInjector for PrefixRival {
 /// acceptance names its trusted agent in the next moment.
 #[tokio::test]
 async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
+    let started = std::time::Instant::now();
+    let mark = |phase| {
+        if std::env::var_os("DOHC_RUST_PROFILE").is_some() {
+            eprintln!(
+                "RUST_PROFILE publication {phase} {:.3}s",
+                started.elapsed().as_secs_f64()
+            );
+        }
+    };
     const LOCAL: &str = "Private local paragraph";
     const SECOND: &str = "Second private paragraph";
     const REMOTE: &str = "Remote agent paragraph";
@@ -494,6 +503,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     f.doc.apply(&remote_bytes).unwrap();
     // Keep each settlement interval inside the configured maximum while the
     // accepted checkpoint segment accumulates discarded metadata above60MiB.
+    mark("fixture-private-edit");
     const PREFIX: i64 = 700;
     let mut accepted_head = None;
     for cursor in 1..=PREFIX {
@@ -501,9 +511,11 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
             deliver_declared(&handle, &f.binding, cursor, &remote_bytes, large_agent(999)).await;
         assert!(matches!(result, ApplicationResult::Applied(..)));
         if cursor % 100 == 0 {
+            mark("periodic-settlement-start");
             let settled = f.settle(&handle, Some(receipt)).await;
             assert!(!f.file().contains(LOCAL));
             assert!(f.file().contains(REMOTE));
+            mark("periodic-settlement-complete");
             let moments = f.store.table_row_count("moments").unwrap();
             if let Some((moment, count)) = &accepted_head {
                 assert_eq!(
@@ -519,6 +531,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
             }
         }
     }
+    mark("ingress-with-periodic-settlement");
     let metadata: i64 = f
         .store
         .read_with(|conn| {
@@ -555,6 +568,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         }
     };
     assert!(admitted > 1);
+    mark("fill-capacity");
 
     // The private edit's native sequence has no application. Settling the
     // accepted prefix leaves it out of the file and the moment.
@@ -597,6 +611,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
             .content
             .contains(LOCAL)
     );
+    mark("rival-refusal");
     std::fs::write(f.root.path().join(&f.binding.current_path), preimage).unwrap();
     let settled = f.settle(&handle, terminal.clone()).await;
     assert!(settled.materialized);
@@ -626,6 +641,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         "the file lacks the private edit"
     );
 
+    mark("rescue");
     // Another private edit, then a restart before the acknowledgement reached
     // the relay. The same terminal replays the same settlement.
     f.record_by(
@@ -677,6 +693,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
         )
         .await
         .unwrap();
+    mark("restart");
     let replayed = f.settle(&handle, terminal).await;
     assert_eq!(replayed.settlement_id, settled.settlement_id);
     assert_eq!(replayed.local_ydoc_sequence, settled.local_ydoc_sequence);
@@ -684,6 +701,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     assert_eq!(f.store.table_row_count("moments").unwrap(), moments + 1);
     assert!(!f.file().contains(LOCAL));
 
+    mark("ack-replay");
     // The refused delivery applies once the interval is free.
     let (_, retried) = deliver_declared(
         &handle,
@@ -713,6 +731,7 @@ async fn accepted_prefix_settles_past_a_private_tail_at_author_capacity() {
     assert_eq!(named, expected);
     owner.close().await.unwrap();
     supervisor.close_all().unwrap();
+    mark("complete");
 }
 
 #[tokio::test]

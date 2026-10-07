@@ -186,7 +186,7 @@ Use Node 24.14 or newer and pnpm 11.20.0, as pinned in `package.json`.
 ## Verification
 
 Use [the agent verification procedure](docs/engineering/verify-agent-work.md) for worktree setup, desktop QA, debug access, and PR evidence.
-For desktop QA, start with `pnpm doctor`. Use `pnpm qa:smoke` for boot, editing, persistence, and restart.
+For desktop QA, start with `pnpm run doctor`. Use `pnpm qa:smoke` for boot, editing, persistence, and restart.
 
 Run the smallest check that proves the change.
 
