@@ -2,7 +2,7 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { WorkspacePathOpenFailedEvent } from "../../ipc/bridgeContract";
+import type { WorkspacePathOpenFailure } from "../../ipc/bridgeContract";
 import { deferred } from "../../testing/deferred";
 import { ConnectionNotices, useConnectionNotices } from "./connectionNotices";
 import {
@@ -11,19 +11,37 @@ import {
   WorkspacePathOpenFailures,
 } from "./workspacePathOpenFailures";
 
-let emit: (failure: WorkspacePathOpenFailedEvent) => void = () => undefined;
+// Main's side: it holds each failure for the window until a take, and
+// pushes a ping the window may or may not hear.
+let held: WorkspacePathOpenFailure[] = [];
+let ping: () => void = () => undefined;
+let order: string[] = [];
 const retryWorkspacePathOpen = vi.fn(async (_payload: { attemptId: string }) => undefined);
 
+// Main reports a failure: it holds it, then pings.
+async function emit(failure: WorkspacePathOpenFailure) {
+  held.push(failure);
+  await act(async () => ping());
+}
+
 beforeEach(() => {
+  held = [];
+  ping = () => undefined;
+  order = [];
   vi.stubGlobal("dohcDesktop", {
     platform: "win32",
     getUpdateState: () => new Promise(() => {}),
     onUpdateState: () => () => {},
-    onWorkspacePathOpenFailed: (listener: typeof emit) => {
-      emit = listener;
+    onWorkspacePathOpenFailed: (listener: () => void) => {
+      order.push("listen");
+      ping = listener;
       return () => {
-        emit = () => undefined;
+        ping = () => undefined;
       };
+    },
+    takeWorkspacePathOpenFailures: async () => {
+      order.push("take");
+      return held.splice(0);
     },
     retryWorkspacePathOpen,
   });
@@ -54,15 +72,15 @@ function Owner(props: { workspaceId: string | null }) {
 // The window's root: it holds failures whether or not an owner is mounted.
 // Each workspace gets its own owner, as DesktopRoot keys the shell.
 function Root(props: { owner: string | null | false }) {
-  const held = useHeldWorkspacePathOpenFailures();
+  const holding = useHeldWorkspacePathOpenFailures();
   return (
-    <WorkspacePathOpenFailures.Provider value={held}>
+    <WorkspacePathOpenFailures.Provider value={holding}>
       {props.owner === false ? null : <Owner key={String(props.owner)} workspaceId={props.owner} />}
     </WorkspacePathOpenFailures.Provider>
   );
 }
 
-function failure(cause: string, change: Partial<WorkspacePathOpenFailedEvent> = {}): WorkspacePathOpenFailedEvent {
+function failure(cause: string, change: Partial<WorkspacePathOpenFailure> = {}): WorkspacePathOpenFailure {
   return { attemptId: "attempt-1", path: "C:\\work\\Trips", cause, workspaceId: null, ...change };
 }
 
@@ -107,7 +125,7 @@ describe("folders a launch could not open", () => {
     ],
   ])("names the folder and says why for %s, with the error behind Copy", async (_kind, cause, message, canRetry) => {
     render(<Root owner={null} />);
-    act(() => emit(failure(cause)));
+    await emit(failure(cause));
 
     const toast = await screen.findByTestId("workspace-shell-error");
     expect(toast.textContent).toContain(message);
@@ -123,7 +141,7 @@ describe("folders a launch could not open", () => {
   it("keeps the row in Notices, with Try again and Copy, after the toast closes", async () => {
     const user = userEvent.setup();
     render(<Root owner={null} />);
-    act(() => emit(failure("Error [EBUSY]: EBUSY: resource busy or locked")));
+    await emit(failure("Error [EBUSY]: EBUSY: resource busy or locked"));
 
     const toast = await screen.findByTestId("workspace-shell-error");
     await user.click(within(toast).getByRole("button", { name: "Dismiss workspace error" }));
@@ -136,9 +154,19 @@ describe("folders a launch could not open", () => {
     expect(within(row).getByRole("button", { name: "Copy error details" })).toBeTruthy();
   });
 
+  it("shows a failure main held before this window listened, such as one reported while it loaded", async () => {
+    // Main pinged before the page listened, so only a take can find it.
+    held.push(failure("Error [EBUSY]: EBUSY: resource busy or locked"));
+    render(<Root owner={null} />);
+
+    expect(order).toEqual(["listen", "take"]);
+    expect(await screen.findAllByTestId("workspace-shell-error")).toHaveLength(1);
+    expect(held).toEqual([]);
+  });
+
   it("holds a failure that arrives before any notice owner, then shows it once", async () => {
     const view = render(<Root owner={false} />);
-    act(() => emit(failure("Error [EBUSY]: EBUSY: resource busy or locked")));
+    await emit(failure("Error [EBUSY]: EBUSY: resource busy or locked"));
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
     view.rerender(<Root owner={null} />);
@@ -149,26 +177,26 @@ describe("folders a launch could not open", () => {
 
   it("drops a failure main tied to a workspace this window no longer shows", async () => {
     render(<Root owner="current" />);
-    act(() => emit(failure("Error [EBUSY]: EBUSY: resource busy or locked", { workspaceId: "previous" })));
+    await emit(failure("Error [EBUSY]: EBUSY: resource busy or locked", { workspaceId: "previous" }));
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
-    act(() => emit(failure("Error [EBUSY]: EBUSY: resource busy or locked", { workspaceId: "current" })));
+    await emit(failure("Error [EBUSY]: EBUSY: resource busy or locked", { workspaceId: "current" }));
     expect(await screen.findByTestId("workspace-shell-error")).toBeTruthy();
   });
 
   it("asks main to open the same attempt again, and shows main's next answer with its own Try again", async () => {
     const user = userEvent.setup();
     render(<Root owner={null} />);
-    act(() => emit(failure("WorkspaceManifestError [unreadable]: this folder has a corrupt .dohc/manifest.json")));
+    await emit(failure("WorkspaceManifestError [unreadable]: this folder has a corrupt .dohc/manifest.json"));
 
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
     expect(retryWorkspacePathOpen).toHaveBeenCalledExactlyOnceWith({ attemptId: "attempt-1" });
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
 
     // Main reports the second failure with a new attempt, on the same row.
-    act(() => emit(failure("Error [ENOENT]: ENOENT: no such file or directory, stat 'C:\\work\\Trips'", {
+    await emit(failure("Error [ENOENT]: ENOENT: no such file or directory, stat 'C:\\work\\Trips'", {
       attemptId: "attempt-2",
-    })));
+    }));
     const toasts = await screen.findAllByTestId("workspace-shell-error");
     expect(toasts).toHaveLength(1);
     expect(toasts[0]!.textContent).toContain("dohc could not open Trips. The file or folder is not there anymore.");
@@ -182,7 +210,7 @@ describe("folders a launch could not open", () => {
       "Error invoking remote method 'desktop:retry-workspace-path-open': Error: Open the folder again.",
     ));
     render(<Root owner={null} />);
-    act(() => emit(failure("Error [EBUSY]: EBUSY: resource busy or locked")));
+    await emit(failure("Error [EBUSY]: EBUSY: resource busy or locked"));
 
     await user.click(within(await screen.findByTestId("workspace-shell-error")).getByRole("button", { name: "Try again" }));
     const toast = await screen.findByTestId("workspace-shell-error");
@@ -199,15 +227,15 @@ describe("folders a launch could not open", () => {
       return null;
     }
     function SpyRoot(props: { mounted: boolean }) {
-      const held = useHeldWorkspacePathOpenFailures();
+      const holding = useHeldWorkspacePathOpenFailures();
       return (
-        <WorkspacePathOpenFailures.Provider value={held}>
+        <WorkspacePathOpenFailures.Provider value={holding}>
           {props.mounted ? <SpyOwner /> : null}
         </WorkspacePathOpenFailures.Provider>
       );
     }
     const view = render(<SpyRoot mounted />);
-    act(() => emit(failure("Error [EBUSY]: EBUSY: resource busy or locked")));
+    await emit(failure("Error [EBUSY]: EBUSY: resource busy or locked"));
     expect(report).toHaveBeenCalledOnce();
 
     act(() => report.mock.calls[0]![0].retry?.());

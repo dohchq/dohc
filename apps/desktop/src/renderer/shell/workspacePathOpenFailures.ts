@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import type { WorkspacePathOpenFailedEvent } from "../../ipc/bridgeContract";
+import type { WorkspacePathOpenFailure } from "../../ipc/bridgeContract";
 import { needsNewerDohc, withErrorWords } from "../../ipc/errorWords";
 import { bridge } from "../bridge";
 import { workspaceName } from "../Titlebar";
@@ -15,23 +15,35 @@ export function workspacePathOpenNotice(path: string, cause: unknown): { message
 }
 
 interface HeldFailures {
-  failures: readonly WorkspacePathOpenFailedEvent[];
-  take(taken: readonly WorkspacePathOpenFailedEvent[]): void;
+  failures: readonly WorkspacePathOpenFailure[];
+  take(taken: readonly WorkspacePathOpenFailure[]): void;
 }
 
 export const WorkspacePathOpenFailures = createContext<HeldFailures>({ failures: [], take: () => undefined });
 
 /**
- * The window's root holds each failure main sends until a notice owner takes
- * it. The first can arrive before the workspace list is read and any owner
- * is mounted.
+ * The window's root takes each failure main holds for this window, then
+ * holds it until a notice owner takes it in turn. It listens first, then
+ * takes what main already holds, so a failure main reported while this page
+ * loaded still arrives. The first can come before any owner is mounted.
  */
 export function useHeldWorkspacePathOpenFailures(): HeldFailures {
-  const [failures, setFailures] = useState<readonly WorkspacePathOpenFailedEvent[]>([]);
-  useEffect(() => bridge().onWorkspacePathOpenFailed((failure) => {
-    setFailures((held) => [...held, failure]);
-  }), []);
-  const take = useCallback((taken: readonly WorkspacePathOpenFailedEvent[]) => {
+  const [failures, setFailures] = useState<readonly WorkspacePathOpenFailure[]>([]);
+  useEffect(() => {
+    let live = true;
+    const takeFromMain = () => {
+      void bridge().takeWorkspacePathOpenFailures({}).then((taken) => {
+        if (live && taken.length > 0) setFailures((held) => [...held, ...taken]);
+      }, (error: unknown) => console.error("[dohc] could not take folder open failures:", error));
+    };
+    const unsubscribe = bridge().onWorkspacePathOpenFailed(takeFromMain);
+    takeFromMain();
+    return () => {
+      live = false;
+      unsubscribe();
+    };
+  }, []);
+  const take = useCallback((taken: readonly WorkspacePathOpenFailure[]) => {
     setFailures((held) => held.filter((failure) => !taken.includes(failure)));
   }, []);
   return useMemo(() => ({ failures, take }), [failures, take]);
@@ -64,7 +76,7 @@ export function useWorkspacePathOpenFailures(workspaceId: string | null, report:
 
   useEffect(() => {
     if (failures.length === 0) return;
-    const reportFailure = (failure: WorkspacePathOpenFailedEvent, cause: unknown, canRetry: boolean) => {
+    const reportFailure = (failure: WorkspacePathOpenFailure, cause: unknown, canRetry: boolean) => {
       const notice = workspacePathOpenNotice(failure.path, cause);
       report({
         message: notice.message,

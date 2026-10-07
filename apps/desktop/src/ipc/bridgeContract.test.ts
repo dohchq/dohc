@@ -1,6 +1,6 @@
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { describe, expect, it } from "vitest";
-import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailedEvent } from "./bridgeContract";
+import { activityPathsAffectWorkspaceListing, WorkspacePathOpenFailure } from "./bridgeContract";
 
 import {
   ENGINE_YDOC_UPDATE_MAX_BYTES,
@@ -4471,7 +4471,7 @@ describe("launch path failure event", () => {
   it.each([null, "selected"])("retains the attempt, path, and cause for workspace %j", (workspaceId) => {
     const event = { attemptId: "attempt-1", path: "C:\\work\\attempted",
       cause: "ReservedWorkspaceIdError: refused", workspaceId };
-    expect(WorkspacePathOpenFailedEvent.parse({ ...event, authority: "ignored" })).toEqual(event);
+    expect(WorkspacePathOpenFailure.parse({ ...event, authority: "ignored" })).toEqual(event);
   });
 
   it.each([
@@ -4480,7 +4480,7 @@ describe("launch path failure event", () => {
     { cause: null },
     { path: "" },
   ])("rejects malformed failure packets %j", (change) => {
-    expect(WorkspacePathOpenFailedEvent.safeParse({ attemptId: "attempt-1", path: "attempted", cause: "refused",
+    expect(WorkspacePathOpenFailure.safeParse({ attemptId: "attempt-1", path: "attempted", cause: "refused",
       workspaceId: null, ...change }).success).toBe(false);
   });
 });

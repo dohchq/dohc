@@ -114,5 +114,6 @@
   "data.import",
   "data.query",
   "app.link.create",
-  "workspace.open.retry"
+  "workspace.open.retry",
+  "workspace.open.failures.take"
 ]

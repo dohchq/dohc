@@ -46,16 +46,21 @@ export function whenOpenPathFailureTargetReady(window: OpenPathFailureWindow): P
 
 export function captureOpenPathFailureTarget<Session extends { workspaceId: string }>(
   window: OpenPathFailureWindow,
-  context: { isLive(): boolean; currentSession(): Session | undefined },
+  context: { isLive(): boolean; currentSession(): Session | undefined; admittedCount(): number },
 ) {
   const session = context.currentSession();
+  const admitted = context.admittedCount();
   const ready = whenOpenPathFailureTargetReady(window);
   return {
     whenReady: () => ready,
     isCurrent: (opened?: { workspaceId: string } | null) => {
       if (!context.isLive() || window.isDestroyed() || window.webContents.isDestroyed() || window.webContents.isCrashed()) return false;
       const current = context.currentSession();
-      return current === session || (opened != null && current?.workspaceId === opened.workspaceId);
+      // A window with no workspace yet that then opens its first one, such
+      // as a starting window opening its first listed workspace, has not
+      // switched away from the request.
+      const first = session === undefined && current !== undefined && context.admittedCount() === admitted + 1;
+      return current === session || first || (opened != null && current?.workspaceId === opened.workspaceId);
     },
   };
 }

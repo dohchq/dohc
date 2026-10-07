@@ -5935,6 +5935,25 @@ export const scheduleHostOperations = {
   },
 } satisfies OperationTable;
 
+// A folder the command line or the OS asked dohc to open did not open. Main
+// keeps the error itself in its log; `cause` is its one-line form for Copy.
+// `workspaceId` is the workspace the window showed when the request came,
+// or null for none: the renderer drops a failure meant for another one.
+// `attemptId` lets that window ask once for the same folder again.
+export const WorkspacePathOpenFailure = z.object({
+  attemptId: OPAQUE_ID,
+  path: z.string().min(1),
+  cause: z.string(),
+  workspaceId: z.string().min(1).nullable(),
+});
+export type WorkspacePathOpenFailure = z.infer<typeof WorkspacePathOpenFailure>;
+// The most failures main holds at once, oldest dropped first.
+export const WORKSPACE_PATH_OPEN_FAILURES_MAX = 32;
+// Main holds each failure for its window until the renderer takes it. This
+// push only says there is one to take, so a push the renderer misses while
+// it loads loses nothing.
+export const WorkspacePathOpenFailedEvent = z.undefined();
+
 export const noticeOperations = {
   listNotices: {
     capabilityId: "notice.list",
@@ -5960,9 +5979,18 @@ export const noticeOperations = {
     channel: "desktop:retry-automation-notice",
     payload: RetryAutomationNoticePayload, result: RetryAutomationNoticeResult, guard: "trusted-sender",
   },
+  // The failures main holds for the sending window. Each is given once.
+  takeWorkspacePathOpenFailures: {
+    capabilityId: "workspace.open.failures.take",
+    scope: "device",
+    channel: "desktop:take-workspace-path-open-failures",
+    payload: z.object({}),
+    result: z.array(WorkspacePathOpenFailure).max(WORKSPACE_PATH_OPEN_FAILURES_MAX),
+    guard: "trusted-sender",
+  },
   // Opens the folder a launch failure names again. The renderer names the
-  // attempt, never a path, and main honors it once, for the window it told.
-  // A failure arrives as a new WorkspacePathOpenFailedEvent.
+  // attempt, never a path, and main honors it once, for the window it holds
+  // it for. A failure comes back as a new one to take.
   retryWorkspacePathOpen: {
     capabilityId: "workspace.open.retry",
     scope: "device",
@@ -6216,19 +6244,6 @@ export const LaunchMarksResult = z.object({
   shellVisibleMs: z.number().positive().optional(),
 });
 export type LaunchMarksResult = z.infer<typeof LaunchMarksResult>;
-
-// A folder the command line or the OS asked dohc to open did not open. Main
-// keeps the error itself in its log; `cause` is its one-line form for Copy.
-// `workspaceId` is the workspace the window showed when main sent this, or
-// null for none: the renderer drops a failure meant for another workspace.
-// `attemptId` lets that window ask once for the same folder again.
-export const WorkspacePathOpenFailedEvent = z.object({
-  attemptId: OPAQUE_ID,
-  path: z.string().min(1),
-  cause: z.string(),
-  workspaceId: z.string().min(1).nullable(),
-});
-export type WorkspacePathOpenFailedEvent = z.infer<typeof WorkspacePathOpenFailedEvent>;
 
 export interface DohcDesktopBridge
   extends OperationBridge<typeof workspaceVersionOperations>,
@@ -6723,7 +6738,8 @@ export interface DohcDesktopBridge
   // workspace summary; the preload strips and validates it before the root
   // swaps workspaces.
   onWorkspaceActivated(listener: (workspace: WorkspaceSummary) => void): () => void;
-  onWorkspacePathOpenFailed(listener: (event: WorkspacePathOpenFailedEvent) => void): () => void;
+  // A folder failure is waiting: take it with takeWorkspacePathOpenFailures.
+  onWorkspacePathOpenFailed(listener: () => void): () => void;
   // Auto-update state pushes from main, validated against UpdateStateEvent in
   // the preload before they reach renderer code. Returns an unsubscribe function.
   onUpdateState(listener: (state: UpdateStateEvent) => void): () => void;

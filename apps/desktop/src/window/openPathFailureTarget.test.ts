@@ -68,7 +68,7 @@ describe("launch path failure target context", () => {
     window.webContents.getURL.mockReturnValue("file:///dohc/index.html");
     window.webContents.isLoadingMainFrame.mockReturnValue(false);
     let session = { workspaceId: "original" };
-    const target = captureOpenPathFailureTarget(window, { isLive: () => true, currentSession: () => session });
+    const target = captureOpenPathFailureTarget(window, { isLive: () => true, currentSession: () => session, admittedCount: () => 1 });
     expect(target.isCurrent()).toBe(true);
     session = { workspaceId: "opened" };
     expect(target.isCurrent()).toBe(false);
@@ -77,12 +77,32 @@ describe("launch path failure target context", () => {
     expect(target.isCurrent({ workspaceId: "opened" })).toBe(false);
   });
 
+  it("keeps a window that had no workspace and then opened its first, but not its second", () => {
+    const window = fixture();
+    let session: { workspaceId: string } | undefined;
+    let admitted = 0;
+    const target = captureOpenPathFailureTarget(window, {
+      isLive: () => true, currentSession: () => session, admittedCount: () => admitted,
+    });
+    expect(target.isCurrent(null)).toBe(true);
+    // The starting window opens the first workspace it lists while the
+    // launch path is still opening, and the launch path then fails.
+    session = { workspaceId: "first-listed" };
+    admitted = 1;
+    expect(target.isCurrent(null)).toBe(true);
+    session = { workspaceId: "switched-to" };
+    admitted = 2;
+    expect(target.isCurrent(null)).toBe(false);
+  });
+
   it.each(["closed", "contents-destroyed", "crashed", "untracked"])("rejects a %s target even after its own successful open", (state) => {
     const window = fixture();
     window.webContents.getURL.mockReturnValue("file:///dohc/index.html");
     window.webContents.isLoadingMainFrame.mockReturnValue(false);
     let live = true;
-    const target = captureOpenPathFailureTarget(window, { isLive: () => live, currentSession: () => ({ workspaceId: "opened" }) });
+    const target = captureOpenPathFailureTarget(window, {
+      isLive: () => live, currentSession: () => ({ workspaceId: "opened" }), admittedCount: () => 1,
+    });
     if (state === "closed") window.isDestroyed.mockReturnValue(true);
     if (state === "contents-destroyed") window.webContents.isDestroyed.mockReturnValue(true);
     if (state === "crashed") window.webContents.isCrashed.mockReturnValue(true);

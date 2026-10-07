@@ -97,6 +97,7 @@ function noticeBridge() {
     listNotices: vi.fn(async () => ({ account: null, notices: [] })),
     onNoticesChanged: vi.fn(() => () => undefined),
     onWorkspacePathOpenFailed: vi.fn(() => () => undefined),
+    takeWorkspacePathOpenFailures: vi.fn(async () => []),
   };
 }
 
