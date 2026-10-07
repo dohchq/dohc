@@ -779,7 +779,7 @@ function Pane(props: { theme: "light" | "dark" }) {
         </Specimen>
         <Specimen label="failed">
           <EmptyPanel>
-            <EmptyState icon={AlertTriangle} tone="danger" title="Workspace is still updating. Try again.">
+            <EmptyState icon={AlertTriangle} tone="danger" title="Could not load Chats for this file.">
               <SecondaryButton>Try again</SecondaryButton>
             </EmptyState>
           </EmptyPanel>

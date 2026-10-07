@@ -140,9 +140,12 @@ export function SectionLabel({
   );
 }
 
+// The mark is larger and heavier than a 20px glyph, so its ghost is one
+// step fainter: in text-subtle a glyph still reads, and in text-line it
+// all but disappears.
 const emptyGlyphToneClass = {
-  ghost: "text-line",
-  danger: "text-danger",
+  ghost: { glyph: "text-subtle", mark: "text-line" },
+  danger: { glyph: "text-danger", mark: "text-danger" },
 } as const;
 
 /** Centered empty state: a ghost glyph, one muted line that says what is
@@ -164,13 +167,13 @@ export function EmptyState({
   hint?: string;
   children?: ReactNode;
 } & Omit<HTMLAttributes<HTMLDivElement>, "title" | "className" | "children">) {
-  const glyphClass = emptyGlyphToneClass[tone];
+  const toneClass = emptyGlyphToneClass[tone];
   return (
     <div {...rest} className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
       {Icon ? (
-        <Icon size={20} strokeWidth={1.9} aria-hidden className={glyphClass} />
+        <Icon size={20} strokeWidth={1.9} aria-hidden className={toneClass.glyph} />
       ) : (
-        <DohcMark size={30} className={glyphClass} />
+        <DohcMark size={30} className={toneClass.mark} />
       )}
       <div className="flex max-w-sm flex-col gap-1 wrap-anywhere">
         <span className="text-sm text-muted">{title}</span>
