@@ -192,8 +192,8 @@ interface InFlightLaunch {
 // launch runs its smoke in the background so start() can resolve on the
 // handshake; every restart keeps the blocking smoke, because restartAfterExit
 // counts a failed smoke as a failed attempt — which is what bounds a daemon
-// that relaunches but cannot do workspace work. A stall after request progress
-// is inconclusive on a responding daemon; reaching the smoke cap still fails.
+// that relaunches but cannot do workspace work. Smokes wait through progress
+// stalls until their cap; daemon silence can fail them sooner.
 type SmokeMode = "background" | "blocking";
 
 export class EngineDaemonUnavailableError extends Error {
@@ -328,7 +328,6 @@ export class EngineDaemonLifecycle {
   // exit it caused; either way the reason is reported once.
   private readonly reportedFailures = new WeakSet<Error>();
   private readonly condemnedClients = new WeakSet<EngineDaemonClient>();
-  private readonly stalledLifecycleErrors = new WeakSet<Error>();
   // Requests a CLI read sends. They wait for the engine's open lock like any
   // open, but they never hold it for long, so they are not what a stuck
   // attach waits behind.
@@ -607,6 +606,7 @@ export class EngineDaemonLifecycle {
     const smokeCap = {
       capMs: this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
       condemnOnCap: () => true,
+      cancelOnStall: false,
     };
     const opened = resultObject(
       await this.sendLifecycleRequest(
@@ -680,7 +680,7 @@ export class EngineDaemonLifecycle {
   private async sendLifecycleRequest(
     client: EngineDaemonClient,
     request: Request,
-    bound: { capMs: number; condemnOnCap: () => boolean; read?: boolean },
+    bound: { capMs: number; condemnOnCap: () => boolean; read?: boolean; cancelOnStall?: boolean },
   ): Promise<Response> {
     const { method } = request;
     const timeoutMs = bound.capMs;
@@ -694,7 +694,7 @@ export class EngineDaemonLifecycle {
       !this.exitedGenerations.has(generation) &&
       (this.client === client || this.launchingClients.has(client));
     const controller = new AbortController();
-    const watch = this.watchRequestLiveness(client, method, controller.signal);
+    const watch = this.watchRequestLiveness(client, method, controller.signal, bound.cancelOnStall ?? true);
     const startedAt = this.monotonicNowMs(), activityBefore = client.inboundActivity?.();
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
@@ -728,7 +728,6 @@ export class EngineDaemonLifecycle {
       // A stalled open can fail while the rest of the daemon remains healthy.
       void client.cancelRequest?.(request.id).catch(() => undefined);
       if (current() && watch.daemonSilent()) this.condemn(client, asError(error));
-      else this.stalledLifecycleErrors.add(asError(error));
       throw error;
     });
     let rejectRetired!: (error: Error) => void;
@@ -759,12 +758,13 @@ export class EngineDaemonLifecycle {
 
   // An open waiting for the engine lock has not started reporting progress.
   // Watch daemon health until its first frame, then use only its callback to
-  // extend the quiet wait. A stalled request can cancel on a responding daemon;
-  // silence condemns it. Neither wait extends the absolute cap.
+  // extend the quiet wait. Ordinary requests cancel on a progress stall; smokes
+  // keep watching daemon health until their cap. Silence condemns either.
   private watchRequestLiveness(
     client: EngineDaemonClient,
     method: string,
     signal: AbortSignal,
+    cancelOnStall: boolean,
   ): { silent: Promise<never>; progress(): void; responding(): boolean; daemonSilent(): boolean; stop(): void } {
     const probeDelayMs =
       this.options.requestProbeDelayMs ?? DEFAULT_REQUEST_PROBE_DELAY_MS;
@@ -812,7 +812,7 @@ export class EngineDaemonLifecycle {
           continue;
         }
         if (!answered && this.monotonicNowMs() - probedAt > expiryMs + LATE_TIMER_TOLERANCE_MS) continue;
-        if (tracksProgress && progressCount > 0 && (answered || afterProbe !== seen)) {
+        if (cancelOnStall && tracksProgress && progressCount > 0 && (answered || afterProbe !== seen)) {
           throw new EngineDaemonUnavailableError(`Rust engine ${method} made no progress while the daemon was responding.`);
         }
         if (answered || afterProbe !== seen) {
@@ -962,26 +962,18 @@ export class EngineDaemonLifecycle {
   }
 
   private async runSmoke(client: EngineDaemonClient): Promise<void> {
-    try {
-      await runEngineDaemonSmoke(
-        async (rootDir, workspaceId) =>
-          await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
-        (error) => this.reportFailure(
-          new Error("Could not delete the engine startup smoke directory.", { cause: error }),
-          false,
-        ),
-      );
-    } catch (error) {
-      if (!this.stalledLifecycleErrors.has(asError(error))) throw error;
-      // A progress stall is inconclusive on a responding daemon. A request
-      // that reaches its absolute cap is still a failed smoke in either mode.
-      console.warn("[engine-daemon] startup smoke request cancelled:", error);
-    }
+    await runEngineDaemonSmoke(
+      async (rootDir, workspaceId) =>
+        await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
+      (error) => this.reportFailure(
+        new Error("Could not delete the engine startup smoke directory.", { cause: error }),
+        false,
+      ),
+    );
   }
 
-  // The first launch's smoke checks workspace work after the handshake. A
-  // stall after progress is logged without reporting a daemon failure.
-  // Other failures kill for replacement through the normal restart path.
+  // The first launch's smoke checks workspace work after the handshake.
+  // Failures kill for replacement through the normal restart path.
   private async runDeferredSmoke(
     generation: number,
     client: EngineDaemonClient,

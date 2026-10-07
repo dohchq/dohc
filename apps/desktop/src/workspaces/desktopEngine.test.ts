@@ -487,10 +487,9 @@ describe("desktop engine restart coordination", () => {
     } finally { await f.close(); }
   });
 
-  it.each(["stall", "cap"] as const)("reports smoke %s outcomes according to their cancellation reason", async cancellation => {
+  it("waits for the startup smoke cap after progress stalls before reporting an engine failure", async () => {
     const f = fixture();
     const opened = deferred();
-    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
     const cancel = vi.fn(async (_requestId: number) => {});
     let openId!: number;
     const client: EngineDaemonClient = {
@@ -498,7 +497,7 @@ describe("desktop engine restart coordination", () => {
       async sendRequest(request, _signal, onProgress) {
         if (request.method === "workspace.open" && String(workspaceIdOf(request)).startsWith("desktop-startup-smoke-")) {
           openId = request.id;
-          if (cancellation === "stall") onProgress?.();
+          onProgress?.();
           opened.resolve();
           return await new Promise<Response>(() => {});
         }
@@ -515,30 +514,19 @@ describe("desktop engine restart coordination", () => {
       vi.useFakeTimers();
       await f.engine.start();
       await opened.promise;
-      await vi.advanceTimersByTimeAsync(cancellation === "stall" ? 11_000 : 120_010);
-      await vi.waitFor(() => expect(
-        log.mock.calls.some(([message]) => message === "[engine-daemon] startup smoke request cancelled:") ||
-        vi.mocked(f.dependencies.recordEngineProblem).mock.calls.length > 0,
-      ).toBe(true), { timeout: 15_000 });
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(cancel).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      expect(f.engine.daemon!.currentClient()).toBe(client);
+      expect(f.dependencies.recordEngineProblem).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(109_010);
+      await vi.waitFor(() => expect(f.dependencies.recordEngineProblem).toHaveBeenCalled(), { timeout: 15_000 });
       expect(cancel).toHaveBeenCalledWith(openId);
+      expect(close).toHaveBeenCalledOnce();
+      expect(f.dependencies.recordEngineProblem).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: "Rust engine workspace.open timed out after 120000ms." }), "restarting",
+      );
       expect(f.dependencies.dialog.showErrorBox).not.toHaveBeenCalled();
-      if (cancellation === "stall") {
-        expect(log).toHaveBeenCalledWith("[engine-daemon] startup smoke request cancelled:", expect.any(Error));
-        expect(close).not.toHaveBeenCalled();
-        expect(f.engine.daemon!.currentClient()).toBe(client);
-        expect(f.dependencies.recordEngineProblem).not.toHaveBeenCalled();
-        f.setLaunch(async () => new Client());
-        f.spawns[0]!.onExit!(1, null);
-        expect(f.dependencies.recordEngineProblem).toHaveBeenCalledExactlyOnceWith(
-          expect.objectContaining({ message: "Rust engine daemon exited unexpectedly with code 1." }), "restarting",
-        );
-      } else {
-        expect(log).not.toHaveBeenCalledWith("[engine-daemon] startup smoke request cancelled:", expect.any(Error));
-        expect(close).toHaveBeenCalledOnce();
-        expect(f.dependencies.recordEngineProblem).toHaveBeenCalledExactlyOnceWith(
-          expect.objectContaining({ message: "Rust engine workspace.open timed out after 120000ms." }), "restarting",
-        );
-      }
     } finally { await f.close(); }
   });
 
