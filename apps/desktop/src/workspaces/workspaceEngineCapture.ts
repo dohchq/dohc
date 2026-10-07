@@ -3836,7 +3836,10 @@ export function createWorkspaceEngineCapture(
           } else {
             pendingCollectionAdoptionProviders.delete(adoptionKey);
           }
-          if (isEngineStoreBusyRefusal(error)) continue;
+          if (isTransientEngineRefusal(error)) {
+            deferred = true;
+            continue;
+          }
           onError(`collection adoption of ${adoption.filePath}`, error);
         }
       }

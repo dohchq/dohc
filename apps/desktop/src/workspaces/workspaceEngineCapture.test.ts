@@ -397,7 +397,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it.each(["ownerPending", "declined", "mismatch"] as const)(
+  it.each(["ownerPending", "declined", "mismatch", "live-settlement-capacity", "engine-store-busy"] as const)(
     "defers an open adoption (%s) while another record proceeds", async (status) => {
     const root = await createTestScratch("dohc-engine-capture-");
     const path = "tasks/pending.md";
@@ -408,6 +408,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const liveStore = createCaptureLiveStores({ workspaceId: WORKSPACE_ID, rootPath: root,
       attachmentId: WORKSPACE_ATTACHMENT_ID }, sessions).store;
     let pending = true;
+    let adoptionRefused = true;
     let healthyPending = true;
     const reconcile = vi.fn(async () => {
       healthyPending = false;
@@ -441,6 +442,14 @@ describe("workspaceEngineCapture batch capture", () => {
       unsettled: false, close, evict,
       applyLocalUpdate: async (update: Uint8Array) => { Y.applyUpdate(doc, update); },
       adoptCollectionRecord: async () => {
+        if (status === "live-settlement-capacity" || status === "engine-store-busy") {
+          if (adoptionRefused) {
+            throw new DaemonRefusalError({ code: "OVERLOADED", message: status, retry: "afterBackoff" }, undefined);
+          }
+          doc.getMap("frontmatter").set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
+          pending = false;
+          return "settled" as const;
+        }
         if (status === "ownerPending") doc.getMap("frontmatter").set("id", "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
         return status === "declined" ? "declined" as const : "ownerPending" as const;
       },
@@ -464,6 +473,14 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(evict).not.toHaveBeenCalled();
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(errors).toEqual([]);
+    if (status === "live-settlement-capacity" || status === "engine-store-busy") {
+      adoptionRefused = false;
+      await engine.flush();
+      expect(pending).toBe(false);
+      expect(session.doc.getMap("frontmatter").get("id")).toBe("rec_aaaaaaaaaaaaaaaaaaaaaaaaaa");
+      expect(open).toHaveBeenCalledTimes(2);
+      expect(errors).toEqual([]);
+    }
     healthyPending = true;
     reconcile.mockRejectedValueOnce(new DaemonRefusalError({
       code: "INTERNAL", message: "collection-reconciliation-lease-held", retry: "no",
@@ -563,7 +580,7 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  it("retries a busy collection adoption provider on a later pass while other items proceed", async () => {
+  it.each(["engine-store-busy", "live-settlement-capacity"])("retries a collection adoption provider after %s while other items proceed", async (message) => {
     const root = await createTestScratch("dohc-engine-capture-");
     const adoptions = [
       {
@@ -603,7 +620,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const busy = new DaemonRefusalError(
       {
         code: "OVERLOADED",
-        message: "engine-store-busy",
+        message,
         retry: "afterBackoff",
       },
       undefined,
