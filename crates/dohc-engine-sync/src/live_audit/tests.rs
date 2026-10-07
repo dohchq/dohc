@@ -1407,3 +1407,79 @@ fn historical_event_export_reads_the_base_once_then_reuses_its_published_scope()
     assert_eq!(BASE_BLOB_BYTES_READ.with(|read| read.get()), f.bytes.len());
     assert_eq!(operations(&f.store), published);
 }
+
+#[test]
+fn owner_settlement_lookup_accepts_both_binding_key_orders() {
+    for canonical in [false, true] {
+        let mut f = fixture(false);
+        let owner = dohc_engine_collab::owner_outbox::draft::OwnerDraftDescriptor {
+            binding: f.binding.clone(),
+            relay_database_namespace: "relay".into(),
+            revision: 1,
+            accepted_cursor: 3,
+            native_head_sequence: 0,
+            native_unsettled: false,
+            outbox_id: None,
+            pending_bytes: 0,
+            state: None,
+        };
+        let binding_json = if canonical {
+            serde_json::to_string(&serde_json::to_value(&f.binding).unwrap()).unwrap()
+        } else {
+            serde_json::to_string(&f.binding).unwrap()
+        };
+        f.store
+            .write_with(&NoFaults, |tx| {
+                tx.execute("INSERT INTO blobs(sha256,text,byte_length) VALUES ('markdown','text',4)", []).map_err(SyncError::persist)?;
+                for cursor in [3, 2] {
+                    let record = format!(
+                        "{{\"binding\":{binding_json},\"momentId\":\"moment\",\"terminalCursor\":{cursor},\"relayDatabaseNamespace\":\"relay\"}}"
+                    );
+                    tx.execute(
+                        "INSERT INTO live_audit_settlements(settlement_id,workspace_id,record_digest,record_json,markdown_digest) VALUES (?1,'ws','digest',?2,'markdown')",
+                        params![format!("settlement-{cursor}"), record],
+                    ).map_err(SyncError::persist)?;
+                }
+                Ok::<_, SyncError>(())
+            })
+            .unwrap();
+        let found = f
+            .store
+            .read_with(|conn| owner_settlement_cursor_in(conn, &owner, "moment", "markdown"))
+            .unwrap();
+        assert_eq!(found, Some(2), "canonical binding order: {canonical}");
+        for field in [
+            "workspace",
+            "version",
+            "object",
+            "lineage",
+            "path",
+            "selectors",
+            "fence",
+            "namespace",
+        ] {
+            let mut different = owner.clone();
+            match field {
+                "workspace" => different.binding.workspace_id = "other".into(),
+                "version" => different.binding.main_version_id = "other".into(),
+                "object" => different.binding.object_id = "other".into(),
+                "lineage" => different.binding.lineage_claim_id = "other".into(),
+                "path" => different.binding.current_path = "other.md".into(),
+                "selectors" => different.binding.selector_paths = vec!["other.md".into()],
+                "fence" => different.binding.restore_fence_generation = 1,
+                "namespace" => different.relay_database_namespace = "other".into(),
+                _ => unreachable!(),
+            }
+            let found = f
+                .store
+                .read_with(|conn| {
+                    owner_settlement_cursor_in(conn, &different, "moment", "markdown")
+                })
+                .unwrap();
+            assert_eq!(
+                found, None,
+                "a different {field} must not authorize publication"
+            );
+        }
+    }
+}

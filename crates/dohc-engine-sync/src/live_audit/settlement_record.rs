@@ -11,21 +11,32 @@ pub(crate) fn owner_settlement_cursor_in(
     moment_id: &str,
     markdown_digest: &str,
 ) -> Result<Option<i64>, SyncError> {
-    conn.query_row(
-        "SELECT min(json_extract(record_json,'$.terminalCursor')) FROM live_audit_settlements
-         WHERE workspace_id=?1 AND json_extract(record_json,'$.momentId')=?2 AND markdown_digest=?3
-           AND json_extract(record_json,'$.relayDatabaseNamespace')=?4
-           AND json(json_extract(record_json,'$.binding'))=json(?5)",
-        params![
+    let mut stmt = conn
+        .prepare(
+            "SELECT json_extract(record_json,'$.binding'),json_extract(record_json,'$.terminalCursor')
+             FROM live_audit_settlements
+             WHERE workspace_id=?1 AND json_extract(record_json,'$.momentId')=?2 AND markdown_digest=?3
+               AND json_extract(record_json,'$.relayDatabaseNamespace')=?4
+             ORDER BY json_extract(record_json,'$.terminalCursor')",
+        )
+        .map_err(SyncError::corrupt)?;
+    let mut rows = stmt
+        .query(params![
             owner.binding.workspace_id,
             moment_id,
             markdown_digest,
             owner.relay_database_namespace,
-            serde_json::to_string(&owner.binding).map_err(SyncError::corrupt)?
-        ],
-        |row| row.get(0),
-    )
-    .map_err(SyncError::corrupt)
+        ])
+        .map_err(SyncError::corrupt)?;
+    while let Some(row) = rows.next().map_err(SyncError::corrupt)? {
+        let binding: LiveObjectBinding =
+            serde_json::from_str(&row.get::<_, String>(0).map_err(SyncError::corrupt)?)
+                .map_err(SyncError::corrupt)?;
+        if binding == owner.binding {
+            return row.get(1).map(Some).map_err(SyncError::corrupt);
+        }
+    }
+    Ok(None)
 }
 
 /// An audited settlement at a later restore generation of the owner's binding.
