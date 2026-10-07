@@ -84,10 +84,6 @@ export type PersistentReply = {id:number;ok:true;result:PersistentResult}
 // its own and reports nothing inside, such as the integrity check, names that
 // budget, and the host lets the step stay quiet long enough to use it.
 export type PersistentProgress = {id:number;progress:string;cpuBudgetMs?:number};
-// Prefix of the empty file created by the CPU budget watch before it ends the worker.
-// Its name includes the kind and budget, such as "cpu-budget-exceeded-app-5000".
-// Creating the file publishes the whole reason, even if the watch ends before a write finishes.
-export const CPU_BUDGET_MARKER="cpu-budget-exceeded";
 // Runs a step of the dataset worker under one of its CPU budgets: the app's
 // code, or a check over `bytes` of data.
 export interface CpuBudgets {

@@ -133,7 +133,6 @@ it("says the app's code ran too long when the CPU budget watch ended the worker"
 });
 
 it.each([
-  {marker:"cpu-budget-exceeded",step:"running the Collection action",message:"The app's code ran too long while running the Collection action. Try again."},
   {marker:"cpu-budget-exceeded-app-1000",step:"running the Collection action",message:"The app's code ran too long: it used more than 1 s of CPU time while running the Collection action. Try again."},
   {marker:"cpu-budget-exceeded-checks-9000",step:"checking the tables",message:"dohc's checks of this Collection ran too long: they used more than 9 s of CPU time while checking the tables. Try again."},
   {marker:"cpu-budget-exceeded-app-NaN",step:"running the Collection action",message:"The app's code ran too long while running the Collection action. Try again."},
@@ -149,6 +148,19 @@ it.each([
   await expect(worker.discard("proposal")).rejects.toMatchObject({
     code: "worker_budget",
     message,
+  });
+  await worker.close();
+});
+
+it.each(["cpu-budget-exceeded","cpu-budget-exceeded-other-1000"])("does not infer a budget from an unsupported marker: %s", async marker => {
+  let end!: () => void;
+  const worker = await open((command, send) => {
+    send({ id: command.id, progress: "running the Collection action" });
+    void writeFile(join(roots.at(-1)!, marker), "").then(end);
+  }, { silenceMs: 60_000, commandCapMs: 60_000 }, exit => { end = exit; });
+  await expect(worker.discard("proposal")).rejects.toMatchObject({
+    code: "worker_stopped",
+    message: "dohc's work on this Collection stopped while running the Collection action. Try again.",
   });
   await worker.close();
 });

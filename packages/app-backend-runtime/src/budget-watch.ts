@@ -8,6 +8,21 @@
 export const BUDGET_STATE_SLOTS=4;
 export const CONDEMNED=-1n;
 
+// File creation publishes the budget in its name, without waiting for a payload write.
+export const CPU_BUDGET_MARKER_PREFIX="cpu-budget-exceeded-";
+type CpuBudgetKind="app"|"checks";
+export function budgetMarkerName(kind:CpuBudgetKind, budgetMs:number):string {
+  return CPU_BUDGET_MARKER_PREFIX+kind+"-"+budgetMs;
+}
+export function parseBudgetMarkerName(name:string):{kind:CpuBudgetKind;budgetMs?:number}|undefined {
+  if(!name.startsWith(CPU_BUDGET_MARKER_PREFIX)) return undefined;
+  const suffix=name.slice(CPU_BUDGET_MARKER_PREFIX.length), separator=suffix.indexOf("-");
+  const kind=suffix.slice(0,separator);
+  if(kind!=="app" && kind!=="checks") return undefined;
+  const budgetMs=Number(suffix.slice(separator+1));
+  return {kind,budgetMs:Number.isSafeInteger(budgetMs) && budgetMs>0 ? budgetMs : undefined};
+}
+
 /** Starts a budgeted step and returns its section. */
 export function armBudget(state:BigInt64Array, kind:bigint, origin:bigint, budget:bigint):bigint {
   Atomics.store(state,1,kind);Atomics.store(state,2,origin);Atomics.store(state,3,budget);
@@ -21,12 +36,12 @@ export function disarmBudget(state:BigInt64Array, section:bigint, cpuMicros:bigi
 
 /**
  * Runs on the watch thread, which keeps running while SQLite blocks the main
- * thread. It condemns a step over its budget, then ends the worker. The marker
- * that tells the host why is best effort: the kill waits for it at most
- * `graceMs`, so a stalled disk cannot keep app code running. This function is
+ * thread. It condemns a step over its budget, then ends the worker. The writer
+ * creates the marker synchronously before returning a promise. The kill waits
+ * for that promise at most `graceMs`. This function is
  * sent to the thread as source text, so it uses only its parameters and globals.
  */
-export function watchBudget(state:BigInt64Array, cpuMicros:()=>bigint, writeMarker:(reason:string)=>Promise<unknown>,
+export function watchBudget(state:BigInt64Array, cpuMicros:()=>bigint, writeMarker:(kind:CpuBudgetKind,budgetMs:number)=>Promise<unknown>,
   kill:()=>void, pollMs:number, graceMs:number):()=>void {
   const timer=setInterval(()=>{
     const section=Atomics.load(state,0);
@@ -37,9 +52,12 @@ export function watchBudget(state:BigInt64Array, cpuMicros:()=>bigint, writeMark
     // section is unchanged the values read above are this step's.
     if(Atomics.compareExchange(state,0,section,-1n)!==section) return;
     clearInterval(timer);
+    let marker:Promise<unknown>;
+    try {marker=writeMarker(kind===1n ? "app" : "checks",Number(budget/1000n));}
+    catch {kill();return;}
     const end=setTimeout(kill,graceMs);
     const finish=()=>{clearTimeout(end);kill();};
-    writeMarker((kind===1n ? "app " : "checks ")+String(budget/1000n)).then(finish,finish);
+    marker.then(finish,finish);
   },pollMs);
   return ()=>clearInterval(timer);
 }

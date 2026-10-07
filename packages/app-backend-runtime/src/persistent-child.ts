@@ -11,8 +11,8 @@ import { replayThroughShadow } from "./replay.js";
 import { createMigrationPreviewReport } from "./migration-preview-report.js";
 import { acquireWorkerLease } from "./worker-ownership.js";
 import { Worker } from "node:worker_threads";
-import { armBudget, BUDGET_STATE_SLOTS, disarmBudget, watchBudget } from "./budget-watch.js";
-import { CPU_BUDGET_MARKER, databaseBytes } from "./persistent-protocol.js";
+import { armBudget, budgetMarkerName, BUDGET_STATE_SLOTS, CPU_BUDGET_MARKER_PREFIX, disarmBudget, watchBudget } from "./budget-watch.js";
+import { databaseBytes } from "./persistent-protocol.js";
 import type { CpuBudgets, DatasetCursor, OpenRequest, PersistentCommand, PersistentResult, PersistentWorkerMessage } from "./persistent-protocol.js";
 
 let db:DatabaseSync | undefined;
@@ -74,16 +74,19 @@ const budgetState=new BigInt64Array(new SharedArrayBuffer(BUDGET_STATE_SLOTS*8))
 const [APP_CODE,DATASET_CHECK]=[1n,2n];
 const budgetWatchSource=`
 const {workerData}=require("node:worker_threads");
-const {writeFile}=require("node:fs/promises");
+const {openSync,closeSync}=require("node:fs");
+const {join}=require("node:path");
+const CPU_BUDGET_MARKER_PREFIX=${JSON.stringify(CPU_BUDGET_MARKER_PREFIX)};
+const budgetMarkerName=(${budgetMarkerName.toString()});
 (${watchBudget.toString()})(new BigInt64Array(workerData.state),()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);},
-  reason=>writeFile(workerData.marker+"-"+reason.replace(" ","-"),"",{flag:"wx"}),()=>process.kill(process.pid,"SIGKILL"),50,250);`;
+  (kind,budgetMs)=>{closeSync(openSync(join(workerData.directory,budgetMarkerName(kind,budgetMs)),"wx"));return Promise.resolve();},()=>process.kill(process.pid,"SIGKILL"),50,250);`;
 let budgetWatch:Worker|undefined;
 let exiting=false;
 process.on("exit",()=>{exiting=true;});
 const cpuMicros=()=>{const used=process.cpuUsage();return BigInt(used.user+used.system);};
 function startBudgetWatch():void {
   if(budgetWatch) return;
-  budgetWatch=new Worker(budgetWatchSource,{eval:true,workerData:{state:budgetState.buffer,marker:join(config.directory,CPU_BUDGET_MARKER)}});
+  budgetWatch=new Worker(budgetWatchSource,{eval:true,workerData:{state:budgetState.buffer,directory:config.directory}});
   budgetWatch.unref();
   // Without the watch, app code would run unbounded. End the worker instead.
   const lost=()=>{if(!exiting) process.exit(70);};
