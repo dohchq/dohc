@@ -444,6 +444,30 @@ describe("PropertiesPanel", () => {
       } finally { doc.destroy(); }
     });
 
+    it.each([false, true])("shows integer-like names in the order the file holds them (shared: %s)", (shared) => {
+      const markdown = "---\nbudget: 100\n'2026': a\n'10': b\n'1': c\n---\n\nBody";
+      const doc = markdownToYDoc(markdown);
+      try {
+        render(shared ? <PropertiesPanel ydoc={doc} /> : <ControlledPropertiesPanel initialBody={markdown} />);
+        expect(names()).toEqual(["budget", "2026", "10", "1"]);
+      } finally { doc.destroy(); }
+    });
+
+    it("keeps an integer-like name where it was renamed after a reopen", async () => {
+      const user = userEvent.setup();
+      const doc = markdownToYDoc("---\nbudget: 100\nwifi: hunter2\n---\n\nBody");
+      try {
+        const { unmount } = render(<PropertiesPanel ydoc={doc} />);
+        await rename(user, "wifi", "2026");
+        unmount();
+        const reopened = markdownToYDoc(yDocToMarkdown(doc));
+        try {
+          render(<PropertiesPanel ydoc={reopened} />);
+          expect(names()).toEqual(["budget", "2026"]);
+        } finally { reopened.destroy(); }
+      } finally { doc.destroy(); }
+    });
+
     it("shows a property another device renames in its row", () => {
       const doc = markdownToYDoc(budget);
       const peer = new Y.Doc();

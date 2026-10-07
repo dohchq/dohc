@@ -13,7 +13,7 @@ import {
   applyFrontmatter,
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEntries,
-  frontmatterEntriesFromMeta,
+  frontmatterEntriesFromPairs,
   type FrontmatterEntry,
 } from "./markdown/frontmatter";
 
@@ -82,10 +82,6 @@ function shouldDeferKeyCommit(
 
 function editableEntries(entries: FrontmatterEntry[]): FrontmatterEntry[] {
   return entries.filter((entry) => !isReserved(entry.key));
-}
-
-function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
-  return Object.fromEntries(map.entries());
 }
 
 function buildProperties(
@@ -184,9 +180,9 @@ function applySharedFrontmatterPatch(
 // does. Keys the text does not hold follow in map order.
 function liveEntries(doc: Y.Doc): FrontmatterEntry[] {
   const source = doc.getMap("meta").get(FRONTMATTER_SOURCE_META_KEY);
-  const order = typeof source === "string" ? Object.keys(loadMarkdownFrontmatter(source)?.meta ?? {}) : [];
+  const order = typeof source === "string" ? (loadMarkdownFrontmatter(source)?.keys ?? []) : [];
   const place = (key: string): number => (order.includes(key) ? order.indexOf(key) : order.length);
-  return frontmatterEntriesFromMeta(mapToObject(doc.getMap(FRONTMATTER_FIELD)))
+  return frontmatterEntriesFromPairs(doc.getMap(FRONTMATTER_FIELD).entries())
     .map((entry) => ({ entry, place: place(entry.key) }))
     .sort((first, second) => first.place - second.place)
     .map(({ entry }) => entry);

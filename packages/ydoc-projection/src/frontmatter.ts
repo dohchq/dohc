@@ -399,17 +399,18 @@ export function leadingFrontmatter(markdown: string): { text: string; readable: 
 }
 
 /**
- * Frontmatter values with top-level keys in document order, and the text after
- * the block. `undefined` when the document has no readable block.
+ * Frontmatter values, the top-level keys in document order, and the text after
+ * the block. `undefined` when the document has no readable block. Read the
+ * order from `keys`: enumerating `meta` lists integer-like keys first.
  */
 export function loadMarkdownFrontmatter(
   markdown: string,
-): { meta: Record<string, unknown>; rest: string } | undefined {
+): { meta: Record<string, unknown>; keys: string[]; rest: string } | undefined {
   const block = readFrontmatterBlock(markdown)
   if (!block) return undefined
   const meta = nullPrototypeRecord()
   for (const key of block.keys) meta[key] = block.value[key]
-  return { meta, rest: block.rest }
+  return { meta, keys: block.keys, rest: block.rest }
 }
 
 /**
