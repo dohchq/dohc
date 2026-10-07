@@ -100,7 +100,7 @@ export class OwnerYDocFrameDelivery implements OwnerYDocDelivery {
     attempt.transport?.close();
     attempt.controls.length = 0;
     attempt.transfer = undefined;
-    attempt.ready.resolve(result.kind === "receipt" ? {kind: "retry"} : result);
+    attempt.ready.resolve(result.kind === "receipt" || result.kind === "not-accepted" ? {kind: "retry"} : result);
     attempt.delivered.resolve(result);
   }
 

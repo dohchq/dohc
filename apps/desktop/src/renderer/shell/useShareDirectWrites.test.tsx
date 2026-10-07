@@ -32,6 +32,7 @@ async function setup(options: { enabled?: boolean; ready?: boolean; workspaceId?
   if (options.opened) pushShareDirectWrites.mockResolvedValueOnce(options.opened);
   const notices: DirectWriteNotice[] = [];
   const refreshShareView = vi.fn(async (): Promise<ShareViewRefresh> => (options.ended ? "ended" : "current"));
+  const checkShareAccess = vi.fn(async (): Promise<ShareViewRefresh> => (options.ended ? "ended" : "current"));
   const sendShareChanges = vi.fn(async () => undefined);
   const hook = renderHook(() =>
     useShareDirectWrites({
@@ -40,13 +41,14 @@ async function setup(options: { enabled?: boolean; ready?: boolean; workspaceId?
       ready: options.ready ?? true,
       ownerName: "ana@example.com",
       refreshShareView,
+      checkShareAccess,
       sendShareChanges,
       showNotice: (notice) => notices.push(notice),
     }),
   );
   // The push on open.
   await act(async () => { await Promise.resolve(); });
-  return { notices, refreshShareView, sendShareChanges, hook };
+  return { notices, refreshShareView, checkShareAccess, sendShareChanges, hook };
 }
 
 function answer(result: PushShareDirectWritesResult, workspaceId = "share-view") {
@@ -77,6 +79,7 @@ it("listens while opening and gates Try again on the latest readiness", async ()
     ready,
     ownerName: "ana@example.com",
     refreshShareView: async () => "current",
+    checkShareAccess: async () => "current",
     sendShareChanges: async () => undefined,
     showNotice,
   }), { initialProps: { ready: false } });
@@ -109,6 +112,7 @@ it("waits for readiness before reporting unavailable, then shows only the access
     ready,
     ownerName: "ana@example.com",
     refreshShareView: () => refreshShareView(ready),
+    checkShareAccess: () => refreshShareView(ready),
     sendShareChanges: async () => undefined,
     showNotice,
   }), { initialProps: { ready: false } });
@@ -123,7 +127,7 @@ it("waits for readiness before reporting unavailable, then shows only the access
   expect(refreshShareView).toHaveBeenCalledExactlyOnceWith(true);
   expect(showNotice).toHaveBeenCalledWith({
     kind: "direct-write-unavailable",
-    message: "Your access to this share ended, so your Collection changes didn't reach ana@example.com. Ask ana@example.com to share it again.",
+    message: "Your access to this share ended. Your unsent Collection changes stay in this workspace. Ask ana@example.com to share it again.",
     retry: null,
     send: null,
   });
@@ -235,22 +239,22 @@ it("offers Send as proposal for a lasting refusal, keeping an earlier refusal's 
   ]);
 });
 
-it("says the person's access ended once the view's refresh finds the share ended", async () => {
-  const { notices, refreshShareView } = await setup({ opened: { status: "unavailable" }, ended: true });
+it("says the person's access ended once the metadata check finds the share ended", async () => {
+  const { notices, checkShareAccess } = await setup({ opened: { status: "unavailable" }, ended: true });
   await vi.waitFor(() => expect(notices).toHaveLength(1));
   expect(notices).toEqual([{
     kind: "direct-write-unavailable",
-    message: "Your access to this share ended, so your Collection changes didn't reach ana@example.com. Ask ana@example.com to share it again.",
+    message: "Your access to this share ended. Your unsent Collection changes stay in this workspace. Ask ana@example.com to share it again.",
     retry: null,
     send: null,
   }]);
-  expect(refreshShareView).toHaveBeenCalledTimes(1);
+  expect(checkShareAccess).toHaveBeenCalledTimes(1);
 });
 
-it("says the changes did not go, with Try again, when the refresh finds the share still open", async () => {
-  const { notices, refreshShareView } = await setup({ opened: { status: "unavailable" }, ended: false });
+it("says the changes did not go, with Try again, when the metadata check finds the share still open", async () => {
+  const { notices, checkShareAccess } = await setup({ opened: { status: "unavailable" }, ended: false });
   await vi.waitFor(() => expect(notices).toHaveLength(1));
-  expect(refreshShareView).toHaveBeenCalledTimes(1);
+  expect(checkShareAccess).toHaveBeenCalledTimes(1);
   expect(notices[0]).toMatchObject({
     kind: "direct-write-failed",
     message: "dohc could not send your Collection changes to ana@example.com.",
@@ -283,6 +287,7 @@ it("keeps an unavailable push's pending refresh when writing stops in the same w
     ready: true,
     ownerName: "ana@example.com",
     refreshShareView,
+    checkShareAccess: refreshShareView,
     sendShareChanges: async () => undefined,
     showNotice,
   }), { initialProps: { enabled: true } });
@@ -300,6 +305,7 @@ it("discards an unavailable push's pending refresh after A to B to A", async () 
   const hook = renderHook(({ workspaceId }) => useShareDirectWrites({
     workspaceId, enabled: true, ready: true, ownerName: "ana@example.com",
     refreshShareView: () => refresh.promise,
+    checkShareAccess: () => refresh.promise,
     sendShareChanges: async () => undefined, showNotice,
   }), { initialProps: { workspaceId: "share-view" } });
   await act(async () => {});
@@ -317,4 +323,16 @@ it("does not retry a failure after the view closes", async () => {
   hook.unmount();
   await act(async () => { notices[0]!.retry?.(); });
   expect(pushShareDirectWrites).toHaveBeenCalledOnce();
+});
+
+it.each(["ended", "changed"] as const)("reports locally refused writes after access %s without a dead retry", async access => {
+  const showNotice = vi.fn();
+  const checkShareAccess = vi.fn(async () => access);
+  renderHook(() => useShareDirectWrites({ workspaceId: "share-view", enabled: false, ready: true, ownerName: "Ana",
+    refreshShareView: async () => "stale", checkShareAccess, sendShareChanges: async () => undefined, showNotice }));
+  await act(async () => pushed?.({ workspaceId: "share-view", result: { status: "failed", writes: [], lasting: false, errorMessage: "access refused locally" } }));
+  expect(checkShareAccess).toHaveBeenCalledOnce();
+  expect(showNotice).toHaveBeenCalledOnce();
+  expect(showNotice.mock.calls[0]![0]).toMatchObject({ retry: null, send: null });
+  expect(showNotice.mock.calls[0]![0].message).toContain("Your unsent Collection changes stay in this workspace.");
 });

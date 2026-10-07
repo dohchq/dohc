@@ -4339,6 +4339,10 @@ export function createWorkspaceEngineCapture(
           onLineageReplaced: (update, recoveredPaths) => {
             noteUpdate();
             input.onLineageReplaced?.(update, recoveredPaths);
+            reportSaveState("settling", 0, "status");
+            enqueue(`ydoc replacement settle of ${input.path}`, async () => {
+              if (entry !== null && liveYDocSessions.get(input.path) === entry && entry.status === "live") settleOnOpen();
+            });
           },
           onEditRefused: input.onEditRefused,
           onSettled,
@@ -5293,6 +5297,7 @@ export function createWorkspaceEngineCapture(
         if (head === "present") {
           const openingUpdates = updatesSeen;
           let drifted = false;
+          let checkedClean = false;
           try {
             const snapshot = await engine.readTextFile({ workspaceId, versionId, path: input.path });
             if (snapshot) {
@@ -5300,6 +5305,7 @@ export function createWorkspaceEngineCapture(
               drifted =
                 disk.kind === "changed" ||
                 (disk.kind === "sha256" && disk.sha256 !== snapshot.sha256);
+              checkedClean = disk.kind === "sha256" && disk.sha256 === snapshot.sha256;
             }
           } catch {
             // A failed read does not prove drift. Keep the existing state and
@@ -5314,6 +5320,8 @@ export function createWorkspaceEngineCapture(
             }
           } else if (unsettled) {
             settleOnOpen();
+          } else if (checkedClean && updatesSeen === updatesSettled && updatesSeen === openingUpdates && lastSettledSha === null) {
+            reportSaveState("saved", 0, "status");
           }
         } else if (lineage === "existing") {
           // A crash-kept draft of a file capture never recorded. Its text is
@@ -5325,6 +5333,8 @@ export function createWorkspaceEngineCapture(
           } else {
             reportSaveState("error", 0, "status");
           }
+        } else if (absentHeadDisk === "empty" && updatesSeen === 0) {
+          reportSaveState("saved", 0, "status");
         }
         const publicSession: WorkspaceEngineYDocProviderSession = {
           get nativeOwner() { return session.nativeOwner; },

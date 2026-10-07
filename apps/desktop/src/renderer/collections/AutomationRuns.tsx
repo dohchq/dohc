@@ -34,8 +34,9 @@ function sentence(text: string): string {
 /** What an Undo did, for its notice: "Undid 3 changes. 1 field changed since then." */
 export function undoSentence(undone: Undone, onServer = false): string {
   const parts: string[] = [];
-  if (undone.sharedReversals?.some(write => write.state === "pending")) parts.push("Reversal saved on this computer. The shared host has not accepted it yet.");
-  if (undone.sharedReversals?.some(write => write.state === "not-accepted")) parts.push("Reversal saved on this computer. The shared host did not accept it. Try Undo again.");
+  const saved = onServer ? "Reversal saved on your server." : "Reversal saved on this computer.";
+  if (undone.sharedReversals?.some(write => write.state === "pending")) parts.push(`${saved} The shared host has not accepted it yet.`);
+  if (undone.sharedReversals?.some(write => write.state === "not-accepted")) parts.push(`${saved} The shared host did not accept it. Try Undo again.`);
   if (undone.reverted > 0) parts.push(`Undid ${count(undone.reverted, "change", "changes")}.`);
   if (undone.removed > 0) parts.push(onServer
     ? `Deleted ${count(undone.removed, "added record", "added records")}. History can restore them.`
@@ -125,6 +126,10 @@ function settlementText(state: "pending" | "settled" | "not-accepted" | "absent"
 }
 
 function runSummary(run: Run): string {
+  if (run.undoSettlementNotAccepted) return "Reversal not accepted";
+  if (run.undoSettlementPending) return "Reversal pending";
+  if (run.sharedSettlementNotAccepted) return "Update not accepted";
+  if (run.sharedSettlementPending) return "Update pending";
   if (run.state === "pending" || run.state === "running") return "Running";
   if (run.state === "failed") return sentence(run.chainStopped ? "The automation chain stopped before this run" : run.error ?? "The run failed");
   const fields = run.writes.reduce((total, write) => total + (write.kind === "field" ? 1 : write.kind === "dataset-edit" ? write.fields.length : 0), 0);
@@ -144,6 +149,8 @@ function runSummary(run: Run): string {
 }
 
 function RunMark({ run }: { run: Run }) {
+  if (run.sharedSettlementNotAccepted || run.undoSettlementNotAccepted) return <AlertTriangle size={13} aria-label="Not accepted" className="mt-0.5 shrink-0 text-warning" />;
+  if (run.sharedSettlementPending || run.undoSettlementPending) return <CircleDashed size={13} aria-label="Pending" className="mt-0.5 shrink-0 text-subtle" />;
   if (run.undone) return <Undo2 size={13} aria-label="Undone" className="mt-0.5 shrink-0 text-subtle" />;
   if (run.state === "failed") return <AlertTriangle size={13} aria-label="Failed" className="mt-0.5 shrink-0 text-warning" />;
   if (run.state === "done") return <CheckCircle2 size={13} aria-label="Done" className="mt-0.5 shrink-0 text-success" />;
@@ -218,22 +225,22 @@ function RunRow(props: {
       {run.sharedSettlementPending ? (
         <p role="status" className="m-0 mt-1.5 flex items-start gap-1.5 pl-5 text-[12px] text-muted">
           <CircleDashed aria-hidden size={13} className="mt-0.5 shrink-0" />
-          Saved on this computer. The shared host has not accepted this update yet.
+          {props.onServer ? "Saved on your server." : "Saved on this computer."} The shared host has not accepted this update yet.
         </p>
       ) : null}
       {run.sharedSettlementNotAccepted ? (
         <p role="status" className="m-0 mt-1.5 pl-5 text-[12px] text-muted">
-          Saved on this computer. The shared host did not accept this update. Check the shared file before editing again.
+          {props.onServer ? "Saved on your server." : "Saved on this computer."} The shared host did not accept this update. Check the shared file before editing again.
         </p>
       ) : null}
       {run.undoSettlementPending ? (
         <p role="status" className="m-0 mt-1.5 pl-5 text-[12px] text-muted">
-          Reversal saved on this computer. The shared host has not accepted it yet.
+          {props.onServer ? "Reversal saved on your server." : "Reversal saved on this computer."} The shared host has not accepted it yet.
         </p>
       ) : null}
       {run.undoSettlementNotAccepted ? (
         <p role="status" className="m-0 mt-1.5 pl-5 text-[12px] text-muted">
-          Reversal saved on this computer. The shared host did not accept it. Try Undo again.
+          {props.onServer ? "Reversal saved on your server." : "Reversal saved on this computer."} The shared host did not accept it. Try Undo again.
         </p>
       ) : null}
       {canRetry || canUndo || run.writes.length > 0 ? (

@@ -1,5 +1,38 @@
 import { isEditableEditor } from "./pmHelpers";
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import { useLayoutEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
+import {
+  ChevronRight,
+  Heading1,
+  Heading2,
+  Heading3,
+  Image,
+  Info,
+  Link,
+  List,
+  ListOrdered,
+  ListTodo,
+  Minus,
+  Quote,
+  Sigma,
+  SquareCode,
+  Table,
+  Workflow,
+  type LucideIcon,
+} from "lucide-react";
+import {
+  MENU_ACTIVE_OPTION,
+  MENU_DETAIL,
+  MENU_EMPTY,
+  MENU_ENTER,
+  MENU_FRAME,
+  MENU_ICON,
+  MENU_ROW,
+  MENU_ROW_TONE,
+  MENU_TITLE,
+  menuEnterFrom,
+  movedPointer,
+  revealMenuRow,
+} from "../ui/Menu";
 import type { Editor } from "@tiptap/core";
 import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
@@ -32,7 +65,7 @@ type SlashCommandItem = {
   id: SlashCommandId;
   label: string;
   hint: string;
-  glyph: string;
+  icon: LucideIcon;
   aliases: string[];
 };
 
@@ -77,63 +110,63 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     id: "wikilink",
     label: "Link",
     hint: "Link another page",
-    glyph: "[[",
+    icon: Link,
     aliases: ["link", "page", "wiki", "wikilink"],
   },
   {
     id: "heading-1",
     label: "Heading 1",
     hint: "Large section heading",
-    glyph: "H1",
+    icon: Heading1,
     aliases: ["h1", "heading", "title"],
   },
   {
     id: "heading-2",
     label: "Heading 2",
     hint: "Medium section heading",
-    glyph: "H2",
+    icon: Heading2,
     aliases: ["h2", "subheading", "subtitle"],
   },
   {
     id: "heading-3",
     label: "Heading 3",
     hint: "Small section heading",
-    glyph: "H3",
+    icon: Heading3,
     aliases: ["h3", "heading", "subheading"],
   },
   {
     id: "bulleted-list",
     label: "Bulleted list",
     hint: "Start a simple list",
-    glyph: "-",
+    icon: List,
     aliases: ["bullet", "bulleted", "list", "ul"],
   },
   {
     id: "numbered-list",
     label: "Numbered list",
     hint: "Start an ordered list",
-    glyph: "1.",
+    icon: ListOrdered,
     aliases: ["number", "numbered", "ordered", "ol"],
   },
   {
     id: "task-list",
     label: "Todo list",
     hint: "Track checkable work",
-    glyph: "[]",
+    icon: ListTodo,
     aliases: ["todo", "task", "checklist", "checkbox"],
   },
   {
     id: "quote",
     label: "Quote",
     hint: "Call out a thought",
-    glyph: ">",
+    icon: Quote,
     aliases: ["blockquote", "quote"],
   },
   {
     id: "callout",
     label: "Callout",
     hint: "Highlighted info box",
-    glyph: "!",
+    icon: Info,
     aliases: [
       "callout",
       "note",
@@ -149,49 +182,49 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     id: "toggle",
     label: "Toggle",
     hint: "Collapsible callout",
-    glyph: "▸",
+    icon: ChevronRight,
     aliases: ["toggle", "fold", "collapse", "details", "accordion"],
   },
   {
     id: "code-block",
     label: "Code block",
     hint: "Write code or raw text",
-    glyph: "</>",
+    icon: SquareCode,
     aliases: ["code", "fence", "pre"],
   },
   {
     id: "mermaid",
     label: "Mermaid diagram",
     hint: "Flowchart, sequence & more",
-    glyph: "dgm",
+    icon: Workflow,
     aliases: ["mermaid", "diagram", "flowchart", "chart", "graph"],
   },
   {
     id: "math",
     label: "Math block",
     hint: "TeX equation with $$",
-    glyph: "∑",
+    icon: Sigma,
     aliases: ["math", "equation", "tex", "latex", "katex"],
   },
   {
     id: "divider",
     label: "Divider",
     hint: "Separate sections",
-    glyph: "-",
+    icon: Minus,
     aliases: ["divider", "line", "rule", "separator", "hr"],
   },
   {
     id: "table",
     label: "Table",
     hint: "Insert a simple grid",
-    glyph: "tbl",
+    icon: Table,
     aliases: ["table", "grid", "rows", "columns"],
   },
   {
     id: "image",
     label: "Image",
     hint: "Upload a picture",
-    glyph: "img",
+    icon: Image,
     aliases: ["image", "img", "picture", "photo", "upload"],
   },
 ];
@@ -353,6 +386,10 @@ export function makeSlashCommandPlugin({
   });
 }
 
+// The slash menu, drawn from the Menu part's recipe. The editor keeps focus
+// and its keys move the active option (handleKeyDown above), so the option
+// draws the accent outline whenever it is active, and the list scrolls only
+// itself to show it.
 export function SlashCommandMenu({
   state,
   onSelect,
@@ -362,45 +399,68 @@ export function SlashCommandMenu({
   onSelect: (id: SlashCommandId) => void;
   onHover: (index: number) => void;
 }) {
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const selected = state.open ? state.selected : -1;
+  const query = state.open ? state.query : "";
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (list && selected >= 0) revealMenuRow(list, optionRefs.current[selected]);
+  }, [selected, query]);
+
   if (!state.open) return null;
   const items = filterSlashCommands(state.query);
 
   return (
     <div
-      className="dohc-slash-menu"
+      ref={listRef}
+      className={`dohc-slash-menu ${MENU_FRAME} ${MENU_ENTER}`}
       data-placement={state.placement}
       // Above the cursor the menu anchors by its bottom edge: filtering
       // changes its content height, and a top-anchored box (whose top assumes
       // the full maxHeight) would leap up and down with every keystroke.
-      style={
-        state.placement === "above" && state.bottom !== null
+      style={{
+        ...(state.placement === "above" && state.bottom !== null
           ? { left: state.x, bottom: state.bottom, maxHeight: state.maxHeight }
-          : { left: state.x, top: state.y, maxHeight: state.maxHeight }
-      }
+          : { left: state.x, top: state.y, maxHeight: state.maxHeight }),
+        ...menuEnterFrom(state.placement),
+      }}
       role="listbox"
       aria-label="slash commands"
       onMouseDown={(event) => event.preventDefault()}
     >
       {items.length ? (
-        items.map((item, index) => (
-          <button
-            key={item.id}
-            type="button"
-            role="option"
-            aria-selected={index === state.selected}
-            className={`dohc-slash-menu__item${index === state.selected ? " is-selected" : ""}`}
-            onMouseEnter={() => onHover(index)}
-            onClick={() => onSelect(item.id)}
-          >
-            <span className="dohc-slash-menu__glyph">{item.glyph}</span>
-            <span className="dohc-slash-menu__copy">
-              <span className="dohc-slash-menu__label">{item.label}</span>
-              <span className="dohc-slash-menu__hint">{item.hint}</span>
-            </span>
-          </button>
-        ))
+        items.map((item, index) => {
+          const Icon = item.icon;
+          return (
+            <button
+              key={item.id}
+              ref={(element) => {
+                optionRefs.current[index] = element;
+              }}
+              type="button"
+              role="option"
+              tabIndex={-1}
+              aria-selected={index === state.selected}
+              data-active={index === state.selected || undefined}
+              className={`dohc-slash-menu__item ${MENU_ROW} ${MENU_ACTIVE_OPTION} ${MENU_ROW_TONE.rest} data-active:text-ink`}
+              // Only a pointer that moves picks the active option, so a menu
+              // that opens or scrolls under a still pointer keeps the keys'.
+              onMouseMove={(event) => {
+                if (movedPointer(event) && index !== state.selected) onHover(index);
+              }}
+              onClick={() => onSelect(item.id)}
+            >
+              <span className={`${MENU_ICON} text-subtle`}>
+                <Icon size={14} aria-hidden />
+              </span>
+              <span className={MENU_TITLE}>{item.label}</span>
+              <span className={MENU_DETAIL}>{item.hint}</span>
+            </button>
+          );
+        })
       ) : (
-        <div className="dohc-slash-menu__empty">No commands</div>
+        <div className={MENU_EMPTY}>No commands</div>
       )}
     </div>
   );

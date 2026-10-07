@@ -3099,6 +3099,45 @@ pub struct AgentDeclaration {
     pub depth: u32,
 }
 
+/// Automation provenance carried by a durable shared record draft. Never authority.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AutomationDeclaration {
+    pub automation_id: String,
+    pub attribution: ChangeAttribution,
+}
+
+impl AutomationDeclaration {
+    pub fn deserialize_present<'de, D: serde::Deserializer<'de>>(
+        decoder: D,
+    ) -> Result<Option<Self>, D::Error> {
+        let declaration = Self::deserialize(decoder)?;
+        declaration.validate().map_err(serde::de::Error::custom)?;
+        Ok(Some(declaration))
+    }
+    pub fn from_change(
+        actor_origin_id: Option<&str>,
+        attribution: Option<&ChangeAttribution>,
+    ) -> Option<Self> {
+        let attribution = attribution.filter(|a| a.actor_kind == ChangeActorKind::Automation)?;
+        Some(Self {
+            automation_id: actor_origin_id?.to_owned(),
+            attribution: attribution.clone(),
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.automation_id.is_empty()
+            || self.automation_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
+            || self.automation_id.chars().any(char::is_control)
+            || self.attribution.actor_kind != ChangeActorKind::Automation
+        {
+            return Err("invalid automation declaration");
+        }
+        self.attribution.validate()
+    }
+}
+
 impl AgentDeclaration {
     /// Reads an optional member that is either absent or a valid declaration.
     /// Use with `#[serde(default)]`: an explicit null is malformed, not absent.

@@ -8,14 +8,17 @@ import {
   CLI_JSON_SCHEMA_VERSION,
   CLI_PROTOCOL_VERSION,
   documentEditTextSchema,
-  commentBodySchema,
-  MAX_COMMENT_BODY_BYTES,
   parseCliResult,
   type CliRequestWithoutToken,
   type CliResultByVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
 import { readStdinText } from "./stdin";
+import {
+  CHAT_MESSAGE_TOO_LONG,
+  MAX_CHAT_MESSAGE_BODY_BYTES,
+  normalizeChatMessageBody,
+} from "@dohc/workspace-contracts/chat-message-body";
 
 const DEFAULT_RESPONSE_TIMEOUT_MS = 30_000;
 
@@ -45,8 +48,12 @@ async function bodyForCommand(
   }
   if (command.verb === "fileChatStart") {
     const body = command.stdin ? await readStdin() : command.body;
-    if (!commentBodySchema.safeParse(body).success) throw new DohcCliError("comment body is at most 64 KiB as UTF-8");
-    if (!body.trim()) throw new DohcCliError("comment body must contain text that is not all whitespace");
+    // The desktop applies the same check; refusing here saves the request.
+    try {
+      normalizeChatMessageBody(body);
+    } catch (error) {
+      throw new DohcCliError(error instanceof Error ? error.message : String(error));
+    }
     return body;
   }
   if (command.verb !== "post" && command.verb !== "reply") return undefined;
@@ -297,7 +304,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     const env = options.env ?? process.env;
     const command = parseCliArguments(options.argv, env);
     if ("help" in command) return { exitCode: 0, stdout: renderCliHelp(command), stderr: "" };
-    const stdinBody = await bodyForCommand(command, options.readStdin ?? (() => readStdinText(process.stdin, command.verb === "fileChatStart" ? MAX_COMMENT_BODY_BYTES : undefined)));
+    const stdinBody = await bodyForCommand(command, options.readStdin ?? (() => readStdinText(process.stdin, command.verb === "fileChatStart" ? { bytes: MAX_CHAT_MESSAGE_BODY_BYTES, message: CHAT_MESSAGE_TOO_LONG } : undefined)));
     const request = buildCliRequest(
       command,
       options.cwd ?? process.cwd(),

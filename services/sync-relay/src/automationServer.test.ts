@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import type { ScheduledAutomation, CollectionAutomationsOptions, DatasetAutomationHost, CollectionAutomationHold } from "@dohc/automation-executor/collection-automations";
 import { AUTOMATION_SERVER_MAX_WORKSPACES } from "@dohc/workspace-contracts/relay";
+import type {RelayButtonInspection} from "@dohc/workspace-contracts/relay";
+import {SHARED_BUTTON_DENIED, SHARED_BUTTON_HELD, SHARED_BUTTON_MOVED, SHARED_BUTTON_FIELD_CHANGED, SHARED_BUTTON_UNCHECKED} from "@dohc/automation-executor/button-presser";
 import type { ReachHandover } from "@dohc/automation-executor/reach-verdicts";
-import { DaemonRefusalError, VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover, type MomentRecord } from "@dohc/workspace-engine-client";
+import { DaemonRefusalError, OwnerYDocOutbox, VersionedLiveAdapter, type AutomationClaim, type AutomationGroupHandover, type MomentRecord } from "@dohc/workspace-engine-client";
 import { AUTOMATION_SWITCHED_OFF_BODY, AUTOMATION_SWITCHED_OFF_VIEW_BODY } from "@dohc/automation-executor/automation-failed-notice";
 import type { EngineClient } from "@dohc/workspace-engine-client/daemon";
 import type { AutomationReplica, startAutomationReplicas } from "./automationReplicas";
@@ -159,6 +161,8 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
   sync?: () => Promise<void>;
   live?: AutomationServerOptions["live"];
   client?: EngineClient;
+  inspection?: RelayButtonInspection;
+  recordDelivery?: AutomationServerOptions["recordDelivery"];
 } = {}) {
   const marks = input.marks ?? new Map();
   const executors: Fake[] = [];
@@ -186,8 +190,10 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
       return { unavailable: false, replica: (id) => open.get(id), reconcile: () => undefined, failedSyncs: () => new Map(), settled: async () => undefined, close: async () => undefined };
     },
     ...(input.live ? { live: input.live } : {}),
+    ...(input.recordDelivery ? {recordDelivery: input.recordDelivery} : {}),
     createExecutor: (options) => {
       const fake = fakeExecutor(options, marks, input.engine, input.schedules);
+      if (input.inspection) fake.executor.inspectRelayedBatch = async ids => ids.map(() => input.inspection!);
       executors.push(fake);
       return fake.executor;
     },
@@ -205,7 +211,7 @@ async function server(storage: SyncRelayStorage, h: Pick<ReturnType<typeof testH
       open.set(WORKSPACE, {
         workspaceId: WORKSPACE, ownerUserId: OWNER, incarnation: input.incarnation ?? 1, startedAtMs: input.startedAtMs ?? at(7),
         root: "unused", metadataDir: "unused", client: input.client ?? {} as unknown as EngineClient, workspace: "handle", signal,
-        nextRequestId: () => 1, sync, get pulledHead() { return pulledHead; },
+        nextRequestId: () => 1, sync, withRecordWork: work => work(), get pulledHead() { return pulledHead; },
       });
       hooks!.onChanged?.(WORKSPACE);
       await vi.waitFor(() => expect(executors).toHaveLength(1));
@@ -525,13 +531,20 @@ describe("a server that runs a workspace's automations", () => {
     expect(await fake.options.reachRelayRecord(7)).toEqual({ generation: 7, reach: reach("held", 6), everShared: false });
   });
 
-  it("keeps a server host with an initial press backlog available for inspections", async () => {
+  it.each([
+    [{kind: "unchecked", reason: "Host unavailable"}, SHARED_BUTTON_UNCHECKED],
+    [{kind: "denied", reason: "carol@x cannot view Payroll"}, SHARED_BUTTON_DENIED],
+    [{kind: "denied", reason: "Private Collection does not support this step"}, SHARED_BUTTON_DENIED],
+    [{kind: "denied", reason: SHARED_BUTTON_HELD}, SHARED_BUTTON_HELD],
+    [{kind: "denied", reason: SHARED_BUTTON_MOVED}, SHARED_BUTTON_MOVED],
+    [{kind: "denied", reason: SHARED_BUTTON_FIELD_CHANGED}, SHARED_BUTTON_FIELD_CHANGED],
+  ] satisfies Array<[RelayButtonInspection, string]>)("answers an inspection safely with an initial press backlog: %j", async (inspectionResult, safeReason) => {
     clock = at(8);
     const { storage, h, host } = await relay();
     await host("/check-in", { installId: "laptop", label: "Laptop", claim: true });
     const shareId = await createShare(h, OWNER, WORKSPACE, { recipientUserId: "ana", paths: ["Tasks"], access: "edit" });
     const grant = storage.listActiveShareGrantsForRecipient(shareId, "ana")[0]!;
-    const s = await server(storage, h);
+    const s = await server(storage, h, {inspection: inspectionResult});
     expect((await h(request("ana", `/sync/shares/${shareId}/automation-presses`, jsonBody({
       pressId: "initial", automationId: PRESSED, collectionPath: "Tasks", definitionHash: "0123456789abcdef", recordId: "rec-12", confirmed: [],
     })))).status).toBe(200);
@@ -556,7 +569,8 @@ describe("a server that runs a workspace's automations", () => {
       await vi.waitFor(() => expect(fake.pressed).toHaveLength(1));
       expect(queued).toBe(1);
       // The fake executor answers unchecked; receiving it proves the request reached the host.
-      await expect(inspection).resolves.toMatchObject({ kind: "unchecked", reason: "Host unavailable" });
+      await expect(inspection).resolves.toEqual({ kind: inspectionResult.kind, reason: safeReason });
+      expect(s.errors.some(([, error]) => error instanceof Error && error.message === inspectionResult.reason)).toBe(true);
     } finally { controller.abort(); spy.mockRestore(); }
   });
 
@@ -721,6 +735,35 @@ describe("a server whose copies of workspaces fail", () => {
 });
 
 describe("a server that pushes its copy of a workspace", () => {
+  it("flushes pending drafts at startup and still syncs while an owner device is offline", async () => {
+    clock = at(8);
+    const {storage, h} = await relay();
+    const binding = {workspaceId: WORKSPACE, mainVersionId: "main", objectId: "record", lineageClaimId: "a".repeat(64),
+      currentPath: "Tasks/one.md", selectorPaths: ["Tasks"], restoreFenceGeneration: 0};
+    const draft = {binding, pendingBytes: 10, state: "active", outboxId: "outbox"};
+    let rejectDelivery: (error: Error) => void = () => {};
+    const preparing = new Promise<never>((_resolve, reject) => {rejectDelivery = reject;});
+    const capture = vi.fn(() => preparing);
+    const client = {ownerYDocListDrafts: vi.fn(async () => ({drafts: [draft], next: null})),
+      ownerYDocPrepareEnrollment: vi.fn(() => preparing)};
+    vi.spyOn(storage, "automationRecordBinding").mockReturnValue({binding, shareId: "share"});
+    const readHead = vi.spyOn(OwnerYDocOutbox.prototype, "readHead").mockResolvedValue({outboxId: "outbox", binding,
+      baseUpdate: Uint8Array.of(0, 0), baseUpdateDigest: binding.lineageClaimId, state: "active", pendingBytes: 10,
+      oldestEntryAtMs: 1, quarantineReason: null, observedBinding: null,
+      entry: {appendKey: "key", sequence: 1, deliveryId: "delivery", updateDigest: "b".repeat(64), update: Uint8Array.of(0, 0), byteLength: 2, createdAtMs: 1}});
+    const currentBinding = vi.mocked(storage.automationRecordBinding);
+    const s = await server(storage, h, {client: client as unknown as EngineClient,
+      recordDelivery: {namespace: "relay", capture}});
+    const fake = await s.openReplica();
+    await vi.waitFor(() => expect(capture).toHaveBeenCalled());
+    await vi.waitFor(() => expect(s.sync).toHaveBeenCalledTimes(1));
+    expect(client.ownerYDocListDrafts).toHaveBeenCalledWith(expect.anything(), {after: null, limit: 64, pendingOnly: true}, expect.anything());
+    rejectDelivery(new Error("Device delivery is unavailable."));
+    await vi.waitFor(() => expect(s.errors.some(([context]) => context.startsWith("deliver automation record"))).toBe(true));
+    await fake.options.withRecordWrites(new AbortController().signal, async () => undefined);
+    await vi.waitFor(() => expect(s.sync.mock.calls.length).toBeGreaterThan(1));
+    readHead.mockRestore(); currentBinding.mockRestore();
+  });
   it("tries a sync the engine refused again, and reports only one that keeps failing", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {

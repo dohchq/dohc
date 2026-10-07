@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
-import { createApp, deleteWorkspacePath, importData, moveWorkspacePath, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
+import { createApp, deleteWorkspacePath, importData, moveWorkspacePath, startFileChat, writeWorkspaceFile, type ToolContext } from "../../../../packages/mcp/src/tools";
 import { executeCli } from "@dohc/cli";
 import {
   CLI_PROTOCOL_VERSION,
@@ -2332,6 +2332,51 @@ describe("CLI socket server", () => {
       exitCode: 1, stdout: "", stderr: "dohc: chats are not available in a read-only shared view\n",
     });
     expect(calls.writes).toBe(beforeReadOnly);
+  });
+
+  it("refuses a 90 KB CJK first message through MCP without creating a file chat", async () => {
+    const create = vi.spyOn(store!, "createThread");
+    const ctx: ToolContext = { root: workspaceRoot, home: stateDir, request: request => invoke(request.verb, request.args) };
+    expect(await startFileChat(ctx, { path: "tracked.md", title: "Too large", body: "界".repeat(30_000) }, undefined))
+      .toEqual({ ok: false, reason: "The message is longer than 64 KiB. Shorten it." });
+    expect(create).not.toHaveBeenCalled();
+    expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
+      .toMatchObject({ ok: true, threads: [] });
+    expect(calls.writes).toBe(0);
+  });
+
+  it.each([
+    ["x".repeat(65_537), "The message is longer than 64 KiB. Shorten it."],
+    [" \r\n\t\uFEFF", "The message is empty. Enter a message."],
+  ])("refuses an invalid raw socket first message before creating its chat", async (body, reason) => {
+    const create = vi.spyOn(store!, "createThread");
+    expect(await rawRequest({ token, protocolVersion: CLI_PROTOCOL_VERSION, verb: "fileChatStart",
+      args: { cwd: workspaceRoot, actor: "agent", path: "tracked.md", title: "Refused", body },
+    })).toMatchObject({ ok: true, result: { ok: false, reason } });
+    expect(create).not.toHaveBeenCalled();
+    expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
+      .toMatchObject({ ok: true, threads: [] });
+    expect(calls.writes).toBe(0);
+  });
+
+  it("lets a refused file-chat request id be retried and corrected before creating exactly one chat", async () => {
+    const args = { cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md", title: "Retry", body: "界".repeat(30_000), requestId: "refused-body" };
+    const refusal = { ok: false, reason: "The message is longer than 64 KiB. Shorten it." };
+    expect(await invoke("fileChatStart", args)).toEqual(refusal);
+    expect(await invoke("fileChatStart", args)).toEqual(refusal);
+    expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
+      .toMatchObject({ ok: true, threads: [] });
+    const body = "界".repeat(21_844) + "\r\nx\r\ny\uFEFF ";
+    const normalized = "界".repeat(21_844) + "\nx\ny";
+    expect(Buffer.byteLength(normalized, "utf8")).toBe(65_536);
+    const corrected = { ...args, body };
+    const started = await invoke("fileChatStart", corrected);
+    if (!started.ok) throw new Error(started.reason);
+    expect(await store!.listMessages({ workspaceId: WORKSPACE_ID, threadId: started.threadId }))
+      .toMatchObject([{ body: normalized }]);
+    expect(await invoke("fileChatStart", corrected)).toEqual(started);
+    expect(await invoke("fileChats", { cwd: workspaceRoot, actor: "agent", path: "tracked.md" }))
+      .toMatchObject({ ok: true, threads: [{ title: "Retry" }] });
   });
 
   it("answers a resent document edit with its first result", async () => {

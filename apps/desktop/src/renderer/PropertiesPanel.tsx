@@ -1,5 +1,7 @@
 import {
+  FRONTMATTER_SOURCE_META_KEY,
   frontmatterEditsRefused,
+  loadMarkdownFrontmatter,
   markdownFrontmatterEditsRefused,
   patchFrontmatter,
 } from "@dohc/ydoc-projection/frontmatter";
@@ -11,7 +13,7 @@ import {
   applyFrontmatter,
   FRONTMATTER_EDIT_REFUSED_MESSAGE,
   frontmatterEntries,
-  frontmatterEntriesFromMeta,
+  frontmatterEntriesFromPairs,
   type FrontmatterEntry,
 } from "./markdown/frontmatter";
 
@@ -82,10 +84,6 @@ function editableEntries(entries: FrontmatterEntry[]): FrontmatterEntry[] {
   return entries.filter((entry) => !isReserved(entry.key));
 }
 
-function mapToObject(map: Y.Map<unknown>): Record<string, unknown> {
-  return Object.fromEntries(map.entries());
-}
-
 function buildProperties(
   currentEntries: FrontmatterEntry[],
   nextEntries: FrontmatterEntry[],
@@ -143,6 +141,23 @@ function renamedKeys(
   return renamed;
 }
 
+// A live document's map adds a renamed key last. Rows keep the order they
+// show, so the row being renamed stays under the person typing. A key renamed
+// on another device takes the row its old key left; other new keys follow.
+function inShownOrder(entries: FrontmatterEntry[], shown: FrontmatterEntry[]): FrontmatterEntry[] {
+  const rows = entries.map((entry) => {
+    const held = shown.findIndex((candidate) => candidate.sourceKey === entry.key);
+    return held === -1 ? shown.findIndex((candidate) => propertyKey(candidate) === entry.key) : held;
+  });
+  const left = shown.flatMap((_, row) => (rows.includes(row) ? [] : [row]));
+  const added = rows.flatMap((row, index) => (row === -1 ? [index] : []));
+  if (left.length === 1 && added.length === 1) rows[added[0]!] = left[0]!;
+  return entries
+    .map((entry, index) => ({ entry, row: rows[index] === -1 ? shown.length : rows[index]! }))
+    .sort((first, second) => first.row - second.row)
+    .map(({ entry }) => entry);
+}
+
 function applySharedFrontmatterPatch(
   doc: Y.Doc,
   previousEntries: FrontmatterEntry[],
@@ -158,7 +173,19 @@ function applySharedFrontmatterPatch(
       values.set(key, value);
     }
   }
-  patchFrontmatter(doc, values, remove);
+  patchFrontmatter(doc, values, remove, renamedKeys(previousEntries, nextEntries));
+}
+
+// The map has no order of its own, so rows follow the kept text, as the file
+// does. Keys the text does not hold follow in map order.
+function liveEntries(doc: Y.Doc): FrontmatterEntry[] {
+  const source = doc.getMap("meta").get(FRONTMATTER_SOURCE_META_KEY);
+  const order = typeof source === "string" ? (loadMarkdownFrontmatter(source)?.keys ?? []) : [];
+  const place = (key: string): number => (order.includes(key) ? order.indexOf(key) : order.length);
+  return frontmatterEntriesFromPairs(doc.getMap(FRONTMATTER_FIELD).entries())
+    .map((entry) => ({ entry, place: place(entry.key) }))
+    .sort((first, second) => first.place - second.place)
+    .map(({ entry }) => entry);
 }
 
 export function PropertiesPanel(props: PropertiesPanelProps) {
@@ -166,12 +193,10 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   const body = props.body ?? "";
   const [ydocRevision, setYdocRevision] = useState(0);
   const [editRefused, setEditRefused] = useState(false);
-  const sourceEntries = useMemo(() => {
-    if (ydoc) {
-      return frontmatterEntriesFromMeta(mapToObject(ydoc.getMap(FRONTMATTER_FIELD)));
-    }
-    return frontmatterEntries(body);
-  }, [body, ydoc, ydocRevision]);
+  const sourceEntries = useMemo(
+    () => (ydoc ? liveEntries(ydoc) : frontmatterEntries(body)),
+    [body, ydoc, ydocRevision],
+  );
   const [entries, setEntries] = useState<FrontmatterEntry[]>(() =>
     editableEntries(sourceEntries),
   );
@@ -185,9 +210,13 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
   }, [ydoc]);
 
   useEffect(() => {
-    setEntries(editableEntries(sourceEntries));
+    // This can apply after the person's next keystroke has changed the
+    // document, so a live document's rows read the document as it is now.
+    setEntries((shown) =>
+      ydoc ? inShownOrder(editableEntries(liveEntries(ydoc)), shown) : editableEntries(sourceEntries),
+    );
     setEditRefused(false);
-  }, [sourceEntries]);
+  }, [sourceEntries, ydoc]);
 
   // An unsplittable block cannot change one property without
   // rewriting the others, so the panel refuses edits before any write.
@@ -201,6 +230,12 @@ export function PropertiesPanel(props: PropertiesPanelProps) {
     try {
       if (ydoc) {
         applySharedFrontmatterPatch(ydoc, previous, next);
+        // Each row now names the key it wrote. The document's update reaches
+        // the rows later, and a keystroke before then renames from this key.
+        setEntries(next.map((entry) => {
+          const key = propertyKey(entry);
+          return key === null ? entry : { ...entry, sourceKey: key };
+        }));
       } else {
         props.onChange?.(
           applyFrontmatter(body, buildProperties(sourceEntries, next), renamedKeys(previous, next)),

@@ -10,6 +10,7 @@ import {
   MENU_SHORTCUT,
   deleteShortcut,
   menuEnterFrom,
+  movedPointer,
   moveInMenu,
   revealMenuRow,
 } from "../ui/Menu";
@@ -643,7 +644,7 @@ function openGripMenu(
     // Only a pointer that moves picks the active row, so a menu that opens
     // under a still pointer keeps its first row.
     button.addEventListener("mousemove", (event) => {
-      if (!(event.movementX || event.movementY) || selected === index) return;
+      if (!movedPointer(event) || selected === index) return;
       selected = index;
       highlight();
     });
@@ -655,7 +656,7 @@ function openGripMenu(
   highlight();
 
   function onKeyDown(event: KeyboardEvent): void {
-    const next = moveInMenu(event.key, selected, labels);
+    const next = moveInMenu(event, selected, labels);
     if (next !== null) {
       event.preventDefault();
       selected = next;

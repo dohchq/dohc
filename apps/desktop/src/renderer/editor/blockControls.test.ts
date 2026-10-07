@@ -15,6 +15,7 @@ import { Markdown } from "@tiptap/markdown";
 import { TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { NodeSelection } from "@tiptap/pm/state";
+import { inListView, mockListLayout } from "../ui/listLayout.testSupport";
 import { DohcTaskItem, dohcMarkdownExtensions } from "./extensions";
 import {
   BlockMenu,
@@ -690,6 +691,59 @@ describe("TurnIntoMenu dropdown rendering", () => {
     fireEvent.keyDown(listbox, { key: "Escape" });
     expect(screen.queryByRole("listbox")).toBeNull();
     await waitFor(() => expect(editor.view.hasFocus()).toBe(true));
+  });
+});
+
+describe("TurnIntoMenu on the Menu part's recipe", () => {
+  it("names its active option, moves by the Menu keys, keeps it in view, and keeps the current type's fill", () => {
+    const restore = mockListLayout(150);
+    const editor = track(makeEditor("Hello world"));
+    editor.commands.setTextSelection(3);
+    try {
+      render(createElement(TurnIntoMenu, { editor, activeId: turnIntoIdAt(editor.state.selection.$from) }));
+      fireEvent.click(screen.getByTitle("Turn into"));
+      const listbox = screen.getByRole("listbox", { name: "turn into" });
+      const options = within(listbox).getAllByRole("option");
+      const text = options[0]!;
+      expect(document.activeElement).toBe(listbox);
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(text.id);
+      expect(text.className.split(" ")).toContain("bg-selected");
+
+      fireEvent.keyDown(listbox, { key: "End" });
+      const quote = options.at(-1)!;
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(quote.id);
+      expect(quote.hasAttribute("data-active")).toBe(true);
+      expect(inListView(listbox, quote)).toBe(true);
+      // The block's own type keeps its fill when the active option leaves it.
+      expect(text.className.split(" ")).toContain("bg-selected");
+      fireEvent.keyDown(listbox, { key: "h" });
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+      expect(inListView(listbox, options[1]!)).toBe(true);
+
+      fireEvent.mouseMove(options[3]!, { movementX: 0, movementY: 0 });
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+
+      // Ctrl+N is New file and Ctrl+B the files panel. They reach the shell,
+      // which skips a prevented key, and leave the active option alone.
+      const shell = vi.fn((event: KeyboardEvent) => event.defaultPrevented);
+      window.addEventListener("keydown", shell);
+      try {
+        for (const letter of ["n", "b"]) {
+          expect(fireEvent.keyDown(listbox, { key: letter, ctrlKey: true })).toBe(true);
+          expect(fireEvent.keyDown(listbox, { key: letter, metaKey: true })).toBe(true);
+        }
+      } finally {
+        window.removeEventListener("keydown", shell);
+      }
+      expect(shell).toHaveBeenCalledTimes(4);
+      expect(shell.mock.results.every((result) => result.value === false)).toBe(true);
+      expect(listbox.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+
+      fireEvent.keyDown(listbox, { key: " " });
+      expect(editor.getJSON().content?.[0]?.attrs?.level).toBe(1);
+    } finally {
+      restore();
+    }
   });
 });
 

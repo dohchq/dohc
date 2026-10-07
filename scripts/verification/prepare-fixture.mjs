@@ -14,7 +14,8 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
   put("node_modules/installed.txt", "old-lock");
   put("scripts/verification/build.mjs", readFileSync(buildSource));
   put("scripts/verification/cancellation.mjs", readFileSync(new URL("./cancellation.mjs", import.meta.url)));
-  put("tools/rust-engine-program/build-slot.mjs", "export const resolveBuildBudget=()=>null; export const freeDiskGb=()=>100; export const acquireBuildSlot=()=>{throw Error('not expected')};  export const acquireVerificationSlot=()=>null;");
+  put("tools/rust-engine-program/build-slot.mjs", "export const acquireExclusiveSlot=()=>null; export const capBuildParallelism=source=>({...source}); export const resolveBuildBudget=()=>null; export const freeDiskGb=()=>100; export const acquireBuildSlot=()=>{throw Error('not expected')};  export const acquireVerificationSlot=()=>null;");
+  put("scripts/verification/admission.mjs", "export const admissionPreflight=()=>{};export const installedDependenciesMatch=()=>false;export const verificationAdmission=()=>({lightweight:false,reason:'fixture full lane'});");
   put("apps/desktop/scripts/require-e2e-engine.mjs", "export const requireE2eEngine=()=>{};");
   put("scripts/verification/process.mjs", `
     import assert from 'node:assert/strict';
@@ -51,6 +52,10 @@ export function createPrepareFixture(root, buildSource, { commit = true } = {}) 
       for(const path of ['apps/desktop/dist','apps/desktop/resources/cli-bin','apps/desktop/resources/app-backend-runtime',
         ...(process.platform==='win32' && process.arch==='x64'?['apps/desktop/resources/app-compiler']:[])])
         put(join(repoRoot,path,'built.txt'),readFileSync(join(repoRoot,'node_modules/installed.txt')));
+      for(const name of ['dohc','dohc-mcp']) {
+        const launcher=join(repoRoot,'apps/desktop/resources/cli-bin',name);
+        put(launcher,'#!/bin/sh\\nexit 0\\n'); chmodSync(launcher,0o755);
+      }
       return {};
     }
   `);

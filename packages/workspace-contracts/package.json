@@ -13,6 +13,7 @@
     "./chat-identity": "./src/chatIdentity.ts",
     "./chat-identity-values": "./src/chatIdentityValues.ts",
     "./names": "./src/names.ts",
+    "./chat-message-body": "./src/chatMessageBody.ts",
     "./chat-mentions": "./src/chatMentions.ts",
     "./collection": "./src/collection.ts",
     "./collection-data": "./src/collectionData.ts",
@@ -31,7 +32,10 @@
     "./dataset-path": "./src/datasetPath.ts",
     "./workspace-settings": "./src/workspaceSettings.ts",
     "./workspace-settings-values": "./src/workspaceSettingsValues.ts",
-    "./capabilities": "./src/capabilities.ts"
+    "./capabilities": "./src/capabilities.ts",
+    "./save-state": "./src/saveState.ts",
+    "./save-state-schema": "./src/saveStateSchema.ts",
+    "./usage": "./src/usage.ts"
   },
   "scripts": {
     "test": "vitest run",

@@ -14,7 +14,7 @@ export const ACCOUNT_CSS = `:root {
   --muted: #55524a;
   --subtle: #7f7b6e;
   --accent: #2d342e;
-  --danger: #a6402c;
+  --danger: #a43e2a;
   --success: #38684e;
   --sans: "Inter Variable", system-ui, "Segoe UI", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;

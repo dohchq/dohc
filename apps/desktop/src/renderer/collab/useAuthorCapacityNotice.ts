@@ -1,13 +1,13 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { useEffect, useRef } from "react";
 import { authorCapacityMessage } from "./authorCapacityMessage";
 import type { ReportButtonError } from "../collections/useAutomationButtons";
-import type { EngineDocSaveState } from "./engineDocLease";
 
 export function useAuthorCapacityNotice(input: {
   workspaceId: string;
   path: string;
   authorCapacity: boolean;
-  saveState: EngineDocSaveState;
+  saveState: SaveState;
   reportError?: ReportButtonError;
   retry: () => void;
 }): void {
@@ -16,7 +16,7 @@ export function useAuthorCapacityNotice(input: {
   current.current = input;
   const key = JSON.stringify([input.workspaceId, input.path]);
   useEffect(() => {
-    if (input.saveState === "saved" || input.saveState === "saved-to-host") {
+    if (input.saveState.kind === "saved-here" || input.saveState.kind === "saved-to-host") {
       reported.current = null;
     }
     if (!input.authorCapacity || !input.reportError || reported.current === key) return;
