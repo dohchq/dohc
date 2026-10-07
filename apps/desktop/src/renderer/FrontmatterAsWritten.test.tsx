@@ -233,6 +233,60 @@ describe("useFileText", () => {
     expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
   });
 
+  it("drops a pending read when the inspector's newer read arrives", async () => {
+    const doc = markdownToYDoc(BUDGET_FILE);
+    let answer: (text: string) => void = () => undefined;
+    bridgeMock.readWorkspaceText.mockReturnValueOnce(new Promise((resolve) => {
+      answer = (text) => resolve(fileRead(text));
+    }));
+    const view = render(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
+    view.rerender(<Live body={COST_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    expect(shown()).toBe(COST);
+    answer(BUDGET_FILE);
+    await settle();
+    expect(shown()).toBe(COST);
+  });
+
+  it("keeps a frontmatter read owed until one succeeds, with edits made during it", async () => {
+    const doc = markdownToYDoc(BUDGET_FILE);
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead(BUDGET_FILE));
+    const view = render(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+
+    // The rename saves, but reading the file fails.
+    act(() => renameBudget(doc));
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVING} />);
+    bridgeMock.readWorkspaceText.mockRejectedValueOnce(new Error("busy"));
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+    expect(shown()).toBe(BUDGET);
+
+    // A body edit's save still reads, because the rename's read is owed. A
+    // value edit lands while that read is out.
+    act(() => doc.getXmlFragment("body").insert(0, [new Y.XmlText("typed")]));
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVING} />);
+    let answer: (text: string) => void = () => undefined;
+    bridgeMock.readWorkspaceText.mockReturnValueOnce(new Promise((resolve) => {
+      answer = (text) => resolve(fileRead(text));
+    }));
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+    act(() => patchFrontmatter(doc, new Map([["cost", 200]])));
+    answer(COST_FILE);
+    await settle();
+    expect(shown()).toBe(COST);
+
+    // The value edit is still owed, so its save reads again.
+    const cost200 = COST_FILE.replace("100", "200");
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead(cost200));
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVING} />);
+    view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
+    await settle();
+    expect(shown()).toBe("---\n# Monthly\ncost: 200 # euros\n---");
+  });
+
   it("never shows a slow read on another document, or an older read over a newer one", async () => {
     const doc = markdownToYDoc(BUDGET_FILE);
     let answerTrip: (text: string) => void = () => undefined;

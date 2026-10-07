@@ -1,7 +1,7 @@
 import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { leadingFrontmatter, loadMarkdownFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { ChevronRight } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type * as Y from "yjs";
 import { bridge } from "./bridge";
 import { displayFrontmatterValue } from "./markdown/frontmatter";
@@ -37,13 +37,15 @@ export function useFileText(input: {
     setRead(current);
   }
 
-  // A body edit cannot change the block, so its save needs no read.
-  const frontmatterChanged = useRef(true);
+  // Frontmatter edits counted against the last read that covered them. A
+  // body edit cannot change the block, so its save needs no read. A read that
+  // fails or is dropped leaves its edits owed.
+  const edits = useRef({ made: 1, read: 0 });
   useEffect(() => {
     if (!ydoc) return;
-    frontmatterChanged.current = true;
+    edits.current.made += 1;
     const mark = () => {
-      frontmatterChanged.current = true;
+      edits.current.made += 1;
     };
     const maps = [ydoc.getMap("frontmatter"), ydoc.getMap("meta")];
     for (const map of maps) map.observeDeep(mark);
@@ -52,15 +54,21 @@ export function useFileText(input: {
     };
   }, [ydoc]);
 
-  // Only the newest read lands, and only on the document that asked for it.
+  // One order for both readers: a newer inspector read, or another document,
+  // drops every read still pending, and only the newest read lands.
   const latest = useRef(0);
+  useLayoutEffect(() => {
+    latest.current += 1;
+  }, [key, body, ydoc]);
   const readFile = useCallback(() => {
     const id = ++latest.current;
+    const covers = edits.current.made;
     void Promise.resolve()
       .then(() => bridge().readWorkspaceText({ workspaceId, relativePath: path }))
       .then(
         (result) => {
           if (latest.current !== id) return;
+          edits.current.read = Math.max(edits.current.read, covers);
           setRead((last) => (last.key === key ? { ...last, text: result.text } : last));
         },
         // The text read last stays. The inspector reports a file it cannot read.
@@ -70,20 +78,18 @@ export function useFileText(input: {
 
   const kind = input.saveState.kind;
   useEffect(() => {
-    if (kind !== "changed-on-disk" && !(kind === "saved-here" && frontmatterChanged.current)) return;
-    frontmatterChanged.current = false;
-    readFile();
-  }, [readFile, kind]);
+    if (!ydoc) return;
+    if (kind === "changed-on-disk" || (kind === "saved-here" && edits.current.made > edits.current.read)) readFile();
+  }, [readFile, kind, ydoc]);
 
   // A write from outside dohc reaches an open document's file without a save.
-  useEffect(
-    () =>
-      bridge().onWorkspaceActivity((event) => {
-        if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
-        if (event.paths === undefined || event.paths.includes(path)) readFile();
-      }),
-    [readFile, workspaceId, path],
-  );
+  useEffect(() => {
+    if (!ydoc) return;
+    return bridge().onWorkspaceActivity((event) => {
+      if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) return;
+      if (event.paths === undefined || event.paths.includes(path)) readFile();
+    });
+  }, [readFile, workspaceId, path, ydoc]);
   return current.text;
 }
 
