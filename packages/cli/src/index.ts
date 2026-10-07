@@ -8,11 +8,14 @@ import {
   CLI_JSON_SCHEMA_VERSION,
   CLI_PROTOCOL_VERSION,
   documentEditTextSchema,
+  commentBodySchema,
+  MAX_COMMENT_BODY_BYTES,
   parseCliResult,
   type CliRequestWithoutToken,
   type CliResultByVerb,
 } from "./protocol";
 import { renderCliResult } from "./render";
+import { readStdinText } from "./stdin";
 
 const DEFAULT_RESPONSE_TIMEOUT_MS = 30_000;
 
@@ -31,14 +34,6 @@ interface CliExecutionOptions {
   client?: CliClientOptions;
 }
 
-async function processStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
 async function bodyForCommand(
   command: ParsedCliCommand,
   readStdin: () => Promise<string>,
@@ -47,6 +42,12 @@ async function bodyForCommand(
     const text = command.stdin ? await readStdin() : command.text;
     if (!documentEditTextSchema.safeParse(text).success) throw new DohcCliError("document text is at most 256 KiB as UTF-8");
     return text;
+  }
+  if (command.verb === "fileChatStart") {
+    const body = command.stdin ? await readStdin() : command.body;
+    if (!commentBodySchema.safeParse(body).success) throw new DohcCliError("comment body is at most 64 KiB as UTF-8");
+    if (!body.trim()) throw new DohcCliError("comment body must contain text that is not all whitespace");
+    return body;
   }
   if (command.verb !== "post" && command.verb !== "reply") return undefined;
   if (command.body !== "-") return command.body;
@@ -83,6 +84,14 @@ function buildCliRequest(
             ...(command.requestId === undefined ? {} : { requestId: command.requestId }),
           } };
     }
+    case "fileChatStart":
+      return { verb: command.verb, protocolVersion: common.protocolVersion, args: {
+        cwd: common.cwd, actor: common.actor, path: command.path, title: command.title,
+        body: stdinBody ?? command.body,
+        ...(command.agent === undefined ? {} : { agent: command.agent }),
+        ...(command.requestId === undefined ? {} : { requestId: command.requestId }),
+        ...((command.runId ?? runId) ? { runId: command.runId ?? runId } : {}),
+      } };
     case "dataset":
       return { verb: command.verb, protocolVersion: common.protocolVersion, args: { cwd: common.cwd, actor: common.actor, request: command.request } };
     case "appPublication":
@@ -277,7 +286,7 @@ function refusal(result: CliResultByVerb[keyof CliResultByVerb]): string | null 
     : result.reason;
 }
 
-const REFUSING_VERBS = new Set(["moments", "moment", "documentRead", "documentEdit", "documentCreate", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
+const REFUSING_VERBS = new Set(["moments", "moment", "documentRead", "documentEdit", "documentCreate", "fileChatStart", "automationRuns", "automationRun", "automationRetry", "automationButtons", "automationPress"]);
 
 function jsonOutput(result: CliResultByVerb[keyof CliResultByVerb]): string {
   return JSON.stringify({ schemaVersion: CLI_JSON_SCHEMA_VERSION, ...result }, null, 2);
@@ -288,7 +297,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
     const env = options.env ?? process.env;
     const command = parseCliArguments(options.argv, env);
     if ("help" in command) return { exitCode: 0, stdout: renderCliHelp(command), stderr: "" };
-    const stdinBody = await bodyForCommand(command, options.readStdin ?? processStdin);
+    const stdinBody = await bodyForCommand(command, options.readStdin ?? (() => readStdinText(process.stdin, command.verb === "fileChatStart" ? MAX_COMMENT_BODY_BYTES : undefined)));
     const request = buildCliRequest(
       command,
       options.cwd ?? process.cwd(),

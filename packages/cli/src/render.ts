@@ -273,6 +273,12 @@ export function renderCliResult<Verb extends keyof CliResultByVerb>(
       const action = "changed" in document ? document.changed ? "Updated" : "Unchanged" : "Created";
       return `${action} ${document.path}${"warning" in document && document.warning ? `\n${document.warning}` : ""}`;
     }
+    case "fileChatStart": {
+      const comment = result as CliResultByVerb["fileChatStart"];
+      if (!comment.ok) throw new DohcCliError(comment.reason);
+      const commented = `Commented on ${lineSafe(comment.path)} in ${lineSafe(comment.threadId)}`;
+      return comment.warning ? `${commented}\nwarning: ${lineSafe(comment.warning)}` : commented;
+    }
     case "groups":
       return renderGroups(result as CliResultByVerb["groups"]);
     case "threads":

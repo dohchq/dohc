@@ -2247,14 +2247,15 @@ describe("CLI socket server", () => {
 
   it("comments on a file through the chat write path a person's comment takes", async () => {
     if (!store) throw new Error("Store is not available");
-    const started = await invoke("fileChatStart", {
-      cwd: workspaceRoot,
-      actor: "agent",
-      agent: "claude-code",
-      path: "tracked.md",
-      title: "Budget",
-      body: "Is 400 enough for food?",
+    const comment = (path: string, title: string, body: string, flags: string[] = []) => executeCli({
+      argv: ["document", "comment", path, "--title", title, "--text", body, "--json", ...flags],
+      cwd: workspaceRoot, env: {}, request: (request) => invoke(request.verb, request.args),
     });
+    const output = await comment("tracked.md", "Budget", "Is 400 enough for food?", ["--agent", "claude-code"]);
+    expect(output.exitCode, output.stderr).toBe(0);
+    const { schemaVersion, ...startedResult } = JSON.parse(output.stdout);
+    expect(schemaVersion).toBe(2);
+    const started = parseCliResult("fileChatStart", startedResult);
     if (!started.ok) throw new Error(started.reason);
     expect(started.path).toBe("tracked.md");
 
@@ -2290,9 +2291,17 @@ describe("CLI socket server", () => {
     // A retry with the same request id returns the first chat instead of
     // starting a second; the id cannot be reused for a different comment.
     const once = { cwd: workspaceRoot, actor: "agent" as const, path: "tracked.md", title: "Once", body: "One chat.", requestId: "req-1" };
-    const first = await invoke("fileChatStart", once);
+    const retryFlags = ["--request-id", once.requestId];
+    const firstOutput = await comment(once.path, once.title, once.body, retryFlags);
+    expect(firstOutput.exitCode, firstOutput.stderr).toBe(0);
+    const { schemaVersion: retrySchemaVersion, ...firstResult } = JSON.parse(firstOutput.stdout);
+    expect(retrySchemaVersion).toBe(2);
+    const first = parseCliResult("fileChatStart", firstResult);
     if (!first.ok) throw new Error(first.reason);
-    await expect(invoke("fileChatStart", once)).resolves.toEqual(first);
+    await expect(comment(once.path, once.title, once.body, retryFlags)).resolves.toEqual(firstOutput);
+    await expect(comment(once.path, once.title, "Another.", retryFlags)).resolves.toEqual({
+      exitCode: 1, stdout: "", stderr: "dohc: request id req-1 was already used for a different request\n",
+    });
     await expect(invoke("fileChatStart", { ...once, body: "Another." })).resolves.toEqual({
       ok: false,
       reason: "request id req-1 was already used for a different request",
@@ -2304,12 +2313,25 @@ describe("CLI socket server", () => {
     await expect(store.listMessages({ workspaceId: WORKSPACE_ID, threadId: first.threadId }))
       .resolves.toMatchObject([{ author: { kind: "agent", displayName: "Nova" } }]);
 
+    for (const [path, reason] of [
+      ["untracked.md", "dohc does not track untracked.md yet, so it cannot have chats. Only text files dohc tracks can. Try again once dohc lists the file."],
+      ["../outside.md", "path rejected (traversal): ../outside.md"],
+      [".dohc/private.md", "path rejected (reserved): .dohc/private.md"],
+    ] as const) {
+      const denied = await comment(path, "T", "B");
+      expect(denied).toEqual({ exitCode: 1, stdout: "", stderr: `dohc: ${reason}\n` });
+    }
+    const beforeReadOnly = calls.writes;
     // A shared view refuses before the chat module is reached.
     registryWorkspace = { ...registryWorkspace, readOnly: true };
     context.readOnly = true;
     await expect(invoke("fileChatStart", {
       cwd: workspaceRoot, actor: "agent", path: "tracked.md", title: "T", body: "B",
     })).rejects.toThrow("chats are not available in a read-only shared view");
+    await expect(comment("tracked.md", "T", "B")).resolves.toEqual({
+      exitCode: 1, stdout: "", stderr: "dohc: chats are not available in a read-only shared view\n",
+    });
+    expect(calls.writes).toBe(beforeReadOnly);
   });
 
   it("answers a resent document edit with its first result", async () => {
