@@ -642,7 +642,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       }
       await typeAfter(page, H1, ` ${R1}`);
       // A shared session reports saved once the server's host accepted the edit.
-      await expect(saveState(page)).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
+      await expect(saveState(page)).toHaveAttribute("data-state", "saved-to-host", { timeout: 60_000 });
       await expectNoCollectionNotice(page);
     });
 
@@ -693,7 +693,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       await expect(dialog.getByRole("listitem").filter({ hasText: recipientLabel })).toHaveCount(1);
       await attachScreen(testInfo, page, "restore stop access");
       // The recipient can still edit, so read-only afterwards proves the stop.
-      await expect(saveState(recipient!.page)).toHaveAttribute("data-state", "saved");
+      await expect(saveState(recipient!.page)).toHaveAttribute("data-state", "saved-to-host");
       await expect(editor(recipient!.page)).toHaveAttribute("contenteditable", "true");
       await dialog.getByRole("button", { name: "Stop access" }).click();
       const current = dialog.getByLabel("Current file before restore");
@@ -805,7 +805,7 @@ test("@shared-continuity a live document keeps its person's and agent's work thr
       provenance.hostedNewRecipient = await expectDeclaredMoment(page, sharedWorkspaceId, HA, admittedAgent(hosted!.change.authorSnapshot));
       provenance.nextNewRecipient = await expectDeclaredMoment(page, sharedWorkspaceId, A2, admittedAgent(next!.change.authorSnapshot));
       await typeAfter(page, H2, ` ${R2}`);
-      await expect(saveState(page)).toHaveAttribute("data-state", "saved", { timeout: 60_000 });
+      await expect(saveState(page)).toHaveAttribute("data-state", "saved-to-host", { timeout: 60_000 });
       await expect(editor(owner!.page)).toContainText(R2, { timeout: 60_000 });
       await expect.poll(() => cliRead(ownerTemp), { timeout: 60_000 }).toContain(R2);
       await expect.poll(() => ownerSettled(ownerTemp, [H1, A1, HA, H2, A2, R2], [R1]), { timeout: 60_000 }).toBe(true);

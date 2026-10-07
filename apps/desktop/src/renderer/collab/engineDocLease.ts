@@ -420,8 +420,8 @@ function createEngineDocSession(
   let replacementPending = false;
   let replacementSaveState: EngineYDocSaveStateEvent | null = null;
   let pendingSavedState: SaveState = SAVED_HERE;
-  // The last local edit a saved-here report covered. Remote deltas also show
-  // saving, but they are not this window's work.
+  // The last local edit a saved-here or saved-to-host report covered. Remote
+  // deltas also show saving, but they are not this window's work.
   let savedLocalSeq = 0;
   const localEditsSaved = (): boolean =>
     !deliveryPending && savedLocalSeq >= localSeq.current;
@@ -491,7 +491,7 @@ function createEngineDocSession(
     authorCapacity = false,
   ): void => {
     if (state.kind === "error" && error) state = saveProblem("error", error, "issueId" in state ? state.issueId : null);
-    if (state.kind === "saved-here") savedLocalSeq = localSeq.current;
+    if (state.kind === "saved-here" || state.kind === "saved-to-host") savedLocalSeq = localSeq.current;
     if (saveStateEqual(snapshot.saveState, state) && snapshot.saveError === error && snapshot.authorCapacity === authorCapacity) return;
     saveStateRef.current = state;
     publish((current) => ({ ...current, saveState: state, saveError: error, authorCapacity }));
