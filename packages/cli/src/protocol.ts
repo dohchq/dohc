@@ -23,6 +23,8 @@ const cliAuthorKindSchema = z.enum(["human", "agent", "automation"]);
 const requestBase = {
   token: z.string().regex(/^[a-f0-9]{64}$/),
   protocolVersion: z.literal(CLI_PROTOCOL_VERSION),
+  // Attribution only. Authority comes from the token, workspace and actor.
+  door: z.enum(["cli", "mcp"]).optional(),
 };
 
 const argsBase = {

@@ -43,3 +43,14 @@ it("cannot answer the comparison placement decision without a deliberate compari
     pairs: USAGE_DOORS.map(door => ({ capabilityId: "version.compare", door })) });
   for (const row of rows) expect(row).toMatchObject({ total: null, usedDays: null, coveredDays: 0 });
 });
+
+it("uses the build's real coverage and never presents an uncovered candidate as zero", () => {
+  const snapshot = usageDecisionFixture();
+  const rows = queryUsage(snapshot, { from: "2026-09-08", through: "2026-10-07",
+    pairs: snapshot.coverage[0]!.pairs.filter(pair => pair.status !== "covered").map(({ capabilityId, door }) => ({ capabilityId, door })) });
+  expect(rows.length).toBeGreaterThan(0);
+  for (const row of rows) {
+    expect(row).toMatchObject({ total: null, usedDays: null, coveredDays: 0 });
+    expect(row.daily.every(day => day.count === null && day.status === "uncovered")).toBe(true);
+  }
+});
