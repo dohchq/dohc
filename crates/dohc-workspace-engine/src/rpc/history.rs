@@ -237,10 +237,24 @@ fn parsed_moment_author(value: Value) -> Value {
         return if valid { value } else { corrupt() };
     }
     if object.get("kind").and_then(Value::as_str) == Some("human") {
-        let valid = object.len() == 2 + usize::from(object.contains_key("onBehalfOf"))
+        let name_ok = object.get("humanName").is_none_or(|name| {
+            name.as_str()
+                .is_some_and(|name| !name.is_empty() && name.len() <= 512)
+        });
+        let valid = object.len()
+            == 2 + usize::from(object.contains_key("onBehalfOf"))
+                + usize::from(object.contains_key("humanName"))
             && bounded_ids(&["humanId"])
-            && principal_ok;
-        return if valid { value } else { corrupt() };
+            && principal_ok
+            && name_ok;
+        if !valid {
+            return corrupt();
+        }
+        let mut author = json!({"kind":"human", "humanId":object["humanId"]});
+        if let Some(principal) = object.get("onBehalfOf") {
+            author["onBehalfOf"] = principal.clone();
+        }
+        return author;
     }
     let kind_ok = object.get("kind").and_then(Value::as_str) == Some("agent");
     let nonempty = |key: &str| {
@@ -468,6 +482,25 @@ mod relay_author_tests {
             panic!("one author in, one author out: {authors}");
         };
         author.clone()
+    }
+
+    #[test]
+    fn reads_live_human_and_agent_snapshot_as_native_moment_authors() {
+        let human = json!({"kind":"human", "humanId":"owner", "humanName":"Owner proof"});
+        let agent =
+            json!({"kind":"agent", "agentId":"hosted-agent", "onBehalfOf":"owner", "depth":0});
+        assert_eq!(
+            parsed_moment_authors(&json!([human, agent]).to_string()),
+            json!([{"kind":"human", "humanId":"owner"}, {"kind":"agent", "agentId":"hosted-agent", "onBehalfOf":"owner"}])
+        );
+        for name in [json!(null), json!(""), json!("x".repeat(513))] {
+            assert_eq!(
+                parsed_moment_author(
+                    &json!({"kind":"human", "humanId":"owner", "humanName":name}).to_string()
+                ),
+                json!({"corrupt":true})
+            );
+        }
     }
 
     #[test]

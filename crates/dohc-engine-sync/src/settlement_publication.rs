@@ -152,6 +152,11 @@ pub(crate) fn refresh_in_tx(
         return Err(SyncError::CoordinateDiverged);
     }
     let moment_authors = admitted_moment_authors(envelope)?
+        .filter(|authors| {
+            authors
+                .as_array()
+                .is_some_and(|authors| !authors.is_empty())
+        })
         .as_ref()
         .map(serde_json::to_string)
         .transpose()
@@ -474,6 +479,14 @@ mod tests {
                 .primary,
             ApplyDisposition::Applied(_)
         ));
+        let (native, retained): (Option<String>, String) = empty.read_with(|conn| {
+            conn.query_row("SELECT m.author_json,a.authors_json FROM moments m JOIN live_settlement_publication_admissions a USING(workspace_id,moment_id) WHERE m.moment_id='moment'", [], |r| Ok((r.get(0)?,r.get(1)?)))
+        }).unwrap();
+        assert_eq!(
+            native, None,
+            "an empty admitted snapshot names no native moment author"
+        );
+        assert_eq!(retained, "[]", "exact admission evidence remains retained");
     }
     #[test]
     fn admitted_automation_converts_to_native_moment_authors_and_keeps_exact_replay_identity() {
