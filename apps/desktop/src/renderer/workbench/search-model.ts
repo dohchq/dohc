@@ -17,6 +17,10 @@ export interface SearchModel {
   // The id of the search these results belong to; batches with any other id
   // are stale (a superseded search's stragglers) and must be dropped.
   searchId: string | null;
+  // The query these results answer. The input can already hold the next
+  // one while its search waits out the debounce, so an empty result names
+  // this query, never the input's.
+  query: string;
   status: "idle" | "searching" | "updating" | "complete";
   limitHit: boolean;
   groups: SearchGroup[];
@@ -30,6 +34,7 @@ export interface SearchModel {
 export function idleSearchModel(): SearchModel {
   return {
     searchId: null,
+    query: "",
     status: "idle",
     limitHit: false,
     groups: [],
@@ -38,9 +43,10 @@ export function idleSearchModel(): SearchModel {
   };
 }
 
-export function beginSearch(searchId: string): SearchModel {
+export function beginSearch(searchId: string, query: string): SearchModel {
   return {
     searchId,
+    query,
     status: "searching",
     limitHit: false,
     groups: [],
@@ -80,6 +86,7 @@ export function applyBatch(model: SearchModel, batch: SearchResultsEvent): Searc
   }
   return {
     searchId: model.searchId,
+    query: model.query,
     status: batch.done ? "complete" : "searching",
     limitHit: model.limitHit || batch.limitHit,
     groups,

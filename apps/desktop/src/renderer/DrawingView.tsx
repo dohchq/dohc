@@ -22,12 +22,14 @@ import {
   parseExcalidrawDocument,
 } from "./excalidrawDocument";
 import {
-  AffordanceCard,
   EngineArtifactAssetsInvalidNotice,
   EngineMayHoldDocumentNotice,
+  OpenExternallyButton,
   ViewHeader,
   type FileSaveState,
 } from "./fileInspectorUi";
+import { TriangleAlert } from "lucide-react";
+import { EmptyState } from "./ui/controls";
 import { SkeletonRows } from "./ui/SkeletonRows";
 import { StateMark } from "./ui/StateMark";
 import type { SharedLocalDocument } from "./sharedLocalDocument";
@@ -343,10 +345,9 @@ export function DrawingView({
       {engine.opening ? (
         <SkeletonRows layout="panel" testId="view-drawing-opening" label="Loading drawing…" />
       ) : truncated && !engineMode ? (
-        <AffordanceCard
-          testId="view-drawing-truncated"
-          title="Drawing too large"
-          body="dohc cannot open a partial Excalidraw file."
+        <EmptyState
+          data-testid="view-drawing-truncated"
+          title="This drawing is too large for dohc to open."
         />
       ) : drawingReady ? (
         <div
@@ -370,12 +371,14 @@ export function DrawingView({
           </Suspense>
         </div>
       ) : (
-        <AffordanceCard
-          testId="view-drawing-error"
-          title="Couldn't open drawing"
-          body={document.error ?? "The drawing is invalid."}
-          openExternally={{ workspaceId, path }}
-        />
+        <EmptyState
+          data-testid="view-drawing-error"
+          icon={TriangleAlert}
+          tone="danger"
+          title={`dohc could not open this drawing. ${document.error ?? "The drawing is invalid."}`}
+        >
+          <OpenExternallyButton workspaceId={workspaceId} path={path} />
+        </EmptyState>
       )}
     </div>
   );

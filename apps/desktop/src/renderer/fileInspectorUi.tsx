@@ -8,7 +8,7 @@ import type { ComponentProps, ReactNode } from "react";
 import { bridge } from "./bridge";
 import type { EngineRemovalInProgress } from "./collab/useEngineDoc";
 import { DocumentMenu } from "./DocumentMenu";
-import { IconButton } from "./ui/controls";
+import { IconButton, SecondaryButton } from "./ui/controls";
 import { KindGlyph } from "./ui/KindGlyph";
 import type { SaveState } from "./useAutosavedTextDraft";
 
@@ -169,34 +169,20 @@ export function EngineArtifactAssetsInvalidNotice(props: {
   );
 }
 
-export function AffordanceCard(props: {
-  testId: string;
-  title: string;
-  body: string;
-  openExternally?: { workspaceId: string; path: string };
-}) {
+// The next step in a file view that cannot show its file: the system's app
+// for it.
+export function OpenExternallyButton(props: { workspaceId: string; path: string }) {
   return (
-    <div
-      data-testid={props.testId}
-      className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center"
+    <SecondaryButton
+      onClick={() =>
+        void bridge().openFileExternally({
+          workspaceId: props.workspaceId,
+          relativePath: props.path,
+        })
+      }
     >
-      <span className="text-sm text-ink">{props.title}</span>
-      <span className="max-w-md text-xs text-muted">{props.body}</span>
-      {props.openExternally ? (
-        <button
-          type="button"
-          onClick={() =>
-            void bridge().openFileExternally({
-              workspaceId: props.openExternally!.workspaceId,
-              relativePath: props.openExternally!.path,
-            })
-          }
-          className="rounded border border-line bg-panel-2 px-2.5 py-1 text-xs text-muted hover:text-ink"
-        >
-          Open externally
-        </button>
-      ) : null}
-    </div>
+      Open externally
+    </SecondaryButton>
   );
 }
 
