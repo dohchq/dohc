@@ -676,7 +676,7 @@ export function MarkdownView(props: {
       ? saveState
       : orphanedDrafts.length > 0
         ? ("recovery" as const)
-        : "saved";
+        : props.forceReadOnly ? "read-only" : "saved";
   // The engine branch has its own authoritative save state; the set-aside
   // draft still is not in the document it shows, so a settled engine must
   // not read "Saved" over an unresolved notice.
@@ -1908,7 +1908,9 @@ export function MarkdownView(props: {
               testId="markdown-save-state"
               truncate
               state={engine.readOnlyWhileEditing ? "read-only" : engineChipState}
-              shown={engine.readOnlyWhileEditing ? "read-only-transition" : engineChipState}
+              shown={engine.readOnlyWhileEditing
+                ? orphanedDrafts.length > 0 ? "read-only-transition" : "read-only"
+                : engineChipState}
               title={
                 (engineChipState === "deleted" ||
                   engineChipState === "object-changed") &&
