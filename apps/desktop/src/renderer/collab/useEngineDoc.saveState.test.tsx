@@ -1052,7 +1052,7 @@ it("host acknowledgement recovery sets aside a newer edit after the host saved a
   act(() => harness.emitNow("read-only", 0));
 
   expect(hook.result.current.readOnlyWhileEditing).toBe(true);
-  expect(drafts.result.current).toHaveLength(1);
+  await waitFor(() => expect(drafts.result.current).toHaveLength(1));
   await waitFor(() =>
     expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!!"]),
   );
@@ -1070,7 +1070,7 @@ it("host acknowledgement recovery keeps the draft when a stale host save arrives
   act(() => harness.emitNow("read-only", 0));
 
   expect(hook.result.current.readOnlyWhileEditing).toBe(true);
-  expect(drafts.result.current).toHaveLength(1);
+  await waitFor(() => expect(drafts.result.current).toHaveLength(1));
   await waitFor(() =>
     expect(drafts.result.current.map((draft) => draft.text)).toEqual(["seed!!"]),
   );
