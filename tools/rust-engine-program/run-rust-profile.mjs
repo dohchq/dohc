@@ -43,6 +43,7 @@ report.readings = [{ step: "start", state: tree() }];
 report.patch = patch();
 save();
 const cancellation = cancellationScope("Rust profiling");
+let scratchPrepared = false;
 try {
   await withBuildBudget(async env => {
     await cancellation.checkpoint();
@@ -56,6 +57,7 @@ try {
     report.environment = Object.fromEntries(Object.entries(env).filter(([key]) => /^(CARGO_(INCREMENTAL|BUILD_JOBS|TARGET_DIR|PROFILE_)|RUST_TEST_THREADS|NEXTEST_TEST_THREADS|DOHC_RUST_PROFILE)/.test(key)));
     mkdirSync(scratch, { recursive: true });
     writeFileSync(join(scratch, SCRATCH_SENTINEL), label);
+    scratchPrepared = true;
     const nativeStarted = Date.now();
     report.nativeProbe = { log: join(output, "native.log") };
     const probe = await run("cargo", ["rustc", "--locked", "-p", "dohc-engine-protocol", "--lib", "--profile", "check", "--", "--print", "cfg"], { env, log: report.nativeProbe.log, onSpawn: child => { report.nativeProbe.pid = child.pid; save(); } });
@@ -81,7 +83,7 @@ try {
   report.error = error.message;
   process.exitCode = 1;
 } finally {
-  if (existsSync(scratch)) {
+  if (scratchPrepared || existsSync(scratch)) {
     report.scratch = await inspectScratchRun(scratch);
     if (report.scratch.status !== "PASS") { report.verdict = "FAIL"; process.exitCode = 1; }
   }

@@ -79,8 +79,8 @@ Share-web inputs retain desktop preparation, desktop browser proofs, and the nat
 Combined site changes retain both renderer compatibility files and those proofs.
 Desktop process, storage, shared, and unclassified inputs retain the complete desktop suite, packaging tests, and proofs.
 Isolated renderer changes run their tracked test consumers and the site suite.
-Pure desktop Vitest consumers outside the renderer join that selection after their runtime dependencies pass the same safety checks.
-External tests with a Node environment or Node built-in dependencies retain broader selection.
+Pure desktop Vitest consumers outside the renderer join that selection when they declare jsdom or happy-dom and their runtime dependencies pass the same safety checks.
+External tests with undeclared or Node environments, or Node built-in dependencies, retain broader selection.
 The runner keeps persistence smoke and the Windows pixel gallery for those changes.
 Every focused renderer plan retains the onboarding proof and its Postgres setup.
 Unknown imports, native resources, uncovered sources, and other consumers outside that boundary retain broader selection.

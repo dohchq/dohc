@@ -765,12 +765,20 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const budget = resolveBuildBudget();
   const cargoRoot = values.root ?? budget?.root;
   const verificationRoot = values.root ?? process.env.DOHC_VERIFICATION_SLOT_ROOT ?? budget?.root;
+  let verificationSlots = 1;
+  let verificationConfigurationError = null;
+  try { verificationSlots = verificationLanes(); }
+  catch (error) { verificationConfigurationError = error.message; }
+  // Inspect any existing second lane even when this shell cannot admit one.
+  const inspectedVerificationSlots = verificationRoot && existsSync(join(verificationRoot, "verification-slot-2"))
+    ? Math.max(2, verificationSlots) : verificationSlots;
   const lanes = [
     ...(cargoRoot ? [buildQueueStatus({root: cargoRoot, slots: budget?.slots ?? 4})] : []),
     ...(verificationRoot ? [
-      buildQueueStatus({root: verificationRoot, kind: "verification-slot", slots: existsSync(join(verificationRoot, "verification-slot-2")) ? 2 : verificationLanes()}),
+      buildQueueStatus({root: verificationRoot, kind: "verification-slot", slots: inspectedVerificationSlots}),
       buildQueueStatus({root: verificationRoot, kind: "verification-light-slot", slots: 1}),
     ] : []),
   ];
-  console.log(JSON.stringify({cargoRoot: cargoRoot ?? null, verificationRoot: verificationRoot ?? null, lanes}, null, 2));
+  console.log(JSON.stringify({cargoRoot: cargoRoot ?? null, verificationRoot: verificationRoot ?? null,
+    verificationSlots: verificationConfigurationError ? null : verificationSlots, verificationConfigurationError, lanes}, null, 2));
 }

@@ -549,6 +549,41 @@ test("status CLI reads absent queues without creating or acquiring anything", t 
   assert.equal(existsSync(absent), false);
 });
 
+test("status CLI reports invalid configuration and preserves an existing second lane", t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const second = join(root, "verification-slot-2");
+  mkdirSync(second);
+  const owner = JSON.stringify({pid: process.pid, start: new Date().toISOString()});
+  writeFileSync(join(second, "owner.json"), owner);
+  const result = spawnSync(process.execPath, [new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).pathname.replace(/^\/(\w:)/u, "$1"), "--status"],
+    {encoding: "utf8", timeout: 5000, env: {...process.env, DOHC_BUILD_SLOT_ROOT: root,
+      DOHC_VERIFICATION_SLOT_ROOT: root, DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: ""}});
+  assert.equal(result.status, 0, result.stderr);
+  const status = JSON.parse(result.stdout);
+  assert.equal(status.verificationSlots, null);
+  assert.match(status.verificationConfigurationError, /isolated/);
+  assert.equal(status.lanes.find(lane => lane.kind === "verification-slot").owners[0].name, "verification-slot-2");
+  assert.equal(readFileSync(join(second, "owner.json"), "utf8"), owner);
+  assert.equal(existsSync(join(root, "verification-slot-1")), false);
+  assert.equal(existsSync(join(root, "verification-slot-queue")), false);
+});
+
+test("status CLI reports configured empty trial capacity without acquiring a lane", t => {
+  const root = slotRoot();
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const trial = join(root, "trial");
+  const result = spawnSync(process.execPath, [new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).pathname.replace(/^\/(\w:)/u, "$1"), "--status"],
+    {encoding: "utf8", timeout: 5000, env: {...process.env, DOHC_BUILD_SLOT_ROOT: root,
+      DOHC_VERIFICATION_SLOT_ROOT: trial, DOHC_VERIFICATION_LANES: "2", DOHC_VERIFICATION_TRIAL: "1"}});
+  assert.equal(result.status, 0, result.stderr);
+  const status = JSON.parse(result.stdout);
+  assert.equal(status.verificationSlots, 2);
+  assert.equal(status.verificationConfigurationError, null);
+  assert.equal(status.lanes.find(lane => lane.kind === "verification-slot").slots, 2);
+  assert.equal(existsSync(trial), false);
+});
+
 test("a bounded light gate completes while eighteen heavy waiters remain queued", async t => {
   const {root, start, message} = queueHarness(t);
   const holder = await acquireVerificationSlot({DOHC_BUILD_SLOT_ROOT: root});

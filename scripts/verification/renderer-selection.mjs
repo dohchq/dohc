@@ -258,7 +258,8 @@ export function focusedRendererSelection(changed, files, {baseFiles, graph, load
   for (const path of externalTests) {
     if (!desktopTest(path) || /\.e2e\.test\./u.test(path)) return null;
     const source = sources.get(path) ?? "";
-    if (/@vitest-environment\s+node\b/u.test(source)) return null;
+    if (!/@vitest-environment\s+(?:jsdom|happy-dom)\b/u.test(source)
+      || /@vitest-environment\s+node\b/u.test(source)) return null;
     const parsed = moduleReferences(path, source, parse);
     if (parsed.ambiguous || parsed.failed || !parsed.references.some(reference => reference.module
       && reference.imported && !reference.type && reference.value === "vitest")) return null;

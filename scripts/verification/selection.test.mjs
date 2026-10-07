@@ -648,7 +648,7 @@ test("indirect onboarding locators keep their proof without disabling focused re
 
 test("pure desktop Vitest coupling consumers join focused renderer tests", () => {
   const path = "apps/desktop/src/testPins.coupling.test.tsx";
-  const files = rendererFixture([{path, source: 'import {it} from "vitest"; import {Widget} from "./renderer/Widget";'}]);
+  const files = rendererFixture([{path, source: '// @vitest-environment jsdom\nimport {it} from "vitest"; import {Widget} from "./renderer/Widget";'}]);
   const plan = focusedRendererSelection([`${rendererPath}Widget.tsx`], files);
   assert.ok(plan);
   assert.ok(plan.testFiles["@dohc/desktop"].includes("src/testPins.coupling.test.tsx"));
@@ -738,6 +738,9 @@ test("every focused renderer plan retains onboarding and Postgres across indirec
 });
 
 test("external desktop tests retain broad selection for Node, native, process, and unknown consumers", () => {
+  const undeclared = rendererFixture([{path: "apps/desktop/src/coupling.test.tsx",
+    source: 'import {it} from "vitest"; import "./renderer/Widget";'}]);
+  assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], undeclared), null);
   for (const source of [
     'import "./renderer/Widget";',
     'import type {TestContext} from "vitest"; import "./renderer/Widget";',
@@ -754,14 +757,15 @@ test("external desktop tests retain broad selection for Node, native, process, a
     'import {it} from "vitest"; import "./missing"; import "./renderer/Widget";',
   ]) {
     const files = rendererFixture([
-      {path: "apps/desktop/src/coupling.test.tsx", source},
+      {path: "apps/desktop/src/coupling.test.tsx", source: source.startsWith("// @vitest-environment")
+        ? source : "// @vitest-environment jsdom\n" + source},
       {path: "apps/desktop/src/process/runtime.ts", source: "export const runtime = 1;"},
       {path: "apps/desktop/src/testing/storage.ts", source: 'import "node:fs";'},
     ]);
     assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], files), null, source);
   }
   const files = rendererFixture([{path: "apps/desktop/src/coupling.e2e.test.tsx",
-    source: 'import {it} from "vitest"; import "./renderer/Widget";'}]);
+    source: '// @vitest-environment jsdom\nimport {it} from "vitest"; import "./renderer/Widget";'}]);
   assert.equal(focusedRendererSelection([`${rendererPath}Widget.tsx`], files), null);
 });
 
@@ -811,7 +815,7 @@ test("real renderer selection activates for pure changes and rejects native edge
   assert.ok(plan, "The focused renderer path must remain reachable in this repository.");
   assert.ok(plan.testFiles["@dohc/desktop"].includes("src/renderer/workbench/quick-open-rank.test.ts"));
   assert.equal(plan.proofs.smoke, true);
-  assert.equal(plan.proofs.desktop, true, "Affected workspace shell consumers retain onboarding.");
+  assert.equal(plan.proofs.desktop, true, "Every focused renderer plan retains onboarding.");
   assert.equal(plan.needs.postgres, true);
   for (const component of ["CloudLogin.tsx", "JoinSyncedWorkspace.tsx", "WorkspaceManager.tsx"]) {
     const componentPlan = focusedRendererSelection([`${rendererPath}${component}`], files, {graph});

@@ -58,7 +58,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
   const siteFiles = ["src/renderer/tokens.test.ts", "src/renderer/workbench/ChatLane.test.tsx", "src/renderer/workbench/ProductDemo.test.tsx"];
   const serviceFiles = ["src/workspaces/twoDaemonSync.e2e.test.ts"];
   const cases = [];
-  for (const [mode, job, fault, changed = "pnpm-lock.yaml", full = false, onboarding = false] of [
+  for (const [mode, job, fault, changed = "pnpm-lock.yaml", full = false] of [
     ["pr", null, null], ["pr", "rust", null], ["pr", "js", null],
     ["smoke", null, null], ["e2e", null, null],
     ["pr", null, "rust-verdict"], ["pr", "rust", "cargo-version"], ["pr", null, "source"],
@@ -73,15 +73,14 @@ test("verification selects packages and proofs and prepares before parallel jobs
     ["pr", null, null, "services/workspace-api/src/index.ts"],
     ["pr", null, null, "apps/site/src/index.ts"],
     ["pr", null, null, "apps/desktop/src/renderer/Widget.tsx"],
-    ["pr", null, null, "apps/desktop/src/renderer/Widget.tsx", false, true],
-    ["pr", "js", "onboarding-missing", "apps/desktop/src/renderer/Widget.tsx", false, true],
+    ["pr", "js", "onboarding-missing", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", "js", "desktop-skipped", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", "js", "smoke-missing", "apps/desktop/src/renderer/Widget.tsx"],
     ["pr", null, null, "apps/desktop/src/renderer/Widget.tsx", true],
     ...(process.platform === "win32" ? [["pr", "js", "gallery-missing", "apps/desktop/src/renderer/Widget.tsx"]] : []),
     ["pr", null, null, null, true], ["pr", "js", null, null, true], ["pr", "rust", null, null, true],
     ["pr", "js", null, null],
-  ]) cases.push(t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : "", onboarding ? "onboarding" : ""].filter(Boolean).join(" "), async (context) => {
+  ]) cases.push(t.test([mode, job, fault, changed ?? "empty diff", full ? "full" : ""].filter(Boolean).join(" "), async (context) => {
     const rust = mode === "pr" && job !== "js" && (full || job === "rust" || changed === "pnpm-lock.yaml");
     const js = mode === "pr" && job !== "rust";
     const siteOnly = changed === "apps/site/src/index.ts" && !full;
@@ -148,7 +147,7 @@ test("verification selects packages and proofs and prepares before parallel jobs
       put(".gitignore", readFileSync(join(root, ".gitignore"), "utf8") + ".agent-artifacts/\napps/desktop/.env.local\n");
       put("apps/desktop/package.json", '{"name":"@dohc/desktop","scripts":{"test":"unused","test:unit":"vitest run","test:scripts":"scripts","test:scripts:isolated":"isolated","test:scripts:runtime":"runtime"}}');
       for (const file of [...siteFiles, ...serviceFiles]) put(`apps/desktop/${file}`, "// fixture compatibility test\n");
-      put("apps/desktop/src/renderer/Widget.tsx", onboarding ? 'export const value = () => <button data-testid="onboarding-control" />;\n' : "export const value = 1;\n");
+      put("apps/desktop/src/renderer/Widget.tsx", "export const value = 1;\n");
       put("apps/desktop/src/renderer/Widget.test.tsx", 'import "./Widget.js";\n');
       put("apps/desktop/e2e/self-host-onboarding.spec.ts", 'page.getByTestId("onboarding-control");\n');
       for (const name of ["fixture", "mcp", "share-web", "site", "unrelated", "workspace-api"]) {

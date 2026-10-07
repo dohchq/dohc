@@ -84,7 +84,7 @@ try {
   const failure = lane?.signal.reason ?? error;
   let measurements = {};
   try { measurements = JSON.parse(await readFile(settings.resultPath, 'utf8')); }
-  catch (readError) { if (readError.code !== 'ENOENT') throw readError; }
+  catch (readError) { if (!(readError instanceof SyntaxError) && readError.code !== 'ENOENT') throw readError; }
   await writeFile(settings.resultPath, JSON.stringify({ ...measurements, status: 'failed', startedAt, settings,
     error: String(failure), hostContext: lane?.evidence ?? error.hostContext }, null, 2) + '\n');
   throw failure;
