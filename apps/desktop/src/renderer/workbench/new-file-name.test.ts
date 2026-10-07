@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { withMarkdownDefault } from "./new-file-name";
+import { withMarkdownDefault, withRenameDefault } from "./new-file-name";
 
 describe("withMarkdownDefault", () => {
   it("appends .md to a plain name", () => {
@@ -51,5 +51,22 @@ describe("withMarkdownDefault", () => {
     expect(withMarkdownDefault("/")).toBe("/");
     expect(withMarkdownDefault(".")).toBe(".");
     expect(withMarkdownDefault("..")).toBe("..");
+  });
+});
+
+describe("withRenameDefault", () => {
+  it("keeps the Markdown default for a file with an extension", () => {
+    expect(withRenameDefault("notes.md", "notes")).toBe("notes.md");
+    expect(withRenameDefault("hello.m", "hello")).toBe("hello.md");
+    expect(withRenameDefault("docs/plan.txt", "docs/plan")).toBe("docs/plan.md");
+    expect(withRenameDefault("hello.m", "hello.txt")).toBe("hello.txt");
+  });
+
+  it("takes the typed name for a file without an extension", () => {
+    expect(withRenameDefault("LICENSE", "LICENSE")).toBe("LICENSE");
+    expect(withRenameDefault("LICENSE", "NOTICE")).toBe("NOTICE");
+    expect(withRenameDefault("docs/Makefile", "docs/Rakefile")).toBe("docs/Rakefile");
+    expect(withRenameDefault(".env", "env")).toBe("env");
+    expect(withRenameDefault("LICENSE", "LICENSE.txt")).toBe("LICENSE.txt");
   });
 });

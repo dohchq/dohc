@@ -198,6 +198,16 @@ describe("Explorer kind glyphs", () => {
     fireEvent.keyDown(rename, { key: "Escape" });
   });
 
+  it("keeps a file without an extension a plain file while renaming", async () => {
+    render(<Explorer {...explorerProps({ files: [file("LICENSE")] })} />);
+    fireEvent.click(treeRow("LICENSE"));
+    fireEvent.keyDown(treeRow("LICENSE"), { key: "F2" });
+    const rename = await screen.findByTestId("tree-edit-input");
+    fireEvent.change(rename, { target: { value: "NOTICE" } });
+    expect(editRowGlyph().classList.contains("lucide-file")).toBe(true);
+    fireEvent.keyDown(rename, { key: "Escape" });
+  });
+
   it.each([
     // A `.db` the listing does not report as a database stays a plain file.
     ["cache.db", "file", "lucide-file"],
