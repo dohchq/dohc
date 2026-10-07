@@ -78,6 +78,14 @@ export interface OperationBoundary<Event, WorkspaceOperation> {
   ): Promise<Result>;
 }
 
+export type OperationCompletions<Table extends OperationTable, Event> = {
+  readonly [Name in keyof Table]?: (
+    input: z.output<Table[Name]["payload"]>,
+    result: Reply<Table[Name]>,
+    event: Event,
+  ) => void;
+};
+
 type LooseHandler<Event, WorkspaceOperation> = (
   input: unknown,
   context: { readonly event: Event; readonly operation?: WorkspaceOperation },
@@ -104,25 +112,33 @@ export function registerOperations<
   boundary: OperationBoundary<Event, WorkspaceOperation>,
   table: Table,
   handlers: OperationHandlers<Table, Event, WorkspaceOperation>,
+  completions: OperationCompletions<Table, Event> = {},
 ): void {
   const bodies = handlers as Record<string, LooseHandler<Event, WorkspaceOperation>>;
+  const observers = completions as Record<string, ((input: unknown, result: unknown, event: Event) => void) | undefined>;
   for (const [name, definition] of Object.entries<OperationDefinition>(table)) {
     const handler = bodies[name]!;
     boundary.handle(definition.channel, async (event, payload) => {
       boundary.assertTrustedSender(event);
+      let input: unknown;
       let result: unknown;
       if (definition.guard === "trusted-sender") {
-        result = await handler(definition.payload.parse(payload), { event });
+        input = definition.payload.parse(payload);
+        result = await handler(input, { event });
       } else {
-        const input = definition.payload.parse(payload);
+        const workspaceInput = definition.payload.parse(payload);
+        input = workspaceInput;
         result = await boundary.withActiveWorkspace(
           event,
-          input.workspaceId,
+          workspaceInput.workspaceId,
           definition.inactiveMessage,
           async (operation) => await handler(input, { event, operation }),
         );
       }
-      return definition.result?.parse(result);
+      const reply = definition.result?.parse(result);
+      // Measurement cannot change the reply or bypass admission and validation.
+      try { observers[name]?.(input, reply, event); } catch { /* Keep the operation's result. */ }
+      return reply;
     });
   }
 }

@@ -8,15 +8,19 @@ export function usageDecisionFixture(): UsageSnapshot {
   const counts: UsageCount[] = [];
   for (const { capabilityId } of USAGE_DECISION.candidates) {
     for (const door of ["renderer", "cli", "mcp"] as const) {
+      // Comparison runs on mount and refresh; its placement is unanswered.
+      if (capabilityId === "version.compare") {
+        pairs.push({ capabilityId, door, status: "uncovered" });
+        continue;
+      }
       const available = capabilityId === "file.kept.save"
         || capabilityId === "chat.export" && door === "cli"
-        || capabilityId !== "chat.export" && door === "renderer";
+        || capabilityId === "version.try" && door === "renderer";
       pairs.push({ capabilityId, door, status: available ? "covered" : "unavailable" });
     }
   }
   for (const [index, day] of days.entries()) {
     if (index % 6 === 0) counts.push({ day, capabilityId: "chat.export", door: "cli", count: 2 });
-    if (index === 20) counts.push({ day, capabilityId: "version.compare", door: "renderer", count: 1 });
     if (index % 3 === 0) counts.push({ day, capabilityId: "file.kept.save", door: "mcp", count: 2 });
   }
   return UsageSnapshot.parse({ version: 1, enabled: true, cleanExit: true,
