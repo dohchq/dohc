@@ -735,10 +735,10 @@ fn observed_owner_settlement_scenario(fields: OwnerSettlementFields) {
         .enumerate()
     {
         let before = doc.encode_state_vector();
-        if index == 0 {
-            if let Some(record_id) = &record_id {
-                doc.frontmatter_set("id", record_id).unwrap();
-            }
+        if index == 0
+            && let Some(record_id) = &record_id
+        {
+            doc.frontmatter_set("id", record_id).unwrap();
         }
         if with_collection && (index == 0 || undo_field || field_values.is_some()) {
             doc.frontmatter_set_value(
