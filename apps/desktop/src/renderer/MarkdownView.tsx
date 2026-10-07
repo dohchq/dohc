@@ -62,7 +62,7 @@ import { blockTargetForLine } from "./editor/intraBlock";
 import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
-import { FrontmatterAsWritten, useFileText } from "./FrontmatterAsWritten";
+import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 import { captureOrphanedDraft, useOrphanedDrafts } from "./orphanedDrafts";
 import { BacklinksPanel } from "./BacklinksPanel";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
@@ -299,13 +299,6 @@ export function MarkdownView(props: {
   } | null>(null);
 
   const engine = props.engine;
-  const fileText = useFileText({
-    workspaceId: props.workspaceId,
-    path: props.path,
-    body: props.body,
-    ydoc: engine.doc,
-    saveState: engine.saveState,
-  });
   useEffect(() => {
     if (!engine.available && pendingMarkdownOwner !== null) {
       setSaveState(SAVING);
@@ -2012,7 +2005,14 @@ export function MarkdownView(props: {
                 <LazyPropertiesPanel ydoc={engine.doc} fieldMarks={fieldMarks} />
               </Suspense>
             )}
-            <FrontmatterAsWritten markdown={fileText} propertiesShown={!readOnly} />
+            <LiveFrontmatterAsWritten
+              workspaceId={props.workspaceId}
+              path={props.path}
+              body={props.body}
+              ydoc={engine.doc}
+              saveState={engine.saveState}
+              propertiesShown={!readOnly}
+            />
           </div>
           <EditorErrorBoundary
             resetKey={`${props.workspaceId}:${props.path}:${props.reopenKey}:engine`}

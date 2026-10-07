@@ -5,7 +5,8 @@ import { patchFrontmatter } from "@dohc/ydoc-projection/frontmatter";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { FrontmatterAsWritten, useFileText } from "./FrontmatterAsWritten";
+import { Profiler } from "react";
+import { FrontmatterAsWritten, LiveFrontmatterAsWritten } from "./FrontmatterAsWritten";
 
 const bridgeMock = vi.hoisted(() => ({
   readWorkspaceText: vi.fn(),
@@ -41,10 +42,32 @@ function renameBudget(doc: Y.Doc): void {
 // Every text the section rendered, so a render of the document's own text fails.
 let rendered: string[] = [];
 
-function Live(props: { path?: string; body: string; ydoc: Y.Doc | null; saveState: SaveState }) {
-  const text = useFileText({ workspaceId: "ws", path: props.path ?? "trip.md", body: props.body, ydoc: props.ydoc, saveState: props.saveState });
-  rendered.push(text);
-  return <FrontmatterAsWritten markdown={text} propertiesShown />;
+function Live(props: { path?: string; body: string; ydoc: Y.Doc; saveState: SaveState }) {
+  return (
+    <Profiler id="as-written" onRender={() => rendered.push(shown() ?? "")}>
+      <LiveFrontmatterAsWritten
+        workspaceId="ws"
+        path={props.path ?? "trip.md"}
+        body={props.body}
+        ydoc={props.ydoc}
+        saveState={props.saveState}
+        propertiesShown
+      />
+    </Profiler>
+  );
+}
+
+function activity(paths: string[]): void {
+  act(() => bridgeMock.activity.forEach((listener) => listener({ workspaceId: "ws", paths })));
+}
+
+function expand(): void {
+  const details = screen.getByTestId("frontmatter-as-written").querySelector("details");
+  if (!details) throw new Error("no details");
+  act(() => {
+    details.open = true;
+    details.dispatchEvent(new Event("toggle"));
+  });
 }
 
 // Let a mocked file read answer and its result render.
@@ -285,6 +308,54 @@ describe("useFileText", () => {
     view.rerender(<Live body={BUDGET_FILE} ydoc={doc} saveState={SAVED_HERE} />);
     await settle();
     expect(shown()).toBe("---\n# Monthly\ncost: 200 # euros\n---");
+  });
+
+  it("reads nothing while the section is closed, then reads once when it opens", async () => {
+    const canonical = "---\nstatus: draft\n---\n\nBody";
+    const doc = markdownToYDoc(canonical);
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead("---\nstatus: ready\n---\n\nBody"));
+    const view = render(<Live body={canonical} ydoc={doc} saveState={SAVED_HERE} />);
+    expect(opened()).toBe(false);
+    act(() => patchFrontmatter(doc, new Map([["status", "ready"]])));
+    view.rerender(<Live body={canonical} ydoc={doc} saveState={SAVING} />);
+    view.rerender(<Live body={canonical} ydoc={doc} saveState={SAVED_HERE} />);
+    activity(["trip.md"]);
+    view.rerender(<Live body={canonical} ydoc={doc} saveState={saveProblem("changed-on-disk", "The file changed on disk.")} />);
+    await settle();
+    expect(bridgeMock.readWorkspaceText).not.toHaveBeenCalled();
+    expect(shown()).toBe("---\nstatus: draft\n---");
+
+    expand();
+    await settle();
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
+    expect(shown()).toBe("---\nstatus: ready\n---");
+    expect(opened()).toBe(true);
+  });
+
+  it("reads once for activity that arrives before its read starts, and owes one more while it is out", async () => {
+    const doc = markdownToYDoc(COST_FILE);
+    bridgeMock.readWorkspaceText.mockResolvedValue(fileRead(COST_FILE));
+    render(<Live body={COST_FILE} ydoc={doc} saveState={UNKNOWN_SAVE_STATE} />);
+    act(() => bridgeMock.activity.forEach((listener) => {
+      listener({ workspaceId: "ws", paths: ["trip.md"] });
+      listener({ workspaceId: "ws", paths: ["trip.md"] });
+    }));
+    await settle();
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(1);
+
+    let answer: (text: string) => void = () => undefined;
+    bridgeMock.readWorkspaceText.mockReturnValueOnce(new Promise((resolve) => {
+      answer = (text) => resolve(fileRead(text));
+    }));
+    activity(["trip.md"]);
+    await settle();
+    activity(["trip.md"]);
+    activity(["trip.md"]);
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(2);
+    answer(COST_FILE);
+    await settle();
+    await settle();
+    expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3);
   });
 
   it("never shows a slow read on another document, or an older read over a newer one", async () => {
