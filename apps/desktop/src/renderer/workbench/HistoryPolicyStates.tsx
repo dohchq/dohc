@@ -1,4 +1,4 @@
-import { EyeOff, TriangleAlert } from "lucide-react";
+import { EyeOff, TriangleAlert, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { HistoryPolicyUnreadableResult, WorkspacePolicyPath } from "../../ipc/bridgeContract";
 import { errorDetails } from "../shell/copyDetails";
@@ -27,14 +27,18 @@ export function restoreRulesUnreadableWords(unreadable: readonly WorkspacePolicy
   return `dohc could not restore this file because it can't read ${what}. ${fix}, then try again.`;
 }
 
-// A side panel or a whole tab: the words keep a readable width in both.
-function PolicyState(props: { testId: string; icon: ReactNode; words: string; children: ReactNode }) {
+// A side panel or a whole tab; EmptyState keeps the words a readable width.
+function PolicyState(props: {
+  testId: string;
+  icon: LucideIcon;
+  tone?: "danger";
+  words: string;
+  children: ReactNode;
+}) {
   return (
-    <div data-testid={props.testId} className="mx-auto flex min-h-0 w-full max-w-md flex-1 flex-col">
-      <EmptyState icon={props.icon} title={props.words}>
-        <div className="flex items-center gap-1">{props.children}</div>
-      </EmptyState>
-    </div>
+    <EmptyState data-testid={props.testId} icon={props.icon} tone={props.tone} title={props.words}>
+      <div className="flex items-center gap-1">{props.children}</div>
+    </EmptyState>
   );
 }
 
@@ -49,7 +53,8 @@ export function HistoryHiddenState(props: {
   return (
     <PolicyState
       testId={props.testId}
-      icon={<TriangleAlert size={20} strokeWidth={1.9} aria-hidden className="text-danger" />}
+      icon={TriangleAlert}
+      tone="danger"
       words={words}
     >
       <SecondaryButton onClick={props.onRetry}>Try again</SecondaryButton>
@@ -70,7 +75,7 @@ export function HistoryUntrackedState(props: { onRetry: () => void; testId: stri
   return (
     <PolicyState
       testId={props.testId}
-      icon={<EyeOff size={20} strokeWidth={1.9} aria-hidden className="text-subtle" />}
+      icon={EyeOff}
       words="History no longer tracks this file, so this change is hidden. To show it, track the file in .dohc/files.toml."
     >
       <SecondaryButton onClick={props.onRetry}>Try again</SecondaryButton>

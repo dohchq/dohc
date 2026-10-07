@@ -55,7 +55,7 @@ const EXPORT_STYLE_CSS = `
     --accent: #2d342e;
     --success: #38684e;
     --warning: #8a6420;
-    --danger: #a6402c;
+    --danger: #a43e2a;
     --match: #326fce;
   }
   @page { margin: 20mm 18mm; }

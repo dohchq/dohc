@@ -132,8 +132,6 @@ export const documentEditTextSchema = z
   .refine((value) => fitsUtf8Bytes(value, MAX_DOCUMENT_EDIT_BYTES), {
     message: "Document edit text is at most 256 KiB as UTF-8.",
   });
-export const MAX_COMMENT_BODY_BYTES = 64 * 1024;
-export const commentBodySchema = z.string().refine((value) => fitsUtf8Bytes(value, MAX_COMMENT_BODY_BYTES));
 // A name the calling agent gives itself, recorded as the author of its edits.
 // A slash is refused so no name can pass for an automation's id.
 export const documentAgentNameSchema = z
