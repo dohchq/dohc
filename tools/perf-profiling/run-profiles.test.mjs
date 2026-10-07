@@ -62,7 +62,7 @@ test("relay profiling preserves interruption evidence with missing or incomplete
 });
 
 test("Rust profiling inspects every prepared scratch root without launching Cargo", async t => {
-  for (const fault of ["none", "removed", "preflight"]) await t.test(fault, async context => {
+  for (const fault of ["none", "removed", "preflight", "context-unavailable"]) await t.test(fault, async context => {
     const {root, put} = await commandFixture(context);
     await put("tools/rust-engine-program/run-rust-profile.mjs", await readFile(new URL("../rust-engine-program/run-rust-profile.mjs", import.meta.url)));
     await put("tools/rust-engine-program/scratch-leak-report.mjs", await readFile(new URL("../rust-engine-program/scratch-leak-report.mjs", import.meta.url)));
@@ -71,6 +71,10 @@ test("Rust profiling inspects every prepared scratch root without launching Carg
     await put("scripts/verification/cancellation.mjs", "export const cancellationScope=()=>({checkpoint:async()=>{},dispose:async()=>null});");
     await put("tools/rust-engine-program/tree-provenance.mjs", "export const readTreeState=()=>({});export const classifyTreeProvenance=()=>({status:'PASS'});");
     await put("tools/rust-engine-program/native-target.mjs", "export const verifyNativeTarget=()=>({ok:true});");
+    await put("tools/perf-profiling/admission.mjs", `export function profilingHostContext(){
+      if(${JSON.stringify(fault)}==='context-unavailable')throw Error('fixture queue unreadable');
+      return {at:new Date().toISOString(),lanes:[{kind:'build-slot',owners:[{pid:process.pid}],
+        waiters:[{pid:1,purpose:'fixture contention'}]}]};}`);
     await put("scripts/verification/process.mjs", `
       import {existsSync} from 'node:fs';
       import {rm} from 'node:fs/promises';
@@ -86,16 +90,26 @@ test("Rust profiling inspects every prepared scratch root without launching Carg
     `);
     const result = spawnSync(process.execPath, [join(root, "tools/rust-engine-program/run-rust-profile.mjs"),
       "fixture", "--", "-p", "fixture-package"], {cwd: root, encoding: "utf8", timeout: 10000});
-    assert.equal(result.status, fault === "none" ? 0 : 1, result.stderr);
+    const pass = ["none", "context-unavailable"].includes(fault);
+    assert.equal(result.status, pass ? 0 : 1, result.stderr);
     const receiptPath = result.stdout.match(/separately: (.+result\.json)/u)?.[1];
     assert.ok(receiptPath, result.stdout);
     const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
-    assert.equal(receipt.verdict, fault === "none" ? "PASS" : "FAIL");
+    assert.equal(receipt.verdict, pass ? "PASS" : "FAIL");
+    assert.match(receipt.hostContext.scope, /does not certify an idle host/);
+    assert.deepEqual(receipt.hostContext.observations.map(reading => reading.phase), fault === "preflight"
+      ? ["before-admission", "finished"] : ["before-admission", "admitted", "tests-start", "tests-finished", "finished"]);
+    for (const reading of receipt.hostContext.observations) {
+      if (fault === "context-unavailable") {
+        assert.match(reading.error, /fixture queue unreadable/);
+        assert.equal(reading.lanes, null);
+      } else assert.equal(reading.lanes[0].waiters[0].purpose, "fixture contention");
+    }
     if (fault === "preflight") {
       assert.match(receipt.error, /fixture admission denied/);
       assert.equal(receipt.scratch, undefined);
     } else {
-      assert.equal(receipt.scratch.status, fault === "none" ? "PASS" : "FAIL");
+      assert.equal(receipt.scratch.status, pass ? "PASS" : "FAIL");
       if (fault === "removed") assert.match(receipt.scratch.reason, /does not exist/);
     }
   });

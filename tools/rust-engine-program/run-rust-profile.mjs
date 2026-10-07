@@ -10,6 +10,7 @@ import { git, repoRoot, run } from "../../scripts/verification/process.mjs";
 import { classifyTreeProvenance, readTreeState } from "./tree-provenance.mjs";
 import { verifyNativeTarget } from "./native-target.mjs";
 import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
+import { profilingHostContext } from "../perf-profiling/admission.mjs";
 
 const args = process.argv.slice(2);
 const separator = args.indexOf("--");
@@ -32,6 +33,13 @@ const output = join(repoRoot, ".agent-artifacts/rust-profile", `${new Date().toI
 mkdirSync(output, { recursive: true });
 const scratch = join(tmpdir(), "dohc-test-scratch", `rust-profile-${process.pid}-${randomBytes(8).toString("hex")}`);
 const report = { kind: "focused-rust-profile", gateEvidence: false, label, root: repoRoot, pid: process.pid, target: join(repoRoot, "target"), selection, output, steps: [], verdict: "RUNNING" };
+report.hostContext = {scope: "Registered queue work at phase boundaries; does not certify an idle host.", observations: []};
+function observeHost(phase, env = process.env) {
+  let reading;
+  try { reading = profilingHostContext(env); }
+  catch (error) { reading = {at: new Date().toISOString(), error: String(error), lanes: null}; }
+  report.hostContext.observations.push({phase, ...reading});
+}
 const save = () => writeFileSync(join(output, "result.json"), JSON.stringify(report, null, 2) + "\n");
 function tree() {
   return readTreeState(command => {
@@ -45,6 +53,7 @@ save();
 const cancellation = cancellationScope("Rust profiling");
 let scratchPrepared = false;
 try {
+  observeHost("before-admission");
   await withBuildBudget(async env => {
     await cancellation.checkpoint();
     env.CARGO_INCREMENTAL = "0";
@@ -55,6 +64,7 @@ try {
     env.DOHC_TEST_SCRATCH_ROOT = scratch;
     env.DOHC_RUST_PROFILE = "1";
     report.environment = Object.fromEntries(Object.entries(env).filter(([key]) => /^(CARGO_(INCREMENTAL|BUILD_JOBS|TARGET_DIR|PROFILE_)|RUST_TEST_THREADS|NEXTEST_TEST_THREADS|DOHC_RUST_PROFILE)/.test(key)));
+    observeHost("admitted", env);
     mkdirSync(scratch, { recursive: true });
     writeFileSync(join(scratch, SCRATCH_SENTINEL), label);
     scratchPrepared = true;
@@ -66,13 +76,14 @@ try {
     if (!report.native.ok) throw new Error(report.native.reason);
     report.readings.push({ step: "native", state: tree() });
     save();
+    observeHost("tests-start", env);
     const started = Date.now();
     const row = { command: "cargo", args: ["nextest", "run", "--locked", "--no-fail-fast", "--success-output", "immediate", ...selection], log: join(output, "tests.log") };
     report.steps.push(row); save();
     try {
       await run(row.command, row.args, { env, log: row.log, onSpawn: child => { row.pid = child.pid; save(); } });
       row.verdict = "PASS";
-    } finally { row.seconds = (Date.now() - started) / 1000; save(); }
+    } finally { row.seconds = (Date.now() - started) / 1000; observeHost("tests-finished", env); save(); }
     report.readings.push({ step: "tests", state: tree() });
     report.provenance = classifyTreeProvenance(report.readings);
     if (report.provenance.status !== "PASS" || patch() !== report.patch) throw new Error("Sources changed during profiling.");
@@ -83,6 +94,7 @@ try {
   report.error = error.message;
   process.exitCode = 1;
 } finally {
+  observeHost("finished");
   if (scratchPrepared || existsSync(scratch)) {
     report.scratch = await inspectScratchRun(scratch);
     if (report.scratch.status !== "PASS") { report.verdict = "FAIL"; process.exitCode = 1; }

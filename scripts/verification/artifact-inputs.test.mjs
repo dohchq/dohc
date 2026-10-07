@@ -154,17 +154,20 @@ test("receipts cover new configuration, manifests, lockfiles, Cargo and vendor i
   } finally { childProcess.execFileSync = exec; syncBuiltinESMExports(); }
 });
 
-test("preparation reuses artifacts after a verification-only edit", t => {
-  const root = mkdtempSync(join(tmpdir(), "dohc-prepare-artifact-"));
-  t.after(() => rmSync(root, {recursive: true, force: true}));
-  const prepare = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
-  const first = prepare();
-  assert.equal(first.status, 0, first.stderr);
-  writeFileSync(join(root, "scripts/verification/extra.test.mjs"), "new test");
-  const second = prepare();
-  assert.equal(second.status, 0, second.stderr);
-  const builds = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse).filter(call => call.command === "cargo" || call.args.at(-1) === "build");
-  assert.equal(builds.length, 3);
+test("preparation reuses artifacts after a verification-only edit", async t => {
+  for (const platform of ["linux", "darwin", "win32"]) await t.test(platform, context => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-prepare-artifact-"));
+    context.after(() => rmSync(root, {recursive: true, force: true}));
+    const prepare = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+    const first = prepare({platform});
+    assert.equal(first.status, 0, first.stderr);
+    writeFileSync(join(root, "scripts/verification/extra.test.mjs"), "new test");
+    const second = prepare({platform});
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(JSON.parse(second.stdout.trim().split("\n").at(-1)).desktopPrepared, true);
+    const builds = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse).filter(call => call.command === "cargo" || call.args.at(-1) === "build");
+    assert.equal(builds.length, 3);
+  });
 });
 
 test("configured compiler bytes remain production inputs at the same path", t => {
