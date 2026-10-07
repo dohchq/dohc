@@ -4,6 +4,8 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
+import { Slice } from "@tiptap/pm/model";
+import { TextSelection } from "@tiptap/pm/state";
 import {
   CLOSED_SLASH_COMMAND_STATE,
   makeSlashCommandPlugin,
@@ -229,6 +231,32 @@ describe("Escape on the slash menu", () => {
     expect(stateRef.current.open).toBe(false);
     editor.commands.setTextSelection(6);
     expect(stateRef.current).toMatchObject({ open: true, from: 1, query: "head" });
+    editor.destroy();
+  });
+
+  it("stays closed through a collaborator's edit above it", () => {
+    const { editor, stateRef, press } = makeSlashEditor();
+    editor.commands.setContent("<p>Intro</p><p>/he</p>");
+    editor.commands.setTextSelection(11);
+    expect(stateRef.current).toMatchObject({ open: true, from: 8 });
+    press("Escape");
+
+    // As y-tiptap applies a remote edit: replace the whole document, then
+    // restore the caret from its relative position.
+    const { state } = editor.view;
+    const next = state.schema.nodeFromJSON({
+      type: "doc",
+      content: [
+        { type: "paragraph", content: [{ type: "text", text: "Intro, edited" }] },
+        { type: "paragraph", content: [{ type: "text", text: "/he" }] },
+      ],
+    });
+    const tr = state.tr.replace(0, state.doc.content.size, new Slice(next.content, 0, 0));
+    editor.view.dispatch(tr.setSelection(TextSelection.create(tr.doc, 19)));
+    expect(stateRef.current.open).toBe(false);
+
+    editor.commands.insertContent("a");
+    expect(stateRef.current.open).toBe(false);
     editor.destroy();
   });
 });

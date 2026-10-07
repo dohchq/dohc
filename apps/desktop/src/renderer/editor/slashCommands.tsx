@@ -337,9 +337,17 @@ export function makeSlashCommandPlugin({
     // that trigger; leaving it and coming back, or a new "/", opens the menu.
     state: {
       init: () => null,
-      apply(tr, dismissed, _oldState, state) {
-        const meta: number | undefined = tr.getMeta(slashCommandKey);
-        const from = meta ?? (dismissed === null ? null : tr.mapping.map(dismissed));
+      apply(tr, dismissed, oldState, state) {
+        let from: number | null = tr.getMeta(slashCommandKey) ?? null;
+        if (from === null && dismissed !== null) {
+          // Y.js applies a remote edit by replacing the whole document, which
+          // maps the "/" away. It restores the caret, so the "/" keeps its
+          // distance before the caret.
+          const mapped = tr.mapping.mapResult(dismissed);
+          from = mapped.deleted
+            ? state.selection.from - (oldState.selection.from - dismissed)
+            : mapped.pos;
+        }
         return from !== null && findSlashTrigger(state)?.from === from ? from : null;
       },
     },
