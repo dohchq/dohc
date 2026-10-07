@@ -8,6 +8,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { desktopMetadata } from "../desktopAction";
 import { IconButton } from "./controls";
 import { useDismiss } from "./useDismiss";
 
@@ -99,7 +100,12 @@ export const MENU_SHORTCUT = "shrink-0 rounded border border-line bg-bg px-1 fon
  * front of the person labels it: ⌫ on macOS, where that key is Backspace,
  * and Del elsewhere. `keys` is the row's aria-keyshortcuts.
  */
-export function deleteShortcut(platform = window.dohcDesktop?.platform): { label: string; keys: string } {
+export function deleteShortcut(platform?: NodeJS.Platform): { label: string; keys: string } {
+  if (platform === undefined) {
+    try { platform = desktopMetadata().platform; } catch {
+      // Menus also run without the desktop bridge, on the site and in tests.
+    }
+  }
   return platform === "darwin" ? { label: "⌫", keys: "Backspace" } : { label: "Del", keys: "Delete" };
 }
 

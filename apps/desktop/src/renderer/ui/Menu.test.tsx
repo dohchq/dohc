@@ -505,6 +505,19 @@ describe("menuEnterFrom", () => {
 });
 
 describe("deleteShortcut", () => {
+  it("uses desktop metadata by default and keeps Del when the bridge is absent", () => {
+    const original = window.dohcDesktop;
+    try {
+      Object.defineProperty(window, "dohcDesktop", { configurable: true, writable: true, value: undefined });
+      expect(deleteShortcut()).toEqual({ label: "Del", keys: "Delete" });
+      Object.defineProperty(window, "dohcDesktop", { configurable: true, writable: true, value: { platform: "darwin" } });
+      expect(deleteShortcut()).toEqual({ label: "⌫", keys: "Backspace" });
+      expect(deleteShortcut("win32")).toEqual({ label: "Del", keys: "Delete" });
+    } finally {
+      Object.defineProperty(window, "dohcDesktop", { configurable: true, writable: true, value: original });
+    }
+  });
+
   it("labels the key as the keyboard does: ⌫ on macOS, Del elsewhere", () => {
     expect(deleteShortcut("darwin")).toEqual({ label: "⌫", keys: "Backspace" });
     expect(deleteShortcut("win32")).toEqual({ label: "Del", keys: "Delete" });

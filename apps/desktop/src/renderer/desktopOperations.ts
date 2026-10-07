@@ -210,7 +210,6 @@ export const desktopMembers = {
   getWorkspaceSettings: { kind: "read" },
   setWorkspaceSettings: { kind: "command" },
   resetWorkspaceSettings: { kind: "command" },
-  writeClipboardText: { kind: "command" },
   setTitlebarTheme: { kind: "command" },
   onUserSettingsChanged: { kind: "event" },
   stepWindowZoom: { kind: "command" },
