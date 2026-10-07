@@ -105,3 +105,17 @@ it("serves only relay-admitted settlement authors, keeps owner bytes, and advanc
  expect(rows[0]!.payloadJson).toBe(payloadJson);expect(JSON.parse(payloadJson)).not.toHaveProperty("authors");
  const accountless=queries.filteredLogPage("workspace",selector,0,10,"accountless");expect(accountless.ops.map(op=>op.relaySeq)).toEqual([1,3]);expect(accountless.ops[0]!.payload).not.toHaveProperty("authors");
 });
+
+it("converts admitted automation to the ordinary moment format only for authenticated shares", () => {
+ const payloadJson = JSON.stringify({...moment(undefined), momentId: "automation", settlementReference:{record:{settlementId:"automation"}}});
+ const authors = [{kind:"automation" as const, automationId:"collection:Tasks#mark", attribution:{actorKind:"automation" as const,
+   onBehalfOf:"presser", depth:2, run:{claimId:"claim",automationName:"Mark task"}}}];
+ const row:import("./storage").SyncRelayLogRow = {workspaceId:"workspace",originId:"host",originSeq:0,relaySeq:1,
+   opKind:"moment.append",payloadJson,recordedAtMs:1,admittedAuthorSnapshot:authors,settlementAdmission:{status:"accepted",settlementId:"automation"}};
+ const storage = {fetchLogPage:()=>({rows:[row],nextCursor:1,hasMore:false})};
+ const queries=createShareReadQueries(storage as unknown as Parameters<typeof createShareReadQueries>[0],500);
+ expect(queries.filteredLogPage("workspace",selector,0,10,"authenticated").ops[0]?.payload).toMatchObject({
+   authors:[{kind:"automation",automationId:"collection:Tasks#mark",onBehalfOf:"presser",depth:2}]});
+ expect(queries.filteredLogPage("workspace",selector,0,10,"accountless").ops[0]?.payload).not.toHaveProperty("authors");
+ expect(row.admittedAuthorSnapshot).toEqual(authors);
+});

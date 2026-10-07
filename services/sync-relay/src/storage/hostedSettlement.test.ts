@@ -89,6 +89,7 @@ function publication(
   previous = 0,
   before = f.input.evidence.projectedMarkdownSha256,
   originSeq = 0,
+  automation?: import("@dohc/live-session-contract/live-authorship").AutomationDeclaration,
 ) {
   f.doc.gc = false;
   const baselineBytes = new TextEncoder().encode(
@@ -100,15 +101,15 @@ function publication(
     content: baselineBytes,
     createdAtMs: 1,
   });
-  const captured = f.capture(f.update("title", id), id, {
+  const captured = f.capture(f.update("title", id), id, automation ? {kind: "owner", userId: "owner", shareId: "share"} : {
     kind: "named",
     userId: "reader",
     grantId: "grant",
   });
   const accepted = f.storage.commitLiveUpdateJournal({
     ...captured,
-    trustedAccount: { accountId: "reader", name: "Reader" },
-    metadata: {
+    ...(automation ? {trustedAutomation: automation} : {trustedAccount: { accountId: "reader", name: "Reader" }}),
+    metadata: automation ? captured.metadata : {
       ...captured.metadata,
       authorContext: {
         kind: "account",
@@ -306,12 +307,16 @@ it.each([
   "scope",
   "moment",
   "authors",
+  "automation-authors",
+  "automation-presser",
+  "automation-claim",
   "mixed-authors",
   "human-authors",
   "mixed-forged-human",
   "replay",
   "copied-ref",
   "fence",
+  "future-cursor",
   "after-path",
   "operation",
 ])(
@@ -319,7 +324,9 @@ it.each([
   async (field) => {
     const f = registered({ deployment: true });
     try {
-      const first = publication(f, "first");
+      const first = publication(f, "first", 0, f.input.evidence.projectedMarkdownSha256, 0,
+        field.startsWith("automation-") ? {automationId:"collection:Tasks#mark",attribution:{actorKind:"automation",onBehalfOf:"owner",depth:2,
+          run:{claimId:"claim",automationName:"Mark task"}}} : undefined);
       if (field === "replay" || field === "copied-ref") {
         await prepare(f, [first.op]);
         append(f, [first.op]);
@@ -345,6 +352,10 @@ it.each([
       if (field === "moment") payload.momentId = "other";
       if (field === "authors")
         payload.authors = [{ kind: "agent", agentId: "forged" }];
+      if (field.startsWith("automation-"))
+        payload.authors = [{kind: "automation", automationId: "collection:Tasks#mark", depth: 2,
+          ...(field === "automation-presser" ? {onBehalfOf: "forged-presser"} : {}),
+          ...(field === "automation-claim" ? {attribution: {actorKind: "automation", depth: 2, run: {claimId: "forged-claim", automationName: "Forged"}}} : {})}];
       if (field === "mixed-authors")
         payload.authors = [
           { kind: "human", humanId: "reader", humanName: "Reader" },
@@ -373,6 +384,7 @@ it.each([
       if (field === "after-path")
         payload.payloadAfterPath = "private/forged.md";
       if (field === "operation") payload.operation = "delete";
+      if (field === "future-cursor") reference.record.terminalCursor = first.record.terminalCursor + 100;
       if (field === "fence")
         reference.record.binding = {
           ...first.record.binding,
@@ -510,4 +522,60 @@ it("rejects altered full content with the same CRDT clocks", async () => {
   } finally {
     f.close();
   }
+});
+
+it("publishes admitted automation declaration without inferring its presser as a human", async () => {
+  const f = registered({deployment: true});
+  try {
+    const automation = {automationId: "collection:Tasks#mark", attribution: {actorKind: "automation" as const,
+      onBehalfOf: "owner", depth: 2, run: {claimId: "claim", automationName: "Mark task"}}};
+    const first = publication(f, "automation", 0, f.input.evidence.projectedMarkdownSha256, 0, automation);
+    await prepare(f, [first.op]);
+    expect(append(f, [first.op]).settlementRefusals).toBeUndefined();
+    expect(f.storage.fetchLogCoordinate({workspaceId: "workspace", originId: "proof", originSeq: 0})?.admittedAuthorSnapshot)
+      .toEqual([{kind: "automation", ...automation}]);
+    const forged = structuredClone(first.payload);
+    forged.momentId = "copied-automation";
+    forged.settlementReference.record.momentId = forged.momentId;
+    forged.settlementReference.record.settlementId = "copied-automation";
+    forged.settlementReference.recordDigest = hash(stableJsonStringify(forged.settlementReference.record));
+    const copied = {...first.op, originSeq: 1, payloadJson: stableJsonStringify(forged)};
+    await prepare(f, [copied]);
+    expect(append(f, [copied]).settlementRefusals).toHaveLength(1);
+  } finally {f.close();}
+});
+
+it("folds automation depth across authenticated contributors while preserving the first declaration", async () => {
+  const f=registered({deployment:true});
+  try {
+    const automation={automationId:"collection:Tasks#mark",attribution:{actorKind:"automation" as const,onBehalfOf:"owner",depth:2,
+      run:{claimId:"claim",automationName:"Mark task"}}};
+    publication(f,"automation-first",0,f.input.evidence.projectedMarkdownSha256,0,automation);
+    f.doc.clientID=987654321;
+    const last=publication(f,"automation-last",0,f.input.evidence.projectedMarkdownSha256,0,
+      {...automation,attribution:{...automation.attribution,depth:3}});
+    await prepare(f,[last.op]);
+    expect(append(f,[last.op]).settlementRefusals).toBeUndefined();
+    expect(f.storage.fetchLogCoordinate({workspaceId:"workspace",originId:"proof",originSeq:0})?.admittedAuthorSnapshot)
+      .toEqual([{kind:"automation",...automation,attribution:{...automation.attribution,depth:3}}]);
+  } finally {f.close();}
+});
+it.each(["transition", "skipped-base"])("anchors a changed full selector binding to its accepted predecessor: %s", async variant => {
+  const f=registered({deployment:true});
+  try {
+    const first=publication(f,"old-selector");await prepare(f,[first.op]);append(f,[first.op]);
+    f.write(db=>db.prepare("UPDATE sync_relay_shares SET selector_json=? WHERE share_id='share'")
+      .run(JSON.stringify({paths:["docs/a.md"],versionId:null})));
+    const next=publication(f,"new-selector",first.receipt.journalCursor,first.markdownSha,1);
+    expect(next.record.binding.selectorPaths).not.toEqual(first.record.binding.selectorPaths);
+    let selected=next;
+    if(variant==="skipped-base")selected=publication(f,"skipped-selector",next.receipt.journalCursor,next.markdownSha,1);
+    await prepare(f,[selected.op]);
+    const result=append(f,[selected.op]);
+    if(variant==="transition") {
+      expect(result.settlementRefusals).toBeUndefined();
+      const later=publication(f,"later-selector",next.receipt.journalCursor,next.markdownSha,2);
+      await prepare(f,[later.op]);expect(append(f,[later.op]).settlementRefusals).toBeUndefined();
+    } else expect(result.settlementRefusals).toHaveLength(1);
+  } finally {f.close();}
 });

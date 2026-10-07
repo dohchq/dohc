@@ -335,16 +335,14 @@ pub fn apply_moment_envelope_detailed(
             envelope.settlement_admission,
             Some(crate::SettlementAdmission::Accepted { .. })
         ) {
-            let authors: Vec<MomentAuthor> =
-                serde_json::from_value(envelope.admitted_author_snapshot.clone().ok_or(
-                    SyncError::InvalidInput {
-                        reason: "accepted settlement has no authors",
-                    },
-                )?)
-                .map_err(|_| SyncError::InvalidInput {
-                    reason: "accepted settlement authors are invalid",
-                })?;
-            payload.authors = (!authors.is_empty()).then_some(authors);
+            // The authenticated snapshot is stored by admission refresh.
+            // Ordinary client author shapes grant no authority to that snapshot.
+            crate::settlement_publication::admitted_moment_authors(envelope)?.ok_or(
+                SyncError::InvalidInput {
+                    reason: "accepted settlement has no authors",
+                },
+            )?;
+            payload.authors = None;
         }
         validate_payload_bounds(&payload)?;
         validate_payload(&payload)?;

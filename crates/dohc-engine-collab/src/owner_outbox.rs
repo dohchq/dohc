@@ -291,8 +291,7 @@ pub fn refuse_entry_in_tx(
     validate_digest(&input.update_digest)?;
     let parent = read_parent(tx, &input.outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
     require_workspace(workspace, &parent.binding.workspace_id)?;
-    let observed =
-        draft::read_observed_in(tx, &parent.binding)?.ok_or(OwnerOutboxError::NotFound)?;
+    let observed = draft::read_observed_in(tx, &parent.binding)?;
     let entry: Option<(String, bool, Option<String>, Option<String>)> = tx.query_row(
         "SELECT update_digest,pending,accepted_receipt_json,terminal_reason FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND delivery_id=?2",
         params![input.outbox_id,input.delivery_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
@@ -308,10 +307,59 @@ pub fn refuse_entry_in_tx(
             Err(OwnerOutboxError::ReceiptMismatch)
         };
     }
+    let checkpoint_digest = match observed {
+        Some(observed) => observed.checkpoint_digest,
+        None => native_refusal_checkpoint_in_tx(tx, &parent.binding, input)?,
+    };
     tx.execute("UPDATE owner_ydoc_outbox_entries SET pending=0,terminal_blob_digest=update_blob_digest,update_blob_digest=NULL,terminal_reason=?3 WHERE outbox_id=?1 AND delivery_id=?2 AND pending=1", params![input.outbox_id,input.delivery_id,input.reason]).map_err(write_sql)?;
-    draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &observed.checkpoint_digest)?;
+    draft::refuse_dependent_entries_in_tx(tx, &input.outbox_id, &checkpoint_digest)?;
     refresh_pending_in_tx(tx, &input.outbox_id)?;
     Ok(parent.binding)
+}
+
+fn native_refusal_checkpoint_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &LiveObjectBinding,
+    input: &OwnerOutboxRefuseInput,
+) -> Result<String, OwnerOutboxError> {
+    let (append_key, source): (String, String) = tx.query_row(
+        "SELECT append_key,native_source_json FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND delivery_id=?2 AND native_source_json IS NOT NULL",
+        params![input.outbox_id,input.delivery_id], |r| Ok((r.get(0)?,r.get(1)?)),
+    ).optional().map_err(read_sql)?.ok_or(OwnerOutboxError::NotFound)?;
+    let source: OwnerOutboxNativeSource =
+        serde_json::from_str(&source).map_err(|_| OwnerOutboxError::Corrupt)?;
+    source.validate(&append_key)?;
+    source.verify_retained_row(tx)?;
+    if source.binding != *binding || source.update_digest != input.update_digest {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let key = draft::key(binding)?;
+    let mut remaining = crate::limits::MAX_YDOC_UPDATE_BYTES;
+    let (active, namespace, accepted) =
+        crate::live_update_application::read_native_accepted_in(tx, &key, &mut remaining)
+            .map_err(|_| OwnerOutboxError::ParentMismatch)?
+            .ok_or(OwnerOutboxError::NotFound)?;
+    if active != *binding {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let adoption: Option<String> = tx.query_row(
+        "SELECT adoption_id FROM live_owner_adoptions WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5",
+        params![namespace,binding.workspace_id,binding.main_version_id,binding.object_id,binding.lineage_claim_id], |r| r.get(0),
+    ).optional().map_err(read_sql)?;
+    if adoption.as_deref() != Some(source.adoption_id.as_str()) {
+        return Err(OwnerOutboxError::ParentMismatch);
+    }
+    let applied: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM live_device_update_applications WHERE relay_database_namespace=?1 AND delivery_id=?2)",
+        params![namespace,input.delivery_id], |r| r.get(0),
+    ).map_err(read_sql)?;
+    if applied {
+        return Err(OwnerOutboxError::ReceiptMismatch);
+    }
+    let bytes = accepted
+        .encode_full_state_bounded(crate::limits::MAX_YDOC_UPDATE_BYTES)
+        .ok_or(OwnerOutboxError::Corrupt)?;
+    dohc_engine_storage::put_binary_blob(tx, &bytes).map_err(OwnerOutboxError::Storage)
 }
 
 fn refresh_pending_in_tx(

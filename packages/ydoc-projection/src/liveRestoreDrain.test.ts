@@ -1956,3 +1956,39 @@ it.each(["old-fence", "copied-fence", "changed-admission"])("consumes invalid ho
   } finally {f.close();}
 });
 afterAll(async () => {await liveValidation.close();});
+
+it.each(["accepted-base", "forged-before", "skipped-cut", "changed-base-admission", "damaged-base-cut"])("restarts hosted chain from authenticated recovered binding base: %s", async variant => {
+  const f = admittedRestoreFixture(), doc = new Y.Doc({gc: false});
+  try {
+    const restoreCursor = f.admitted.admitted.accepted.receipt.journalCursor;
+    const bytes = f.raw.prepare("SELECT validation_checkpoint_bytes FROM sync_relay_live_update_journal WHERE journal_cursor=?").get(restoreCursor)!.validation_checkpoint_bytes as Uint8Array;
+    const base = restorePublication(f, bytes, restoreCursor, "unpublished-recovery-base");
+    f.complete();
+    Y.applyUpdate(doc, bytes); doc.getMap("frontmatter").set("after", "recovered work");
+    const firstCapture = f.journalCapture(Y.encodeStateAsUpdate(doc), "recovered-first");
+    const first = f.storage.commitLiveUpdateJournal({...firstCapture, trustedAccount: {accountId:"owner",name:"Owner"},
+      metadata:{...firstCapture.metadata,authorContext:{kind:"account",accountId:"owner"}}});
+    expect(first.result.kind).toBe("accepted");
+    let previous = restoreCursor, before = base.markdownDigest, terminal = first.admitted!.metadata.accepted.receipt.journalCursor;
+    if (variant === "forged-before") before = "a".repeat(64);
+    if (variant === "skipped-cut") {
+      const skipped = restorePublication(f, Y.encodeStateAsUpdate(doc), terminal, "skipped", restoreCursor, before);
+      previous = terminal; before = skipped.markdownDigest;
+      doc.getMap("frontmatter").set("second", "cannot skip accepted work");
+      const captured = f.journalCapture(Y.encodeStateAsUpdate(doc), "recovered-second");
+      const accepted = f.storage.commitLiveUpdateJournal({...captured, trustedAccount:{accountId:"owner",name:"Owner"},
+        metadata:{...captured.metadata,authorContext:{kind:"account",accountId:"owner"}}});
+      expect(accepted.result.kind).toBe("accepted"); terminal = accepted.admitted!.metadata.accepted.receipt.journalCursor;
+    }
+    const publication = restorePublication(f, Y.encodeStateAsUpdate(doc), terminal, "recovered-publication", previous, before);
+    if (variant === "damaged-base-cut") f.raw.prepare("DELETE FROM sync_relay_live_settlement_cuts WHERE journal_cursor=?").run(restoreCursor);
+    await prepareHostedSettlements(f.context,{workspaceId:"workspace",originId:"proof",ops:[publication.op]});
+    if (variant === "changed-base-admission") f.raw.prepare("UPDATE sync_relay_live_restore_lifecycles SET admission_sha256=?").run("a".repeat(64));
+    const result = f.storage.appendLogBatch({workspaceId:"workspace",originId:"proof",ops:[publication.op]});
+    if (variant === "accepted-base") {
+      expect(result.settlementRefusals).toBeUndefined();
+      expect(f.storage.fetchLogCoordinate({workspaceId:"workspace",originId:"proof",originSeq:0})!.admittedAuthorSnapshot)
+        .toEqual([{kind:"human",humanId:"owner",humanName:"Owner"}]);
+    } else expect(result.settlementRefusals).toHaveLength(1);
+  } finally {doc.destroy();f.close();}
+});

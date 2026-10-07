@@ -279,16 +279,26 @@ fn require_restore_application(
     Ok(())
 }
 
+fn read_native_metadata(
+    conn: &Connection,
+    workspace: &str,
+    id: &str,
+) -> Result<SettlementRecord, SyncError> {
+    let record=conn.query_row("SELECT relay_database_namespace,binding_json,host_coordinate_json,previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,markdown_digest,source_state_vector_digest,recorded_at_ms,restore_operation_id FROM live_device_settlements WHERE workspace_id=?1 AND settlement_id=?2",params![workspace,id],|row|{
+        let binding=serde_json::from_str(&row.get::<_,String>(1)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(1,rusqlite::types::Type::Text,Box::new(error)))?;
+        let host_coordinate=serde_json::from_str(&row.get::<_,String>(2)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(2,rusqlite::types::Type::Text,Box::new(error)))?;
+        Ok(SettlementRecord{settlement_id:id.into(),relay_database_namespace:row.get(0)?,binding,host_coordinate,previous_cursor:row.get(3)?,terminal_cursor:row.get(4)?,previous_ydoc_sequence:row.get(5)?,local_ydoc_sequence:row.get(6)?,application_count:row.get(7)?,native_interval_digest:row.get(8)?,accepted_event_count:0,accepted_interval_digest:String::new(),moment_id:row.get(9)?,markdown_digest:row.get(10)?,source_state_vector_digest:row.get(11)?,accepted_state_blob_sha256:String::new(),recorded_at_ms:row.get(12)?,restore_operation_id:row.get(13)?})
+    }).map_err(SyncError::corrupt)?;
+    record.binding.validate_canonical().map_err(invalid)?;
+    Ok(record)
+}
+
 fn read_native(
     conn: &Connection,
     workspace: &str,
     id: &str,
 ) -> Result<SettlementRecord, SyncError> {
-    let mut record=conn.query_row("SELECT relay_database_namespace,binding_json,host_coordinate_json,previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,application_count,interval_digest,moment_id,markdown_digest,source_state_vector_digest,recorded_at_ms,restore_operation_id FROM live_device_settlements WHERE workspace_id=?1 AND settlement_id=?2",params![workspace,id],|row|{
-        let binding=serde_json::from_str(&row.get::<_,String>(1)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(1,rusqlite::types::Type::Text,Box::new(error)))?;
-        let host_coordinate=serde_json::from_str(&row.get::<_,String>(2)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(2,rusqlite::types::Type::Text,Box::new(error)))?;
-        Ok(SettlementRecord{settlement_id:id.into(),relay_database_namespace:row.get(0)?,binding,host_coordinate,previous_cursor:row.get(3)?,terminal_cursor:row.get(4)?,previous_ydoc_sequence:row.get(5)?,local_ydoc_sequence:row.get(6)?,application_count:row.get(7)?,native_interval_digest:row.get(8)?,accepted_event_count:0,accepted_interval_digest:String::new(),moment_id:row.get(9)?,markdown_digest:row.get(10)?,source_state_vector_digest:row.get(11)?,accepted_state_blob_sha256:String::new(),recorded_at_ms:row.get(12)?,restore_operation_id:row.get(13)?})
-    }).map_err(SyncError::corrupt)?;
+    let mut record = read_native_metadata(conn, workspace, id)?;
     let (count, digest) = accepted_interval(
         conn,
         &record.relay_database_namespace,
@@ -335,8 +345,19 @@ pub(super) fn journal_ready_in_tx(
     }
     let unavailable:Option<String>=tx.query_row("SELECT moment_id FROM live_device_settlements s WHERE s.workspace_id=?1 AND s.settlement_id=?2 AND NOT EXISTS(SELECT 1 FROM live_settlement_publication_states p WHERE p.settlement_id=s.settlement_id)",params![workspace,id],|r|r.get(0)).optional().map_err(SyncError::corrupt)?;
     if let Some(moment) = unavailable {
-        return crate::outbound::journal_saved_settlement_moment_in_tx(tx, workspace, &moment)
-            .map(Some);
+        let terminal: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_settlement_attribution_unavailable WHERE workspace_id=?1 AND moment_id=?2 AND settlement_id=?3 AND reason='terminal-owner-source')",params![workspace,moment,id],|r|r.get(0)).map_err(SyncError::corrupt)?;
+        let before = if terminal {
+            publication_source_before_in_tx(tx, &read_native_metadata(tx, workspace, id)?)?
+        } else {
+            None
+        };
+        return crate::outbound::journal_saved_settlement_moment_in_tx(
+            tx,
+            workspace,
+            &moment,
+            before.as_ref(),
+        )
+        .map(Some);
     }
     let record = read_native(tx, workspace, id)?;
     let payload = record.payload()?;
@@ -416,6 +437,12 @@ fn publication_source_before_in_tx(
     {
         return Ok(Some(before));
     }
+    // An unavailable interval does not advance the relay's verified chain.
+    // The next proof starts at its prior accepted cut and names that artifact.
+    let skipped: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_attribution_unavailable u ON u.workspace_id=s.workspace_id AND u.settlement_id=s.settlement_id WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor>?6 AND s.terminal_cursor<?7)",params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor,record.terminal_cursor],|r|r.get(0)).map_err(SyncError::corrupt)?;
+    if skipped && record.previous_cursor > 0 {
+        return tx.query_row("SELECT m.moment_id,m.version_id,m.object_id,m.path,m.after_blob_sha256,t.byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) JOIN moments m ON m.workspace_id=s.workspace_id AND m.moment_id=s.moment_id JOIN blobs t ON t.sha256=s.markdown_digest WHERE s.workspace_id=?1 AND s.relay_database_namespace=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND m.after_blob_sha256=s.markdown_digest",params![b.workspace_id,record.relay_database_namespace,b.main_version_id,b.object_id,b.lineage_claim_id,record.previous_cursor],|row|Ok(crate::outbound::PortableBefore {moment_id:row.get(0)?,version_id:row.get(1)?,object_id:row.get(2)?,path:row.get(3)?,blob_sha256:row.get(4)?,byte_length:row.get(5)?,recorded_at_ms:row.get(6)?,metadata_origin:row.get(7)?,metadata_summary:row.get(8)?,metadata_correlation_id:row.get(9)?})).map(Some).map_err(SyncError::corrupt);
+    }
     tx.query_row(
         "SELECT m.moment_id,m.version_id,m.object_id,m.path,a.source_digest,a.source_byte_length,m.recorded_at_ms,m.metadata_origin,m.metadata_summary,m.metadata_correlation_id
          FROM live_owner_adoptions a
@@ -424,9 +451,9 @@ fn publication_source_before_in_tx(
          JOIN blobs t ON t.sha256=a.source_digest AND t.byte_length=a.source_byte_length
          WHERE a.relay_database_namespace=?1 AND a.workspace_id=?2 AND a.main_version_id=?3 AND a.object_id=?4 AND a.lineage_claim_id=?5
            AND a.binding_json=?6 AND a.terminal_cursor=?8
-           AND NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9)",
+           AND (?10 OR NOT EXISTS(SELECT 1 FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor<?9))",
         params![record.relay_database_namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,
-            serde_json::to_string(b).map_err(SyncError::corrupt)?,b.current_path,record.previous_cursor,record.terminal_cursor],
+            serde_json::to_string(b).map_err(SyncError::corrupt)?,b.current_path,record.previous_cursor,record.terminal_cursor,skipped],
         |row| Ok(crate::outbound::PortableBefore {
             moment_id: row.get(0)?,
             version_id: row.get(1)?,

@@ -245,7 +245,10 @@ export function createShareReadQueries(
         if (payload === null) continue;
         if (audience === "authenticated" && row.opKind === "moment.append") {
           const authors = row.settlementAdmission?.status === "accepted"
-            ? row.admittedAuthorSnapshot
+            ? row.admittedAuthorSnapshot?.map(author => author.kind === "automation" ? {
+              kind: "automation", automationId: author.automationId, depth: author.attribution.depth,
+              ...(author.attribution.onBehalfOf === undefined ? {} : {onBehalfOf: author.attribution.onBehalfOf}),
+            } : author)
             : admittedMomentAuthors(row.payloadJson);
           if (authors) (payload as Record<string, unknown>).authors = authors;
           const original = JSON.parse(row.payloadJson) as Record<string, unknown>;

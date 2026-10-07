@@ -21,6 +21,7 @@ const schema: Record<string, string> = {
     lineage_claim_id TEXT NOT NULL,
     namespace TEXT NOT NULL,
     restore_fence INTEGER NOT NULL CHECK(restore_fence>=0),
+    binding_json TEXT NOT NULL CHECK(json_valid(binding_json)),
     previous_cursor INTEGER NOT NULL CHECK(previous_cursor>=0),
     terminal_cursor INTEGER NOT NULL CHECK(terminal_cursor>previous_cursor),
     settlement_id TEXT NOT NULL,

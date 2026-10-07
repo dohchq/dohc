@@ -44,11 +44,7 @@ pub(crate) fn validate(envelope: &ReplicationEnvelope) -> Result<(), SyncError> 
             {
                 return Err(invalid("settlement admission reference differs"));
             }
-            if envelope
-                .payload
-                .get("authors")
-                .is_some_and(|v| !v.is_null())
-            {
+            if envelope.payload.get("authors").is_some() {
                 return Err(invalid("proof settlement cannot declare authors"));
             }
             let authors = envelope
@@ -69,6 +65,40 @@ pub(crate) fn validate(envelope: &ReplicationEnvelope) -> Result<(), SyncError> 
         }
     }
     Ok(())
+}
+
+pub(crate) fn admitted_moment_authors(
+    envelope: &ReplicationEnvelope,
+) -> Result<Option<Value>, SyncError> {
+    use dohc_engine_collab::live_update_application::LiveAuthorEntry;
+    let Some(snapshot) = &envelope.admitted_author_snapshot else {
+        return Ok(None);
+    };
+    let authors: Vec<LiveAuthorEntry> = serde_json::from_value(snapshot.clone())
+        .map_err(|_| invalid("accepted settlement authors are invalid"))?;
+    let mut converted = Vec::with_capacity(authors.len());
+    for author in authors {
+        author
+            .validate()
+            .map_err(|_| invalid("accepted settlement authors are invalid"))?;
+        match author {
+            LiveAuthorEntry::Automation {
+                automation_id,
+                attribution,
+            } => {
+                let native = dohc_engine_domain::moment_author_json(
+                    Some(&automation_id),
+                    Some(&attribution),
+                )
+                .ok_or_else(|| invalid("accepted automation has no native author"))?;
+                let entries: Vec<Value> =
+                    serde_json::from_str(&native).map_err(SyncError::corrupt)?;
+                converted.extend(entries);
+            }
+            other => converted.push(serde_json::to_value(other).map_err(SyncError::corrupt)?),
+        }
+    }
+    Ok(Some(Value::Array(converted)))
 }
 
 pub(crate) fn refresh_in_tx(
@@ -100,7 +130,7 @@ pub(crate) fn refresh_in_tx(
             tx.execute("INSERT INTO live_settlement_attribution_unavailable(workspace_id,moment_id,settlement_id,reason) VALUES (?1,?2,?3,?4) ON CONFLICT(workspace_id,moment_id) DO NOTHING",params![envelope.workspace_id,envelope.payload["momentId"].as_str(),id,reason]).map_err(SyncError::persist)?;
             tx.execute("UPDATE moments SET author_json=NULL,metadata_summary='Attribution unavailable' WHERE workspace_id=?1 AND moment_id=?2 AND EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=?1 AND r.origin_id=?3 AND r.origin_seq=?4 AND (r.imported=0 OR r.apply_disposition='applied'))",params![envelope.workspace_id,envelope.payload["momentId"].as_str(),envelope.origin_id,envelope.origin_seq]).map_err(SyncError::persist)?;
             let local:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM replication_log WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3 AND imported=0)",params![envelope.workspace_id,envelope.origin_id,envelope.origin_seq],|r|r.get(0)).map_err(SyncError::corrupt)?;
-            if local && !marked_before {
+            if local && (!marked_before || reason == "terminal-owner-source") {
                 tx.execute("INSERT INTO replication_pending_refusals(workspace_id,origin_id,origin_seq,op_kind,reason_code,reason_message) VALUES (?1,?2,?3,'moment.append','invalid-input',?4) ON CONFLICT(workspace_id,origin_id,origin_seq) DO NOTHING",params![envelope.workspace_id,envelope.origin_id,envelope.origin_seq,REFUSAL_MESSAGE]).map_err(SyncError::persist)?;
             }
         }
@@ -121,12 +151,17 @@ pub(crate) fn refresh_in_tx(
     {
         return Err(SyncError::CoordinateDiverged);
     }
+    let moment_authors = admitted_moment_authors(envelope)?
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(SyncError::corrupt)?;
     tx.execute("INSERT INTO live_settlement_publication_admissions(workspace_id,origin_id,origin_seq,moment_id,admission_json,authors_json) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(workspace_id,origin_id,origin_seq) DO NOTHING",params![envelope.workspace_id,envelope.origin_id,envelope.origin_seq,moment,encoded,authors]).map_err(SyncError::persist)?;
     match admission {
         SettlementAdmission::Accepted { .. } => {
             tx.execute(
                 "UPDATE moments SET author_json=?3 WHERE workspace_id=?1 AND moment_id=?2 AND EXISTS(SELECT 1 FROM replication_log r WHERE r.workspace_id=?1 AND r.origin_id=?4 AND r.origin_seq=?5 AND (r.imported=0 OR r.apply_disposition='applied'))",
-                params![envelope.workspace_id, moment, authors,envelope.origin_id,envelope.origin_seq],
+                params![envelope.workspace_id, moment, moment_authors,envelope.origin_id,envelope.origin_seq],
             )
             .map_err(SyncError::persist)?;
             Ok(None)
@@ -348,6 +383,166 @@ mod tests {
             Err(SyncError::CoordinateDiverged)
         ));
     }
+
+    #[test]
+    fn accepted_live_link_and_agent_snapshot_imports_without_client_author_authority() {
+        let retain_text = |store: &mut EngineStore| {
+            store
+                .write_with(&NoFaults, |tx| {
+                    tx.execute(
+                        "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,13,'accepted work')",
+                        [dohc_engine_storage::hex_sha256(b"accepted work")],
+                    )
+                    .map_err(SyncError::persist)?;
+                    Ok::<_, SyncError>(())
+                })
+                .unwrap();
+        };
+        let (_scratch, _path, mut source_store) = open_store();
+        let mut envelope = proved(source(&mut source_store));
+        let snapshot = json!([
+            {"kind":"link","publicPrincipalId":"edit-link","label":"Edit link"},
+            {"kind":"agent","agentId":"assistant","agentName":"Assistant","onBehalfOf":"reader","depth":2}
+        ]);
+        envelope.admitted_author_snapshot = Some(snapshot.clone());
+        for claimed in [Value::Null, json!([]), snapshot.clone()] {
+            let mut forged = envelope.clone();
+            forged.payload["authors"] = claimed;
+            assert!(matches!(
+                validate(&forged),
+                Err(SyncError::InvalidInput { .. })
+            ));
+        }
+        let (_peer, _path, mut peer) = open_store();
+        VersionedTextStore::new(&mut peer)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        retain_text(&mut peer);
+        assert!(matches!(
+            apply_moment_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
+                .unwrap()
+                .primary,
+            ApplyDisposition::Applied(_)
+        ));
+        let authors: String = peer
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT author_json FROM moments WHERE moment_id='moment'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        let retained:String=peer.read_with(|conn|conn.query_row("SELECT authors_json FROM live_settlement_publication_admissions WHERE moment_id='moment'",[],|r|r.get(0))).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&authors).unwrap(), snapshot);
+        assert_eq!(serde_json::from_str::<Value>(&retained).unwrap(), snapshot);
+        for claimed in [
+            snapshot,
+            json!([{"kind":"link","grantId":"forged","grantGeneration":1,"principalId":"forged"}]),
+        ] {
+            let (_ordinary, _path, mut ordinary) = open_store();
+            VersionedTextStore::new(&mut ordinary)
+                .ensure_main_version("ws", "main", 1, &NoFaults)
+                .unwrap();
+            retain_text(&mut ordinary);
+            let mut forged = envelope.clone();
+            forged.settlement_admission = None;
+            forged.admitted_author_snapshot = None;
+            forged
+                .payload
+                .as_object_mut()
+                .unwrap()
+                .remove("settlementReference");
+            forged.payload["authors"] = claimed;
+            assert!(matches!(
+                apply_moment_envelope(&mut ordinary, &forged, &NoFaults, &NoLiveLeases)
+                    .unwrap()
+                    .primary,
+                ApplyDisposition::Refused(_)
+            ));
+            assert_eq!(ordinary.table_row_count("moments").unwrap(), 0);
+        }
+        let (_empty, _path, mut empty) = open_store();
+        VersionedTextStore::new(&mut empty)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        retain_text(&mut empty);
+        envelope.admitted_author_snapshot = Some(json!([]));
+        assert!(matches!(
+            apply_moment_envelope(&mut empty, &envelope, &NoFaults, &NoLiveLeases)
+                .unwrap()
+                .primary,
+            ApplyDisposition::Applied(_)
+        ));
+    }
+    #[test]
+    fn admitted_automation_converts_to_native_moment_authors_and_keeps_exact_replay_identity() {
+        let (_scratch, _path, mut store) = open_store();
+        let original = source(&mut store);
+        let mut envelope = proved(original);
+        let automation = json!({"kind":"automation","automationId":"collection:Tasks#mark",
+            "attribution":{"actorKind":"automation","onBehalfOf":"presser","depth":1,
+                "run":{"claimId":"claim","automationName":"Mark task"}}});
+        envelope.admitted_author_snapshot = Some(json!([automation]));
+        store.write_with(&NoFaults, |tx| {
+            tx.execute("UPDATE replication_log SET payload_json=?1 WHERE workspace_id='ws' AND origin_id=?2 AND origin_seq=?3",
+                params![envelope.payload.to_string(),envelope.origin_id,envelope.origin_seq]).map_err(SyncError::persist)?;
+            Ok::<_,SyncError>(())
+        }).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                apply_moment_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
+                    .unwrap()
+                    .primary,
+                ApplyDisposition::Skipped
+            );
+        }
+        let (authors, snapshot): (String, String) = store.read_with(|conn| {
+            conn.query_row("SELECT m.author_json,a.authors_json FROM moments m JOIN live_settlement_publication_admissions a ON a.workspace_id=m.workspace_id AND a.moment_id=m.moment_id WHERE m.workspace_id='ws' AND m.moment_id='moment'", [], |r| Ok((r.get(0)?,r.get(1)?))).map_err(SyncError::corrupt)
+        }).unwrap();
+        let expected = json!([{"kind":"automation","automationId":"collection:Tasks#mark","onBehalfOf":"presser","depth":1}]);
+        assert_eq!(serde_json::from_str::<Value>(&authors).unwrap(), expected);
+        assert_eq!(
+            serde_json::from_str::<Value>(&snapshot).unwrap(),
+            envelope.admitted_author_snapshot.clone().unwrap()
+        );
+        for (field, changed) in [
+            ("onBehalfOf", json!("other")),
+            (
+                "run",
+                json!({"claimId":"other-claim","automationName":"Mark task"}),
+            ),
+        ] {
+            let mut forged = envelope.clone();
+            forged.admitted_author_snapshot.as_mut().unwrap()[0]["attribution"][field] = changed;
+            assert!(matches!(
+                apply_moment_envelope(&mut store, &forged, &NoFaults, &NoLiveLeases),
+                Err(SyncError::CoordinateDiverged)
+            ));
+        }
+        let (_peer_scratch, _peer_path, mut peer) = open_store();
+        VersionedTextStore::new(&mut peer)
+            .ensure_main_version("ws", "main", 1, &NoFaults)
+            .unwrap();
+        peer.write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs(sha256,byte_length,text) VALUES (?1,13,'accepted work')",
+                [&envelope.payload["payloadAfterBlobSha256"].as_str().unwrap()],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .unwrap();
+        assert!(matches!(
+            apply_moment_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
+                .unwrap()
+                .primary,
+            ApplyDisposition::Applied(_)
+        ));
+        let imported: String = peer.read_with(|conn| conn.query_row("SELECT author_json FROM moments WHERE workspace_id='ws' AND moment_id='moment'", [], |r|r.get(0)).map_err(SyncError::corrupt)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&imported).unwrap(), expected);
+    }
+
     #[test]
     fn acknowledged_refusal_journals_one_marked_fallback_and_does_not_wedge_the_origin() {
         let (_scratch, _path, mut store) = open_store();

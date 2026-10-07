@@ -2272,6 +2272,7 @@ fn record_file_holds_head(
             )?;
             if let Some(state) = state {
             audit.record_publication_state_in_tx(tx, &id, state)?;
+            }
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,
@@ -2279,7 +2280,6 @@ fn record_file_holds_head(
                 now_ms,
             )
             .map_err(StorageError::persist_public)?;
-            }
         }
         settled_collection_record_reconcile_required_in_tx(tx, key, path, richdoc)
     })?;
@@ -3032,6 +3032,7 @@ pub(super) fn ydoc_settle_on_store(
             )?;
             if let Some(state) = state {
             audit.record_publication_state_in_tx(tx, &id, state)?;
+            }
             dohc_engine_sync::journal_live_settlement_in_tx(
                 tx,
                 &audit.binding().workspace_id,
@@ -3039,7 +3040,6 @@ pub(super) fn ydoc_settle_on_store(
                 now_ms,
             )
             .map_err(StorageError::persist_public)?;
-            }
         }
         // Live settlement export owns its companion moment, including when
         // enrollment defers the pair until earlier audit events are exported.

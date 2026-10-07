@@ -42,6 +42,7 @@ pub struct LiveSettlementAudit {
     /// The accepted document through the terminal, when the owner's private
     /// native tail keeps the native head ahead of acceptance.
     accepted: Option<crate::Ydoc>,
+    terminal_source: bool,
     receipts: Vec<ReceiptIdentity>,
     interval_digest: String,
     bootstrap_moment: String,
@@ -110,6 +111,9 @@ impl LiveSettlementAudit {
         moment: &str,
         markdown: &str,
     ) -> Result<bool, StorageError> {
+        if self.terminal_source {
+            return Ok(false);
+        }
         if let Some(restore) = &self.restore {
             let b = &self.binding;
             return conn.query_row(
@@ -265,6 +269,9 @@ impl LiveSettlementAudit {
         tx.execute("INSERT INTO live_device_settlements VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
             params![id,self.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,self.previous_cursor,self.terminal_cursor,self.previous_sequence,self.sequence,self.receipts.len() as i64,self.interval_digest,moment,markdown,vector,
                 serde_json::to_string(b).map_err(StorageError::persist_public)?,serde_json::to_string(&self.coordinate).map_err(StorageError::persist_public)?,now_ms,if operation.is_some() {"restore"} else {"ordinary"},operation]).map_err(StorageError::persist_public)?;
+        if self.terminal_source {
+            tx.execute("INSERT INTO live_settlement_attribution_unavailable(workspace_id,moment_id,settlement_id,reason) VALUES (?1,?2,?3,'terminal-owner-source') ON CONFLICT(workspace_id,moment_id) DO NOTHING",params![b.workspace_id,moment,id]).map_err(StorageError::persist_public)?;
+        }
         Ok(id)
     }
 
@@ -274,6 +281,9 @@ impl LiveSettlementAudit {
         &self,
         tx: &Transaction<'_>,
     ) -> Result<LiveSettlementPublicationState, StorageError> {
+        if self.terminal_source {
+            return Ok(LiveSettlementPublicationState::Unavailable);
+        }
         let settlement_id: Option<String> = tx
             .query_row(
                 "SELECT settlement_id FROM live_device_settlements \
@@ -342,6 +352,9 @@ impl LiveSettlementAudit {
         settlement_id: &str,
         full_state_bytes: &[u8],
     ) -> Result<(), StorageError> {
+        if self.terminal_source {
+            return Err(StorageError::StateCorrupt { source: None });
+        }
         let matches_audit: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM live_device_settlements \
@@ -453,16 +466,19 @@ where
         let latest = latest_receipt(conn,&held)?;
         if latest != terminal { return Err(invalid("settlement terminal is not current")); }
         let terminal_cursor = terminal.as_ref().map_or(0,|r|r.journal_cursor);
-        let previous: Option<(i64,i64,i64,i64)> = conn.query_row("SELECT previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY terminal_cursor DESC LIMIT 1",
-            params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional().map_err(read_sql)?;
+        let previous: Option<(i64,i64,i64,i64,bool)> = conn.query_row("SELECT previous_cursor,terminal_cursor,previous_ydoc_sequence,local_ydoc_sequence,EXISTS(SELECT 1 FROM live_settlement_attribution_unavailable u WHERE u.workspace_id=live_device_settlements.workspace_id AND u.settlement_id=live_device_settlements.settlement_id),binding_json FROM live_device_settlements WHERE relay_database_namespace=?1 AND workspace_id=?2 AND main_version_id=?3 AND object_id=?4 AND lineage_claim_id=?5 ORDER BY terminal_cursor DESC LIMIT 1",
+            params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id],|row| {
+                let binding: LiveObjectBinding = serde_json::from_str(&row.get::<_,String>(5)?).map_err(|error|rusqlite::Error::FromSqlConversionFailure(5,rusqlite::types::Type::Text,Box::new(error)))?;
+                Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get::<_,bool>(4)? && binding == *b))
+            }).optional().map_err(read_sql)?;
         // A settlement at the current terminal replays with the native head
         // it first covered. Private native edits since then extend the head
         // but never this settlement's identity.
         let head = marker.head_update_seq;
         let (previous_cursor,previous_sequence,replayed) = match previous {
-            Some((_,end,_,end_sequence)) if end == terminal_cursor && restored_origin.as_ref().is_some_and(|anchor|anchor.cursor == end) => (end,end_sequence,None),
-            Some((start,end,start_sequence,end_sequence)) if end == terminal_cursor => (start,start_sequence,Some(end_sequence)),
-            Some((_,end,_,end_sequence)) if end < terminal_cursor => (end,end_sequence,None),
+            Some((_,end,_,end_sequence,_)) if end == terminal_cursor && restored_origin.as_ref().is_some_and(|anchor|anchor.cursor == end) => (end,end_sequence,None),
+            Some((start,end,start_sequence,end_sequence,_)) if end == terminal_cursor => (start,start_sequence,Some(end_sequence)),
+            Some((start,end,_,end_sequence,unavailable)) if end < terminal_cursor => (if unavailable { verified_previous_cursor(conn,&held,start,origin_cursor,max_applications)? } else {end},end_sequence,None),
             Some(_) => return Err(ApplicationError::Corrupt),
             None => (origin_cursor,origin_sequence,None),
         };
@@ -491,11 +507,45 @@ where
         };
         let interval_digest=hex_sha256(&serde_json::to_vec(&receipts).map_err(|_| ApplicationError::Corrupt)?);
         let last_settled: Option<String> = conn.query_row("SELECT last_settled_sha FROM ydoc_docs WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",params![b.workspace_id,b.main_version_id,b.object_id],|row|row.get(0)).map_err(read_sql)?;
-        Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(head),observed_head:head,accepted,receipts,interval_digest,
+        Ok(LiveSettlementAudit { namespace:held.namespace.clone(),binding:b.clone(),coordinate:held.coordinate.clone(),previous_cursor,terminal_cursor,previous_sequence,sequence:replayed.unwrap_or(head),observed_head:head,accepted,terminal_source:replayed.is_none() && tail.terminal,receipts,interval_digest,
             bootstrap_moment:origin_moment,bootstrap_digest:origin_digest,first:owner_origin.is_none() && previous.is_none() && last_settled.is_none(),restore:None,
             replay_anchor:restored_origin.filter(|anchor|anchor.cursor == terminal_cursor) })
     }).map_err(E::from)?;
     settle(store, &audit)
+}
+
+/// Refused queued proofs can point to one another. Only this full binding's
+/// unavailable native predecessors are skipped; the authenticated origin stays.
+fn verified_previous_cursor(
+    conn: &Connection,
+    held: &Registration,
+    start: i64,
+    origin: i64,
+    limit: usize,
+) -> Result<i64, ApplicationError> {
+    let b = &held.binding;
+    let mut cursor = start.max(origin);
+    let mut visited = 0;
+    while cursor > origin {
+        if visited >= limit {
+            return Err(invalid("settlement application limit exceeded"));
+        }
+        let prior: Option<(i64,String)> = conn.query_row(
+            "SELECT previous_cursor,binding_json FROM live_device_settlements s WHERE s.relay_database_namespace=?1 AND s.workspace_id=?2 AND s.main_version_id=?3 AND s.object_id=?4 AND s.lineage_claim_id=?5 AND s.terminal_cursor=?6 AND json_extract(s.binding_json,'$.currentPath')=?7 AND json_extract(s.binding_json,'$.restoreFenceGeneration')=?8 AND json_extract(s.binding_json,'$.selectorPaths')=json(?9) AND EXISTS(SELECT 1 FROM live_settlement_attribution_unavailable u WHERE u.workspace_id=s.workspace_id AND u.settlement_id=s.settlement_id)",
+            params![held.namespace,b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,cursor,b.current_path,b.restore_fence_generation,serde_json::to_string(&b.selector_paths).map_err(|_|ApplicationError::Corrupt)?],|row|Ok((row.get(0)?,row.get(1)?)),
+        ).optional().map_err(read_sql)?;
+        let Some((previous, binding)) = prior else {
+            break;
+        };
+        let binding: LiveObjectBinding =
+            serde_json::from_str(&binding).map_err(|_| ApplicationError::Corrupt)?;
+        if binding != *b || previous < 0 || previous >= cursor {
+            return Err(ApplicationError::Corrupt);
+        }
+        cursor = previous.max(origin);
+        visited += 1;
+    }
+    Ok(cursor)
 }
 
 type ReceiptIdentity = (String, String, i64, i64, i64, String);
@@ -515,6 +565,7 @@ struct PrivateTail {
     any: bool,
     /// Whether the adoption seed is among them.
     seed: bool,
+    terminal: bool,
 }
 
 fn private_tail(
@@ -529,17 +580,25 @@ fn private_tail(
     let Some(adoption) = adoption else {
         return Ok(PrivateTail::default());
     };
-    let tail = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND e.pending=1 AND e.native_source_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id)";
-    let (any, seed): (bool, bool) = conn.query_row(&format!("SELECT EXISTS(SELECT 1 {tail}),EXISTS(SELECT 1 {tail} AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')"),
-        params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation,b.current_path,held.namespace],
-        |row|Ok((row.get(0)?,row.get(1)?))).map_err(read_sql)?;
-    if !any {
-        return Ok(PrivateTail::default());
-    }
-    // Each sequence in the interval is explained once, so the interval bounds
-    // the rows read.
+    let tail = "FROM owner_ydoc_outbox_entries e JOIN owner_ydoc_outboxes o ON o.outbox_id=e.outbox_id WHERE o.workspace_id=?1 AND o.main_version_id=?2 AND o.object_id=?3 AND o.lineage_claim_id=?4 AND o.restore_fence_generation=?5 AND o.current_path=?6 AND (e.pending=1 OR (e.pending=0 AND e.terminal_reason IS NOT NULL AND e.terminal_blob_digest=e.update_digest AND e.accepted_receipt_json IS NULL)) AND e.native_source_json IS NOT NULL AND NOT EXISTS(SELECT 1 FROM live_device_update_applications a WHERE a.relay_database_namespace=?7 AND a.delivery_id=e.delivery_id)";
+    let any: bool = conn
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 {tail})"),
+            params![
+                b.workspace_id,
+                b.main_version_id,
+                b.object_id,
+                b.lineage_claim_id,
+                b.restore_fence_generation,
+                b.current_path,
+                held.namespace
+            ],
+            |row| row.get(0),
+        )
+        .map_err(read_sql)?;
+    let seed: bool = conn.query_row(&format!("SELECT EXISTS(SELECT 1 {tail} AND e.pending=1 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')"),params![b.workspace_id,b.main_version_id,b.object_id,b.lineage_claim_id,b.restore_fence_generation,b.current_path,held.namespace],|row|row.get(0)).map_err(read_sql)?;
     let gap = head - previous_sequence;
-    let mut query = conn.prepare(&format!("SELECT e.append_key,e.update_digest,length(CAST(e.native_source_json AS BLOB)),e.native_source_json {tail} AND json_extract(e.native_source_json,'$.nativeSequence')>?8 ORDER BY e.outbox_id,e.sequence LIMIT ?9")).map_err(read_sql)?;
+    let mut query = conn.prepare(&format!("SELECT e.append_key,e.update_digest,length(CAST(e.native_source_json AS BLOB)),e.native_source_json,e.pending {tail} AND (json_extract(e.native_source_json,'$.nativeSequence')>?8 OR (json_extract(e.native_source_json,'$.nativeSequence')=?8 AND json_extract(e.native_source_json,'$.origin.kind')='adoptionSeed')) ORDER BY e.outbox_id,e.sequence LIMIT ?9")).map_err(read_sql)?;
     let mut rows = query
         .query(params![
             b.workspace_id,
@@ -550,18 +609,20 @@ fn private_tail(
             b.current_path,
             held.namespace,
             previous_sequence,
-            gap + 1
+            gap + 2
         ])
         .map_err(read_sql)?;
     let mut sequences = Vec::new();
+    let mut terminal = false;
     while let Some(row) = rows.next().map_err(read_sql)? {
         let length: i64 = row.get(2).map_err(read_sql)?;
-        if sequences.len() as i64 >= gap || !(1..=MAX_NATIVE_SOURCE_BYTES).contains(&length) {
+        if !(1..=MAX_NATIVE_SOURCE_BYTES).contains(&length) {
             return Err(ApplicationError::Corrupt);
         }
         let append_key: String = row.get(0).map_err(read_sql)?;
         let digest: String = row.get(1).map_err(read_sql)?;
         let json: String = row.get(3).map_err(read_sql)?;
+        let pending: bool = row.get(4).map_err(read_sql)?;
         let source: crate::owner_outbox::OwnerOutboxNativeSource =
             serde_json::from_str(&json).map_err(|_| ApplicationError::Corrupt)?;
         source
@@ -573,17 +634,29 @@ fn private_tail(
         if source.binding != *b
             || source.adoption_id != adoption
             || source.update_digest != digest
-            || source.native_sequence <= previous_sequence
             || source.native_sequence > head
         {
             return Err(ApplicationError::Corrupt);
         }
-        sequences.push(source.native_sequence);
+        let adoption_seed = matches!(
+            source.origin,
+            crate::owner_outbox::OwnerOutboxNativeOrigin::AdoptionSeed
+        );
+        terminal |= !pending
+            && (source.native_sequence > previous_sequence
+                || adoption_seed && previous_sequence == source.native_sequence);
+        if source.native_sequence > previous_sequence {
+            if sequences.len() as i64 >= gap {
+                return Err(ApplicationError::Corrupt);
+            }
+            sequences.push(source.native_sequence);
+        }
     }
     Ok(PrivateTail {
         sequences,
         any,
         seed,
+        terminal,
     })
 }
 
@@ -751,6 +824,7 @@ mod publication_state_tests {
             sequence: 1,
             observed_head: 1,
             accepted: None,
+            terminal_source: false,
             receipts: Vec::new(),
             interval_digest: digest.clone(),
             bootstrap_moment: "moment".into(),

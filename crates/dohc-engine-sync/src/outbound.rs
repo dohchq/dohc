@@ -2,6 +2,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use dohc_engine_domain::{SecretMomentRecord, VersionRecord};
 use dohc_engine_storage::{StorageError, hex_sha256};
+use rusqlite::OptionalExtension;
 use rusqlite::{Transaction, params};
 
 use crate::{SyncError, journal_local_op_in_tx};
@@ -206,13 +207,14 @@ pub(crate) fn journal_saved_settlement_moment_in_tx(
     tx: &Transaction<'_>,
     workspace: &str,
     moment: &str,
+    before: Option<&PortableBefore>,
 ) -> Result<i64, SyncError> {
     use rusqlite::OptionalExtension;
     let prior:Option<i64>=tx.query_row("SELECT origin_seq FROM replication_log WHERE workspace_id=?1 AND op_kind='moment.append' AND imported=0 AND json_extract(payload_json,'$.momentId')=?2 LIMIT 1",params![workspace,moment],|r|r.get(0)).optional().map_err(SyncError::corrupt)?;
     if let Some(sequence) = prior {
         return Ok(sequence);
     }
-    let (payload, recorded) = moment_payload_in_tx(tx, workspace, moment, None)?;
+    let (payload, recorded) = moment_payload_in_tx(tx, workspace, moment, before)?;
     let sequence = journal_local_op_in_tx(tx, workspace, "moment.append", &payload, recorded)?;
     mark_export_in_tx(tx, workspace, sequence, payload, recorded)?;
     Ok(sequence)
@@ -403,6 +405,16 @@ fn moment_payload_in_tx(
         for (field, value) in fields.as_object().expect("before group is an object") {
             object.insert(field.clone(), value.clone());
         }
+    }
+    let unavailable: Option<(String,String)> = tx.query_row("SELECT settlement_id,reason FROM live_settlement_attribution_unavailable WHERE workspace_id=?1 AND moment_id=?2",params![workspace_id,row.moment_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(SyncError::corrupt)?;
+    if let Some((id, reason)) = unavailable {
+        payload
+            .as_object_mut()
+            .expect("moment payload is an object")
+            .remove("authors");
+        payload["attributionUnavailable"] = serde_json::json!({"settlementId":id,"reason":reason});
+        payload["metadata"]["summary"] =
+            serde_json::Value::String("Attribution unavailable".into());
     }
     let proof_ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM live_device_settlements s JOIN live_settlement_publication_states p USING(settlement_id) WHERE s.workspace_id=?1 AND s.moment_id=?2)",params![workspace_id,row.moment_id],|r|r.get(0)).map_err(SyncError::corrupt)?;
     if !proof_ready {

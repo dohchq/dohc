@@ -25,6 +25,7 @@ import { relayError } from "../errors";
 import { initialAcceptedHistoryDigest } from "../liveAcceptedHistory";
 import {
   readAcceptedHistoryInterval,
+  readAcceptedHistoryDeliveryMetadata,
   RestoreHistoryBudget,
   RestoreHistoryBudgetExceeded,
 } from "./liveAcceptedHistory";
@@ -91,7 +92,8 @@ type RestoreCheck = {
   newFence: number;
 };
 type Prepared = {
-  initialFence: number;
+  initialBinding: LiveObjectBinding;
+  baseBindingJson?: string;
   restores: RestoreCheck[];
   binding: LiveObjectBinding;
   namespace: string;
@@ -188,30 +190,99 @@ function restoreChecks(
     });
     expected = operation.oldBinding;
   }
-  return { initialFence: expected.restoreFenceGeneration, restores };
+  return { initialBinding: expected, restores };
 }
-function anchor(storage: StorageContext, p: Prepared) {
+function prepareBindingBase(
+  storage: StorageContext,
+  p: Prepared,
+  budget: RestoreHistoryBudget,
+) {
+  const selected = endpoint(storage, p.binding, p.namespace, p.previous);
+  require(selected.terminal);
+  const metadata = readAcceptedHistoryDeliveryMetadata(
+    storage,
+    {
+      document: p.binding,
+      namespace: p.namespace,
+      through: p.previous,
+      eventCount: selected.eventCount,
+      deliveryId: selected.terminal.deliveryId,
+    },
+    budget,
+  );
+  require(metadata);
+  const row = storage.db
+    .prepare(`SELECT restore_operation_id FROM sync_relay_live_update_journal WHERE ${where} AND journal_cursor=?`)
+    .get(...documentParams(p.binding), p.previous)!;
+  if (row.restore_operation_id !== null) {
+    const admission = readRestoreAdmission(
+      storage.db,
+      p.namespace,
+      String(row.restore_operation_id),
+      Number.MAX_SAFE_INTEGER,
+      value => budget.chargeBytes(value),
+    );
+    require(
+      isDeepStrictEqual(admission.admitted, metadata) &&
+      isDeepStrictEqual(metadata.accepted.binding, p.initialBinding),
+    );
+    const operation = admission.preparation.fence.operation;
+    require(isDeepStrictEqual(
+      {...operation.oldBinding, restoreFenceGeneration: operation.newFence},
+      p.initialBinding,
+    ));
+    p.restores.push({
+      operationId: String(row.restore_operation_id),
+      terminal: p.previous,
+      newFence: operation.newFence,
+      admissionDigest: String(storage.db
+        .prepare(`SELECT admission_sha256 FROM ${LIVE_RESTORE_LIFECYCLES} WHERE relay_database_namespace=? AND operation_id=?`)
+        .get(p.namespace, row.restore_operation_id)!.admission_sha256),
+    });
+  } else {
+    require(
+      metadata.accepted.binding.restoreFenceGeneration === p.initialBinding.restoreFenceGeneration &&
+      !isDeepStrictEqual(metadata.accepted.binding, p.initialBinding),
+    );
+  }
+  p.baseBindingJson = stableJsonStringify(metadata.accepted.binding);
+}
+function anchor(storage: StorageContext, p: Prepared, budget?: RestoreHistoryBudget) {
   const prior = storage.db
-    .prepare(
-      `SELECT * FROM ${SETTLEMENT_BINDINGS} WHERE ${where} ORDER BY terminal_cursor DESC LIMIT 1`,
-    )
+    .prepare(`SELECT * FROM ${SETTLEMENT_BINDINGS} WHERE ${where} ORDER BY terminal_cursor DESC LIMIT 1`)
     .get(...documentParams(p.binding));
-  if (prior) {
+  if (prior && prior.binding_json === stableJsonStringify(p.initialBinding)) {
     require(
       prior.terminal_cursor === p.previous &&
-        prior.markdown_sha256 === p.before &&
-        prior.namespace === p.namespace &&
-        prior.restore_fence === p.initialFence,
+      prior.markdown_sha256 === p.before &&
+      prior.namespace === p.namespace,
     );
     return;
   }
-  const baseline = storage.db
-    .prepare(`SELECT * FROM sync_relay_live_documents WHERE ${where}`)
-    .get(...documentParams(p.binding));
+  if (p.previous === 0) {
+    const baseline = storage.db
+      .prepare(`SELECT * FROM sync_relay_live_documents WHERE ${where}`)
+      .get(...documentParams(p.binding));
+    require(!prior && baseline && baseline.baseline_projected_sha256 === p.before);
+    return;
+  }
+  if (budget) prepareBindingBase(storage, p, budget);
+  const base = storage.db
+    .prepare(`SELECT j.relay_database_namespace,j.current_path,j.selector_paths_json,j.restore_fence_generation,c.markdown_sha256
+      FROM sync_relay_live_update_journal j JOIN ${SETTLEMENT_CUTS} c USING(journal_cursor)
+      WHERE j.workspace_id=? AND j.main_version_id=? AND j.object_id=? AND j.lineage_claim_id=? AND j.journal_cursor=?`)
+    .get(...documentParams(p.binding), p.previous);
   require(
-    baseline &&
-      p.previous === 0 &&
-      baseline.baseline_projected_sha256 === p.before,
+    p.baseBindingJson && base &&
+    base.relay_database_namespace === p.namespace &&
+    base.markdown_sha256 === p.before &&
+    (!prior || integer(prior.terminal_cursor) <= p.previous) &&
+    stableJsonStringify({
+      ...p.binding,
+      currentPath: base.current_path,
+      selectorPaths: JSON.parse(String(base.selector_paths_json)),
+      restoreFenceGeneration: base.restore_fence_generation,
+    }) === p.baseBindingJson,
   );
 }
 export async function prepareHostedSettlements(
@@ -384,13 +455,11 @@ export async function prepareHostedSettlements(
       };
       const key = JSON.stringify(documentParams(document)),
         prior = provisional.get(key);
-      if (prior)
+      if (prior && isDeepStrictEqual(prior.binding, p.initialBinding))
         require(
-          prior.terminal === previous &&
-            prior.markdown === p.before &&
-            prior.binding.restoreFenceGeneration === p.initialFence,
+          prior.terminal === previous && prior.markdown === p.before,
         );
-      else anchor(storage, p);
+      else anchor(storage, p, budget);
       const authors = new Map<string, LiveAuthorEntry>();
       for (const { metadata } of events) {
         if (
@@ -410,7 +479,15 @@ export async function prepareHostedSettlements(
                     ? { depth: author.depth }
                     : {}),
                 }
-              : (prior ?? author),
+              : prior?.kind === "automation" && author.kind === "automation"
+                ? {
+                    ...prior,
+                    attribution: {
+                      ...prior.attribution,
+                      depth: Math.max(prior.attribution.depth, author.attribution.depth),
+                    },
+                  }
+                : (prior ?? author),
           );
         }
       }
@@ -422,7 +499,13 @@ export async function prepareHostedSettlements(
       if (signal?.aborted) throw error;
       if (error instanceof RestoreHistoryBudgetExceeded)
         throw relayError("settlement_proof_budget");
-      if (!(error instanceof SettlementProofRefusal)) throw error;
+      if (
+        !(error instanceof SettlementProofRefusal) &&
+        !(error instanceof Error && [
+          "Accepted journal history is damaged.",
+          "Retained restore evidence is damaged.",
+        ].includes(error.message))
+      ) throw error;
       op.admittedAuthorSnapshot = undefined;
       op.settlementAdmission = {
         status: "refused",
@@ -529,6 +612,7 @@ function commitPreparedHostedSettlement(
     ...documentParams(p.binding),
     p.namespace,
     p.binding.restoreFenceGeneration,
+    stableJsonStringify(p.binding),
     p.previous,
     p.terminal,
     p.settlementId,
@@ -543,7 +627,7 @@ function commitPreparedHostedSettlement(
   assertWorkspaceQuota(storage, workspaceId, storageBytes);
   storage.db
     .prepare(
-      `INSERT INTO ${SETTLEMENT_BINDINGS} VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO ${SETTLEMENT_BINDINGS} VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(...values, storageBytes);
 }

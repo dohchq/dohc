@@ -1252,8 +1252,18 @@ async fn first_audited_settlement_publishes_its_own_moment_over_an_imported_prel
     };
     assert_eq!(
         published.payload["payloadBeforeBlobSha256"],
-        serde_json::json!(head.blob_sha256)
+        serde_json::json!(hex_sha256(source["markdown"].as_str().unwrap().as_bytes()))
     );
+    let local_before: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT before_blob_sha256 FROM moments WHERE moment_id=?1",
+                [&settled.moment_id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(local_before, head.blob_sha256);
     let allowed = |op: &ReplicationEnvelope| {
         owner_publication_prefix(&store, "workspace", std::slice::from_ref(op), 1_000_000)
             .unwrap()
@@ -1782,4 +1792,437 @@ async fn first_owner_settlement_publishes_the_adopted_source_over_a_settled_seed
 #[tokio::test]
 async fn first_owner_settlement_publishes_the_adopted_source_over_a_replaced_draft() {
     first_owner_settlement_publishes_the_adopted_source(true).await;
+}
+
+#[tokio::test]
+async fn terminal_native_seed_publishes_only_accepted_content_and_unblocks_ordinary_work() {
+    use dohc_engine_sync::{ReplicationEnvelope, owner_publication_prefix};
+    let mut f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    f.record(
+        &actor,
+        f.doc.richdoc_append_paragraph("Private refused seed"),
+        "private",
+        10,
+    )
+    .await;
+    f.ordinary_settle(&actor).await.unwrap();
+    let head: i64 = f
+        .store
+        .read_with(|conn| conn.query_row("SELECT head_update_seq FROM ydoc_docs", [], |r| r.get(0)))
+        .unwrap();
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt_at(&owner, head).await;
+    let settle = |terminal| {
+        handle.settle(
+            terminal,
+            100,
+            f.root.path().to_owned(),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+            AdmittedNativeHistoryReconstruction {
+                policy: NativeHistoryReconstruction {
+                    working_reserve_bytes: 8 * 1024 * 1024,
+                },
+                reservation: Arc::new(()),
+            },
+        )
+    };
+    // A real pending seed remains retryable and cannot publish its private bytes.
+    assert!(settle(None).await.is_err());
+    let input = f.store.read_with(|conn| conn.query_row("SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1", [], |r| Ok(dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput {
+        outbox_id:r.get(0)?, delivery_id:r.get(1)?, update_digest:r.get(2)?, reason:"terminal-source-refused".into()
+    }))).unwrap();
+    let refused_digest = input.update_digest.clone();
+    actor
+        .owner_ydoc_refuse_entry(
+            "workspace".into(),
+            input,
+            CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let remote = Ydoc::wire();
+    remote.apply(&f.bytes).unwrap();
+    let bytes = remote.richdoc_append_paragraph("Accepted collaborator work");
+    let (receipt, _) = deliver_declared(
+        &handle,
+        &f.binding,
+        1,
+        &bytes,
+        AgentDeclaration {
+            agent_id: "accepted-agent".into(),
+            on_behalf_of: Some("owner".into()),
+            depth: 1,
+        },
+    )
+    .await;
+    let result = settle(Some(receipt.clone())).await.unwrap();
+    assert!(!f.file().contains("Private refused seed"));
+    assert!(f.file().contains("Accepted collaborator work"));
+    let op = f.store.read_with(|conn| conn.query_row("SELECT origin_id,origin_seq,payload_json,recorded_at_ms FROM replication_log WHERE imported=0 AND op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1", [&result.moment_id], |r| Ok(ReplicationEnvelope {
+        workspace_id:"workspace".into(), origin_id:r.get(0)?, origin_seq:r.get(1)?, relay_seq:None, op_kind:"moment.append".into(), payload:serde_json::from_str(&r.get::<_,String>(2)?).unwrap(), recorded_at_ms:r.get(3)?, settlement_admission:None, admitted_author_snapshot:None
+    }))).unwrap();
+    assert_eq!(
+        op.payload["attributionUnavailable"]["reason"],
+        "terminal-owner-source"
+    );
+    assert!(op.payload.get("authors").is_none());
+    assert!(op.payload.get("settlementReference").is_none());
+    assert_eq!(
+        op.payload["payloadBeforeBlobSha256"],
+        hex_sha256(f.text.as_bytes())
+    );
+    assert_eq!(
+        owner_publication_prefix(&f.store, "workspace", std::slice::from_ref(&op), 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        1
+    );
+    assert_eq!(
+        f.store
+            .table_row_count("live_settlement_publication_states")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        f.store
+            .table_row_count("replication_pending_refusals")
+            .unwrap(),
+        1
+    );
+    assert!(f.moment_authors(&result.moment_id).is_empty());
+    assert!(f.store.get_binary_blob(&refused_digest).unwrap().is_some());
+    let counts = f.counts();
+    assert_eq!(
+        settle(Some(receipt)).await.unwrap().settlement_id,
+        result.settlement_id
+    );
+    assert_eq!(f.counts(), counts);
+    assert_eq!(
+        f.store
+            .table_row_count("replication_pending_refusals")
+            .unwrap(),
+        1
+    );
+    let next = remote.richdoc_append_paragraph("Later accepted work");
+    let (next_receipt, _) = deliver_declared(
+        &handle,
+        &f.binding,
+        2,
+        &next,
+        AgentDeclaration {
+            agent_id: "later-agent".into(),
+            on_behalf_of: Some("owner".into()),
+            depth: 1,
+        },
+    )
+    .await;
+    let next_result = settle(Some(next_receipt)).await.unwrap();
+    assert_eq!(next_result.previous_cursor, 0);
+    assert_eq!(next_result.terminal_cursor, 2);
+    let next_payload: serde_json::Value = f.store.read_with(|conn|conn.query_row("SELECT payload_json FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",[&next_result.moment_id],|r|r.get::<_,String>(0))).map(|s|serde_json::from_str(&s).unwrap()).unwrap();
+    assert_eq!(
+        next_payload["settlementReference"]["record"]["previousCursor"],
+        0
+    );
+    assert_eq!(
+        next_payload["payloadBeforeBlobSha256"],
+        hex_sha256(f.text.as_bytes())
+    );
+    assert!(next_payload.get("attributionUnavailable").is_none());
+    assert!(next_payload.get("authors").is_none()); // relay supplies canonical attribution
+    assert_eq!(
+        f.store
+            .table_row_count("live_settlement_publication_states")
+            .unwrap(),
+        1
+    );
+    assert!(!f.file().contains("Private refused seed"));
+    // An unrelated ordinary operation uses the unchanged publication gate.
+    dohc_engine_domain::VersionedTextStore::new(&mut f.store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: "workspace".into(),
+                version_id: "main".into(),
+                object_id: "other".into(),
+                path: "other.md".into(),
+                text: "Ordinary later work".into(),
+                moment_id: "later".into(),
+                metadata_origin: "api".into(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms: 40,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .unwrap();
+    f.store
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_sync::journal_moment_append_in_tx(tx, "workspace", "later")
+        })
+        .unwrap();
+    let later: serde_json::Value=f.store.read_with(|conn|conn.query_row("SELECT payload_json FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')='later'",[],|r|r.get::<_,String>(0))).map(|s|serde_json::from_str(&s).unwrap()).unwrap();
+    let mut later_op = op.clone();
+    later_op.payload = later;
+    assert_eq!(
+        owner_publication_prefix(&f.store, "workspace", &[op, later_op], 1_000_000)
+            .unwrap()
+            .allowed_ops,
+        2
+    );
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn native_refusal_rejects_wrong_digest_stale_binding_and_accepted_delivery() {
+    let f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let _handle = f.adopt(&owner).await;
+    f.record(
+        &actor,
+        f.doc.richdoc_append_paragraph("Exact native source"),
+        "native",
+        10,
+    )
+    .await;
+    let input=f.store.read_with(|conn|conn.query_row("SELECT outbox_id,delivery_id,update_digest FROM owner_ydoc_outbox_entries WHERE pending=1",[],|r|Ok(dohc_engine_collab::owner_outbox::OwnerOutboxRefuseInput {outbox_id:r.get(0)?,delivery_id:r.get(1)?,update_digest:r.get(2)?,reason:"terminal-source-refused".into()}))).unwrap();
+    let mut wrong = input.clone();
+    wrong.update_digest = "ab".repeat(32);
+    assert!(
+        actor
+            .owner_ydoc_refuse_entry(
+                "workspace".into(),
+                wrong,
+                CancellationToken::new(),
+                Arc::new(())
+            )
+            .await
+            .unwrap()
+            .is_err()
+    );
+    let mut stale = f.binding.clone();
+    stale.selector_paths = vec!["notes".into()];
+    let _new_handle = owner
+        .register(
+            "relay".into(),
+            ApplicationHostCoordinate {
+                host_id: "host".into(),
+                host_epoch: 1,
+                instance_id: "instance".into(),
+                connection_id: "connection".into(),
+            },
+            stale,
+        )
+        .await
+        .unwrap();
+    assert!(
+        actor
+            .owner_ydoc_refuse_entry(
+                "workspace".into(),
+                input.clone(),
+                CancellationToken::new(),
+                Arc::new(())
+            )
+            .await
+            .unwrap()
+            .is_err()
+    );
+    let handle = owner
+        .register(
+            "relay".into(),
+            ApplicationHostCoordinate {
+                host_id: "host".into(),
+                host_epoch: 1,
+                instance_id: "instance".into(),
+                connection_id: "connection".into(),
+            },
+            f.binding.clone(),
+        )
+        .await
+        .unwrap();
+    let receipt = LiveUpdateReceipt {
+        delivery_id: input.delivery_id.clone(),
+        update_digest: input.update_digest.clone(),
+        journal_cursor: 1,
+        accepting_host_epoch: 1,
+    };
+    assert!(matches!(
+        handle
+            .apply(
+                AdmittedLiveUpdate {
+                    metadata: AdmittedLiveUpdateMetadata {
+                        accepted: RelayAcceptedLiveUpdate {
+                            receipt: receipt.clone(),
+                            binding: f.binding.clone(),
+                            authority: ServerDerivedLiveUpdateAuthority::Owner {
+                                principal_id: "owner".into()
+                            },
+                            received_at_ms: 20
+                        },
+                        first_seen: vec![],
+                        canonical_version: Some(2),
+                        author_snapshot: Some(vec![]),
+                        first_seen_deletes: Some(vec![]),
+                        checkpoint_coverage: None
+                    },
+                    update_bytes: f
+                        .store
+                        .get_binary_blob(&input.update_digest)
+                        .unwrap()
+                        .unwrap()
+                },
+                Arc::new(NoFaults),
+                100_000_000
+            )
+            .await
+            .unwrap(),
+        ApplicationResult::Applied(..)
+    ));
+    // Delivery acceptance is authoritative even before its owner ACK arrives.
+    assert!(matches!(
+        actor
+            .owner_ydoc_refuse_entry(
+                "workspace".into(),
+                input,
+                CancellationToken::new(),
+                Arc::new(())
+            )
+            .await
+            .unwrap(),
+        Err(dohc_engine_collab::OwnerOutboxError::ReceiptMismatch)
+    ));
+    let saved = f.settle(&handle, Some(receipt)).await;
+    assert!(f.file().contains("Exact native source"));
+    assert_eq!(
+        f.store
+            .table_row_count("live_settlement_publication_states")
+            .unwrap(),
+        1
+    );
+    assert!(saved.materialized);
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
+}
+
+#[tokio::test]
+async fn refused_admission_keeps_the_next_native_proof_at_the_last_verified_cut() {
+    refused_native_publications_continue(1).await;
+}
+
+#[tokio::test]
+async fn queued_refused_admissions_keep_the_third_native_proof_at_the_last_verified_cut() {
+    refused_native_publications_continue(2).await;
+}
+
+async fn refused_native_publications_continue(queued: i64) {
+    use dohc_engine_sync::{NoLiveLeases, SettlementAdmission, apply_replication_envelope};
+    let mut f = Fixture::new();
+    let supervisor = WorkspaceSupervisor::new();
+    let actor = supervisor.open(&f.db, 3).unwrap().actor;
+    let owner = actor
+        .live_application_owner("workspace".into())
+        .await
+        .unwrap();
+    let handle = f.adopt(&owner).await;
+    let mut settlements = Vec::new();
+    // Each proof is queued against the preceding cut before any refusal arrives.
+    for cursor in 1..=queued {
+        f.record(
+            &actor,
+            f.doc
+                .richdoc_append_paragraph(&format!("Accepted content {cursor}")),
+            &format!("queued-{cursor}"),
+            10 + cursor,
+        )
+        .await;
+        let receipt = f.accept_pending(&actor, &handle, cursor).await;
+        settlements.push(f.settle(&handle, Some(receipt)).await);
+    }
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    let mut echoes =
+        dohc_engine_sync::list_replication_ops(&f.store, "workspace", "origin", -1, 500).unwrap();
+    let last_sequence = echoes
+        .iter()
+        .filter(|op| {
+            op.op_kind == "moment.append"
+                && settlements
+                    .iter()
+                    .any(|s| op.payload["momentId"] == s.moment_id)
+        })
+        .map(|op| op.origin_seq)
+        .max()
+        .unwrap();
+    for echoed in &mut echoes {
+        if echoed.origin_seq > last_sequence {
+            break;
+        }
+        echoed.relay_seq = Some(echoed.origin_seq + 1);
+        if let Some(settled) = settlements.iter().find(|s| {
+            echoed.op_kind == "moment.append" && echoed.payload["momentId"] == s.moment_id
+        }) {
+            // Authenticated results use the canonical admission path, not mark edits.
+            echoed.settlement_admission = Some(SettlementAdmission::Refused {
+                settlement_id: settled.settlement_id.clone(),
+                reason: "authorship-mismatch".into(),
+            });
+        }
+        apply_replication_envelope(&mut f.store, &mut cache, echoed, &NoFaults, &NoLiveLeases)
+            .unwrap();
+    }
+    assert_eq!(
+        f.store
+            .table_row_count("live_settlement_attribution_unavailable")
+            .unwrap(),
+        queued
+    );
+    f.record(
+        &actor,
+        f.doc.richdoc_append_paragraph("Accepted next content"),
+        "next",
+        40,
+    )
+    .await;
+    let receipt = f.accept_pending(&actor, &handle, queued + 1).await;
+    let next = f.settle(&handle, Some(receipt)).await;
+    assert_eq!(next.previous_cursor, 0);
+    assert_eq!(next.terminal_cursor, queued + 1);
+    let payload:serde_json::Value=f.store.read_with(|conn|conn.query_row("SELECT payload_json FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",[&next.moment_id],|r|r.get::<_,String>(0))).map(|s|serde_json::from_str(&s).unwrap()).unwrap();
+    assert_eq!(
+        payload["settlementReference"]["record"]["previousCursor"],
+        0
+    );
+    assert_eq!(
+        payload["payloadBeforeBlobSha256"],
+        hex_sha256(f.text.as_bytes())
+    );
+    assert!(payload.get("attributionUnavailable").is_none());
+    assert!(payload.get("authors").is_none());
+    assert_eq!(
+        f.store
+            .table_row_count("live_settlement_attribution_unavailable")
+            .unwrap(),
+        queued
+    );
+    for cursor in 1..=queued {
+        assert!(f.file().contains(&format!("Accepted content {cursor}")));
+    }
+    assert!(f.file().contains("Accepted next content"));
+    owner.close().await.unwrap();
+    supervisor.close_all().unwrap();
 }

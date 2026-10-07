@@ -3718,3 +3718,119 @@ async fn live_history_publication_and_settlement_benchmark() {
         );
     }
 }
+
+#[tokio::test]
+async fn resumed_binding_publication_starts_at_authenticated_restore_cut() {
+    resumed_binding_publication(false).await;
+}
+
+#[tokio::test]
+async fn refused_restore_publication_keeps_new_binding_at_authenticated_restore_cut() {
+    resumed_binding_publication(true).await;
+}
+
+async fn resumed_binding_publication(refused: bool) {
+    let mut f = Fixture::with_relay(true).await;
+    let first = f.settle(None, 100, Arc::new(NoFaults)).await.unwrap();
+    // Finish publication before the authenticated stop/restore transition.
+    rusqlite::Connection::open(&f.db).unwrap().execute("INSERT INTO sync_relay_push_state(workspace_id,origin_id,pushed_seq) SELECT workspace_id,origin_id,max(origin_seq) FROM replication_log WHERE workspace_id='workspace' GROUP BY workspace_id,origin_id",[]).unwrap();
+    let input = applied_restore(&f, None, 0).await;
+    let restored = settle_restore(&f, input.clone(), Arc::new(NoFaults))
+        .await
+        .unwrap();
+    if refused {
+        let mut store = EngineStore::open(&f.db, 30).unwrap();
+        let mut cache = dohc_engine_collab::WriterDocCache::new();
+        let mut echoes =
+            dohc_engine_sync::list_replication_ops(&store, "workspace", "owner-origin", -1, 500)
+                .unwrap();
+        let last = echoes
+            .iter()
+            .find(|op| {
+                op.op_kind == "moment.append" && op.payload["momentId"] == restored.moment_id
+            })
+            .unwrap()
+            .origin_seq;
+        for op in &mut echoes {
+            if op.origin_seq > last {
+                break;
+            }
+            op.relay_seq = Some(op.origin_seq + 1);
+            if op.op_kind == "moment.append" && op.payload["momentId"] == restored.moment_id {
+                op.settlement_admission = Some(dohc_engine_sync::SettlementAdmission::Refused {
+                    settlement_id: restored.settlement_id.clone(),
+                    reason: "authorship-mismatch".into(),
+                });
+            }
+            dohc_engine_sync::apply_replication_envelope(
+                &mut store,
+                &mut cache,
+                op,
+                &NoFaults,
+                &dohc_engine_sync::NoLiveLeases,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            store
+                .table_row_count("live_settlement_attribution_unavailable")
+                .unwrap(),
+            1
+        );
+    }
+    let resumed = f
+        .owner
+        .resume_restore(
+            NativeRestoreResume {
+                application: input.clone(),
+                settlement_id: restored.settlement_id.clone(),
+            },
+            restore_coordinate(),
+            2_000_000,
+            100,
+            f.root.path().to_owned(),
+            31,
+            Arc::new(NoFaults),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.application_receipt.journal_cursor, 71);
+    f.binding = input.admitted.accepted.binding;
+    f.handle = f
+        .owner
+        .register("relay".into(), restore_coordinate(), f.binding.clone())
+        .await
+        .unwrap();
+    // The selected checkpoint is the resumed document; private old-head bytes
+    // cannot supply the publication base.
+    f.doc = f.read(|db| {
+        dohc_engine_collab::load_doc_in(
+            db,
+            &dohc_engine_collab::DocKey::new("workspace", "main", "object").unwrap(),
+        )
+        .unwrap()
+    });
+    let receipt = f
+        .apply(
+            72,
+            f.doc.richdoc_append_paragraph("After recovered binding"),
+        )
+        .await;
+    let settled = f
+        .settle(Some(receipt), 100, Arc::new(NoFaults))
+        .await
+        .unwrap();
+    assert_eq!(settled.previous_cursor, 71);
+    assert_eq!(settled.terminal_cursor, 72);
+    f.read(|db| {
+        let payload:String=db.query_row("SELECT payload_json FROM replication_log WHERE op_kind='moment.append' AND json_extract(payload_json,'$.momentId')=?1",[&settled.moment_id],|r|r.get(0)).unwrap();
+        let payload:serde_json::Value=serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["settlementReference"]["record"]["previousCursor"],71);
+        assert_eq!(payload["settlementReference"]["record"]["binding"]["restoreFenceGeneration"],1);
+        assert_eq!(payload["payloadBeforeBlobSha256"],restored.markdown_digest);
+        assert_eq!(payload["beforeLatestMomentId"],restored.moment_id);
+        assert_ne!(settled.settlement_id,first.settlement_id);
+    });
+}
