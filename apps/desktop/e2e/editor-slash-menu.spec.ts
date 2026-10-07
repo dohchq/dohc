@@ -157,3 +157,38 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
     await cleanupDesktopWorkspace(desktop, temp);
   }
 });
+
+test("@slash-menu Escape keeps the slash menu closed while the query is typed", async () => {
+  test.setTimeout(120_000);
+  const temp = await createTempWorkspace();
+  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
+
+  try {
+    await writeWorkspaceFiles(temp, [{ path: "notes/doc.md", contents: "# Doc\n\nText.\n" }]);
+    desktop = await launchDesktopApp({ workspace: temp });
+    const { page } = desktop;
+    await openWorkspaceFromFirstRun(page, temp);
+    await explorerRow(page, "notes").click();
+    await explorerRow(page, "notes/doc.md").click();
+    const editor = page.getByTestId("markdown-editor");
+    await expect(editor).toBeVisible({ timeout: 20_000 });
+
+    await editor.getByText("Text.").click();
+    await page.keyboard.press("End");
+    await page.keyboard.press("Enter");
+    const menu = page.getByRole("listbox", { name: "slash commands" });
+    await page.keyboard.type("/he");
+    await expect(menu).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(menu).toBeHidden();
+    await page.keyboard.type("ad");
+    await expect(editor.locator("p").last()).toHaveText("/head");
+    await expect(menu).toBeHidden();
+
+    await page.keyboard.type(" /");
+    await expect(menu).toBeVisible();
+  } finally {
+    await cleanupDesktopWorkspace(desktop, temp);
+  }
+});

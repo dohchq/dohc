@@ -34,7 +34,7 @@ import {
   revealMenuRow,
 } from "../ui/Menu";
 import type { Editor } from "@tiptap/core";
-import { NodeSelection, Plugin, PluginKey } from "@tiptap/pm/state";
+import { NodeSelection, Plugin, PluginKey, type EditorState } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   FLOATING_MENU_MAX_HEIGHT,
@@ -229,7 +229,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
 ];
 
-const slashCommandKey = new PluginKey("dohc-slash-command");
+const slashCommandKey = new PluginKey<number | null>("dohc-slash-command");
 
 export function filterSlashCommands(query: string): SlashCommandItem[] {
   const normalized = query.trim().toLowerCase();
@@ -250,6 +250,16 @@ export function findSlashCommandMatch(
   return { slashOffset, query: match[1]?.toLowerCase() ?? "" };
 }
 
+// The trigger the caret is in: its "/" position and the query typed after it.
+function findSlashTrigger(state: EditorState): { from: number; query: string } | null {
+  const selection = state.selection;
+  if (!selection.empty) return null;
+  const $from = selection.$from;
+  if (!$from.parent.isTextblock) return null;
+  const match = findSlashCommandMatch($from.parent.textBetween(0, $from.parentOffset));
+  return match ? { from: $from.start() + match.slashOffset, query: match.query } : null;
+}
+
 function readSlashCommandState(
   view: EditorView,
   previous: SlashCommandState,
@@ -258,18 +268,13 @@ function readSlashCommandState(
     return CLOSED_SLASH_COMMAND_STATE;
   }
 
-  const state = view.state;
-  const selection = state.selection;
-  if (!selection.empty) return CLOSED_SLASH_COMMAND_STATE;
+  const trigger = findSlashTrigger(view.state);
+  if (!trigger || slashCommandKey.getState(view.state) === trigger.from) {
+    return CLOSED_SLASH_COMMAND_STATE;
+  }
 
-  const $from = selection.$from;
-  if (!$from.parent.isTextblock) return CLOSED_SLASH_COMMAND_STATE;
-  const textBeforeCursor = $from.parent.textBetween(0, $from.parentOffset);
-  const match = findSlashCommandMatch(textBeforeCursor);
-  if (!match) return CLOSED_SLASH_COMMAND_STATE;
-
-  const from = $from.start() + match.slashOffset;
-  const to = selection.from;
+  const from = trigger.from;
+  const to = view.state.selection.from;
   let x = 12;
   let y = 40;
   let bottom: number | null = null;
@@ -287,7 +292,7 @@ function readSlashCommandState(
     // Offscreen/jsdom editors cannot always resolve coordinates.
   }
 
-  const query = match.query;
+  const query = trigger.query;
   const selected = previous.open && previous.query === query ? previous.selected : 0;
   const itemCount = filterSlashCommands(query).length;
   return {
@@ -326,8 +331,18 @@ export function makeSlashCommandPlugin({
     publish(next);
   };
 
-  return new Plugin({
+  return new Plugin<number | null>({
     key: slashCommandKey,
+    // The "/" whose menu Escape closed. It stays closed while the caret is in
+    // that trigger; leaving it and coming back, or a new "/", opens the menu.
+    state: {
+      init: () => null,
+      apply(tr, dismissed, _oldState, state) {
+        const meta: number | undefined = tr.getMeta(slashCommandKey);
+        const from = meta ?? (dismissed === null ? null : tr.mapping.map(dismissed));
+        return from !== null && findSlashTrigger(state)?.from === from ? from : null;
+      },
+    },
     view(view) {
       refresh(view);
       return {
@@ -375,7 +390,7 @@ export function makeSlashCommandPlugin({
 
         if (event.key === "Escape") {
           event.preventDefault();
-          close();
+          view.dispatch(view.state.tr.setMeta(slashCommandKey, slashState.from));
           view.focus();
           return true;
         }

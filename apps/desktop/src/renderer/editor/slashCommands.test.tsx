@@ -154,6 +154,85 @@ describe("slash menu render stability", () => {
   });
 });
 
+// The plugin alone, on a plain ref, as blockExit.test wires it.
+function makeSlashEditor() {
+  const stateRef: { current: SlashCommandState } = { current: CLOSED_SLASH_COMMAND_STATE };
+  const editor = new Editor({
+    element: document.createElement("div"),
+    extensions: [
+      StarterKit.configure({ trailingNode: false }),
+      Extension.create({
+        name: "dohcTestSlash",
+        addProseMirrorPlugins() {
+          return [
+            makeSlashCommandPlugin({
+              stateRef,
+              setState: (next) => {
+                stateRef.current = typeof next === "function" ? next(stateRef.current) : next;
+              },
+              runCommandRef: { current: () => {} },
+            }),
+          ];
+        },
+      }),
+    ],
+    content: "<p></p>",
+  });
+  const press = (key: string): KeyboardEvent => {
+    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    editor.view.dom.dispatchEvent(event);
+    return event;
+  };
+  return { editor, stateRef, press };
+}
+
+describe("Escape on the slash menu", () => {
+  it("closes it, keeps the typed text, and keeps it closed while the query is typed", () => {
+    const { editor, stateRef, press } = makeSlashEditor();
+    editor.commands.insertContent("/he");
+    expect(stateRef.current.open).toBe(true);
+
+    expect(press("Escape").defaultPrevented).toBe(true);
+    expect(stateRef.current.open).toBe(false);
+    expect(editor.state.doc.textContent).toBe("/he");
+
+    editor.commands.insertContent("a");
+    editor.commands.insertContent("d");
+    expect(editor.state.doc.textContent).toBe("/head");
+    expect(stateRef.current.open).toBe(false);
+    // With the menu closed, Escape is no longer the menu's.
+    expect(press("Escape").defaultPrevented).toBe(false);
+    editor.destroy();
+  });
+
+  it("opens again for a fresh /", () => {
+    const { editor, stateRef, press } = makeSlashEditor();
+    editor.commands.insertContent("/he");
+    press("Escape");
+    editor.commands.insertContent("x");
+    expect(stateRef.current.open).toBe(false);
+
+    editor.commands.insertContent(" /");
+    expect(stateRef.current).toMatchObject({ open: true, from: 6, query: "" });
+    editor.destroy();
+  });
+
+  it("opens again when the caret leaves the trigger and comes back", () => {
+    const { editor, stateRef, press } = makeSlashEditor();
+    editor.commands.insertContent("/head");
+    press("Escape");
+    // Inside the trigger, the caret keeps it dismissed.
+    editor.commands.setTextSelection(4);
+    expect(stateRef.current.open).toBe(false);
+
+    editor.commands.setTextSelection(1);
+    expect(stateRef.current.open).toBe(false);
+    editor.commands.setTextSelection(6);
+    expect(stateRef.current).toMatchObject({ open: true, from: 1, query: "head" });
+    editor.destroy();
+  });
+});
+
 describe("SlashCommandMenu placement anchoring", () => {
   it("top-anchors below-placement menus at the cursor", () => {
     const { container } = render(
