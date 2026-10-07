@@ -739,11 +739,6 @@ describe("keeping the roster current", () => {
     list.mockImplementation(async () => answered({ grants: [ana], links: [], formerGrants: [], endedGrants: [] }));
     first.resolve(answered({ grants: [], links: [], formerGrants: [], endedGrants: [] }));
     await r.forRun(WORKSPACE);
-    expect(list).toHaveBeenCalledTimes(1);
-    expect(r.observation(WORKSPACE).freshness).toBe("stale");
-    now += SHARE_ROSTER_FRESH_MS;
-    await vi.advanceTimersByTimeAsync(SHARE_ROSTER_FRESH_MS);
-    await r.requestRefresh(WORKSPACE);
     expect(list).toHaveBeenCalledTimes(2);
     expect(store.find(WORKSPACE)?.shareRoster).toMatchObject({ version: 2, grants: [ana], links: [], formerGrants: [], endedGrants: [] });
   });
@@ -753,8 +748,6 @@ describe("keeping the roster current", () => {
     r.open(WORKSPACE);
     await r.forRun(WORKSPACE);
     r.sharesChanged(null);
-    now += SHARE_ROSTER_FRESH_MS;
-    await vi.advanceTimersByTimeAsync(SHARE_ROSTER_FRESH_MS);
     await r.forRun(WORKSPACE);
     expect(list.mock.calls.map(([workspace]) => workspace.workspaceId)).toEqual([WORKSPACE, WORKSPACE]);
   });

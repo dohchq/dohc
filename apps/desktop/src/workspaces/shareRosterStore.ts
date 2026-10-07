@@ -9,7 +9,7 @@ const Metadata = z.object({ version: z.number().int().positive(), listedAtMs: z.
 
 export function createShareRosterStore(directory: string) {
   const file = (entry: RegistryEntry) => join(directory, `${observationKey([
-    entry.workspaceId, entry.rootPath, entry.remote?.ownerUserId ?? "", entry.remote?.serverUrl ?? "",
+    entry.workspaceId, entry.remote?.ownerUserId ?? "", entry.remote?.serverUrl ?? "",
   ])}.json`);
   const cache = new Map<string, ShareRoster | undefined>();
   return {
@@ -37,7 +37,8 @@ export function createShareRosterStore(directory: string) {
     markPulled(entry: RegistryEntry): ShareRoster | undefined {
       if (!entry.shareRoster || entry.shareRoster.pulledAfter) return entry.shareRoster;
       const next = { ...entry.shareRoster, pulledAfter: true as const };
-      writeObservationFile(file(entry), next);
+      try { writeObservationFile(file(entry), next); } catch (error) { cache.delete(file(entry)); throw error; }
+      cache.set(file(entry), next);
       return next;
     },
     remove(entry: RegistryEntry): void { removeObservationFile(file(entry)); cache.delete(file(entry)); },

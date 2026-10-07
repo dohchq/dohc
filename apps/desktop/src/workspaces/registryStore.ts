@@ -603,9 +603,7 @@ export function createRegistryStore(registryFile: string) {
       const registry = read();
       const entry = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
-      const shareRoster = rosters.save(entry, listing, pulledAfter, listedAtMs);
-      if (shareRoster === entry.shareRoster) return;
-      cache = { ...registry, workspaces: registry.workspaces.map(current => current === entry ? withRoster(current) : current) };
+      rosters.save(entry, listing, pulledAfter, listedAtMs);
     },
 
     /** The pull mark remains durable for automation reach, independently of Access freshness. */
@@ -613,9 +611,7 @@ export function createRegistryStore(registryFile: string) {
       const registry = read();
       const entry = registry.workspaces.find(entry => entry.workspaceId === workspaceId);
       if (!entry) throw new Error(`Unknown workspace: ${workspaceId}`);
-      const shareRoster = rosters.markPulled(entry);
-      if (shareRoster === entry.shareRoster) return;
-      cache = { ...registry, workspaces: registry.workspaces.map(current => current === entry ? { ...current, shareRoster } : current) };
+      rosters.markPulled(entry);
     },
 
     /**

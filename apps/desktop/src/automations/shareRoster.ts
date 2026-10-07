@@ -236,8 +236,8 @@ export function createShareRosters(dependencies: {
     dependencies.onListed?.(workspaceId);
   }
 
-  // Pacing for background and surface requests. Automation reach retains its
-  // immediate re-list after an overlapping pull, before allowing a run.
+  // Pace Access requests independently of immediate share-change and pull
+  // relisting for automation reach.
   function pacedRefresh(workspaceId: string): Promise<void> {
     const state = stateFor(workspaceId);
     if (state.running) return state.running;
@@ -254,12 +254,14 @@ export function createShareRosters(dependencies: {
 
   function refresh(workspaceId: string): Promise<void> {
     const state = stateFor(workspaceId);
-    if (state.running) return state.running;
+    if (state.running) { state.again = true; return state.running; }
     if (state.retry) { clearTimeout(state.retry); state.retry = null; }
-    const running = listOnce(workspaceId, state).finally(() => {
-      state.running = null;
-      if (state.again) { state.again = false; void pacedRefresh(workspaceId); }
-    });
+    const running = (async () => {
+      do {
+        state.again = false;
+        await listOnce(workspaceId, state);
+      } while (state.again && !state.retired);
+    })().finally(() => { state.running = null; });
     state.running = running;
     return running;
   }
@@ -337,8 +339,7 @@ export function createShareRosters(dependencies: {
         const state = stateFor(id);
         state.changeGeneration += 1;
         state.invalidated = true;
-        state.again = state.running !== null;
-        void pacedRefresh(id);
+        void refresh(id);
       };
       if (workspaceId !== null) invalidate(workspaceId);
       else for (const [id, state] of states) if (state.timer) invalidate(id);

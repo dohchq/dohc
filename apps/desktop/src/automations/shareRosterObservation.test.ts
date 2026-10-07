@@ -44,18 +44,25 @@ it("timestamps acquisition start, expires freshness and makes restart stale with
   expect(r.observation("w").freshness).toBe("stale");
 });
 
-it("invalidates immediately, paces local changes and cannot publish a pre-change acquisition fresh", async () => {
-  const h = harness(); const r = h.make(); const response = deferred<RosterAnswer>();
-  h.list.mockImplementationOnce(() => response.promise);
-  r.open("w"); r.sharesChanged("w"); r.sharesChanged("w");
-  response.resolve(answered); await r.forRun("w");
+it("invalidates an overlapping Access observation and immediately relists local changes for reach", async () => {
+  const h = harness(); const r = h.make(); const first = deferred<RosterAnswer>(); const second = deferred<RosterAnswer>();
+  h.list.mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+  const pending = r.requestRefresh("w"); r.sharesChanged("w"); r.sharesChanged("w");
+  first.resolve(answered);
+  await vi.waitFor(() => expect(h.list).toHaveBeenCalledTimes(2));
   expect(r.observation("w").freshness).toBe("stale");
-  expect(h.list).toHaveBeenCalledOnce();
-  await h.advance(SHARE_ROSTER_FRESH_MS - 1);
-  expect(h.list).toHaveBeenCalledOnce();
-  await h.advance(1); await r.requestRefresh("w");
-  expect(h.list).toHaveBeenCalledTimes(2);
+  second.resolve(answered); await pending;
   expect(r.observation("w").freshness).toBe("fresh");
+  r.close("w");
+});
+
+it("paces Access requests without delaying local share-change relisting", async () => {
+  const h = harness(); const r = h.make(); await r.requestRefresh("w");
+  await r.requestRefresh("w"); await r.requestRefresh("w");
+  expect(h.list).toHaveBeenCalledOnce();
+  await h.advance(SHARE_ROSTER_FRESH_MS - 1); expect(h.list).toHaveBeenCalledOnce();
+  await h.advance(1); await r.requestRefresh("w"); expect(h.list).toHaveBeenCalledTimes(2);
+  r.sharesChanged("w"); await r.forRun("w"); expect(h.list).toHaveBeenCalledTimes(3);
   r.close("w");
 });
 
@@ -88,7 +95,7 @@ it("does not refresh on routine sync and stops deferred refreshes on retirement"
   const h = harness(); const r = h.make(); r.open("w"); await r.forRun("w");
   for (let i = 0; i < 10; i++) await r.pulled("w", false);
   expect(h.list).toHaveBeenCalledOnce();
-  r.sharesChanged("w"); r.close("w");
+  await r.requestRefresh("w"); r.close("w");
   await h.advance(SHARE_ROSTER_REFRESH_MS * 2);
   expect(h.list).toHaveBeenCalledOnce();
 });
@@ -119,7 +126,7 @@ it("reuses the parsed observation until the underlying roster changes", async ()
   const h = harness(); const r = h.make(); await r.requestRefresh("w");
   const first = r.observation("w").listing;
   expect(r.observation("w").listing).toBe(first);
-  r.sharesChanged("w");
+  await r.requestRefresh("w");
   expect(r.observation("w").listing).toBe(first);
   r.close("w");
 });

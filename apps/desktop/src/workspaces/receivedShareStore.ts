@@ -92,12 +92,22 @@ export function createReceivedShareAcquisition(dependencies: {
   let invalidation = 0;
   let failed = false;
   let lifetime = 0;
+  let credentialScope = dependencies.scope();
   const same = (a: ReceivedScope | null, b: ReceivedScope) =>
     a?.userId === b.userId && a.relayUrl === b.relayUrl && a.generation === b.generation;
 
+  function retire(): void { lifetime += 1; live = null; attempt = null; pending = null; failed = false; }
   return {
     invalidate(): void { invalidation += 1; },
-    retire(): void { lifetime += 1; live = null; attempt = null; pending = null; failed = false; },
+    retire,
+    credentialsChanged(current: ReceivedScope | null, settled = true): void {
+      retire();
+      if (!settled) return;
+      const previous = credentialScope;
+      credentialScope = current;
+      if (!previous || previous.userId === current?.userId && previous.relayUrl === current.relayUrl) return;
+      try { dependencies.store.remove(previous); } catch (error) { dependencies.logError(error); }
+    },
     observation(): ReceivedObservation {
       const scope = dependencies.scope();
       if (!scope) return { inventory: null, checkedAtMs: null, freshness: "unknown" };

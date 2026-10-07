@@ -896,6 +896,7 @@ let clearButtonInspections: (() => void) | undefined;
 const ownerDatasetCopies = createOwnerDatasetCopyRegistry();
 const namedDatasetPages = createNamedDatasetCacheRegistry({ directory: () => join(stateDir(), "named-dataset-pages") });
 let credentialCacheGeneration = 0;
+let receivedShareCredentialsChanged: ((current: CloudSessionCredentials | null, settled: boolean) => void) | undefined;
 // Who History credits this computer's edits to. A credential load's
 // placeholder null never relabels edits made meanwhile.
 const localAuthorship = createLocalAuthorship({
@@ -914,6 +915,7 @@ const credentialSessionCache =
     const buttonAccountChanged = chatShareSessionKey(cachedCredentials) !== chatShareSessionKey(snapshot.credentials);
     cachedCredentials = snapshot.credentials;
     credentialCacheGeneration = snapshot.generation;
+    receivedShareCredentialsChanged?.(cachedCredentials, settled);
     if (buttonAccountChanged) {
       refreshSharedButtonInspections(() => clearButtonInspections?.(),
         activity.listOpenWorkspaceIds().filter(workspaceId => sharedViewOf(workspaceId) !== null),
@@ -1348,6 +1350,13 @@ const receivedShareAcquisition = createReceivedShareAcquisition({
   logError: error => console.warn("[desktop] received share observation:", error),
 });
 
+receivedShareCredentialsChanged = (current, settled) => {
+  const scope = (credentials: CloudSessionCredentials | null) => credentials?.relayUrl ? {
+    userId: credentials.userId, relayUrl: credentials.relayUrl, generation: credentialCacheGeneration,
+  } : null;
+  receivedShareAcquisition.credentialsChanged(scope(current), settled);
+};
+
 // The account file remains while another registered workspace can use it.
 function removeWorkspace(workspaceId: string): void {
   removeRegisteredWorkspace(workspaceId);
@@ -1358,12 +1367,32 @@ function removeWorkspace(workspaceId: string): void {
   });
 }
 
-// A restored share must resume even if this device was offline during Undo.
+// Existing received-copy recovery uses a live listing, without refreshing the Access store.
+let removalRecheck: { generation: number; startedAt: number; pending: Promise<void> } | null = null;
 async function recheckRemovedShares(workspaceId: string): Promise<void> {
   const entry = findWorkspace(workspaceId);
   if (!entry || !recipientShareNeedsRecheck(entry)) return;
   await warmCredentialCache();
-  await receivedShareAcquisition.refresh();
+  const credentials = cachedCredentials;
+  if (!credentials?.relayUrl) return;
+  const generation = credentialCacheGeneration;
+  if (removalRecheck?.generation === generation && Date.now() - removalRecheck.startedAt < 30_000) {
+    return removalRecheck.pending;
+  }
+  const pending = (async () => {
+    try {
+      const listing = await awaitCredentialGeneration({
+        capturedGeneration: generation,
+        currentGeneration: () => credentialCacheGeneration,
+        run: () => relayShareJsonWithCredentials<unknown>(credentials, "/sync/shares"),
+      });
+      await reconcileReceivedShares(listing, () => generation === credentialCacheGeneration);
+    } catch (error) {
+      console.warn(`[desktop] share removal recheck for ${workspaceId}:`, error);
+    }
+  })();
+  removalRecheck = { generation, startedAt: Date.now(), pending };
+  await pending;
 }
 
 const rosterContexts = new Map<string, { generation: number; binding: unknown }>();
@@ -1397,9 +1426,6 @@ const shareRosters = createShareRosters({
     if (!credentials.relayUrl) {
       return { kind: "unanswered", next: "Reconnect your sharing server, then try again.", partial: false };
     }
-    // The owner pages and the account observation share this refresh attempt.
-    // Received storage and resumptions consume the same complete live response.
-    void receivedShareAcquisition.refresh();
     return listRosterGrants(workspace.workspaceId, async (path) => {
       const response = await relayShareResponseWithCredentials(credentials, path, { method: "GET" });
       return { status: response.status, body: await response.json().catch(() => undefined) };
@@ -3295,7 +3321,6 @@ async function openWorkspaceActivityForOperation(
   });
   queueChatBookmarkProjection(canonicalWorkspace.workspaceId);
   shareRosters.open(canonicalWorkspace.workspaceId);
-  void receivedShareAcquisition.refresh();
   // Automations run where changes are captured: never in a shared view.
   if (activity.engineCaptureFor(canonicalWorkspace.workspaceId)) {
     automationHosts.open(canonicalWorkspace.workspaceId);

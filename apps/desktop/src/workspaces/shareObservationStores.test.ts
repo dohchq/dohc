@@ -28,6 +28,34 @@ let directory: string;
 beforeEach(async () => { vi.restoreAllMocks(); vi.clearAllMocks(); directory = await createTestScratch("dohc-share-observations-"); });
 
 describe("per-workspace roster storage", () => {
+  it("preserves the pull mark through metadata updates without serializing the roster", () => {
+    const file = join(directory, "registry.json");
+    const store = createRegistryStore(file);
+    store.register(workspace);
+    store.register({ ...workspace, workspaceId: "other", rootPath: "/other" });
+    store.setShareRoster("w", listing, false, 123);
+    store.markShareRosterPulled("w");
+    store.markOpened("other", 456);
+    expect(readFileSync(file, "utf8")).not.toContain('"shareRoster"');
+    store.setAutomationHost("w", null);
+    expect(store.find("w")?.shareRoster?.pulledAfter).toBe(true);
+    expect(createRegistryStore(file).find("w")?.shareRoster?.pulledAfter).toBe(true);
+    expect(readFileSync(file, "utf8")).not.toContain('"shareRoster"');
+  });
+
+  it("keeps entry identity when saving changed and unchanged rosters or marking a pull", () => {
+    const store = createRegistryStore(join(directory, "registry.json"));
+    store.register(workspace);
+    const entry = store.find("w");
+    store.setShareRoster("w", listing, false, 100);
+    expect(store.find("w")).toBe(entry);
+    store.setShareRoster("w", listing, false, 200);
+    expect(store.find("w")).toBe(entry);
+    store.markShareRosterPulled("w");
+    expect(store.find("w")).toBe(entry);
+    expect(entry?.shareRoster?.pulledAfter).toBe(true);
+  });
+
   it("keeps 10,000 grants out of the registry and writes only the affected workspace", () => {
     const registry = join(directory, "workspaces.json");
     const store = createRegistryStore(registry);
@@ -46,12 +74,13 @@ describe("per-workspace roster storage", () => {
     expect(store.find("w")?.shareRoster?.listedAtMs).toBe(123);
   });
 
-  it("partitions by owner, relay and attachment, and deletes the roster on removal", () => {
+  it("partitions by owner and relay, survives re-rooting, and deletes the roster on removal", () => {
     const registry = createRegistryStore(join(directory, "workspaces.json"));
     registry.register(workspace);
     registry.setShareRoster("w", listing, false, 123);
     const files = createShareRosterStore(join(directory, "share-rosters"));
-    expect(files.read({ ...workspace, rootPath: "/copy" })).toBeUndefined();
+    expect(files.file({ ...workspace, rootPath: "/copy" })).toBe(files.file(workspace));
+    expect(files.read({ ...workspace, rootPath: "/copy" })?.listedAtMs).toBe(123);
     expect(files.read({ ...workspace, remote: { ...workspace.remote!, ownerUserId: "another" } })).toBeUndefined();
     expect(files.read({ ...workspace, remote: { ...workspace.remote!, serverUrl: "https://elsewhere.test" } })).toBeUndefined();
     registry.remove("w");
@@ -107,6 +136,36 @@ describe("account received observations", () => {
       scope: () => scope!, switch: (next: ReceivedScope | null) => { scope = next; },
       advance: (ms: number) => { mono += ms; wall += ms; }, setWall: (ms: number) => { wall = ms; } };
   }
+
+  it.each([null,
+    { userId: "other", relayUrl: "https://relay.test", generation: 2 },
+    { userId: "friend", relayUrl: "https://other.test", generation: 2 },
+  ])("deletes the previous account file on sign-out or account/relay switch to %j", async next => {
+    const h = harness(); const a = h.acquisition(); await a.refresh();
+    const previous = h.scope();
+    const response = deferred<unknown>(); h.advance(60_000);
+    h.list.mockImplementationOnce(() => response.promise);
+    const pending = a.refresh();
+    h.switch(next); a.credentialsChanged(next);
+    expect(createReceivedShareStore(join(directory, "received")).read(previous)).toBeNull();
+    response.resolve(inventory()); await pending;
+    expect(createReceivedShareStore(join(directory, "received")).read(previous)).toBeNull();
+    expect(h.onLive).toHaveBeenCalledOnce();
+    expect(a.observation().freshness).toBe("unknown");
+  });
+
+  it("retires on a credential reload placeholder without deleting the same account's observations", async () => {
+    const h = harness(); const a = h.acquisition(); await a.refresh();
+    const previous = h.scope();
+    h.switch(null); a.credentialsChanged(null, false);
+    expect(createReceivedShareStore(join(directory, "received")).read(previous)).not.toBeNull();
+    const renewed = { ...previous, generation: 2 };
+    h.switch(renewed); a.credentialsChanged(renewed);
+    expect(a.observation().freshness).toBe("stale");
+    expect(createReceivedShareStore(join(directory, "received")).read(previous)).not.toBeNull();
+    h.switch(null); a.credentialsChanged(null, false); a.credentialsChanged(null);
+    expect(createReceivedShareStore(join(directory, "received")).read(previous)).toBeNull();
+  });
 
   it("coalesces acquisitions, timestamps their start and labels offline restart stale", async () => {
     const h = harness();
@@ -273,4 +332,15 @@ it("keeps authorization modules independent of received observations and Access 
     const source = readFileSync(resolve(import.meta.dirname, "../../../..", path), "utf8");
     expect(source, path).not.toMatch(/receivedShareStore|RosterObservation|\.observation\(/);
   }
+});
+
+it("leaves received Access refreshes to Sharing opening and Access expansion", () => {
+  const main = readFileSync(resolve(import.meta.dirname, "../main.ts"), "utf8");
+  const rosterStart = main.indexOf("const shareRosters =");
+  const roster = main.slice(rosterStart, main.indexOf("\n});", rosterStart));
+  const openStart = main.indexOf("async function openWorkspaceActivityForOperation(");
+  const open = main.slice(openStart, main.indexOf("\nasync function ", openStart + 1));
+  expect(rosterStart).toBeGreaterThan(0); expect(openStart).toBeGreaterThan(0);
+  expect(roster).not.toContain("receivedShareAcquisition.refresh()");
+  expect(open).not.toContain("receivedShareAcquisition.refresh()");
 });

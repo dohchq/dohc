@@ -202,6 +202,19 @@ function hasEnded(current: RegistryEntry, kind: string) {
 }
 
 describe("reconcileRecipientSharesAfterLookup", () => {
+  it.each(["mount", "view", "channel"])("does not abort an exact %s resume when only the roster changes", async kind => {
+    const h = await lookupHarness({ ...endedEntry(kind),
+      remote: { ownerUserId: "owner", serverUrl: credentials.relayUrl! } });
+    const started = deferred(); const reply = deferred<unknown>();
+    h.lookupShare.mockImplementation(() => { started.resolve(); return reply.promise; });
+    const pending = h.run(listing(["share"])); await started.promise;
+    h.store.setShareRoster("ws", { grants: [], links: [], formerGrants: [], endedGrants: [] }, false, 100);
+    h.store.markShareRosterPulled("ws");
+    reply.resolve(exactShare("share"));
+    expect(await pending).toBe(true);
+    expect(hasEnded(h.current(), kind)).toBeUndefined();
+  });
+
   it.each(["mount", "view", "channel"])("skips a damaged received listing for an ended %s until repaired", async kind => {
     const before = endedEntry(kind);
     const h = await lookupHarness(before);
