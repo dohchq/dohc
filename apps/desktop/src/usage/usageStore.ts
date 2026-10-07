@@ -17,8 +17,8 @@ export interface UsageFileSystem {
   rm(path: string, options: { force: true }): Promise<unknown>;
 }
 
-// Main supplies one fixed build mapping after editable readiness in PR 2.
-// Until then every pair is uncovered. Early successes queue only aggregates.
+// Main supplies the fixed coverage mapping for this build.
+// Early successes queue only aggregates until the saved setting is loaded.
 export function createUsageStore(deps: {
   stateDir(): string;
   appVersion: string;
