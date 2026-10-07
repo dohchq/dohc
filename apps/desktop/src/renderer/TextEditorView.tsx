@@ -1,3 +1,4 @@
+import type { SaveState } from "@dohc/workspace-contracts/save-state";
 import { Suspense } from "react";
 import { LazySourceCodeEditor } from "./LazySourceCodeEditor";
 import type { PendingTextUndo } from "./fileEditorUndo";
@@ -7,7 +8,6 @@ import { StateMark } from "./ui/StateMark";
 import {
   useAutosavedTextDraft,
   type DraftFlush,
-  type SaveState,
 } from "./useAutosavedTextDraft";
 
 export function TextEditorView({

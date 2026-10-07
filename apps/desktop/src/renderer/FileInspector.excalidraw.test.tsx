@@ -1,3 +1,4 @@
+import { engineSaveState } from "../workspaces/engineYDocSaveState";
 // @vitest-environment jsdom
 import { useEffect } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -215,10 +216,10 @@ function bridgeFor(
         return () => saveStateListeners.delete(listener);
       },
     ),
-    emitSaveState(state: EngineYDocSaveStateEvent["state"], seq: number) {
+    emitSaveState(state: import("../ipc/channels").EngineYDocSaveStateName, seq: number) {
       if (!sessionId) throw new Error("The scene session is not open.");
       for (const listener of saveStateListeners) {
-        listener({ sessionId, state, seq });
+        listener({ sessionId, ...engineSaveState(state), seq });
       }
     },
     emitLineageReplacement(
@@ -817,8 +818,10 @@ describe("FileInspector Excalidraw view", () => {
     vi.stubGlobal("dohcDesktop", bridge);
     render(<FileInspector workspaceId="ws-1" path="drawing.excalidraw" />);
 
+    await screen.findByTestId("mock-excalidraw-canvas");
+    act(() => bridge.emitSaveState("saved", 0));
     const chip = await screen.findByTestId("drawing-save-state");
-    await waitFor(() => expect(chip.textContent).toBe("Saved"));
+    expect(chip.textContent).toBe("Saved");
     act(() => bridge.emitSaveState("file-locked", 1));
 
     expect(chip.dataset.state).toBe("file-locked");
