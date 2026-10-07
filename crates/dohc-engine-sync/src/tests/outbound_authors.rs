@@ -11,7 +11,19 @@ fn queued_author_repair_omits_only_people() {
     let local_agent = json!({"kind":"agent","agentId":"agent","onBehalfOf":"local:123","agentRunId":"run","depth":3});
     let local_automation =
         json!({"kind":"automation","automationId":"rule","onBehalfOf":"local:456","depth":4});
+    let unattributed = json!({"kind":"unattributed"});
+    let recipient = json!({"kind":"human","humanId":"recipient","humanName":"Recipient"});
     for (authors, expected) in [
+        (json!([unattributed]), Some(json!([unattributed]))),
+        (json!([human, unattributed]), Some(json!([unattributed]))),
+        (
+            json!([unattributed, agent]),
+            Some(json!([unattributed, agent])),
+        ),
+        (
+            json!([recipient, unattributed]),
+            Some(json!([recipient, unattributed])),
+        ),
         (json!([human]), None),
         (json!([human, agent]), Some(json!([agent]))),
         (json!([agent, automation]), Some(json!([agent, automation]))),

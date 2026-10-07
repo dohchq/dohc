@@ -77,6 +77,9 @@ export function createCollectionWriteRoutes(input: {
         { "cache-control": "private, no-store" });
     }
     const body = await readBody(request);
+    if (Object.keys(body).some((key) => key !== "submitId" && key !== "changes")) {
+      throw relayError("share_op_rejected");
+    }
     const submitId = parseString(body.submitId, "submitId", MAX_SUBMIT_ID_CHARS);
     const decision = filterCollectionWriteForShare(authorized.effectiveSelector, body.changes, {
       channelKind: (wireId) => storage.findChannelCreateKind(share.workspaceId, wireId),

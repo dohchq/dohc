@@ -41,8 +41,9 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
     return {invalidated: controller.signal, close, isDocumentReady: ready, onEvent: () => () => undefined} as never;
   });
   const onError = vi.fn();
+  const frameChanges = createNamedFrameChanges(8);
   const host = await startSelfHostedLiveHost({storage: f.storage, history, root: data, engineExecutable: process.execPath,
-    relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges: createNamedFrameChanges(8), startHost, onError});
+    relayOrigin: "https://relay.test", key: new Uint8Array(32).fill(9), frameChanges, startHost, onError});
   cleanup.push(() => host.close());
   // The supervisor reconciles on timers and writes configuration files; a loaded
   // gate host can take seconds for either.
@@ -52,8 +53,26 @@ async function fixture(options: {beforeStart?(): Promise<void>; empty?: boolean;
       VALUES (?,?,1,?,'main',?,?,'text',1,1)`).run(scope.workspaceId, objectId, `moment-${objectId}`, path, "b".repeat(64));
     return f.storage.enrollServiceHostDocument({...input, path});
   };
-  return {...f, host, history, starts, startHost, input, add, waitStarted, onError, peak: () => peak};
+  return {...f, host, history, starts, startHost, input, add, waitStarted, onError, frameChanges, peak: () => peak};
 }
+
+it("wakes waiting desktop listeners after publishing the returning service host", async () => {
+  const entered = deferred(), finish = deferred();
+  const f = await fixture({beforeStart: async () => {entered.resolve(); await finish.promise;}});
+  await entered.promise;
+  const ready = deferred(), changed = vi.fn(() => {
+    const available = f.host.ready(binding);
+    ready.resolve();
+    return available;
+  });
+  const remove = f.frameChanges.subscribe(changed, {workspaceId: binding.workspaceId, objectId: binding.objectId});
+  try {
+    expect(changed).not.toHaveBeenCalled();
+    finish.resolve(); await ready.promise;
+    expect(changed).toHaveBeenCalledOnce();
+    expect(changed.mock.results[0]!.value).toBe(true);
+  } finally {finish.resolve(); remove();}
+});
 
 it("names a workspace for automations only while a live-shared document sits in a Collection with automations", async () => {
   const f = await fixture();

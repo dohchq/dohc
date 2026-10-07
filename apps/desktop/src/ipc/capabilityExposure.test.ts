@@ -13,6 +13,7 @@ import type { OperationDefinition } from "./operationTable";
 import { OPERATION_TABLES } from "./operationTables";
 import mainIpc from "./ipcExposure.main.json";
 import clipboardIpc from "./ipcExposure.pr1639.json";
+import recipientRecordsIpc from "./ipcExposure.pr1688.json";
 import launchOpenIpc from "./ipcExposure.pr1701.json";
 import mainCli from "./cliExposure.main.json";
 import publicationCli from "./cliExposure.pr1659.json";
@@ -53,7 +54,7 @@ describe("B1 main inventories (a4be19d5b)", () => {
       expect(expectedNames).toContain(name);
       expectedNames.splice(expectedNames.indexOf(name), 1);
     }
-    for (const name of launchOpenIpc.nameAdditions) {
+    for (const name of [...launchOpenIpc.nameAdditions, ...recipientRecordsIpc.nameAdditions]) {
       expect(expectedNames).not.toContain(name);
       expectedNames.push(name);
     }

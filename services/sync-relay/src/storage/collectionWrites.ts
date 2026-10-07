@@ -8,7 +8,7 @@ import {
   type AutomationsFileParseResult,
 } from "@dohc/workspace-contracts/automations";
 import { pathCollisionKey } from "../pathCollisionKey";
-import { parseCollectionRecordFields, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
+import { parseCollectionRecordIdentity, parseCollectionRecordFields, parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { collectionVersionError } from "@dohc/workspace-contracts/collection";
 import { stableJsonStringify } from "../canonicalJson";
 import { notFound, relayError, RelayError } from "../errors";
@@ -217,6 +217,10 @@ export function commitCollectionWrite(
       throw new CollectionWriteStaleError(path, currentFile(storage, workspaceId, path)?.blobSha256 ?? null);
     }
     checkBases(storage, workspaceId, decision.write);
+    if (decision.write.kind === "new-record") {
+      checkRecordCreation(storage, workspaceId, decision.write, writer.kind === "link"
+        ? suppliedBytes(writer.content) : storedBytes(storage, workspaceId, decision.write));
+    }
 
     let addedBytes = 0;
     let principalId: string | null = null;
@@ -279,6 +283,24 @@ export function commitCollectionWrite(
 
 function changesOf(write: CollectionWrite): ProposedChange[] {
   return write.kind === "new-collection" ? write.changes : [write.change];
+}
+
+function checkRecordCreation(
+  storage: StorageContext, workspaceId: string,
+  write: Extract<CollectionWrite, { kind: "new-record" }>, bytesOf: ContentBytes,
+): void {
+  const schema = currentFile(storage, workspaceId, `${write.collectionPath}/${COLLECTION_SCHEMA_FILE}`);
+  const schemaText = schema && priorText(storage, workspaceId, schema.blobSha256);
+  if (!schemaText || schemaText === "unreadable" || parseCollectionSchema(schemaText).status !== "valid") {
+    throw refusal("This Collection does not have a current document schema.");
+  }
+  const bytes = bytesOf(write.change.afterBlobSha256!, write.change.afterByteLength!);
+  const id = bytes && parseCollectionRecordIdentity(utf8(bytes) ?? "");
+  if (!id) throw refusal("This record needs a valid record ID.");
+  if (storage.db.prepare(`SELECT 1 FROM sync_relay_current_record_ids
+    WHERE workspace_id = ? AND version_id = ? AND record_id = ? LIMIT 1`).get(workspaceId, MAIN_VERSION_ID, id)) {
+    throw refusal("The sync relay could not create this record. Choose a new name and record ID, then try again.");
+  }
 }
 
 // What a submit id stands for. The client's own clock is left out: the

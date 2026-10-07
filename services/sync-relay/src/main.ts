@@ -223,7 +223,10 @@ const namedLiveConfig = (() => {
   if (!namedBrowserSessionLimits || !shareWebOrigin || !relayExchangeKey || !linkKey || !process.env.DOHC_RELAY_NAMED_LIVE_HOSTS) {
     fatal("FATAL: Named live routes require browser sessions, viewer origin, relay exchange and link keys, and explicit relay Host values.");
   }
-  try { return parseNamedLiveConfig(JSON.parse(value)); }
+  try { return parseNamedLiveConfig(JSON.parse(value), process.env.DOHC_RELAY_NAMED_EDITOR_LIMITS !== undefined || liveProfile ? {
+    maxPendingAdmissionRequests: namedBrowserSessionLimits.maxPendingRequests,
+    maxPendingReadinessRequests: selfHostLiveProfile().desktopReadiness.maxPendingRequests,
+  } : undefined); }
   catch { fatal("FATAL: DOHC_RELAY_NAMED_LIVE_CONFIG must provide every named live budget and validation policy."); }
 })();
 const frameChanges = namedLiveConfig ? createNamedFrameChanges(namedLiveConfig.maxListeners) : undefined;
@@ -314,7 +317,7 @@ let automations: Awaited<ReturnType<typeof startAutomationServer>> | undefined;
 const serviceReplication = selfHostedLive && deployment && linkKey
   ? (() => {
       const credential = {key: Buffer.from(linkKey), namespace: deployment.history.namespace};
-      return createServiceHostReplication({storage, prefix: "dohc-service-v1.",
+      return createServiceHostReplication({storage, prefix: "dohc-service-v1.", provenance: "native-settlements",
         authorize: input => authorizeServiceHostReplication(storage, {...credential, ...input})});
     })() : undefined;
 
@@ -397,7 +400,7 @@ const relayHandler = guardRelayResponses(storage, request => {
   if (request.headers.get("authorization")?.startsWith(`Bearer ${AUTOMATION_REPLICA_BEARER_PREFIX}`)) return automationReplication?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (/^\/sync\/[^/]+\/live-host$/.test(path)) return serviceEnrollment?.(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (path === "/sync/live/named-tickets") return namedLive?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
-  if (path === "/sync/live/desktop-open") return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
+  if ((path === "/sync/live/desktop-open" || path === "/sync/live/desktop-ready")) return desktopAdmission?.handle(request) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   if (isLinkLivePath(path)) return (path === "/sync/live/link-tickets" ? linkLive?.handle(request) : linkLiveHttp?.(request)) ?? Promise.resolve(Response.json({ok: false, error: "not found"}, {status: 404}));
   return relayApplication(request);
 });
@@ -493,7 +496,7 @@ const server = serveFetchHandler({
     /^\/sync\/[^/]+\/live-host$/.test(url.pathname) ? 16 * 1024 :
     isAutomationPressPath(url.pathname) ? AUTOMATION_PRESS_MAX_BODY_BYTES :
     isAutomationServerPath(url.pathname) ? AUTOMATION_SERVER_MAX_BODY_BYTES :
-    url.pathname === "/sync/live/desktop-open" && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
+    (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     (url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname)) && namedLiveConfig ? namedLiveConfig.transport.maxRequestBytes :
     isNamedBrowserSessionPath(url.pathname) && namedBrowserSessionLimits ? namedBrowserSessionLimits.maxRequestBytes :
     isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
@@ -501,7 +504,7 @@ const server = serveFetchHandler({
       : MAX_BODY_BYTES),
   oversized: (url) =>
     isLinkEndpointPath(url.pathname) ? opaqueLinkRefusal() :
-    url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
+    (url.pathname === "/sync/live/desktop-open" || url.pathname === "/sync/live/desktop-ready") || url.pathname === "/sync/live/named-tickets" || isLinkLivePath(url.pathname) || isNamedBrowserSessionPath(url.pathname) || isLinkExchangePath(url.pathname) || isLinkRefreshPath(url.pathname)
       ? errorBody("not_found")
       : errorBody("payload_too_large"),
   // Never echo internal error details (or anything derived from the request)
@@ -610,7 +613,8 @@ if (namedLiveConfig) {
   if (desktopEditorLimits) {
     const hosts = new Set(process.env.DOHC_RELAY_NAMED_LIVE_HOSTS!.split(","));
     desktopAdmission = createNamedDesktopLive({storage, resolveActor, publicOrigin: shareWebOrigin!, hosts,
-      limits: namedBrowserSessionLimits!, editorLimits: desktopEditorLimits, tickets});
+      limits: namedBrowserSessionLimits!, editorLimits: desktopEditorLimits, tickets, changes: frameChanges!,
+      readinessLimits: selfHostLiveProfile().desktopReadiness});
     desktopLive = createNamedLiveRoutes({kind: "named", desktopBearer: true, storage, lookupUserDisplayName, hosts,
       publicOrigin: shareWebOrigin!, exchangeKey: relayExchangeKey!, limits: namedLiveConfig.transport,
       frames: namedLiveConfig.frames, bounds: namedLiveConfig.host, validate: namedLiveConfig.validate,

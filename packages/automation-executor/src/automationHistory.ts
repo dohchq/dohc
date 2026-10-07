@@ -60,6 +60,7 @@ function entryAuthorOf(author: MomentAuthor | undefined, ownerUserId: string): C
     case "link":
       return { kind: "link" };
     case "public":
+    case "unattributed":
       return { kind: "nobody" };
   }
 }

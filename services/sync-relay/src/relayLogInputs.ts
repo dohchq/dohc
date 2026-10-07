@@ -1,5 +1,5 @@
 import { sha256Hex } from "@dohc/workspace-core/hash";
-import { parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
+import { MAX_LIVE_AUTHOR_BYTES, MAX_LIVE_AUTHOR_IDENTITIES, parseLiveAuthorContext, parseLiveAuthorSnapshot, type LiveAuthorContext } from "@dohc/live-session-contract/live-authorship";
 import { stableJsonStringify } from "./canonicalJson";
 import { badRequest, relayError } from "./errors";
 import { parseString } from "./requestInputs";
@@ -17,12 +17,29 @@ export function namedShareOrigin(shareId: string, userId: string, originId: stri
   return `${SHARE_MEMBER_ORIGIN_PREFIX}${sha256Hex(JSON.stringify([shareId, userId, originId]))}`;
 }
 
-// A client's moment names no author, or its own agent or automation. Only
-// the relay mints the others (public, named, and link), under these origins,
-// so an author kind a client may not stamp is refused whatever it is.
+// Clients can publish their agent and automation authors, or an exact
+// unattributed coverage marker. The marker claims no identity. The relay
+// alone mints human, public, named, and link attribution.
 const CLIENT_MOMENT_AUTHOR_KINDS: ReadonlySet<unknown> = new Set(["agent", "automation"]);
 
 export function assertClientLogProvenance(originId: string, rawOps: unknown[]): void {
+  assertUnreservedLogOrigin(originId);
+  for (const raw of rawOps) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const op = raw as Record<string, unknown>;
+    if (op.opKind !== "moment.append") continue;
+    const payload = op.payload as Record<string, unknown> | null;
+    const authors = payload?.authors;
+    if (authors == null) continue;
+    if (!Array.isArray(authors) || authors.length === 0 || authors.some((author: unknown) =>
+      !author || typeof author !== "object" || Array.isArray(author) ||
+      (!CLIENT_MOMENT_AUTHOR_KINDS.has((author as Record<string, unknown>).kind) &&
+        !((author as Record<string, unknown>).kind === "unattributed" && Object.keys(author).length === 1))
+    )) throw relayError("authorship_mismatch");
+  }
+}
+
+function assertUnreservedLogOrigin(originId: string): void {
   if (originId.startsWith(SHARE_MEMBER_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for named share writes");
   }
@@ -32,16 +49,36 @@ export function assertClientLogProvenance(originId: string, rawOps: unknown[]): 
   if (originId.startsWith(COLLECTION_FILE_ORIGIN_PREFIX)) {
     throw badRequest("originId is reserved for relay collection file writes");
   }
+}
+
+// A credential derived for the native service can publish the public authors
+// already recorded in its live settlements. Other moments keep client rules.
+export function assertServiceReplicaLogProvenance(originId: string, rawOps: unknown[]): void {
+  assertUnreservedLogOrigin(originId);
   for (const raw of rawOps) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
     const op = raw as Record<string, unknown>;
     if (op.opKind !== "moment.append") continue;
     const payload = op.payload as Record<string, unknown> | null;
-    const authors = payload?.authors;
+    if (typeof payload?.momentId !== "string" || !/^moment-ydoc-[0-9a-f]{64}$/.test(payload.momentId)) {
+      assertClientLogProvenance(originId, [raw]);
+      continue;
+    }
+    const authors = payload.authors;
     if (authors == null) continue;
-    if (!Array.isArray(authors) || authors.length === 0 || authors.some((author: unknown) =>
-      !author || typeof author !== "object" || !CLIENT_MOMENT_AUTHOR_KINDS.has((author as Record<string, unknown>).kind)
-    )) throw relayError("authorship_mismatch");
+    try {
+      if (!Array.isArray(authors) || authors.length === 0 || authors.length > MAX_LIVE_AUTHOR_IDENTITIES ||
+        Buffer.byteLength(JSON.stringify(authors), "utf8") > MAX_LIVE_AUTHOR_BYTES) throw new TypeError("Invalid settlement authors.");
+      // Settlement coverage combines many update snapshots, so it can exceed
+      // a single snapshot's two entries. Validate each public entry strictly.
+      for (const author of authors) {
+        if (author && typeof author === "object" && !Array.isArray(author)
+          && author.kind === "unattributed" && Object.keys(author).length === 1) continue;
+        parseLiveAuthorSnapshot([author]);
+      }
+    } catch {
+      throw relayError("authorship_mismatch");
+    }
   }
 }
 

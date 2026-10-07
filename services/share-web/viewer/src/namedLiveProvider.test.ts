@@ -7,6 +7,7 @@ import { createLiveFrameSession, encodeLiveFrame, encodeLiveFrameSync,
   type LiveFrame, type LiveFrameBegin } from "@dohc/live-session-contract/live-frame";
 import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 import { createNamedLiveProvider, type NamedLiveProviderLimits } from "@dohc/ydoc-projection/named-live-provider";
+import type { LiveAuthorContext } from "@dohc/live-session-contract";
 
 const limits = (): NamedLiveProviderLimits => ({
   frames: { receive: { maxFrameBytes: 1024, maxStateVectorBytes: 4096, maxUpdateBytes: 8192, maxSyncBytes: 16384 },
@@ -20,8 +21,8 @@ type Provider = ReturnType<typeof createNamedLiveProvider>;
 type Received = { begin: LiveFrameBegin; bytes: Uint8Array };
 const cleanup: (() => void)[] = [];
 afterEach(() => { for (const stop of cleanup.splice(0)) stop(); });
-function provider(options = limits()) {
-  const value = createNamedLiveProvider(options);
+function provider(options = limits(), context?: LiveAuthorContext) {
+  const value = createNamedLiveProvider(options, undefined, context);
   cleanup.push(() => { value.close(); value.doc.destroy(); });
   return value;
 }
@@ -120,6 +121,25 @@ async function live(value = provider(), doc = document("base")) {
 }
 
 describe("named live browser provider", () => {
+  it.each([
+    {kind: "account", accountId: "ana"},
+    {kind: "link", publicPrincipalId: "public-ana"},
+  ] satisfies LiveAuthorContext[])("retains the $kind recording context on an ambiguous retry", async context => {
+    let current: LiveAuthorContext = context;
+    const value = createNamedLiveProvider(limits(), undefined, () => current);
+    cleanup.push(() => {value.close(); value.doc.destroy();});
+    const { host, doc } = await live(value);
+    edit(value, " draft");
+    const first = await host.submitted();
+    expect(first.begin).toMatchObject({authorContext: context});
+    current = {kind: "signed-out"};
+    Y.applyUpdate(doc, first.bytes); host.route.disconnect(); await host.route.settled();
+    const second = peer(value, 2); await second.greet(); await second.initial(doc, binding, 1);
+    const retry = await second.submitted();
+    expect(retry.begin).toMatchObject({authorContext: context, deliveryId: (first.begin as {deliveryId: string}).deliveryId});
+    await second.ack(retry, 1);
+    expect(value.state().pendingUpdates).toBe(0);
+  });
   it("retains the membership overflow marker without inventing departures", async () => {
     const { value, host } = await live();
     const first = "ab".repeat(16), second = "cd".repeat(16);

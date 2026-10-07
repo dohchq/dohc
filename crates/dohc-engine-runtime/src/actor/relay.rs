@@ -1144,6 +1144,27 @@ pub enum ShareViewIdentityRecord {
 }
 
 impl ActorHandle {
+    pub async fn share_record_creation_statuses(
+        &self,
+        workspace_id: String,
+        share_id: String,
+        paths: Vec<String>,
+        granted: dohc_engine_sync::ShareGrant,
+    ) -> Result<std::collections::BTreeMap<String, dohc_engine_sync::DirectWriteStatus>, RuntimeError>
+    {
+        self.run(move |store, _cache| {
+            dohc_engine_sync::read_record_creation_statuses(
+                store,
+                &workspace_id,
+                &share_id,
+                &paths,
+                &granted,
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
+    }
+
     pub async fn share_direct_status(
         &self,
         workspace_id: String,

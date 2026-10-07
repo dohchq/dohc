@@ -3,7 +3,8 @@ import {yDocToMarkdown} from "@dohc/ydoc-projection";
 import type {NamedLiveBrowserLimits} from "@dohc/ydoc-projection/named-live-browser-transport";
 import type {createLinkLiveClient} from "./linkLiveClient";
 import {replaceLiveText} from "./liveTextEdit";
-import {LIVE_UPDATE_REFUSAL_VALUES} from "@dohc/live-session-contract/live-update-admission";
+import {LIVE_UPDATE_REFUSAL_VALUES, parseLiveUpdateIdentifier} from "@dohc/live-session-contract/live-update-admission";
+import {parseLiveTicketToken} from "@dohc/live-session-contract/live-ticket";
 import {readBoundedJson} from "@dohc/service-http";
 import {LINK_REFUSALS, parseLinkRefusal} from "@dohc/security-contract/link-refusal";
 
@@ -51,14 +52,19 @@ export async function remoteLiveDocument(options: {
     const {objectId} = await document.json() as {objectId: string};
     const ticket = await options.request("/api/live/link-ticket", {method: "POST", body: JSON.stringify({discriminator: options.discriminator, objectId}), signal});
     if (!ticket.ok) throw await refusalError(ticket, signal);
-    const {token} = await ticket.json() as {token: string};
+    const ticketValue: unknown = await readBoundedJson(ticket, options.limits.maxHttpResponseBytes, signal);
+    if (!ticketValue || typeof ticketValue !== "object" || Array.isArray(ticketValue) || Object.keys(ticketValue).sort().join() !== "expiresAtMs,publicPrincipalId,token") throw new Error("Invalid link ticket.");
+    const {token, publicPrincipalId, expiresAtMs} = ticketValue as Record<string, unknown>;
+    parseLiveTicketToken(token);
+    const principal = parseLiveUpdateIdentifier(publicPrincipalId);
+    if (typeof expiresAtMs !== "number" || !Number.isSafeInteger(expiresAtMs) || expiresAtMs <= Date.now()) throw new Error("Invalid link ticket.");
     const frames = options.limits.provider.frames;
-    const host = await options.client.openMaterialRoute(options.discriminator, options.cookie, token, signal, {
+    const host = await options.client.openMaterialRoute(options.discriminator, options.cookie, token as string, signal, {
       maxPayload: frames.receive.maxFrameBytes, maxFragments: 64, maxBufferedChunks: 64,
       closeTimeout: options.limits.sendTimeoutMs, perMessageDeflate: false, autoPong: false,
     });
     if (!host) throw new Error("The live document host is unavailable.");
-    provider = createNamedLiveProvider(options.limits.provider, {objectId});
+    provider = createNamedLiveProvider(options.limits.provider, {objectId}, {kind: "link", publicPrincipalId: principal});
     const current = provider;
     route = provider.connect({
       send(bytes) {

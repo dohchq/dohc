@@ -433,6 +433,9 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
   return (
     <div className="mt-3 space-y-3" data-testid="stop-and-restore-outcome">
       <p className="m-0 text-[13px] text-ink">{undone ? words.undone(files) : words.stopped(files)}</p>
+      {!undone && result.restored.some(file => file.removed) ? <p className="m-0 text-[13px] text-muted">
+        Removed {plural(result.restored.filter(file => file.removed).length, "created file", "created files")}.
+      </p> : null}
       {result.unfinished?.step === "files" && !undone ? (
         <p className="m-0 text-[13px] text-ink">dohc has not finished restoring files.</p>
       ) : null}
@@ -529,7 +532,7 @@ function Outcome({ words, result, undone, onOpenFile, onOpenCollection }: {
 }
 
 function reviewReason(file: Restored["review"][number], after: string): string {
-  if (file.reason === "changed-since") return `Someone changed it after ${after}.`;
+  if (file.reason === "changed-since") return `${file.changedBy ?? "Another author"} changed it after ${after}.`;
   if (file.reason === "folder-in-use") return "This Collection holds files someone else added.";
   if (file.reason === "rules-unreadable") return restoreRulesUnreadableWords(file.unreadable);
   return `dohc could not restore it. ${file.detail}`;

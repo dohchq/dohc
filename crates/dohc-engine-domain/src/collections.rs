@@ -2891,6 +2891,17 @@ impl SharedChangeAuthor {
     }
 }
 
+/// The sole relay-derived author of a direct Collection write.
+pub fn moment_shared_author(author_json: Option<&str>) -> Option<SharedChangeAuthor> {
+    let authors = moment_author_entries(author_json);
+    let [author] = authors.as_slice() else {
+        return None;
+    };
+    serde_json::from_value::<SharedChangeAuthor>(author.clone())
+        .ok()
+        .filter(SharedChangeAuthor::is_valid)
+}
+
 /// The automation run a write came from: the claim it ran for, and the
 /// automation's name when it ran. Record history names the automation by
 /// it after the definition changes or goes, and opens the run by its claim
