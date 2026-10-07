@@ -89,14 +89,13 @@ it("releases cut quota when its journal parent is deleted, without charging twic
     accepting_host_epoch,received_at_ms,update_bytes,relay_database_namespace,accepted_event_count,accepted_evidence_digest,accepted_metadata_bytes)
     VALUES(?,?,'workspace','main','object',?,'notes.md','["notes.md"]',1,'owner','owner',1,1,?,'namespace',1,?,1)`);
   const digest = "a".repeat(64);
-  const first = Number(
-    insertJournal.run("first", digest, digest, new Uint8Array([1]), digest)
-      .lastInsertRowid,
+  insertJournal.run("first", digest, digest, new Uint8Array([1]), digest);
+  insertJournal.run("second", digest, digest, new Uint8Array([1]), digest);
+  const cursor = db.prepare(
+    "SELECT journal_cursor FROM sync_relay_live_update_journal WHERE delivery_id=?",
   );
-  const second = Number(
-    insertJournal.run("second", digest, digest, new Uint8Array([1]), digest)
-      .lastInsertRowid,
-  );
+  const first = Number(cursor.get("first")!.journal_cursor);
+  const second = Number(cursor.get("second")!.journal_cursor);
   const insertCut = db.prepare(
     `INSERT INTO ${SETTLEMENT_CUTS}(journal_cursor,state_sha256,markdown_sha256,state_byte_length,markdown_byte_length) VALUES(?,?,?,?,?)`,
   );
@@ -121,10 +120,8 @@ it("releases cut quota when its journal parent is deleted, without charging twic
     "DELETE FROM sync_relay_live_update_journal WHERE journal_cursor=?",
   ).run(second);
   expect(usage()).toBe(0);
-  const third = Number(
-    insertJournal.run("third", digest, digest, new Uint8Array([1]), digest)
-      .lastInsertRowid,
-  );
+  insertJournal.run("third", digest, digest, new Uint8Array([1]), digest);
+  const third = Number(cursor.get("third")!.journal_cursor);
   insertCut.run(third, digest, digest, 1, 0);
   db.prepare(
     "DELETE FROM sync_relay_workspaces WHERE workspace_id='workspace'",
