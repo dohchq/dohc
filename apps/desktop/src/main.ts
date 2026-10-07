@@ -488,8 +488,9 @@ import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemptio
 // top-level statement rather than moving inside app.whenReady.
 makeProcessDiagnosticsNonFatal();
 
-const usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: RENDERER_USAGE_COVERAGE });
-const rendererUsage = createRendererUsage<IpcMainInvokeEvent>(invocation => usageStore.recordSuccess(invocation));
+let usageStore: ReturnType<typeof createUsageStore> | undefined;
+let usageLoad: ReturnType<typeof setImmediate> | undefined;
+const rendererUsage = createRendererUsage<IpcMainInvokeEvent>(invocation => usageStore?.recordSuccess(invocation));
 
 // Crashes are recorded on this computer before anything else can crash. A
 // report leaves only when the person confirms in main's own dialog, and
@@ -5066,7 +5067,11 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       launchMarks.appReady();
       desktopMarks.markOnce("app-ready");
       // Start retention even when Off. Never wait for measurement on startup.
-      setImmediate(() => { void usageStore.load().catch(() => {}); });
+      usageLoad = setImmediate(() => {
+        usageLoad = undefined;
+        usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: RENDERER_USAGE_COVERAGE });
+        void usageStore.load().catch(() => {});
+      });
     },
     startEngine: () => desktopEngine.start(),
     loadSettings: () => readCachedUserSettingsFile(stateDir()),
@@ -5176,7 +5181,8 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
       await namedDatasetPages.close();
     },
     disposeDatabase: async () => {
-      await usageStore.close().catch(() => {});
+      if (usageLoad) clearImmediate(usageLoad);
+      await usageStore?.close().catch(() => {});
       await workspaceFilesWorker.dispose();
       await workspaceDatabaseWorker.dispose();
     },
@@ -6285,7 +6291,7 @@ function registerIpcHandlers(): void {
     onActivityError: (error) => {
       console.error("[desktop] workspace search activity:", error);
     },
-  }), rendererUsage.search);
+  }));
 
   registerOperations(operationBoundary, scheduleHostOperations, {
     readScheduleHost: (input) => scheduleHostState(input.workspaceId),
@@ -6302,7 +6308,7 @@ function registerIpcHandlers(): void {
   registerOperations(operationBoundary, chatDispatchNoticeOperations, {
     registerChatDispatchNotices: (input) => chatDispatchNotices.register(input.workspaceId),
     dismissChatDispatchNotice: (input) => chatDispatchNotices.dismiss(input.workspaceId, input.id),
-  }, rendererUsage.dispatch);
+  });
 
   registerOperations(operationBoundary, noticeOperations, {
     listNotices: () => noticeStore().list(),

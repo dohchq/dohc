@@ -89,13 +89,18 @@ describe("usage import boundary", () => {
     const main = readFileSync(join(root, "apps/desktop/src/main.ts"), "utf8");
     expect(main).toContain("createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: RENDERER_USAGE_COVERAGE })");
     const markReady = main.slice(main.indexOf("markReady: () =>"), main.indexOf("startEngine: () =>"));
-    expect(markReady).toContain("setImmediate(() => { void usageStore.load().catch(() => {}); });");
+    expect(markReady).toContain("usageLoad = setImmediate(() => {");
+    expect(markReady).toContain("usageStore = createUsageStore({ stateDir, appVersion: app.getVersion(), coverage: RENDERER_USAGE_COVERAGE });");
+    expect(main.slice(0, main.indexOf("markReady: () =>"))).not.toMatch(/createUsageStore\(\{/);
     expect(main.match(/usageStore\.load\(/g)).toHaveLength(1);
     expect(markReady).not.toMatch(/if\s*\(/);
-    expect(main).toContain("await usageStore.close().catch(() => {});");
-    for (const group of ["version", "crash", "search", "dispatch", "notice"]) {
+    expect(main).toContain("await usageStore?.close().catch(() => {});");
+    for (const group of ["version", "crash", "notice"]) {
       expect(main).toContain(`rendererUsage.${group});`);
     }
+    expect(main).not.toContain("rendererUsage.search");
+    expect(main).not.toContain("rendererUsage.dispatch");
+    expect(main).toContain("if (usageLoad) clearImmediate(usageLoad);");
     // Privacy has no counting observer or agent transport registration.
     const usage = readFileSync(join(root, "apps/desktop/src/usage/rendererUsage.ts"), "utf8");
     expect(usage).not.toMatch(/usage\.(read|query|copy)/);
