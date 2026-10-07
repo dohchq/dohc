@@ -48,8 +48,10 @@ export function desktopReleaseTargets(platforms = "windows") {
     },
   ];
   if (platforms === "windows") return targets.filter((target) => target.os === "Windows");
+  if (platforms === "linux") return targets.filter((target) => target.os === "Linux");
+  if (platforms === "windows-linux") return targets.filter((target) => target.os !== "macOS");
   if (platforms === "all") return targets;
-  throw new Error(`Invalid release platforms '${platforms}'. Expected windows or all.`);
+  throw new Error(`Invalid release platforms '${platforms}'. Expected windows, linux, windows-linux, or all.`);
 }
 
 export function repoRootFromScript() {

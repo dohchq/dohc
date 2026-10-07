@@ -7,11 +7,14 @@ description: Prepare or publish a dohc desktop nightly or stable release when Ic
 
 Read [the release procedure](../../../docs/engineering/desktop-release.md) before preparing or dispatching a release.
 Use the repository's release scripts for versioning and artifact checks.
+This skill provides instructions, not credentials or repository permissions.
 
 ## Prepare the release
 
 Confirm the requested channel, source commit, platforms, and publication intent from the conversation.
 Default testing builds to the nightly channel and Windows x64.
+Use `platforms=linux` for Linux-only builds and `platforms=windows-linux` for both platforms on one PC.
+Use `platforms=all` when macOS must also receive the release.
 Check previous releases on the requested channel before selecting platforms.
 Continue including platforms that already receive updates on that channel.
 A request to prepare a release authorizes preparation and a dry run.
@@ -28,7 +31,10 @@ The stable version must match the committed desktop package version.
 
 Check the live workflow and its inputs before dispatching.
 Confirm that the required self-hosted runners are online and owned by the release operator.
-If the owner's Windows runner is offline, start its registered `run.cmd` for this release.
+If a selected Windows runner is offline, start its registered `run.cmd` for this release.
+For Linux-only builds, use the registered Linux runner for every job, including preflight and publication.
+For WSL, follow the Linux runner and shared-PC requirements in the release procedure.
+Start only a registered Linux runner that the operator owns, using its `run.sh` and native Linux tools.
 Record the process identity and stop that task-started listener after the run finishes.
 Check the local build budget before dispatching on the shared PC.
 Release jobs accept only reviewed code on `main`.

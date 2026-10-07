@@ -24,6 +24,8 @@ on:
         type: choice
         options:
           - windows
+          - linux
+          - windows-linux
           - all
       dry_run:
         description: Build and test without publishing artifacts
@@ -44,7 +46,7 @@ jobs:
   preflight:
     name: Preflight
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, windows, x64]
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 20
     outputs:
       release_channel: ${{ steps.release.outputs.release_channel }}
@@ -125,7 +127,7 @@ jobs:
   unused-version:
     name: Check release publication
     needs: preflight
-    runs-on: [self-hosted, windows, x64]
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 5
     permissions:
       contents: write
@@ -194,6 +196,8 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
+      # Windows and WSL share the same PC for this selection.
+      max-parallel: ${{ inputs.platforms == 'windows-linux' && 1 || 4 }}
       matrix:
         include: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
@@ -336,7 +340,7 @@ jobs:
       - preflight
       - build
     if: ${{ needs.preflight.outputs.dry_run != 'true' }}
-    runs-on: [self-hosted, windows, x64]
+    runs-on: ${{ fromJSON(inputs.platforms == 'linux' && '["self-hosted","linux","x64"]' || '["self-hosted","windows","x64"]') }}
     timeout-minutes: 20
     permissions:
       # Required for creating GitHub releases via softprops/action-gh-release.
