@@ -45,12 +45,20 @@ pub enum OwnerOutboxDraftOrigin {
             deserialize_with = "AgentDeclaration::deserialize_present"
         )]
         agent_declaration: Option<AgentDeclaration>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "AutomationDeclaration::deserialize_present"
+        )]
+        automation_declaration: Option<AutomationDeclaration>,
     },
 }
 
 impl OwnerOutboxDraftSource {
     pub fn agent_declaration(&self) -> Option<&AgentDeclaration> {
-        let OwnerOutboxDraftOrigin::OwnerDraft { agent_declaration } = &self.origin;
+        let OwnerOutboxDraftOrigin::OwnerDraft {
+            agent_declaration, ..
+        } = &self.origin;
         agent_declaration.as_ref()
     }
 }

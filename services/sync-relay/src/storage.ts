@@ -410,6 +410,23 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return liveDocumentAuthorityStorage.resolveCurrentLiveDocumentBinding(this, input, activation);
   }
 
+  automationRecordWriteAllowed(input: Parameters<SyncRelayStorage["automationRecordWriteAllowed"]>[0]): boolean {
+    const {authority, ...target} = input;
+    return this.readTx(() => "hostPressId" in authority ? automationPressStorage.automationPressAdmissionAllowed(this, {...target, ...authority})
+      : automationPressStorage.automationGrantAdmissionAllowed(this, {...target, ...authority}));
+  }
+
+  automationRecordBinding(workspaceId: string, ownerUserId: string, path: string) {
+    return liveDocumentAuthorityStorage.automationRecordBinding(this, workspaceId, ownerUserId, path);
+  }
+
+  /** Internal replica refresh hint; accepted bytes still pass the journal's validated sync path. */
+  automationRecordJournalCursor(binding: import("@dohc/live-session-contract/live-object-binding").LiveObjectBinding): number {
+    return Number(this.db.prepare(`SELECT COALESCE(MAX(journal_cursor),0) AS cursor FROM sync_relay_live_update_journal
+      WHERE workspace_id=? AND main_version_id=? AND object_id=? AND lineage_claim_id=?`)
+      .get(binding.workspaceId, binding.mainVersionId, binding.objectId, binding.lineageClaimId)!.cursor);
+  }
+
   resolveLiveObjectHostBinding(scope: Parameters<typeof liveDocumentAuthorityStorage.resolveLiveObjectHostBinding>[1], objectId: string): liveDocumentAuthorityStorage.LiveObjectHostBindingResult {
     return liveDocumentAuthorityStorage.resolveLiveObjectHostBinding(this, scope, objectId);
   }

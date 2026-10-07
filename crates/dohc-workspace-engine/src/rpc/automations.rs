@@ -340,6 +340,12 @@ pub(crate) fn automation_claim_json(claim: &AutomationClaim) -> Value {
         "createdAtMs": claim.created_at_ms,
         "updatedAtMs": claim.updated_at_ms,
     });
+    if let Some(parent) = &claim.parent_claim_id {
+        value
+            .as_object_mut()
+            .expect("claim is an object")
+            .insert("parentClaimId".to_owned(), json!(parent));
+    }
     if let Some(error) = &claim.error {
         let object = value.as_object_mut().expect("claim is an object");
         object.insert("error".to_owned(), json!(error));
